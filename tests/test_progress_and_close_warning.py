@@ -259,6 +259,100 @@ class TestWarnIfLiveChildren:
         # Must not raise.
         orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
 
+    def test_scaffolding_only_children_stay_silent(self, orch: Orchestrator, monkeypatch) -> None:
+        """#272: a pane closing with only its own CLI-launcher scaffolding
+        alive (npm .cmd shim's cmd.exe/conhost.exe/node.exe on Windows) must
+        not warn — that was every single close before this filter existed."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        children = []
+        for name in ("cmd.exe", "conhost.exe", "node.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_codex_scaffolding_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        children = []
+        for name in ("cmd.exe", "conhost.exe", "node.exe", "codex-code-mode-host.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "codex", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_kimi_python_scaffolding_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "kimi",
+        )
+        child = MagicMock()
+        child.name.return_value = "python.exe"
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "kimi", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_real_work_still_warns_past_scaffolding(self, orch: Orchestrator, monkeypatch) -> None:
+        """#234 must not regress: real work (docker/pytest/build tooling)
+        surviving the scaffolding filter still warns, and the count/detail
+        reflect only the real work — not the scaffolding noise."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        children = []
+        for name in ("cmd.exe", "conhost.exe", "node.exe", "docker"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "1 subprocess" in written
+        assert "docker" in written
+        assert "node.exe" not in written
+        assert "cmd.exe" not in written
+
     def test_close_calls_warn_before_terminate(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())
         session = _make_alive_session()

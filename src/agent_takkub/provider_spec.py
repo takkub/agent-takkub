@@ -26,6 +26,7 @@ phase has a faithful starting point instead of having to rediscover it.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -209,6 +210,21 @@ class ProviderSpec:
     # stuck").
     auth_transient_markers: tuple[str, ...] = field(default_factory=tuple)
 
+    # ─── 14. Close-time scaffolding filter (#272) ───
+    # Process names (matched case-insensitively, `.exe` suffix ignored so one
+    # entry covers both Windows and POSIX) that are THIS provider's own
+    # CLI-launcher/runtime children — always present under a live pane's pid
+    # right before close, never evidence of real unfinished work by
+    # themselves. orchestrator._warn_if_live_children (#234) subtracts these
+    # (plus the Windows-universal ConPTY baseline in
+    # GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 below) before deciding whether
+    # to warn Lead, so a pane closing with only its own npm/uv shim tree left
+    # standing stays silent instead of firing a warning with zero new
+    # information (#272: was 100% of closes before this field existed).
+    # Empty = no provider-specific scaffolding confirmed yet; the Windows
+    # baseline still applies.
+    scaffolding_process_names: tuple[str, ...] = field(default_factory=tuple)
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -354,6 +370,13 @@ claude_spec = ProviderSpec(
     # error text exists to list here. GENERIC_AUTH_ERROR_MARKERS is the only
     # signal for this provider until one is observed.
     auth_error_markers=(),
+    # config.py's find_claude_executable() deliberately prefers the real
+    # claude.exe over the claude.cmd npm shim specifically to avoid the
+    # visible cmd.exe console window (see that function's own docstring) —
+    # but claude.exe itself still runs on a bundled node runtime, so a plain
+    # `node` child is the one scaffolding process actually confirmed under
+    # it (#272).
+    scaffolding_process_names=("node.exe", "node"),
 )
 
 
@@ -472,6 +495,16 @@ codex_spec = ProviderSpec(
     # error) — no confirmed in-pane error text exists to list here.
     # GENERIC_AUTH_ERROR_MARKERS is the only signal until one is observed.
     auth_error_markers=(),
+    # codex is an npm-installed CLI on a node runtime (same shim shape as
+    # claude/opencode) plus its own `code_mode`/`codex_apps` sandbox host
+    # process — both confirmed always-present under a live codex pane at
+    # close time, not evidence of unfinished work (#272).
+    scaffolding_process_names=(
+        "node.exe",
+        "node",
+        "codex-code-mode-host.exe",
+        "codex-code-mode-host",
+    ),
 )
 
 
@@ -670,6 +703,10 @@ opencode_spec = ProviderSpec(
     # ⚠ NOT yet verified — no authenticated opencode session was available
     # for calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
     auth_error_markers=(),
+    # opencode-ai is npm-installed (same shim shape as claude/codex), so a
+    # `node` child is expected scaffolding, not evidence of unfinished work
+    # (#272).
+    scaffolding_process_names=("node.exe", "node"),
 )
 
 
@@ -771,6 +808,11 @@ kimi_spec = ProviderSpec(
     # convict the pane on login grounds. "send /login to login" is
     # first-person CLI chrome no unrelated dev-output plausibly reproduces.
     auth_error_markers=("send /login to login",),
+    # kimi-cli is installed via `uv tool install` and runs on a python
+    # interpreter (uv shims resolve to a python entry point), so a `python`
+    # child is expected scaffolding under a live kimi pane, not evidence of
+    # unfinished work (#272).
+    scaffolding_process_names=("python.exe", "python", "python3"),
 )
 
 
@@ -1045,3 +1087,38 @@ def effort_levels_for(provider: str, model: str | None) -> tuple[str, ...]:
     if model and model.strip() in _MODELS_WITHOUT_EFFORT.get(provider, frozenset()):
         return ()
     return spec.effort_levels
+
+
+# ── close-time scaffolding filter (#272) ────────────────────────────────────
+# Windows-only: ConPTY hosting itself surfaces a cmd.exe/conhost.exe pair
+# under a live pane's pid regardless of which provider is running (the npm
+# `.cmd` shim most providers install through spawns cmd.exe, which pywinpty
+# gives its own conhost) — confirmed present on every provider's close in
+# #272's evidence, so unlike scaffolding_process_names above this is not
+# provider-specific. POSIX has no equivalent console-host process, so this
+# stays empty there; leave it that way rather than guessing a shell name that
+# may not actually appear (#272's evidence is Windows-only).
+GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32: tuple[str, ...] = ("cmd.exe", "conhost.exe")
+
+
+def normalize_process_name(name: str) -> str:
+    """Lowercase a process name and drop a trailing ``.exe`` so the same
+    scaffolding entry matches both the Windows and POSIX spelling."""
+    normalized = name.strip().lower()
+    if normalized.endswith(".exe"):
+        normalized = normalized[: -len(".exe")]
+    return normalized
+
+
+def scaffolding_process_names_for(provider: str) -> frozenset[str]:
+    """Normalized (``normalize_process_name``) set of process names that are
+    *expected* scaffolding under a live ``provider`` pane — this provider's
+    own confirmed ``scaffolding_process_names`` plus the Windows-universal
+    ConPTY baseline (``GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32``) when running
+    on Windows. Unknown provider name → baseline only, same as an
+    unrecognized name having no provider-specific scaffolding confirmed.
+    """
+    spec = PROVIDER_REGISTRY.get(provider)
+    own = spec.scaffolding_process_names if spec is not None else ()
+    generic = GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 if sys.platform == "win32" else ()
+    return frozenset(normalize_process_name(n) for n in (*own, *generic))
