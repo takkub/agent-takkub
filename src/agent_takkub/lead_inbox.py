@@ -1681,7 +1681,20 @@ class LeadInboxMixin:
 
         Callers gate on their own one-shot flag (``boot_stall_warned`` in
         _send_when_ready's ``_check`` closure) so this fires at most once
-        per delivery. No-op when warning the Lead about itself."""
+        per delivery. No-op when warning the Lead about itself.
+
+        #270: deliberately NOT auto-degraded like the no-content/auth-failure
+        watchdogs (see ``_recover_broken_pane``) — a continuous boot marker
+        means the CLI IS rendering and could still clear on its own (a slow
+        first-cold-start MCP handshake, for example), unlike those two which
+        are definitive dead ends. Auto-killing a pane that was about to
+        succeed would waste the boot time already sunk and could paper over
+        a real config bug (e.g. a broken MCP server entry) Lead should
+        actually see and fix rather than have silently substituted away.
+        So this stays Lead's call — but the notice now names the concrete
+        `--provider` escape hatch (issue #270) instead of only "close and
+        reassign", since a plain reassign to the SAME stuck provider just
+        stalls again."""
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
@@ -1692,9 +1705,11 @@ class LeadInboxMixin:
             f"⛔ [delivery-boot-stall] {role_name} pane ค้างอยู่ที่ boot phase "
             f"(กำลังโหลด MCP server) มาแล้ว {elapsed_sec:.0f}s ติดต่อกันโดยไม่ถึง ready prompt "
             f"— task ยังไม่ถูกส่งเข้าไปเลย นี่ต่างจาก [delivery-busy-wait] ทั่วไป (#144) เพราะ pane "
-            f"นี้ดูเหมือนติด boot ไม่ผ่าน ไม่ใช่แค่กำลังทำงานอยู่ ถ้ายังไม่คลี่คลายเอง แนะนำ "
-            f"`takkub close --role {role_name}` แล้ว assign ใหม่ (task เดิมดูได้ผ่าน "
-            f"`takkub task show --role {role_name}`) (issue #254)"
+            f"นี้ดูเหมือนติด boot ไม่ผ่าน ไม่ใช่แค่กำลังทำงานอยู่ ถ้ายังไม่คลี่คลายเอง: "
+            f"`takkub close --role {role_name}` แล้ว `takkub assign --role {role_name} "
+            f"--provider claude ...` เพื่อบังคับ spawn ใหม่ด้วย claude แทน provider เดิมที่ค้าง "
+            f"(#270 — assign ใหม่แบบไม่ระบุ --provider จะไปติด provider เดิมซ้ำ) task เดิมดูได้ผ่าน "
+            f"`takkub task show --role {role_name}` (issue #254)"
         )
         self._notify_lead(project_ns, msg)
         _log_event(

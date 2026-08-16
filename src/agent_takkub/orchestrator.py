@@ -1481,6 +1481,7 @@ class Orchestrator(
         project: str | None = None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
         mode: str = "pane",
         _resource_token: ResourceToken | None = None,
     ) -> tuple[bool, str]:
@@ -1489,6 +1490,8 @@ class Orchestrator(
         if mode == "subagent":
             if model:
                 return False, "model override is not supported in subagent mode"
+            if provider:
+                return False, "provider override is not supported in subagent mode"
             if plan:
                 return False, "plan mode is not supported in subagent mode"
             return self._register_subagent(
@@ -1502,11 +1505,20 @@ class Orchestrator(
                 project=project,
                 feature=feature,
             )
+        provider = (provider or "").strip().lower() or None
+        if provider:
+            from .provider_config import assign_provider_override_error
+
+            provider_error = assign_provider_override_error(provider)
+            if provider_error:
+                return False, provider_error
         model = (model or "").strip() or None
         if model:
             from .provider_config import assign_model_override_error
 
-            model_error = assign_model_override_error(role_name, model, project)
+            model_error = assign_model_override_error(
+                role_name, model, project, provider_override=provider
+            )
             if model_error:
                 return False, model_error
         # #162: a repeated `--isolation worktree` assign at the same BARE role
@@ -1545,7 +1557,7 @@ class Orchestrator(
                     task_id=task_id,
                     resource_class=resource_class,
                     reason=decision.reason,
-                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model: (
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider: (
                         self.assign(
                             r,
                             c,
@@ -1558,6 +1570,7 @@ class Orchestrator(
                             project=p,
                             feature=f,
                             model=m,
+                            provider=pr,
                             _resource_token=token,
                         )
                     ),
@@ -1602,6 +1615,7 @@ class Orchestrator(
                 project,
                 feature,
                 model,
+                provider,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -1619,6 +1633,7 @@ class Orchestrator(
                 project,
                 feature,
                 model,
+                provider,
             )
         else:
             result = self._assign_dispatch(
@@ -1633,6 +1648,7 @@ class Orchestrator(
                 worktree=None,
                 feature=feature,
                 model=model,
+                provider=provider,
             )
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
@@ -1698,6 +1714,7 @@ class Orchestrator(
         worktree: dict | None = None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -1715,7 +1732,48 @@ class Orchestrator(
         raw_task_for_ledger = task
         task = self._apply_session_goal(task, project_ns)
         base_role_a = _split_shard(role_name)[0]
-        effective_provider = effective_provider_for(base_role_a, project=project_ns)
+        # Fetched early (normally computed further down, right before spawn)
+        # so an explicit --provider (#270) can be validated against
+        # pane_is_running and folded into `effective_provider` BEFORE it's
+        # used below for the codex task-rewrite decision and the
+        # system_prompt_flag lookup — both must reflect the CLI that will
+        # actually run, not the role's static config, exactly like the
+        # model_override handling a few lines down.
+        key = _exit_key(project_ns, role_name)
+        ps_assign = self._ps(key)
+        ps_assign.task_id = _uuid.uuid4().hex
+        existing_pane = self._project_panes(project_ns).get(role_name)
+        pane_is_running = bool(
+            existing_pane is not None
+            and getattr(existing_pane, "session", None) is not None
+            and getattr(existing_pane.session, "is_alive", False)
+        )
+        if provider and pane_is_running:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --provider {provider!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "provider เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+            )
+            _log_event(
+                "assign_provider_override_ignored",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # Same "clear on a plain re-assign, survive gate/FIFO/respawn
+            # otherwise" contract as model_override below. A watchdog-set
+            # degrade (see PaneState.provider_override docstring) that this
+            # explicit call doesn't renew is intentionally dropped here —
+            # spawn()'s own fresh-spawn-clear block would reset it to None on
+            # the very next spawn anyway; this just does it one call sooner.
+            ps_assign.provider_override = provider
+        effective_provider = ps_assign.provider_override or effective_provider_for(
+            base_role_a, project=project_ns
+        )
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
@@ -1740,15 +1798,6 @@ class Orchestrator(
             delivery_task,
             project_ns,
             role_name,
-        )
-        key = _exit_key(project_ns, role_name)
-        ps_assign = self._ps(key)
-        ps_assign.task_id = _uuid.uuid4().hex
-        existing_pane = self._project_panes(project_ns).get(role_name)
-        pane_is_running = bool(
-            existing_pane is not None
-            and getattr(existing_pane, "session", None) is not None
-            and getattr(existing_pane.session, "is_alive", False)
         )
         if model and pane_is_running:
             self._notify_lead(
@@ -1961,6 +2010,7 @@ class Orchestrator(
             initial_delivery_reason=initial_delivery_reason,
             effective_provider=effective_provider,
             model_override=model,
+            provider_override=provider,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -1976,6 +2026,7 @@ class Orchestrator(
         project: str | None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -2011,6 +2062,7 @@ class Orchestrator(
                 worktree=None,
                 feature=feature,
                 model=model,
+                provider=provider,
             )
 
         if not base_cwd:
@@ -2073,6 +2125,7 @@ class Orchestrator(
             worktree=info.as_dict(),
             feature=feature,
             model=model,
+            provider=provider,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -6460,11 +6513,12 @@ class Orchestrator(
         project: str | None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
         flag (commit gate, auto-chain, shards, plan, isolation, feature,
-        per-assign model) survives unchanged."""
+        per-assign model/provider) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -6482,6 +6536,7 @@ class Orchestrator(
                 "project": project,
                 "feature": feature,
                 "model": model,
+                "provider": provider,
             }
         )
         depth = len(q[project_ns])
@@ -6543,6 +6598,7 @@ class Orchestrator(
                 project=item["project"],
                 feature=item.get("feature", ""),
                 model=item.get("model"),
+                provider=item.get("provider"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a

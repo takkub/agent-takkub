@@ -82,6 +82,21 @@ def test_subagent_mode_rejects_model_override(orch: Orchestrator, tmp_path: Path
     assert "model override" in message
 
 
+def test_subagent_mode_rejects_provider_override(orch: Orchestrator, tmp_path: Path) -> None:
+    # Issue #270: subagents always inherit the parent's provider/model
+    # context — a --provider override is meaningless there, same as --model.
+    ok, message = orch.assign(
+        "reviewer",
+        str(tmp_path),
+        "audit",
+        mode="subagent",
+        provider="claude",
+        project="subtest",
+    )
+    assert ok is False
+    assert "provider override" in message
+
+
 def test_every_builtin_role_has_conditional_subagent_rule() -> None:
     role_files = sorted((REPO_ROOT / ".claude" / "agents").glob("*.md"))
     assert len(role_files) == 16

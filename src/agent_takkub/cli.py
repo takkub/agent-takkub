@@ -296,23 +296,39 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             }
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
+    provider = (getattr(args, "provider", None) or "").strip().lower() or None
     if mode == "subagent" and model:
         return {
             "ok": False,
             "msg": "--model cannot be used with --mode subagent: native subagents always use the parent provider/model context",
+        }
+    if mode == "subagent" and provider:
+        return {
+            "ok": False,
+            "msg": "--provider cannot be used with --mode subagent: native subagents always use the parent provider/model context",
         }
     if mode == "subagent" and getattr(args, "plan", False):
         return {
             "ok": False,
             "msg": "--plan cannot be used with --mode subagent; fan out native subagents directly with --shards",
         }
+    if provider:
+        from .provider_config import assign_provider_override_error
+
+        provider_error = assign_provider_override_error(provider)
+        if provider_error:
+            return {"ok": False, "msg": provider_error}
     if model:
         from .provider_config import assign_model_override_error, assign_model_override_warning
 
-        model_error = assign_model_override_error(args.role, model, _from_project())
+        model_error = assign_model_override_error(
+            args.role, model, _from_project(), provider_override=provider
+        )
         if model_error:
             return {"ok": False, "msg": model_error}
-        model_warning = assign_model_override_warning(args.role, model, _from_project())
+        model_warning = assign_model_override_warning(
+            args.role, model, _from_project(), provider_override=provider
+        )
         if model_warning:
             print(f"warn: {model_warning}", file=sys.stderr)
     if shards > 1 and getattr(args, "auto_chain", False):
@@ -360,6 +376,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "plan": True,
                     "shard_total": shards,
                     "model": model,
+                    "provider": provider,
                     "feature": getattr(args, "feature", "") or "",
                     "mode": mode,
                 }
@@ -383,6 +400,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "shard_total": shards,
                         "isolation": isolation,
                         "model": model,
+                        "provider": provider,
                         "feature": getattr(args, "feature", "") or "",
                         "mode": mode,
                     }
@@ -409,6 +427,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
                 "model": model,
+                "provider": provider,
                 "feature": getattr(args, "feature", "") or "",
                 "mode": mode,
             }
@@ -2043,9 +2062,25 @@ def main(argv: list[str] | None = None) -> int:
         "--model",
         default=None,
         metavar="ID",
-        help="override the model for this assign when it spawns a new pane "
-        "(takes precedence over role/provider defaults; an already-running "
-        "pane keeps its current model)",
+        help="override the model id for this assign's fresh spawn — must be a "
+        "model id valid for the role's EFFECTIVE provider (its configured "
+        "provider, or the one set by --provider on the same assign); it does "
+        "NOT itself change which CLI runs (use --provider for that). Only "
+        "takes effect when spawning a new pane; an already-running pane "
+        "keeps its current model",
+    )
+    sa.add_argument(
+        "--provider",
+        default=None,
+        metavar="NAME",
+        help="force this ONE assign's fresh spawn onto a different CLI than "
+        "the role's configured provider (issue #270 — e.g. reroute a "
+        "codex-mapped role to claude when codex is boot-stalled/broken). A "
+        "one-assign escape hatch, not a persistent remap (edit "
+        "role-providers.json / Settings → Providers & Roles for that, which "
+        "needs a cockpit restart to take effect). Only takes effect when "
+        "spawning a new pane; an already-running pane keeps its current "
+        "provider",
     )
     sa.add_argument("task", help="task content (positional)")
     sa.add_argument(
