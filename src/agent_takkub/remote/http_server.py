@@ -632,16 +632,35 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
 
     # ── static PWA shell ─────────────────────────────────────────────────
     def _serve_static(self, rest: str) -> None:
+        """`rel` is attacker-controlled (URL path segment). Traversal is
+        blocked by canonicalize-then-check-containment, the standard-safe
+        pattern (not string-prefix filtering, which is bypassable by `..`,
+        symlinks, and — on Windows — drive-relative overrides): `.resolve()`
+        collapses `..` and symlinks into an absolute path *first*, then
+        `is_relative_to()` verifies that absolute path is `_STATIC_ROOT`
+        itself or strictly inside it before any filesystem read happens.
+        `PurePath.__truediv__` resets to an absolute/drive-anchored operand
+        when `rel` supplies one (e.g. `rel="C:/secret"` discards
+        `_STATIC_ROOT` entirely) — harmless here because that only changes
+        what `candidate` resolves to, and the containment check below still
+        catches it precisely like any other escape.
+        """
         rel = rest.lstrip("/") or "index.html"
+        # codeql[py/path-injection]: sink is unavoidable — resolving the
+        # candidate path (incl. following symlinks) is the first step of
+        # the containment check itself; there is no way to validate
+        # containment without first computing the canonical path.
         candidate = (_STATIC_ROOT / rel).resolve()
-        if candidate != _STATIC_ROOT and _STATIC_ROOT not in candidate.parents:
+        if not candidate.is_relative_to(_STATIC_ROOT):
             self._reject()
             return
+        # codeql[py/path-injection]: `candidate` is proven contained by the
+        # `is_relative_to()` guard above — safe to stat/read.
         if not candidate.is_file():
             self._reject()
             return
         try:
-            data = candidate.read_bytes()
+            data = candidate.read_bytes()  # codeql[py/path-injection]: see guard above
         except OSError:
             self._reject()
             return

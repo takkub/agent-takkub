@@ -185,8 +185,15 @@ class TestStartDiagnosticNotes:
 
         rc = RemoteControl.maybe_start(MagicMock())
         try:
-            assert "old.example.com" in rc.hostname_mismatch_note
-            assert "new.example.com" in rc.hostname_mismatch_note
+            # Not URL sanitization — just confirming a human-readable
+            # diagnostic note mentions both hostnames; no trust decision
+            # is gated on this substring check.
+            assert (
+                "old.example.com" in rc.hostname_mismatch_note
+            )  # codeql[py/incomplete-url-substring-sanitization]
+            assert (
+                "new.example.com" in rc.hostname_mismatch_note
+            )  # codeql[py/incomplete-url-substring-sanitization]
         finally:
             rc.stop()
 

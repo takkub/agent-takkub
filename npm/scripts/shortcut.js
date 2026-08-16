@@ -44,8 +44,15 @@ function createWindows() {
   // Run from a temp .ps1 FILE, not an inline -Command: passing a long quoted
   // command through Node→Windows arg-escaping mangles the quotes and produces
   // an empty shortcut. A -File avoids all of that.
-  const ps1 = path.join(os.tmpdir(), `att-shortcut-${process.pid}.ps1`);
-  fs.writeFileSync(ps1, lines.join('\r\n') + '\r\n', 'utf8');
+  //
+  // mkdtempSync (not a PID-based name in os.tmpdir() directly) gives a
+  // freshly-created, uniquely-named, current-user-owned directory — a
+  // predictable path there is guessable/plantable by another local account
+  // ahead of time (symlink pre-plant), which a plain writeFileSync would
+  // silently follow and overwrite.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'att-shortcut-'));
+  const ps1 = path.join(tmpDir, 'shortcut.ps1');
+  fs.writeFileSync(ps1, lines.join('\r\n') + '\r\n', { encoding: 'utf8', flag: 'wx' });
   try {
     const r = spawnSync(
       'powershell',
@@ -55,7 +62,7 @@ function createWindows() {
     return r.status === 0 && fs.existsSync(lnk) ? lnk : null;
   } finally {
     try {
-      fs.unlinkSync(ps1);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_e) {
       /* ignore */
     }

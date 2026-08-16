@@ -2536,7 +2536,17 @@
       .catch(function () {
         // forgetToken() already switched to pairing on an auth 404. Keep the
         // normal retry behavior for a transient network failure.
-        if (state.token) enterAuthenticatedApp();
+        //
+        // Not an auth bypass: `state.token` only decides which client-side
+        // *view* renders (app shell vs. pairing screen) — no data and no
+        // privileged action lives behind it. `enterAuthenticatedApp()` only
+        // toggles CSS/DOM state and kicks off `apiFetch()` calls, and every
+        // one of those is independently re-checked server-side (bearer
+        // token + optional password session, see `http_server.py`'s
+        // `_check_bearer`/`_check_password_gate`) on every request — a
+        // forged/stale `state.token` here just means those later fetches
+        // 404/403 and bounce back to pairing, same as today.
+        if (state.token) enterAuthenticatedApp(); // codeql[js/user-controlled-bypass]
       });
   }
 

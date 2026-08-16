@@ -92,10 +92,29 @@ function posixEnsure(binDir) {
   if (fs.existsSync(bashrc)) rcs.push(bashrc);
   let added = false;
   for (const rc of rcs) {
-    const existing = fs.existsSync(rc) ? fs.readFileSync(rc, 'utf8') : '';
-    if (existing.includes(MARKER)) continue;
-    fs.writeFileSync(rc, existing + block);
-    added = true;
+    // One fd carries the whole check-then-write cycle (not separate
+    // existsSync/readFileSync/writeFileSync path lookups): opening `rc`
+    // once and reusing that fd for both the read and the append means what
+    // we inspected and what we wrote to are provably the same file, with
+    // no window between "check" and "write" for `rc` to start pointing
+    // somewhere else. `wx+` on the create branch is itself atomic
+    // create-if-absent (and still readable, unlike plain `wx`), closing
+    // the same race on the exists check too.
+    let fd;
+    try {
+      fd = fs.openSync(rc, 'r+');
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+      fd = fs.openSync(rc, 'wx+');
+    }
+    try {
+      const existing = fs.readFileSync(fd, 'utf8');
+      if (existing.includes(MARKER)) continue;
+      fs.writeSync(fd, block); // position advanced to EOF by the read above
+      added = true;
+    } finally {
+      fs.closeSync(fd);
+    }
   }
   return added;
 }
