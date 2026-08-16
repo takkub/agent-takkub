@@ -1247,6 +1247,23 @@ class LeadInboxMixin:
                         reason=_reason,
                     )
                     self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            # #271: computed once per poll (not just while the #254 warning
+            # below is still armed) so the elapsed>=max_wait_ms blind-paste
+            # guard further down can reuse the SAME read instead of calling
+            # shows_startup_marker() a second time — a live session would
+            # answer identically either way, but a second call also desyncs
+            # any test double driven by a finite side_effect sequence.
+            try:
+                _still_booting = pane.session.shows_startup_marker()
+                if not isinstance(_still_booting, bool):
+                    # Defensive: a real PtySession always returns bool, but a
+                    # test double / unconfigured mock session returns a
+                    # truthy Mock object by default — never treat that as a
+                    # genuine boot-phase marker hit (same guard as the
+                    # auth-failure check below).
+                    _still_booting = False
+            except Exception:
+                _still_booting = False
             if not boot_stall_warned[0]:
                 # #254: same "checked every poll, own escalation" shape as
                 # the prompt-block check above, for the same reason —
@@ -1258,18 +1275,7 @@ class LeadInboxMixin:
                 # BUSY_WAIT_CEILING_SEC with no further signal. Escalating
                 # far earlier, on a short CONTINUOUS streak, gives Lead
                 # something concrete to act on well before that.
-                try:
-                    _booting = pane.session.shows_startup_marker()
-                    if not isinstance(_booting, bool):
-                        # Defensive: a real PtySession always returns bool,
-                        # but a test double / unconfigured mock session
-                        # returns a truthy Mock object by default — never
-                        # treat that as a genuine boot-phase marker hit
-                        # (same guard as the auth-failure check above).
-                        _booting = False
-                except Exception:
-                    _booting = False
-                if _booting:
+                if _still_booting:
                     boot_stall_elapsed[0] += _READY_POLL_INTERVAL_MS
                     if boot_stall_elapsed[0] >= _orch_attr("BOOT_STALL_GRACE_SEC", 110) * 1000:
                         boot_stall_warned[0] = True
@@ -1415,6 +1421,33 @@ class LeadInboxMixin:
                 # `takkub status` already uses to call a pane "stalled" —
                 # otherwise keep polling so the task still lands normally the
                 # moment the pane returns to ready.
+                if _still_booting:
+                    # #271: never blind-paste while the provider's own
+                    # boot-phase marker (codex "Booting MCP server: …", agy
+                    # equivalent) is still on screen — the composer hasn't
+                    # rendered yet, so the bytes land as raw keystrokes on
+                    # the boot splash and the task is lost outright, not
+                    # merely unconfirmed (same risk class as the trust-modal
+                    # defer in _deliver() above). Keep waiting past
+                    # max_wait_ms instead, capped at the same
+                    # BUSY_WAIT_CEILING_SEC ceiling as the busy-pane branch
+                    # below so a boot that genuinely never finishes still
+                    # gets a last-resort blind paste rather than polling
+                    # forever. The [delivery-boot-stall] notice (#254,
+                    # boot_stall_warned above) already tells Lead this pane
+                    # is stuck here — no separate warning needed.
+                    busy_wait_ceiling_ms = _orch_attr("BUSY_WAIT_CEILING_SEC", 1800) * 1000
+                    if elapsed[0] < busy_wait_ceiling_ms:
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
+                    _log_event(
+                        "task_deliver_boot_marker_ceiling_timeout",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        elapsed_sec=round(elapsed[0] / 1000, 1),
+                    )
+                    _deliver(unconfirmed=True, busy_ceiling=True)
+                    return
                 seconds_since_output = pane.session.seconds_since_output()
                 stall_threshold_sec = _orch_attr("STALL_THRESHOLD_SEC", 300)
                 if seconds_since_output < stall_threshold_sec:

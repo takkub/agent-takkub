@@ -376,7 +376,10 @@ class TestReadyWaitMs:
         monkeypatch.setattr(
             provider_config, "effective_provider_for", lambda role, project=None: "codex"
         )
-        assert orch._ready_wait_ms("codex", "P", 45_000) == 90_000
+        # #271: raised from 90_000 — measured cold boot on real hardware runs
+        # 90-150s every trial (4/4, 2026-08-16), routinely expiring the old
+        # window mid-boot.
+        assert orch._ready_wait_ms("codex", "P", 45_000) == 180_000
 
     def test_claude_role_without_mcps_keeps_default(self, orch, monkeypatch) -> None:
         from agent_takkub import pane_tools_policy, provider_config

@@ -397,7 +397,14 @@ codex_spec = ProviderSpec(
         ReadyRule("fast off", True),  # pty_session.py:247
         ReadyRule("fast on", True),  # pty_session.py:248
     ),
-    ready_wait_ms=90_000,  # lead_inbox.py:434-435 (cold-boot + MCP-boot allowance)
+    # #271: 90s was set before codex grew the `code_mode`/`codex_apps`
+    # feature — measured cold-boot on real hardware now runs 90-150s EVERY
+    # spawn (4/4 trials, 2026-08-16), so the old window routinely expired
+    # mid-boot. 180s covers the observed spread with margin; the
+    # shows_startup_marker() guard in lead_inbox.py's _check() (#271) is the
+    # actual blind-paste backstop, this just keeps the common case from
+    # relying on that extension at all.
+    ready_wait_ms=180_000,  # lead_inbox.py:434-435 (cold-boot + MCP-boot allowance)
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
