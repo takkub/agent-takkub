@@ -1,4 +1,4 @@
-"""Structural checks for #252/#254: the PWA's connectivity chip must not lie
+"""Structural checks for #252: the PWA's connectivity chip must not lie
 in EITHER direction.
 
 A Cloudflare/tunnel edge failure (530, 502, 503, ...) is intercepted before
@@ -57,7 +57,7 @@ class TestApiFetchEdgeDetection:
         assert unreachable_throw < offline_false
 
     def test_5xx_with_our_json_content_type_is_not_unreachable(self):
-        """#254: a 5xx whose Content-Type is application/json is the
+        """#252: a 5xx whose Content-Type is application/json is the
         cockpit's own bridge-timeout response (see module docstring) — must
         NOT setOffline(true) and must NOT throw cockpit_unreachable. It gets
         its own distinct error so the chip stays Online."""
@@ -155,7 +155,7 @@ class TestBridgeTimeoutHelper:
 class TestCallSitesUseConnError:
     """Every user-facing apiFetch call site must distinguish an edge/tunnel
     failure from a generic app-level error, per #252 requirement 2 — and
-    (#254) must also distinguish a cockpit-answered bridge timeout from
+    (#252) must also distinguish a cockpit-answered bridge timeout from
     both of those. Call sites now route through the shared `errMsg(err,
     fallback)` helper (fix-loop round 3 dedup) instead of repeating the
     isConnError/isBridgeTimeoutError ternary inline; the helper's own
