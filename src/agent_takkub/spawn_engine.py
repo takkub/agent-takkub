@@ -490,26 +490,36 @@ class PaneState:
     # because CLI argv cannot be changed after process start. Keeping it in
     # PaneState carries the choice through spawn gate/FIFO and auto-respawn.
     model_override: str | None = None
-    # #248/#247 round 2: per-pane provider override, set by
-    # lead_inbox._recover_no_content_pane's degrade step when a provider's
-    # CLI never rendered any content across a spawn + one retry — consulted
-    # ahead of provider_config.effective_provider_for's normal config/
-    # availability resolution (see spawn()'s effective_provider assignment
-    # below), same idea as that function's own "unavailable provider ->
-    # claude substitute" fallback, just pane-scoped instead of global.
-    # Clears naturally the next time this PaneState is popped (close()/
-    # done()), so a later fresh assign() for this role tries the real
-    # provider again instead of staying degraded forever. Mirrors
-    # model_override's shape/precedent immediately above.
+    # #248/#247 round 2 (extended #269): per-pane provider override, set by
+    # lead_inbox._recover_broken_pane's degrade step — either when a
+    # provider's CLI never rendered any content across a spawn + one retry
+    # (the no-content watchdog), or immediately when the CLI shows its own
+    # auth-failure marker (#269 — no non-degraded retry there, since a login
+    # wall doesn't clear itself on retry) — consulted ahead of
+    # provider_config.effective_provider_for's normal config/availability
+    # resolution (see spawn()'s effective_provider assignment below), same
+    # idea as that function's own "unavailable provider -> claude
+    # substitute" fallback, just pane-scoped instead of global. Clears
+    # naturally the next time this PaneState is popped (close()/done()), so
+    # a later fresh assign() for this role tries the real provider again
+    # instead of staying degraded forever. Mirrors model_override's
+    # shape/precedent immediately above.
     provider_override: str | None = None
-    # #248/#247 round 2: how many times the no-content watchdog has already
-    # closed+respawned this pane (0 = never). 1 = one plain retry used;
-    # >= 2 = the degrade-to-claude respawn also used — the watchdog gives up
-    # after that and lets the ordinary elapsed[0] >= max_wait_ms path in
-    # lead_inbox._check take over as the final safety net. Cleared on a
-    # deliberate fresh spawn (see spawn()'s fresh-spawn-clear block), kept
-    # across the watchdog's own _from_auto_respawn=True respawns — same
-    # split as stuck_recover_attempts immediately above.
+    # #248/#247 round 2 (extended #269): how many times
+    # lead_inbox._recover_broken_pane has already closed+respawned this pane
+    # for EITHER reason — no-content OR auth-failure (0 = never). For the
+    # no-content watchdog specifically: 1 = one plain retry used; >= 2 = the
+    # degrade-to-claude respawn also used, after which the watchdog gives up
+    # and lets the ordinary elapsed[0] >= max_wait_ms path in
+    # lead_inbox._check take over as the final safety net. An auth-failure
+    # recovery always degrades on its first call (see
+    # lead_inbox._recover_auth_failed_pane) and does not itself branch on
+    # this counter — it only bumps it, same as the no-content path, so a
+    # later no-content check on the same pane degrades sooner rather than
+    # spending a redundant plain retry. Cleared on a deliberate fresh spawn
+    # (see spawn()'s fresh-spawn-clear block), kept across the watchdog's
+    # own _from_auto_respawn=True respawns — same split as
+    # stuck_recover_attempts immediately above.
     no_content_recover_attempts: int = 0
     # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
     # preload it through --append-system-prompt-file; providers without an

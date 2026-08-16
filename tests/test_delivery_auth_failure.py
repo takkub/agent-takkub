@@ -150,7 +150,10 @@ class TestReadyPromptWinsOverStaleAuthMarker:
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
-        with patch("agent_takkub.lead_inbox._log_event"):
+        with (
+            patch.object(orch, "_recover_auth_failed_pane"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
             orch._send_when_ready("backend", "run smoke", max_wait_ms=100_000, project="P")
 
         warnings = _written_strings(lead.session)
@@ -197,7 +200,10 @@ class TestAuthFailureRequiresConsecutivePolls:
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
-        with patch("agent_takkub.lead_inbox._log_event") as log:
+        with (
+            patch.object(orch, "_recover_auth_failed_pane") as recover,
+            patch("agent_takkub.lead_inbox._log_event") as log,
+        ):
             orch._send_when_ready("backend", "run smoke", max_wait_ms=100_000, project="P")
 
         warnings = _written_strings(lead.session)
@@ -207,5 +213,13 @@ class TestAuthFailureRequiresConsecutivePolls:
         assert "not signed in" in auth_warnings[0]
         assert backend.session.auth_failure_reason.call_count == _AUTH_FAILURE_CONFIRM_POLLS
         assert any(c.args and c.args[0] == "task_deliver_auth_failure" for c in log.call_args_list)
-        # Blind-delivered (unconfirmed) — the payload still lands.
-        assert backend.session.write.called
+        # #269: no longer blind-pastes into the broken pane — routes to the
+        # same close+respawn+degrade-to-claude recovery the no-content
+        # watchdog uses, instead of losing the task in a pane that can never
+        # process it.
+        recover.assert_called_once()
+        call = recover.call_args
+        assert call.args[0] == "backend"
+        assert call.kwargs["provider"] == "claude"
+        assert call.kwargs["reason"] == "not signed in"
+        assert not backend.session.write.called

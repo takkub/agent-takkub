@@ -1325,6 +1325,7 @@ class LeadInboxMixin:
                         auth_failure_streak[0] = 0
                     if _auth_reason and auth_failure_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
                         auth_failure_warned[0] = True
+                        sent[0] = True
                         _log_event(
                             "task_deliver_auth_failure",
                             project=self._resolve_project(project),
@@ -1333,7 +1334,22 @@ class LeadInboxMixin:
                             reason=_auth_reason,
                         )
                         self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
-                        _deliver(unconfirmed=True)
+                        # #269: blind-pasting into a CLI that just told us it
+                        # isn't signed in only loses the task — unlike the
+                        # no-content watchdog's timeout (which can be a slow
+                        # boot), an auth-failure marker is a definitive
+                        # "this provider is unusable right now" signal, unaffected
+                        # by retrying the same provider. Route to the SAME
+                        # close+respawn+degrade-to-claude recovery the no-content
+                        # watchdog uses below instead, so any provider's auth
+                        # failure recovers the same way no-content already does
+                        # (previously ONLY no-content ever reached
+                        # `provider_override`, so a provider whose CLI prints a
+                        # recognisable auth-failure marker — e.g. gemini's "not
+                        # signed in" — never degraded at all, #269).
+                        self._recover_auth_failed_pane(
+                            role_name, project, pane, task, provider=_provider, reason=_auth_reason
+                        )
                         return
             no_content_ceiling_ms = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75) * 1000
             try:
@@ -1697,6 +1713,40 @@ class LeadInboxMixin:
             reason=reason,
         )
 
+    def _warn_lead_auth_failure_degrade(
+        self, role_name: str, project: str | None, provider: str, reason: str
+    ) -> None:
+        """Second Lead notice for an auth-failure recovery (#269), fired
+        right after `_warn_lead_auth_failure` above (which names the
+        provider/reason/login-hint) — tells Lead the pane is ALSO being
+        degraded to claude and respawned, mirroring `_warn_lead_no_content`'s
+        degrade message below for the no-content path. Split out the same
+        way that one is, so the message can be asserted on independently of
+        the close→respawn side effect."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        msg = (
+            f"⚠️ [auth-failure-degrade] {role_name} pane ({display}) ยัง auth ไม่ผ่าน "
+            f'("{reason}") — degrade เป็น claude substitute แล้ว spawn ใหม่ (#269); '
+            f"ถ้าต้องการใช้ {display} ต่อ ให้ login แล้วสั่งงานใหม่อีกครั้ง"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "auth_failure_degrade_warned",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            reason=reason,
+        )
+
     def _warn_lead_no_content(self, role_name: str, project: str | None, *, degrade: bool) -> None:
         """One-line Lead notice for `_recover_no_content_pane` below — split
         out from the respawn logic so the message can be asserted on
@@ -1750,22 +1800,77 @@ class LeadInboxMixin:
 
         Second occurrence (``degrade=True``): the retry ALSO produced
         nothing, so stop trying this provider for this pane — force the
-        next spawn to claude via `PaneState.provider_override` (mirrors
-        `model_override`'s existing per-pane precedent in spawn_engine.py;
-        consulted ahead of `provider_config.effective_provider_for`'s
-        normal config/availability resolution), the same "unavailable
-        provider → claude substitute" idea the cockpit already applies
-        globally, just triggered per-pane here instead of by the
-        disabled-providers/binary-missing check that mechanism normally
-        runs on. `provider_override` naturally clears the next time this
-        role's PaneState is popped (a plain `close()`/`done()`, or the
+        next spawn to claude via `PaneState.provider_override`. See
+        `_recover_broken_pane` for the shared close+respawn+degrade
+        mechanics (also used by `_recover_auth_failed_pane` below, #269)."""
+        self._warn_lead_no_content(role_name, self._resolve_project(project), degrade=degrade)
+        self._recover_broken_pane(
+            role_name, project, pane, task, degrade=degrade, kind="no_content"
+        )
+
+    def _recover_auth_failed_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        provider: str,
+        reason: str,
+    ) -> None:
+        """#269: a pane whose provider CLI is showing its own auth-failure
+        marker (confirmed over `_AUTH_FAILURE_CONFIRM_POLLS` consecutive
+        polls by `_check` above) — unlike the no-content watchdog's timeout
+        (which can just mean a slow boot), an auth-failure marker is a
+        definitive "this provider is unusable right now" signal. Retrying
+        the same provider cannot help (a CLI stuck on login stays stuck
+        until a human logs it in out-of-band — proven in #269 by Lead
+        manually close+reassigning the same role 3 times with identical
+        results), so this degrades straight to claude — no non-degraded
+        retry step, unlike `_recover_no_content_pane`'s first occurrence.
+
+        Before this, ONLY the no-content watchdog ever reached
+        `PaneState.provider_override` — a provider whose CLI renders a
+        recognisable auth-failure marker (e.g. gemini's "not signed in")
+        never has `first_content_ts()` stay ``None`` (the marker text IS
+        content), so the no-content branch's `_no_content` check never
+        fires and this path never engaged, leaving that role permanently
+        stuck reassigning into the same broken login every time (#269)."""
+        self._warn_lead_auth_failure_degrade(
+            role_name, self._resolve_project(project), provider, reason
+        )
+        self._recover_broken_pane(role_name, project, pane, task, degrade=True, kind="auth_failure")
+
+    def _recover_broken_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        degrade: bool,
+        kind: str,
+    ) -> None:
+        """Shared close+respawn(+degrade-to-claude) mechanics for
+        `_recover_no_content_pane` and `_recover_auth_failed_pane` (#269) —
+        see those two for why/when each calls in with ``degrade``.
+
+        ``degrade=True`` forces the next spawn to claude via
+        `PaneState.provider_override` (mirrors `model_override`'s existing
+        per-pane precedent in spawn_engine.py; consulted ahead of
+        `provider_config.effective_provider_for`'s normal config/
+        availability resolution), the same "unavailable provider → claude
+        substitute" idea the cockpit already applies globally, just
+        triggered per-pane here instead of by the disabled-providers/
+        binary-missing check that mechanism normally runs on.
+        `provider_override` naturally clears the next time this role's
+        PaneState is popped (a plain `close()`/`done()`, or the
         `self.close()` a few lines below), so a later fresh `assign()` for
         this role tries the real provider again rather than staying
         degraded forever.
 
-        Unlike `_prompt_block_reason`/auth-failure handling above, the
-        caller (`_check`) does NOT keep polling the same closure afterward
-        — `close()` tears the AgentPane widget down entirely
+        The caller (`_check`) does NOT keep polling the same closure
+        afterward — `close()` tears the AgentPane widget down entirely
         (`paneClosed` → `main_window._remove_teammate_pane`) and a respawn
         builds a brand new one (`_ensure_teammate_pane`), so the `pane`
         object this call was given goes stale the moment `close()` returns.
@@ -1784,17 +1889,18 @@ class LeadInboxMixin:
         # Snapshot before close() pops the whole PaneState — restored into
         # the fresh one _do_respawn creates so the attempt count survives
         # the pop (same snapshot/restore shape _auto_recover_stuck uses for
-        # its own counters).
+        # its own counters). Shared across both `kind`s: an auth-failure
+        # recovery bumping this is harmless (it only ever makes a LATER
+        # no-content check on this same pane degrade sooner, never later).
         _ps_snap = getattr(self, "_pane_state", {}).get(key)
         snap_attempts = _ps_snap.no_content_recover_attempts if _ps_snap is not None else 0
         _log_event(
-            "no_content_pane_recover",
+            f"{kind}_pane_recover",
             role=role_name,
             project=project_ns,
             degrade=degrade,
             prior_attempts=snap_attempts,
         )
-        self._warn_lead_no_content(role_name, project_ns, degrade=degrade)
         self.close(role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True)
 
         def _do_respawn() -> None:
@@ -1804,7 +1910,7 @@ class LeadInboxMixin:
                 ps.provider_override = "claude"
             ok, msg = self.spawn(role_name, cwd=cwd, project=project_ns, _from_auto_respawn=True)
             _log_event(
-                "no_content_pane_respawned",
+                f"{kind}_pane_respawned",
                 role=role_name,
                 project=project_ns,
                 degrade=degrade,
