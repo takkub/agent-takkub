@@ -102,3 +102,55 @@ collected" message — not a real failure, confirmed by cross-checking with
 
 Full suite not run per this task's targeted-tests-only scope (#project
 convention) — leave to the qa batch gate before merge.
+
+## Follow-up: cross-platform CI failure (2026-08-16, post-merge)
+
+1.0.67's CI run (windows-latest green, macos-latest + ubuntu-latest red,
+[run 31935323677](https://github.com/takkub/agent-takkub/actions/runs/31935323677))
+failed 3 of the 4 new `TestWarnIfLiveChildren` cases:
+`test_scaffolding_only_children_stay_silent`,
+`test_codex_scaffolding_stays_silent`, `test_real_work_still_warns_past_scaffolding`.
+
+**Root cause was in the tests, not the implementation.** All three fed
+mocked children named `cmd.exe`/`conhost.exe` — the Windows-only ConPTY
+console-host pair (`GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32`, correctly
+gated `if sys.platform == "win32"` in `scaffolding_process_names_for`) —
+without ever pinning `sys.platform`. On the CI machine's real OS
+(`darwin`/`linux`), that generic set evaluates to `()`, so those two names
+never landed in the scaffolding set and leaked through as "real" children:
+`test_scaffolding_only_children_stay_silent`/`test_codex_scaffolding_stays_silent`
+warned when they should have stayed silent, and
+`test_real_work_still_warns_past_scaffolding` counted 3 subprocesses
+(`node.exe`+`cmd.exe`+`conhost.exe` all miscounted alongside `docker`)
+instead of the intended 1. The three hypotheses from the task were checked
+in order: the win32-only baseline is deliberate and documented (not a bug —
+POSIX genuinely has no ConPTY console-host analog to guess at); the per-provider
+`scaffolding_process_names` entries already list both the `.exe` and
+bare-name spelling (e.g. claude's `("node.exe", "node")`), so
+`normalize_process_name` matches those on every OS already; the actual
+defect was the third hypothesis — Windows-shaped fixture names asserted
+without gating `sys.platform` to match.
+
+**Fix** (test-only, no production code changed — the filter itself was
+already correctly cross-platform):
+
+- `monkeypatch.setattr(sys, "platform", "win32")` added to the 3 failing
+  tests so they pin and prove the Windows ConPTY-baseline branch on every
+  CI OS, not just whichever one happens to be running the suite.
+- 3 new POSIX-side cases added (`test_scaffolding_only_children_stay_silent_posix`,
+  `test_codex_scaffolding_stays_silent_posix`,
+  `test_real_work_still_warns_past_scaffolding_posix`), each pinning
+  `sys.platform` to `"linux"`/`"darwin"` and using bare (`.exe`-less)
+  process names (`node`, `codex-code-mode-host`) with no `cmd.exe`/`conhost.exe`
+  in the mix, proving the provider-owned scaffolding list alone is enough
+  on POSIX and that real work (`docker`) still survives the filter and
+  warns there too.
+- Both branches (`win32` and POSIX) are now exercised in a single test run
+  on any one OS via `sys.platform` monkeypatching, per the project's
+  cross-platform convention — no longer relying on which CI runner happens
+  to execute the file.
+
+Verification: `PYTHONPATH=<repo>/src python -m pytest
+tests/test_progress_and_close_warning.py -q` → 24/24 passed (17 pre-#272 +
+4 from #272 + 3 new POSIX cases) on this Windows dev box. Full suite not
+run per targeted-tests-only convention — leave to the qa batch gate.

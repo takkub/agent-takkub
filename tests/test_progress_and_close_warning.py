@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -262,8 +263,15 @@ class TestWarnIfLiveChildren:
     def test_scaffolding_only_children_stay_silent(self, orch: Orchestrator, monkeypatch) -> None:
         """#272: a pane closing with only its own CLI-launcher scaffolding
         alive (npm .cmd shim's cmd.exe/conhost.exe/node.exe on Windows) must
-        not warn — that was every single close before this filter existed."""
+        not warn — that was every single close before this filter existed.
+
+        cmd.exe/conhost.exe are the Windows-only ConPTY console-host pair
+        (`GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32`), so this pins them by
+        forcing `sys.platform` rather than relying on which OS the suite
+        happens to run on — otherwise this test silently no-ops on
+        macOS/Linux CI runners instead of proving the Windows baseline."""
         _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
             lambda role, project=None: "claude",
@@ -283,14 +291,62 @@ class TestWarnIfLiveChildren:
         lead = orch._panes_by_project[PROJECT][LEAD.name]
         lead.session.write.assert_not_called()
 
+    def test_scaffolding_only_children_stay_silent_posix(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """POSIX side of the same #272 guarantee: no ConPTY console-host
+        pair exists there, so only the provider's own confirmed scaffolding
+        (`scaffolding_process_names`, unsuffixed on POSIX — e.g. claude's
+        bundled `node` runtime) is expected to be filtered."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        child = MagicMock()
+        child.name.return_value = "node"
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
     def test_codex_scaffolding_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
             lambda role, project=None: "codex",
         )
         children = []
         for name in ("cmd.exe", "conhost.exe", "node.exe", "codex-code-mode-host.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "codex", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_codex_scaffolding_stays_silent_posix(self, orch: Orchestrator, monkeypatch) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        children = []
+        for name in ("node", "codex-code-mode-host"):
             c = MagicMock()
             c.name.return_value = name
             children.append(c)
@@ -327,6 +383,7 @@ class TestWarnIfLiveChildren:
         surviving the scaffolding filter still warns, and the count/detail
         reflect only the real work — not the scaffolding noise."""
         _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
             lambda role, project=None: "claude",
@@ -352,6 +409,40 @@ class TestWarnIfLiveChildren:
         assert "docker" in written
         assert "node.exe" not in written
         assert "cmd.exe" not in written
+
+    def test_real_work_still_warns_past_scaffolding_posix(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """POSIX side of the same #234/#272 guarantee: no cmd.exe/conhost.exe
+        pair to filter there, but the provider's own unsuffixed scaffolding
+        (`node`) must still be subtracted, leaving only real work (`docker`)
+        in the count/detail."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        children = []
+        for name in ("node", "docker"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "1 subprocess" in written
+        assert "docker" in written
+        assert "node" not in written
 
     def test_close_calls_warn_before_terminate(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())
