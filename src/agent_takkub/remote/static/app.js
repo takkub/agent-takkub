@@ -250,6 +250,16 @@
     if (state.session) headers["X-Session"] = state.session;
     return fetch(apiUrl(path), Object.assign({}, opts, { headers: headers }))
       .then(function (res) {
+        // #252: a tunnel/edge failure (Cloudflare down, cockpit's remote
+        // toggled off) never reaches the cockpit itself — it's intercepted
+        // upstream and answers with its own error page (5xx, text/plain or
+        // text/html body), never one of our own JSON responses. The cockpit
+        // itself never answers 5xx, so any 5xx here means "can't reach
+        // cockpit", not a real response — must not be read as "Online".
+        if (res.status >= 500) {
+          setOffline(true);
+          throw new Error("cockpit_unreachable");
+        }
         setOffline(false);
         // Server is a zero-surface design: every auth failure (bad secret
         // path, bad/expired token) answers with a bare 404 — never a 401.
@@ -309,6 +319,15 @@
     offlineBanner.classList.toggle("show", v);
     statusConn.classList.toggle("offline", v);
     statusConnText.textContent = v ? "Offline" : "Online";
+  }
+
+  // #252: distinguishes "can't reach cockpit at all" (tunnel down / edge
+  // error / real network failure) from an ordinary app-level error (bad
+  // input, 400/409, etc). Callers use this to show the right message —
+  // telling the user to go check the desktop, not just "retry".
+  var CONN_ERROR_MSG = "เชื่อมต่อ cockpit ไม่ได้ (tunnel ล่ม หรือ cockpit ปิด remote อยู่)";
+  function isConnError(err) {
+    return err instanceof TypeError || (err instanceof Error && err.message === "cockpit_unreachable");
   }
 
   // ---------------------------------------------------------------
@@ -439,8 +458,8 @@
           $("password-error").textContent = "รหัสผ่านไม่ถูกต้อง";
         }
       })
-      .catch(function () {
-        $("password-error").textContent = "เชื่อมต่อไม่ได้ ลองใหม่อีกครั้ง";
+      .catch(function (err) {
+        $("password-error").textContent = isConnError(err) ? CONN_ERROR_MSG : "เชื่อมต่อไม่ได้ ลองใหม่อีกครั้ง";
       });
   });
 
@@ -482,8 +501,9 @@
     list.innerHTML = '<div class="empty-state">กำลังโหลด…</div>';
     fetchProjectsAndMode()
       .then(renderProjects)
-      .catch(function () {
-        list.innerHTML = '<div class="empty-state">โหลด projects ไม่สำเร็จ<br>ลองใหม่อีกครั้ง</div>';
+      .catch(function (err) {
+        var msg = isConnError(err) ? CONN_ERROR_MSG : "โหลด projects ไม่สำเร็จ<br>ลองใหม่อีกครั้ง";
+        list.innerHTML = '<div class="empty-state">' + msg + "</div>";
       });
   }
 
@@ -594,7 +614,7 @@
         // password_required / unauthorized are already surfaced by apiFetch
         // (password prompt / pairing screen) — nothing more to toast.
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("เปิดไม่สำเร็จ ลองใหม่");
+        toast(isConnError(err) ? CONN_ERROR_MSG : "เปิดไม่สำเร็จ ลองใหม่");
       })
       .then(function () {
         state.opening = null;
@@ -639,7 +659,7 @@
       })
       .catch(function (err) {
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("ปิดไม่สำเร็จ ลองใหม่");
+        toast(isConnError(err) ? CONN_ERROR_MSG : "ปิดไม่สำเร็จ ลองใหม่");
       })
       .then(function () {
         state.closing = null;
@@ -1340,9 +1360,9 @@
           );
         }
       })
-      .catch(function () {
+      .catch(function (err) {
         if (targetLead) setProjectWorking(project, false, null, false);
-        toast("ส่งข้อความไม่สำเร็จ");
+        toast(isConnError(err) ? CONN_ERROR_MSG : "ส่งข้อความไม่สำเร็จ");
       });
   }
 
@@ -1404,6 +1424,7 @@
         })
         .catch(function (err) {
           if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
+          if (isConnError(err)) { toast(CONN_ERROR_MSG); return; }
           toast(err instanceof Error && err.message ? err.message : "ส่งรูปไม่สำเร็จ");
         })
         .then(function () {
@@ -1921,7 +1942,7 @@
       })
       .catch(function (err) {
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("resume ไม่สำเร็จ ลองใหม่");
+        toast(isConnError(err) ? CONN_ERROR_MSG : "resume ไม่สำเร็จ ลองใหม่");
       })
       .then(function () {
         state.resumePending = false;
