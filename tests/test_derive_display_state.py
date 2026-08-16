@@ -1,0 +1,298 @@
+"""#263: `Orchestrator._derive_display_state` unifies pane.state (declared
+at dispatch), the ready-marker screen scrape, and the delivery-health
+notice signal into ONE state for `takkub list`/`status`'s display — see
+that method's docstring for the full priority order. Real evidence from
+the issue: gemini stuck on "Signing in..." read "working"; codex
+genuinely busy (no task ever dispatched) read "active"; kimi stuck
+needing `/login` read "active" too — all three hid ground truth the
+screen already showed.
+
+Level 1 (`TestPriorityOrder`): the priority chain in isolation via a
+lightweight fake session whose 3 signal methods return canned
+booleans/strings directly — proves ordering/gating regardless of what
+real screen text produces those signals.
+
+Level 2 (`TestRealTranscriptFixtures`): the SAME real
+`PtySession.auth_failure_reason`/`shows_startup_marker`/
+`is_hard_blocked_for` production methods, run unbound against real
+captured screen text per provider (same `_FakeScreen`-delegate pattern
+test_auth_failure_detection.py already uses) — proves the full pipeline
+classifies a real transcript correctly, not just the priority logic in
+the abstract.
+
+Level 3 (`TestListStatusDetailedWiring`): `list_status_detailed` exposes
+the result as an additive `"display_state"` key while leaving `"state"`
+byte-identical to before — the #248/#247 pinned `_pane_display_state`
+tests and `_resolve_role_wait_status` (lead_wait.py) both depend on
+`"state"`'s literal value never changing.
+"""
+
+from __future__ import annotations
+
+import collections
+import types
+
+import pytest
+from PyQt6.QtCore import QCoreApplication, QObject
+
+from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.provider_spec import AUTH_TRANSIENT_GRACE_SEC
+from agent_takkub.pty_session import PtySession
+
+
+def _pane(
+    state: str, session: object | None = None, provider: str = "claude"
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        state=state,
+        session=session,
+        model=types.SimpleNamespace(provider_name=provider),
+    )
+
+
+class _StubSession:
+    """Fake session whose 3 signal methods return exactly what's configured
+    — isolates `_derive_display_state`'s priority/gating logic from what
+    real screen text would produce those signals (see
+    `TestRealTranscriptFixtures` for that side)."""
+
+    def __init__(
+        self,
+        auth_reason: str | None = None,
+        booting: bool = False,
+        hard_blocked: bool = False,
+        raise_on: tuple[str, ...] = (),
+    ) -> None:
+        self._auth_reason = auth_reason
+        self._booting = booting
+        self._hard_blocked = hard_blocked
+        self._raise_on = raise_on
+        self.is_alive = True
+
+    def auth_failure_reason(self, provider: str) -> str | None:
+        if "auth" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._auth_reason
+
+    def shows_startup_marker(self) -> bool:
+        if "booting" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._booting
+
+    def is_hard_blocked_for(self, provider: str) -> bool:
+        if "busy" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._hard_blocked
+
+
+class TestPriorityOrder:
+    def test_non_active_working_states_pass_through_unchanged(self) -> None:
+        for state in ("spawning", "ready", "done", "empty", "pending-notice"):
+            pane = _pane(state, session=_StubSession(auth_reason="send /login to login"))
+            assert Orchestrator._derive_display_state(None, pane, state, False) == state
+
+    def test_no_session_passes_through(self) -> None:
+        pane = _pane("active", session=None)
+        assert Orchestrator._derive_display_state(None, pane, "active", False) == "active"
+
+    def test_login_required_beats_everything_else(self) -> None:
+        session = _StubSession(auth_reason="send /login to login", booting=True, hard_blocked=True)
+        pane = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "working", True) == "login-required"
+
+    def test_booting_beats_waiting_delivery(self) -> None:
+        session = _StubSession(booting=True)
+        pane = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "working", True) == "booting"
+
+    def test_booting_applies_to_active_too(self) -> None:
+        session = _StubSession(booting=True)
+        pane = _pane("active", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "active", False) == "booting"
+
+    def test_waiting_delivery_only_when_working_and_unconfirmed(self) -> None:
+        session = _StubSession()
+        pane = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "working", True) == "waiting-delivery"
+        assert Orchestrator._derive_display_state(None, pane, "working", False) == "working"
+
+    def test_busy_only_applies_to_active(self) -> None:
+        session = _StubSession(hard_blocked=True)
+        pane = _pane("active", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "active", False) == "busy"
+        # "working" + hard-blocked is the NORMAL case (a real dispatched
+        # task is genuinely generating) — not surfaced as anything special.
+        pane_w = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane_w, "working", False) == "working"
+
+    def test_unknown_only_for_active_uncalibrated_provider(self) -> None:
+        session = _StubSession()
+        pane = _pane("active", session=session, provider="cursor")
+        assert Orchestrator._derive_display_state(None, pane, "active", False) == "unknown"
+
+    def test_unknown_does_not_apply_to_calibrated_provider(self) -> None:
+        session = _StubSession()
+        pane = _pane("active", session=session, provider="claude")
+        assert Orchestrator._derive_display_state(None, pane, "active", False) == "active"
+
+    def test_unknown_does_not_apply_to_working(self) -> None:
+        # A dispatched task is a fact the orchestrator itself knows,
+        # independent of ready-marker calibration — must not be downgraded
+        # to "unknown" just because the provider has no ready_rules.
+        session = _StubSession()
+        pane = _pane("working", session=session, provider="cursor")
+        assert Orchestrator._derive_display_state(None, pane, "working", False) == "working"
+
+    def test_each_signal_check_fails_open_on_exception(self) -> None:
+        for which in ("auth", "booting", "busy"):
+            session = _StubSession(raise_on=(which,))
+            pane = _pane("active", session=session, provider="cursor")
+            # No crash; falls through to whatever the next tier decides —
+            # here that's "unknown" (cursor, active, no other signal fired).
+            assert Orchestrator._derive_display_state(None, pane, "active", False) == "unknown"
+
+
+class _RealSignalSession:
+    """Delegates to the REAL `PtySession.auth_failure_reason` /
+    `shows_startup_marker` / `is_hard_blocked_for` production methods
+    (unbound-call trick, same pattern test_auth_failure_detection.py's
+    `_FakeScreen` uses) against captured provider screen text — proves the
+    full pipeline classifies a real transcript, not just the priority
+    logic in the abstract."""
+
+    def __init__(self, lines: list[str], seconds_since_output: float = 100.0) -> None:
+        self._lines = lines
+        self._seconds_since_output = seconds_since_output
+        self.is_alive = True
+
+    def display_lines(self) -> list[str]:
+        return self._lines
+
+    def seconds_since_output(self) -> float:
+        return self._seconds_since_output
+
+    def auth_failure_reason(self, provider: str) -> str | None:
+        return PtySession.auth_failure_reason(self, provider)
+
+    def shows_startup_marker(self) -> bool:
+        return PtySession.shows_startup_marker(self)
+
+    def is_hard_blocked_for(self, provider: str) -> bool:
+        return PtySession.is_hard_blocked_for(self, provider)
+
+
+class TestRealTranscriptFixtures:
+    """Real captured screen text per provider — mirrors the evidence in
+    docs/audit/2026-08-16-263-264-266-notify-truth.md and reuses the same
+    strings already confirmed in test_auth_failure_detection.py's
+    TestGeminiColdBootNotSignedIn / TestKimiNotLoggedIn fixtures."""
+
+    def test_gemini_stuck_signing_in_past_grace_is_login_required(self) -> None:
+        session = _RealSignalSession(
+            ["", "Signing in...", ""], seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "login-required"
+
+    def test_gemini_signing_in_during_normal_boot_is_not_login_required_yet(self) -> None:
+        session = _RealSignalSession(
+            ["", "Signing in...", ""], seconds_since_output=AUTH_TRANSIENT_GRACE_SEC - 1
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        # Transient marker hasn't cleared its grace period yet — falls
+        # through to the next tier (waiting-delivery, from the queued
+        # delivery-health notice — #263's original evidence shape).
+        assert result == "waiting-delivery"
+
+    def test_kimi_stuck_needing_login_is_login_required(self) -> None:
+        session = _RealSignalSession(
+            ["", "Model: not set, send /login to login", ""], seconds_since_output=5.0
+        )
+        pane = _pane("active", session=session, provider="kimi")
+        result = Orchestrator._derive_display_state(None, pane, "active", False)
+        assert result == "login-required"
+
+    def test_codex_mcp_cold_boot_is_booting(self) -> None:
+        session = _RealSignalSession(
+            ["OpenAI Codex (v0.145.0)", "booting mcp server..."], seconds_since_output=2.0
+        )
+        pane = _pane("active", session=session, provider="codex")
+        result = Orchestrator._derive_display_state(None, pane, "active", False)
+        assert result == "booting"
+
+    def test_codex_genuinely_busy_with_no_dispatch_is_busy(self) -> None:
+        # The issue's own evidence: `takkub list` said "active" while the
+        # screen plainly showed the busy indicator, because no task had
+        # ever been dispatched (pane.state stayed "active", never promoted
+        # to "working").
+        session = _RealSignalSession(
+            ["gpt-5.5 medium", "Working (0s . esc to interrupt)"], seconds_since_output=0.0
+        )
+        pane = _pane("active", session=session, provider="codex")
+        result = Orchestrator._derive_display_state(None, pane, "active", False)
+        assert result == "busy"
+
+    def test_cursor_uncalibrated_active_reads_unknown_not_active(self) -> None:
+        session = _RealSignalSession(["cursor-agent", "> "], seconds_since_output=50.0)
+        pane = _pane("active", session=session, provider="cursor")
+        result = Orchestrator._derive_display_state(None, pane, "active", False)
+        assert result == "unknown"
+
+
+class TestListStatusDetailedWiring:
+    """`list_status_detailed` must expose the new derivation as an
+    additive `"display_state"` key while `"state"` itself stays
+    byte-identical to before."""
+
+    @pytest.fixture(scope="class")
+    def qapp(self) -> QCoreApplication:
+        app = QCoreApplication.instance()
+        if app is None:
+            app = QCoreApplication([])
+        return app
+
+    @pytest.fixture
+    def orch(self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
+        o = Orchestrator.__new__(Orchestrator)
+        QObject.__init__(o)
+        o._panes_by_project = {}
+        o._pane_state = {}
+        o._lead_digest_queue = {}
+        o._lead_notify_queue = {}
+        o._pending_done_notices = {}
+        o._recent_done = []
+        monkeypatch.setattr(o, "_resolve_project", lambda p=None: p or "display-state-wiring")
+        monkeypatch.setattr(
+            o, "_project_panes", lambda p=None: o._panes_by_project.get(o._resolve_project(p), {})
+        )
+        return o
+
+    def test_display_state_added_without_changing_state(self, orch: Orchestrator) -> None:
+        project = "display-state-wiring"
+        session = _StubSession(auth_reason="send /login to login")
+        pane = _pane("working", session=session, provider="kimi")
+        orch._panes_by_project[project] = {"kimi": pane}
+        orch._lead_digest_queue[project] = collections.deque()
+        orch._lead_notify_queue[project] = collections.deque()
+
+        detailed = orch.list_status_detailed(project=project)
+
+        assert detailed["kimi"]["state"] == "working"
+        assert detailed["kimi"]["display_state"] == "login-required"
+
+    def test_display_state_falls_back_cleanly_when_every_signal_check_errors(
+        self, orch: Orchestrator
+    ) -> None:
+        project = "display-state-wiring"
+        session = _StubSession(raise_on=("auth", "booting", "busy"))
+        pane = _pane("active", session=session, provider="claude")
+        orch._panes_by_project[project] = {"backend": pane}
+        orch._lead_digest_queue[project] = collections.deque()
+        orch._lead_notify_queue[project] = collections.deque()
+
+        detailed = orch.list_status_detailed(project=project)
+
+        assert detailed["backend"]["state"] == "active"
+        assert detailed["backend"]["display_state"] == "active"

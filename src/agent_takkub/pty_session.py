@@ -1646,6 +1646,43 @@ class PtySession(QObject):
                     return marker
         return None
 
+    def is_hard_blocked_for(self, provider: str) -> bool:
+        """True when `provider`'s own `ready_hard_blockers` currently match
+        this pane's footer region — i.e. the screen shows an active
+        interrupt/generation indicator ("esc to interrupt", ...) — REGARDLESS
+        of whether the orchestrator ever dispatched a task to this pane (#263).
+
+        Exists because `is_at_ready_prompt()`/`is_at_ready_prompt_cached()`
+        collapse "hard-blocked (genuinely busy)" and "no ready marker matched
+        yet (ambiguous)" into the same single `False`, which is exactly what
+        let a codex pane read as bare "active" in `takkub list` while its
+        screen plainly showed "Working (0s - esc to interrupt)" — the
+        orchestrator's own declared-idle label and the screen's own busy
+        chrome silently disagreed with nothing surfacing the difference.
+        `Orchestrator._derive_display_state` uses this specifically to split
+        that "active" bucket into a "busy" label.
+
+        Deliberately duplicates (rather than refactors) the hard-blocker loop
+        `_classify_ready`/`_classify_ready_for_provider` already run, instead
+        of extracting a shared helper both would then depend on — those two
+        are covered by `ready_marker_selftest()`'s shipped-table self-test and
+        the task instructions for this change explicitly call out not to risk
+        touching that self-tested precedence chain for an unrelated feature.
+        Same `_ready_region` scoping and "verifying your account" /
+        "please try again shortly" carve-out as `_classify_ready_for_provider`,
+        so the two can never disagree about what counts as hard-blocked for a
+        given provider."""
+        spec = PROVIDER_REGISTRY.get(provider)
+        if spec is None:
+            return False
+        text = _ready_region(self.display_lines())
+        for b in spec.ready_hard_blockers:
+            if b in text:
+                if b == "verifying your account" and "please try again shortly" in text:
+                    continue
+                return True
+        return False
+
     def is_blocked_on_tty_prompt(self) -> str | None:
         """Return the first matching line if the pane is stuck on an interactive
         shell prompt (y/N, credential, 'press any key'); else ``None``.

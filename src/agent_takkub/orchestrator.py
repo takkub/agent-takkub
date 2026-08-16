@@ -4132,6 +4132,116 @@ class Orchestrator(
                 return True
         return False
 
+    def _derive_display_state(
+        self,
+        pane: AgentPane,
+        base_state: str,
+        delivery_unconfirmed: bool,
+    ) -> str:
+        """(#263) Combine the 3 disagreeing sources of truth the issue names —
+        `pane.state` (orchestrator-declared at dispatch), the ready-marker
+        screen scrape, and the delivery-health notice signal — into ONE state
+        string for `takkub list`/`status`'s display, with an explicit
+        priority order so no two of them can silently contradict each other
+        on screen the way the issue's evidence showed (gemini read "working"
+        while stuck on "Signing in..."; codex read "active" while the screen
+        plainly showed "Working (0s - esc to interrupt)"; kimi read "active"
+        while stuck needing `/login`).
+
+        Deliberately layered ON TOP OF `_pane_display_state`'s existing
+        spawning/active/ready/pass-through refinement (`base_state` — the
+        `"state"` key `list_status_detailed` already returns) instead of
+        replacing it: every existing `pane.state`/`"state"`-keyed check
+        elsewhere (`_resolve_role_wait_status`'s `state == "working"`, stall
+        detection above, the pre-existing `_pane_display_state` unit tests)
+        keeps reading the UNCHANGED base value. This produces a SEPARATE
+        `"display_state"` key — additive only, same contract as
+        `blocked_reason`/`delivery_unconfirmed` before it.
+
+        Priority (first match wins — screen-scraped ground truth always beats
+        an orchestrator-declared or notice-derived label, since the CLI
+        itself cannot be doing two contradictory things at once):
+
+          1. **login-required** — `session.auth_failure_reason(provider)`
+             matches (kimi "send /login to login", gemini stuck "Signing
+             in..." past its grace period, ...). The screen is definitive: a
+             CLI stuck here cannot simultaneously be "working" or "ready" no
+             matter what `pane.state` optimistically claims.
+          2. **booting** — `session.shows_startup_marker()` (codex/agy MCP
+             cold-boot chrome: "booting mcp server" / "tab to queue
+             message"). Distinct from `base_state == "spawning"` (nothing
+             printed at all yet) — this is "printed a banner, still not at
+             its own ready prompt".
+          3. **waiting-delivery** — `base_state == "working"` and
+             `delivery_unconfirmed` is True: the orchestrator declared the
+             task dispatched, but the delivery layer's own health notice
+             says it isn't sure the paste ever landed. Covers a provider
+             with no calibrated auth marker to catch tier 1's shape of the
+             same underlying problem.
+          4. **busy** — `base_state == "active"` (i.e. NOT yet promoted to
+             "working" by any dispatch) but `session.is_hard_blocked_for`
+             says the screen's own hard-blocker markers ("esc to
+             interrupt", ...) show the CLI actively generating/interrupting
+             anyway — the codex evidence above. Splits "genuinely idle"
+             apart from "busy for a reason the orchestrator doesn't know
+             about" instead of both reading as the same bare "active".
+          5. **unknown** — `base_state == "active"` and this pane's provider
+             is in `uncalibrated_providers()` (empty `ready_rules` —
+             currently only "cursor"): the active/ready split depends on a
+             ready-marker table never confirmed for this provider, so
+             claiming either confidently would be a guess dressed up as
+             fact (same "ตรวจไม่ได้ beats a confident wrong label"
+             principle as #251).
+          6. Otherwise `base_state` unchanged.
+
+        All screen-scrape checks are best-effort: any exception from a loose
+        test double or a torn-down session falls through to the next tier
+        instead of raising, matching `_pane_display_state`'s own
+        `except Exception` fallback.
+        """
+        if base_state not in ("active", "working"):
+            return base_state
+        session = pane.session
+        if session is None:
+            return base_state
+        provider = getattr(pane.model, "provider_name", None) or "claude"
+
+        try:
+            auth_reason = session.auth_failure_reason(provider)
+        except Exception:
+            auth_reason = None
+        if auth_reason:
+            return "login-required"
+
+        try:
+            booting = session.shows_startup_marker()
+        except Exception:
+            booting = False
+        if booting:
+            return "booting"
+
+        if base_state == "working":
+            return "waiting-delivery" if delivery_unconfirmed else base_state
+
+        # base_state == "active" from here on.
+        try:
+            busy = session.is_hard_blocked_for(provider)
+        except Exception:
+            busy = False
+        if busy:
+            return "busy"
+
+        from .provider_spec import uncalibrated_providers
+
+        try:
+            uncalibrated = provider in uncalibrated_providers()
+        except Exception:
+            uncalibrated = False
+        if uncalibrated:
+            return "unknown"
+
+        return base_state
+
     def list_status_detailed(self, project: str | None = None) -> dict[str, dict]:
         """Extended status snapshot with stall detection.
 
@@ -4155,6 +4265,15 @@ class Orchestrator(
         notice is currently pending for this role — see
         `_role_delivery_unconfirmed`. Same additive-only contract as
         `blocked_reason`.
+
+        `display_state` (#263) is `_derive_display_state`'s unified verdict —
+        the same `"state"` value, further refined into "login-required" /
+        "booting" / "waiting-delivery" / "busy" / "unknown" where the raw
+        `"state"` would otherwise show a misleadingly bare "working"/"active"
+        (see that method's docstring for the full priority order). This is
+        what `takkub list`/`status` render to Lead; `"state"` itself stays
+        exactly as before for every internal consumer (wait resolution,
+        stall detection) that depends on its literal value.
         """
         now = time.time()
         project_ns = self._resolve_project(project)
@@ -4179,8 +4298,16 @@ class Orchestrator(
                     delivery_unconfirmed = self._role_delivery_unconfirmed(project_ns, role)
                 except Exception:
                     delivery_unconfirmed = False
+            display_state_base = self._pane_display_state(pane)
+            try:
+                display_state = self._derive_display_state(
+                    pane, display_state_base, delivery_unconfirmed
+                )
+            except Exception:
+                display_state = display_state_base
             result[role] = {
-                "state": self._pane_display_state(pane),
+                "state": display_state_base,
+                "display_state": display_state,
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
                 "blocked_reason": blocked_reason,
@@ -4189,6 +4316,7 @@ class Orchestrator(
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
                 "state": state,
+                "display_state": state,
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
@@ -4197,6 +4325,7 @@ class Orchestrator(
         for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
                 "state": state,
+                "display_state": state,
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
@@ -4344,6 +4473,7 @@ class Orchestrator(
 
         for role, info in detailed.items():
             state = info["state"]
+            display_state = info.get("display_state", state)
             last_ts = info["last_progress_ts"]
             stall_min = info["stall_minutes"]
 
@@ -4411,11 +4541,13 @@ class Orchestrator(
 
             panes_out[role] = {
                 "state": state,
+                "display_state": display_state,
                 "stall_minutes": stall_min,
                 "last_progress_ts": last_ts,
                 "last_progress_human": human_ts,
                 "last_progress_abs": abs_ts,
                 "blocked_reason": info.get("blocked_reason"),
+                "delivery_unconfirmed": info.get("delivery_unconfirmed", False),
                 "transcript_tail": transcript_tail,
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,

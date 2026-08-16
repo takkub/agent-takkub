@@ -604,7 +604,12 @@ class CliServer(QObject):
                 detailed = self._orch.list_status_detailed(project=from_project)
                 status: dict[str, str] = {}
                 for role, info in detailed.items():
-                    state = info["state"]
+                    # #263: show the unified display_state (login-required /
+                    # booting / waiting-delivery / busy / unknown) so `takkub
+                    # list` can't silently disagree with what the screen
+                    # actually shows; falls back to the raw state if a caller
+                    # somehow gets a dict predating this key.
+                    state = info.get("display_state", info["state"])
                     stall_min = info.get("stall_minutes")
                     if stall_min is not None:
                         state = f"{state} (stalled {stall_min}m)"
