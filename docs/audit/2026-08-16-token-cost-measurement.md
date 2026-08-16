@@ -229,6 +229,7 @@ Lead เองได้ประโยชน์เพิ่ม (นอกเห�
 Command names, CLI flags, file paths, and issue numbers (`takkub done`, `--isolation worktree`, `#169`, `#202`, `#234`, …) were never touched — grep-verified after the fact (§ Verification).
 
 ### What stayed in Thai (rule 2 of the task, applied deliberately)
+> **Correction (fix-loop, same day):** the first pass of this translation actually translated 26 of these placeholder/template strings across all 16 files (e.g. `takkub done "<note สรุปงาน>"` → `"<summary note>"`, blocked-message placeholders, and `qa.md`'s output schema + literal shell warning string) — contradicting the claim below. Cross-check report: `docs/audit/2026-08-16-267-translation-crosscheck.md` (Major 1). All 26 were restored to Thai in the fix-loop; the claim below now holds against the working tree.
 - Every literal example string passed to `takkub done "..."` / `takkub send --to <role> "..."` — these are the actual template for the Thai-language note the user/Lead reads (per prior project convention: [Thai changelog](feedback_thai_changelog.md), [reads summary only](feedback_reads_summary_only.md)), so translating them would change output format, not just save tokens.
 - `critic.md`'s generated design-review markdown template (§`## 📸 Scope` / `✅ ของดีที่ควรเก็บไว้` / `➕ เพิ่ม` / `➖ ลบ` / `🔧 ปรับ` / `🚩 Heuristic violations` / `🎯 Recommended next steps`) — these headings become the literal `.md`/`.html` document Lead/the user opens, not a rule the model reads about itself.
 - `critic.md`'s embedded `takkub send --to gemini "..."` message body — this is CC'd to Lead automatically per the role file's own communication rule, so it counts as user-visible output, not model-only instruction; left untouched out of caution rather than judging it borderline-safe to translate.
@@ -261,27 +262,29 @@ Procedure: `git stash` the translation → call `agent_takkub.config.agent_role_
 
 | role | before (tok) | after (tok) | saved | saved % |
 |---|---:|---:|---:|---:|
-| devops | 6,148 | 4,100 | 2,048 | 33.3% |
-| critic | 6,133 | 4,335 | 1,798 | 29.3% |
-| qa | 5,923 | 4,140 | 1,783 | 30.1% |
-| frontend | 5,447 | 3,528 | 1,919 | 35.2% |
-| mobile | 5,384 | 3,514 | 1,870 | 34.7% |
-| docs | 5,378 | 3,407 | 1,971 | 36.6% |
-| backend | 5,311 | 3,471 | 1,840 | 34.6% |
-| security | 5,186 | 3,390 | 1,796 | 34.6% |
-| reviewer | 5,161 | 3,278 | 1,883 | 36.5% |
-| analyst | 4,919 | 3,201 | 1,718 | 34.9% |
-| designer | 4,538 | 3,062 | 1,476 | 32.5% |
-| gemini | 4,028 | 2,567 | 1,461 | 36.3% |
-| codex | 3,836 | 2,490 | 1,346 | 35.1% |
-| cursor | 3,764 | 2,427 | 1,337 | 35.5% |
-| kimi | 3,759 | 2,437 | 1,322 | 35.2% |
-| opencode | 3,742 | 2,424 | 1,318 | 35.2% |
-| **TOTAL** | **78,657** | **51,771** | **26,886** | **34.2%** |
+| devops | 6,148 | 4,117 | 2,031 | 33.0% |
+| critic | 6,133 | 4,360 | 1,773 | 28.9% |
+| qa | 5,923 | 4,183 | 1,740 | 29.4% |
+| frontend | 5,447 | 3,550 | 1,897 | 34.8% |
+| mobile | 5,384 | 3,536 | 1,848 | 34.3% |
+| docs | 5,378 | 3,429 | 1,949 | 36.2% |
+| backend | 5,311 | 3,493 | 1,818 | 34.2% |
+| security | 5,186 | 3,412 | 1,774 | 34.2% |
+| reviewer | 5,161 | 3,300 | 1,861 | 36.1% |
+| analyst | 4,919 | 3,223 | 1,696 | 34.5% |
+| designer | 4,538 | 3,084 | 1,454 | 32.0% |
+| gemini | 4,028 | 2,571 | 1,457 | 36.2% |
+| codex | 3,836 | 2,495 | 1,341 | 35.0% |
+| cursor | 3,764 | 2,431 | 1,333 | 35.4% |
+| kimi | 3,759 | 2,441 | 1,318 | 35.1% |
+| opencode | 3,742 | 2,428 | 1,314 | 35.1% |
+| **TOTAL** | **78,657** | **52,053** | **26,604** | **33.8%** |
 
-**Reads lower than the earlier ~45-55% estimate in §"ประมาณ"** — expected and explainable, not a measurement error: that estimate was a pure char/token-efficiency ratio projection ("แปลแล้วยาวขึ้น/สั้นลงแค่ไหนจริง" was explicitly flagged as the unknown); the actual translation kept every `takkub done`/`takkub send` example string and critic's document template in Thai (rule 2), which the estimate didn't carve out. 34.2% is the number that's actually measured, not projected.
+> **Re-measured (fix-loop, same day)** after restoring the 26 wrongly-translated placeholder/template strings to Thai (§ "What stayed in Thai" correction above, `docs/audit/2026-08-16-267-translation-crosscheck.md` Major 1). The `after` column and everything derived from it below is the corrected number — savings are slightly lower than the flawed first pass (33.8% vs the earlier 34.2%) because more literal Thai text is back in the staged files, which is the intended, correct behavior.
 
-Resend-weighted ceiling using the same formula as §4 (133.4 mean turns/session, today's spawn frequency for this project — backend×5, devops×2, frontend×7 non-Lead spawns counted in §4's methodology; the other 13 roles didn't spawn today so their ceiling isn't in today's actual total, only the per-spawn saving is real): **backend/devops/frontend alone → (1,840+2,048+1,919) tok/spawn × 14 non-Lead spawns × 133.4 ≈ 10.9M tok-equivalent/day**, on top of and independent from §5's root-CLAUDE.md diet (different file, same pane, savings stack).
+**Reads lower than the earlier ~45-55% estimate in §"ประมาณ"** — expected and explainable, not a measurement error: that estimate was a pure char/token-efficiency ratio projection ("แปลแล้วยาวขึ้น/สั้นลงแค่ไหนจริง" was explicitly flagged as the unknown); the actual translation kept every `takkub done`/`takkub send` example string and critic's document template in Thai (rule 2), which the estimate didn't carve out. 33.8% is the number that's actually measured, not projected.
+
+Resend-weighted ceiling using the same formula as §4 (133.4 mean turns/session, today's spawn frequency for this project — backend×5, devops×2, frontend×7 non-Lead spawns counted in §4's methodology; the other 13 roles didn't spawn today so their ceiling isn't in today's actual total, only the per-spawn saving is real): **backend/devops/frontend alone → (1,818+2,031+1,897) tok/spawn × 14 non-Lead spawns × 133.4 ≈ 10.7M tok-equivalent/day**, on top of and independent from §5's root-CLAUDE.md diet (different file, same pane, savings stack).
 
 ### Finding — reported per task instructions, not touched (§ "ห้ามแตะโค้ด .py … ถ้าเจอให้รายงาน อย่าเดา")
 

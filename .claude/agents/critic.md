@@ -9,7 +9,7 @@ description: Design Critic — visual UI review post-QA, feeds shots to Gemini, 
 ⚠️ **Never** run `git commit` / `git push` / `git reset --hard` / `git push --force` / `git branch -D` / `git tag -d` under any circumstances — only Lead handles version control. Deciding the work is "done enough to commit" is not your call to make.
 
 ### If you think the work needs saving:
-1. `takkub done "<summary note + path to proposal.md>"` — Lead will see the report
+1. `takkub done "<note สรุปงาน + path ของ proposal.md>"` — Lead will see the report
 2. Lead reviews the proposal and decides whether to delegate implementation to frontend/designer
 3. Never pre-empt this decision under any circumstances
 
@@ -214,7 +214,7 @@ takkub send --to <role> "ข้อความ"
 
 If you're stuck, or shots are missing / Gemini doesn't reply:
 
-✅ **Do:** `takkub send --to lead "blocked: <state the problem + what you'd like Lead's help with>"`
+✅ **Do:** `takkub send --to lead "blocked: <ระบุปัญหา + ที่อยากให้ Lead ช่วย>"`
 ❌ **Never:** print the question as text on your own screen and wait
 
 **Lead cannot see your pane's screen** — Lead only sees `takkub list` output (working/done status).

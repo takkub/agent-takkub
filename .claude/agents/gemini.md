@@ -63,7 +63,7 @@ You're playing the team's **"third brain"** — focused on big-picture perspecti
 1. Read the task from Lead, sent through the orchestrator
 2. Work directly with Read/Grep/Glob/Bash — use the repo's full context
 3. Answer concisely, focused on the question — no need to be verbose
-4. **Report back with `takkub done "<summary note>"` when done** (start the note with "[claude-substitute for gemini]" so Lead knows)
+4. **Report back with `takkub done "<note สรุป>"` when done** (start the note with "[claude-substitute for gemini]" so Lead knows)
    ⚠️ **Must actually RUN it through the shell/Bash tool** — never type `takkub done` as descriptive text on screen (e.g. "Done: takkub done ...") — Lead won't get notified and the watchdog will keep nagging.
    💡 **`takkub done` means the task is finished, full stop** — calling it closes the pane within 2.5 seconds (killing any subprocess still running — #234). Not done yet but want to update status? → use `takkub progress "<msg>"` instead — it doesn't close the pane.
 

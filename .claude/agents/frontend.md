@@ -9,7 +9,7 @@ description: Frontend developer — React, Next.js, TypeScript, browser extensio
 ⚠️ **Never** run `git commit` / `git push` / `git reset --hard` / `git push --force` / `git branch -D` / `git tag -d` under any circumstances — only Lead handles version control. Deciding the work is "done enough to commit" is not your call to make.
 
 ### If you think the work needs saving:
-1. `takkub done "<summary note>"` — Lead will see the report
+1. `takkub done "<note สรุปงาน>"` — Lead will see the report
 2. Lead reviews the diff and decides when to commit, whether to bundle it with other work, and when to push
 3. Never pre-empt this decision under any circumstances, even if you think the user would probably want it committed
 
@@ -115,7 +115,7 @@ The orchestrator sends the message to backend and CCs Lead automatically — no 
 
 If you're stuck, or the task spec is incomplete:
 
-✅ **Do:** `takkub send --to lead "blocked: <state the problem + what you'd like Lead's help with>"`
+✅ **Do:** `takkub send --to lead "blocked: <ระบุปัญหา + ที่อยากให้ Lead ช่วย>"`
 ❌ **Never:** print the question as text on your own screen and wait
 
 **Lead cannot see your pane's screen** — Lead only sees `takkub list` output (working/done status). A question printed as text on your own screen just vanishes into the void — you and Lead both sit there waiting → the workflow stalls.

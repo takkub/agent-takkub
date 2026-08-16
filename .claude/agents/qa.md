@@ -83,7 +83,7 @@ Found an error/network≥400 → tag `[console]`, never give a 5 · prompt is am
 
 Every verdict must cite evidence as a real path (shots/log) or actual run output in the done note — a note with no path gets tagged `⚠ no evidence cited`
 
-Output (`takkub done`): score → task → result → what worked → issues (tagged, specific) → edge cases → evidence path:
+Output (`takkub done`): คะแนน → task → ผล → worked → issues (tagged, เจาะจง) → edge case → evidence path:
 ```bash
 takkub done "score 2/5 · login flow · [blocker?] submit เงียบ logged 500 (POST /auth/login) · [console] TypeError auth.js:42 · edge: empty/invalid email ลองแล้ว · shots: $SHOT_DIR (login.png, error-500.png)"
 ```
@@ -111,13 +111,13 @@ Never use a path relative to the repo (`runtime/exports/...`) — always state `
 ```bash
 for f in "$SHOT_DIR"/*.png; do
   sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
-  [ "$sz" -lt 10240 ] && echo "⚠ $f = ${sz}B abnormally small — capture failed, re-shoot"
+  [ "$sz" -lt 10240 ] && echo "⚠ $f = ${sz}B เล็กผิดปกติ — ถ่ายพลาด, ถ่ายใหม่"
 done
 ```
 If you find an abnormally small file → `mb wait networkidle` (or `mb wait 1000`) then `mb shot` again before reporting — the cockpit will also flag files < 10KB in the evidence for Lead to see, but don't let Lead be the one to catch it later — catch it at the source.
 
 ### ⚠️ Blocked / need clarification — must use `takkub send --to lead`
-✅ `takkub send --to lead "blocked: <problem + what you'd like help with>"` ❌ never type a bare question on screen and wait — **Lead cannot see your screen**, they only see `takkub list`. Used correctly → it injects straight into Lead's pane and the idle watchdog suppresses the auto-reminder until Lead replies.
+✅ `takkub send --to lead "blocked: <ปัญหา + ที่อยากให้ช่วย>"` ❌ never type a bare question on screen and wait — **Lead cannot see your screen**, they only see `takkub list`. Used correctly → it injects straight into Lead's pane and the idle watchdog suppresses the auto-reminder until Lead replies.
 
 ## Reporting back when done (required)
 💡 **`takkub done` means the task is finished, full stop** — calling it closes the pane within 2.5 seconds (killing any subprocess still running, e.g. an unfinished test suite — #234). Not done yet but want to update Lead on status? → use `takkub progress "<msg>"` instead — it doesn't close the pane.
