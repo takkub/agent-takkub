@@ -304,7 +304,7 @@ class TestDialogInitialState:
     def test_starts_in_disable_state_when_live_and_shows_pairing_url(self):
         cfg = _default_config(public_url="https://x.example.com", secret_path="sek", token="tok")
         dlg = sd.RemoteSettingsDialog(None, is_live=True, current=cfg, on_apply=MagicMock())
-        assert dlg._toggle_btn.text() == "Disable"
+        assert dlg._toggle_btn.text() == "Disable & revoke pairing"
         assert dlg._pairing_edit.text() == cfg.pairing_url()
         assert dlg._password_edit.isEnabled() is False
 
@@ -376,7 +376,7 @@ class TestDialogEnableValidation:
         assert config.tunnel.type == "quick"
         assert verify_password("hunter22", config.password_hash) is True
         assert dlg._is_live is True
-        assert dlg._toggle_btn.text() == "Disable"
+        assert dlg._toggle_btn.text() == "Disable & revoke pairing"
         assert dlg._pairing_edit.text() == "https://pair.example.com/sek/#token=tok"
 
     def test_failed_enable_shows_error_and_stays_off(self, monkeypatch):
@@ -413,7 +413,7 @@ class TestDialogEnableValidation:
         dlg._on_toggle()
 
         assert dlg._is_live is True
-        assert dlg._toggle_btn.text() == "Disable"
+        assert dlg._toggle_btn.text() == "Disable & revoke pairing"
         assert len(warnings) == 1
         assert "Port 9999" in warnings[0][2]
 
@@ -429,11 +429,10 @@ class TestDialogEnableValidation:
 
 
 class TestDialogPairingReuse:
-    """#252 item 2: re-enabling must not force every paired phone to
-    re-scan — the dialog reuses the existing secret_path/token unless the
-    user explicitly checks "generate a new pairing link"."""
+    """The identity survives an idle auto-suspend (#252), but a user-clicked
+    Disable revokes it before the next Enable (#260)."""
 
-    def test_reenable_reuses_existing_secret_path_and_token_by_default(self):
+    def test_enable_after_auto_suspend_reuses_existing_pairing_identity(self):
         on_apply = MagicMock(return_value=(True, "", ""))
         cfg = _default_config(
             tunnel=TunnelConfig(type="quick"), secret_path="existing-sek", token="existing-tok"
@@ -447,29 +446,28 @@ class TestDialogPairingReuse:
         assert config.secret_path == "existing-sek"
         assert config.token == "existing-tok"
 
-    def test_rotate_checkbox_mints_fresh_identity(self):
-        on_apply = MagicMock(return_value=(True, "", ""))
+    def test_disable_then_enable_in_same_dialog_mints_fresh_identity(self):
+        applied = []
+
+        def on_apply(config, enable):
+            applied.append((config, enable))
+            return True, "", ""
+
         cfg = _default_config(
-            tunnel=TunnelConfig(type="quick"), secret_path="existing-sek", token="existing-tok"
+            public_url="https://x.example.com",
+            secret_path="s",
+            token="t",
+            tunnel=TunnelConfig(type="quick"),
         )
-        dlg = sd.RemoteSettingsDialog(None, is_live=False, current=cfg, on_apply=on_apply)
-        dlg._password_edit.setText("hunter22")
-        dlg._rotate_pairing_check.setChecked(True)
-
-        dlg._on_toggle()
-
-        config, _enable = on_apply.call_args[0]
-        assert config.secret_path == ""
-        assert config.token == ""
-
-    def test_rotate_checkbox_resets_after_disable(self):
-        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
-        dlg = sd.RemoteSettingsDialog(
-            None, is_live=True, current=cfg, on_apply=MagicMock(return_value=(True, "", ""))
-        )
-        dlg._rotate_pairing_check.setChecked(True)
+        dlg = sd.RemoteSettingsDialog(None, is_live=True, current=cfg, on_apply=on_apply)
         dlg._on_toggle()  # Disable
-        assert dlg._rotate_pairing_check.isChecked() is False
+        dlg._password_edit.setText("hunter22")
+        dlg._on_toggle()  # Enable
+
+        enabled_config, enable = applied[-1]
+        assert enable is True
+        assert enabled_config.secret_path == ""
+        assert enabled_config.token == ""
 
 
 class TestDialogIdleExpireSetting:
@@ -575,6 +573,17 @@ class TestDialogDisable:
         assert dlg._is_live is False
         assert dlg._toggle_btn.text() == "Enable"
         assert dlg._pairing_edit.isHidden() is True
+
+    def test_disable_clears_in_memory_pairing_identity(self):
+        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
+        dlg = sd.RemoteSettingsDialog(
+            None, is_live=True, current=cfg, on_apply=MagicMock(return_value=(True, "", ""))
+        )
+
+        dlg._on_toggle()
+
+        assert cfg.secret_path == ""
+        assert cfg.token == ""
 
     def test_disable_clears_the_password_field(self):
         cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
