@@ -39,7 +39,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QProcess, QTimer
 
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
@@ -1718,6 +1718,122 @@ class LeadInboxMixin:
             project=project_ns,
             elapsed_sec=round(elapsed_sec, 1),
         )
+        # #273: best-effort follow-up — ask the stuck provider's own CLI
+        # what's actually wrong (e.g. `codex mcp list`) instead of leaving
+        # Lead with only the generic "boot phase" wording above. Async and
+        # fully optional: this notice has ALREADY been sent unchanged, so a
+        # missing/slow/failed diagnostic changes nothing about it.
+        self._run_boot_diagnostic_async(role_name, project, elapsed_sec)
+
+    @staticmethod
+    def _boot_diagnostic_notice_text(
+        role_name: str, provider: str, argv: tuple[str, ...], exit_code: int, output: str
+    ) -> str | None:
+        """Pure: build the Lead follow-up notice from a finished diagnostic
+        process's result, or None when nothing should be reported.
+
+        A clean exit (0) means the provider's own health-check found
+        nothing wrong — not itself news for a STUCK-boot diagnostic, so it
+        stays silent rather than adding noise. Split out from
+        `_run_boot_diagnostic_async`'s QProcess glue so this decision is
+        unit-testable without spawning a real process (mirrors
+        `Orchestrator._uncommitted_warning` next to
+        `_check_uncommitted_async`)."""
+        combined = (output or "").strip()
+        if exit_code == 0 or not combined:
+            return None
+        return (
+            f"🔎 [boot-diagnostic] {role_name} · `{provider} {' '.join(argv)}` "
+            f"ตอบ (#273):\n{combined[:500]}"
+        )
+
+    def _run_boot_diagnostic_async(
+        self, role_name: str, project: str | None, elapsed_sec: float
+    ) -> None:
+        """#273: probe the boot-stalled role's EFFECTIVE provider with its
+        own ``ProviderSpec.boot_diagnostic_argv`` health-check command (e.g.
+        ``codex mcp list``) and, only if it reports a real error, send Lead a
+        follow-up notice with that error verbatim instead of leaving the
+        generic `_warn_lead_delivery_boot_stall` wording as the only signal.
+
+        Real incident (#273): the actual codex failure —
+        ``Error: failed to load bootstrap configuration / Caused by: invalid
+        transport in ...`` — was fully diagnosable via `codex mcp list` in
+        under a second, but cockpit had no way to surface it, costing ~40
+        minutes of manual config-file guessing.
+
+        Runs via QProcess (mirrors `Orchestrator._check_uncommitted_async`)
+        — NEVER blocks the Qt main thread. No-op, silently, whenever:
+        the effective provider has no confirmed diagnostic command
+        (``boot_diagnostic_argv`` is None — most providers today), its
+        binary can't be found, the process errors/times out, OR it exits
+        clean (a clean run means the provider's config is fine — this is a
+        stuck-boot diagnostic, not a routine health poll, so a clean answer
+        is not itself news). Every one of those is a no-op by design: this
+        method may add a follow-up notice, never replace or delay the one
+        `_warn_lead_delivery_boot_stall` already sent (#254 must not
+        regress on providers without a confirmed diagnostic — the vast
+        majority)."""
+        from .provider_config import effective_provider_for
+        from .provider_spec import PROVIDER_REGISTRY
+
+        project_ns = self._resolve_project(project)
+        provider = effective_provider_for(role_name, project=project_ns)
+        spec = PROVIDER_REGISTRY.get(provider)
+        argv = spec.boot_diagnostic_argv if spec is not None else None
+        if not argv or spec.custom_discovery_fn is None:
+            return
+        try:
+            binary = spec.custom_discovery_fn()
+        except Exception:
+            binary = None
+        if not binary:
+            return
+
+        proc = QProcess(self)
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.setInterval(8_000)
+        state = {"done": False}
+
+        def _settle(notice_text: str | None) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            timeout.stop()
+            timeout.deleteLater()
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.deleteLater()
+            if not notice_text:
+                return
+            self._notify_lead(project_ns, notice_text, from_role=role_name)
+            _log_event(
+                "boot_diagnostic_reported",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                elapsed_sec=round(elapsed_sec, 1),
+            )
+
+        def _on_finished(_code: int, _status: object) -> None:
+            try:
+                out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+            except Exception:
+                out, err = "", ""
+            notice_text = self._boot_diagnostic_notice_text(
+                role_name, provider, argv, proc.exitCode(), err or out
+            )
+            _settle(notice_text)
+
+        proc.finished.connect(_on_finished)
+        proc.errorOccurred.connect(lambda _e: _settle(None))
+        timeout.timeout.connect(lambda: _settle(None))
+        timeout.start()
+        proc.start(binary, list(argv))
 
     def _warn_lead_auth_failure(
         self, role_name: str, project: str | None, provider: str, reason: str

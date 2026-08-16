@@ -113,6 +113,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _teammate_tier,
     _truncate_at_word_boundary,
     cwd_validation_error,
+    is_delivery_pointer_failure,
     prune_old_transcripts,
     scan_artifacts,
 )
@@ -1794,10 +1795,15 @@ class Orchestrator(
         # the full task to its per-spawn system-prompt file; the pointer remains
         # the fallback and is still the delivery path for a running pane and
         # providers without a confirmed file-backed equivalent.
+        # #273: gated on the EFFECTIVE provider's own file-read capability —
+        # a provider whose agent tool set has no structured file-read (only
+        # codex, confirmed) never gets the pointer at all, regardless of
+        # task length; see `_task_handoff_pointer`'s docstring.
         paste_text, task_file = _task_handoff_pointer(
             delivery_task,
             project_ns,
             role_name,
+            supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
         )
         if model and pane_is_running:
             self._notify_lead(
@@ -3098,6 +3104,31 @@ class Orchestrator(
         )
 
     @staticmethod
+    def _build_delivery_pointer_failure_notice(
+        from_role: str, note: str, task_file: str | None
+    ) -> str:
+        """Lead-facing notice for a `done --fail` that `is_delivery_pointer_failure`
+        classified as a TASK-DELIVERY failure, not a work failure (issue
+        #273) — the pane couldn't open the file-pointer handoff, so the
+        assigned work never started.
+
+        Deliberately NOT `_build_verify_fail_handoff`'s fix-loop-propose
+        wording: there is no root cause in the WORK to find yet, so telling
+        Lead to hunt for one wastes time on a task that was never
+        attempted. Points straight at the fix instead — just reassign.
+        """
+        body = note.strip() or "(no detail given)"
+        file_note = f" ({task_file})" if task_file else ""
+        return (
+            f"[{from_role} delivery-failed] {body}\n\n"
+            f"⚠️ นี่คือ delivery failure ไม่ใช่ task failure (#273) — pane เปิด "
+            f"task-pointer file ไม่ได้{file_note} จึงยังไม่เคยเริ่มงานเลยแม้แต่บรรทัดเดียว "
+            "ไม่ต้องหา root cause ของ 'งาน' (ยังไม่มีงานให้หา) แค่ assign ใหม่ก็พอ — "
+            "ถ้า pane role/provider นี้ยังเจอซ้ำ ให้เช็ค "
+            "ProviderSpec.supports_agent_file_read ของ provider นั้น"
+        )
+
+    @staticmethod
     def _condense_done_note(
         raw_note: str, merged_note: str, evidence_line: str, session_md_path: str | None
     ) -> str:
@@ -3322,6 +3353,7 @@ class Orchestrator(
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
         had_assign_ts = _ps_done.assign_ts
+        had_task_file = _ps_done.last_assigned_task_file
         had_assign_base_sha = _ps_done.assign_base_sha
         had_assign_git_root = _ps_done.assign_git_root
         had_assign_dirty_snapshot = _ps_done.assign_dirty_snapshot
@@ -3409,19 +3441,41 @@ class Orchestrator(
         _worktree_digest_precomputed = None
         if failed:
             notice_body = note
-            notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
-            _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
-            # ReflexionMemory-style auto-capture: a FAILED report used to go to
-            # Lead and nowhere else, so the same role could repeat the same
-            # failure cold next spawn. No agent decision required here.
-            try:
-                from .role_memory import append_failure_entry
+            elapsed_since_assign = (time.time() - had_assign_ts) if had_assign_ts else float("inf")
+            if is_delivery_pointer_failure(note, had_task_file, elapsed_since_assign):
+                # #273: a pane that couldn't open the file-pointer handoff
+                # never started the assigned WORK at all — this is a
+                # delivery failure, not a task failure. Deliberately skip
+                # the fix-loop-propose wording (there is no root cause in
+                # the work to find yet) and the role_memory capture below
+                # (it would poison this role's future-spawn context with a
+                # failure that was never about anything it did).
+                notice = self._build_delivery_pointer_failure_notice(
+                    from_role, f"{ref_tag}{note}", had_task_file
+                )
+                _log_event(
+                    "delivery_pointer_failure",
+                    project=project_ns,
+                    role=from_role,
+                    note=(note or "")[:200],
+                    task_file=had_task_file,
+                )
+            else:
+                notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
+                _log_event(
+                    "verify_failed", project=project_ns, role=from_role, note=(note or "")[:200]
+                )
+                # ReflexionMemory-style auto-capture: a FAILED report used to go to
+                # Lead and nowhere else, so the same role could repeat the same
+                # failure cold next spawn. No agent decision required here.
+                try:
+                    from .role_memory import append_failure_entry
 
-                fail_role, _ = _split_shard(from_role)
-                fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
-                append_failure_entry(project_ns, fail_role, fail_reason)
-            except Exception:
-                pass
+                    fail_role, _ = _split_shard(from_role)
+                    fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
+                    append_failure_entry(project_ns, fail_role, fail_reason)
+                except Exception:
+                    pass
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
             notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()

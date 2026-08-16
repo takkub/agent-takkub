@@ -147,9 +147,13 @@ class TestAutoRespawnReplay:
         the assign() integration breaks a test.
 
         The rewritten (notice + task) payload is long enough to trip the
-        file-based task-handoff pointer (issue #1) — the FULL text still
-        lives in last_assigned_task (crash-replay unit) but what actually
-        gets pasted into the pane is a short pointer to the handoff file.
+        file-based task-handoff pointer's LENGTH threshold (issue #1) — but
+        codex's `ProviderSpec.supports_agent_file_read=False` (issue #273:
+        a codex pane has no structured file-read tool distinct from the
+        shell exec the pointer forbids using, so it can't act on a pointer
+        at all) unconditionally skips the pointer regardless of length. The
+        FULL rewritten text is what actually gets pasted — not a pointer to
+        a handoff file.
         """
         from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
 
@@ -170,17 +174,11 @@ class TestAutoRespawnReplay:
         cached = orch._pane_state[ekey].last_assigned_task
         assert cached.startswith(_CODEX_TASK_NOTICE)
 
-        # The pasted payload is a pointer, not the rewritten task itself.
+        # #273: pasted verbatim in full, not pointer-ized — codex has no
+        # file-read tool to act on a pointer with.
         sent_task = mock_send.call_args.args[1]
-        assert sent_task != cached
-        assert sent_task.startswith("[ROLE: codex]")
-
-        task_file = orch._pane_state[ekey].last_assigned_task_file
-        assert task_file is not None
-        assert task_file.replace("\\", "/") in sent_task
-        import pathlib
-
-        assert pathlib.Path(task_file).read_text(encoding="utf-8") == cached
+        assert sent_task == cached
+        assert orch._pane_state[ekey].last_assigned_task_file is None
 
     def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator) -> None:
         """Non-codex roles must NOT receive the codex-specific override
