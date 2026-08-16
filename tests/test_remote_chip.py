@@ -200,6 +200,21 @@ class TestApplyRemoteConfig:
 
         assert RemoteConfig.load().enabled is False
 
+    def test_disable_revokes_persisted_pairing_identity(self, monkeypatch, tmp_path):
+        """#260: a lost phone's old QR/link must stay dead after the user
+        explicitly disables remote control and later enables it again."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+        RemoteConfig(enabled=True, secret_path="old-secret", token="old-token").save()
+
+        stub._apply_remote_config(None, False)
+
+        disabled = RemoteConfig.load()
+        assert disabled.enabled is False
+        assert disabled.secret_path == ""
+        assert disabled.token == ""
+
     def test_reenable_while_live_stops_the_old_handle_first(self, monkeypatch, tmp_path):
         _isolate_remote_json(monkeypatch, tmp_path)
         stub = _Stub()

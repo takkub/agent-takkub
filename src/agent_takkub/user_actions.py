@@ -813,6 +813,14 @@ class UserActionsMixin:
                 _session_store_mod = importlib.import_module("agent_takkub.remote.session_store")
                 cfg = _config_mod.RemoteConfig.load()
                 cfg.enabled = False
+                # #260: a user-clicked Disable is a revocation boundary, not
+                # an idle pause. Removing both halves of the pairing identity
+                # makes the lost/stolen phone's old URL permanently useless;
+                # `_start()` mints a new pair on the next Enable. The idle
+                # watchdog never enters this branch, so #252's restart-without-
+                # re-pair behavior remains intact.
+                cfg.secret_path = ""
+                cfg.token = ""
                 cfg.save()
                 # #196 requirement 3: disabling remote invalidates every
                 # session outright and immediately, rather than leaning on

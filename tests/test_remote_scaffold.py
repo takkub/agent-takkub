@@ -252,7 +252,13 @@ class TestIdleAutoSuspend:
     dead every next boot until the user noticed and re-enabled by hand."""
 
     def test_idle_expire_stops_server_but_leaves_enabled_true_on_disk(self, _isolated):
-        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=False,
+            secret_path="existing-secret",
+            token="existing-token",
+        ).save()
         rc = RemoteControl.maybe_start(MagicMock())
         assert rc is not None
         assert rc.config.enabled is True
@@ -262,7 +268,10 @@ class TestIdleAutoSuspend:
 
         assert rc._server is None  # actually torn down — same security behavior
         assert rc.auto_suspended is True
-        assert RemoteConfig.load().enabled is True  # NOT persisted as user-disabled
+        persisted = RemoteConfig.load()
+        assert persisted.enabled is True  # NOT persisted as user-disabled
+        assert persisted.secret_path == "existing-secret"
+        assert persisted.token == "existing-token"  # #252: no re-pair after idle suspend
 
     def test_idle_expire_calls_on_auto_suspend_callback(self, _isolated):
         RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
