@@ -250,6 +250,29 @@
     if (state.session) headers["X-Session"] = state.session;
     return fetch(apiUrl(path), Object.assign({}, opts, { headers: headers }))
       .then(function (res) {
+        // #252/#254: a tunnel/edge failure (Cloudflare down, cockpit's
+        // remote toggled off) never reaches the cockpit itself — it's
+        // intercepted upstream and answers with its own error page (5xx,
+        // text/plain or text/html body), never one of our own JSON
+        // responses. But the cockpit CAN answer 5xx itself: if the Qt main
+        // thread doesn't reply within the bridge timeout, http_server.py's
+        // `_respond_marshaled` (remote/http_server.py:602-611) sends its own
+        // 504 `{"ok": false, "msg": "orchestrator did not respond"}` as
+        // `application/json` — that's "reached cockpit, it's slow/stuck",
+        // not "can't reach cockpit". Only a 5xx WITHOUT our JSON
+        // content-type is an edge/tunnel failure worth flipping Offline for.
+        if (res.status >= 500) {
+          var ct = res.headers.get("Content-Type") || "";
+          if (ct.indexOf("application/json") !== -1) {
+            // This IS proof the cockpit was reached, so clear any stale
+            // Offline state before throwing — else a prior edge outage
+            // leaves the chip stuck Offline even once cockpit answers again.
+            setOffline(false);
+            throw new Error("cockpit_unresponsive");
+          }
+          setOffline(true);
+          throw new Error("cockpit_unreachable");
+        }
         setOffline(false);
         // Server is a zero-surface design: every auth failure (bad secret
         // path, bad/expired token) answers with a bare 404 — never a 401.
@@ -309,6 +332,32 @@
     offlineBanner.classList.toggle("show", v);
     statusConn.classList.toggle("offline", v);
     statusConnText.textContent = v ? "Offline" : "Online";
+  }
+
+  // #252: distinguishes "can't reach cockpit at all" (tunnel down / edge
+  // error / real network failure) from an ordinary app-level error (bad
+  // input, 400/409, etc). Callers use this to show the right message —
+  // telling the user to go check the desktop, not just "retry".
+  var CONN_ERROR_MSG = "เชื่อมต่อ cockpit ไม่ได้ (tunnel ล่ม หรือ cockpit ปิด remote อยู่)";
+  function isConnError(err) {
+    return err instanceof TypeError || (err instanceof Error && err.message === "cockpit_unreachable");
+  }
+
+  // #254: the other half of the split above — cockpit was reached but its
+  // Qt main thread didn't answer in time (bridge timeout, 504 from our own
+  // JSON). Distinct from CONN_ERROR_MSG: the chip stays Online, this just
+  // tells the user the request itself didn't get an answer.
+  var BRIDGE_TIMEOUT_MSG = "cockpit ตอบช้าหรือไม่ตอบสนอง ลองใหม่อีกครั้ง";
+  function isBridgeTimeoutError(err) {
+    return err instanceof Error && err.message === "cockpit_unresponsive";
+  }
+
+  // Shared "which error message to show" logic — conn/bridge errors always
+  // win over the caller's generic fallback, regardless of what failed.
+  function errMsg(err, fallback) {
+    if (isConnError(err)) return CONN_ERROR_MSG;
+    if (isBridgeTimeoutError(err)) return BRIDGE_TIMEOUT_MSG;
+    return fallback;
   }
 
   // ---------------------------------------------------------------
@@ -439,8 +488,8 @@
           $("password-error").textContent = "รหัสผ่านไม่ถูกต้อง";
         }
       })
-      .catch(function () {
-        $("password-error").textContent = "เชื่อมต่อไม่ได้ ลองใหม่อีกครั้ง";
+      .catch(function (err) {
+        $("password-error").textContent = errMsg(err, "เชื่อมต่อไม่ได้ ลองใหม่อีกครั้ง");
       });
   });
 
@@ -482,8 +531,9 @@
     list.innerHTML = '<div class="empty-state">กำลังโหลด…</div>';
     fetchProjectsAndMode()
       .then(renderProjects)
-      .catch(function () {
-        list.innerHTML = '<div class="empty-state">โหลด projects ไม่สำเร็จ<br>ลองใหม่อีกครั้ง</div>';
+      .catch(function (err) {
+        var msg = errMsg(err, "โหลด projects ไม่สำเร็จ<br>ลองใหม่อีกครั้ง");
+        list.innerHTML = '<div class="empty-state">' + msg + "</div>";
       });
   }
 
@@ -594,7 +644,7 @@
         // password_required / unauthorized are already surfaced by apiFetch
         // (password prompt / pairing screen) — nothing more to toast.
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("เปิดไม่สำเร็จ ลองใหม่");
+        toast(errMsg(err, "เปิดไม่สำเร็จ ลองใหม่"));
       })
       .then(function () {
         state.opening = null;
@@ -639,7 +689,7 @@
       })
       .catch(function (err) {
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("ปิดไม่สำเร็จ ลองใหม่");
+        toast(errMsg(err, "ปิดไม่สำเร็จ ลองใหม่"));
       })
       .then(function () {
         state.closing = null;
@@ -1340,9 +1390,9 @@
           );
         }
       })
-      .catch(function () {
+      .catch(function (err) {
         if (targetLead) setProjectWorking(project, false, null, false);
-        toast("ส่งข้อความไม่สำเร็จ");
+        toast(errMsg(err, "ส่งข้อความไม่สำเร็จ"));
       });
   }
 
@@ -1404,7 +1454,7 @@
         })
         .catch(function (err) {
           if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-          toast(err instanceof Error && err.message ? err.message : "ส่งรูปไม่สำเร็จ");
+          toast(errMsg(err, err instanceof Error && err.message ? err.message : "ส่งรูปไม่สำเร็จ"));
         })
         .then(function () {
           attach.disabled = state.mode !== "control";
@@ -1921,7 +1971,7 @@
       })
       .catch(function (err) {
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
-        toast("resume ไม่สำเร็จ ลองใหม่");
+        toast(errMsg(err, "resume ไม่สำเร็จ ลองใหม่"));
       })
       .then(function () {
         state.resumePending = false;
