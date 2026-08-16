@@ -195,9 +195,31 @@ class LeadWaitMixin:
         and reset to a fresh pane-state entry on every new assign) — a
         report timestamped before the active assign is for a task this
         wait was never watching.
+
+        #262: `started_ts` alone has the exact same staleness hole one
+        level up, for a role whose pane ISN'T (yet) terminal. A
+        multi-role registration stays active — and `started_ts` fixed at
+        whenever `begin_wait` first created it — for as long as ANY
+        watched role is still pending. If Lead reassigns a role that
+        already resolved (or attaches it via a fresh `begin_wait` while
+        another role's registration is still open) to a brand-new task
+        mid-wait, that role's stale `_wait_done_events` entry from the
+        task BEFORE this one still satisfies `event.ts >= started_ts`
+        (started_ts predates both tasks) and is returned as "done"
+        immediately — before the new task's pane state, or even its own
+        `_assign_dispatch`, is ever consulted. Reported live: `wait`
+        resolved "done: backend, devops" while `takkub list` showed both
+        panes still "working" and no new report file existed on disk.
+        Fix: floor the freshness threshold at `assign_ts` here too (the
+        same signal the terminal-state branch below already trusts) via
+        `effective_start` — a stale event can never outrank the role's
+        own current assignment, watched-or-attached timing aside.
         """
         event = getattr(self, "_wait_done_events", {}).get((project_ns, role))
-        fresh = event is not None and event.get("ts", 0.0) >= started_ts
+        pane_state = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role))
+        assign_ts = pane_state.assign_ts if pane_state is not None else 0.0
+        effective_start = max(started_ts, assign_ts)
+        fresh = event is not None and event.get("ts", 0.0) >= effective_start
         if fresh:
             if self._has_pending_lead_notice(project_ns, role):
                 return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
@@ -231,8 +253,6 @@ class LeadWaitMixin:
             return "pending", "ยังทำงานอยู่"
 
         if state in _WAIT_TERMINAL_PANE_STATES:
-            pane_state = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role))
-            assign_ts = pane_state.assign_ts if pane_state is not None else 0.0
             covers_active_assign = event is not None and event.get("ts", 0.0) >= assign_ts
             if covers_active_assign:
                 if self._has_pending_lead_notice(project_ns, role):
@@ -247,6 +267,47 @@ class LeadWaitMixin:
             return "gone", f"pane ปิดไปแล้วโดยไม่มีรายงาน done (state: {state})"
 
         return "pending", f"pane state: {state or 'unknown'}"
+
+    def _pending_user_input_interrupt(
+        self, project_ns: str, started_ts: float
+    ) -> dict[str, str] | None:
+        """(#265) The Lead pane's owner outranks every teammate role: while
+        Lead is blocked in `takkub wait`, anything the owner types goes into
+        the CLI's stdin as queued input and sits unprocessed until `wait`
+        returns — up to the full --timeout (30 min cap). Wakes the wait the
+        moment `_lead_last_user_input_ts` shows a byte arrived AFTER this
+        wait started watching — deliberately "any byte", not "a submitted
+        line": a still-unsubmitted draft already proves the owner is about
+        to issue a command and Lead should stop polling to make room for it,
+        same call the issue itself made explicit rather than leaving
+        implicit.
+
+        `_lead_last_user_input_ts` is stamped from the exact same
+        `Orchestrator._on_pane_input` choke point the pre-existing #3
+        draft-typing guard (`_lead_draft_state`) already uses for the SAME
+        Lead-pane-only, real-keystrokes-only guarantee: engine-originated
+        writes (done notices, CC flushes, task pastes) go straight to
+        `session.write()` and never pass through `_on_pane_input`, so they
+        can never be mistaken for the owner interrupting — see that
+        method's own comment. No new capture path was added; this only
+        reads a timestamp latched at plumbing that already existed.
+
+        Only checked while something is still pending (matching
+        `_pending_notice_outside`/`_pending_system_notice_for_watched`
+        above) — a fully-resolved poll is already about to end the
+        registration on its own.
+        """
+        last_input_ts = getattr(self, "_lead_last_user_input_ts", {}).get(project_ns, 0.0)
+        if last_input_ts <= started_ts:
+            return None
+        return {
+            "role": LEAD.name,
+            "detail": (
+                "มีข้อความ/คำสั่งใหม่จากคุณเข้ามาระหว่างที่ wait กำลังรออยู่ — "
+                "ไปอ่าน/จัดการก่อน แล้วค่อยเรียก `takkub wait` ใหม่เพื่อ resume watching role ที่เหลือ"
+            ),
+            "reason": "user_input",
+        }
 
     def poll_wait(self, project_ns: str, wait_id: str) -> dict:
         """One poll tick for an active wait registration.
@@ -268,13 +329,33 @@ class LeadWaitMixin:
         client never needs to call `end_wait` on the success path — only on
         early abort (Ctrl-C).
 
-        ``"interrupt": {"role", "detail"} | None`` (#253): set when a role
-        OUTSIDE this registration's watched set has a blocking notice
+        ``"interrupt": {"role", "detail", "reason"?} | None`` (#253): set
+        when a role OUTSIDE this registration's watched set has a blocking notice
         (FAILED / spawn-failed / delivery-unconfirmed / spawn-stuck) sitting
         in the outbound-to-Lead pipeline — see `_pending_notice_outside`.
         Before this, a `wait --role qa` could sit blind for the full
         --timeout while a `devops` FAILED report queued up unseen behind it
         (the pane's own auto-close timer doesn't wait for Lead to notice).
+        (#259) Also set when a role INSIDE the watched set has one of the
+        4 system markers (delivery-unconfirmed / spawn-stuck /
+        delivery-boot-stall / spawn-failed) pending for it — those never
+        call done()/failed(), so a watched role that never even received
+        its task used to block to the full --timeout even though the
+        notice explaining why had been sitting in the inbox the whole
+        time — see `_pending_system_notice_for_watched`. A watched
+        role's own FAILED is deliberately excluded from this second
+        check — that already resolves normally via `_wait_done_events`.
+
+        (#265) Also set — with ``"reason": "user_input"`` and no real
+        teammate role behind ``"role"`` (stamped `LEAD.name`) — when the
+        Lead pane's OWNER typed anything after this wait started watching.
+        The owner outranks every role: without this, whatever they typed
+        sat as queued CLI input, unprocessed, until `wait` returned — up to
+        the full --timeout. See `_pending_user_input_interrupt`. This is
+        the only interrupt kind that isn't about a teammate at all, which
+        is why callers should check ``reason`` before treating ``role`` as
+        a pane name to look up.
+
         An interrupt ends the registration exactly like a natural
         resolution — the watched roles that were still pending stay
         genuinely pending in their own panes, only this wait's tracking
@@ -348,6 +429,21 @@ class LeadWaitMixin:
         interrupt = (
             self._pending_notice_outside(project_ns, set(active["roles"])) if pending else None
         )
+        # #259: a delivery-health system notice (delivery-unconfirmed/
+        # spawn-stuck/delivery-boot-stall/spawn-failed) about a role THIS
+        # wait IS watching never calls done()/failed() either, so it would
+        # otherwise stay invisible the same way — see
+        # `_pending_system_notice_for_watched`'s docstring.
+        if interrupt is None and pending:
+            interrupt = self._pending_system_notice_for_watched(project_ns, set(pending))
+        # #265: the owner outranks every role — if they typed anything
+        # into the Lead pane (submitted or still drafting) after this wait
+        # started watching, wake immediately instead of leaving them
+        # queued behind up to --timeout of teammate polling. See
+        # `_pending_user_input_interrupt`'s docstring for why this can
+        # never fire on the cockpit's own notice/task pastes.
+        if interrupt is None and pending:
+            interrupt = self._pending_user_input_interrupt(project_ns, started_ts)
 
         elapsed = now - started_ts
         expired = elapsed >= active["timeout_s"]
