@@ -88,7 +88,14 @@ def test_every_builtin_role_has_conditional_subagent_rule() -> None:
     for role_file in role_files:
         header = "\n".join(role_file.read_text(encoding="utf-8").splitlines()[:10])
         assert "--mode subagent" in header, role_file.name
-        assert "ห้าม spawn subagent เอง" in header, role_file.name
+        # #267 translated role files to English; the rule's wording changed
+        # but its CONDITIONAL shape must not — this substring only matches
+        # the "unless Lead assigned ... --mode subagent" form, so it still
+        # goes red if a role file regresses to an unconditional ban ("Never
+        # spawn a subagent yourself.") or drops the rule entirely.
+        assert "Never spawn a subagent yourself unless Lead assigned the current task" in header, (
+            role_file.name
+        )
 
 
 def test_cross_provider_limitation_is_documented() -> None:
