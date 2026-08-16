@@ -39,13 +39,25 @@ class RemoteControl:
     `stop()`, called on idle-expire and on `QCoreApplication.aboutToQuit`.
     """
 
-    def __init__(self, config: RemoteConfig, orch) -> None:
+    def __init__(self, config: RemoteConfig, orch, *, on_auto_suspend=None) -> None:
         self.config = config
         self._orch = orch
         self._server = None
         self._notifier = None
         self._tunnel = None
         self._idle_timer: QTimer | None = None
+        # #252: the caller's hook for "idle-expire just tore this instance
+        # down" — MainWindow wires this to drop its own `self._remote`
+        # reference and repaint the 🌐 chip, so the UI doesn't keep claiming
+        # remote is live once `_check_idle_expire` has already stopped it.
+        # Optional (None) so headless/test callers don't need to supply one.
+        self._on_auto_suspend = on_auto_suspend
+        # #252: set only by `_check_idle_expire` — distinguishes "the user
+        # turned this off" from "the idle watchdog tore it down but
+        # `config.enabled` is still True on disk", so the next cockpit boot
+        # restarts remote control on its own instead of requiring the user
+        # to re-open Settings and click Enable every morning.
+        self.auto_suspended = False
         # Set when `tunnel.start()` raises — the reason a requested tunnel
         # didn't come up, so callers (the Settings dialog's Enable flow) can
         # surface *why* instead of a dead pairing URL with no explanation.
@@ -59,7 +71,7 @@ class RemoteControl:
         self.local_probe_note: str | None = None
 
     @classmethod
-    def maybe_start(cls, orch) -> RemoteControl | None:
+    def maybe_start(cls, orch, *, on_auto_suspend=None) -> RemoteControl | None:
         """Off by default: `enabled=false` returns None before touching any
         thread/socket/file/signal. `enabled=true` starts the real server —
         any failure partway through is cleaned up before returning None
@@ -68,7 +80,13 @@ class RemoteControl:
         #197: reaps any tunnel orphaned by a *previous* session first,
         unconditionally — a hard-kill/crash that skipped `stop()` last time
         must be cleaned up on this boot even if this session doesn't want
-        remote control on at all. Best-effort, never raises."""
+        remote control on at all. Best-effort, never raises.
+
+        #252: `config.enabled=True` on disk means "the user wants remote
+        control on" — that's what gates this, not "was it running the
+        moment the cockpit last closed". An idle-auto-suspended session
+        leaves `enabled` untouched (see `_check_idle_expire`), so a fresh
+        boot the next morning starts remote control back up on its own."""
         from . import tunnel as _tunnel_mod
 
         try:
@@ -79,7 +97,7 @@ class RemoteControl:
         config = RemoteConfig.load()
         if not config.enabled:
             return None
-        self = cls(config, orch)
+        self = cls(config, orch, on_auto_suspend=on_auto_suspend)
         try:
             self._start()
         except Exception:
@@ -170,12 +188,36 @@ class RemoteControl:
         self._idle_timer.start(_IDLE_CHECK_MS)
 
     def _check_idle_expire(self) -> None:
+        """#252 fix: idle-expire used to write `config.enabled = False` to
+        disk — indistinguishable on the next boot from the user having
+        clicked Disable. `RemoteControl.maybe_start()` reads exactly that
+        flag to decide whether to come up at all, so a phone that went quiet
+        overnight (idle_expire_min default 240min) silently killed remote
+        control until the user noticed and re-opened Settings to turn it
+        back on by hand — no auto-resume, no error, nothing in the UI to
+        explain why.
+
+        The security behavior this watchdog exists for is unchanged: the
+        HTTP server, notifier and tunnel subprocess are still torn down for
+        real via `self.stop()`, the same as before — a paired phone that's
+        gone quiet stops being reachable exactly as it did previously. What
+        changes is *only* that `config.enabled` stays whatever the user last
+        set it to. That's the one bit `maybe_start()` checks at boot, so
+        leaving it alone means the next cockpit launch (or the next manual
+        Enable) restarts remote control on its own instead of requiring a
+        trip to Settings — auto-suspended, not user-disabled."""
         try:
             if self._server is not None and self._server.auth.idle_expired():
-                _log.info("remote-control idle-expired — disabling")
+                _log.info(
+                    "remote-control idle-expired — auto-suspending (config.enabled left as-is)"
+                )
+                self.auto_suspended = True
                 self.stop()
-                self.config.enabled = False
-                self.config.save()
+                if self._on_auto_suspend is not None:
+                    try:
+                        self._on_auto_suspend()
+                    except Exception:
+                        _log.exception("remote-control on_auto_suspend callback failed")
         except Exception:
             # This is a QTimer slot: no filesystem/tunnel failure may escape
             # into Qt's event loop and abort the whole cockpit.

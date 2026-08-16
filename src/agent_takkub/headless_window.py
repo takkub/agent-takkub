@@ -88,7 +88,9 @@ class HeadlessWindow(QObject):
             import importlib
 
             _remote_mod = importlib.import_module("agent_takkub.remote")
-            self._remote = _remote_mod.RemoteControl.maybe_start(self.orch)
+            self._remote = _remote_mod.RemoteControl.maybe_start(
+                self.orch, on_auto_suspend=self._on_remote_auto_suspended
+            )
         except ModuleNotFoundError:  # folder deleted = uninstall no-op (B4)
             self._remote = None
         except Exception:
@@ -104,6 +106,12 @@ class HeadlessWindow(QObject):
         for name in names:
             self._open_project_tab(name)
         return port
+
+    def _on_remote_auto_suspended(self) -> None:
+        """#252: mirrors `UserActionsMixin._on_remote_auto_suspended` — no
+        chip to repaint headlessly, just drop the dead handle so
+        `shutdown()`'s `self._remote is not None` check reflects reality."""
+        self._remote = None
 
     def shutdown(self) -> None:
         """Best-effort teardown for every open project — used by the

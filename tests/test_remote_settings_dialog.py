@@ -188,6 +188,60 @@ class TestBuildConfig:
         )
         assert cfg.tunnel.ngrok_bin == "/opt/homebrew/bin/ngrok"
 
+    def test_secret_path_and_token_default_blank(self):
+        """#252: a caller that omits them (brand-new setup) keeps the old
+        "mint fresh" behavior — `RemoteControl._start()` only mints when
+        both are still blank."""
+        cfg = sd.build_config(
+            tunnel_type="quick",
+            credentials_json="",
+            public_url="",
+            cloudflared_bin="",
+            mode="view",
+            password_hash="h",
+        )
+        assert cfg.secret_path == ""
+        assert cfg.token == ""
+
+    def test_secret_path_and_token_are_forwarded_and_stripped(self):
+        """#252: the dialog passes the existing pairing identity through on
+        a re-enable so it survives — `_start()` must never re-mint it."""
+        cfg = sd.build_config(
+            tunnel_type="quick",
+            credentials_json="",
+            public_url="",
+            cloudflared_bin="",
+            mode="view",
+            password_hash="h",
+            secret_path="  existing-secret  ",
+            token="  existing-token  ",
+        )
+        assert cfg.secret_path == "existing-secret"
+        assert cfg.token == "existing-token"
+
+    def test_idle_expire_min_defaults_to_240(self):
+        cfg = sd.build_config(
+            tunnel_type="quick",
+            credentials_json="",
+            public_url="",
+            cloudflared_bin="",
+            mode="view",
+            password_hash="h",
+        )
+        assert cfg.idle_expire_min == 240
+
+    def test_idle_expire_min_is_forwarded(self):
+        cfg = sd.build_config(
+            tunnel_type="quick",
+            credentials_json="",
+            public_url="",
+            cloudflared_bin="",
+            mode="view",
+            password_hash="h",
+            idle_expire_min=0,
+        )
+        assert cfg.idle_expire_min == 0
+
 
 # ---------------------------------------------------------------------------
 # _run_ngrok_authtoken — one-shot `ngrok config add-authtoken` subprocess
@@ -372,6 +426,89 @@ class TestDialogEnableValidation:
         dlg._on_toggle()
 
         assert warnings == []
+
+
+class TestDialogPairingReuse:
+    """#252 item 2: re-enabling must not force every paired phone to
+    re-scan — the dialog reuses the existing secret_path/token unless the
+    user explicitly checks "generate a new pairing link"."""
+
+    def test_reenable_reuses_existing_secret_path_and_token_by_default(self):
+        on_apply = MagicMock(return_value=(True, "", ""))
+        cfg = _default_config(
+            tunnel=TunnelConfig(type="quick"), secret_path="existing-sek", token="existing-tok"
+        )
+        dlg = sd.RemoteSettingsDialog(None, is_live=False, current=cfg, on_apply=on_apply)
+        dlg._password_edit.setText("hunter22")
+
+        dlg._on_toggle()
+
+        config, _enable = on_apply.call_args[0]
+        assert config.secret_path == "existing-sek"
+        assert config.token == "existing-tok"
+
+    def test_rotate_checkbox_mints_fresh_identity(self):
+        on_apply = MagicMock(return_value=(True, "", ""))
+        cfg = _default_config(
+            tunnel=TunnelConfig(type="quick"), secret_path="existing-sek", token="existing-tok"
+        )
+        dlg = sd.RemoteSettingsDialog(None, is_live=False, current=cfg, on_apply=on_apply)
+        dlg._password_edit.setText("hunter22")
+        dlg._rotate_pairing_check.setChecked(True)
+
+        dlg._on_toggle()
+
+        config, _enable = on_apply.call_args[0]
+        assert config.secret_path == ""
+        assert config.token == ""
+
+    def test_rotate_checkbox_resets_after_disable(self):
+        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
+        dlg = sd.RemoteSettingsDialog(
+            None, is_live=True, current=cfg, on_apply=MagicMock(return_value=(True, "", ""))
+        )
+        dlg._rotate_pairing_check.setChecked(True)
+        dlg._on_toggle()  # Disable
+        assert dlg._rotate_pairing_check.isChecked() is False
+
+
+class TestDialogIdleExpireSetting:
+    """#252 item 3: idle_expire_min is a real editable setting, not a
+    hardcoded 240 the dialog silently resets on every Enable."""
+
+    def test_spinbox_prefills_from_current_config(self):
+        cfg = _default_config(idle_expire_min=60)
+        dlg = sd.RemoteSettingsDialog(None, is_live=False, current=cfg, on_apply=MagicMock())
+        assert dlg._idle_expire_spin.value() == 60
+
+    def test_changed_value_is_forwarded_to_on_apply(self):
+        on_apply = MagicMock(return_value=(True, "", ""))
+        dlg = sd.RemoteSettingsDialog(
+            None,
+            is_live=False,
+            current=_default_config(tunnel=TunnelConfig(type="quick")),
+            on_apply=on_apply,
+        )
+        dlg._password_edit.setText("hunter22")
+        dlg._idle_expire_spin.setValue(0)
+
+        dlg._on_toggle()
+
+        config, _enable = on_apply.call_args[0]
+        assert config.idle_expire_min == 0
+
+    def test_value_survives_a_reenable_round_trip(self):
+        """A user who sets idle_expire_min=90 must not have it silently
+        reset to the 240 default on their next Enable click."""
+        on_apply = MagicMock(return_value=(True, "", ""))
+        cfg = _default_config(tunnel=TunnelConfig(type="quick"), idle_expire_min=90)
+        dlg = sd.RemoteSettingsDialog(None, is_live=False, current=cfg, on_apply=on_apply)
+        dlg._password_edit.setText("hunter22")
+
+        dlg._on_toggle()
+
+        config, _enable = on_apply.call_args[0]
+        assert config.idle_expire_min == 90
 
 
 class TestStopTunnelButton:

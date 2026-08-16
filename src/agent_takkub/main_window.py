@@ -599,7 +599,9 @@ class MainWindow(
             import importlib
 
             _remote_mod = importlib.import_module("agent_takkub.remote")
-            self._remote = _remote_mod.RemoteControl.maybe_start(self.orch)
+            self._remote = _remote_mod.RemoteControl.maybe_start(
+                self.orch, on_auto_suspend=self._on_remote_auto_suspended
+            )
         except ModuleNotFoundError:  # folder deleted = uninstall no-op (B4)
             self._remote = None
         except Exception:  # any other error: never leave a half-open socket
