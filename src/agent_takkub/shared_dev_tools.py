@@ -780,7 +780,12 @@ def _prefer_offline_npx(cfg: dict) -> dict:
     if not isinstance(cfg, dict):
         return cfg
     command = cfg.get("command")
-    if not isinstance(command, str) or pathlib.PurePath(command).stem.lower() != "npx":
+    # PureWindowsPath (not PurePath) on purpose: it splits on BOTH separators,
+    # so a Windows-style "C:\...\npx.cmd" read on a mac/linux cockpit — a
+    # shared-mcp.json synced across machines — still resolves to "npx".
+    # PurePath on POSIX treats "\\" as an ordinary character and misses it
+    # (caught by CI's ubuntu/macos legs, 2026-08-16).
+    if not isinstance(command, str) or pathlib.PureWindowsPath(command).stem.lower() != "npx":
         return cfg
     args = cfg.get("args")
     if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
