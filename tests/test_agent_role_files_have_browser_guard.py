@@ -27,7 +27,7 @@ from agent_takkub import pane_guard
 
 AGENTS_DIR = Path(__file__).parent.parent / ".claude" / "agents"
 ROLE_FILES = sorted(AGENTS_DIR.glob("*.md"))
-SECTION = "## Browser & เครื่องมือหนัก"
+SECTION = "## Browser & heavy tooling"
 
 
 def _is_browser_role(role_file: Path) -> bool:
@@ -54,7 +54,7 @@ class TestRoleFileBrowserGuard:
 
     def test_forbids_whole_disk_scan(self, role_file: Path) -> None:
         content = role_file.read_text(encoding="utf-8")
-        assert "ห้ามสแกนทั้งไดรฟ์" in content, (
+        assert "Never scan the whole drive" in content, (
             f"{role_file.name} is missing the whole-disk-scan prohibition"
         )
 
@@ -65,19 +65,19 @@ class TestRoleFileBrowserGuard:
         exact hole this whole change closes)."""
         content = role_file.read_text(encoding="utf-8")
         if _is_browser_role(role_file):
-            assert "ได้สิทธิ์ขับ browser" in content, (
+            assert "is granted browser access" in content, (
                 f"{role_file.name} is in pane_guard.BROWSER_ROLES but its role "
                 "file does not grant browser access"
             )
-            assert "ห้ามติดตั้งหรือรัน browser driver เอง" not in content, (
+            assert "Never install or run a browser driver yourself" not in content, (
                 f"{role_file.name} is a browser role but carries the prohibition"
             )
         else:
-            assert "ห้ามติดตั้งหรือรัน browser driver เอง" in content, (
+            assert "Never install or run a browser driver yourself" in content, (
                 f"{role_file.name} is not in pane_guard.BROWSER_ROLES but its "
                 "role file never forbids driving a browser"
             )
-            assert "ได้สิทธิ์ขับ browser" not in content, (
+            assert "is granted browser access" not in content, (
                 f"{role_file.name} is not a browser role but grants access"
             )
 

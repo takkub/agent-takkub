@@ -27,7 +27,7 @@ import pytest
 
 AGENTS_DIR = Path(__file__).parent.parent / ".claude" / "agents"
 ROLE_FILES = sorted(AGENTS_DIR.glob("*.md"))
-SECTION = "ห้าม kill process ด้วยชื่อ"
+SECTION = "Never kill a process by name"
 
 
 @pytest.mark.parametrize("role_file", ROLE_FILES, ids=lambda p: p.name)
@@ -54,6 +54,6 @@ class TestRoleFileHostDestructiveGuard:
         """Unlike the browser-driver rule, this one has no permission
         variant — every role file must carry the prohibition, never a grant."""
         content = role_file.read_text(encoding="utf-8")
-        assert "ห้ามสั่ง kill process ด้วยชื่อ" in content, (
+        assert "Never kill a process by name" in content, (
             f"{role_file.name} is missing the prohibition wording"
         )
