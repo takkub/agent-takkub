@@ -4,6 +4,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.66] - 2026-08-16
+
+### Fixed (แก้)
+
+**pane ที่ auth ไม่ผ่านไม่เคย degrade เป็น claude (#269)**
+- role ที่ provider ล็อกอินไม่ผ่าน (เคสจริง: qa/gemini-agy ล้ม 3 รอบติด) **ไม่เคยถูก degrade เป็น claude substitute เลย** ทั้งที่ backend/frontend ในเซสชันเดียวกันบนเครื่องเดียวกัน degrade ได้ปกติ → QA gate ค้างทั้งที่งาน dev เสร็จหมด และไม่มี workaround นอกจากให้ผู้ใช้ไปล็อกอินเอง
+- **root cause:** จุดเดียวในระบบที่แตะ `provider_override` (คือ degrade) คือ no-content watchdog ที่เฝ้าว่า pane ไม่พ่นอะไรออกมาเลย — แต่ pane ที่ติด auth **พ่นข้อความ error ออกมา** ซึ่งนับเป็น "content" watchdog จึงไม่มีวันเจอเคสนี้ และไม่มีทางไปถึงโค้ด degrade · backend/frontend ที่ degrade ได้เพราะล้มด้วยอาการ no-content จริงๆ คนละอาการกัน
+- แยก `_recover_auth_failed_pane` ออกมา **degrade ทันทีตั้งแต่ครั้งแรกโดยไม่ retry ก่อน** (ต่างจาก no-content ที่ retry ก่อน) เพราะกำแพง login ไม่หายเอง · close+respawn+degrade ถูก extract เป็น `_recover_broken_pane` ให้ทั้งสอง path ใช้ร่วมกัน
+- ครึ่งหลังของ #269 (`takkub list` โชว์ working ทั้งที่ pane ไม่เคยถึง ready prompt) ถูกคุมแล้วโดย `login-required` tier ของ #263 ใน 1.0.65
+
+
 ## [1.0.65] - 2026-08-16
 
 รอบต่อเนื่องจาก 1.0.64 ในวันเดียวกัน — ปิดสองใบที่ค้างไว้เพราะรอบก่อนทำได้ไม่ครบ
