@@ -503,6 +503,14 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     # include 'esc to interrupt' too, so the case is self-contained there
     # without needing codex's 'fast off' rule at all.
     ("(esc to interrupt) building...\nsomeone mentions fast off", False, "claude"),
+    # kimi idle footer (#257), captured via direct ConPTY capture against a
+    # signed-in kimi-cli 1.49.x session on Windows, 2026-08-16 — see
+    # kimi_spec.ready_rules's comment for the full captured line.
+    (
+        "main  @: mention files | ctrl-x: toggle mode | shift-tab: plan mode | ctrl+o: editor",
+        True,
+        "kimi",
+    ),
 )
 
 

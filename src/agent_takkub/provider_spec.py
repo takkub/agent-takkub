@@ -555,7 +555,27 @@ gemini_spec = ProviderSpec(
     # way) — listed again here because auth_failure_reason() answers a
     # different question ("stuck", gated on sustained staleness) than
     # is_at_ready_prompt() ("not yet ready", true from frame one).
-    auth_transient_markers=("signing in", "verifying your account"),
+    #
+    # "not signed in" (#256): agy's own cold-start banner reads "You are
+    # currently not signed in." on EVERY spawn, before the CLI has even
+    # started its OAuth check — confirmed by a same-day transcript
+    # (gemini-090814.transcript.log) showing banner -> "Signing in..." ->
+    # signed-in header (email + model) -> normal task execution, all while
+    # GENERIC_AUTH_ERROR_MARKERS's old instant-fail listing of this phrase
+    # convicted the pane mid-boot. Moved here instead of staying a
+    # zero-grace instant marker (see GENERIC_AUTH_ERROR_MARKERS's #256 note
+    # below for why it left the generic table entirely rather than being
+    # provider-excluded there): grace-gating on `seconds_since_output()`
+    # means it only convicts once the screen has gone STATIC on this text
+    # for AUTH_TRANSIENT_GRACE_SEC — a normal cold boot keeps producing new
+    # output (banner -> spinner -> signed-in header) so the clock never
+    # accumulates that long, and once the header/task output scrolls the
+    # banner out of `_ready_region`'s 6-row tail the marker stops matching
+    # at all — the same tail-scoping that already protects every other
+    # check in this module (module note above `_ready_region`) doubles as
+    # the "override a stale marker once a newer identity is on screen"
+    # mechanism #256 asked for, with no separate identity-parsing needed.
+    auth_transient_markers=("signing in", "verifying your account", "not signed in"),
 )
 
 
@@ -675,10 +695,29 @@ kimi_spec = ProviderSpec(
     system_prompt_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
-    # ⚠ BUSY marker NOT yet calibrated: no authenticated Kimi TUI was
-    # available for ConPTY capture. Do not guess at an idle/busy footer; keep
-    # this empty until an exact marker is observed (#103).
-    ready_rules=(),
+    # ⚠ BUSY marker STILL NOT calibrated (#257): the idle footer below was
+    # captured against a logged-in, IDLE Kimi TUI only — nobody has yet sent
+    # it a real task and watched what the footer/status line reads while
+    # Kimi is actively generating. Do not guess it from the idle text; the
+    # only busy signal until then is the cross-provider `ready_hard_blockers`
+    # dedup table (esc to interrupt/cancel), which may not even apply if
+    # Kimi words its own interrupt hint differently — a working pane could
+    # misread as ready. Re-probe by assigning kimi a real task and capturing
+    # the footer mid-generation, then fill this in as a data-only change.
+    ready_rules=(
+        # Idle composer footer, captured via direct ConPTY capture against a
+        # signed-in kimi-cli 1.49.x session on Windows (#257, 2026-08-16):
+        #   main  @: mention files | ctrl-x: toggle mode | shift-tab: plan
+        #   mode | ctrl+o: editor
+        # "ctrl-x: toggle mode" is the distinctive half — no substring
+        # collision with any other provider's ready/busy markers in this
+        # file. Before this entry, ready_rules was empty, so
+        # is_at_ready_prompt() could never return True for a kimi pane and
+        # every assigned task sat undelivered until the 1800s busy-wait
+        # ceiling (proven empirically the same day — task text never
+        # appeared on screen even after a manual resend).
+        ReadyRule("ctrl-x: toggle mode", True),
+    ),
     ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
     # AGENTS.md discovery CONFIRMED (kimi-cli changelog 1.29.0, 2026-04-01:
     # "discovers and merges AGENTS.md files from the git project root down to
@@ -714,9 +753,17 @@ kimi_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
-    # ⚠ NOT yet verified — no authenticated Kimi TUI was available for
-    # calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
-    auth_error_markers=(),
+    # CONFIRMED (#257, 2026-08-16): a fresh kimi pane spawned with no
+    # credentials shows "Model: not set, send /login to login" instead of
+    # ever reaching the idle footer above — kimi cannot do anything in this
+    # state (no model selected), so unlike gemini's transient boot banner
+    # this is a genuine instant failure, not a normal startup step. Narrowed
+    # to "send /login to login" (drop the "model: not set" half): the model
+    # name is settable per-role independent of login state, so a future
+    # "model not set" wording for a DIFFERENT reason must not silently
+    # convict the pane on login grounds. "send /login to login" is
+    # first-person CLI chrome no unrelated dev-output plausibly reproduces.
+    auth_error_markers=("send /login to login",),
 )
 
 
@@ -822,8 +869,9 @@ _READY_RULES_BY_PROVIDER: tuple[tuple[str, ProviderSpec], ...] = (
     # substring with any rule above, so position carries no precedence weight —
     # last keeps the historical gemini→codex→claude table byte-identical.
     ("opencode", opencode_spec),
-    # Kimi intentionally contributes no rules yet, but keeping an explicit
-    # entry makes the future calibrated marker a data-only change (#103).
+    # Kimi (#257): now contributes "ctrl-x: toggle mode" (idle footer). No
+    # substring collision with any rule above, so its position here carries
+    # no precedence weight either.
     ("kimi", kimi_spec),
     # Cursor intentionally contributes no rules until its TUI has been
     # observed; keep the entry explicit so calibration remains data-only.
@@ -877,8 +925,26 @@ READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
 # backend pane the moment its own test suite exercised an authless request.
 # What remains reads only as first-person CLI chrome telling an operator to
 # re-auth — text no unrelated dev-output string plausibly reproduces.
+#
+# Dropped in the #256 follow-up: "not signed in". Proven UNSAFE as a
+# zero-grace, every-provider instant marker — gemini/agy prints "You are
+# currently not signed in." in its own cold-start banner on every single
+# spawn, before it has even begun the OAuth check that normally follows
+# (transcript gemini-090814.transcript.log, same day). That is exactly the
+# "plausibly reproduces" failure this table's own design note above warns
+# against; unlike the HTTP/test-framework phrases dropped in round 2, this
+# one is real first-person CLI chrome, just transient rather than a
+# failure. It was NOT re-added per-provider-excluded here (no such
+# mechanism exists on this generic table, and building one for a single
+# known offender would be premature) — it now lives solely as gemini_spec's
+# own auth_transient_markers entry (see that field's comment), which is the
+# tier built for exactly this "normal for the first few seconds, only a
+# real problem if it never clears" shape. No other provider has confirmed
+# this phrase as either an instant failure or a normal boot artifact, so it
+# is simply absent from the generic baseline until one does — that
+# provider's own `auth_error_markers` is the place to add it, confirmed
+# against a real screen, not a guess re-added here.
 GENERIC_AUTH_ERROR_MARKERS: tuple[str, ...] = (
-    "not signed in",
     "please sign in again",
     "please log in again",
     "please authenticate",
@@ -913,6 +979,34 @@ def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
     boot-time account-check text."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.auth_transient_markers if spec is not None else ()
+
+
+# ── ready-marker calibration status (#257) ──────────────────────────────────
+# A provider spawned with an empty `ready_rules` can NEVER satisfy
+# is_at_ready_prompt() (no rule can ever match ()), so task delivery silently
+# stalls until orchestrator's busy-wait ceiling (1800s default) — proven
+# empirically for kimi the same day this was written, before its
+# "ctrl-x: toggle mode" rule above was captured. This predicate is a pure
+# data-layer query only: no spawn-time Lead warning is wired to it yet — that
+# requires touching spawn_engine.py/lead_inbox.py, both out of scope for this
+# change (see this task's file boundaries). Whoever wires that follow-up
+# should call this instead of re-deriving "empty tuple" as the calibration
+# signal, so a future provider only needs a ProviderSpec entry to go green.
+def is_ready_marker_calibrated(provider: str) -> bool:
+    """True when `provider` has at least one ready rule, so
+    `is_at_ready_prompt()` can ever return True for it. False for an unknown
+    provider name too — no rules to match means the same "task can never be
+    delivered" outcome regardless of the reason."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return bool(spec and spec.ready_rules)
+
+
+def uncalibrated_providers() -> tuple[str, ...]:
+    """Every registered provider name whose `ready_rules` is still empty, in
+    `PROVIDER_REGISTRY` iteration order. Empty tuple = every provider can, at
+    minimum, ever reach a ready verdict (says nothing about busy-marker
+    accuracy — see each spec's own busy-marker calibration notes)."""
+    return tuple(name for name, spec in PROVIDER_REGISTRY.items() if not spec.ready_rules)
 
 
 # ── per-model effort exceptions ────────────────────────────────────────────

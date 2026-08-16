@@ -9,6 +9,8 @@ from __future__ import annotations
 from agent_takkub.provider_spec import (
     AUTH_TRANSIENT_GRACE_SEC,
     GENERIC_AUTH_ERROR_MARKERS,
+    is_ready_marker_calibrated,
+    uncalibrated_providers,
 )
 from agent_takkub.pty_session import _READY_TAIL_ROWS, PtySession
 
@@ -50,13 +52,13 @@ class TestInstantMarkers:
         # _READY_TAIL_ROWS (6) non-blank rows from the bottom are scoped; a
         # marker further up the scrollback must not poison the verdict, same
         # reasoning as `_classify_ready`.
-        lines = ["not signed in"] + [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)]
+        lines = ["please log in again"] + [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)]
         assert len(lines) - _READY_TAIL_ROWS > 1  # sanity: marker really is out of window
         assert _auth_failure_reason(lines, "claude") is None
 
     def test_marker_inside_ready_region_matches(self) -> None:
-        lines = [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)] + ["not signed in"]
-        assert _auth_failure_reason(lines, "claude") == "not signed in"
+        lines = [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)] + ["please log in again"]
+        assert _auth_failure_reason(lines, "claude") == "please log in again"
 
 
 class TestTransientMarkers:
@@ -114,3 +116,100 @@ class TestNarrowedGenericMarkers:
     def test_remaining_markers_still_read_as_first_person_cli_chrome(self) -> None:
         for marker in GENERIC_AUTH_ERROR_MARKERS:
             assert "sign" in marker or "log in" in marker or "authenticate" in marker, marker
+
+
+class TestGeminiColdBootNotSignedIn:
+    """#256: agy's own cold-start banner ('You are currently not signed in.')
+    used to be an instant, zero-grace failure via GENERIC_AUTH_ERROR_MARKERS
+    — every single agy spawn tripped it, well before the CLI had even begun
+    signing in, let alone failed to. Moved to gemini_spec's own
+    auth_transient_markers (grace-gated), same tier as its existing
+    'signing in' / 'verifying your account' entries."""
+
+    def test_not_signed_in_is_no_longer_a_generic_instant_marker(self) -> None:
+        assert "not signed in" not in GENERIC_AUTH_ERROR_MARKERS
+
+    def test_not_signed_in_does_not_fire_during_a_normal_boot(self) -> None:
+        # Banner is on screen but the pane just spawned (low
+        # seconds_since_output) — must not convict a normal cold boot.
+        lines = ["", "You are currently not signed in.", ""]
+        reason = _auth_failure_reason(lines, "gemini", seconds_since_output=0.5)
+        assert reason is None
+
+    def test_not_signed_in_fires_once_stuck_past_grace(self) -> None:
+        # If agy genuinely never gets past this banner, it is exactly as
+        # legitimate a stall as 'signing in' hanging forever (#247) — same
+        # grace-gated tier, same eventual conviction.
+        lines = ["", "You are currently not signed in.", ""]
+        reason = _auth_failure_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason == "not signed in"
+
+    def test_not_signed_in_never_fires_for_a_provider_with_none_confirmed(self) -> None:
+        # Removed from the generic table entirely (see the class above) —
+        # unlike the old behavior, no other provider gets this marker at
+        # all, instant or transient, until it confirms its own.
+        lines = ["", "You are currently not signed in.", ""]
+        reason = _auth_failure_reason(lines, "claude", seconds_since_output=10_000)
+        assert reason is None
+
+    def test_banner_scrolling_out_of_the_ready_region_overrides_it(self) -> None:
+        # #256 point 2: once real output (a signed-in identity header, then
+        # normal task output) has pushed the banner out of the bottom
+        # _READY_TAIL_ROWS window, the marker simply cannot match anymore —
+        # the same tail-scoping that protects every other check in this
+        # module doubles as the "a newer identity overrides the stale
+        # marker" mechanism, with no separate identity parsing needed.
+        lines = (
+            ["You are currently not signed in.", "Signing in..."]
+            + [f"assistant output line {i}" for i in range(_READY_TAIL_ROWS)]
+            + ["? for shortcuts            Gemini 3.1 Pro (High)"]
+        )
+        reason = _auth_failure_reason(lines, "gemini", seconds_since_output=1_000.0)
+        assert reason is None
+
+
+class TestKimiNotLoggedIn:
+    """#257: a fresh kimi pane spawned with no credentials shows "Model: not
+    set, send /login to login" instead of ever reaching the idle footer —
+    unlike gemini's transient boot banner, this is a genuine dead end (no
+    model selected, nothing will ever run), so it belongs at the instant-fail
+    tier as kimi's own confirmed `auth_error_markers` entry."""
+
+    def test_send_login_to_login_is_an_instant_marker_for_kimi(self) -> None:
+        lines = ["", "Model: not set, send /login to login", ""]
+        assert _auth_failure_reason(lines, "kimi", seconds_since_output=0.0) == (
+            "send /login to login"
+        )
+
+    def test_send_login_to_login_is_not_a_generic_marker(self) -> None:
+        # Confirmed only for kimi's own exact wording — must not leak into
+        # every other provider's baseline the way the #256 follow-up
+        # explicitly avoided doing for "not signed in".
+        assert "send /login to login" not in GENERIC_AUTH_ERROR_MARKERS
+        lines = ["", "Model: not set, send /login to login", ""]
+        assert _auth_failure_reason(lines, "claude", seconds_since_output=0.0) is None
+
+
+class TestReadyMarkerCalibrationStatus:
+    """#257 point 3: a provider whose ready_rules is empty can never satisfy
+    is_at_ready_prompt(), so delivery silently stalls — this predicate lets a
+    future spawn-time caller warn Lead instead of staying silent. Wiring an
+    actual spawn-time warning is out of scope here (spawn_engine.py /
+    lead_inbox.py); only the data-layer signal is added by this change."""
+
+    def test_kimi_is_now_calibrated(self) -> None:
+        # The #257 fix: kimi_spec.ready_rules went from () to a real entry.
+        assert is_ready_marker_calibrated("kimi") is True
+        assert "kimi" not in uncalibrated_providers()
+
+    def test_cursor_is_still_uncalibrated(self) -> None:
+        # cursor_spec.ready_rules is still () — no TUI has been observed yet
+        # (unrelated to this change; documents the predicate's current truth
+        # so a future cursor calibration flips this test, not silently).
+        assert is_ready_marker_calibrated("cursor") is False
+        assert "cursor" in uncalibrated_providers()
+
+    def test_unknown_provider_reads_as_uncalibrated(self) -> None:
+        assert is_ready_marker_calibrated("not-a-real-provider") is False
