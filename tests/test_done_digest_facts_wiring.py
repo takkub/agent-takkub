@@ -212,7 +212,14 @@ class TestSharedTreePaneDigestFacts:
         _register_pane(orch, LEAD.name, proj, _make_alive_session())
         _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/repo/api")
         orch._pane_state[f"{proj}::backend"] = PaneState(
-            last_assigned_task="fix #245", worktree=None, assign_base_sha="abc123"
+            last_assigned_task="fix #245",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={
+                "stale.png": ("??", None, None),
+                "src/other.py": (" M", None, None),
+            },
         )
 
         class _SharedFake:
@@ -229,8 +236,8 @@ class TestSharedTreePaneDigestFacts:
             def commits_since(self, cwd, base_sha):
                 return 3
 
-            def status_porcelain(self, cwd):
-                return "?? src/new.py\n"
+            def shared_tree_status_porcelain(self, cwd):
+                return "?? stale.png\n M src/other.py\n?? src/new.py\n"
 
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _SharedFake())
 
@@ -242,7 +249,40 @@ class TestSharedTreePaneDigestFacts:
         facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
         assert facts.branch == "main"
         assert facts.commits_ahead == 3
-        assert facts.uncommitted == 1
+        assert facts.uncommitted == 3  # whole-tree dirt is still labelled honestly
         assert facts.files_touched == 2  # a.py + new.py
+        assert facts.files_dirs == ("src",)
         assert facts.merge_conflicts is None
         assert "shared tree" in facts.merge_note
+        assert "path/mtime/size" in facts.files_note
+
+    def test_done_status_failure_reports_unverifiable_not_baseline_paths(self, orch, monkeypatch):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session(), cwd="/repo")
+        orch._pane_state[f"{proj}::qa"] = PaneState(
+            last_assigned_task="verify #251",
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={"stale.png": ("??", 100, 10)},
+        )
+
+        class _FailedStatusFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def commits_since(self, cwd, base_sha):
+                return 0
+
+            def shared_tree_status_porcelain(self, cwd):
+                return None
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _FailedStatusFake())
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("qa", note="done", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[qa"))
+        assert facts.files_touched is None
+        assert "git status ตอน done" in facts.files_note

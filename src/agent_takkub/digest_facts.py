@@ -19,6 +19,7 @@ cursor pane as it does for claude.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from .worktree_manager import parse_porcelain_paths
@@ -106,15 +107,25 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     return "\n".join([line, *extra]) if extra else line
 
 
-def union_files_touched(diffstat_text: str, porcelain_text: str) -> tuple[int, list[str]]:
+def union_files_touched(
+    diffstat_text: str, uncommitted: str | Iterable[str]
+) -> tuple[int, list[str]]:
     """Combine committed-diff paths (since a baseline SHA) with currently
-    uncommitted paths into one deduped "files touched" count + top-level dir
-    list (#245 — a shared-tree pane's work can be committed, uncommitted, or
-    both; neither source alone is the full picture)."""
+    changed dirty paths into one deduped "files touched" count + top-level
+    dir list.
+
+    A porcelain string is still accepted for the isolated legacy callers and
+    pure tests.  Shared-tree done reports pass the already-filtered path list
+    produced by the assign/done metadata snapshots (#251), so pre-existing
+    dirty files that did not change during the assignment are excluded.
+    """
     committed_paths = [
         line.split("|", 1)[0].strip() for line in diffstat_text.strip().splitlines() if "|" in line
     ]
-    all_paths = {p for p in committed_paths if p} | set(parse_porcelain_paths(porcelain_text))
+    uncommitted_paths = (
+        parse_porcelain_paths(uncommitted) if isinstance(uncommitted, str) else uncommitted
+    )
+    all_paths = {p for p in committed_paths if p} | {p for p in uncommitted_paths if p}
     dirs: list[str] = []
     for path in sorted(all_paths):
         top = path.split("/", 1)[0] if "/" in path else path
