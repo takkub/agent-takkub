@@ -135,7 +135,14 @@ class TestCodexArgvNetworkAccess:
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
         assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        # `--disable apps` (#283): codex's built-in codex_apps MCP paints
+        # "esc to interrupt" for minutes while its composer is already usable,
+        # which is codex_spec's own ready blocker — measured ready 388s -> 0s
+        # with it off. Part of autonomy_flags, so it lands right after the
+        # sandbox flag.
         assert argv[2:] == [
+            "--disable",
+            "apps",
             "-c",
             "model_reasoning_effort=high",
             "-c",
@@ -209,6 +216,8 @@ class TestCodexArgvMcpInjection:
         assert argv == [
             "codex",
             "--dangerously-bypass-approvals-and-sandbox",
+            "--disable",
+            "apps",
             "-c",
             "model_reasoning_effort=high",
             "-c",
