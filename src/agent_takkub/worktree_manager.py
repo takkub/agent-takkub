@@ -636,6 +636,27 @@ class WorktreeManager:
         res = self._run(["-C", cwd, "rev-parse", "HEAD"], None)
         return res.stdout.strip() if res.ok and res.stdout.strip() else None
 
+    def shared_tree_baseline(
+        self, cwd: str
+    ) -> tuple[str | None, str | None, DirtyTreeSnapshot | None]:
+        """Capture the cheap assign-time baseline for a shared checkout.
+
+        ``rev-parse`` returns both the root and HEAD in one process; the only
+        other git process is porcelain status.  File metadata is read only for
+        paths status already declared dirty, so this never hashes or walks the
+        tracked tree.  ``None`` for the dirty snapshot means status itself
+        failed; an empty dict is a successfully observed clean tree.
+        """
+        discovery = self._run(["-C", cwd, "rev-parse", "--show-toplevel", "HEAD"], None)
+        lines = [line.strip() for line in discovery.stdout.splitlines() if line.strip()]
+        if not discovery.ok or len(lines) < 2:
+            return None, None, None
+        git_root, head_sha = lines[0], lines[1]
+        porcelain = self.shared_tree_status_porcelain(cwd)
+        if porcelain is None:
+            return head_sha, git_root, None
+        return head_sha, git_root, snapshot_porcelain_paths(git_root, porcelain)
+
     # -- create -------------------------------------------------------------
 
     def create(
@@ -764,6 +785,21 @@ class WorktreeManager:
         matching every pre-existing caller's error handling)."""
         res = self._run(["-C", cwd, "status", "--porcelain"], None)
         return res.stdout if res.ok else ""
+
+    def shared_tree_status_porcelain(self, cwd: str) -> str | None:
+        """Checked porcelain result for #251's shared-tree snapshot.
+
+        Unlike the long-established :meth:`status_porcelain` API, failure is
+        ``None`` rather than an empty string.  A failed done-time probe must
+        render "ตรวจไม่ได้", not claim every baseline-dirty path disappeared.
+        Keeping this separate also leaves isolated-worktree behavior exactly
+        unchanged.
+        """
+        # NUL form prevents git's platform/config-dependent C quoting from
+        # turning a Unicode/space-containing filename into a non-existent
+        # literal path when we lstat it.
+        res = self._run(["-C", cwd, "status", "--porcelain", "-z"], None)
+        return res.stdout if res.ok else None
 
     def is_dirty(self, info: WorktreeInfo) -> bool:
         """True when the worktree has uncommitted changes (blocks safe_remove)."""
@@ -1162,27 +1198,91 @@ def parse_worktree_list(porcelain: str) -> list[dict]:
     return out
 
 
-def parse_porcelain_paths(porcelain: str) -> list[str]:
-    """Extract changed file paths from ``git status --porcelain`` output.
+DirtyPathFingerprint = tuple[str, int | None, int | None]
+DirtyTreeSnapshot = dict[str, DirtyPathFingerprint]
 
-    Pure — no I/O. Each line is ``XY<space>path`` (short format); a rename
-    line reads ``XY old -> new`` and this keeps only the NEW path, matching
-    what a diffstat would show for the same change. Used by #245's
-    shared-tree digest facts to union "files touched" with the committed
-    diffstat's path list (a shared-tree pane's changes can be committed,
-    uncommitted, or both — neither source alone is the full picture).
-    """
-    paths: list[str] = []
+
+def _parse_porcelain_entries(porcelain: str) -> list[tuple[str, str]]:
+    """Return ``(XY, repo-relative path)`` pairs from porcelain v1."""
+    entries: list[tuple[str, str]] = []
+    if "\0" in porcelain:
+        fields = porcelain.split("\0")
+        index = 0
+        while index < len(fields):
+            field = fields[index]
+            if not field:
+                index += 1
+                continue
+            status = field[:2] if len(field) >= 2 else field.strip()
+            path = field[3:] if len(field) > 3 else field.strip()
+            if path:
+                entries.append((status, path))
+            # In -z form a rename/copy stores `to\0from\0` (no arrow). Keep
+            # the destination, matching the legacy line parser, and skip the
+            # source field before reading the next status record.
+            if "R" in status or "C" in status:
+                index += 1
+            index += 1
+        return entries
     for line in porcelain.splitlines():
         if not line.strip():
             continue
+        status = line[:2] if len(line) >= 2 else line.strip()
         rest = line[3:] if len(line) > 3 else line.strip()
         if " -> " in rest:
             rest = rest.split(" -> ", 1)[1]
         rest = rest.strip()
         if rest:
-            paths.append(rest)
-    return paths
+            entries.append((status, rest))
+    return entries
+
+
+def parse_porcelain_paths(porcelain: str) -> list[str]:
+    """Extract changed file paths from ``git status --porcelain`` output.
+
+    Pure — no I/O. Accepts line-based short format and the unquoted ``-z``
+    form used by #251's metadata snapshots. A rename keeps only the NEW path,
+    matching what a diffstat would show for the same change. Used by shared-
+    tree digest facts to union "files touched" with committed diffstat paths.
+    """
+    return [path for _status, path in _parse_porcelain_entries(porcelain)]
+
+
+def snapshot_porcelain_paths(git_root: str, porcelain: str) -> DirtyTreeSnapshot:
+    """Fingerprint only paths already reported dirty by git.
+
+    The tuple is ``(XY status, mtime_ns, size)``.  Metadata equality is used,
+    never ordering, because timestamp epochs/resolution differ across Windows
+    and macOS filesystems.  ``lstat`` avoids following a symlink outside the
+    checkout.  A missing path (normally a deletion) is represented by two
+    ``None`` values rather than treated as a snapshot failure.
+    """
+    root = Path(git_root)
+    snapshot: DirtyTreeSnapshot = {}
+    for status, path in _parse_porcelain_entries(porcelain):
+        try:
+            stat_result = (root / Path(path)).lstat()
+        except OSError:
+            mtime_ns = None
+            size = None
+        else:
+            mtime_ns = stat_result.st_mtime_ns
+            size = stat_result.st_size
+        snapshot[path] = (status, mtime_ns, size)
+    return snapshot
+
+
+def changed_dirty_paths(baseline: DirtyTreeSnapshot, current: DirtyTreeSnapshot) -> list[str]:
+    """Paths whose dirty state or cheap metadata changed since assign.
+
+    The symmetric comparison intentionally includes a baseline-dirty path
+    that disappeared (restored, removed, or committed) as well as a newly
+    dirty path.  An unchanged pre-existing untracked screenshot therefore
+    disappears from the pane report instead of being attributed to it.
+    """
+    return sorted(
+        path for path in baseline.keys() | current.keys() if baseline.get(path) != current.get(path)
+    )
 
 
 def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:

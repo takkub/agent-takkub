@@ -609,6 +609,15 @@ class PaneState:
     # every fresh task dispatch, same "one baseline per assign" semantic as
     # assign_ts just above.
     assign_base_sha: str | None = None
+    # #251: HEAD alone cannot distinguish this pane's assignment interval
+    # from dirty files that were already sitting in a shared checkout.  Keep
+    # the repo root plus a cheap snapshot of ONLY porcelain paths:
+    # ``path -> (XY status, mtime_ns, size)``.  No tracked-tree walk or content
+    # hashing.  None means the baseline was unverifiable; {} means the tree was
+    # successfully observed clean.  Isolated worktrees leave both fields unset
+    # and continue using WorktreeInfo.base_sha exactly as before.
+    assign_git_root: str | None = None
+    assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None = None
     # ── auto-resume (🌙, limit_autoresume.py) — park/wake bookkeeping ────────
     # limit_parked: True while this pane is currently parked awaiting its
     # usage-limit window to reset (auto-resume ON path only).

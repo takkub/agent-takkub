@@ -1601,22 +1601,28 @@ class Orchestrator(
             # (merge proposal if the branch has commits, else safe-remove).
             ps_assign.worktree = worktree
             ps_assign.assign_base_sha = None
+            ps_assign.assign_git_root = None
+            ps_assign.assign_dirty_snapshot = None
         else:
-            # #245 (follow-up to #244): a SHARED-tree pane has no
-            # WorktreeInfo.base_sha to diff "files touched" against — snapshot
-            # HEAD now, once, so done()'s digest fact table can diff against
-            # it later instead of guessing. One-shot per assign event, not
-            # per-tick (#229/#244 boundary): a single bounded `git rev-parse
-            # HEAD` in the pane's resolved cwd. Best-effort — None when the
-            # cwd isn't a git repo or HEAD is unborn; the digest then reports
-            # "ตรวจไม่ได้" rather than a misleading 0.
+            # #245/#251: a SHARED-tree pane has no WorktreeInfo baseline.
+            # Capture HEAD plus the current porcelain paths' status/mtime/size
+            # once per assign.  Comparing that cheap O(dirty paths) snapshot
+            # at done excludes unchanged work that pre-dated this assignment;
+            # no tracked-tree walk or content hash is performed.
             from .worktree_manager import WorktreeManager as _WorktreeManagerSnap
 
             _snap_pane = self._project_panes(project_ns).get(role_name)
             _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
-            ps_assign.assign_base_sha = (
-                _WorktreeManagerSnap().head_sha(_snap_cwd) if _snap_cwd else None
-            )
+            if _snap_cwd:
+                (
+                    ps_assign.assign_base_sha,
+                    ps_assign.assign_git_root,
+                    ps_assign.assign_dirty_snapshot,
+                ) = _WorktreeManagerSnap().shared_tree_baseline(_snap_cwd)
+            else:
+                ps_assign.assign_base_sha = None
+                ps_assign.assign_git_root = None
+                ps_assign.assign_dirty_snapshot = None
         initial_task_consumed = ps_assign.spawn_initial_task_state in {
             "pending",
             "delivered",
@@ -2762,6 +2768,8 @@ class Orchestrator(
         had_worktree: dict | None,
         pane_cwd: str | None,
         assign_base_sha: str | None,
+        assign_git_root: str | None,
+        assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -2781,7 +2789,14 @@ class Orchestrator(
         a specific CLI's terminal output.
         """
         from .digest_facts import DigestFacts, union_files_touched
-        from .worktree_manager import WorktreeInfo, WorktreeManager, summarize_diffstat
+        from .worktree_manager import (
+            WorktreeInfo,
+            WorktreeManager,
+            changed_dirty_paths,
+            parse_porcelain_paths,
+            snapshot_porcelain_paths,
+            summarize_diffstat,
+        )
 
         mgr = WorktreeManager()
 
@@ -2822,16 +2837,16 @@ class Orchestrator(
             }
             return facts, precomputed
 
-        # Shared-tree pane (#245's explicit follow-up to #244, which "chose
-        # not to guess" here): no WorktreeInfo.base_sha to diff against, so
-        # use the HEAD snapshot _assign_dispatch captured at assign-time
-        # instead (PaneState.assign_base_sha, set only for shared-tree
-        # panes). Multiple panes can share this same tree, so a commit
-        # landing between assign and done is NOT necessarily this pane's own
-        # work — files_note says so explicitly rather than implying an exact
-        # attribution the cockpit cannot actually prove.
+        # Shared-tree pane: HEAD covers committed changes in the assignment
+        # interval; the dirty-path metadata snapshot covers uncommitted state
+        # while excluding unchanged dirt that pre-dated assign (#251).
         branch = mgr.current_branch(pane_cwd) if pane_cwd else None
-        if not pane_cwd or not assign_base_sha:
+        if (
+            not pane_cwd
+            or not assign_base_sha
+            or not assign_git_root
+            or assign_dirty_snapshot is None
+        ):
             return (
                 DigestFacts(
                     role=from_role,
@@ -2840,17 +2855,38 @@ class Orchestrator(
                     report_path=report_path,
                     headline=headline,
                     files_note=(
-                        "ตรวจไม่ได้ (ไม่มี snapshot ตอน assign — cwd ไม่ใช่ git repo "
-                        "หรือ HEAD ว่างตอน assign)"
+                        "ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ — cwd ไม่ใช่ git repo, "
+                        "HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
                     ),
                 ),
                 None,
             )
-        uncommitted = mgr.uncommitted_count_at(pane_cwd)
-        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        # One porcelain read feeds BOTH the uncommitted count and the metadata
+        # comparison; done() does not pay for two status subprocesses.
         commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
-        porcelain = mgr.status_porcelain(pane_cwd)
-        files_touched, dirs = union_files_touched(diffstat, porcelain)
+        porcelain = mgr.shared_tree_status_porcelain(pane_cwd)
+        if porcelain is None:
+            return (
+                DigestFacts(
+                    role=from_role,
+                    ref=ref,
+                    branch=branch,
+                    commits_ahead=commits_ahead,
+                    merge_conflicts=None,
+                    merge_note=(
+                        "N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"
+                    ),
+                    report_path=report_path,
+                    headline=headline,
+                    files_note="ตรวจไม่ได้ (อ่าน git status ตอน done ไม่สำเร็จ)",
+                ),
+                None,
+            )
+        uncommitted = len(parse_porcelain_paths(porcelain))
+        current_dirty_snapshot = snapshot_porcelain_paths(assign_git_root, porcelain)
+        changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
+        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)
         facts = DigestFacts(
             role=from_role,
             ref=ref,
@@ -2862,8 +2898,8 @@ class Orchestrator(
             files_touched=files_touched,
             files_dirs=tuple(dirs),
             files_note=(
-                "เทียบกับ snapshot ตอน assign — อาจรวม commit ของ pane อื่นถ้ามีคน commit "
-                "ทับ shared tree คาบเกี่ยวกัน"
+                "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
+                "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
             ),
             report_path=report_path,
             headline=headline,
@@ -2921,6 +2957,8 @@ class Orchestrator(
         had_worktree = _ps_done.worktree
         had_assign_ts = _ps_done.assign_ts
         had_assign_base_sha = _ps_done.assign_base_sha
+        had_assign_git_root = _ps_done.assign_git_root
+        had_assign_dirty_snapshot = _ps_done.assign_dirty_snapshot
         if not hasattr(self, "_last_done_task_ids"):
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
@@ -3034,6 +3072,8 @@ class Orchestrator(
                     had_worktree,
                     pane_cwd,
                     had_assign_base_sha,
+                    had_assign_git_root,
+                    had_assign_dirty_snapshot,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
@@ -5480,6 +5520,10 @@ class Orchestrator(
         # the resumed pane would lose its baseline and done()'s fact table
         # would report "ตรวจไม่ได้" for a pane that actually had one.
         snap_assign_base_sha = _ps_snap.assign_base_sha if _ps_snap is not None else None
+        snap_assign_git_root = _ps_snap.assign_git_root if _ps_snap is not None else None
+        snap_assign_dirty_snapshot = (
+            _ps_snap.assign_dirty_snapshot if _ps_snap is not None else None
+        )
         # #41: carry the stuck-recover attempt count across the close→respawn so
         # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
@@ -5544,6 +5588,10 @@ class Orchestrator(
                 self._ps(key).pipeline_run_id = snap_pipeline_run_id
             if snap_assign_base_sha is not None:
                 self._ps(key).assign_base_sha = snap_assign_base_sha
+            if snap_assign_git_root is not None:
+                self._ps(key).assign_git_root = snap_assign_git_root
+            if snap_assign_dirty_snapshot is not None:
+                self._ps(key).assign_dirty_snapshot = snap_assign_dirty_snapshot
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.

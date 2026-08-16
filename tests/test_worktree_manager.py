@@ -20,8 +20,10 @@ from agent_takkub.worktree_manager import (
     WorktreeManager,
     branch_name,
     build_merge_proposal,
+    changed_dirty_paths,
     repair_editable_pth_if_stale,
     sanitize_ref_component,
+    snapshot_porcelain_paths,
     summarize_diffstat,
     worktree_dest,
     worktree_root,
@@ -252,6 +254,45 @@ class TestInspect:
 
 
 class TestGenericCwdProbes:
+    def test_shared_tree_baseline_uses_two_git_processes(self, tmp_path):
+        (tmp_path / "stale.png").write_bytes(b"png")
+        r = FakeRunner(
+            [
+                (
+                    ["rev-parse", "--show-toplevel", "HEAD"],
+                    _ok(f"{tmp_path}\ndeadbeef\n"),
+                ),
+                (["status", "--porcelain"], _ok("?? stale.png\n")),
+            ]
+        )
+
+        head, root, dirty = WorktreeManager(r).shared_tree_baseline(str(tmp_path))
+
+        assert head == "deadbeef"
+        assert root == str(tmp_path)
+        assert dirty is not None
+        assert dirty["stale.png"][0] == "??"
+        assert dirty["stale.png"][2] == 3
+        assert len(r.calls) == 2
+
+    def test_shared_tree_baseline_distinguishes_status_failure_from_clean(self, tmp_path):
+        discovery = _ok(f"{tmp_path}\ndeadbeef\n")
+        failed = FakeRunner(
+            [
+                (["rev-parse", "--show-toplevel", "HEAD"], discovery),
+                (["status", "--porcelain"], _fail()),
+            ]
+        )
+        clean = FakeRunner(
+            [
+                (["rev-parse", "--show-toplevel", "HEAD"], discovery),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+
+        assert WorktreeManager(failed).shared_tree_baseline(str(tmp_path))[2] is None
+        assert WorktreeManager(clean).shared_tree_baseline(str(tmp_path))[2] == {}
+
     def test_commits_since_parses(self):
         r = FakeRunner([(["rev-list", "--count", "abc..HEAD"], _ok("4\n"))])
         assert WorktreeManager(r).commits_since("/repo", "abc") == 4
@@ -295,6 +336,12 @@ class TestParsePorcelainPaths:
 
         assert parse_porcelain_paths("R  old/x.py -> new/x.py\n") == ["new/x.py"]
 
+    def test_nul_form_keeps_literal_path_and_rename_destination(self):
+        from agent_takkub.worktree_manager import parse_porcelain_paths
+
+        porcelain = "?? ชื่อ file.txt\0R  new name.py\0old name.py\0"
+        assert parse_porcelain_paths(porcelain) == ["ชื่อ file.txt", "new name.py"]
+
     def test_blank_lines_ignored(self):
         from agent_takkub.worktree_manager import parse_porcelain_paths
 
@@ -304,6 +351,51 @@ class TestParsePorcelainPaths:
         from agent_takkub.worktree_manager import parse_porcelain_paths
 
         assert parse_porcelain_paths("") == []
+
+
+class TestDirtyPathSnapshots:
+    def test_snapshots_status_mtime_and_size_without_following_missing_path(self, tmp_path):
+        changed = tmp_path / "src" / "a.py"
+        changed.parent.mkdir()
+        changed.write_text("abc", encoding="utf-8")
+
+        snapshot = snapshot_porcelain_paths(str(tmp_path), " M src/a.py\n D deleted.py\n")
+
+        assert snapshot["src/a.py"][0] == " M"
+        assert isinstance(snapshot["src/a.py"][1], int)
+        assert snapshot["src/a.py"][2] == 3
+        assert snapshot["deleted.py"] == (" D", None, None)
+
+    def test_unchanged_preexisting_dirty_paths_are_excluded(self):
+        baseline = {
+            "stale.png": ("??", 100, 10),
+            "src/preexisting.py": (" M", 200, 20),
+        }
+        current = dict(baseline)
+
+        assert changed_dirty_paths(baseline, current) == []
+
+    def test_metadata_status_addition_and_disappearance_are_changes(self):
+        baseline = {
+            "mtime.py": (" M", 100, 10),
+            "size.py": (" M", 100, 10),
+            "status.py": (" M", 100, 10),
+            "removed.png": ("??", 100, 10),
+        }
+        current = {
+            "mtime.py": (" M", 101, 10),
+            "size.py": (" M", 100, 11),
+            "status.py": ("M ", 100, 10),
+            "new.py": ("??", 300, 30),
+        }
+
+        assert changed_dirty_paths(baseline, current) == [
+            "mtime.py",
+            "new.py",
+            "removed.png",
+            "size.py",
+            "status.py",
+        ]
 
 
 # ── Destroy (2-tier) ────────────────────────────────────────────────────────
