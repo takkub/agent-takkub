@@ -4,6 +4,28 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.72] - 2026-08-17
+
+### Changed (เปลี่ยน)
+
+**Lead ไม่ต้อง "เฝ้า" อีกต่อไป — ค่าเริ่มต้นคือยิงงานแล้วจบเทิร์น (#287)**
+- Lead ถูกจับได้ว่าค้างใน foreground Bash call เดียว **4 นาที 53 วินาที** (เพดาน 13 นาที) วน `takkub list` ทุก 20 วินาทีรอ backend — ขณะที่ user มีข้อความพิมพ์ค้างไว้ 7 บรรทัดที่ Lead อ่านไม่ได้
+- ต้นทุนจริงไม่ใช่ socket call ที่ยิงซ้ำ แต่คือ **turn ของ Lead ถูกบล็อกทั้งอัน** → อ่านอะไรไม่ได้เลยรวมถึงข้อความ user · และ delivery pipeline เห็น Lead busy ตลอดช่วงนั้น (เงื่อนไขเดียวกับที่ต้องคิด busy-deliver escalation ขึ้นมาแก้ใน #279)
+- แม้แต่ `takkub wait` ที่เป็นวิธี "ถูกต้อง" ก็ยังบล็อก turn อยู่ดี แค่ถูกกว่า — **ค่าเริ่มต้นใหม่คือไม่ต้องรอเลย** จบเทิร์นไป รายงาน done/FAILED จะถูกส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่เอง (คือหน้าที่ของ delivery pipeline ทั้งอัน ซึ่งทนพอแล้วหลัง #276/#277/#279)
+- `takkub wait` เหลือเป็นข้อยกเว้น: ไม่มีงานอื่นทำเลย **และ** ต้องขยับทันทีที่รายงานถึง
+
+### Fixed (แก้)
+
+**กฎห้าม loop เฝ้า pane มีแต่ prose มาตั้งแต่ #242 — บังคับใช้ไม่ได้เลย (#287)**
+- `docs/lead/role-and-workflow.md` เขียนว่า "เป็นแพทเทิร์นต้องห้ามเด็ดขาด" มาตลอด แต่ `pane_guard._UNGUARDED_ROLES = {"lead","shell"}` ทำให้ `classify()` คืน allow ก่อนกฎใดๆ ได้รัน
+- **role เดียวที่มี teammate ให้เฝ้า และเป็นเจ้าของ `takkub wait` คือ role เดียวที่ถูกยกเว้นจากชั้นบังคับใช้** — บทเรียนซ้ำกับ #202/browser rule เป๊ะ: prose ชั้นเดียวไม่เคยยึด
+- เพิ่มกฎ `pane_poll_loop` เช็ค**ก่อน** `_UNGUARDED_ROLES` exit — deny เมื่อครบ 3 อย่างพร้อมกัน: loop construct + `takkub list|status|inbox|ledger` + `sleep`
+- ต้องครบทั้ง 3 จึงไม่กิน: fan-out ครั้งเดียว (ไม่มี sleep), curl/healthcheck poll ที่ `docs/lead/patterns.md` แนะนำเอง (ไม่ใช่ takkub), `takkub wait` เอง · role ว่าง = คนพิมพ์ที่ terminal จริง ยัง fail-open
+
+**heredoc body ไม่ใช่โค้ด (#287)**
+- เจอทันทีที่กฎขึ้น: การสร้าง issue #287 เอง (ซึ่ง quote loop ไว้เป็นหลักฐาน) ถูก deny โดยกฎที่มันกำลังอธิบาย — guard ที่ทำให้เขียนรายงานตัวเองไม่ได้ จะสอนให้ pane หาทางอ้อม guard
+- strip heredoc body ก่อนแมตช์ · ยกเว้น heredoc ที่ป้อนให้ shell (`bash <<'EOF'`) ซึ่ง body ถูกรันจริง — ไม่งั้นเป็นทางอ้อมกฎแบบบรรทัดเดียว
+
 ## [1.0.71] - 2026-08-17
 
 ### Fixed (แก้)

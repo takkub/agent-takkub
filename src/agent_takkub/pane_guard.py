@@ -64,6 +64,11 @@ run mid-flight — silently imported code from the wrong worktree, so the gate
 result couldn't be trusted. `PIP_EDITABLE_RULE_TEXT` is the prose
 counterpart, pinned in role files by
 `tests/test_agent_role_files_have_pip_editable_guard.py`.
+
+A fifth rule, ``pane_poll_loop`` (#287), blocks hand-rolled loops that poll
+`takkub list`/`status` with a `sleep` — and is the one rule that deliberately
+applies to `lead` as well, since Lead is the only role with teammates to poll.
+See its pattern block below for why the #242 prose ban never bound.
 """
 
 from __future__ import annotations
@@ -232,6 +237,90 @@ _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Hand-rolled pane-polling loops (#287). `docs/lead/role-and-workflow.md` has
+# called this "แพทเทิร์นต้องห้ามเด็ดขาด" since #242 — and Lead kept doing it,
+# because prose was the ONLY layer: `lead` sits in `_UNGUARDED_ROLES`, so the
+# one mechanism that actually enforces anything never saw its commands. Same
+# two-layer lesson as the browser rule above, discovered the same way.
+#
+# Observed 2026-08-17 in the Lead pane, 4m53s into a foreground turn:
+#
+#     for i in $(seq 1 40); do s=$(takkub list | grep -E "^\s+backend\s" \
+#       | awk '{print $2}'); if [ "$s" != "working" ]; then break; fi; \
+#       sleep 20; done
+#
+# Up to 13 minutes parked in one Bash call. The cost is not the socket calls —
+# it is that Lead cannot read anything while its turn is blocked, so the
+# user's own queued messages sat unread behind it, AND the delivery pipeline
+# saw Lead "busy" for the whole window (the very condition #279's
+# busy-deliver escalation had to be invented to survive).
+#
+# All three signals are required together — loop construct, a takkub *status*
+# read, and a sleep — so a legitimate one-shot fan-out
+# (`for p in a b c; do takkub list --project $p; done`) and the blessed
+# non-takkub verification polls (`until curl -sf localhost:3000; do sleep 2;
+# done`, see docs/lead/patterns.md) both stay allowed.
+_POLL_LOOP_LOOP = re.compile(
+    r"(?:^|[|;&(]\s*|\bdo\s+)(?:for|while|until)(?![\w-])|\bForEach-Object\b|\b\d+\.\.\d+\b",
+    re.I | re.M,
+)
+_POLL_LOOP_TAKKUB_READ = re.compile(
+    r"(?<![\w-])takkub(?:\.(?:exe|cmd|bat))?(?![\w-])\s+(?:list|status|inbox|ledger)(?![\w-])",
+    re.I,
+)
+_POLL_LOOP_SLEEP = re.compile(
+    r"(?<![\w-])(?:sleep|Start-Sleep)(?![\w-])|(?<![\w-])timeout(?![\w-])\s+/t\b",
+    re.I,
+)
+
+# A heredoc body is DATA handed to a program (`gh issue create --body <<'EOF'`,
+# `git commit -F -`), not shell the pane executes — so the poll-loop rule must
+# not read it as code. Found the moment the rule shipped: writing #287's own
+# bug report, which quotes the offending loop verbatim, was denied by the rule
+# it was documenting. A guard that makes its own incident report unwritable
+# teaches panes to route around the guard.
+#
+# The exception is a heredoc fed to a shell (`bash <<'EOF' … EOF`), where the
+# body genuinely IS executed — stripping that would be a one-line bypass of
+# the whole rule, so those keep their body.
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1(?P<body>.*?)^\s*\2\s*$", re.S | re.M)
+_HEREDOC_SHELL_SINK = re.compile(
+    r"(?<![\w-])(?:ba|z|k|da)?sh(?![\w-])|(?<![\w-])pwsh(?![\w-])"
+    r"|(?<![\w-])python3?(?![\w-])|(?<![\w-])(?:eval|source)(?![\w-])",
+    re.I,
+)
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """Blank out heredoc bodies that are data rather than shell code.
+
+    The interpreter check looks at the text from the start of the heredoc's
+    own line up to the `<<`, which is where the sink command sits.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        line_start = cmd.rfind("\n", 0, match.start()) + 1
+        introducer = cmd[line_start : match.start()]
+        if _HEREDOC_SHELL_SINK.search(introducer):
+            return match.group(0)
+        return match.group(0).replace(match.group("body"), "\n")
+
+    return _HEREDOC.sub(_replace, cmd)
+
+
+# Prose handed to role files verbatim (#287). Kept in sync with the patterns
+# above by tests/test_lead_poll_loop_guard.py.
+POLL_LOOP_RULE_TEXT = (
+    "ห้ามเขียน loop เฝ้า pane เอง (`for`/`while`/`until` + `takkub list|status` + `sleep`) — "
+    "ระหว่างที่ loop รันอยู่ turn ของ Lead ถูกบล็อกทั้งอัน อ่านอะไรไม่ได้เลย "
+    "รวมถึง**ข้อความที่ user พิมพ์ค้างไว้** และ delivery pipeline ก็เห็น Lead ยุ่งตลอดช่วงนั้น "
+    "(เคสจริง #287: loop เดียวกินไป 4 นาที 53 วินาที เพดาน 13 นาที). "
+    "ค่าเริ่มต้นคือ **ไม่ต้องรอ — จบเทิร์นไปเลย** รายงาน done/FAILED จะถูกส่งเข้า pane ของ Lead "
+    "แล้วปลุกเทิร์นใหม่เอง (นั่นคือหน้าที่ของ delivery pipeline ทั้งอัน). "
+    "ถ้าจำเป็นต้องคาไว้จริงๆ (ไม่มีงานอื่นทำเลย และต้องขยับทันทีที่รายงานถึง) ใช้ "
+    "`takkub wait [--role <r>]... [--timeout <s>]` — ตัวเดียวต่อ project, ตื่นเองเมื่อมี blocking report."
+)
+
 # pip/python -m pip install with -e/--editable, any target (#202): rewrites
 # __editable__*.pth in the SHARED venv's site-packages to point at the
 # caller's cwd — deadly when the caller is a `--isolation worktree` checkout
@@ -280,6 +369,34 @@ def classify(command: str, role: str | None) -> Verdict:
         return Verdict(True)
 
     name = normalise_role(role)
+
+    # #287: checked BEFORE the _UNGUARDED_ROLES exit on purpose — `lead` is the
+    # role this rule exists for. It is the only role that owns teammates to
+    # poll and the only one handed `takkub wait`, and it is exempt from every
+    # rule below it, which is precisely why the prose ban survived from #242 to
+    # #287 without ever binding. `shell` is included for the same reason (it
+    # can reach the same CLI); an unknown/empty role still fails open, since
+    # that means a human at a real terminal rather than a pane.
+    #
+    # A user typing this loop themselves via `!` would also be denied. That is
+    # accepted: the verdict text says what to do instead, and rephrasing costs
+    # a keystroke — whereas leaving the hole open is what produced #287.
+    if name:
+        code = _strip_heredoc_bodies(cmd)
+        if (
+            _POLL_LOOP_LOOP.search(code)
+            and _POLL_LOOP_TAKKUB_READ.search(code)
+            and _POLL_LOOP_SLEEP.search(code)
+        ):
+            return Verdict(
+                False,
+                rule="pane_poll_loop:takkub-status-sleep",
+                reason=(
+                    f"role `{name}` เขียน loop เฝ้า pane เองไม่ได้ (นโยบาย cockpit). "
+                    f"{POLL_LOOP_RULE_TEXT}"
+                ),
+            )
+
     if not name or name in _UNGUARDED_ROLES:
         return Verdict(True)
 
