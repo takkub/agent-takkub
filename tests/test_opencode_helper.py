@@ -15,10 +15,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
 from agent_takkub import opencode_helper
 from agent_takkub.provider_spec import PROVIDER_REGISTRY, opencode_spec
@@ -85,7 +84,9 @@ class TestOpencodeDatabaseResolution:
         assert opencode_helper.opencode_db_path() == custom
 
     def test_find_executable(self, monkeypatch):
-        monkeypatch.setattr("shutil.which", lambda n: "/usr/local/bin/opencode" if n == "opencode" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda n: "/usr/local/bin/opencode" if n == "opencode" else None
+        )
         assert opencode_helper.find_opencode_executable() == "/usr/local/bin/opencode"
 
     def test_provider_spec_has_remote_history(self):
@@ -156,7 +157,13 @@ class TestOpencodeMessageReading:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_u1", "msg_u1", "ses_1", 1000, json.dumps({"type": "text", "text": "[remote → lead] hello world"})),
+            (
+                "prt_u1",
+                "msg_u1",
+                "ses_1",
+                1000,
+                json.dumps({"type": "text", "text": "[remote → lead] hello world"}),
+            ),
         )
         # Assistant message with reasoning + tool + text
         cur.execute(
@@ -165,7 +172,13 @@ class TestOpencodeMessageReading:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_a1_reason", "msg_a1", "ses_1", 2000, json.dumps({"type": "reasoning", "text": "Thinking..."})),
+            (
+                "prt_a1_reason",
+                "msg_a1",
+                "ses_1",
+                2000,
+                json.dumps({"type": "reasoning", "text": "Thinking..."}),
+            ),
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
@@ -173,7 +186,13 @@ class TestOpencodeMessageReading:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_a1_text", "msg_a1", "ses_1", 2100, json.dumps({"type": "text", "text": "Hello! How can I help?"})),
+            (
+                "prt_a1_text",
+                "msg_a1",
+                "ses_1",
+                2100,
+                json.dumps({"type": "text", "text": "Hello! How can I help?"}),
+            ),
         )
         conn.commit()
         conn.close()
@@ -200,7 +219,13 @@ class TestOpencodeListSessions:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_n", "msg_n", "ses_normal", 1000, json.dumps({"type": "text", "text": "Can you design a dashboard?"})),
+            (
+                "prt_n",
+                "msg_n",
+                "ses_normal",
+                1000,
+                json.dumps({"type": "text", "text": "Can you design a dashboard?"}),
+            ),
         )
 
         cur.execute(
@@ -213,7 +238,13 @@ class TestOpencodeListSessions:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_t", "msg_t", "ses_teammate", 3000, json.dumps({"type": "text", "text": "[ROLE: frontend — fix bug #123]"})),
+            (
+                "prt_t",
+                "msg_t",
+                "ses_teammate",
+                3000,
+                json.dumps({"type": "text", "text": "[ROLE: frontend — fix bug #123]"}),
+            ),
         )
         conn.commit()
         conn.close()
@@ -241,7 +272,13 @@ class TestOpencodeDeltaPolling:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_1", "msg_1", "ses_1", 1000, json.dumps({"type": "text", "text": "[remote → lead] hi"})),
+            (
+                "prt_1",
+                "msg_1",
+                "ses_1",
+                1000,
+                json.dumps({"type": "text", "text": "[remote → lead] hi"}),
+            ),
         )
         conn.commit()
 
@@ -265,7 +302,13 @@ class TestOpencodeDeltaPolling:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_text", "msg_2", "ses_1", 2050, json.dumps({"type": "text", "text": "Command executed successfully."})),
+            (
+                "prt_text",
+                "msg_2",
+                "ses_1",
+                2050,
+                json.dumps({"type": "text", "text": "Command executed successfully."}),
+            ),
         )
         conn.commit()
 
@@ -297,7 +340,10 @@ class TestOpencodeDeltaPolling:
                                 "questions": [
                                     {
                                         "question": "Which database engine should we use?",
-                                        "options": [{"label": "PostgreSQL (Recommended)"}, {"label": "SQLite"}],
+                                        "options": [
+                                            {"label": "PostgreSQL (Recommended)"},
+                                            {"label": "SQLite"},
+                                        ],
                                     }
                                 ]
                             },
@@ -315,9 +361,6 @@ class TestOpencodeDeltaPolling:
         assert events[0][0] == "blocked_on_picker"
         assert events[0][1]["prompt"] == "Which database engine should we use?"
         assert events[0][1]["options"] == ["PostgreSQL (Recommended)", "SQLite"]
-
-
-from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
 
 class _FakeBroadcaster:
@@ -385,7 +428,13 @@ class TestOpencodeLeadNotifierIntegration:
         )
         cur.execute(
             "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
-            ("prt_1", "msg_1", "ses_test", 2000, json.dumps({"type": "text", "text": "Hello from OpenCode Lead!"})),
+            (
+                "prt_1",
+                "msg_1",
+                "ses_test",
+                2000,
+                json.dumps({"type": "text", "text": "Hello from OpenCode Lead!"}),
+            ),
         )
         conn.commit()
         conn.close()

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 152,
+  "module_count": 153,
   "modules": [
     {
       "module": "agent_takkub",
@@ -63,6 +63,7 @@
         "agent_takkub.issues",
         "agent_takkub.limit_status",
         "agent_takkub.mcp_bridge",
+        "agent_takkub.opencode_helper",
         "agent_takkub.pane_env",
         "agent_takkub.plugin_installer",
         "agent_takkub.project_rules",
@@ -81,7 +82,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 28,
+      "fan_in": 29,
       "fan_out": 0
     },
     {
@@ -872,6 +873,18 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.opencode_helper",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.provider_spec",
+        "agent_takkub.remote.notify"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
@@ -1232,7 +1245,8 @@
       "imports": [
         "agent_takkub.codex_helper",
         "agent_takkub.config",
-        "agent_takkub.gemini_helper"
+        "agent_takkub.gemini_helper",
+        "agent_takkub.opencode_helper"
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
@@ -1257,7 +1271,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 20,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_state",
@@ -1415,6 +1429,7 @@
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.gemini_helper",
+        "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
@@ -1427,7 +1442,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.remote.session_store",
