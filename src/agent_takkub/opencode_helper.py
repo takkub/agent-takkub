@@ -134,7 +134,8 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection | None:
         return None
     try:
         # uri=True with mode=ro avoids obtaining write locks or conflicting with OpenCode
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2.0)
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
         conn.row_factory = sqlite3.Row
         return conn
     except (sqlite3.Error, OSError):
@@ -153,8 +154,8 @@ def _live_user_payload(text: str) -> list[dict]:
     return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
 
 
-# Cache for resolved (cwd, session_uuid) -> session_id
-_OPENCODE_RESOLVE_CACHE: dict[tuple[str, str, int], tuple[Path, str]] = {}
+# Cache for resolved (db_path, cwd, session_uuid, not_before) -> session_id
+_OPENCODE_RESOLVE_CACHE: dict[tuple[str, str, str, int], tuple[Path, str]] = {}
 _LAST_RESOLVED_SESSION_BY_PROJECT: dict[str, str] = {}
 
 
@@ -169,15 +170,16 @@ def resolve_opencode_session(
     wanted_cwd = normalize_opencode_cwd(cwd)
     if not wanted_cwd:
         return None
-    wanted_uuid = str(session_id or "").strip()
-    cache_key = (wanted_cwd, wanted_uuid, int(not_before or 0.0))
-    cached = _OPENCODE_RESOLVE_CACHE.get(cache_key)
-    if cached is not None and cached[0].is_file():
-        return cached
 
     real_db = db_path if db_path is not None else opencode_db_path()
     if real_db is None or not real_db.is_file():
         return None
+
+    wanted_uuid = str(session_id or "").strip()
+    cache_key = (str(real_db.resolve()), wanted_cwd, wanted_uuid, int(not_before or 0.0))
+    cached = _OPENCODE_RESOLVE_CACHE.get(cache_key)
+    if cached is not None and cached[0].is_file():
+        return cached
 
     conn = _connect_ro(real_db)
     if conn is None:
