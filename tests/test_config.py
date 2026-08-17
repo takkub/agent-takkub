@@ -215,6 +215,104 @@ class TestAgentRoleDir:
             config.AGENTS_DIR = old_agents_dir
 
 
+class TestRoleGuardCapability:
+    """#250: _DEV_SERVER_HYGIENE / STALE_FILE_GUARD are gated per-role instead
+    of injected unconditionally. Fail-safe contract: only roles PROVEN to
+    never need a guard are excluded — an unrecognised/custom role name must
+    always get both guards.
+    """
+
+    @pytest.mark.parametrize(
+        "role",
+        [
+            "reviewer",
+            "gemini",
+            "docs",
+            "analyst",
+            "security",
+            "codex",
+            "opencode",
+            "kimi",
+            "cursor",
+        ],
+    )
+    def test_dev_server_guard_excluded_for_proven_roles(self, role: str) -> None:
+        assert config.role_needs_dev_server_guard(role) is False
+
+    @pytest.mark.parametrize(
+        "role",
+        ["frontend", "backend", "mobile", "devops", "qa", "critic", "designer", "lead"],
+    )
+    def test_dev_server_guard_kept_for_app_running_roles(self, role: str) -> None:
+        assert config.role_needs_dev_server_guard(role) is True
+
+    @pytest.mark.parametrize("role", ["reviewer", "gemini"])
+    def test_stale_file_guard_excluded_for_read_only_roles(self, role: str) -> None:
+        assert config.role_needs_stale_file_guard(role) is False
+
+    @pytest.mark.parametrize(
+        "role",
+        [
+            "frontend",
+            "backend",
+            "mobile",
+            "devops",
+            "qa",
+            "critic",
+            "designer",
+            "docs",
+            "analyst",
+            "security",
+        ],
+    )
+    def test_stale_file_guard_kept_for_editing_roles(self, role: str) -> None:
+        assert config.role_needs_stale_file_guard(role) is True
+
+    def test_unknown_role_gets_both_guards_failsafe(self) -> None:
+        for name in ("totally-unrecognised-role-xyz", "data-eng", ""):
+            assert config.role_needs_dev_server_guard(name) is True
+            assert config.role_needs_stale_file_guard(name) is True
+
+    def test_dev_server_hygiene_omitted_for_reviewer(self, projects_file: Path) -> None:
+        agents_dir = projects_file.parent / ".claude" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "reviewer.md").write_text("# Reviewer role\n", encoding="utf-8")
+        old_agents_dir = config.AGENTS_DIR
+        config.AGENTS_DIR = agents_dir
+        try:
+            d = config.agent_role_dir("reviewer")
+            content = (d / "CLAUDE.md").read_text(encoding="utf-8")
+            assert "next build && next start" not in content
+            # Non-interactive + token-discipline hygiene are NOT in #250's
+            # scope and must still be present for every role.
+            assert "npx --yes" in content
+        finally:
+            config.AGENTS_DIR = old_agents_dir
+
+    def test_dev_server_hygiene_kept_for_backend(self, projects_file: Path) -> None:
+        agents_dir = projects_file.parent / ".claude" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "backend.md").write_text("# Backend role\n", encoding="utf-8")
+        old_agents_dir = config.AGENTS_DIR
+        config.AGENTS_DIR = agents_dir
+        try:
+            d = config.agent_role_dir("backend")
+            content = (d / "CLAUDE.md").read_text(encoding="utf-8")
+            assert "next build && next start" in content
+        finally:
+            config.AGENTS_DIR = old_agents_dir
+
+    def test_unrecognised_role_still_gets_dev_server_hygiene(self, projects_file: Path) -> None:
+        # A6 custom role, e.g. "data-eng" — never appears in _NO_DEV_SERVER_ROLES.
+        config.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.CUSTOM_AGENTS_DIR / "data-eng.md").write_text(
+            "# Data Eng\nHandles pipelines.\n", encoding="utf-8"
+        )
+        d = config.agent_role_dir("data-eng")
+        content = (d / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "next build && next start" in content
+
+
 class TestAgentRoleDirCustomFallback:
     """A6: agent_role_dir() falls back to CUSTOM_AGENTS_DIR (writable, unlike
     the app-shipped AGENTS_DIR on an installed build) for user-created roles.

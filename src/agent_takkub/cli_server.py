@@ -2,7 +2,7 @@
 
 Protocol (newline-delimited JSON):
 
-  request:  {"cmd": "send|assign|spawn|close|done|list|hook|session-report", ...args}
+  request:  {"cmd": "send|assign|spawn|close|done|subagent-done|list|hook|session-report", ...args}
   response: {"ok": bool, "msg": str, ...extras}
 
 Runs on the Qt main thread via QTcpServer so all calls into Orchestrator are
@@ -56,6 +56,7 @@ _LEAD_ONLY_CMDS = frozenset(
     {
         "spawn",
         "assign",
+        "subagent-done",
         "close",
         "close-all",
         "harvest",
@@ -75,6 +76,10 @@ _LEAD_ONLY_CMDS = frozenset(
         "wait-begin",
         "wait-poll",
         "wait-end",
+        "wait-cancel",
+        # messages (#277): the send-audit log carries other roles' full
+        # instruction text — same read-sensitivity call as `inbox` above.
+        "messages",
     }
 )
 
@@ -103,7 +108,7 @@ class CliServer(QObject):
         # fingerprints so a client retry of the identical request within
         # _ASSIGN_DEDUP_WINDOW_S is acked without a second dispatch. Pruned
         # alongside the idle-connection reaper (same 1s tick).
-        self._recent_assign_fingerprints: dict[tuple[str, str, str], float] = {}
+        self._recent_assign_fingerprints: dict[tuple[str, str, str, str], float] = {}
         # Reap idle (no newline received) connections once per second.
         self._reaper = QTimer(self)
         self._reaper.setInterval(1_000)
@@ -257,11 +262,13 @@ class CliServer(QObject):
             self._recent_assign_fingerprints.pop(k, None)
 
     @staticmethod
-    def _assign_fingerprint(project_ns: str, role: str, task: str) -> tuple[str, str, str]:
+    def _assign_fingerprint(
+        project_ns: str, role: str, task: str, mode: str = "pane"
+    ) -> tuple[str, str, str, str]:
         task_hash = hashlib.blake2b(
             (task or "").encode("utf-8", "replace"), digest_size=8
         ).hexdigest()
-        return (project_ns or "default", role, task_hash)
+        return (project_ns or "default", role, task_hash, mode)
 
     def _on_ready_read(self, sock: QTcpSocket) -> None:
         # Reject connections whose buffered data exceeds the frame cap without a
@@ -461,12 +468,26 @@ class CliServer(QObject):
                             self._reply(sock, ok=False, msg=cwd_err)
                             return
                 if cmd == "assign":
-                    from .provider_config import assign_model_override_error
+                    mode = str(req.get("mode", "pane") or "pane")
+                    if mode not in {"pane", "subagent"}:
+                        self._reply(sock, ok=False, msg="--mode must be pane or subagent")
+                        return
+                    from .provider_config import (
+                        assign_model_override_error,
+                        assign_provider_override_error,
+                    )
 
+                    provider_req = str(req.get("provider", "") or "").strip().lower() or None
+                    if provider_req:
+                        provider_error = assign_provider_override_error(provider_req)
+                        if provider_error:
+                            self._reply(sock, ok=False, msg=provider_error)
+                            return
                     model_error = assign_model_override_error(
                         role,
                         req.get("model"),
                         from_project,
+                        provider_override=provider_req,
                     )
                     if model_error:
                         self._reply(sock, ok=False, msg=model_error)
@@ -498,7 +519,7 @@ class CliServer(QObject):
                         if _resolve_project_fp is not None
                         else (from_project or "default")
                     )
-                    fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""))
+                    fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""), mode)
                     now_fp = time.time()
                     last_seen = self._recent_assign_fingerprints.get(fp)
                     self._recent_assign_fingerprints[fp] = now_fp
@@ -512,6 +533,21 @@ class CliServer(QObject):
                             ),
                         )
                         return
+                if cmd == "assign" and mode == "subagent":
+                    ok, msg = self._orch.assign(
+                        role,
+                        cwd=req.get("cwd"),
+                        task=req.get("task", ""),
+                        requires_commit=bool(req.get("requires_commit", False)),
+                        auto_chain=bool(req.get("auto_chain", False)),
+                        shard_total=int(req.get("shard_total", 0)),
+                        isolation=str(req.get("isolation", "shared") or "shared"),
+                        project=from_project,
+                        feature=str(req.get("feature", "") or ""),
+                        mode=mode,
+                    )
+                    self._reply(sock, ok=ok, msg=msg)
+                    return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(
@@ -534,6 +570,7 @@ class CliServer(QObject):
                             project=from_project,
                             feature=str(req.get("feature", "") or ""),
                             model=(str(req.get("model", "") or "").strip() or None),
+                            provider=(str(req.get("provider", "") or "").strip().lower() or None),
                         ),
                     )
                     self._reply(
@@ -558,6 +595,14 @@ class CliServer(QObject):
             elif cmd == "done":
                 ok, msg = self._orch.done(
                     req.get("from") or "",
+                    note=req.get("note", ""),
+                    project=from_project,
+                    failed=bool(req.get("failed", False)),
+                    force=bool(req.get("force", False)),
+                )
+            elif cmd == "subagent-done":
+                ok, msg = self._orch.subagent_done(
+                    req.get("role") or "",
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
@@ -603,7 +648,12 @@ class CliServer(QObject):
                 detailed = self._orch.list_status_detailed(project=from_project)
                 status: dict[str, str] = {}
                 for role, info in detailed.items():
-                    state = info["state"]
+                    # #263: show the unified display_state (login-required /
+                    # booting / waiting-delivery / busy / unknown) so `takkub
+                    # list` can't silently disagree with what the screen
+                    # actually shows; falls back to the raw state if a caller
+                    # somehow gets a dict predating this key.
+                    state = info.get("display_state", info["state"])
                     stall_min = info.get("stall_minutes")
                     if stall_min is not None:
                         state = f"{state} (stalled {stall_min}m)"
@@ -733,6 +783,19 @@ class CliServer(QObject):
                 self._orch.end_wait(project_ns_we, str(req.get("wait_id") or ""))
                 self._reply(sock, ok=True, msg="wait ended")
                 return
+            elif cmd == "wait-cancel":
+                # #249 item 5: `takkub wait --cancel` — releases whatever
+                # registration is active for this project without needing a
+                # wait_id (a fresh CLI invocation never has one).
+                _resolve_project_wc = getattr(self._orch, "_resolve_project", None)
+                project_ns_wc = (
+                    _resolve_project_wc(from_project)
+                    if _resolve_project_wc is not None
+                    else (from_project or "default")
+                )
+                cancelled, cancel_msg = self._orch.cancel_wait(project_ns_wc)
+                self._reply(sock, ok=cancelled, msg=cancel_msg)
+                return
             elif cmd == "harvest":
                 harvest_since_ts: float | None = None
                 harvest_since_hhmm = req.get("since")
@@ -776,6 +839,15 @@ class CliServer(QObject):
                 else:
                     self._reply(sock, ok=False, msg=msg_t)
                 return
+            elif cmd == "messages":
+                # #277: read-only audit of `takkub send` traffic for one role.
+                ok_m, msg_m, lines_m = self._orch.role_message_log(
+                    req.get("role", ""),
+                    project=from_project,
+                    limit=int(req.get("limit", 20) or 20),
+                )
+                self._reply(sock, ok=ok_m, msg=msg_m, lines=lines_m)
+                return
             elif cmd == "task-reconcile":
                 ok, msg = self._orch.task_reconcile(
                     project=from_project, dry_run=bool(req.get("dry_run", False))
@@ -786,6 +858,11 @@ class CliServer(QObject):
                     project=from_project,
                     force=bool(req.get("force", False)),
                     dry_run=bool(req.get("dry_run", False)),
+                )
+            elif cmd == "task-cancel":
+                ok, msg = self._orch.cancel_task_delivery(
+                    req.get("role", ""),
+                    project=from_project,
                 )
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")

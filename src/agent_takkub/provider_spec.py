@@ -25,6 +25,8 @@ phase has a faithful starting point instead of having to rediscover it.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -118,6 +120,23 @@ class ProviderSpec:
     supports_resume: bool = False
     supports_slash_commands: bool = False
     supports_hooks: bool = False
+    # Does this CLI's own agent harness expose a distinct structured
+    # file-read tool, separate from raw shell/exec? (#273). Gates whether
+    # `_task_handoff_pointer` may hand a long task off as "read this file
+    # yourself" instead of pasting it inline — a pane whose ONLY file
+    # access is a shell tool can't honor that instruction at all when shell
+    # reads are also disallowed (#104's "never `cat`/`type` a long path"
+    # convention, baked into the pointer text itself as "ห้ามรัน path เป็น
+    # คำสั่ง shell"), so the pointer becomes an unopenable dead end and the
+    # pane fails the assign before the actual work ever starts. Default
+    # True (most agent CLIs — including claude — do have one); codex is the
+    # one confirmed exception (real incident, issue #273: a codex pane
+    # replied "[FAILED] ไม่มี file-read tool ใน pane นี้" and never began
+    # the task). Never guess this False for an unconfirmed provider — an
+    # unconfirmed provider defaults True and just risks the SAME (rare,
+    # already-existing) paste-swallow class `_task_handoff_pointer` was
+    # built to avoid, not a hard failure.
+    supports_agent_file_read: bool = True
 
     # ─── 9. Claude/provider branch specific knobs ───
     plugin_dirs: tuple[str, ...] = field(default_factory=tuple)
@@ -179,6 +198,68 @@ class ProviderSpec:
     project_scope_flag: str | None = None
     project_scope_resolver: Callable[[str], str | None] | None = None
     project_scope_new_flag: str | None = None
+
+    # ─── 13. Auth-failure detection (#248/#247 round 2) ───
+    # Lower-case substrings that unambiguously mean "this provider's CLI is
+    # NOT authenticated" when seen on the pane's footer region (_ready_region
+    # — same scope as ready_hard_blockers, so conversation body text quoting
+    # one of these can't poison the verdict). Checked instantly — no grace
+    # period — via pty_session.PtySession.auth_failure_reason(), which ALSO
+    # ORs in provider_spec.GENERIC_AUTH_ERROR_MARKERS below for every
+    # provider. Empty here means no provider-specific text has been
+    # confirmed yet; the generic table is the only signal until a real
+    # failure screen is observed and captured (never guess a marker from a
+    # provider's docs alone — a wrong guess either silently matches
+    # conversation text or never fires).
+    auth_error_markers: tuple[str, ...] = field(default_factory=tuple)
+    # Markers that mean "still going through an auth/account-verification
+    # step" — legitimately shown for the first few seconds of a normal cold
+    # boot, so unlike auth_error_markers these are NOT an instant failure
+    # signal. auth_failure_reason() only treats one of these as a failure
+    # once the screen has been static (seconds_since_output(), the
+    # spinner-normalized content-change clock — see pty_session.py's
+    # #248/#247 module note) for AUTH_TRANSIENT_GRACE_SEC — i.e. "still
+    # animating a spinner next to this text" reads as normal boot, "frozen
+    # on this text" reads as stuck. gemini/agy is the confirmed case (#247:
+    # observed hanging on "Signing in..." indefinitely); reuses the exact
+    # text already in gemini_spec.ready_hard_blockers below by design (same
+    # underlying CLI state, different question — "is it ready" vs "is it
+    # stuck").
+    auth_transient_markers: tuple[str, ...] = field(default_factory=tuple)
+
+    # ─── 14. Close-time scaffolding filter (#272) ───
+    # Process names (matched case-insensitively, `.exe` suffix ignored so one
+    # entry covers both Windows and POSIX) that are THIS provider's own
+    # CLI-launcher/runtime children — always present under a live pane's pid
+    # right before close, never evidence of real unfinished work by
+    # themselves. orchestrator._warn_if_live_children (#234) subtracts these
+    # (plus the Windows-universal ConPTY baseline in
+    # GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 below) before deciding whether
+    # to warn Lead, so a pane closing with only its own npm/uv shim tree left
+    # standing stays silent instead of firing a warning with zero new
+    # information (#272: was 100% of closes before this field existed).
+    # Empty = no provider-specific scaffolding confirmed yet; the Windows
+    # baseline still applies.
+    scaffolding_process_names: tuple[str, ...] = field(default_factory=tuple)
+
+    # ─── 15. Boot-stall diagnostic (#273) ───
+    # Argv (relative to the discovered binary, via custom_discovery_fn) for a
+    # quick, one-shot, non-interactive health-check command this CLI ships —
+    # one that prints its OWN real config error on a single line instead of
+    # cockpit only ever being able to say the generic "ค้างอยู่ที่ boot phase".
+    # Real incident (#273): codex's actual failure was `Error: failed to
+    # load bootstrap configuration / Caused by: invalid transport in ...`,
+    # fully diagnosable via `codex mcp list` in under a second — but cockpit
+    # had no way to surface it, costing ~40 minutes of manual guessing.
+    # Run ASYNC (QProcess, never blocking the Qt main thread — mirrors
+    # `Orchestrator._check_uncommitted_async`) by
+    # `lead_inbox._run_boot_diagnostic_async`, fired once per boot-stall
+    # notice, best-effort: a missing/timed-out/errored diagnostic just means
+    # no follow-up appears — the original generic notice always still fires
+    # unchanged. None = no such command confirmed for this provider yet
+    # (never guess one from docs alone — a wrong argv could itself hang or,
+    # worse, mutate state).
+    boot_diagnostic_argv: tuple[str, ...] | None = None
 
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
@@ -314,6 +395,19 @@ claude_spec = ProviderSpec(
     produces_jsonl_transcript=True,
     supports_token_meter=True,
     supports_remote_history=True,
+    # ⚠ NOT yet verified against a real claude auth-failure screen (#248/#247
+    # round 2) — claude's own login flow runs mostly outside the pane (see
+    # doctor.check_claude's credential-file check), so no confirmed in-pane
+    # error text exists to list here. GENERIC_AUTH_ERROR_MARKERS is the only
+    # signal for this provider until one is observed.
+    auth_error_markers=(),
+    # config.py's find_claude_executable() deliberately prefers the real
+    # claude.exe over the claude.cmd npm shim specifically to avoid the
+    # visible cmd.exe console window (see that function's own docstring) —
+    # but claude.exe itself still runs on a bundled node runtime, so a plain
+    # `node` child is the one scaffolding process actually confirmed under
+    # it (#272).
+    scaffolding_process_names=("node.exe", "node"),
 )
 
 
@@ -331,8 +425,30 @@ codex_spec = ProviderSpec(
     install_command=["npm", "install", "-g", "@openai/codex"],
     post_install_note="run `codex login` once to sign in",
     custom_discovery_fn=_discover_codex,
+    # `--disable apps` (#283): codex's own built-in `codex_apps` MCP (feature
+    # flag `apps`, stable and ON by default) takes minutes to boot AND paints
+    # "esc to interrupt" in the status bar the whole time — while its composer
+    # is already accepting input. That string is this spec's own
+    # `ready_hard_blockers`, so the cockpit reads the pane as busy and refuses
+    # to deliver until the delivery times out. Measured on the reporter's
+    # machine, same task, same box:
+    #
+    #     apps ON  → pane reaches ready 342s / 388s (2 trials); task NEVER
+    #                delivered (boot-timeout every round)
+    #     apps OFF → ready 0s; task delivered in 1s; work starts immediately
+    #
+    # This is not something the cockpit can route around from the outside:
+    # `codex_apps` is internal to codex, so removing it from the injected
+    # `shared-mcp-*.json` does nothing. Disabling the feature at spawn is the
+    # only lever, and it is session-scoped — `~/.codex/config.toml` is never
+    # touched, matching the same rule `mcp_adapter_variant="session_override"`
+    # already follows for MCP config.
     autonomy_flags={
-        "win32": ["--dangerously-bypass-approvals-and-sandbox"],  # spawn_engine.py:1140-1143
+        "win32": [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--disable",
+            "apps",
+        ],  # spawn_engine.py:1140-1143
         "default": [
             "--ask-for-approval",
             "never",
@@ -340,6 +456,8 @@ codex_spec = ProviderSpec(
             "workspace-write",
             "-c",
             "sandbox_workspace_write.network_access=true",
+            "--disable",
+            "apps",
         ],  # spawn_engine.py:1144-1153
     },
     # GAP (CLI 0.145.0 --help, checked 2026-07-24): only positional [PROMPT];
@@ -357,7 +475,14 @@ codex_spec = ProviderSpec(
         ReadyRule("fast off", True),  # pty_session.py:247
         ReadyRule("fast on", True),  # pty_session.py:248
     ),
-    ready_wait_ms=90_000,  # lead_inbox.py:434-435 (cold-boot + MCP-boot allowance)
+    # #271: 90s was set before codex grew the `code_mode`/`codex_apps`
+    # feature — measured cold-boot on real hardware now runs 90-150s EVERY
+    # spawn (4/4 trials, 2026-08-16), so the old window routinely expired
+    # mid-boot. 180s covers the observed spread with margin; the
+    # shows_startup_marker() guard in lead_inbox.py's _check() (#271) is the
+    # actual blind-paste backstop, this just keeps the common case from
+    # relying on that extension at all.
+    ready_wait_ms=180_000,  # lead_inbox.py:434-435 (cold-boot + MCP-boot allowance)
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
@@ -385,10 +510,35 @@ codex_spec = ProviderSpec(
     session_resume_flag="resume",
     supports_slash_commands=False,
     supports_hooks=False,
+    # #273: confirmed False by a live incident — a codex pane replied
+    # "[FAILED] ไม่มี file-read tool ใน pane นี้ จึงเปิด task spec ตามข้อห้าม
+    # shell ไม่ได้" when handed a `_task_handoff_pointer` pointer. Codex's
+    # tool set is shell/apply_patch only; it has no structured read-file
+    # tool distinct from the shell exec the pointer explicitly forbids
+    # using on the path (#104). Long tasks fall back to an inline paste for
+    # this provider instead (see `_task_handoff_pointer` callers).
+    supports_agent_file_read=False,
+    # #273: `codex mcp list` prints the real config error on one line
+    # (confirmed: "Error: failed to load bootstrap configuration / Caused
+    # by: invalid transport in ...") when ~/.codex/config.toml's
+    # [mcp_servers.*] table is malformed. `codex --help` confirms `mcp list`
+    # is read-only (lists configured servers) — safe to run unconditionally.
+    #
+    # ⚠ #281: it does NOT see the MCPs the cockpit itself injects. Those go in
+    # session-scoped as `-c mcp_servers.<name>.<key>=…` (see
+    # `mcp_adapter_variant="session_override"` below) and never touch
+    # ~/.codex/config.toml, so `mcp list` answers "No MCP servers configured
+    # yet" while three of them are visibly loading on screen. A whole session
+    # was lost to that answer, concluding codex had no MCPs and disabling an
+    # unrelated plugin. When a codex pane hangs at boot, the authoritative
+    # source is the pane's own "Starting MCP servers (n/N): …" line — which
+    # `PtySession.boot_phase_detail()` now captures — plus the role's
+    # runtime/shared-mcp-<role>.json.
+    boot_diagnostic_argv=("mcp", "list"),
     task_notice_preamble=(
         "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
-        "- `ห้าม spawn subagent` ใน ROLE prefix หมายถึง AI subagent\n"
-        "  เท่านั้น (Task tool / codex delegation flags) — ไม่รวม shell\n"
+        "- กฎ `ห้าม spawn subagent เอง` ใน ROLE prefix ห้าม native child\n"
+        "  เว้นแต่ Lead สั่ง task นี้ด้วย `--mode subagent`; ไม่รวม shell\n"
         "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
         "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
         '      takkub done "<one-line summary>"\n'
@@ -419,6 +569,22 @@ codex_spec = ProviderSpec(
     supports_remote_history=True,
     auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
     early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
+    # ⚠ NOT yet verified against a real codex auth-failure screen (#248/#247
+    # round 2 — #248's report was "spawns and produces zero output", which
+    # points at the no-content watchdog, not necessarily a rendered auth
+    # error) — no confirmed in-pane error text exists to list here.
+    # GENERIC_AUTH_ERROR_MARKERS is the only signal until one is observed.
+    auth_error_markers=(),
+    # codex is an npm-installed CLI on a node runtime (same shim shape as
+    # claude/opencode) plus its own `code_mode`/`codex_apps` sandbox host
+    # process — both confirmed always-present under a live codex pane at
+    # close time, not evidence of unfinished work (#272).
+    scaffolding_process_names=(
+        "node.exe",
+        "node",
+        "codex-code-mode-host.exe",
+        "codex-code-mode-host",
+    ),
 )
 
 
@@ -500,6 +666,36 @@ gemini_spec = ProviderSpec(
     project_scope_resolver=_resolve_gemini_project_id,
     project_scope_new_flag="--new-project",  # agy 1.1.6 --help: mint a fresh
     # project id when the resolver finds no existing match for this cwd.
+    # No confirmed hard auth-FAILURE text observed yet (#248/#247 round 2) —
+    # GENERIC_AUTH_ERROR_MARKERS is the only instant-fail signal.
+    auth_error_markers=(),
+    # CONFIRMED transient state (#247's exact report): agy can sit on
+    # "Signing in..." indefinitely instead of completing the boot-time OAuth
+    # check. Same text as ready_hard_blockers above (still not ready either
+    # way) — listed again here because auth_failure_reason() answers a
+    # different question ("stuck", gated on sustained staleness) than
+    # is_at_ready_prompt() ("not yet ready", true from frame one).
+    #
+    # "not signed in" (#256): agy's own cold-start banner reads "You are
+    # currently not signed in." on EVERY spawn, before the CLI has even
+    # started its OAuth check — confirmed by a same-day transcript
+    # (gemini-090814.transcript.log) showing banner -> "Signing in..." ->
+    # signed-in header (email + model) -> normal task execution, all while
+    # GENERIC_AUTH_ERROR_MARKERS's old instant-fail listing of this phrase
+    # convicted the pane mid-boot. Moved here instead of staying a
+    # zero-grace instant marker (see GENERIC_AUTH_ERROR_MARKERS's #256 note
+    # below for why it left the generic table entirely rather than being
+    # provider-excluded there): grace-gating on `seconds_since_output()`
+    # means it only convicts once the screen has gone STATIC on this text
+    # for AUTH_TRANSIENT_GRACE_SEC — a normal cold boot keeps producing new
+    # output (banner -> spinner -> signed-in header) so the clock never
+    # accumulates that long, and once the header/task output scrolls the
+    # banner out of `_ready_region`'s 6-row tail the marker stops matching
+    # at all — the same tail-scoping that already protects every other
+    # check in this module (module note above `_ready_region`) doubles as
+    # the "override a stale marker once a newer identity is on screen"
+    # mechanism #256 asked for, with no separate identity-parsing needed.
+    auth_transient_markers=("signing in", "verifying your account", "not signed in"),
 )
 
 
@@ -574,6 +770,13 @@ opencode_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
     early_exit_watch=False,
+    # ⚠ NOT yet verified — no authenticated opencode session was available
+    # for calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
+    auth_error_markers=(),
+    # opencode-ai is npm-installed (same shim shape as claude/codex), so a
+    # `node` child is expected scaffolding, not evidence of unfinished work
+    # (#272).
+    scaffolding_process_names=("node.exe", "node"),
 )
 
 
@@ -606,10 +809,29 @@ kimi_spec = ProviderSpec(
     system_prompt_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
-    # ⚠ BUSY marker NOT yet calibrated: no authenticated Kimi TUI was
-    # available for ConPTY capture. Do not guess at an idle/busy footer; keep
-    # this empty until an exact marker is observed (#103).
-    ready_rules=(),
+    # ⚠ BUSY marker STILL NOT calibrated (#257): the idle footer below was
+    # captured against a logged-in, IDLE Kimi TUI only — nobody has yet sent
+    # it a real task and watched what the footer/status line reads while
+    # Kimi is actively generating. Do not guess it from the idle text; the
+    # only busy signal until then is the cross-provider `ready_hard_blockers`
+    # dedup table (esc to interrupt/cancel), which may not even apply if
+    # Kimi words its own interrupt hint differently — a working pane could
+    # misread as ready. Re-probe by assigning kimi a real task and capturing
+    # the footer mid-generation, then fill this in as a data-only change.
+    ready_rules=(
+        # Idle composer footer, captured via direct ConPTY capture against a
+        # signed-in kimi-cli 1.49.x session on Windows (#257, 2026-08-16):
+        #   main  @: mention files | ctrl-x: toggle mode | shift-tab: plan
+        #   mode | ctrl+o: editor
+        # "ctrl-x: toggle mode" is the distinctive half — no substring
+        # collision with any other provider's ready/busy markers in this
+        # file. Before this entry, ready_rules was empty, so
+        # is_at_ready_prompt() could never return True for a kimi pane and
+        # every assigned task sat undelivered until the 1800s busy-wait
+        # ceiling (proven empirically the same day — task text never
+        # appeared on screen even after a manual resend).
+        ReadyRule("ctrl-x: toggle mode", True),
+    ),
     ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
     # AGENTS.md discovery CONFIRMED (kimi-cli changelog 1.29.0, 2026-04-01:
     # "discovers and merges AGENTS.md files from the git project root down to
@@ -645,6 +867,22 @@ kimi_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
+    # CONFIRMED (#257, 2026-08-16): a fresh kimi pane spawned with no
+    # credentials shows "Model: not set, send /login to login" instead of
+    # ever reaching the idle footer above — kimi cannot do anything in this
+    # state (no model selected), so unlike gemini's transient boot banner
+    # this is a genuine instant failure, not a normal startup step. Narrowed
+    # to "send /login to login" (drop the "model: not set" half): the model
+    # name is settable per-role independent of login state, so a future
+    # "model not set" wording for a DIFFERENT reason must not silently
+    # convict the pane on login grounds. "send /login to login" is
+    # first-person CLI chrome no unrelated dev-output plausibly reproduces.
+    auth_error_markers=("send /login to login",),
+    # kimi-cli is installed via `uv tool install` and runs on a python
+    # interpreter (uv shims resolve to a python entry point), so a `python`
+    # child is expected scaffolding under a live kimi pane, not evidence of
+    # unfinished work (#272).
+    scaffolding_process_names=("python.exe", "python", "python3"),
 )
 
 
@@ -719,6 +957,9 @@ cursor_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
+    # ⚠ NOT yet verified — no Cursor TUI auth-failure screen has been
+    # observed (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
+    auth_error_markers=(),
 )
 
 
@@ -747,8 +988,9 @@ _READY_RULES_BY_PROVIDER: tuple[tuple[str, ProviderSpec], ...] = (
     # substring with any rule above, so position carries no precedence weight —
     # last keeps the historical gemini→codex→claude table byte-identical.
     ("opencode", opencode_spec),
-    # Kimi intentionally contributes no rules yet, but keeping an explicit
-    # entry makes the future calibrated marker a data-only change (#103).
+    # Kimi (#257): now contributes "ctrl-x: toggle mode" (idle footer). No
+    # substring collision with any rule above, so its position here carries
+    # no precedence weight either.
     ("kimi", kimi_spec),
     # Cursor intentionally contributes no rules until its TUI has been
     # observed; keep the entry explicit so calibration remains data-only.
@@ -769,6 +1011,121 @@ READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
         blocker for spec in PROVIDER_REGISTRY.values() for blocker in spec.ready_hard_blockers
     )
 )
+
+
+# ── auth-failure detection (#248/#247 round 2) ──────────────────────────────
+# Cross-provider fallback markers: unambiguous "not authenticated" phrasing a
+# CLI might show regardless of which provider it is. Applied to EVERY
+# provider in addition to that provider's own (currently mostly empty, see
+# each spec's auth_error_markers comment above) confirmed list — a new
+# provider therefore gets at least this baseline coverage with zero data
+# entry required. Deliberately narrow substrings (not just "sign in", which
+# would false-match a spinner-adjacent "Signing in..." on gemini/agy — that
+# case is handled separately by auth_transient_markers/AUTH_TRANSIENT_GRACE_SEC
+# below since it is legitimately transient, not an instant failure) to keep
+# the false-positive risk low against ordinary conversation text scrolling
+# through the footer region. UNVERIFIED against a real failure screen for any
+# provider as of this round — a best-effort baseline pending a live #248/#247
+# repro, not a confirmed table like READY_HARD_BLOCKERS above.
+#
+# Narrowed in the #248/#247 round-2 follow-up: a first pass included several
+# phrases that are common HTTP/test-framework vocabulary, NOT CLI-chrome —
+# ordinary backend dev output routinely prints these while testing an
+# unrelated auth *feature* in the pane's own project, and this table is
+# scoped to the footer tail rows (`_ready_region`, 6 lines), not the whole
+# scrollback, so a long test run's final lines can easily still be sitting
+# there when a poll lands. Dropped: "unauthorized" (any HTTP 401 log line),
+# "invalid credentials" / "invalid api key" (typical login-test assertion
+# text), "session expired" (common app-level error string), "login
+# required" (common 401 body text), "authentication required" /
+# "authentication failed" (generic app error strings), and especially "not
+# authenticated" — FastAPI's own default 401 detail is the literal string
+# "Not authenticated", so keeping it here would auto-fail every FastAPI
+# backend pane the moment its own test suite exercised an authless request.
+# What remains reads only as first-person CLI chrome telling an operator to
+# re-auth — text no unrelated dev-output string plausibly reproduces.
+#
+# Dropped in the #256 follow-up: "not signed in". Proven UNSAFE as a
+# zero-grace, every-provider instant marker — gemini/agy prints "You are
+# currently not signed in." in its own cold-start banner on every single
+# spawn, before it has even begun the OAuth check that normally follows
+# (transcript gemini-090814.transcript.log, same day). That is exactly the
+# "plausibly reproduces" failure this table's own design note above warns
+# against; unlike the HTTP/test-framework phrases dropped in round 2, this
+# one is real first-person CLI chrome, just transient rather than a
+# failure. It was NOT re-added per-provider-excluded here (no such
+# mechanism exists on this generic table, and building one for a single
+# known offender would be premature) — it now lives solely as gemini_spec's
+# own auth_transient_markers entry (see that field's comment), which is the
+# tier built for exactly this "normal for the first few seconds, only a
+# real problem if it never clears" shape. No other provider has confirmed
+# this phrase as either an instant failure or a normal boot artifact, so it
+# is simply absent from the generic baseline until one does — that
+# provider's own `auth_error_markers` is the place to add it, confirmed
+# against a real screen, not a guess re-added here.
+GENERIC_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "please sign in again",
+    "please log in again",
+    "please authenticate",
+)
+
+# Gate for auth_transient_markers (#247): a marker in that list only counts
+# as "stuck" once the screen has been static (PtySession.seconds_since_output
+# — spinner-normalized, so an animating spinner next to the same text does
+# NOT reset this) for at least this long. Short relative to
+# orchestrator.BUSY_WAIT_CEILING_SEC (1800s default) — the whole point is
+# surfacing this to Lead far sooner than that ceiling — but long enough that
+# the first few seconds of a completely normal sign-in on a fresh spawn never
+# false-positives. Overrideable for slow/loaded machines.
+AUTH_TRANSIENT_GRACE_SEC = float(os.environ.get("TAKKUB_AUTH_TRANSIENT_GRACE_SEC", "45"))
+
+
+def auth_error_markers_for(provider: str) -> tuple[str, ...]:
+    """Instant-failure auth markers for `provider`: its own confirmed list
+    (``ProviderSpec.auth_error_markers``) plus the generic cross-provider
+    baseline, deduped. Unknown provider name → generic markers only."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    own = spec.auth_error_markers if spec is not None else ()
+    return tuple(dict.fromkeys((*own, *GENERIC_AUTH_ERROR_MARKERS)))
+
+
+def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
+    """Sustained-only auth-stall markers for `provider` (see
+    ``ProviderSpec.auth_transient_markers``). Empty for a provider with none
+    confirmed, or an unknown provider name — never falls back to a generic
+    table, unlike ``auth_error_markers_for``, because a transient marker only
+    makes sense paired with the exact wording of that provider's own
+    boot-time account-check text."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.auth_transient_markers if spec is not None else ()
+
+
+# ── ready-marker calibration status (#257) ──────────────────────────────────
+# A provider spawned with an empty `ready_rules` can NEVER satisfy
+# is_at_ready_prompt() (no rule can ever match ()), so task delivery silently
+# stalls until orchestrator's busy-wait ceiling (1800s default) — proven
+# empirically for kimi the same day this was written, before its
+# "ctrl-x: toggle mode" rule above was captured. This predicate is a pure
+# data-layer query only: no spawn-time Lead warning is wired to it yet — that
+# requires touching spawn_engine.py/lead_inbox.py, both out of scope for this
+# change (see this task's file boundaries). Whoever wires that follow-up
+# should call this instead of re-deriving "empty tuple" as the calibration
+# signal, so a future provider only needs a ProviderSpec entry to go green.
+def is_ready_marker_calibrated(provider: str) -> bool:
+    """True when `provider` has at least one ready rule, so
+    `is_at_ready_prompt()` can ever return True for it. False for an unknown
+    provider name too — no rules to match means the same "task can never be
+    delivered" outcome regardless of the reason."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return bool(spec and spec.ready_rules)
+
+
+def uncalibrated_providers() -> tuple[str, ...]:
+    """Every registered provider name whose `ready_rules` is still empty, in
+    `PROVIDER_REGISTRY` iteration order. Empty tuple = every provider can, at
+    minimum, ever reach a ready verdict (says nothing about busy-marker
+    accuracy — see each spec's own busy-marker calibration notes)."""
+    return tuple(name for name, spec in PROVIDER_REGISTRY.items() if not spec.ready_rules)
 
 
 # ── per-model effort exceptions ────────────────────────────────────────────
@@ -800,3 +1157,38 @@ def effort_levels_for(provider: str, model: str | None) -> tuple[str, ...]:
     if model and model.strip() in _MODELS_WITHOUT_EFFORT.get(provider, frozenset()):
         return ()
     return spec.effort_levels
+
+
+# ── close-time scaffolding filter (#272) ────────────────────────────────────
+# Windows-only: ConPTY hosting itself surfaces a cmd.exe/conhost.exe pair
+# under a live pane's pid regardless of which provider is running (the npm
+# `.cmd` shim most providers install through spawns cmd.exe, which pywinpty
+# gives its own conhost) — confirmed present on every provider's close in
+# #272's evidence, so unlike scaffolding_process_names above this is not
+# provider-specific. POSIX has no equivalent console-host process, so this
+# stays empty there; leave it that way rather than guessing a shell name that
+# may not actually appear (#272's evidence is Windows-only).
+GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32: tuple[str, ...] = ("cmd.exe", "conhost.exe")
+
+
+def normalize_process_name(name: str) -> str:
+    """Lowercase a process name and drop a trailing ``.exe`` so the same
+    scaffolding entry matches both the Windows and POSIX spelling."""
+    normalized = name.strip().lower()
+    if normalized.endswith(".exe"):
+        normalized = normalized[: -len(".exe")]
+    return normalized
+
+
+def scaffolding_process_names_for(provider: str) -> frozenset[str]:
+    """Normalized (``normalize_process_name``) set of process names that are
+    *expected* scaffolding under a live ``provider`` pane — this provider's
+    own confirmed ``scaffolding_process_names`` plus the Windows-universal
+    ConPTY baseline (``GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32``) when running
+    on Windows. Unknown provider name → baseline only, same as an
+    unrecognized name having no provider-specific scaffolding confirmed.
+    """
+    spec = PROVIDER_REGISTRY.get(provider)
+    own = spec.scaffolding_process_names if spec is not None else ()
+    generic = GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 if sys.platform == "win32" else ()
+    return frozenset(normalize_process_name(n) for n in (*own, *generic))

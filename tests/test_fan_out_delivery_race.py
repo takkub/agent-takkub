@@ -10,6 +10,12 @@ simply still rendering. Two independent mechanisms are covered:
      Lead composer while a previous write's own verify chain is still
      in-flight (events.log proved two independent chains raced the same
      session — duplicate `remaining: 3` log entries within milliseconds).
+
+Also covers #258 (a follow-up gap in the same QTimer chain, unrelated to
+#133): `_delayed_enter_verified`'s own CR-resend and repaste writes must
+carry the same cancel validator the caller's first write used, so a
+delivery cancelled after the chain was already scheduled still gets its
+queued writes dropped instead of landing on top of the composer.
 """
 
 from __future__ import annotations
@@ -188,6 +194,117 @@ class TestStallAwareDeferral:
         # not < _RENDER_ACTIVE_S so the render-wait is skipped every round,
         # repasting immediately each time until max_resends is exhausted.
         assert repastes == [3, 2, 1]
+
+
+# ---------------------------------------------------------------------------
+# Mechanism 1b (#258): the repaste/resend writes queued by
+# _delayed_enter_verified's own QTimer chain must carry the SAME cancel
+# validator the caller's original write used, so a delivery cancelled
+# (`takkub send` / `takkub task cancel`, #255) after the chain was already
+# scheduled still gets its later writes dropped by the PTY writer instead of
+# landing on top of the composer.
+# ---------------------------------------------------------------------------
+
+
+class TestRepasteCarriesTheCancelValidator:
+    def _swallow_session(self, write_side_effect) -> MagicMock:
+        session = MagicMock()
+        session.is_at_ready_prompt.return_value = True
+        session.shows_pending_input.return_value = False
+        session.seconds_since_output.return_value = 5.0
+        session.last_output_monotonic.return_value = 100.0
+        session.write.side_effect = write_side_effect
+        return session
+
+    def _validator_aware_write(self, written: list) -> callable:
+        """Stands in for `_WriterThread.run`'s own validator gate
+        (already unit-tested in isolation at test_pty_writer_queue_v2.py's
+        `test_cancelled_delivery_validator_is_checked_at_native_write`) —
+        drops the write instead of recording it when a validator is
+        attached and now reports False, exactly like the real PTY writer
+        thread does immediately before its native write."""
+
+        def _write(data, **kwargs):
+            validator = kwargs.get("validator")
+            if validator is not None and not validator():
+                return False
+            written.append(data)
+            return True
+
+        return _write
+
+    def test_both_cr_and_repaste_writes_carry_the_validator_kwarg(self, qapp) -> None:
+        """The #258 bug in one assertion: before the fix, only the
+        CR-resend write (line ~569) forwarded a validator — the repaste
+        write (line ~703) omitted it entirely, so `_WriterThread.run`
+        never had anything to check before pasting a cancelled delivery's
+        payload."""
+        from agent_takkub.lead_inbox import _delayed_enter_verified
+
+        written: list = []
+        session = self._swallow_session(self._validator_aware_write(written))
+        pane = _pane(session)
+        always_valid = lambda: True  # noqa: E731
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=lambda _ms, fn: fn()):
+            _delayed_enter_verified(
+                pane,
+                session,
+                0,
+                payload="the-task-payload",
+                content_fragment="the-task-payload",
+                delivery_id="delivery-1",
+                validator=always_valid,
+            )
+
+        calls = session.write.call_args_list
+        assert calls, "expected at least the initial CR write"
+        for call in calls:
+            assert call.kwargs.get("validator") is always_valid, (
+                f"write of {call.args[0]!r} did not carry the caller's validator"
+            )
+        assert b"\r" in written
+        assert "the-task-payload" in written
+
+    def test_cancel_after_chain_scheduled_drops_the_queued_repaste(self, qapp) -> None:
+        """#258's actual failure scenario: the QTimer chain is already
+        queued (the caller's first write happened while the delivery was
+        still valid) when a cancel lands. The CR that already fired
+        before the cancel is allowed to have landed; the repaste that
+        fires AFTER must never reach the PTY."""
+        from agent_takkub.lead_inbox import _delayed_enter_verified
+
+        written: list = []
+        cancelled = [False]
+        session = self._swallow_session(self._validator_aware_write(written))
+        pane = _pane(session)
+
+        timers: list = []
+
+        def _capture(_ms, fn):
+            timers.append(fn)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=_capture):
+            _delayed_enter_verified(
+                pane,
+                session,
+                0,
+                payload="the-task-payload",
+                content_fragment="the-task-payload",
+                delivery_id="delivery-1",
+                validator=lambda: not cancelled[0],
+            )
+            timers.pop(0)()  # _send_then_verify: writes the initial CR
+            # Cancel lands while the verify() tick that will decide to
+            # repaste is still sitting in the QTimer queue — the exact
+            # #255/#258 race (`takkub task cancel` firing mid-chain).
+            cancelled[0] = True
+            timers.pop(0)()  # _verify(): decides "genuine swallow" -> repaste
+
+        assert b"\r" in written, "the CR issued before cancel must still have landed"
+        assert "the-task-payload" not in written, (
+            "a repaste queued before cancel reached the PTY anyway — #258 regressed"
+        )
 
 
 # ---------------------------------------------------------------------------

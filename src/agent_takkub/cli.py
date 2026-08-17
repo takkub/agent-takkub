@@ -8,6 +8,7 @@ Usage from inside an agent pane (Claude running with TAKKUB_ROLE env set):
   takkub close --role frontend
   takkub list
   takkub done [note]
+  takkub subagent-done --role reviewer [note]
 
 Output is human readable on stdout. Exit 0 on success, 1 on error.
 """
@@ -33,6 +34,7 @@ LEAD_ONLY_COMMANDS = frozenset(
     {
         "spawn",
         "assign",
+        "subagent-done",
         "close",
         "close-all",
         "end-session",
@@ -56,11 +58,32 @@ LEAD_ONLY_COMMANDS = frozenset(
 # #242: `takkub wait` always carries a bounded timeout — never an unbounded
 # block. No explicit --timeout uses the default; either way the value is
 # clamped into this range before being sent to the server.
+#
+# #253 lowered the ceiling from 7200s (2h) to 1800s (30 min). The original
+# incident (`wait --role qa --timeout 3000` sitting blind for 9 minutes while
+# devops's done report queued behind it) is now mostly closed by
+# `poll_wait`'s "interrupt" wake — a FAILED/blocking report from a role
+# OUTSIDE the watched set ends the wait immediately instead of waiting out
+# the timeout. But a 2h ceiling was still a foot-gun on top of that fix: a
+# PLAIN done notice from an unwatched role deliberately does NOT interrupt
+# (routine parallel-fan-out noise, see `_pending_notice_outside`), so a Lead
+# that watches a slow role while several fast ones report clean could still
+# go silent for up to the full ceiling with nothing forcing it to look
+# around. 30 min matches the pre-existing default (a `wait` that would have
+# run longer than that already needed to be re-issued under the old rules
+# too) and forces Lead back into the loop periodically on a genuinely long
+# task instead of treating `wait` as a multi-hour park.
 _WAIT_DEFAULT_TIMEOUT_S = 1800.0  # 30 min
 _WAIT_MIN_TIMEOUT_S = 5.0
-_WAIT_MAX_TIMEOUT_S = 7200.0  # 2h hard ceiling
+_WAIT_MAX_TIMEOUT_S = 1800.0  # 30 min hard ceiling (#253 — was 7200s/2h)
 _WAIT_POLL_INTERVAL_S = 4.0
 _WAIT_POLL_MAX_INTERVAL_S = 15.0
+# #249 item 4: print a heartbeat line at least this often while roles are
+# still pending, so an external observer (or the Lead session that spawned
+# `takkub wait` as a background shell) can tell "still waiting" apart from
+# "hung" without needing to cross-reference `takkub list`. A role resolving
+# also prints immediately, independent of this interval.
+_WAIT_HEARTBEAT_INTERVAL_S = 30.0
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -258,7 +281,8 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 def cmd_assign(args: argparse.Namespace) -> dict:
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
-    _SHARDS_MAX = 8
+    mode = getattr(args, "mode", "pane") or "pane"
+    _SHARDS_MAX = 20 if mode == "subagent" else 8
     _raw_shards = getattr(args, "shards", 1)
     if _raw_shards is not None:
         _shards_int = int(_raw_shards)
@@ -272,13 +296,39 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             }
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
+    provider = (getattr(args, "provider", None) or "").strip().lower() or None
+    if mode == "subagent" and model:
+        return {
+            "ok": False,
+            "msg": "--model cannot be used with --mode subagent: native subagents always use the parent provider/model context",
+        }
+    if mode == "subagent" and provider:
+        return {
+            "ok": False,
+            "msg": "--provider cannot be used with --mode subagent: native subagents always use the parent provider/model context",
+        }
+    if mode == "subagent" and getattr(args, "plan", False):
+        return {
+            "ok": False,
+            "msg": "--plan cannot be used with --mode subagent; fan out native subagents directly with --shards",
+        }
+    if provider:
+        from .provider_config import assign_provider_override_error
+
+        provider_error = assign_provider_override_error(provider)
+        if provider_error:
+            return {"ok": False, "msg": provider_error}
     if model:
         from .provider_config import assign_model_override_error, assign_model_override_warning
 
-        model_error = assign_model_override_error(args.role, model, _from_project())
+        model_error = assign_model_override_error(
+            args.role, model, _from_project(), provider_override=provider
+        )
         if model_error:
             return {"ok": False, "msg": model_error}
-        model_warning = assign_model_override_warning(args.role, model, _from_project())
+        model_warning = assign_model_override_warning(
+            args.role, model, _from_project(), provider_override=provider
+        )
         if model_warning:
             print(f"warn: {model_warning}", file=sys.stderr)
     if shards > 1 and getattr(args, "auto_chain", False):
@@ -326,7 +376,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "plan": True,
                     "shard_total": shards,
                     "model": model,
+                    "provider": provider,
                     "feature": getattr(args, "feature", "") or "",
+                    "mode": mode,
                 }
             )
         )
@@ -348,12 +400,20 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "shard_total": shards,
                         "isolation": isolation,
                         "model": model,
+                        "provider": provider,
                         "feature": getattr(args, "feature", "") or "",
+                        "mode": mode,
                     }
                 )
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
+        if mode == "subagent":
+            details = "\n".join(str(r.get("msg", "")) for r in results if r.get("msg"))
+            return {
+                "ok": ok_count == shards,
+                "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip(),
+            }
         return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards"}
     return _request(
         _with_project(
@@ -367,7 +427,23 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
                 "model": model,
+                "provider": provider,
                 "feature": getattr(args, "feature", "") or "",
+                "mode": mode,
+            }
+        )
+    )
+
+
+def cmd_subagent_done(args: argparse.Namespace) -> dict:
+    return _request(
+        _with_project(
+            {
+                "cmd": "subagent-done",
+                "from": _from_role(),
+                "role": args.role,
+                "note": args.note or "",
+                "failed": bool(getattr(args, "fail", False)),
             }
         )
     )
@@ -615,6 +691,7 @@ def cmd_done(args: argparse.Namespace) -> dict:
                 "from": _from_role(),
                 "note": args.note or "",
                 "failed": bool(getattr(args, "fail", False)),
+                "force": bool(getattr(args, "force", False)),
             }
         )
     )
@@ -739,6 +816,37 @@ def _require_lead_for_task_admin(action: str) -> str | None:
     return None
 
 
+def cmd_messages(args: argparse.Namespace) -> dict:
+    """`takkub messages --role <r>` — read back what `takkub send` actually
+    did (issue #277).
+
+    `send` reports that it queued a message, not that anyone read it, and a
+    pane respawn can swallow one whole. This is the lookup that makes that
+    checkable instead of a matter of trust: every message, its delivery state
+    (queued / confirmed received / abandoned), and whether the cockpit had to
+    re-send it after a respawn.
+    """
+    resp = _request(
+        _with_project(
+            {
+                "cmd": "messages",
+                "role": args.role,
+                "limit": int(getattr(args, "limit", 20) or 20),
+                "from": _from_role(),
+            }
+        )
+    )
+    if not resp.get("ok"):
+        return {"ok": False, "msg": resp.get("msg", "messages failed"), "exit_code": 1}
+    lines = resp.get("lines") or []
+    if not lines:
+        print(f"[messages] ยังไม่มีข้อความที่ส่งถึง {args.role} ในโปรเจกต์นี้")
+        return {"ok": True, "msg": "no messages"}
+    for line in lines:
+        _utf8_print(line)
+    return {"ok": True, "msg": resp.get("msg", "messages")}
+
+
 def cmd_task(args: argparse.Namespace) -> dict:
     """`takkub task show --role <r>` — print the full text of the last task
     assigned to `role` (issue #1 file-based task handoff).
@@ -787,6 +895,13 @@ def cmd_task(args: argparse.Namespace) -> dict:
                 }
             )
         )
+    if args.t_cmd == "cancel":
+        gate_err = _require_lead_for_task_admin("task cancel")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        return _request(
+            _with_project({"cmd": "task-cancel", "role": args.role, "from": _from_role()})
+        )
     return {"ok": False, "msg": f"unknown task subcommand: {args.t_cmd}"}
 
 
@@ -807,14 +922,18 @@ def _print_status_report(report: object) -> None:
     for role, info in panes.items():
         if not isinstance(info, dict):
             info = {}
-        state = info.get("state", "?")
+        # #263: display_state is the unified login-required/booting/
+        # waiting-delivery/busy/unknown verdict — falls back to the raw
+        # state for a report predating this key.
+        state = info.get("display_state", info.get("state", "?"))
         stall = info.get("stall_minutes")
         human_ts = info.get("last_progress_human", "?")
         abs_ts = info.get("last_progress_abs", "?")
         stall_str = f" ⚠ stalled {stall}m" if stall is not None else ""
         blocked = info.get("blocked_reason")
         blocked_str = f" ⛔ blocked:{blocked}-prompt" if blocked else ""
-        print(f"\n  [{role}] {state}{stall_str}{blocked_str}")
+        unconfirmed_str = " ❓ delivery unconfirmed" if info.get("delivery_unconfirmed") else ""
+        print(f"\n  [{role}] {state}{stall_str}{blocked_str}{unconfirmed_str}")
         print(f"    last progress: {human_ts} ({abs_ts})")
         tail = (info.get("transcript_tail") or "").strip()
         if tail:
@@ -883,7 +1002,8 @@ def cmd_inbox(args: argparse.Namespace) -> dict:
 
 def cmd_wait(args: argparse.Namespace) -> dict:
     """(lead) block until every requested role's done/FAILED report has
-    actually reached the Lead pane, or --timeout elapses (#242).
+    actually reached the Lead pane, --timeout elapses, or a blocking report
+    from a role OUTSIDE --role interrupts the wait (#242, #253).
 
     This function IS the canned polling loop — see `lead_wait.py`'s module
     docstring for the rationale. It replaces the hand-rolled `takkub status`
@@ -891,7 +1011,33 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     example of writing one. No --role at all defaults to every role
     currently tracked by this project (same set `takkub list` shows, minus
     Lead itself).
+
+    #253: a `wait --role X` used to be deaf for the entire --timeout to a
+    FAILED/spawn-failed/etc. report from role Y it wasn't watching — the
+    report reached Lead's pane eventually (nothing was lost, see
+    lead_inbox.py), but only after this call finally returned, up to 30
+    minutes late. `poll_wait`'s "interrupt" field ends this call the moment
+    that happens; roles still in --role stay genuinely pending in their own
+    panes, so re-run `takkub wait` (same or no --role) to resume watching
+    them once the interrupting report has been dealt with.
+
+    #265: the same interrupt field also fires — with `reason: "user_input"`
+    — the moment the pane's OWNER types anything into it (submitted or
+    still drafting) after this call started watching. Without this, owner
+    keystrokes typed while `wait` is blocking just sit as queued CLI input,
+    unprocessed until `wait` returns, up to the full --timeout — the owner
+    outranks every teammate role and must never be the one left waiting.
+
+    --cancel (#249 item 5) skips begin/poll entirely and just releases
+    whatever wait registration is active for this project — the cleanup
+    path for a wait that's stuck watching a role that will never resolve
+    (or one the caller simply no longer wants to keep blocking on).
     """
+    if getattr(args, "cancel", False):
+        result = _request(_with_project({"cmd": "wait-cancel", "from": _from_role()}))
+        print(f"[wait] {result.get('msg', 'cancel requested')}")
+        return result
+
     timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
 
@@ -918,6 +1064,9 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     start = time.time()
     interval = _WAIT_POLL_INTERVAL_S
     last: dict = {}
+    last_pending_keys: set[str] = set(roles)
+    last_heartbeat = start
+    interrupted_by: dict | None = None
     try:
         while True:
             poll = _request(
@@ -927,6 +1076,54 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 return poll
             last = poll
             pending = poll.get("pending") or {}
+            pending_keys = set(pending)
+            now_t = time.time()
+            # #249 item 4: prove "still waiting" vs "hung" from the outside
+            # — print the instant a role resolves, otherwise no more often
+            # than the heartbeat interval while roles remain pending.
+            resolved_now = last_pending_keys - pending_keys
+            if resolved_now:
+                print(
+                    f"[wait] resolved: {', '.join(sorted(resolved_now))} "
+                    f"— {len(pending_keys)} still pending ({int(now_t - start)}s elapsed)"
+                )
+                last_heartbeat = now_t
+            elif pending and now_t - last_heartbeat >= _WAIT_HEARTBEAT_INTERVAL_S:
+                print(
+                    f"[wait] still waiting on {len(pending_keys)}: "
+                    f"{', '.join(sorted(pending_keys))} ({int(now_t - start)}s elapsed)"
+                )
+                last_heartbeat = now_t
+            last_pending_keys = pending_keys
+            interrupt = poll.get("interrupt")
+            if interrupt:
+                interrupted_by = interrupt
+                if interrupt.get("reason") == "user_input":
+                    # #265: the owner typed something while this wait was
+                    # blocking — they outrank every role. Stop immediately
+                    # so Lead reads it now instead of leaving it queued as
+                    # unprocessed CLI input for up to the full --timeout.
+                    print(
+                        "[wait] interrupted — คุณพิมพ์ข้อความใหม่เข้ามาระหว่างรอ: "
+                        f"{interrupt.get('detail')} "
+                        f"({len(pending_keys)} watched role(s) still pending: "
+                        f"{', '.join(sorted(pending_keys))}) "
+                        "— อ่าน/จัดการข้อความใหม่ก่อน แล้วค่อย `takkub wait` อีกครั้งเพื่อ resume watching"
+                    )
+                else:
+                    # #253: a blocking report (FAILED/spawn-failed/etc.) from a
+                    # role outside --role landed while we were still watching —
+                    # stop blocking now instead of riding out the full timeout
+                    # deaf to it. The watched roles above are still genuinely
+                    # pending in their own panes; only this wait ends.
+                    print(
+                        f"[wait] interrupted — [{interrupt.get('role')}] needs attention: "
+                        f"{interrupt.get('detail')} "
+                        f"({len(pending_keys)} watched role(s) still pending: "
+                        f"{', '.join(sorted(pending_keys))}) "
+                        "— see `takkub inbox`, then `takkub wait` again to resume watching"
+                    )
+                break
             if not pending or poll.get("expired"):
                 break
             remaining = timeout - (time.time() - start)
@@ -943,6 +1140,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
 
     done = last.get("done") or {}
     failed = last.get("failed") or {}
+    gone = last.get("gone") or {}
     pending = last.get("pending") or {}
     elapsed = int(last.get("elapsed") or (time.time() - start))
 
@@ -951,18 +1149,37 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         print(f"  done: {', '.join(sorted(done))}")
     if failed:
         print(f"  FAILED: {', '.join(sorted(failed))}")
+    if gone:
+        print("  gone (will never report — never spawned or pane already closed):")
+        for role, reason in sorted(gone.items()):
+            print(f"    - {role}: {reason}")
     if pending:
-        print("  still pending (timeout reached):")
+        reason_label = "wait interrupted, see above" if interrupted_by else "timeout reached"
+        print(f"  still pending ({reason_label}):")
         for role, reason in sorted(pending.items()):
             print(f"    - {role}: {reason}")
 
     ok = not pending
+    if ok:
+        msg = "all roles resolved"
+    elif interrupted_by:
+        if interrupted_by.get("reason") == "user_input":
+            msg = f"interrupted by user input; {len(pending)} role(s) still pending"
+        else:
+            msg = (
+                f"interrupted by [{interrupted_by.get('role')}]; "
+                f"{len(pending)} role(s) still pending"
+            )
+    else:
+        msg = f"timeout with {len(pending)} role(s) still pending"
     return {
         "ok": ok,
-        "msg": "all roles resolved" if ok else f"timeout with {len(pending)} role(s) still pending",
+        "msg": msg,
         "done": done,
         "failed": failed,
+        "gone": gone,
         "pending": pending,
+        "interrupt": interrupted_by,
     }
 
 
@@ -1867,12 +2084,35 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--role", required=True)
     sa.add_argument("--cwd", default=None)
     sa.add_argument(
+        "--mode",
+        choices=("pane", "subagent"),
+        default="pane",
+        help="execution mode: pane (default, existing visible cockpit pane) or subagent "
+        "(native same-provider child in the Lead process; no pane/model diversity)",
+    )
+    sa.add_argument(
         "--model",
         default=None,
         metavar="ID",
-        help="override the model for this assign when it spawns a new pane "
-        "(takes precedence over role/provider defaults; an already-running "
-        "pane keeps its current model)",
+        help="override the model id for this assign's fresh spawn — must be a "
+        "model id valid for the role's EFFECTIVE provider (its configured "
+        "provider, or the one set by --provider on the same assign); it does "
+        "NOT itself change which CLI runs (use --provider for that). Only "
+        "takes effect when spawning a new pane; an already-running pane "
+        "keeps its current model",
+    )
+    sa.add_argument(
+        "--provider",
+        default=None,
+        metavar="NAME",
+        help="force this ONE assign's fresh spawn onto a different CLI than "
+        "the role's configured provider (issue #270 — e.g. reroute a "
+        "codex-mapped role to claude when codex is boot-stalled/broken). A "
+        "one-assign escape hatch, not a persistent remap (edit "
+        "role-providers.json / Settings → Providers & Roles for that, which "
+        "needs a cockpit restart to take effect). Only takes effect when "
+        "spawning a new pane; an already-running pane keeps its current "
+        "provider",
     )
     sa.add_argument("task", help="task content (positional)")
     sa.add_argument(
@@ -2025,7 +2265,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
     )
+    sd.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "report even though the cockpit has no record of a task reaching this pane "
+            "(manual work driven by hand outside an assign/send) — #278"
+        ),
+    )
     sd.set_defaults(func=cmd_done)
+
+    ssd = sub.add_parser(
+        "subagent-done",
+        help="complete a pending --mode subagent assignment through the done pipeline (Lead/native child)",
+    )
+    ssd.add_argument("--role", required=True)
+    ssd.add_argument("note", nargs="?", default="")
+    ssd.add_argument("--fail", action="store_true")
+    ssd.set_defaults(func=cmd_subagent_done)
 
     spg = sub.add_parser(
         "progress",
@@ -2088,6 +2345,14 @@ def main(argv: list[str] | None = None) -> int:
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
 
+    smsg = sub.add_parser(
+        "messages",
+        help="(lead) read the `takkub send` audit log for a role — was it actually received? (#277)",
+    )
+    smsg.add_argument("--role", required=True, help="recipient role to look up")
+    smsg.add_argument("--limit", type=int, default=20, help="how many recent messages (default 20)")
+    smsg.set_defaults(func=cmd_messages)
+
     st = sub.add_parser(
         "task",
         help="read back a role's last assigned task (issue #1 file-based task handoff)",
@@ -2121,6 +2386,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="dry_run",
         help="preview without writing",
     )
+    stx = st_sub.add_parser(
+        "cancel",
+        help=(
+            "cancel a role's pending task delivery that is still retrying "
+            "toward its current pane session (issue #255)"
+        ),
+    )
+    stx.add_argument("--role", required=True, help="role name whose pending delivery to cancel")
     st.set_defaults(func=cmd_task)
 
     # Internal — wired as the Stop/Notification hook `command` for every
@@ -2186,6 +2459,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SECONDS",
         help=f"max seconds to block (default {int(_WAIT_DEFAULT_TIMEOUT_S)}, "
         f"capped at {int(_WAIT_MAX_TIMEOUT_S)})",
+    )
+    swt.add_argument(
+        "--cancel",
+        action="store_true",
+        help="release the active wait registration for this project (#249) instead of blocking",
     )
     swt.set_defaults(func=cmd_wait)
 

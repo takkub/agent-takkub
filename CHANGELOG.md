@@ -4,6 +4,222 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.70] - 2026-08-16
+
+### Fixed (แก้)
+
+**codex pane ค้าง booting 342-388 วินาที — `codex_apps` โชว์ `esc to interrupt` ทั้งที่ composer พร้อมแล้ว (#283)**
+- `codex_apps` = MCP ในตัวของ codex (feature `apps`, stable, เปิดเป็นค่าเริ่มต้น) — บูตนานหลายนาที และระหว่างนั้นแสดงคำว่า `esc to interrupt` ในแถบสถานะ **ทั้งที่ composer รับ input ได้แล้ว**
+- คำนั้นคือ `ready_hard_blockers` ของ codex_spec เอง → cockpit อ่านว่า pane ยุ่งตลอด ไม่ยอมส่ง task จน timeout
+- วัดจริง เครื่องเดียว task เดียว: **apps เปิด** → ready 342s/388s, task ไม่เคยส่งสำเร็จ · **apps ปิด** → ready **0s**, task ถึงใน **1s**
+- แก้ด้วย `--disable apps` ใน `autonomy_flags` ของ codex_spec (session-scoped ไม่แตะ `~/.codex/config.toml` ของผู้ใช้) — ถอดผ่าน `shared-mcp-*.json` ไม่ได้เพราะ `codex_apps` อยู่ข้างใน codex
+
+**cockpit ส่ง task เร็วเกินไปตอน pane ยังบูตไม่เสร็จ (#284)**
+- `is_at_ready_prompt()` สแกนแค่ 6 แถวล่างสุด (จูนมาสำหรับ footer บรรทัดเดียวของ claude) · codex มีกรอบ composer + status bar → บรรทัด boot หลุดกรอบทันทีที่ composer สูงขึ้นแค่แถวเดียว → เห็นแค่ `Fast off` → อ่านว่าพร้อม
+- และสาขา ready-streak → `_deliver()` **ไม่เคยเช็ค boot marker เลย** (เช็คเฉพาะตอน timeout จะ blind-paste)
+- แก้: เงื่อนไขส่งงานเป็น `ready AND not booting` · boot probe มีกรอบสแกนของตัวเอง (20 แถว) เฉพาะตอนตัดสินส่ง — ที่อื่นยังใช้กรอบแคบกัน boot line เก่าใน scrollback ค้าง
+
+
+## [1.0.69] - 2026-08-16
+
+### Changed (เปลี่ยน)
+
+**codex ค้าง boot 90-150 วินาทีทุก spawn เพราะ MCP ที่ cockpit ฉีดใช้ `npx -y` แบบไม่ pin version (#281)**
+- `npx` ไปถาม npm registry ทุกครั้งที่รัน แม้แพ็กเกจอยู่ในแคชแล้ว · cockpit รู้เรื่องนี้อยู่แล้วจึง **pin version** ให้ MCP ที่ตัวเองใส่ (playwright/chrome-devtools/graft) แต่ entry ที่ผู้ใช้เพิ่มเอง (context7, figma) ไม่มี version → จ่ายค่า network ทุก spawn (วัดจริง: 23.1s + 9.9s รอบแรก, 11.4s + 28.0s รอบถัดมา)
+- **codex เจ็บที่สุดเพราะมันบล็อกรอ MCP โหลดเสร็จก่อนรับ input** (composer โชว์ `esc to interrupt` ตลอด) ส่วน claude ไม่บล็อก — config ชุดเดียวกันจึงดูปกติดีฝั่ง claude
+- แก้: ใส่ `--prefer-offline` ให้ npx entry ตอน**เขียนไฟล์ที่ pane โหลดจริง** (ไม่แตะ master config ที่เป็นของผู้ใช้) — ใช้แคชก่อน ยิง network เฉพาะตอนไม่มีจริงๆ · ไม่ใช้ `--offline` เพราะรอบแรกสุดจะพังทันที
+- `[delivery-boot-stall]` บอกด้วยว่า**ค้างที่ MCP ตัวไหน** — ดึงบรรทัด `Starting MCP servers (0/3): …` จากจอ pane เอง
+- แก้คอมเมนต์ใน `provider_spec.py` ที่แนะนำให้ใช้ `codex mcp list` วินิจฉัย — **มันมองไม่เห็น MCP ที่ cockpit ฉีด** (session-scoped ผ่าน `-c mcp_servers.…` ไม่แตะ `~/.codex/config.toml`) จึงตอบ "No MCP servers configured yet" ทั้งที่มี 3 ตัวกำลังโหลด
+
+**`tab to queue message` ถูกนับเป็น boot marker (#282)**
+- marker เดียวถูกใช้ตอบ 2 คำถามที่ต่างกัน: "ไม่ใช่ turn ทำงานจริง" (idle watchdog — ถูก) กับ "ยังบูตอยู่" (delivery / boot-stall / `takkub list` — ผิด) · codex โชว์ `tab to queue message` **ตลอดเวลาที่ทำงาน** pane ที่ทำงานอยู่จึงอ่านว่ากำลังบูต
+- แยกเป็น `_BOOT_PHASE_MARKERS` กับ `_QUEUED_MESSAGE_MARKERS` แล้วให้ delivery/boot-stall/display-state ใช้ boot-phase อย่างเดียว · idle watchdog ใช้ union เหมือนเดิม
+- ถ้าไม่แยก boot ceiling ของ #276 (300s → ปิด pane + FAILED) จะไปฆ่า pane ที่ทำงานอยู่จริง
+
+**ระบบเฝ้า pane: เฝ้าเงียบๆ แล้วรายงานตอนปิด pane แทนการรายงานสด (#280)**
+- เดิม watchdog เห็นอะไรก็ยิง notice หา Lead ทันที — `[delivery-busy-wait]` · `[delivery-boot-stall]` · `[delivery-unconfirmed]` · `[no-content-retry]`/`[no-content-degrade]` · `[auth-failure-degrade]` — ทั้งหมดเป็น status update ของ pane ที่ยังทำงานอยู่และส่วนใหญ่อีกแป๊บก็จบปกติ · Lead pane เลยเต็มไปด้วยเรื่องที่ cockpit พูดถึงตัวเอง ไม่ใช่ผลงานของทีม (และเก่าตั้งแต่ก่อนถึงมือ จนต้องมี `_revalidate_system_notice` มาไล่ตรวจ — สัญญาณว่าออกแบบผิดตั้งแต่แรก)
+- **การเฝ้ายังอยู่ครบ** (ยังกู้ pane, ยัง fail task ที่ไปต่อไม่ได้ตาม #276) แต่สิ่งที่เห็นถูกสะสมไว้ต่อ pane lifecycle แล้วแนบไปกับ report ตอน `done` / `done --fail` / `close` เป็นบรรทัดเดียว: `🩺 [pane health] boot ช้า 110s · task ถูก paste แบบ blind ×2`
+- **pane ที่ตายโดยไม่รายงาน** (ถูก close / crash) ยังพูดแทนตัวเองตอนปิด — ไม่งั้น "เงียบ" จะแย่กว่า "หนวกหู"
+- ยิงทันทีเหมือนเดิมเฉพาะเคสที่รอรายงานตอนจบไปไม่ถึง: **ไม่มีตอนจบ** (`spawn-failed` ไม่มี pane เลย · `spawn-stuck` · `respawn-capped`) และ **pane ไปต่อไม่ได้จนกว่าคนจะมาทำอะไร** (auth wall · ติด trust/permission prompt)
+- สลับได้ด้วย env `TAKKUB_PANE_WATCH_NOTICES`: `terminal` (ค่าเริ่มต้น = ใหม่) · `live` (พฤติกรรมเดิม) · `off` (ไม่เก็บไม่รายงานเลย)
+
+### Fixed (แก้)
+
+**pane รายงาน `done` ทั้งที่ไม่เคยได้รับ task (#278, #276)**
+- หลักฐาน (#278): `codex exec "reply with the single word: ok"` ยิง `takkub done "Acknowledged user request"` ออกมาเองตั้งแต่ turn แรก — มันอ่านคำสั่ง orchestrator ที่ถูก inject แล้วตีความว่า "ตอบคำถามจบ = งานเสร็จ" · ผลจริงในงาน: Lead ได้ report ที่อ่านดูสมบูรณ์ แต่เปิดไฟล์จริงแล้วโค้ดเดิมอยู่ครบ ไม่มีอะไรเปลี่ยนเลย
+- `done()` ตอนนี้**ปฏิเสธ**รายงานจาก pane ที่มี task assign ไว้ แต่ task นั้น**ไม่เคยถูกส่งถึง pane เลย** (ไม่มี delivery เขียนลง PTY · ไม่มี preload ตอน spawn · ไม่มี `takkub send` · cockpit ไม่เคย mark ว่า working) — ทุกสัญญาณเป็น bookkeeping ของ cockpit เอง จึงใช้ได้กับทุก provider (#103) ไม่ได้อ่านจอ CLI ตัวไหนเป็นพิเศษ
+- เกณฑ์แคบโดยตั้งใจ: pane ที่**ไม่มี assign อยู่เลย** (spawn แล้วสั่งด้วยมือในจอ) ปล่อยผ่าน — ไม่มี task ค้างอยู่ให้ done ปลอมไปปิด และการห้ามจะพังงานที่ทำอยู่จริง · เคสที่ cockpit ตามไม่ทันจริงๆ ใช้ `takkub done --force`
+- เพิ่ม flag `⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน` ใน digest ของ Lead เมื่อวัดได้จริงว่าเป็นศูนย์ (ไม่ใช่ "ตรวจไม่ได้") — เตือน ไม่บล็อก เพราะงาน review/QA/research จบโดยไม่แตะไฟล์ได้ตามปกติ
+- แก้ถ้อยคำ AGENTS.md ที่ codex อ่าน: `takkub done` ใช้รายงาน **task ที่ได้รับมอบหมาย** เท่านั้น ไม่ใช่ "ตอบคำถามจบ" และห้ามเรียกคำสั่ง cockpit เมื่อรันนอก pane (ไฟล์นี้วางที่ root โปรเจกต์ `codex exec` ที่ผู้ใช้รันเองจึงอ่านเจอด้วย)
+
+**pane ค้าง boot แล้ว task หายเงียบ (#276)**
+- เดิม: pane ที่ค้างอยู่ที่ boot phase จะถูกรอจนถึง `BUSY_WAIT_CEILING_SEC` (**30 นาที**) แล้วค่อย blind-paste ลงหน้า boot ที่ไม่มีช่องรับข้อความ — task จึงไม่ถูกส่ง และไม่ถูก fail มันแค่หายไป
+- ตอนนี้มี `BOOT_STALL_CEILING_SEC` (ค่าเริ่มต้น **300s**, override ด้วย env ได้) ครบแล้ว cockpit จะ **fail task นั้นชัดๆ**: ledger flip เป็น fail · Lead ได้ notice แบบ blocking พร้อมคำสั่งกู้ · ปิด pane ทิ้ง — ผลลัพธ์อาจไม่ดี แต่ไม่เงียบ
+- notice `[delivery-boot-stall]` เลิกอ้างว่า "กำลังโหลด MCP server" — #278 วัดแล้วว่า codex ใช้ 61 วินาทีกับ prompt เปล่าทั้งที่ `codex mcp list` บอกว่า**ไม่มี MCP server ตั้งไว้เลย** · ตอนนี้รายงานเฉพาะสิ่งที่เห็นจริง (startup marker ยังค้างอยู่) และบอกด้วยว่าอีกกี่วินาที cockpit จะจัดการเอง เพื่อให้ Lead เลิกนั่งเฝ้า
+
+**`takkub send` หายเงียบเมื่อ pane respawn (#277)**
+- เดิม `send` ตอบ `ok: sent` เสมอ ไม่เก็บอะไรไว้เลย — pane respawn เมื่อไหร่ข้อความหายไปพร้อม process และ**ตรวจย้อนหลังไม่ได้แม้แต่ในทางทฤษฎี** · เคสจริง: คำสั่งแก้สเปกเรื่องวิธีเก็บรหัสผ่านหายไป agent เลยเดินหน้าสร้างตามสเปกที่ถูกยกเลิกแล้ว (respawn 4 ครั้ง หาย 3 ข้อความ)
+- เพิ่ม message log ถาวรต่อ role (`runtime/messages/<project>.jsonl`) — บันทึกทุกข้อความพร้อม session generation ที่เขียนลงไป
+- **ส่งซ้ำอัตโนมัติ**: ข้อความที่เขียนลง generation เก่าและยังไม่ยืนยันว่าถึงมือ = โดน respawn กลืน → cockpit ส่งซ้ำผ่านทาง delivery ปกติ (จำกัด 3 ครั้ง กัน pane ที่ crash วนไม่ให้โดน paste ซ้ำไม่รู้จบ) แล้วแจ้ง Lead ว่าเกิดขึ้น
+- **`ok: sent` เลิกโกหก** → ตอบ `queued to <role> (id ...)` พร้อมบอกวิธีตรวจ
+- คำสั่งใหม่ **`takkub messages --role <role>`** — อ่านย้อนหลังได้ว่าข้อความไหน ✅ ถึงแล้ว / ⏳ ยังไม่ยืนยัน / ⛔ ส่งไม่สำเร็จ และโดนส่งซ้ำกี่รอบ
+
+**รายงานของ teammate ถึง Lead ช้า ~90 วินาที แล้วมากองพร้อมกันทีเดียว (#279)**
+- อาการที่เห็น: Lead รอ `takkub wait` นานเกินจำเป็น แล้ว notice ก็โผล่มาเป็นพรืดพร้อมกันหลายอัน ทั้งที่ teammate ปิด pane ไปตั้งนานแล้ว
+- สาเหตุจริง (นับจาก `events.log` ของ saas_admin วันที่ 2026-08-16 ทั้งวัน): `done` 36 ครั้ง แต่มี `lead_notify_spill` 52 + `done_notice_force_flush` 32 — แปลว่า**แทบทุกรายงาน**เดินสายยาวสุด คือ retry 75 รอบ (~30s) → spill ลง durable → รอ reaper อีก 60s → ค่อย force-flush
+- ต้นตอ: `_pump_lead_notify` รอ `is_at_ready_prompt()` ของ Lead ก่อนวาง ซึ่งเขียนไว้สมัย Lead มีคนนั่งเฝ้า — Lead ที่ทำงานเองแทบไม่เคยว่าง ยิ่งกว่านั้น `takkub wait` เองจะค้างจนกว่ารายงานจะออกจาก pipeline (#163) **การรอนั้นเองคือสิ่งที่ทำให้ Lead ไม่ว่าง** → เงื่อนไขคลายได้ทางเดียวคือหมดเวลา
+- แก้: ready prompt กลายเป็น "ถ้าได้ก็ดี" ไม่ใช่เงื่อนไขบังคับ — รอ Lead ว่าง 5 วินาที แล้ววางเลยแม้ Lead ยุ่ง (ข้อความไปนอนใน composer เป็น queued message เหมือนที่ force-flush ทำอยู่แล้ว) ยกเว้น 2 กรณีที่ยังห้ามวางเหมือนเดิม: **ผู้ใช้พิมพ์ค้างไว้** (draft guard #3) และ **Lead ติด trust/permission/tty prompt** (ตัวอักษรจะไปตอบ modal แทนที่จะเข้า composer — ของเดิมทาง force-flush ไม่เคยเช็คข้อนี้ ตอนนี้เช็คแล้ว)
+- แก้เพิ่ม: role ที่ `takkub wait` กำลังรออยู่ **ข้าม digest window 15 วินาที** ทันที — การหน่วงเพื่อรวมเป็นชุดไม่มีประโยชน์กับ role ที่ Lead บล็อกรออยู่แล้ว
+- ลดเสียงรบกวน: notice ตระกูล delivery-health ที่ pane เจ้าของปิดไปแล้วก่อนข้อความจะถึง Lead จะถูก**ย่อเหลือบรรทัดเดียว** แทนที่จะแปะ banner ทับข้อความเต็ม 8-10 บรรทัด (เนื้อความคือวิธีแก้ ซึ่งพอ pane หายไปแล้วก็ห้ามทำตาม) · `[spawn-failed]` ถูกกันออกจากการ re-check นี้ เพราะ "ไม่มี pane" คือการ**ยืนยัน**ข้อกล่าวหาของมัน ไม่ใช่การหักล้าง (บั๊กเดิมที่บอกว่า spawn ล้มเหลว "คลี่คลายแล้ว")
+- ผลลัพธ์: รายงานถึง Lead ภายใน ~5 วินาทีแทน ~90-105 วินาที และมาทีละใบตามจังหวะจริง ไม่กองรวมกันอีก
+
+## [1.0.68] - 2026-08-16
+
+### Fixed (แก้)
+
+**Performance Health บอกสาเหตุผิด (#274)**
+- หน้าต่าง Performance Health และ chip บน status bar รายงาน `cpu_high` ทั้งที่ CPU อยู่แค่ 29% — `_denial_reason()` เช็คแค่ว่า RAM ต่ำกว่าเกณฑ์ pause ไหม ถ้าไม่ใช่ก็ **ตกไปคืน `cpu_high` เสมอโดยไม่เคยอ่านค่า CPU จริง**
+- ความจริงของสถานะนั้นคือ latch ยังค้างอยู่เพราะ hysteresis: เข้าโหมด overload เมื่อ CPU ≥ 85% **หรือ** RAM ว่าง < 20% แต่ออกได้เมื่อ CPU ≤ 65% **และ** RAM ว่าง ≥ 25% — latch จึงมักอยู่นานกว่าตัวชี้วัดที่จุดชนวนมันตั้งแต่แรก
+- ตอนนี้รายงานตามค่าจริง: `cpu_high` เมื่อ CPU เกินเกณฑ์ของตัวเอง · `memory_low` เมื่อ RAM ต่ำจริง · เพิ่มสถานะใหม่ **`waiting_resume`** สำหรับเคสที่ทั้งคู่ผ่านเกณฑ์ pause แล้วแต่ยังไม่ถึงเกณฑ์ resume พร้อมบอกว่าขาดอีกเท่าไหร่ · หน้าต่างแสดงเกณฑ์ที่ใช้อยู่ให้เห็นด้วย
+- **ไม่มีการเปลี่ยนค่าเกณฑ์ใดๆ** — กลไกตัดสินใจเดิมถูกต้องแล้ว งานนี้แก้เฉพาะการรายงาน
+
+
+## [1.0.67] - 2026-08-16
+
+รอบ **"ลดค่าใช้จ่ายต่อ pane + Lead ต้องมีทางออกเสมอ"**
+
+### Fixed (แก้)
+
+**codex/gemini บูตไม่ทันแล้วงานหาย (#271)**
+- `codex_spec.ready_wait_ms` ตั้งไว้ 90 วินาที แต่เวลาบูตจริงบนเครื่องทดสอบคือ 90-150 วินาที (วัดจาก 4 spawn ในวันเดียว ค้างเกิน 90 วิ ทุกครั้ง) → นาฬิกาหมดตอนยังบูตไม่เสร็จ → ระบบ paste งานแบบ blind เข้า composer ที่ยังไม่พร้อม → **งานตกหล่น 3 ใน 4 รอบ**
+- แก้ที่ต้นเหตุ: **ห้าม blind-paste ขณะที่จอยังแสดง boot marker** (ใช้ `shows_startup_marker()` เดิม) ให้ยืดการรอแทน มีเพดานที่ `BUSY_WAIT_CEILING_SEC` · เป็น provider-agnostic จึงช่วย gemini ที่ค้างเฟส sign-in ด้วย · และยก `ready_wait_ms` ของ codex เป็น 180 วินาที
+
+**notice ตอนปิด pane เตือนทุกครั้งจนไร้ความหมาย (#272)**
+- เดิมเช็คแค่ "มี child process ไหม" แต่ทุก pane มี scaffolding ของ CLI ติดอยู่เสมอ (cmd.exe/conhost.exe/node.exe/pwsh.exe/codex-code-mode-host/python) → **เตือน 100% ของทุกการปิด** กิน context ของ Lead ฟรีวันละหลายสิบใบ
+- เพิ่ม `ProviderSpec.scaffolding_process_names` แยกตาม provider แล้วกรองออกก่อนตัดสินใจ — เตือนเฉพาะเมื่อเหลือ process งานจริง (docker/pytest/build tooling) เจตนาเดิมของ #234 ยังอยู่ครบ
+
+**Lead ไม่มีทางออกเมื่อ provider ของ role พัง (#270)**
+- `--model` ปฏิเสธ claude model id สำหรับ role ที่ map ไป codex ทั้งที่ `--help` เขียนว่า "takes precedence over role/provider defaults" — พอ codex บูตไม่ผ่าน งานทั้งสายค้างโดยไม่มีทางแก้
+- เพิ่ม **`takkub assign --provider <name>`** เป็นทางออกที่แสดงเจตนาชัด · `--model` ตรวจความเข้ากันได้กับ provider **หลัง override** · error message ชี้ทางแก้ · boot-stall notice บอกคำสั่งที่ใช้ได้จริง
+- **ตัดสินใจไม่ auto-degrade ตอน boot-stall** (ต่างจาก auth-failure/no-content ที่ตายสนิท) เพราะ boot-stall ยังกู้เองได้ — เหตุผลเต็มใน `docs/audit/2026-08-16-270-provider-override.md`
+
+**task ยาวส่งไม่ถึง pane ที่อ่านไฟล์ไม่ได้ (#273)**
+- task ยาวถูกแปลงเป็น "ไปอ่าน spec จากไฟล์" แต่ pane ที่ไม่มี file-read tool เปิดไม่ได้ → ตอบ FAILED ทันที เสีย spawn ฟรี และยังไป trigger fix-loop ให้ Lead ไปหา root cause ของงานที่ไม่เคยเริ่ม
+- เพิ่ม `ProviderSpec.supports_agent_file_read` → provider ที่อ่านไฟล์เองไม่ได้จะได้ task แบบ inline แทน pointer · แยก **delivery-failure ออกจาก task-failure** ไม่ให้ปนกัน
+- boot-stall notice แนบ **error จริงจาก provider** (เช่น `codex mcp list`) ต่อท้าย แทนข้อความ generic — ดึงแบบ async ไม่บล็อก Qt thread
+
+**CodeQL 15 alert**
+- แก้จริง 6: `permissions:` ใน ci.yml (2), temp file ไม่ปลอดภัยใน shortcut.js, TOCTOU ใน pathfix.js (เจอบั๊ก EBADF จริงระหว่างแก้), ลบไฟล์ HTML กำพร้าที่ไม่มีใครอ้างถึง
+- dismiss 9 พร้อมหลักฐานและ `codeql[...]` annotation ในโค้ด: hash ใน session_store เป็น session token ไม่ใช่รหัสผ่าน · path guard ของ `_serve_static` ถูกต้องอยู่แล้ว (เขียนใหม่เป็น `is_relative_to()` ให้อ่านง่ายและทดสอบกับ symlink/`..`/drive-letter override) · `state.token` ใน app.js เลือกแค่หน้าจอ ไม่ใช่สิทธิ์ · 5 ใบที่เหลืออยู่ในไฟล์เทส
+
+### Changed (เปลี่ยน)
+
+**token diet รอบ 2 (#267)**
+- แปลกฎที่โมเดลอ่านอย่างเดียวใน role file ทั้ง 16 ใบเป็นภาษาอังกฤษ — staged context **78,657 → 52,053 token (−33.8%)** วัดด้วย tiktoken บนไฟล์ที่ stage แล้วจริง
+- **ข้อความที่ผู้ใช้ต้องอ่านยังเป็นภาษาไทยทั้งหมด** (placeholder ของ `takkub done`, ข้อความตอน blocked, output template ของ qa) — cross-check โดย codex ทีละบรรทัดครบ 16 ไฟล์ พบจุดที่แปลเกิน 26 จุดแล้วคืนกลับเป็นไทย พร้อมแก้คำแปลที่ทำให้ความหมายเพี้ยน 2 จุด
+
+
+## [1.0.66] - 2026-08-16
+
+### Fixed (แก้)
+
+**pane ที่ auth ไม่ผ่านไม่เคย degrade เป็น claude (#269)**
+- role ที่ provider ล็อกอินไม่ผ่าน (เคสจริง: qa/gemini-agy ล้ม 3 รอบติด) **ไม่เคยถูก degrade เป็น claude substitute เลย** ทั้งที่ backend/frontend ในเซสชันเดียวกันบนเครื่องเดียวกัน degrade ได้ปกติ → QA gate ค้างทั้งที่งาน dev เสร็จหมด และไม่มี workaround นอกจากให้ผู้ใช้ไปล็อกอินเอง
+- **root cause:** จุดเดียวในระบบที่แตะ `provider_override` (คือ degrade) คือ no-content watchdog ที่เฝ้าว่า pane ไม่พ่นอะไรออกมาเลย — แต่ pane ที่ติด auth **พ่นข้อความ error ออกมา** ซึ่งนับเป็น "content" watchdog จึงไม่มีวันเจอเคสนี้ และไม่มีทางไปถึงโค้ด degrade · backend/frontend ที่ degrade ได้เพราะล้มด้วยอาการ no-content จริงๆ คนละอาการกัน
+- แยก `_recover_auth_failed_pane` ออกมา **degrade ทันทีตั้งแต่ครั้งแรกโดยไม่ retry ก่อน** (ต่างจาก no-content ที่ retry ก่อน) เพราะกำแพง login ไม่หายเอง · close+respawn+degrade ถูก extract เป็น `_recover_broken_pane` ให้ทั้งสอง path ใช้ร่วมกัน
+- ครึ่งหลังของ #269 (`takkub list` โชว์ working ทั้งที่ pane ไม่เคยถึง ready prompt) ถูกคุมแล้วโดย `login-required` tier ของ #263 ใน 1.0.65
+
+
+## [1.0.65] - 2026-08-16
+
+รอบต่อเนื่องจาก 1.0.64 ในวันเดียวกัน — ปิดสองใบที่ค้างไว้เพราะรอบก่อนทำได้ไม่ครบ
+
+### Fixed (แก้)
+
+**สถานะ pane มีแหล่งความจริงเดียว (#263)**
+- เดิม `takkub list`/`status` เอาสถานะมาจาก 3 ที่ที่เดินแยกกัน: `pane.state` ที่ orchestrator ประกาศเองตอน dispatch · ready marker ที่ scrape จากหน้าจอ · progress clock — ทั้งสามขัดกันเองได้และขัดจริง (gemini ขึ้น "working" ทั้งที่ค้าง "Signing in..." และ task ไม่เคยถูกส่ง · codex ขึ้น "active" ทั้งที่จอโชว์ "Working (esc to interrupt)" · kimi ขึ้น "active" ทั้งที่ค้างหน้า `/login`)
+- เพิ่ม `display_state` ที่ derive จากทั้งสามแหล่งด้วยลำดับความสำคัญที่เขียนไว้ชัด (จอชนะ label ที่ประกาศเองเสมอ): **login-required → booting → waiting-delivery → busy → ค่าเดิม** · เป็น key ใหม่แบบ additive ของเดิมทุกที่ที่อ่าน `state` จึงไม่พัง
+- provider ที่ marker ยัง calibrate ไม่ได้ แสดง unknown อย่างซื่อสัตย์ ไม่ fallback เป็น label ที่ดูมั่นใจ
+
+### Added (ของใหม่)
+
+**subagent mode (#268)**
+- `takkub assign --mode pane|subagent` — งานรูปทรง scan/audit/หาของ/fan-out เยอะๆ รันเป็น subagent ในโปรเซสเดิมได้ ไม่ต้องเปิด pane ใหม่ จึงไม่ต้องรอ provider บูต และไม่เจอบั๊กตระกูล delivery เลย (#254/#255/#256/#257/#26/#144)
+- **default = `pane` พฤติกรรมเดิมไม่เปลี่ยน** · `--mode subagent` ใช้ร่วมกับ `--model` ไม่ได้ (subagent ใช้ provider/model ของ parent เสมอ จึงแทน cross-check ต่างโมเดลไม่ได้ — เขียนข้อจำกัดนี้ไว้ในเอกสารแล้ว) และใช้กับ `--plan` ไม่ได้
+- shard cap: 20 สำหรับ subagent (pane ยังคง 8) · ผลลัพธ์เข้าท่อ `takkub subagent-done` เพื่อให้ ledger/inbox/wait เห็นเหมือน pane ปกติ
+- `routing_planner` แนะนำโหมดให้เมื่อเจอรูปทรงงานที่เข้าข่าย (เป็นข้อเสนอ Lead ตัดสินเอง)
+- ปรับกฎ "ห้าม spawn subagent" ทั้งระบบให้เป็นเงื่อนไขเดียวกัน — **"ห้าม spawn เอง เว้นแต่ Lead สั่งด้วย `--mode subagent`"** ครบทุกจุด (role file ทุกใบ, prompt builder, guard, เอกสาร) เพื่อไม่ให้ teammate ได้รับคำสั่งขัดกันเองในเทิร์นเดียว
+
+
+### Added
+
+- `takkub assign --mode pane|subagent` (#268): ค่าเริ่มต้นยังเป็น pane; งาน scan/audit/search/triage/fan-out เลือก native subagent provider เดียวกับ Lead ได้โดยไม่เปิด pane และปิดงานผ่าน `subagent-done` เข้าสู่ ledger/inbox/wait เดิม. โหมดนี้ไม่ใช่ cross-model/cross-provider verification.
+
+## [1.0.64] - 2026-08-16
+
+รอบ **"cockpit เลิกโกหก Lead + ลดค่า token ต่อ pane"** — วันเดียวปิด 16 issue (#251-#266) ที่เกือบทั้งหมดโผล่มาจากการใช้งานจริงเช้าวันนั้น เริ่มจาก remote-control ที่ดับเองทุกคืน แล้วสาวไปเจอตระกูลบั๊ก "สัญญาณที่ดูน่าเชื่อถือแต่ไม่จริง" อีกเป็นพวง
+
+### Fixed (แก้)
+
+**remote-control ตายทุกเช้า (#252, #260)**
+- idle-expire (4 ชม.) เคย `stop()` เซิร์ฟเวอร์+tunnel แล้ว **เขียน `enabled=false` ลงดิสก์** ทำให้เปิด cockpit ใหม่ remote ไม่กลับมาเอง และ re-enable ยัง mint `secret_path`/`token` ใหม่ทุกครั้ง = ต้องสแกน QR ใหม่ทุกเช้า · ตอนนี้แยก **auto-suspend** (พักเอง เก็บ pairing เดิม กลับมาเองตอนเปิด cockpit ใหม่) ออกจาก **Disable ที่ผู้ใช้กดเอง** (revoke pairing ทิ้ง เพื่อเคสมือถือหาย) + `idle_expire_min` ตั้งค่าได้ใน Settings (0 = ปิด)
+- PWA เคยขึ้น chip **"Online" ทั้งที่ tunnel ล่ม** เพราะ `apiFetch` ถือว่า response ที่ resolve = ติดต่อได้ · ตอนนี้แยก 5xx ที่เป็น error page ของ edge (Cloudflare 530 → Offline + บอกว่า cockpit ปิด remote อยู่) ออกจาก 504 JSON ของ cockpit เอง (bridge timeout → ยัง Online แต่บอกว่าตอบช้า)
+
+**สัญญาณที่โกหก Lead (#253, #258, #259, #262, #263, #265, #266)**
+- `takkub wait` **resolve ด้วย done event เก่า** ทำให้ Lead เชื่อว่างานเสร็จแล้วทั้งที่ pane ยังทำอยู่ → commit/สรุปงานที่ยังไม่เสร็จ · แก้โดยยกพื้นความสดด้วย `assign_ts` ของ role นั้น event เก่าจึงชนะ assignment ปัจจุบันไม่ได้อีก (#262)
+- `wait` เคยหูหนวกกับทุกอย่างที่ไม่ใช่ role ที่ตัวเองเฝ้า ตอนนี้ตื่นเมื่อมี blocking report จาก role อื่น (#253) · จาก role ที่เฝ้าเองแต่ไม่ใช่ done/FAILED เช่น `[delivery-unconfirmed]` (#259) · และ **เมื่อเจ้าของพิมพ์ข้อความใหม่เข้ามา** (#265) ซึ่งเดิมต้องรอจนครบ timeout 30 นาที
+- delivery ที่ถูก cancel แล้วยัง **paste ซ้ำทับ composer** ได้ เพราะ path repaste ไม่ได้แนบ validator (#258)
+- notice ถูกส่งถึง Lead โดยไม่เช็คว่ายังจริงอยู่ไหม → Lead ได้แต่ "ข่าวเก่า" (worktree ที่ commit ไปแล้ว, pane ที่ปิดไปแล้ว) ตอนนี้ re-validate ก่อน flush + ติดเวลาเกิดเหตุ (#266)
+- สถานะ pane เคยมาจาก 3 แหล่งที่ขัดกันเอง — เพิ่ม flag `delivery_unconfirmed` ให้ `takkub list` บอกได้ว่า "ยังส่งงานไม่ถึง" แทนที่จะขึ้น working ลอยๆ (#263 บางส่วน)
+
+**งานส่งไม่ถึง pane (#254, #255, #256, #257)**
+- pane ที่ค้างเฟส boot (codex โหลด MCP) เคยเงียบยาวถึง 30 นาทีเพราะ spinner ทำให้ busy-wait ต่ออายุตัวเอง ตอนนี้ยิง `[delivery-boot-stall]` ที่ ~110 วินาที พร้อมบอกวิธีแก้ (#254)
+- เพิ่ม `takkub task cancel --role` + `takkub send` ยกเลิก delivery ค้างให้อัตโนมัติ + `expire_stale()` ที่เดิมเป็น dead code และ scope ผิด (จะกวาด delivery ที่ teammate กำลังทำงานจริงอยู่) (#255)
+- gemini/agy ขึ้น auth-failure หลอกทุก cold start เพราะ banner ของมันพิมพ์ "You are currently not signed in." เอง — ย้ายไปเป็น transient marker ที่มี grace คุม (#256)
+- kimi ไม่มี ready marker เลย (`ready_rules=()`) ทำให้ task **ไม่เคยถูกส่งถึง** — ใส่ marker ที่ capture จาก TUI จริง (#257)
+
+**รายงาน "ไฟล์ที่แตะ" ผิด (#251, #261)**
+- โหมด shared tree เคยรายงาน dirty ทั้งทรี รวมงานของ pane อื่นและไฟล์ค้างเก่า · ตอนนี้ snapshot dirty path + mtime/size ตอน assign แล้วเทียบตอน done · probe ล้มเหลว = แสดง "ตรวจไม่ได้" ไม่ใช่แกล้งบอกว่าสะอาด (#251)
+- `?? dir/` ที่ git ยุบมา ถูกขยายเป็นระดับไฟล์ด้วย `-uall` ที่ scope เฉพาะโฟลเดอร์นั้น (cap 2000 entry + fallback) เพื่อไม่ให้ไฟล์ที่แก้ลึกในโฟลเดอร์ untracked หลุดรายงาน (#261)
+
+### Added (ของใหม่)
+
+- **กันกดปิด pane ผิด** — กด X บนหัว pane หรือบนแท็บ ต้องยืนยันก่อน โดยบอกว่า role ไหน กำลังทำงานอยู่ไหม และมีไฟล์ที่ยังไม่ commit / commit ที่ยังไม่ merge อยู่เท่าไหร่ · default = ยกเลิก · **เส้นทางปิดอัตโนมัติทุกทางไม่ถูกแตะ** (CLI close, auto-close หลัง done, close-all, shutdown) เพื่อไม่ให้ automation ค้างรอคนกด
+- **หลอดแสดงโควต้าในป็อปอัพ usage** — Claude 2 หลอด (5h/7d), Codex 1 หลอด · **provider ที่ไม่มีโควต้าจริง (OpenCode) ไม่มีหลอด** เพราะการวาดหลอดโดยไม่มีตัวหารคือการกุตัวเลข · ข้อมูลเก่า (stale) แสดงต่างจากข้อมูลสด
+
+### Changed (เปลี่ยน)
+
+- **token diet (#267)** — วัดจริงจาก session JSONL พบว่า `CLAUDE.md` ที่ root ถูก Claude Code auto-load เข้า**ทุก pane ทุก role ทุกเทิร์น** (6,728 token) ทั้งที่เนื้อหาส่วนใหญ่เป็นคู่มือ Lead เท่านั้น · ย้ายเนื้อหา Lead-only ไป `docs/lead/role-and-workflow.md` (ครบทุกหัวข้อ ไม่ลดเนื้อหา) เหลือ root CLAUDE.md **948 token** = ลด 5,780 token ต่อ pane ต่อเทิร์น
+- `takkub wait` ลด cap `--timeout` จาก 2 ชั่วโมงเหลือ 30 นาที เพื่อไม่ให้ Lead เผลอ park ยาวโดยไม่มีจุดเช็คอิน (#253)
+- installed build: rewrite path ของเอกสาร `docs/lead/*.md` ตามเข้าไปในตัวไฟล์ที่ ship ไปด้วย ไม่ใช่แค่ระดับบนสุด
+
+
+## [1.0.63] - 2026-08-15
+
+รอบ **"pane ค้างต้องรู้ตัวใน 1-2 นาที ไม่ใช่ 30 นาที"** — ปิด #247, #248, #249, #250 ต่อจากรอบ 1.0.62 เน้นเรื่องเดียว: สัญญาณที่ cockpit ใช้ตัดสินว่า pane "ยังทำงานอยู่" ต้องเป็นความคืบหน้าจริง ไม่ใช่แค่มีไบต์ไหลออกมา
+
+### Fixed (แก้)
+
+**สัญญาณ liveness ปลอม (#248, #247)**
+- **pane ที่ค้างตั้งแต่วินาทีแรกยังถูกนับว่า "กำลังทำงาน" จนชน ceiling 1800 วินาที** — ต้นเหตุ: `_last_output_ts` ถูกประทับเวลาทุกครั้งที่มี **raw byte** เข้ามา ซึ่งรวม escape sequence ตอน terminal init กับ spinner ที่หมุนอยู่กับที่ด้วย pane ที่ค้างหน้า login หรือหน้าจอว่างจึงดู "มี output ตลอด" ตอนนี้แยก 2 สัญญาณออกจากกัน: `seconds_since_byte()` = มีไบต์ไหม กับ `seconds_since_output()` = **เนื้อหาบนจอเปลี่ยนจริงไหม** โดยเทียบ fingerprint ที่ตัด spinner glyph (braille / `◐◑◒◓` / `|/\-` เดี่ยวๆ) กับจุดไข่ปลาท้ายบรรทัดออกก่อน
+- **auth fail-fast** — pane ที่ตกหล่นการล็อกอินเดิมต้องรอ busy-wait ceiling เต็ม 30 นาทีถึงจะรู้ ตอนนี้ตรวจได้ในไม่กี่วินาที แยก marker เป็น 2 ชั้น: **ชั้น error** (`not signed in`, `please sign in again`, …) กับ **ชั้น transient** (`signing in`, `verifying your account` — ของ gemini) ที่ต้องเงียบครบ grace 45 วินาทีก่อนถึงจะนับ · ทุกการตรวจ scope อยู่แค่ footer region ของจอ ไม่ใช่ทั้งหน้า เนื้อบทสนทนาจึงปนไม่ได้
+- **ready prompt ชนะ auth marker เสมอ + ต้องเจอติดกัน 5 poll ถึงจะสรุป** — กันเคสที่คำว่า auth โผล่ในผลลัพธ์งานปกติ (เช่น log ของ API 401) แล้วถูกตัดสินว่า pane พัง · ด้วยเหตุผลเดียวกัน generic marker ถูกตัดจาก 12 เหลือ 4 ตัว ที่ตัดทิ้งคือคำที่ชนกับ output ของงาน dev ตรงๆ โดยเฉพาะ `not authenticated` ซึ่งเป็นข้อความ 401 default ของ FastAPI
+- **no-content watchdog** — pane ที่ spawn แล้วไม่เคยมีเนื้อหาขึ้นจอเลยภายใน 75 วินาที (`TAKKUB_NO_CONTENT_WATCHDOG_SEC`) จะถูกกู้อัตโนมัติ **สูงสุด 2 ครั้ง** แล้วหยุด ไม่วน respawn ไม่รู้จบ · provider ที่ตายซ้ำจะ degrade ผ่าน `provider_override` (ค้างไว้ข้าม auto-respawn แต่ล้างเมื่อ spawn ใหม่จริง)
+- **`takkub status` แยก `spawning` / `active` / `ready`** — เดิมทุกอย่างเป็น `active` ก้อนเดียว มองไม่ออกว่า pane เพิ่งเปิดหรือรอ input อยู่ (state อื่นไม่ถูกแตะ และตัวเทียบ `== "working"` ที่มีอยู่ยังทำงานเหมือนเดิม)
+
+**`takkub wait` รอไม่จบ (#249)**
+- **role ที่ไม่เคยถูก spawn ทำให้ `wait` ค้างจนหมด timeout** — เดิมคืน `pending` ตลอดเพราะหา pane ไม่เจอ ตอนนี้มี grace 15 วินาที แล้วสรุปเป็น verdict ใหม่ `gone` · pane ที่อยู่ในสถานะจบแล้ว (`empty`/`done`/`exited`/`error`) ก็ตัดสินทันทีไม่ต้องรอ + มี `cancel_wait()`
+- **race 1: `wait` ตอบ `done` ให้กับงานที่ยังไม่เริ่ม** — `_wait_done_events` ไม่เคยถูกล้าง และ pane เพิ่งพลิกเป็น `working` ตอน **delivery** ไม่ใช่ตอน assign ลำดับ `assign` → `wait` จึงไปเจอ event ของรอบก่อนแล้วตอบว่าเสร็จแล้ว ตอนนี้ event ต้องมี `ts >= assign_ts` ของรอบปัจจุบันเท่านั้นถึงจะนับ
+- **race 2: waiter ตัวที่ attach ได้ `err: wait session no longer active` แทนผลลัพธ์** — เจอจากของจริงตอนรันคืนนั้นเอง ตอนนี้ผลที่ resolve แล้วถูก echo ค้างไว้ 30 วินาทีให้ตัวที่มาทีหลังอ่านได้
+
+**context ตอน spawn (#250)**
+- **ทุก role ได้ guard block เหมือนกันหมดทั้งที่ใช้ไม่ได้** — dev-server hygiene กับ stale-file guard ถูกยัดเข้าไฟล์ role ของ `reviewer`/`gemini`/`codex`/`opencode`/`kimi`/`cursor`/`docs`/`analyst`/`security` ด้วย ทั้งที่ role พวกนี้ไม่ยกเซิร์ฟเวอร์และบางตัวไม่แก้ไฟล์เลย ตอนนี้ inject ตาม capability ผ่าน `role_needs_dev_server_guard()` / `role_needs_stale_file_guard()` · บล็อกที่เหมือนกันทุก role รวม 4,353 ตัวอักษร = 20-27% ของไฟล์ role ที่ staged
+
+### Notes
+- QA gate ผ่านแบบ **GO**: pytest 6527 passed / 7 skipped / 0 failed (670s), ruff check + format, `lint-imports` 25/25 contracts, depgraph fresh — รายงานเต็มที่ `docs/qa/gate-248-247-249-250.md`
+- ต้อง **restart cockpit** ถึงจะได้ของทั้งหมดนี้
+- detector ทั้งหมดในรอบนี้ทำงานกับทุก provider ผ่าน `provider_spec` (`auth_error_markers` / `auth_transient_markers` ต่อ provider) — ไม่มี claude-only shortcut เพิ่มใหม่
+
 ## [1.0.62] - 2026-08-15
 
 รอบ **"cockpit หยุดโกหก Lead"** — ปิดครบ #225–#245 (15 ใบ) เน้นสามเรื่อง: สถานะที่รายงานต้องตรงกับความจริง, Lead ต้องมีเครื่องมือรอที่ใช้ได้จริง, และ pane ต้องไม่ค้างรอคนกดโดยไม่มีใครรู้

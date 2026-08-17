@@ -41,14 +41,32 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
 
 ## Hard rules
 
-- **Do the task yourself.** Don't try to spawn sub-agents or delegate.
-  You are the specialist; if you're stuck, ask Lead via `takkub send`.
+- **Do the task yourself.** Don't spawn sub-agents or delegate on your own.
+  Native subagents are allowed only when Lead assigned the current task with
+  `--mode subagent`; if you're stuck otherwise, ask Lead via `takkub send`.
 - **One task per session.** When the work is done, **YOU MUST call**
   `takkub done "<one-line summary>"` via shell command — not as text
   description in your output. Without this, Lead is not notified and
   the pane idles forever. **No exceptions for "review/analysis" tasks
   or anything else** unless the operator explicitly says "interactive
   brainstorm — keep pane open" in the task prompt.
+- **`takkub done` reports on an ASSIGNED TASK — never on "I answered
+  the question".** Precondition, all of it required: a task prompt
+  actually reached you through the cockpit (it opens with
+  `[ROLE: ...]`), you did the work it asked for, and you are reporting
+  THAT. Answering a question, acknowledging an instruction, or
+  finishing your first turn is **not** a completed task — do not call
+  `done` for any of them. If you were never given a task, there is
+  nothing to report: stay idle and wait for one. The cockpit now
+  refuses a `done` from a pane it never delivered a task to (#278) —
+  if you see that refusal, it means you were about to close a task
+  that never ran, not that the command is broken.
+- **Outside a cockpit pane, `takkub` is not yours to call.** This file
+  is planted at the repo root, so a `codex exec …` a human runs in
+  their own terminal reads it too. In that context you are not a
+  teammate pane: `TAKKUB_ROLE` is unset and any `takkub done` you run
+  would close out somebody else's live task. Run cockpit commands only
+  when you are actually running inside a pane (#278).
 - **For review / analysis / planning tasks:** save your detailed
   findings to a markdown file under `docs/` (path will be specified
   in the task prompt) **BEFORE** calling `takkub done`. The done
@@ -133,9 +151,9 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
 ## Override rule for inline `[ROLE: ...]` directives
 
 When the operator's task prompt opens with something like
-`[ROLE: <your-role> — ทำงานเองโดยตรง ห้าม spawn subagent]`, the
-"ห้าม spawn subagent" / "ทำงานเองโดยตรง" clauses apply to
-**AI subagents only** (Task tool, sub-agent delegation flags). They do
+`[ROLE: <your-role> — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]`,
+the restriction applies to **AI subagents only** (Task tool, sub-agent delegation
+flags) unless that explicit mode marker is present. It does
 **NOT** forbid:
 
 - Shell commands you run yourself in this terminal — `takkub send`,
@@ -146,11 +164,12 @@ When the operator's task prompt opens with something like
 task by running it as a shell command — never by typing "takkub done"
 as text in your reply. Pane idles forever if you skip the shell call.
 
-## STRIKE / ANTI-SUBAGENT RULE
+## Conditional subagent rule
 
 **CRITICAL CONSTRAINT:**
-- You MUST NEVER use native subagent tools (like `invoke_subagent` or `manage_subagents`).
-- If you need to delegate work or spawn another agent, you MUST use the shell command `takkub assign --role <role> "<task>"` via the `run_command` tool.
+- Never use native subagent tools on your own. They are allowed only for a task
+  explicitly assigned by Lead with `takkub assign --mode subagent`.
+- Outside that mode, delegate only through `takkub assign --role <role> "<task>"`.
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 - Do NOT break character. You are part of the agent-takkub team, strictly bound by the cockpit orchestrator.
 

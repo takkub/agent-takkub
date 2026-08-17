@@ -156,9 +156,9 @@ class TestAssignTsCapture:
 
 
 class TestAssignBaseShaCapture:
-    def test_shared_cwd_dispatch_snapshots_head(self, orch, monkeypatch):
+    def test_shared_cwd_dispatch_snapshots_head_and_dirty_paths(self, orch, monkeypatch):
         """_assign_dispatch (worktree=None, the shared-cwd path) snapshots
-        HEAD into PaneState.assign_base_sha right after spawn resolves cwd."""
+        HEAD plus cheap dirty-path metadata right after spawn resolves cwd."""
         from agent_takkub import worktree_manager as wm_mod
 
         monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
@@ -168,9 +168,9 @@ class TestAssignBaseShaCapture:
         pane._session_cwd = "/repo/api"
 
         class _FakeMgr:
-            def head_sha(self, cwd):
+            def shared_tree_baseline(self, cwd):
                 assert cwd == "/repo/api"
-                return "deadbeef"
+                return "deadbeef", "/repo", {"stale.png": ("??", 123, 456)}
 
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _FakeMgr())
 
@@ -178,6 +178,8 @@ class TestAssignBaseShaCapture:
 
         ps = orch._pane_state["proj::backend"]
         assert ps.assign_base_sha == "deadbeef"
+        assert ps.assign_git_root == "/repo"
+        assert ps.assign_dirty_snapshot == {"stale.png": ("??", 123, 456)}
 
     def test_no_resolved_cwd_leaves_baseline_none(self, orch, monkeypatch):
         monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
@@ -189,6 +191,8 @@ class TestAssignBaseShaCapture:
 
         ps = orch._pane_state["proj::backend"]
         assert ps.assign_base_sha is None
+        assert ps.assign_git_root is None
+        assert ps.assign_dirty_snapshot is None
 
     def test_worktree_dispatch_leaves_baseline_none(self, orch, monkeypatch):
         """An isolated worktree pane already has the equivalent baseline in
@@ -213,6 +217,8 @@ class TestAssignBaseShaCapture:
 
         ps = orch._pane_state["proj::backend"]
         assert ps.assign_base_sha is None
+        assert ps.assign_git_root is None
+        assert ps.assign_dirty_snapshot is None
 
 
 # ─────────────────────────────────────────────────────────────

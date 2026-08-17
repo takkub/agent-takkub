@@ -29,7 +29,12 @@ from wcwidth import wcwidth
 from ._pty_backend import spawn_pty_bounded
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 from .job_object_manager import JobObjectManager
-from .provider_spec import PROVIDER_REGISTRY
+from .provider_spec import (
+    AUTH_TRANSIENT_GRACE_SEC,
+    PROVIDER_REGISTRY,
+    auth_error_markers_for,
+    auth_transient_markers_for,
+)
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
 
@@ -94,6 +99,50 @@ def _safe_screen_display(screen: pyte.Screen) -> list[str]:
             chars.append(data)
         rows.append("".join(chars))
     return rows
+
+
+# ── Content-change fingerprint (#248/#247) ──────────────────────────────────
+# `_last_output_ts` (seconds_since_output()) used to stamp on every raw PTY
+# byte chunk, which made two very different states look identical to any
+# caller polling it: a freshly-spawned pane whose terminal-init escape
+# sequence (cursor-position report, mouse-mode enables — no visible glyph at
+# all) renders nothing, and a CLI wedged on a static status line ("Signing
+# in...") whose only motion is an animated spinner glyph. Both kept bumping
+# the "last real output" clock forever, so lead_inbox.py's delivery busy-wait
+# (#130/#144) and the stale-marker watchdog (#20) treated a hung pane as
+# "still making progress" for the full BUSY_WAIT_CEILING_SEC/STUCK_THRESHOLD_S
+# window instead of surfacing it.
+#
+# _content_fingerprint normalizes away the animation (spinner glyph, trailing
+# ellipsis dots) and drops blank rows before comparing, so two frames that
+# only differ by which spinner glyph is showing collapse to the same
+# fingerprint — stamping becomes a strict "the visible content actually
+# changed" signal instead of "a byte arrived".
+_SPINNER_GLYPH_RE = re.compile(
+    r"[⠀-⣿]"  # braille spinner block (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷ … — claude/agy/codex all use some subset)
+    r"|[●○◐◑◒◓]"  # dot/circle spinner frames
+    r"|(?<!\S)[|/\\-](?!\S)"  # isolated ascii spinner glyph — bounded by
+    # whitespace/edges so it can't eat a real hyphen inside a word/flag/path
+    # ("a-b", "--force", "a/b" are left untouched)
+)
+_TRAILING_DOTS_RE = re.compile(r"\.+\s*$")
+
+
+def _content_fingerprint(lines: list[str]) -> str:
+    """Cheap fingerprint of the non-blank screen content with spinner
+    animation normalized away. "" means the screen is entirely blank —
+    nothing rendered yet (e.g. only a terminal-init escape sequence has been
+    fed so far)."""
+    rows: list[str] = []
+    for line in lines:
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        stripped = _SPINNER_GLYPH_RE.sub("", stripped)
+        stripped = _TRAILING_DOTS_RE.sub("", stripped).rstrip()
+        if stripped:
+            rows.append(stripped)
+    return "\n".join(rows)
 
 
 def _tree_kill(pid: int | None) -> None:
@@ -316,16 +365,61 @@ def _classify_ready(text_lower: str) -> bool:
 # which already anchors tty-prompt detection to the bottom for the same reason.
 _READY_TAIL_ROWS = 6
 
-# Provider startup / message-queue chrome. Present in the footer region while a
-# codex/agy pane is still cold-booting its MCP servers (and while a message it
-# received during that window sits queued rather than running). Kept beside the
-# ready markers because it is read from the same region — see
-# PtySession.shows_startup_marker.
-_STARTUP_MARKERS: tuple[str, ...] = (
+# #284: the boot-phase probe gets its OWN, taller window. `_READY_TAIL_ROWS` is
+# sized for claude's single-line footer; codex draws a bordered composer plus a
+# status bar above it, so its boot line ("Booting MCP server: … esc to
+# interrupt") sits several rows higher and falls out of a 6-row window as soon
+# as the composer grows by one line — at which point only "Fast off" remains
+# visible and the pane reads READY while it is demonstrably still starting.
+#
+# Widening the READY scan is not the fix: that window is deliberately tight
+# because body text quoting "esc to interrupt" poisoned the verdict (#70/#20).
+# The boot strings are safe to look for further up — they are provider startup
+# chrome, not phrases that show up in a conversation — so only this probe gets
+# the taller window.
+_BOOT_MARKER_TAIL_ROWS = 20
+
+# Provider BOOT chrome: the CLI has not finished starting up, so there is no
+# composer on screen yet to receive anything.
+_BOOT_PHASE_MARKERS: tuple[str, ...] = (
     "booting mcp server",
     "starting mcp server",
-    "tab to queue message",
 )
+
+# Provider QUEUED-MESSAGE chrome: the composer exists, but the CLI is mid-turn,
+# so input is queued rather than run. codex shows this whenever it is working —
+# NOT only during boot.
+#
+# #281: these two used to be one list, and every consumer inherited "boot" as
+# the meaning of all of it. That is right for the idle watchdog (the original
+# consumer — neither state deserves a forgot-`takkub done` nag) and wrong for
+# everything that reused it afterwards. Proven from a live day of events.log:
+# panes flagged `[delivery-boot-stall] ค้างอยู่ที่ boot phase` at 110s went on
+# to finish their work and call `done` minutes later (13:59→14:03,
+# 15:45→15:54, 20:07→20:17) — they were never booting, they were WORKING with
+# a queued message showing. Left unsplit, #276's new boot ceiling would have
+# closed those panes and failed their tasks at 300s.
+_QUEUED_MESSAGE_MARKERS: tuple[str, ...] = ("tab to queue message",)
+
+# Union — the historical meaning, still what `shows_startup_marker` reports and
+# what the idle watchdog wants: "not a genuine work turn to nag about".
+_STARTUP_MARKERS: tuple[str, ...] = _BOOT_PHASE_MARKERS + _QUEUED_MESSAGE_MARKERS
+
+
+def _tail_region(lines: list[str], rows: int) -> str:
+    """Lowercased bottom *rows* non-blank-trailing screen rows."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = max(0, end - rows)
+    return "\n".join(lines[start:end]).lower()
+
+
+def _boot_marker_region(lines: list[str]) -> str:
+    """Window the boot-phase probe scans — taller than the ready window so a
+    provider whose composer is several rows tall cannot push its own boot line
+    out of view (#284)."""
+    return _tail_region(lines, _BOOT_MARKER_TAIL_ROWS)
 
 
 def _ready_region(lines: list[str]) -> str:
@@ -454,6 +548,14 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     # include 'esc to interrupt' too, so the case is self-contained there
     # without needing codex's 'fast off' rule at all.
     ("(esc to interrupt) building...\nsomeone mentions fast off", False, "claude"),
+    # kimi idle footer (#257), captured via direct ConPTY capture against a
+    # signed-in kimi-cli 1.49.x session on Windows, 2026-08-16 — see
+    # kimi_spec.ready_rules's comment for the full captured line.
+    (
+        "main  @: mention files | ctrl-x: toggle mode | shift-tab: plan mode | ctrl+o: editor",
+        True,
+        "kimi",
+    ),
 )
 
 
@@ -892,13 +994,32 @@ class PtySession(QObject):
         # it so a pane on a non-default user profile finds its session JSONL
         # under <config_dir>/projects/ instead of ~/.claude/projects/.
         self._claude_config_dir: str | None = None
-        # Monotonic timestamp of the last PTY output chunk. A *structural*
-        # idle/busy signal (independent of TUI text markers, #20): a generating
-        # CLI streams output continuously (spinner repaint + token stream), so a
-        # long gap since the last chunk means the pane has gone quiet. 0.0 = no
-        # output seen yet. Written in the reader thread, read on the main thread;
-        # a plain float read/write is atomic under the GIL so no lock is needed.
+        # Monotonic timestamp of the last *content-changing* PTY output chunk
+        # (#248/#247) — a structural idle/busy signal (independent of TUI text
+        # markers, #20): a generating CLI streams visibly-changing output
+        # continuously (spinner repaint + token stream), so a long gap since
+        # the screen last actually changed means the pane has gone quiet.
+        # Stamped only when _content_fingerprint(...) differs from the
+        # previous chunk's — a redrawing spinner glyph or a terminal-init
+        # escape sequence that renders nothing must NOT advance this (see
+        # _feed_and_log). 0.0 = no content seen yet. Written in the reader
+        # thread, read on the main thread; a plain float read/write is atomic
+        # under the GIL so no lock is needed.
         self._last_output_ts: float = 0.0
+        # Raw PTY liveness (#248/#247): stamped on EVERY chunk, unlike
+        # _last_output_ts above — this is "the process is still writing to
+        # the pty", not "the pane is making progress". Kept separate so a
+        # caller that only needs to know the PTY hasn't died isn't fooled by
+        # content-fingerprint normalization, and vice versa.
+        self._last_byte_ts: float = 0.0
+        # Fingerprint of the last chunk's normalized screen content — see
+        # _content_fingerprint. "" until the first non-blank content arrives.
+        self._last_content_fingerprint: str = ""
+        # Monotonic timestamp of the first content-changing chunk this
+        # session ever produced, or None before that (the CLI process is up
+        # but hasn't rendered anything yet — still mid-boot / terminal-init
+        # only). Public accessor: first_content_ts().
+        self._first_content_ts: float | None = None
         self._output_rate_bps: float = 0.0
         self._output_rate_window_started: float = time.monotonic()
         self._output_rate_window_bytes: int = 0
@@ -998,22 +1119,23 @@ class PtySession(QObject):
         thread: write the transcript, feed pyte, and classify the ready state
         (all under the screen lock). Best-effort — never raises so a bad
         chunk can't kill the reader."""
-        # Structural quiescence signal (#20): stamp every real output chunk.
-        self._last_output_ts = time.monotonic()
+        # Raw PTY liveness (#248/#247): every chunk bumps this unconditionally
+        # — see _last_byte_ts's docstring. NOT the content-progress signal;
+        # that's _last_output_ts, stamped further down only on a real
+        # content-fingerprint change.
+        now = time.monotonic()
+        self._last_byte_ts = now
         window_bytes = int(self.__dict__.get("_output_rate_window_bytes", 0)) + len(data)
-        window_started = float(
-            self.__dict__.get("_output_rate_window_started", self._last_output_ts)
-        )
+        window_started = float(self.__dict__.get("_output_rate_window_started", now))
         self.__dict__["_output_rate_window_bytes"] = window_bytes
-        rate_elapsed = self._last_output_ts - window_started
+        rate_elapsed = now - window_started
         if rate_elapsed >= 1.0:
             self.__dict__["_output_rate_bps"] = window_bytes / rate_elapsed
             self.__dict__["_output_rate_window_bytes"] = 0
-            self.__dict__["_output_rate_window_started"] = self._last_output_ts
+            self.__dict__["_output_rate_window_started"] = now
         if self._transcript is not None:
             try:
                 self._transcript.write(data)
-                now = time.monotonic()
                 pending_bytes = int(self.__dict__.get("_transcript_pending_bytes", 0)) + len(data)
                 last_flush = float(self.__dict__.get("_transcript_last_flush", now))
                 self._transcript_pending_bytes = pending_bytes
@@ -1030,14 +1152,23 @@ class PtySession(QObject):
         try:
             with self._screen_lock:
                 self.stream.feed(data)
+                lines = _safe_screen_display(self.screen)
                 # Classify ready state here, while we already hold the lock
                 # feed() just used — the reader thread pays this cost instead
                 # of the Qt main thread (#106: agent_pane._sync_idle_flag was
                 # calling is_at_ready_prompt() on every outputUpdated, taking
                 # this SAME lock and contending with this exact feed()).
-                self._cached_ready = _classify_ready(
-                    _ready_region(_safe_screen_display(self.screen))
-                )
+                self._cached_ready = _classify_ready(_ready_region(lines))
+                # Structural quiescence signal (#248/#247): stamp
+                # _last_output_ts only when the rendered screen actually
+                # changed — reuses `lines` above instead of re-joining the
+                # full screen a second time.
+                fingerprint = _content_fingerprint(lines)
+                if fingerprint != self._last_content_fingerprint:
+                    self._last_content_fingerprint = fingerprint
+                    self._last_output_ts = now
+                    if fingerprint and self._first_content_ts is None:
+                        self._first_content_ts = now
         except Exception:
             # pyte sometimes chokes on partial sequences; skip and continue
             pass
@@ -1334,8 +1465,56 @@ class PtySession(QObject):
         transcript: task queued through MCP boot, ran to completion, called
         `takkub done` — the reminders were pure boot-window noise). The idle
         watchdog uses this to tell a genuine work turn ("Working…") apart from
-        a boot/queue phase, so it only arms after the task actually started."""
+        a boot/queue phase, so it only arms after the task actually started.
+
+        #281: for "is this pane still BOOTING", use `shows_boot_phase_marker`
+        instead — this one is deliberately the wider union and answers a
+        different question."""
         return any(m in _ready_region(self.display_lines()) for m in _STARTUP_MARKERS)
+
+    def shows_boot_phase_marker(self, *, rows: int = _READY_TAIL_ROWS) -> bool:
+        """True only while the provider CLI is still starting up — its
+        composer does not exist yet, so anything written to the pane lands on
+        a splash screen instead of an input box.
+
+        Narrower than `shows_startup_marker` on purpose (#281): that one also
+        reports True for a pane that is simply mid-turn with a queued message
+        ("tab to queue message"), which codex shows whenever it is working.
+        Callers deciding "is delivery stuck at boot / may I paste yet" must
+        use this one — treating a working pane as a stuck boot is what
+        produced `[delivery-boot-stall]` warnings for panes that went on to
+        finish their tasks normally.
+
+        *rows* widens the scanned window (#284). The default matches the ready
+        window, which keeps a boot line that has scrolled up into the
+        conversation body from reading as "still booting" forever. Delivery
+        passes `_BOOT_MARKER_TAIL_ROWS` instead, because there the tight window
+        is the bug: codex's bordered composer pushes its own live boot line out
+        of 6 rows, leaving a READY verdict for a pane that has not started. The
+        two errors are not symmetric — a false "still booting" costs a bounded
+        wait that the existing delivery timeout already backstops, while a
+        false "ready" pastes the task into a pane that cannot receive it.
+        """
+        return any(m in _tail_region(self.display_lines(), rows) for m in _BOOT_PHASE_MARKERS)
+
+    def boot_phase_detail(self) -> str:
+        """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
+        codex_apps, context7, figma (12s • esc to interrupt)`` — or "" when the
+        pane is not in a boot phase.
+
+        #281: Lead used to be told only the word "booting" while the pane
+        itself was displaying exactly which servers it was waiting on. That
+        line is the one piece of information that makes a stuck boot
+        actionable (it names the server to remove or pin), and the obvious
+        alternative — `codex mcp list` — cannot see cockpit-injected MCPs at
+        all. Trimmed to a single line and bounded so a redraw artifact can
+        never paste a screenful into a notice.
+        """
+        for line in reversed(_boot_marker_region(self.display_lines()).splitlines()):
+            lowered = line
+            if any(m in lowered for m in _BOOT_PHASE_MARKERS):
+                return " ".join(line.split())[:200]
+        return ""
 
     def is_at_trust_prompt(self) -> bool:
         """True when claude, codex, OR agy is showing a trust-directory modal.
@@ -1483,6 +1662,35 @@ class PtySession(QObject):
         timestamp unchanged), which a same-clock comparison decides reliably."""
         return self._last_output_ts or 0.0
 
+    def seconds_since_byte(self) -> float:
+        """Monotonic seconds since the PTY last delivered ANY byte chunk,
+        including ones that rendered no visible content change (a terminal-
+        init escape sequence, a redrawing spinner glyph — see
+        seconds_since_output() for the content-filtered version of this).
+
+        This is the raw "is the process still writing to the pty" signal
+        (#248/#247) — for a caller that wants to distinguish a dead/wedged
+        PTY from one that's alive but visibly stuck, not for progress
+        detection (use seconds_since_output() for that). Returns ``inf``
+        before any byte has been seen."""
+        ts = self._last_byte_ts
+        if not ts:
+            return float("inf")
+        return max(0.0, time.monotonic() - ts)
+
+    def first_content_ts(self) -> float | None:
+        """Monotonic timestamp of the first content-changing PTY output this
+        session ever produced, or ``None`` before that.
+
+        ``None`` means the CLI process is spawned and the PTY is open, but
+        nothing has rendered on screen yet — still mid-boot, or so far only
+        terminal-init escape sequences (cursor-position report, mouse-mode
+        enables) have been fed, which is exactly the state a hung/wedged
+        spawn is indistinguishable from without this (#248/#247). Orchestrator
+        status reporting (`takkub list`/`status`) uses this to tell
+        "spawning" apart from "active"/"ready"."""
+        return self._first_content_ts
+
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch
         the limit resets at; else None.
@@ -1494,6 +1702,79 @@ class PtySession(QObject):
         """
         text = "\n".join(self.display_lines()).lower()
         return _parse_rate_limit_reset(text, time.time())
+
+    def auth_failure_reason(self, provider: str) -> str | None:
+        """Return the matched marker if this pane's screen currently shows
+        `provider`'s CLI stuck on an auth failure, else ``None`` (#248/#247
+        round 2).
+
+        Two tiers, both scoped to `_ready_region` (bottom footer rows) like
+        every other prompt-state check in this class — conversation body
+        text merely quoting one of these phrases must not poison the
+        verdict, same reasoning as `_classify_ready`:
+
+          1. `provider_spec.auth_error_markers_for(provider)` — an
+             unambiguous failure phrase (provider-specific confirmed list +
+             the generic cross-provider baseline). Fires instantly, no
+             grace period — this is meant to beat
+             ``orchestrator.BUSY_WAIT_CEILING_SEC`` (1800s) by a wide
+             margin, not tune it.
+          2. `provider_spec.auth_transient_markers_for(provider)` — a
+             normally-transient boot-time marker (e.g. gemini/agy's
+             "Signing in..."). Only counts once the screen has been static
+             for ``AUTH_TRANSIENT_GRACE_SEC`` — measured via
+             ``seconds_since_output()``, the same spinner-normalized
+             content-change clock used everywhere else in this module — so
+             an animating spinner next to the same text still reads as a
+             normal cold boot, not a failure.
+        """
+        text = _ready_region(self.display_lines())
+        for marker in auth_error_markers_for(provider):
+            if marker in text:
+                return marker
+        transient = auth_transient_markers_for(provider)
+        if transient and self.seconds_since_output() >= AUTH_TRANSIENT_GRACE_SEC:
+            for marker in transient:
+                if marker in text:
+                    return marker
+        return None
+
+    def is_hard_blocked_for(self, provider: str) -> bool:
+        """True when `provider`'s own `ready_hard_blockers` currently match
+        this pane's footer region — i.e. the screen shows an active
+        interrupt/generation indicator ("esc to interrupt", ...) — REGARDLESS
+        of whether the orchestrator ever dispatched a task to this pane (#263).
+
+        Exists because `is_at_ready_prompt()`/`is_at_ready_prompt_cached()`
+        collapse "hard-blocked (genuinely busy)" and "no ready marker matched
+        yet (ambiguous)" into the same single `False`, which is exactly what
+        let a codex pane read as bare "active" in `takkub list` while its
+        screen plainly showed "Working (0s - esc to interrupt)" — the
+        orchestrator's own declared-idle label and the screen's own busy
+        chrome silently disagreed with nothing surfacing the difference.
+        `Orchestrator._derive_display_state` uses this specifically to split
+        that "active" bucket into a "busy" label.
+
+        Deliberately duplicates (rather than refactors) the hard-blocker loop
+        `_classify_ready`/`_classify_ready_for_provider` already run, instead
+        of extracting a shared helper both would then depend on — those two
+        are covered by `ready_marker_selftest()`'s shipped-table self-test and
+        the task instructions for this change explicitly call out not to risk
+        touching that self-tested precedence chain for an unrelated feature.
+        Same `_ready_region` scoping and "verifying your account" /
+        "please try again shortly" carve-out as `_classify_ready_for_provider`,
+        so the two can never disagree about what counts as hard-blocked for a
+        given provider."""
+        spec = PROVIDER_REGISTRY.get(provider)
+        if spec is None:
+            return False
+        text = _ready_region(self.display_lines())
+        for b in spec.ready_hard_blockers:
+            if b in text:
+                if b == "verifying your account" and "please try again shortly" in text:
+                    continue
+                return True
+        return False
 
     def is_blocked_on_tty_prompt(self) -> str | None:
         """Return the first matching line if the pane is stuck on an interactive

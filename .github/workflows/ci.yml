@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default: neither job pushes commits, opens PRs, or writes
+# packages/releases — both only read the repo to lint/build/test it.
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     # Cockpit ships on Windows (ConPTY), macOS (_pty_backend) and — since

@@ -43,6 +43,7 @@ from .config import (
     agent_role_dir,
     default_cwd_for_role,
     lead_cwd,
+    role_needs_stale_file_guard,
     validate_name,
 )
 from .headless_pane import HeadlessPane
@@ -489,6 +490,37 @@ class PaneState:
     # because CLI argv cannot be changed after process start. Keeping it in
     # PaneState carries the choice through spawn gate/FIFO and auto-respawn.
     model_override: str | None = None
+    # #248/#247 round 2 (extended #269): per-pane provider override, set by
+    # lead_inbox._recover_broken_pane's degrade step — either when a
+    # provider's CLI never rendered any content across a spawn + one retry
+    # (the no-content watchdog), or immediately when the CLI shows its own
+    # auth-failure marker (#269 — no non-degraded retry there, since a login
+    # wall doesn't clear itself on retry) — consulted ahead of
+    # provider_config.effective_provider_for's normal config/availability
+    # resolution (see spawn()'s effective_provider assignment below), same
+    # idea as that function's own "unavailable provider -> claude
+    # substitute" fallback, just pane-scoped instead of global. Clears
+    # naturally the next time this PaneState is popped (close()/done()), so
+    # a later fresh assign() for this role tries the real provider again
+    # instead of staying degraded forever. Mirrors model_override's
+    # shape/precedent immediately above.
+    provider_override: str | None = None
+    # #248/#247 round 2 (extended #269): how many times
+    # lead_inbox._recover_broken_pane has already closed+respawned this pane
+    # for EITHER reason — no-content OR auth-failure (0 = never). For the
+    # no-content watchdog specifically: 1 = one plain retry used; >= 2 = the
+    # degrade-to-claude respawn also used, after which the watchdog gives up
+    # and lets the ordinary elapsed[0] >= max_wait_ms path in
+    # lead_inbox._check take over as the final safety net. An auth-failure
+    # recovery always degrades on its first call (see
+    # lead_inbox._recover_auth_failed_pane) and does not itself branch on
+    # this counter — it only bumps it, same as the no-content path, so a
+    # later no-content check on the same pane degrades sooner rather than
+    # spending a redundant plain retry. Cleared on a deliberate fresh spawn
+    # (see spawn()'s fresh-spawn-clear block), kept across the watchdog's
+    # own _from_auto_respawn=True respawns — same split as
+    # stuck_recover_attempts immediately above.
+    no_content_recover_attempts: int = 0
     # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
     # preload it through --append-system-prompt-file; providers without an
     # equivalent file-backed system-prompt flag keep the pointer/PTY flow.
@@ -587,6 +619,15 @@ class PaneState:
     # every fresh task dispatch, same "one baseline per assign" semantic as
     # assign_ts just above.
     assign_base_sha: str | None = None
+    # #251: HEAD alone cannot distinguish this pane's assignment interval
+    # from dirty files that were already sitting in a shared checkout.  Keep
+    # the repo root plus a cheap snapshot of ONLY porcelain paths:
+    # ``path -> (XY status, mtime_ns, size)``.  No tracked-tree walk or content
+    # hashing.  None means the baseline was unverifiable; {} means the tree was
+    # successfully observed clean.  Isolated worktrees leave both fields unset
+    # and continue using WorktreeInfo.base_sha exactly as before.
+    assign_git_root: str | None = None
+    assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None = None
     # ── auto-resume (🌙, limit_autoresume.py) — park/wake bookkeeping ────────
     # limit_parked: True while this pane is currently parked awaiting its
     # usage-limit window to reset (auto-resume ON path only).
@@ -684,10 +725,10 @@ class PaneRegistry:
 def _teammate_disallowed_tools() -> list[str]:
     """Tools hard-blocked for teammate panes via claude ``--disallowedTools``.
 
-    Default blocks ``Task`` so a teammate can't spawn invisible subagents — the
-    cockpit policy "ห้าม spawn subagent" (CLAUDE.md), which until now was enforced
-    only by the role-prompt and a model could ignore. A teammate fanning out its
-    own Task subagents burns tokens and does work the cockpit can't see in a pane.
+    Pane-mode teammates still block ``Task`` so they cannot create untracked
+    invisible children. ``assign --mode subagent`` never enters this pane spawn
+    path: the Lead's native child runs in the parent provider process and reports
+    through ``subagent-done`` instead.
 
     Override or clear via ``TAKKUB_TEAMMATE_DISALLOWED_TOOLS`` (space/comma-
     separated tool names; empty string disables the block entirely). Only
@@ -1405,8 +1446,13 @@ class SpawnEngineMixin:
         from .provider_config import CLAUDE, effective_provider_for
         from .provider_spec import PROVIDER_REGISTRY
 
-        effective_provider = effective_provider_for(base_role, project=project_ns)
         _ps_initial = self._ps(_exit_key(project_ns, role_name))
+        # #248/#247 round 2: a pane-scoped degrade (no-content watchdog gave
+        # up on this role's real provider after a retry) wins over the
+        # normal config/availability resolution — see PaneState.provider_override.
+        effective_provider = _ps_initial.provider_override or effective_provider_for(
+            base_role, project=project_ns
+        )
         if (
             _ps_initial.spawn_initial_task_state == "requested"
             and PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None
@@ -1449,6 +1495,24 @@ class SpawnEngineMixin:
                 # recovery and never bite a genuinely-wedged pane.
                 _ps_spawn_clear.stuck_recover_attempts = 0
                 _ps_spawn_clear.stuck_recover_gave_up = False
+                # #248/#247 round 2: same reasoning — a deliberate fresh
+                # assign gets a clean no-content-watchdog budget too;
+                # NOT cleared on the _from_auto_respawn path (the
+                # watchdog's own retry/degrade respawns) or the 1-retry
+                # cap would reset every time and never reach degrade.
+                _ps_spawn_clear.no_content_recover_attempts = 0
+                # A stale PaneState that survived a crash without a clean
+                # close()/done() (which would otherwise have popped it) must
+                # not keep a role pinned to claude forever. Note this clears
+                # it for the NEXT spawn, not this one — effective_provider
+                # above already read the pre-clear value for THIS call, so a
+                # crash-while-degraded pane spawns as claude one more time
+                # before self-healing; harmless, and simpler than reordering
+                # the two blocks for an edge-within-an-edge case. Kept across
+                # _from_auto_respawn=True (the watchdog's own degrade respawn
+                # sets this immediately after this block runs, on the SAME
+                # call).
+                _ps_spawn_clear.provider_override = None
             # Auto-respawn path: recover shard_total so TAKKUB_SHARD_TOTAL is
             # re-injected correctly when _shard_total wasn't passed explicitly.
             if _shard_total == 0 and _ps_spawn_clear.shard_total > 0:
@@ -2132,8 +2196,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # "File has been modified since read" loop caused by a running
                 # dev-server/IDE watcher and stop it instead of retry-looping
                 # for minutes. Lead delegates and rarely bulk-edits, so it's
-                # omitted there to save spawn tokens.
-                _appendix += STALE_FILE_GUARD
+                # omitted there to save spawn tokens. Also gated per-role
+                # (#250) on `role_needs_stale_file_guard` — a role proven to
+                # never hold an Edit/Write tool (see config.py's
+                # `_NO_FILE_EDIT_ROLES`) can never hit this race in the first
+                # place; fail-safe default keeps the guard for every other
+                # (including unrecognised/custom) role name.
+                if role_needs_stale_file_guard(base_role):
+                    _appendix += STALE_FILE_GUARD
                 # Graft-usage caveats (token-reduction wave 4): only inject when
                 # this role's LIVE MCP policy actually grants graft — was
                 # previously baked statically into 7 role .md files regardless
@@ -2402,9 +2472,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             teammate_fallback = _remap_pinned_model(teammate_fallback, env)
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
-            # Hard-enforce "ห้าม spawn subagent" (CLAUDE.md) at the CLI level so a
-            # teammate can't fan out invisible Task subagents (was prompt-only).
-            # Teammates only; the Lead is left unrestricted. Override/clear via
+            # Hard-enforce the pane-mode side of #268 at the CLI level. Native
+            # subagent mode runs under Lead and never reaches this spawn branch.
+            # Teammate panes stay restricted; the Lead remains unrestricted. Override/clear via
             # TAKKUB_TEAMMATE_DISALLOWED_TOOLS (see _teammate_disallowed_tools).
             _disallowed_tools = _teammate_disallowed_tools()
             if _disallowed_tools:

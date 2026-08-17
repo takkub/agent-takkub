@@ -326,13 +326,31 @@ class ResourceGovernor:
         with self._lock:
             return [t.pane_id for t in self._tokens.values() if t.resource_class == resource_class]
 
+    def _overload_state_reason(self) -> str:
+        """Why the overload latch is currently held (issue #274): the old
+        code returned "cpu_high" as an unconditional fallback whenever RAM
+        wasn't below its pause line, even when CPU was nowhere near its own
+        pause line either — e.g. CPU 29%/RAM 21.5% reported "cpu_high" for a
+        latch that RAM itself had triggered minutes earlier. `sample()`'s
+        hysteresis enters overload when CPU >= cpu_pause_percent OR RAM <
+        min_available_ram_percent, but only exits when CPU <= cpu_resume_percent
+        AND RAM >= resume_ram_percent (both, not either) — so a latch commonly
+        outlives the metric that originally tripped it while the *other*
+        metric is still catching up to its (stricter) resume line. Report the
+        metric that is actually over ITS OWN pause threshold right now; if
+        neither is, the latch is just waiting on the resume side of the
+        hysteresis gap."""
+        if self._cpu_percent >= self.limits.cpu_pause_percent:
+            return "cpu_high"
+        if self._available_ram_percent < self.limits.min_available_ram_percent:
+            return "memory_low"
+        return "waiting_resume"
+
     def _denial_reason(self, project_id: str, resource_class: ResourceClass) -> str:
         if resource_class in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
             return ""
         if self._overloaded:
-            if self._available_ram_percent < self.limits.min_available_ram_percent:
-                return "memory_low"
-            return "cpu_high"
+            return self._overload_state_reason()
         heavy, by_project, by_class, _holders = self._counts()
         if heavy >= self.limits.max_heavy_global:
             return "heavy_global_limit"
@@ -582,6 +600,11 @@ class ResourceGovernor:
                 "total_memory_bytes": self._total_memory_bytes,
                 "process_count": self._process_count,
                 "overloaded": self._overloaded,
+                # overload_reason (#274): the system-wide reason the latch is
+                # held, independent of any one queued task's resource class —
+                # lets the Performance Health dialog explain the OVERLOAD
+                # banner instead of leaving the user to infer it.
+                "overload_reason": self._overload_state_reason() if self._overloaded else "",
                 "active_heavy_tasks": heavy,
                 "active_tasks_by_project": by_project,
                 "active_tasks_by_class": {key.value: value for key, value in by_class.items()},

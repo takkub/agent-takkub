@@ -141,22 +141,24 @@ class TestAutoRespawnReplay:
 
     def test_assign_rewrites_codex_task_with_override_notice(self, orch: Orchestrator) -> None:
         """assign() must prepend the override notice when the role is backed
-        by codex — otherwise codex over-reads `ห้าม spawn subagent` and skips
+        by codex — otherwise codex over-reads the conditional subagent rule and skips
         `takkub done` as a shell command (regression guard for 9fd6001).
         Asserts the call-site, not just the rewriter helper, so removing
         the assign() integration breaks a test.
 
         The rewritten (notice + task) payload is long enough to trip the
-        file-based task-handoff pointer (issue #1) — the FULL text still
-        lives in last_assigned_task (crash-replay unit) but what actually
-        gets pasted into the pane is a short pointer to the handoff file.
+        file-based task-handoff pointer's LENGTH threshold (issue #1) — but
+        codex's `ProviderSpec.supports_agent_file_read=False` (issue #273:
+        a codex pane has no structured file-read tool distinct from the
+        shell exec the pointer forbids using, so it can't act on a pointer
+        at all) unconditionally skips the pointer regardless of length. The
+        FULL rewritten text is what actually gets pasted — not a pointer to
+        a handoff file.
         """
         from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
 
         ekey = _exit_key(TEST_PROJECT, "codex")
-        raw_task = (
-            "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]\nCross-check refactor X."
-        )
+        raw_task = "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]\nCross-check refactor X."
 
         # The rewrite gate uses effective_provider_for(), which degrades codex
         # → claude when the codex CLI isn't installed (provider substitution).
@@ -172,17 +174,11 @@ class TestAutoRespawnReplay:
         cached = orch._pane_state[ekey].last_assigned_task
         assert cached.startswith(_CODEX_TASK_NOTICE)
 
-        # The pasted payload is a pointer, not the rewritten task itself.
+        # #273: pasted verbatim in full, not pointer-ized — codex has no
+        # file-read tool to act on a pointer with.
         sent_task = mock_send.call_args.args[1]
-        assert sent_task != cached
-        assert sent_task.startswith("[ROLE: codex]")
-
-        task_file = orch._pane_state[ekey].last_assigned_task_file
-        assert task_file is not None
-        assert task_file.replace("\\", "/") in sent_task
-        import pathlib
-
-        assert pathlib.Path(task_file).read_text(encoding="utf-8") == cached
+        assert sent_task == cached
+        assert orch._pane_state[ekey].last_assigned_task_file is None
 
     def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator) -> None:
         """Non-codex roles must NOT receive the codex-specific override

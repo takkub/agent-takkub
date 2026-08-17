@@ -185,8 +185,15 @@ class TestStartDiagnosticNotes:
 
         rc = RemoteControl.maybe_start(MagicMock())
         try:
-            assert "old.example.com" in rc.hostname_mismatch_note
-            assert "new.example.com" in rc.hostname_mismatch_note
+            # Not URL sanitization — just confirming a human-readable
+            # diagnostic note mentions both hostnames; no trust decision
+            # is gated on this substring check.
+            assert (
+                "old.example.com" in rc.hostname_mismatch_note
+            )  # codeql[py/incomplete-url-substring-sanitization]
+            assert (
+                "new.example.com" in rc.hostname_mismatch_note
+            )  # codeql[py/incomplete-url-substring-sanitization]
         finally:
             rc.stop()
 
@@ -244,6 +251,92 @@ class TestStartDiagnosticNotes:
             assert rc._server is not None  # server/notifier untouched
         finally:
             rc.stop()
+
+
+class TestIdleAutoSuspend:
+    """#252: idle-expire tears the live server down for real but must never
+    persist `config.enabled = False` — that's what made remote control stay
+    dead every next boot until the user noticed and re-enabled by hand."""
+
+    def test_idle_expire_stops_server_but_leaves_enabled_true_on_disk(self, _isolated):
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=False,
+            secret_path="existing-secret",
+            token="existing-token",
+        ).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        assert rc is not None
+        assert rc.config.enabled is True
+        rc._server.auth.idle_expired = lambda: True
+
+        rc._check_idle_expire()
+
+        assert rc._server is None  # actually torn down — same security behavior
+        assert rc.auto_suspended is True
+        persisted = RemoteConfig.load()
+        assert persisted.enabled is True  # NOT persisted as user-disabled
+        assert persisted.secret_path == "existing-secret"
+        assert persisted.token == "existing-token"  # #252: no re-pair after idle suspend
+
+    def test_idle_expire_calls_on_auto_suspend_callback(self, _isolated):
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        callback = MagicMock()
+        rc = RemoteControl.maybe_start(MagicMock(), on_auto_suspend=callback)
+        assert rc is not None
+        rc._server.auth.idle_expired = lambda: True
+
+        rc._check_idle_expire()
+
+        callback.assert_called_once()
+
+    def test_a_failing_callback_does_not_escape_the_qtimer_slot(self, _isolated):
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+
+        def _boom():
+            raise RuntimeError("chip repaint failed")
+
+        rc = RemoteControl.maybe_start(MagicMock(), on_auto_suspend=_boom)
+        assert rc is not None
+        rc._server.auth.idle_expired = lambda: True
+
+        rc._check_idle_expire()  # must not raise
+
+        assert rc.auto_suspended is True
+
+    def test_not_yet_idle_leaves_server_running_and_does_not_call_back(self, _isolated):
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        callback = MagicMock()
+        rc = RemoteControl.maybe_start(MagicMock(), on_auto_suspend=callback)
+        try:
+            assert rc is not None
+            rc._server.auth.idle_expired = lambda: False
+
+            rc._check_idle_expire()
+
+            assert rc._server is not None
+            assert rc.auto_suspended is False
+            callback.assert_not_called()
+        finally:
+            rc.stop()
+
+    def test_reboot_after_idle_suspend_starts_remote_control_again(self, _isolated):
+        """The actual field bug: idle-expire overnight used to leave
+        `enabled=False` on disk, so the next cockpit boot's `maybe_start()`
+        read that and returned None — remote control stayed off until the
+        user noticed and re-enabled by hand."""
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        assert rc is not None
+        rc._server.auth.idle_expired = lambda: True
+        rc._check_idle_expire()
+
+        rc2 = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert rc2 is not None  # would be None with the old persist-false bug
+        finally:
+            rc2.stop()
 
 
 class TestQuickTunnelAutoStart:

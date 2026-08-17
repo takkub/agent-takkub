@@ -23,6 +23,9 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from . import cockpit_theme
 from .provider_usage import ProviderUsage
 
+_BAR_HEIGHT = 6
+_BAR_LABEL_WIDTH = 24
+
 # Claude's brand coral — the spark's calm/default colour so the corner always
 # reads as "a little Claude", not a grey system chip (cockpit_theme.METER_CLAY).
 _CLAUDE_CORAL = cockpit_theme.METER_CLAY
@@ -120,18 +123,26 @@ def severity_color(pct: float | None) -> str:
     return _CLAUDE_CORAL
 
 
-def _provider_body_lines(u: ProviderUsage, now: datetime) -> list[tuple[str, str]]:
-    """Per-provider detail lines for the popup card. Every branch is one of the
-    three states the UI must keep visually distinct: '% left', 'N tokens used
-    (not quota)', or 'no data' — never a fabricated 0%."""
+def _provider_body_entries(
+    u: ProviderUsage, now: datetime
+) -> list[tuple[str, str, str] | tuple[str, str, float, str, bool]]:
+    """Per-provider detail entries for the popup card: ``("text", text, color)``
+    for a plain line, or ``("bar", label, pct_used, color, stale)`` for a quota
+    meter. Bar fill is always **% of quota already used** — the same number
+    `severity_color()` takes and the same one Codex's/Claude's text already
+    quotes ("ใช้ไป NN%") — so a card is never a bar meaning "left" next to a
+    line meaning "used". Only real quota fractions (`utilization`/window
+    `utilization`) get a bar; token-only providers (opencode's `spend`) and
+    unsupported/loading/error providers never get a fabricated denominator."""
     if u.status == "unsupported":
-        return [("ไม่มีข้อมูลให้ดู (provider นี้ไม่รองรับ)", cockpit_theme.TEXT_FAINT)]
+        return [("text", "ไม่มีข้อมูลให้ดู (provider นี้ไม่รองรับ)", cockpit_theme.TEXT_FAINT)]
     if u.status == "loading":
-        return [("กำลังโหลด…", cockpit_theme.TEXT_MUTED)]
+        return [("text", "กำลังโหลด…", cockpit_theme.TEXT_MUTED)]
     if u.status == "error":
-        return [("ดึงข้อมูลไม่สำเร็จ", cockpit_theme.STATE_ERROR_BRIGHT)]
+        return [("text", "ดึงข้อมูลไม่สำเร็จ", cockpit_theme.STATE_ERROR_BRIGHT)]
 
-    lines: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str] | tuple[str, str, float, str, bool]] = []
+    stale = u.status == "stale"
     windows = (u.raw_data or {}).get("windows") if u.provider == "claude" else None
     if windows:
         for key, wlabel in (("five_hour", "5h"), ("seven_day", "7d")):
@@ -142,8 +153,11 @@ def _provider_body_lines(u: ProviderUsage, now: datetime) -> list[tuple[str, str
             text = "—" if pct is None else f"{round(pct)}%"
             eta = w.get("eta") or ""
             line = f"{wlabel}: {text}" + (f" · reset ใน {eta}" if eta else "")
-            lines.append((line, severity_color(pct)))
-        lines.append(("ยอดรวมทั้งบัญชี ไม่ใช่ pane นี้เท่านั้น", cockpit_theme.TEXT_FAINT))
+            color = severity_color(pct)
+            if pct is not None:
+                entries.append(("bar", wlabel, pct, color, stale))
+            entries.append(("text", line, color))
+        entries.append(("text", "ยอดรวมทั้งบัญชี ไม่ใช่ pane นี้เท่านั้น", cockpit_theme.TEXT_FAINT))
     elif u.utilization is not None:
         pct_used = round(u.utilization)
         pct_left = max(0, round(100 - u.utilization))
@@ -151,7 +165,9 @@ def _provider_body_lines(u: ProviderUsage, now: datetime) -> list[tuple[str, str
         line = f"เหลือ {pct_left}% (ใช้ไป {pct_used}%)"
         if eta:
             line += f" · reset ใน {eta}"
-        lines.append((line, severity_color(u.utilization)))
+        color = severity_color(u.utilization)
+        entries.append(("bar", "", u.utilization, color, stale))
+        entries.append(("text", line, color))
     elif u.spend:
         bits = []
         input_tok = u.spend.get("input_tokens") or 0
@@ -163,17 +179,21 @@ def _provider_body_lines(u: ProviderUsage, now: datetime) -> list[tuple[str, str
         if cost_usd:
             bits.append(f"${cost_usd:.2f}")
         if bits:
-            lines.append((" · ".join(bits) + " (ไม่ใช่โควต้า)", cockpit_theme.TEXT_MUTED))
+            # No quota denominator exists for a self-tallied token count — a
+            # bar here would fabricate a "% full" that doesn't exist. Number
+            # only, per contract (see docstring + provider_usage.py's own
+            # "never blended into a utilization meter" rule).
+            entries.append(("text", " · ".join(bits) + " (ไม่ใช่โควต้า)", cockpit_theme.TEXT_MUTED))
         else:
-            lines.append(("ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
+            entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
     else:
-        lines.append(("ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
+        entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
 
     age = fmt_age(u.fetched_at, now)
     stale_enough = u.fetched_at is not None and (now - _aware(u.fetched_at)).total_seconds() > 900
-    if age and (u.status == "stale" or stale_enough):
-        lines.append((f"ข้อมูลเมื่อ {age}", cockpit_theme.TEXT_FAINT))
-    return lines
+    if age and (stale or stale_enough):
+        entries.append(("text", f"ข้อมูลเมื่อ {age}", cockpit_theme.TEXT_FAINT))
+    return entries
 
 
 def _aware(dt: datetime) -> datetime:
@@ -221,6 +241,62 @@ class _Spark(QWidget):
         p.end()
 
 
+class _UsageBar(QWidget):
+    """Thin quota meter — fill = % of quota already used, same convention as
+    ``severity_color()``'s input and the sibling text line's "ใช้ไป NN%".
+
+    ``stale=True`` swaps the flat fill for a diagonal hatch instead of a
+    reduced-alpha flat fill: a dimmed-but-still-solid green bar next to
+    "ข้อมูลเมื่อ 5 เดือนที่แล้ว" would still read as "confirmed mostly free"
+    at a glance, which is exactly the false all-clear the task calls out.
+    """
+
+    def __init__(
+        self, pct_used: float, color: str, *, stale: bool = False, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._pct = max(0.0, min(100.0, pct_used))
+        self._color = QColor(color)
+        self._stale = stale
+        self.setFixedHeight(_BAR_HEIGHT)
+        self.setMinimumWidth(60)
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.rect()
+        radius = r.height() / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(cockpit_theme.GROUND_SELECT)))
+        p.drawRoundedRect(r, radius, radius)
+
+        fill_w = round(r.width() * self._pct / 100)
+        if fill_w > 0:
+            fill_rect = QRect(r.x(), r.y(), fill_w, r.height())
+            if self._stale:
+                p.setBrush(QBrush(self._color, Qt.BrushStyle.BDiagPattern))
+            else:
+                p.setBrush(QBrush(self._color))
+            p.drawRoundedRect(fill_rect, radius, radius)
+        p.end()
+
+
+def _build_bar_row(
+    label: str, pct_used: float, color: str, stale: bool, parent: QWidget
+) -> QWidget:
+    row = QWidget(parent)
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    if label:
+        tag = QLabel(label, row)
+        tag.setFixedWidth(_BAR_LABEL_WIDTH)
+        tag.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:10px; font-weight:600;")
+        lay.addWidget(tag)
+    lay.addWidget(_UsageBar(pct_used, color, stale=stale, parent=row), 1)
+    return row
+
+
 def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
     card = QFrame()
     card.setObjectName("usageProviderCard")
@@ -240,11 +316,16 @@ def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
     header.setStyleSheet(f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:12px; font-weight:600;")
     lay.addWidget(header)
 
-    for text, color in _provider_body_lines(u, now):
-        line = QLabel(text, card)
-        line.setWordWrap(True)
-        line.setStyleSheet(f"color:{color}; font-size:11px;")
-        lay.addWidget(line)
+    for entry in _provider_body_entries(u, now):
+        if entry[0] == "bar":
+            _, bar_label, pct_used, color, stale = entry
+            lay.addWidget(_build_bar_row(bar_label, pct_used, color, stale, card))
+        else:
+            _, text, color = entry
+            line = QLabel(text, card)
+            line.setWordWrap(True)
+            line.setStyleSheet(f"color:{color}; font-size:11px;")
+            lay.addWidget(line)
 
     return card
 

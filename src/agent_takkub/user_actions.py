@@ -729,6 +729,20 @@ class UserActionsMixin:
             self._remote_settings_dialog = None
         self._refresh_remote_chip()
 
+    def _on_remote_auto_suspended(self) -> None:
+        """#252: `RemoteControl`'s idle watchdog already tore its own server
+        down by the time this fires — this just drops MainWindow's now-dead
+        `self._remote` handle and repaints the 🌐 chip so the UI stops
+        claiming remote control is live. `config.enabled` was deliberately
+        left untouched on disk (see `_check_idle_expire`'s docstring), so
+        nothing here needs to persist anything — the next boot (or manual
+        Enable) picks remote control back up on its own."""
+        self._remote = None
+        self._refresh_remote_chip()
+        self._status.showMessage(
+            "🌐 Remote control auto-suspended (idle) — back on next launch", 6000
+        )
+
     def _stop_remote_tunnel_only(self) -> None:
         """#197 item 5: `RemoteSettingsDialog`'s "Stop tunnel only" button —
         kills just the tunnel subprocess, keeps the HTTP server/notifier
@@ -799,6 +813,14 @@ class UserActionsMixin:
                 _session_store_mod = importlib.import_module("agent_takkub.remote.session_store")
                 cfg = _config_mod.RemoteConfig.load()
                 cfg.enabled = False
+                # #260: a user-clicked Disable is a revocation boundary, not
+                # an idle pause. Removing both halves of the pairing identity
+                # makes the lost/stolen phone's old URL permanently useless;
+                # `_start()` mints a new pair on the next Enable. The idle
+                # watchdog never enters this branch, so #252's restart-without-
+                # re-pair behavior remains intact.
+                cfg.secret_path = ""
+                cfg.token = ""
                 cfg.save()
                 # #196 requirement 3: disabling remote invalidates every
                 # session outright and immediately, rather than leaning on
@@ -812,7 +834,9 @@ class UserActionsMixin:
 
         config.enabled = True
         config.save()
-        self._remote = _remote_mod.RemoteControl.maybe_start(self.orch)
+        self._remote = _remote_mod.RemoteControl.maybe_start(
+            self.orch, on_auto_suspend=self._on_remote_auto_suspended
+        )
         if self._remote is None:
             return False, "Failed to start the remote server — check logs.", ""
 

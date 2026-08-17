@@ -19,6 +19,7 @@ cursor pane as it does for claude.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from .worktree_manager import parse_porcelain_paths
@@ -69,8 +70,17 @@ def _files_bit(facts: DigestFacts) -> str:
     if facts.files_touched is None:
         suffix = f" ({facts.files_note})" if facts.files_note else ""
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"
-    dirs = f" ({', '.join(facts.files_dirs[:5])})" if facts.files_dirs else ""
     note = f" · {facts.files_note}" if facts.files_note else ""
+    if facts.files_touched == 0:
+        # #278: a measured (not unverifiable) zero is the one file count that
+        # has to be loud. The incident it comes from: a pane reported done
+        # with a complete-looking summary and Lead only found out nothing had
+        # been built by opening the target file by hand. `0` sitting quietly
+        # in the middle of a fact row reads as just another number, so it is
+        # marked — advisory, never blocking, because analysis/QA/research
+        # tasks legitimately finish having touched nothing.
+        return f"⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน (ถ้าเป็นงาน implementation ให้ตรวจก่อนปิด){note}"
+    dirs = f" ({', '.join(facts.files_dirs[:5])})" if facts.files_dirs else ""
     return f"ไฟล์ที่แตะ:{facts.files_touched}{dirs}{note}"
 
 
@@ -106,15 +116,25 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     return "\n".join([line, *extra]) if extra else line
 
 
-def union_files_touched(diffstat_text: str, porcelain_text: str) -> tuple[int, list[str]]:
+def union_files_touched(
+    diffstat_text: str, uncommitted: str | Iterable[str]
+) -> tuple[int, list[str]]:
     """Combine committed-diff paths (since a baseline SHA) with currently
-    uncommitted paths into one deduped "files touched" count + top-level dir
-    list (#245 — a shared-tree pane's work can be committed, uncommitted, or
-    both; neither source alone is the full picture)."""
+    changed dirty paths into one deduped "files touched" count + top-level
+    dir list.
+
+    A porcelain string is still accepted for the isolated legacy callers and
+    pure tests.  Shared-tree done reports pass the already-filtered path list
+    produced by the assign/done metadata snapshots (#251), so pre-existing
+    dirty files that did not change during the assignment are excluded.
+    """
     committed_paths = [
         line.split("|", 1)[0].strip() for line in diffstat_text.strip().splitlines() if "|" in line
     ]
-    all_paths = {p for p in committed_paths if p} | set(parse_porcelain_paths(porcelain_text))
+    uncommitted_paths = (
+        parse_porcelain_paths(uncommitted) if isinstance(uncommitted, str) else uncommitted
+    )
+    all_paths = {p for p in committed_paths if p} | {p for p in uncommitted_paths if p}
     dirs: list[str] = []
     for path in sorted(all_paths):
         top = path.split("/", 1)[0] if "/" in path else path

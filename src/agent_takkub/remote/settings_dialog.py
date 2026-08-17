@@ -59,6 +59,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
 )
 
@@ -149,6 +150,9 @@ def build_config(
     url_mode: str = "random",
     ngrok_domain: str = "",
     ngrok_bin: str = "",
+    secret_path: str = "",
+    token: str = "",
+    idle_expire_min: int = _IDLE_EXPIRE_MIN,
 ) -> RemoteConfig:
     """Assemble a `RemoteConfig` from the dialog's inputs plus the fixed
     "middle of the road" defaults from task spec §2 — the user never has
@@ -156,12 +160,30 @@ def build_config(
     `auth.hash_password`) — this function never sees the plaintext.
     `url_mode`/`ngrok_domain`/`ngrok_bin` are only meaningful for
     `tunnel_type == "ngrok"` — ignored (kept at their defaults) by the
-    Cloudflare modes."""
+    Cloudflare modes.
+
+    #252/#260: `secret_path`/`token` default to "" (mint fresh, same as
+    always — every existing caller/test that omits them keeps that behavior
+    for a brand-new setup). The dialog passes an existing pairing identity
+    through only while it still exists in `current`: an idle auto-suspend
+    preserves it so the next cockpit launch can reconnect without a re-scan,
+    while an explicit Disable revokes it before a later Enable reaches here.
+
+    Deliberately not rotated merely because the tunnel identity changes (new
+    domain/provider/mode): the secret_path/token pair authenticates a
+    session against *this server*, independent of which transport carries
+    the request, and the old pairing link already stops resolving the
+    moment `public_url` changes — forcing a rotate on top of that adds
+    friction with no security upside. Manual Disable is the explicit
+    revocation boundary; unrelated field changes are not.
+    """
     return RemoteConfig(
         enabled=False,  # caller flips this on only after a successful start
         mode=mode,
         bind_port=_FIXED_PORT,
         public_url=public_url.strip(),
+        secret_path=secret_path.strip(),
+        token=token.strip(),
         tunnel=TunnelConfig(
             type=tunnel_type,
             credentials_json=credentials_json.strip(),
@@ -171,7 +193,7 @@ def build_config(
             ngrok_bin=ngrok_bin.strip(),
         ),
         auto_start_tunnel=True,
-        idle_expire_min=_IDLE_EXPIRE_MIN,
+        idle_expire_min=idle_expire_min,
         lockout_after_fails=_LOCKOUT_AFTER_FAILS,
         password_hash=password_hash,
     )
@@ -226,6 +248,11 @@ class RemoteSettingsDialog(QDialog):
         # pass it just doesn't get the button, never a crash.
         self._on_stop_tunnel = on_stop_tunnel
         self._is_live = is_live
+        # #252/#260: an idle auto-suspend leaves this identity intact, but a
+        # successful manual Disable clears it below. That makes the lifecycle
+        # distinction explicit even when the user disables and re-enables
+        # without closing this dialog.
+        self._current = current
         self.setWindowTitle("🌐 Remote Control")
         self.setMinimumWidth(480)
 
@@ -381,6 +408,24 @@ class RemoteSettingsDialog(QDialog):
         password_note.setStyleSheet("color:#71717a;")
         layout.addWidget(password_note)
 
+        # #252 item 3: was hardcoded to 240 with no UI knob — now a real
+        # setting. 0 = auto-expire off (`AuthGate.idle_expired()` already
+        # treats `idle_expire_min <= 0` as "never expire").
+        self._idle_expire_spin = QSpinBox()
+        self._idle_expire_spin.setRange(0, 1440)
+        self._idle_expire_spin.setSuffix(" min")
+        self._idle_expire_spin.setSpecialValueText("off (never auto-suspend)")
+        self._idle_expire_spin.setValue(current.idle_expire_min)
+        self._form.addRow("Idle auto-suspend after:", self._idle_expire_spin)
+
+        pairing_policy_note = QLabel(
+            "Idle auto-suspend keeps this pairing link, so the phone can reconnect after "
+            "the next cockpit launch. Disable & revoke pairing permanently invalidates "
+            "the link; enabling again creates a new one that phones must re-scan."
+        )
+        pairing_policy_note.setWordWrap(True)
+        layout.addWidget(pairing_policy_note)
+
         # #196 requirement 4: a way to kill every phone's session without
         # waiting for its idle-expire window — e.g. a phone was lost/stolen,
         # or the user just wants a clean slate. Always available (not gated
@@ -393,9 +438,7 @@ class RemoteSettingsDialog(QDialog):
         logout_row.addStretch(1)
         layout.addLayout(logout_row)
 
-        defaults_note = QLabel(
-            "Preset: idle-expire 240min · lockout after 5 fails · tunnel auto-start."
-        )
+        defaults_note = QLabel("Preset: lockout after 5 fails · tunnel auto-start.")
         defaults_note.setWordWrap(True)
         defaults_note.setStyleSheet("color:#71717a;")
         layout.addWidget(defaults_note)
@@ -471,7 +514,7 @@ class RemoteSettingsDialog(QDialog):
         )
 
     def _render_state(self, *, pairing_url: str) -> None:
-        self._toggle_btn.setText("Disable" if self._is_live else "Enable")
+        self._toggle_btn.setText("Disable & revoke pairing" if self._is_live else "Enable")
         self._stop_tunnel_btn.setVisible(self._is_live and self._on_stop_tunnel is not None)
         self._stop_tunnel_btn.setEnabled(True)
         editable = not self._is_live
@@ -494,6 +537,7 @@ class RemoteSettingsDialog(QDialog):
             self._access_control,
             self._password_edit,
             self._password_show_btn,
+            self._idle_expire_spin,
         ):
             w.setEnabled(editable)
         if editable:
@@ -558,7 +602,17 @@ class RemoteSettingsDialog(QDialog):
 
     def _on_toggle(self) -> None:
         if self._is_live:
-            self._on_apply(None, False)
+            ok, msg, _pairing_url = self._on_apply(None, False)
+            if not ok:
+                QMessageBox.critical(self, "Disable failed", msg or "Unknown error.")
+                return
+            # #260: keep the dialog's in-memory config consistent with the
+            # persisted revocation performed by `_apply_remote_config`.
+            # Otherwise Disable -> Enable in this same dialog could resurrect
+            # the old lost-phone pairing even though a newly opened dialog is
+            # safe because it reloads the blank identity from disk.
+            self._current.secret_path = ""
+            self._current.token = ""
             self._is_live = False
             self._render_state(pairing_url="")
             return
@@ -590,6 +644,10 @@ class RemoteSettingsDialog(QDialog):
             return
 
         mode = "control" if self._access_control.isChecked() else "view"
+        # #252/#260: reuse is valid only when an identity still exists — the
+        # idle watchdog preserves it, while manual Disable clears it both on
+        # disk and in this dialog. Blank values make `_start()` mint a fresh
+        # pairing for the next explicit Enable.
         config = build_config(
             tunnel_type=tunnel_type,
             credentials_json=credentials_json,
@@ -600,6 +658,9 @@ class RemoteSettingsDialog(QDialog):
             url_mode=url_mode,
             ngrok_domain=ngrok_domain,
             ngrok_bin=ngrok_bin,
+            secret_path=self._current.secret_path,
+            token=self._current.token,
+            idle_expire_min=self._idle_expire_spin.value(),
         )
         ok, msg, pairing_url = self._on_apply(config, True)
         if not ok:

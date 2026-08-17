@@ -1,7 +1,8 @@
 """Issue #166 CLI surface: `takkub task reconcile [--dry-run]` and
-`takkub task close --role <r> [--force] [--dry-run]`.
+`takkub task close --role <r> [--force] [--dry-run]`. Also issue #255's
+`takkub task cancel --role <r>`, same lead-only shape.
 
-Covers: both subcommands are lead-only (teammate blocked before any IPC
+Covers: all three subcommands are lead-only (teammate blocked before any IPC
 call, `task show` stays open), the request payload cli.py builds for each,
 and exit codes on success/failure.
 """
@@ -25,6 +26,7 @@ class TestLeadGate:
             ["task", "reconcile"],
             ["task", "reconcile", "--dry-run"],
             ["task", "close", "--role", "backend"],
+            ["task", "cancel", "--role", "backend"],
         ],
     )
     def test_teammate_is_blocked_before_any_request(
@@ -113,5 +115,34 @@ class TestRequestPayloads:
         )
 
         code = cli.main(["task", "close", "--role", "backend"])
+
+        assert code == 1
+
+    def test_cancel_role_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clear_role_env(monkeypatch)
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        captured = {}
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: captured.update(payload) or {"ok": True, "msg": "no pending delivery"},
+        )
+
+        code = cli.main(["task", "cancel", "--role", "backend"])
+
+        assert code == 0
+        assert captured["cmd"] == "task-cancel"
+        assert captured["role"] == "backend"
+
+    def test_cancel_failure_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clear_role_env(monkeypatch)
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: {"ok": False, "msg": "unknown role: ghost"},
+        )
+
+        code = cli.main(["task", "cancel", "--role", "ghost"])
 
         assert code == 1

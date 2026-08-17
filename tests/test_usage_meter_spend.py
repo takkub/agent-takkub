@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from agent_takkub import cockpit_theme
 from agent_takkub.provider_usage import ProviderUsage
-from agent_takkub.usage_meter import _provider_body_lines
+from agent_takkub.usage_meter import _provider_body_entries
 
 
 def _opencode_usage(**spend_overrides) -> ProviderUsage:
@@ -30,8 +31,9 @@ def _opencode_usage(**spend_overrides) -> ProviderUsage:
 
 
 def test_opencode_spend_renders_tokens_and_cost():
-    lines = _provider_body_lines(_opencode_usage(), datetime.now(tz=UTC))
-    text = lines[0][0]
+    entries = _provider_body_entries(_opencode_usage(), datetime.now(tz=UTC))
+    assert entries[0][0] == "text"
+    text = entries[0][1]
     assert "128,430" in text
     assert "$4.32" in text
     assert "ไม่ใช่โควต้า" in text
@@ -41,11 +43,18 @@ def test_opencode_never_shown_as_utilization_percent():
     """`spend` must never be mistaken for a quota percentage."""
     usage = _opencode_usage()
     assert usage.utilization is None
-    lines = _provider_body_lines(usage, datetime.now(tz=UTC))
-    assert "%" not in lines[0][0]
+    entries = _provider_body_entries(usage, datetime.now(tz=UTC))
+    assert "%" not in entries[0][1]
+
+
+def test_opencode_spend_never_renders_a_bar():
+    """No quota denominator exists for a self-tallied token count — a bar
+    would fabricate a '% full' reading that doesn't exist."""
+    entries = _provider_body_entries(_opencode_usage(), datetime.now(tz=UTC))
+    assert all(kind != "bar" for kind, *_ in entries)
 
 
 def test_provider_with_no_spend_and_no_utilization_shows_no_data():
     usage = ProviderUsage(provider="opencode", status="active", fetched_at=datetime.now(tz=UTC))
-    lines = _provider_body_lines(usage, datetime.now(tz=UTC))
-    assert lines[0][0] == "ไม่มีข้อมูลให้ดู"
+    entries = _provider_body_entries(usage, datetime.now(tz=UTC))
+    assert entries[0] == ("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT)

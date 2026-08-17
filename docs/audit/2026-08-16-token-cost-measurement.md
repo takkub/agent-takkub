@@ -1,0 +1,322 @@
+# Token cost ของการเปิด pane ใหม่ — วัดจริงก่อนตัดตาม #267/#268 (2026-08-16)
+
+Evaluator: devops (`wt/devops-1786849703`, analysis-only — ไม่แตะ source, ไม่ commit ตามคำสั่ง task).
+Scope: ตอบ 4 คำถามด้วยตัวเลข token จริงจาก session JSONL ของ Claude Code (`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, field `message.usage`), ไม่ใช่การประมาณจากจำนวนอักษร ยกเว้นจุดที่ระบุไว้ชัดเจนว่าเป็นค่าประมาณ
+
+## สรุปผู้บริหาร (อ่านอันนี้พอถ้าไม่มีเวลา)
+
+| # | คำถาม | คำตอบ | หลักฐาน |
+|---|---|---|---|
+| 1 | เปิด pane ใหม่กิน token เท่าไหร่ก่อนทำงาน | **cold spawn (ไม่มี cache อุ่น): ~37,600–65,900 token** (ผัน 1.8× ตาม role) · **warm spawn (spawn ใกล้กันภายใน ~1hr): ~59,000–64,500 token รวม** (แบ่งเป็น cache_read คงที่ ~22,972 + cache_creation เฉพาะ role ~36,000–42,000) | วัดจาก `message.usage` เทิร์นแรกจริง 16 session วันนี้ (backend/lead/devops/frontend) |
+| 2 | ในก้อนนั้นอะไรกินเท่าไหร่ | **วัดตรงได้บางส่วน**: role file (5,181–11,504 tok, cl100k) · root CLAUDE.md ที่ role อื่นไม่ควรได้ (6,728 tok, ทุก pane) · graft MCP schema (847 tok, วัดจริงจาก server) · skills catalog+hook+memory (~6,800 tok, นอกเหนือ cockpit ควบคุม) · **ส่วนที่เหลือ ~35,000–39,000 tok วัดไม่ได้** (Claude Code base system prompt + built-in tool schema เป็น proprietary ไม่ serialize ใน JSONL) | ดู §2 |
+| 3 | สัดส่วน pane-open ต่อ token ทั้ง session | **0.199% วันนี้** (16 session, ถ่วงด้วย session ยาวที่มีอยู่จริง) · เทียบกับ **0.4271%** จาก audit 7 วันเดิม (2026-07-24, ก่อน wave3/4 diet) — ทิศทางเดียวกัน คนละ scope/ช่วงเวลา | ดู §3 |
+| 4 | ตัดตาม #267 ได้กี่ % | **ตัดไม่ได้เป็น "%" เดียวรวม** — ผลต่างกันมากตามรายการ ตารางจัดอันดับ resend-weighted ด้านล่าง §4 |
+
+**อันดับลงมือ (คุ้มสุด→น้อยสุด, ตาม token ที่กู้คืนได้ × ความถี่):**
+
+| ลำดับ | สิ่งที่ตัด | ผลตอบแทนโดยประมาณ (resend-weighted, 1 วันนี้ 1 โปรเจกต์) | ความยาก |
+|---|---|---:|---|
+| 1 | **root CLAUDE.md (เอกสาร Lead) ที่ทุก non-Lead pane โหลดเต็มทั้งไฟล์** — พบใหม่นอกเหนือ 4 ข้อใน #267 | ~12.5M tok-เทียบเท่า/วัน (14 non-Lead spawn × 6,728 tok × ~133 เทิร์น/session) | สูง — ต้องคิด mechanism ใหม่ เพราะ Claude Code auto-load `CLAUDE.md` ตามธรรมชาติของ git worktree ไม่ใช่จุดที่ cockpit inject ได้ตรงๆ |
+| 2 | **#267 ข้อ 3: เขียนกฎเป็นอังกฤษ** | ~7.0M tok-เทียบเท่า/วัน (ประมาณ, ลด role-file ~50%) | สูง — เสี่ยง nuance หายตอนแปล ต้อง review |
+| 3 | **#267 ข้อ 1+2: ตัด/ทำ pull-on-demand หัวข้อ browser-guard ในบทบาทไม่มี MCP browser** | ~1.5M tok-เทียบเท่า/วัน (18 spawn × 612 tok × 133 เทิร์น) | ต่ำ — แก้ 1 constant + gate ตาม `role_mcp_allowlist()`, มี precedent แล้ว (`GRAFT_TOOL_CAVEATS` wave4) |
+| 4 | **#267 ข้อ 4: ปิด MCP graft/context7 ที่ role ไม่ใช้** | **ไม่แนะนำตัด** — audit จริง 2026-08-06 วัดแล้วว่า graft net-positive (ceiling ประหยัด 14% vs ต้นทุน 0.56%) | — |
+| 5 | housekeeping ไฟล์ `CLAUDE.spawn-*.md` ค้าง | **0 token** — เป็นเรื่อง disk ไม่ใช่ context | ต่ำ (ทำได้แต่ไม่ใช่ token win) |
+
+รายละเอียดวิธีวัด + ตัวเลขดิบ ↓
+
+---
+
+## 0. แหล่งข้อมูลและ method
+
+1. **Session JSONL จริง** — สแกนทุก dir ใต้ `~/.claude/projects/` ที่ชื่อมี `agent-takkub` และมีไฟล์ `.jsonl` แก้ไขวันที่ 2026-08-16 พบ **16 session** ที่เป็น Claude-provider pane: backend×5 (รวม 1 session cwd=repo root), lead×2, devops×2 (รวม session นี้เอง), frontend×7
+   - **qa/codex/gemini/kimi/opencode วันนี้ไม่มี session ในรูปแบบนี้เลย** — role เหล่านี้รันผ่าน CLI ของ provider อื่น (codex CLI / gemini-agy / kimi / opencode) ซึ่งเก็บ log คนละ schema คนละที่ (`~/.codex/...` ฯลฯ) **วัดด้วยวิธีนี้ไม่ได้** — ต้องมีสคริปต์แยกต่อ provider ถ้าจะเทียบ token จริง (ไม่ทำในรอบนี้ time-boxed)
+   - ระบุ role ต่อ session ด้วยการ `grep` หา `[ROLE: <x> developer]` หรือ absence ของ marker นั้น (ไม่มี = Lead) ไม่ใช่การเดาจาก path
+2. **Token ของ text component คงที่** (role file, root CLAUDE.md, skills listing ฯลฯ) — tokenize จริงด้วย `tiktoken` (`cl100k_base`) เหมือนวิธีที่ `docs/qa-reports/2026-08-06-graft-token-economics.md` ใช้วัด graft schema (847 tok, ตัวเลขที่ผมอ้างอิงตรงมา ไม่วัดซ้ำ) — ติดตั้ง `tiktoken` ชั่วคราวใน `.venv` แล้ว uninstall หลังใช้เสร็จ (ตาม precedent เดียวกัน) **cl100k_base ไม่ใช่ tokenizer จริงของ Claude** — เป็นค่าประมาณอันดับความสำคัญถูกต้อง (order of magnitude) ตามที่ audit เดิมระบุไว้แล้ว ไม่ใช่ตัวเลขที่ผูกกับบิลจริงเป๊ะ
+3. **สิ่งที่ประกาศไว้ล่วงหน้าว่าวัดไม่ได้**: Claude Code เอง (base system prompt + built-in tool JSON schema เช่น Read/Write/Edit/Bash/Grep/Glob/Task/WebFetch ฯลฯ) เป็น proprietary — ไม่ serialize เป็น text ใน JSONL เลย มีแต่ผลรวม `usage.cache_creation_input_tokens` ที่รวมทุกอย่างเข้าด้วยกัน แยกส่วนไม่ได้จากข้อมูลฝั่งเรา (audit `2026-07-24-token-audit.md` สรุปไว้แล้วเหมือนกันว่า "assigning exact token counts to those individual pieces would be fabricated" — ผมยึดหลักเดียวกัน ไม่เติมตัวเลขให้ครบ)
+
+---
+
+## 1. Pane-open cost — วัดจริงจาก 16 session วันนี้
+
+| role | n | cold (cache_read=0) | warm | first-prompt เฉลี่ย (tok) | หมายเหตุ |
+|---|---:|---:|---:|---:|---|
+| backend | 5 | 2 | 3 | 55,404 | รวม 1 session cwd=repo root (ไม่ผ่าน worktree) |
+| lead | 2 | 0 | 2 | 65,737 | ไม่มี `[ROLE:]` marker — Lead ไม่ได้รับ task-block prefix แบบทีม |
+| devops | 2 | 0 | 2 | 64,407 | รวม session นี้เอง (ยังไม่จบตอนวัด) |
+| frontend | 7 | 1 | 6 | 59,543 | |
+
+**cold vs warm ชัดเจน**: session แรกของวัน/ของ wave จ่ายเต็มราคา (cache_creation = เกือบทั้งก้อน, cache_read = 0) — session ถัดไปที่ spawn ภายใน cache TTL (~1 ชม., ระบุใน system context ของ session นี้เอง) จะ hit `cache_read` ตรง **22,972 token คงที่ทุก role ที่สุ่มตรวจ** (backend/devops/frontend เท่ากันเป๊ะ) ส่วนที่เหลือ (36,000–42,000) เป็น cache_creation เฉพาะ role นั้น (role file + MCP schema + task text ที่ยังไม่เคยถูก cache มาก่อน)
+
+**นัยสำคัญ**: 22,972 token คงที่นี้คือ prefix ที่ทุก role เหมือนกันเป๊ะ (ไม่ขึ้นกับ role file ที่ต่างกัน) — เดาได้อย่างมีเหตุผลว่าประกอบด้วย Claude Code base system prompt + built-in tool schema + skills catalog + hook block + `~/.claude/CLAUDE.md` + MEMORY.md (ผลรวมที่วัดตรงได้ของ 5 อย่างหลัง = 6,818 tok จาก §2 — เหลือ ~16,000 tok เป็นส่วนของ Claude Code เองที่วัดไม่ได้) **นี่เป็นการอนุมานจากลบเลข ไม่ใช่การอ่านค่าตรง — ทำเครื่องหมายเป็นประมาณ**
+
+---
+
+## 2. Breakdown ของก้อน token (แยกวัดตรง / ประมาณ / วัดไม่ได้)
+
+### วัดตรง (tiktoken cl100k_base, ต่อ 1 spawn)
+
+| component | chars | tok (cl100k) | ใช้กับใคร |
+|---|---:|---:|---|
+| root `CLAUDE.md` (เอกสาร "Dev Team Lead") | 14,179 | **6,728** | **ทุก pane ทุก role** (Claude Code auto-load ตามที่อยู่ของไฟล์ในทุก worktree — verify แล้วว่า byte-identical ทุก worktree) |
+| role file `runtime/agents/qa/CLAUDE.md` | 23,393 | 11,504 | เฉพาะ qa |
+| role file `runtime/agents/devops/CLAUDE.md` | 21,529 | 11,228 | เฉพาะ devops |
+| role file `runtime/agents/backend/CLAUDE.md` | 20,964 | 10,120 | เฉพาะ backend |
+| role file `runtime/agents/frontend/CLAUDE.md` | 20,929 | 10,158 | เฉพาะ frontend |
+| role file `runtime/agents/critic/CLAUDE.md` | 21,637 | 9,544 | เฉพาะ critic |
+| role file `runtime/agents/reviewer/CLAUDE.md` | 15,946 | 8,518 | เฉพาะ reviewer |
+| role file `runtime/agents/maintainer/CLAUDE.md` | 11,044 | 5,287 | เฉพาะ maintainer |
+| role file `runtime/agents/docs/CLAUDE.md` | 10,357 | 5,480 | เฉพาะ docs |
+| role file `runtime/agents/codex/CLAUDE.md` | 9,775 | 5,524 | เฉพาะ codex-role-on-claude-substitute (ไม่ใช่ codex CLI ตัวจริง) |
+| role file `runtime/agents/mobile/CLAUDE.md` | 8,604 | 4,558 | เฉพาะ mobile |
+| role file `runtime/agents/gemini/CLAUDE.md` | 5,581 | 3,078 | เฉพาะ gemini-role-on-claude-substitute |
+| role file `runtime/agents/designer/CLAUDE.md` | 9,289 | 5,181 | เฉพาะ designer |
+| graft MCP `tools/list` schema (6 tools) | 3,436 | **847** | backend/frontend/mobile/devops/qa/reviewer/critic (`role_mcp_allowlist`) — **วัดจริงจาก server handshake, อ้างอิงจาก `docs/qa-reports/2026-08-06-graft-token-economics.md` ไม่วัดซ้ำ** |
+| skills catalog (รายการ skill ที่ available) | 12,222 | 2,720 | ทุก pane (global, ไม่ขึ้นกับ role/project) |
+| `using-superpowers` SessionStart hook block | 5,670 | 1,376 | ทุก pane (global) |
+| deferred-tools reminder list | 464 | 109 | ทุก pane (global) |
+| `~/.claude/CLAUDE.md` (graphify+RTK, user-level) | 838 | 235 | ทุก pane บนเครื่องนี้ (ไม่ใช่แค่ project นี้) |
+| MEMORY.md (user auto-memory, ผูกกับ project dir) | 8,896 | 2,378 | ทุก pane ของ project นี้ (Claude Code native feature) |
+| "Browser & เครื่องมือหนัก" guard block (1 instance) | 1,259 | 612 | มีอยู่ใน 7 role file (backend/codex/devops/frontend/qa/reviewer/critic) แต่ MCP browser จริงมีแค่ qa/critic/designer — **5 role ถือ block นี้ไว้เฉยๆ โดยไม่มี MCP ให้ guard** (pane_guard บล็อกที่ tool level อยู่แล้ว) |
+
+**รวมส่วนที่วัดตรงได้และ "ไม่ควรอยู่ในมือ specialist role"**: root CLAUDE.md (6,728) + browser-guard ส่วนเกิน (612 × 5 role ที่ไม่มี MCP) = แกนหลักของสิ่งที่ #267 พูดถึง
+
+### ประมาณ (ระบุวิธีคิด + error bar)
+
+- **สัดส่วน Thai vs English token-efficiency**: role file ภาษาไทยล้วน (เช่น devops) ได้ 1.92 char/tok ส่วน `~/.claude/CLAUDE.md` (อังกฤษ+โค้ดเป็นหลัก) ได้ 3.57 char/tok — **English ประหยัดกว่า Thai ~1.7–1.9× ต่อความหมายเดียวกัน** (สอดคล้องกับสูตร `thai_chars/1.2 + other_chars/4` ที่ wave3/wave4 ใช้) ถ้าแปล role file เป็นอังกฤษล้วน (เก็บเฉพาะ output-format ไว้เป็นไทย) คาดว่าลดได้ **~45–55%** ของ token ต่อไฟล์ — **นี่คือค่าประมาณ ไม่ใช่การแปลจริงแล้ววัด** error bar กว้าง เพราะขึ้นกับว่าแปลแล้วยาวขึ้น/สั้นลงแค่ไหนจริง
+- **prefix ~23K ที่ cache ใช้ร่วมกัน (§1) ประกอบด้วยอะไรบ้าง** — วัดตรงได้ 6,818 tok (skills+hook+deferred+global CLAUDE.md+MEMORY.md) เหลือ ~16,000 tok เป็นส่วนของ Claude Code base system prompt + built-in tool schema ที่**อนุมานจากการลบเลข ไม่ใช่วัดตรง**
+
+### วัดไม่ได้เลยด้วยข้อมูลที่มี (บอกตรงๆ ไม่เติมให้ครบ)
+
+- **Claude Code base system prompt เอง** — ไม่ serialize เป็น text ที่เข้าถึงได้จาก JSONL หรือจากภายใน session ใดๆ ต้องมีทีม Anthropic เปิดเผยเอง หรือวัดทางอ้อมด้วยการทำ session ว่างเปล่าสุดๆ เทียบกับ session ที่มี component ครบ (ไม่ทำในรอบนี้)
+- **Built-in tool JSON schema** (Read/Write/Edit/Bash/Grep/Glob/Task/TodoWrite/WebFetch/WebSearch ฯลฯ) — เหตุผลเดียวกัน
+- **playwright + chrome-devtools MCP schema** (สำหรับ qa/critic/designer) — วิธีวัดที่ถูกต้อง (spawn server จริงแล้ว handshake `tools/list` เหมือนที่ทำกับ graft ใน 2026-08-06) **แต่ policy ของ role นี้ (devops) ห้ามรัน/ติดตั้ง browser driver ไม่ว่าช่องทางไหน แม้จะเป็นแค่ handshake ไม่เปิด browser จริงก็ตาม** — ไม่ทำในรอบนี้ ต้องให้ qa (เจ้าของสิทธิ์ MCP นั้น) รันสคริปต์แบบเดียวกับ `mcp_probe.mjs` เอง จึงจะได้ตัวเลขจริง — จากข้อมูล ecosystem ทั่วไป Playwright MCP + chrome-devtools MCP มักมี tool count มากกว่า graft (6 tools) หลายเท่า **แต่ไม่มีตัวเลขที่พิสูจน์ได้ในมือตอนนี้ ไม่เดา**
+- **การแยก cache_creation ของ role file ออกจาก task-text ที่แนบมาด้วยในเทิร์นแรก** — JSONL มีแค่ผลรวม ไม่มีจุดคั่นให้แยก (audit 2026-07-24 สรุปไว้แล้วเหมือนกัน — "assigning exact token counts to those individual pieces would be fabricated")
+
+---
+
+## 3. สัดส่วน pane-open ต่อ total session tokens
+
+| Scope | sum(first-prompt) | sum(session total) | share |
+|---|---:|---:|---:|
+| **วันนี้ 16 session (agent-takkub เท่านั้น)** | 954,109 | 478,698,804 | **0.199%** |
+| 7-day rolling ทั้งเครื่อง (2026-07-24, ก่อน wave3/4 diet) | 18,454,763 | 4,321,402,081 | 0.4271% |
+
+ตัวเลขวันนี้ต่ำกว่า 7 วันก่อน ~2 เท่า — สอดคล้องทิศทางกับ wave3/wave4 ที่ตัด role file ไปแล้วบางส่วน (ยังไม่ใช่หลักฐานเชิงสาเหตุ เพราะ sample คนละขนาด คนละช่วงเวลา คนละ mix ของ session ยาว/สั้น — **บอกทิศทางได้ ไม่ควรอ้างเป็น "ลดลง X% เพราะ wave3/4"**)
+
+**อ่านตัวเลขนี้ให้ถูก**: ตัวหารคือ**ทั้ง session** รวมทุกเทิร์น การที่ pane-open share ต่ำมาก **ไม่ได้แปลว่าตัดไม่คุ้ม** — เพราะ prompt เดิมถูกจ่ายซ้ำเป็น `cache_read` ทุกเทิร์นที่เหลือของ session (กลไกเดียวกับที่ `docs/qa-reports/2026-08-06-graft-token-economics.md` §3 พิสูจน์ไว้กับ MCP schema) — นี่คือเหตุผลที่ §4 ใช้ resend-weighted ไม่ใช่ first-render share
+
+---
+
+## 4. โปรเจกชันผลตอบแทนจากการตัดตาม #267 (resend-weighted)
+
+สูตร: `spawn_frequency (วันนี้, project นี้) × token_saved_per_spawn × mean_turns_per_session`
+`mean_turns_per_session` ใช้ 133.4 (ค่าเฉลี่ยจาก sample 31 session ของ `2026-08-06-graft-token-economics.md` — ไม่ได้คำนวณใหม่ในรอบนี้ ใช้ค่าที่มีอยู่แล้วเพื่อความสอดคล้อง) **นี่คือ ceiling แบบเดียวกับที่ audit เดิมเตือนไว้ — สมมติว่า content นั้นถูก resend ทุกเทิร์นจนจบ session จริง (ไม่หัก compaction) เป็นค่าสูงสุดทางทฤษฎี ไม่ใช่คำมั่นสัญญา**
+
+| ลำดับ | รายการ | token/spawn ที่กู้คืนได้ | spawn วันนี้ (project นี้) | resend-weighted ceiling | ความเห็น |
+|---|---|---:|---:|---:|---|
+| 1 | ตัด root CLAUDE.md เนื้อหา Lead-only ออกจาก non-Lead pane | 6,728 | 14 (backend5+devops2+frontend7, ไม่รวม lead) | **~12.5M** | ใหญ่สุดแต่แก้ยากสุด — Claude Code auto-load `CLAUDE.md` จาก cwd tree เอง ไม่ใช่จุดที่ spawn_engine.py inject ตรงๆ ต้องคิด mechanism ใหม่ (เช่น per-role symlink/ไฟล์แยก หรือทำให้ root CLAUDE.md สั้นลงเหลือแค่สิ่งที่จำเป็นสำหรับทุก role + ให้ Lead-only เนื้อหาย้ายไปที่อื่นที่ specialist ไม่โดน auto-load) — **ไม่อยู่ใน 4 ข้อของ #267 เดิม เป็น finding ใหม่จากรอบวัดนี้** |
+| 2 | #267 ข้อ 3 — เขียนกฎอังกฤษ | ~3,750 (ประมาณ, เฉลี่ย ~50% ของ role file 7,500 tok) | 14 | **~7.0M** (ประมาณ) | effort สูง เสี่ยง nuance หาย ต้อง review ทุกไฟล์หลัง rewrite |
+| 3 | #267 ข้อ 1+2 — ตัด/ทำ pull-on-demand browser-guard block ใน role ไม่มี MCP browser | 612 (เหลือ pointer ~20, ประหยัดสุทธิ ~592) | 18 (backend5+frontend7+devops2, ไม่รวม codex เพราะวันนี้รันบน codex CLI ไม่ใช่ claude) | **~1.4M** | effort ต่ำสุด — มี precedent ชัดจาก wave4 (`GRAFT_TOOL_CAVEATS` gate ผ่าน `role_mcp_allowlist()` แล้ว) ทำแบบเดียวกันกับ block นี้ได้เลย |
+| 4 | #267 ข้อ 4 — ปิด MCP schema ที่ role ไม่ใช้ | 847 (graft) | ตัวเลขนี้ **ไม่ควรตัด** | — | audit 2026-08-06 วัดแล้วว่า net-positive ชัดเจน (ceiling ประหยัด 14% ของ Read/Grep/Glob token vs ต้นทุนคงที่แค่ 0.56%) — การตัดจะเสียมากกว่าได้ **สวนทางกับสมมติฐานตั้งต้นของ #267 ข้อนี้** — เขียนไว้ตรงๆ ให้ Lead เห็น ไม่ implement |
+| 5 | #267 ข้อ 5 — housekeeping ไฟล์ `CLAUDE.spawn-*.md` ค้าง | 0 | — | 0 tok | ไม่กิน context (แค่ disk 876KB) — ทำได้แต่ไม่ใช่ token win อย่าจัดลำดับสูงเพราะเป็น token task |
+
+**หมายเหตุสำคัญ**: อันดับ 1 กับ 2 มีขนาด ceiling ใหญ่กว่าอันดับ 3 มาก แต่ effort สูงกว่ามาก (อันดับ 1 ต้องคิด mechanism ใหม่ทั้งหมด, อันดับ 2 เสี่ยง regression เชิงความหมาย) — ถ้าจะเริ่มจากของที่ *ship ได้เร็วและมี precedent อยู่แล้ว* อันดับ 3 คือจุดเริ่มที่ปลอดภัยสุด ก่อนลงทุนกับ 1/2
+
+---
+
+## Verification
+
+- ไม่แก้ source, ไม่ commit, ไม่ push — ตามคำสั่ง task (analysis-only)
+- `tiktoken` ติดตั้งชั่วคราวใน `.venv` เพื่อวัด token component แล้ว uninstall ทันทีหลังใช้ (`pip uninstall -y tiktoken` — ยืนยันว่า "Successfully uninstalled") ไม่ทิ้งเป็น dependency
+- ไม่รัน/ติดตั้ง playwright/chrome-devtools MCP driver ใดๆ (ตาม role policy) — เป็นเหตุผลที่ §2 ทิ้งช่องว่างนั้นไว้ตรงๆ แทนการเดา
+- ตัวเลข graft MCP schema (847 tok) และ 31-session resend methodology **อ้างอิงจาก** `docs/qa-reports/2026-08-06-graft-token-economics.md` ไม่ได้วัดซ้ำ — cross-check แล้วว่าตัวเลขนั้นยังสอดคล้องกับ `_ROLE_MCP_POLICY` ปัจจุบัน (`shared_dev_tools.py:730-741`, อ่านสดวันนี้)
+- ตัวเลข role-file ขนาดไบต์ตรงกับที่ issue #267 อ้างไว้เอง (qa 36.8KB, devops 36.2KB, frontend 33.5KB, backend 33.3KB) — cross-check ผ่าน `wc -c` สด ไม่ได้เชื่อตามตัวเลขใน issue เฉยๆ
+
+## Not done / ส่งต่อ
+
+- playwright + chrome-devtools MCP schema token count — ต้อง **qa** รัน `mcp_probe.mjs`-style handshake เอง (devops ทำไม่ได้ตาม role policy)
+- แยก token cost ของ non-Claude provider (codex CLI / gemini-agy / kimi / opencode) — ต้องเขียนตัวแยกวิเคราะห์ log แยกต่างหากทีละ provider เพราะ schema ไม่ตรงกับ JSONL ของ Claude Code
+- แปล role file เป็นอังกฤษจริง + วัด token หลังแปล (ตอนนี้เป็นค่าประมาณจากสัดส่วน char/token เท่านั้น)
+
+---
+
+## 5. Implementation (2026-08-16, worktree `wt/devops-1786850783`) — ตัดจริงตาม §4 อันดับ 1, ข้าม 3 พร้อมเหตุผล
+
+**ทำ:** อันดับ 1 (root CLAUDE.md diet) เท่านั้น ตามคำสั่ง user (ห้ามแตะข้อ 2/แปลอังกฤษ, ห้ามแตะ MCP)
+
+**ข้าม (ไม่ทำ) อันดับ 3 (browser-guard pull-on-demand) — พบ blocking risk ระหว่าง investigate จริง ไม่ใช่แค่ effort สูง:**
+
+สมมติฐานเดิมใน §4 อันดับ 3 ที่ว่า "มี precedent ชัดจาก wave4 (`GRAFT_TOOL_CAVEATS`)" ตรวจแล้วไม่ตรงกับ risk profile ของ browser-guard เพราะ:
+
+- `tests/test_agent_role_files_have_browser_guard.py` (docstring) ระบุตรงๆ ว่า role `.claude/agents/*.md` prose คือ **enforcement ชั้นเดียวที่ non-claude pane (codex/gemini-agy/opencode/kimi/cursor) เห็น** — `pane_guard.py`'s PreToolUse hook บล็อกจริงเฉพาะ **claude pane เท่านั้น**
+- ตาม source ที่อ่านจริง (`spawn_engine.py:1702-1946`, `codex_agents_md.py`): non-claude teammate (ไม่ใช่ Lead) ได้แค่ `CODEX_AGENTS_MD` cheatsheet ทั่วไป + skill appendix เท่านั้น — **ไม่เคยอ่าน `.claude/agents/<role>.md` เลยในเส้นทางปัจจุบัน** ไม่ว่ากรณีไหน ต่างจาก `GRAFT_TOOL_CAVEATS` ที่เป็นแค่ "nice-to-have" caveat (ไม่ใช่ hard safety block) และไม่มี dedicated regression test ผูกกับ multi-provider ไว้แบบนี้
+- สรุปได้ 2 อย่างที่ยังพิสูจน์ไม่ได้ 100% จากขอบเขตงานนี้: (a) test docstring อาจ stale จริง (ไม่ตรง behavior ปัจจุบัน) หรือ (b) มี pathway อื่นที่ยังไม่เจอที่ทำให้ non-claude เห็น prose นี้จริง — ทั้งสองกรณีคือคำถาม **multi-provider correctness** ไม่ใช่ token-diet ล้วนๆ แล้ว
+- เอา token-saving มาแลกกับ "อาจถอด safety net เดียวที่ non-claude มีต่อ browser-driver bloat (เคยกิน cache ถึง 2.88GB/4 builds)" โดยไม่มั่นใจ 100% ว่า assumption ถูก = ไม่คุ้มความเสี่ยงสำหรับ solo devops ตัดสินใจเอง — ไม่ implement, รายงานเป็น finding ให้ Lead ตัดสินว่าจะส่งต่อใคร (แนะนำ: ต้องมีคนตรวจ context_strategy ของ opencode/cursor/gemini เต็มๆ ก่อน ไม่ใช่แค่ codex/kimi ที่ตรวจในรอบนี้ + อาจต้องเขียน test ใหม่แทนที่จะแก้ test เดิม)
+
+**ไฟล์ที่แก้ (อันดับ 1 เท่านั้น):**
+- `CLAUDE.md` (root) — เหลือเฉพาะกฎที่ทุก role ต้องรู้ (godfile-map pointer, multi-provider, cross-platform, test tiers) + pointer บังคับให้ Lead อ่าน `docs/lead/role-and-workflow.md`
+- `docs/lead/role-and-workflow.md` (ใหม่) — ย้ายเนื้อหา Lead-only ทั้งหมดมาแบบ verbatim (บทบาท Lead, parallel dispatch, multi-project tabs, quick reference, vault, auto-routing table, proposal template, confirm handling, done-handoff, lead reply style, auto-fire exceptions, cockpit self-bug auto-issue, unavailable-provider substitution, spawn+assign, anti-patterns) — ไม่ลบกฎใดทิ้ง
+
+**Before/after (วัดจริงด้วย tiktoken cl100k_base เหมือน §0-§2, ติดตั้ง/ถอน `tiktoken` ชั่วคราวรอบใหม่แล้วยืนยัน uninstall สำเร็จอีกครั้ง):**
+
+| ไฟล์ | ก่อน (chars → tok) | หลัง (chars → tok) |
+|---|---:|---:|
+| `CLAUDE.md` (root, ทุก non-Lead pane โหลดเต็ม) | 14,179 → **6,728** | 2,080 → **948** |
+| `docs/lead/role-and-workflow.md` (ใหม่ — pull-on-demand, Lead อ่านเองตอน spawn) | — (ไม่เคยมีไฟล์นี้) | 13,130 → **6,331** |
+
+**ผลตอบแทนที่วัดได้จริง (ไม่ใช่ ceiling ประมาณ):** non-Lead pane ประหยัด **6,728 − 948 = 5,780 tok/spawn** — เอาไปคูณ resend-weighted เดิมของ §4 อันดับ 1 (14 spawn/วัน × 133.4 เทิร์นเฉลี่ย) ได้ **~10.8M tok-เทียบเท่า/วัน** (ต่ำกว่า ceiling เดิมที่ประมาณไว้ 12.5M เพราะไม่ได้ตัดทุกบรรทัด — เหลือ godfile-map/multi-provider/cross-platform/test-tiers ที่ universal จริง + เพิ่ม pointer บรรทัดใหม่)
+
+Lead เองได้ประโยชน์เพิ่ม (นอกเหนือ 14 spawn ที่นับใน §4): `_build_lead_context_text()` (`lead_context.py:336-341`) อ่าน root `CLAUDE.md` เป็น `base` ของ system-prompt-file ตัวเองด้วย — ไฟล์เล็กลงจึงลด base ของ Lead เองไปด้วยเป็นผลพลอยได้ (ไม่ได้นับในตัวเลขข้างบนเพราะ §4 เดิมตั้งใจไม่รวม Lead)
+
+**Verification:**
+- `docs-verify`: `python -m agent_takkub.cli docs-verify` รันจาก worktree นี้ → 10 broken ref เดิม (ไม่เกี่ยวกับไฟล์ที่แก้ — `runtime/*.json` ที่ gitignore ไว้) **ไม่มี broken ref ใหม่จาก `CLAUDE.md` หรือ `docs/lead/role-and-workflow.md`**
+- targeted tests เขียวหมด (ไม่รัน full suite): `test_lead_write_guard.py` `test_lead_context_compact.py` `test_lead_context_docs_lead_rewrite.py` `test_lead_project_rules.py` `test_lead_provider_unlock.py` `test_docs_verify.py` `test_project_rules.py` `test_agent_role_files_have_browser_guard.py` `test_pane_guard.py` — ผ่านทั้งหมด (รันผ่าน `PYTHONPATH=<repo>/src` ตาม conftest's #202 guard, ไม่แตะ shared venv editable install)
+- โค้ดที่อ่าน root `CLAUDE.md` เชิงโปรแกรม (`lead_context.py`, `spawn_engine.py`, `project_rules.py`, `docs_verify.py`) ตรวจแล้วว่าไม่ parse เนื้อหาเฉพาะเจาะจงจากไฟล์ (แค่อ่านทั้งไฟล์เป็น base string + string-replace `docs/lead/` prefix สำหรับ installed build ซึ่งยังทำงานถูกกับ path ใหม่ที่เพิ่ม) — `orchestrator_text.py`/`codex_agents_md.py`/`custom_roles.py` ไม่ได้อ้างอิง `CLAUDE.md` เลย (grep ยืนยันแล้ว)
+- แก้เพิ่มนอกขอบเขตเดิม (ตามคำสั่งแทรกจาก Lead): `tests/test_kimi_provider.py::TestKimiSpec::test_tui_markers_remain_an_explicit_gap` แดงเพราะ #257 (commit 7080ec9) calibrate `kimi_spec.ready_rules` และ `auth_error_markers` ของจริงแล้ว (deterministic, ไม่ใช่ flaky) — อัปเดต assertion ให้ตรง reality ใหม่ (`ready_rules` = calibrated marker, `auth_error_markers` = calibrated `"send /login to login"`) **ยังคง assert `ready_hard_blockers == ()`** (busy-marker gap ที่ยังไม่ calibrate จริง — เจตนาเดิมของเทสไม่หาย) เปลี่ยนชื่อเทสให้ตรงสิ่งที่มันกันจริง — `tests/test_kimi_provider.py` + `tests/test_pty_ready_prompt.py` เขียวหมด, `ruff check` ผ่าน
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786850783`
+
+## Fix-loop: installed-mode rewrite ไม่ตามเข้าไปแก้ nested reference (QA regression, 2026-08-16)
+
+**อาการที่ QA จับได้:** `tests/test_installed_mode_gate.py::TestInstalledLeadContext::test_docs_lead_shipped_and_rewritten_to_resolvable_paths` แดง (6667 pass / 1 fail) — regression จริงจากการ diet ด้านบน ไม่ใช่เทสเก่าปักหมุด
+
+**Root cause ที่พิสูจน์แล้ว (ไม่ใช่เดา):** สร้าง wheel จริง + ติดตั้งใน venv สะอาด (ไม่มี `agent_takkub` ติดอยู่ก่อน — จำเป็นเพราะ conftest's `_assert_agent_takkub_matches_this_checkout()` no-op เฉพาะตอน `agent_takkub` import ไม่ได้เลย, เครื่องนี้มี stale global install ที่ `Python311/Lib/site-packages/agent_takkub` ทำให้ subprocess ที่สืบทอด `PYTHONPATH` เจือปนผลทดสอบ — ต้องแยก venv ทดสอบต่างหากถึงจะได้ ground truth สะอาด) แล้วรันโค้ดจริงตามที่เทสทำ:
+- staging (`setup.py::_stage_assets`) ยังถูกต้อง 100% — `docs/lead/*.md` ทุกไฟล์ (รวม `role-and-workflow.md` ใหม่) ถูก ship เข้า wheel จริง ยืนยันด้วยการเปิด wheel ตรวจ zip listing
+- ตัวปัญหาจริง: `_build_lead_context_text()` เดิม rewrite แค่ **ระดับเดียว** — string-replace `"docs/lead/"` บน `base` (root CLAUDE.md เอง) ซึ่งหลัง diet มีแค่ pointer เดียวไปยัง `docs/lead/role-and-workflow.md` เท่านั้น ไม่มี `patterns.md`/`cli-reference.md` โผล่ใน `base` อีกต่อไป — ส่วน `role-and-workflow.md` (ไฟล์ที่ถูกชี้ไป) ยังคง cross-reference `docs/lead/patterns.md`, `docs/lead/cli-reference.md` แบบ relative **ข้างในตัวมันเอง** ซึ่งไม่เคยถูก rewrite เลย → ถ้า Lead บน installed build ทำตามคำสั่ง (อ่าน role-and-workflow.md แล้วต้องการเปิด patterns.md ต่อ) จะเจอ path เสียซ้ำอีกชั้นหนึ่ง (functional gap ใหม่ที่ #267 เปิดขึ้นมาโดยไม่ตั้งใจ)
+
+**Fix ที่เลือก (ตัดสินเอง + เหตุผล):** `lead_context.py::_build_lead_context_text()` — ในสาขา installed-mode (`ASSETS_ROOT != REPO_ROOT`) เพิ่ม 2 อย่าง แทนที่จะทำแค่ replace บน `base`:
+1. **Rewrite ไฟล์ staged จริงบนดิสก์ (idempotent):** loop ทุกไฟล์ `ASSETS_ROOT/docs/lead/*.md` (ไม่ใช่แค่ role-and-workflow.md — กันไว้ทุกไฟล์ที่ ship มา เผื่อมี chain ลึกกว่า 1 ชั้น) แล้ว string-replace `"docs/lead/"` → absolute path ในเนื้อไฟล์เอง เขียนทับกลับที่เดิม — แก้ปัญหาจริง: Lead ที่ Read role-and-workflow.md (ผ่าน path ที่ rewrite แล้วเหมือนเดิม) จะเห็น cross-reference ข้างในเป็น absolute พร้อมใช้ทันที ไม่ต้องพึ่ง hop ที่สอง
+2. **แปะ resolved-path map สั้นๆ ต่อท้าย `base`:** list `{absolute_dir}/{filename}.md` ของทุกไฟล์ staged — ทำให้ rendered lead-context (สิ่งที่ `_render_lead_context()` เขียนจริง) มี absolute reference ปรากฏโดยตรง ไม่ต้องพึ่งการที่ Lead ไป Read ไฟล์อื่นก่อนถึงจะเห็น path ที่ถูกต้อง — ต้นทุนเพิ่มน้อยมาก (~5 บรรทัด, ชื่อไฟล์เท่านั้น ไม่ inline เนื้อหา)
+
+**ทางเลือกที่ไม่เลือกและเหตุผล:** พิจารณา inline เนื้อหาเต็มของ `role-and-workflow.md` เข้า `base` เลย (แก้ nested reference ได้ในตัวโดยไม่ต้องมี fix ข้อ 1 แยก) — ปัดทิ้งเพราะเพิ่ม token cost ต่อ Lead spawn ทุกครั้งสูง (~6.3K tok ของไฟล์นั้นเอง ยังไม่รวม chain ต่อไปยัง patterns.md/cli-reference.md ถ้า inline ต่อเนื่อง) ขัดกับเจตนาการ diet ด้านบนโดยตรง ส่วนวิธีที่เลือก (rewrite ไฟล์ staged ในดิสก์ + สรุป path สั้นๆ) ต้นทุนต่อ spawn เพิ่มแค่ไม่กี่สิบ token และแก้ปัญหาจริงแบบทั่วไป (ครอบคลุมทุกไฟล์ที่ ship มา ไม่จำกัดแค่ระดับที่ 2)
+
+**Regress check ต่อ diet เดิม:** `git diff --stat CLAUDE.md` ว่างเปล่า — ไฟล์ root ไม่ถูกแตะเลย (ยัง 948 tok เท่าเดิม) การแก้ทั้งหมดอยู่ใน `lead_context.py` (runtime rendering เท่านั้น ไม่ใช่ source-of-truth doc)
+
+**การ ship จริง (ข้อ 2 ของ task):** ตรวจ wheel ที่ build จริงแล้ว — `docs/lead/*.md` ทุกไฟล์ (`role-and-workflow.md`, `patterns.md`, `cli-reference.md`, และไฟล์อื่นในโฟลเดอร์) ถูก ship เข้า `_assets/docs/lead/` ครบ เพราะ `setup.py::_stage_assets` glob `*.md` ทั้งโฟลเดอร์ (ไม่ได้ select เฉพาะที่ CLAUDE.md อ้างถึง) อยู่แล้วตั้งแต่ก่อนแก้ — ไม่ต้องแก้ staging list
+
+**Cross-platform:** ใช้ `.as_posix()` + `pathlib.Path.glob`/`read_text`/`write_text` ล้วน (ไม่มี platform-specific string) เหมือน pattern เดิมของฟังก์ชันนี้
+
+**Verification:**
+- `PYTHONPATH=<repo>/src` วิธีเดิม (conftest #202 guard) รัน: `test_lead_context_docs_lead_rewrite.py`, `test_setup_build.py`, `test_codex_crash_instrumentation.py`, `test_lead_context_compact.py`, `test_lead_provider_unlock.py`, `test_lead_write_guard.py`, `test_orchestrator_claude_env_leak.py`, `test_orchestrator_reexports.py`, `test_plugin_installer.py`, `test_plugin_policy.py`, `test_project_rules.py`, `test_provider_substitution_note.py`, `test_resume_session_picker.py`, `test_session_brief.py` → เขียวหมด
+- `test_installed_mode_gate.py` ทั้งไฟล์ (8 เทส รวมตัวที่ QA จับ) รันผ่าน **venv สะอาดแยกต่างหาก** (ไม่มี `agent_takkub` ติดตั้งอยู่ก่อน กัน env contamination) — เขียวหมด รวม `test_docs_lead_shipped_and_rewritten_to_resolvable_paths` ที่เคยแดง
+- `ruff check` + `ruff format` ผ่านหลังแก้
+- **พบ pre-existing failure ไม่เกี่ยวกับงานนี้** (ยืนยันด้วย `git stash` แล้วรันซ้ำบนโค้ดเดิม แดงเหมือนกัน): `test_lead_project_rules.py` (3 เทส) + `test_project_scoping.py::TestRenderLeadContext` (2 เทส) — สาเหตุคือ worktree นี้ไม่มีโฟลเดอร์ `runtime/` เลย (`ensure_runtime()` gap เฉพาะ environment นี้ ไม่ใช่โค้ด) — **ไม่ใช่ regression จากงานนี้ ไม่ได้แก้** (นอกขอบเขต task, รายงานไว้เผื่อ Lead อยากตามต่อ)
+- **ห้ามรัน full suite ตามคำสั่ง** — รันเฉพาะ targeted ตามรายการข้างบน + gate suite เท่านั้น
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786852508`
+
+## 7. Implementation (2026-08-16, worktree `wt/devops-1786859852`) — #267 item 3: translate machine-only-read role-file rules to English
+
+**Scope:** all 16 `.claude/agents/*.md` role source files (analyst, backend, codex, critic, cursor, designer, devops, docs, frontend, gemini, kimi, mobile, opencode, qa, reviewer, security) — the only source for what gets staged verbatim into `runtime/agents/<role>/CLAUDE.md` (confirmed by reading `config.py::agent_role_dir()` + `spawn_engine.py:2009-2020` before starting: no separate "base file" gets merged in at spawn time — each `.claude/agents/<role>.md` IS the complete role prompt, plus a couple of centrally-appended hygiene blocks noted in the "Finding" subsection below).
+
+### Glossary (held constant across every file)
+| Thai | English |
+|---|---|
+| บังคับ | required |
+| ห้าม / เด็ดขาด | Never … / under any circumstances |
+| ทำแทน | Do instead: |
+| ทำไม | Why: |
+| เคสจริง | Real incident |
+| ขอบเขตงาน | Scope |
+| วิธีทำงาน | Workflow |
+| การสื่อสารระหว่าง agents | Communication between agents |
+| การรายงานกลับเมื่อเสร็จ | Reporting back when done |
+| Blocked / ต้องการ clarification | Blocked / need clarification |
+| Roles ที่ส่งหาได้ | Roles you can send to |
+| งานเสร็จ / done | done / finished |
+| ที่ Bash commands อนุญาตให้ใช้ | Bash commands you're allowed to use |
+
+Command names, CLI flags, file paths, and issue numbers (`takkub done`, `--isolation worktree`, `#169`, `#202`, `#234`, …) were never touched — grep-verified after the fact (§ Verification).
+
+### What stayed in Thai (rule 2 of the task, applied deliberately)
+> **Correction (fix-loop, same day):** the first pass of this translation actually translated 26 of these placeholder/template strings across all 16 files (e.g. `takkub done "<note สรุปงาน>"` → `"<summary note>"`, blocked-message placeholders, and `qa.md`'s output schema + literal shell warning string) — contradicting the claim below. Cross-check report: `docs/audit/2026-08-16-267-translation-crosscheck.md` (Major 1). All 26 were restored to Thai in the fix-loop; the claim below now holds against the working tree.
+- Every literal example string passed to `takkub done "..."` / `takkub send --to <role> "..."` — these are the actual template for the Thai-language note the user/Lead reads (per prior project convention: [Thai changelog](feedback_thai_changelog.md), [reads summary only](feedback_reads_summary_only.md)), so translating them would change output format, not just save tokens.
+- `critic.md`'s generated design-review markdown template (§`## 📸 Scope` / `✅ ของดีที่ควรเก็บไว้` / `➕ เพิ่ม` / `➖ ลบ` / `🔧 ปรับ` / `🚩 Heuristic violations` / `🎯 Recommended next steps`) — these headings become the literal `.md`/`.html` document Lead/the user opens, not a rule the model reads about itself.
+- `critic.md`'s embedded `takkub send --to gemini "..."` message body — this is CC'd to Lead automatically per the role file's own communication rule, so it counts as user-visible output, not model-only instruction; left untouched out of caution rather than judging it borderline-safe to translate.
+
+Everything else — every heading, warning, numbered step, rule list, and prose explanation that only the model reads to decide how to behave — was translated to English.
+
+### Checklist (counted before touching each file, re-counted after)
+Ran a structural diff across all 16 files comparing `git show HEAD` (source, pre-translation) against the working tree post-translation:
+
+| Check | Result |
+|---|---|
+| `^#{2,3} ` heading count per file | **identical before/after, all 16 files** (e.g. reviewer 14/14, critic 27/27, qa 13/13) |
+| Bullet/numbered-list line count (`^\s*[-0-9]`) per file | **identical before/after, all 16 files** |
+| Total line count per file | **identical before/after, all 16 files** (e.g. devops 166/166, critic 230/230) — every edit was a line-for-line content swap, nothing added or removed structurally |
+
+Full per-file numbers (headings/bullets/lines, before=after in every row):
+```
+analyst   12/12  28/28  127/127     designer  12/12  24/24  116/116     kimi      7/7   20/20  74/74
+backend   14/14  30/30  137/137     devops    14/14  37/37  166/166     mobile    14/14  34/34  141/141
+codex      8/8   22/22  78/78       docs      14/14  32/32  140/140     opencode  7/7   19/19  73/73
+critic    27/27  49/49  230/230     frontend  14/14  30/30  140/140     qa        13/13  16/16  153/153
+cursor     7/7   19/19  73/73       gemini    8/8    24/24  80/80       reviewer  14/14  34/34  145/145
+                                                                          security  14/14  31/31  141/141
+```
+No heading was dropped, merged, or split; no rule was summarized away — this is the artifact meant to make codex/gemini's cross-check fast (diff the structural counts first, then spot-check meaning).
+
+### Before/after token measurement (method identical to §0-§2: tiktoken `cl100k_base` on the **staged** `runtime/agents/<role>/CLAUDE.md`, not the source file — per the wave-3 lesson cited in §"วิธีวัดผล" above)
+
+Procedure: `git stash` the translation → call `agent_takkub.config.agent_role_dir(role)` directly for all 16 roles (no pane spawn) to regenerate `runtime/agents/<role>/CLAUDE.md` fresh from the **original Thai** source → measure with tiktoken → `git stash pop` to restore the translation → regenerate + measure again. `tiktoken` installed/uninstalled in `.venv` same as §0 (confirmed `Successfully uninstalled` afterward).
+
+| role | before (tok) | after (tok) | saved | saved % |
+|---|---:|---:|---:|---:|
+| devops | 6,148 | 4,117 | 2,031 | 33.0% |
+| critic | 6,133 | 4,360 | 1,773 | 28.9% |
+| qa | 5,923 | 4,183 | 1,740 | 29.4% |
+| frontend | 5,447 | 3,550 | 1,897 | 34.8% |
+| mobile | 5,384 | 3,536 | 1,848 | 34.3% |
+| docs | 5,378 | 3,429 | 1,949 | 36.2% |
+| backend | 5,311 | 3,493 | 1,818 | 34.2% |
+| security | 5,186 | 3,412 | 1,774 | 34.2% |
+| reviewer | 5,161 | 3,300 | 1,861 | 36.1% |
+| analyst | 4,919 | 3,223 | 1,696 | 34.5% |
+| designer | 4,538 | 3,084 | 1,454 | 32.0% |
+| gemini | 4,028 | 2,571 | 1,457 | 36.2% |
+| codex | 3,836 | 2,495 | 1,341 | 35.0% |
+| cursor | 3,764 | 2,431 | 1,333 | 35.4% |
+| kimi | 3,759 | 2,441 | 1,318 | 35.1% |
+| opencode | 3,742 | 2,428 | 1,314 | 35.1% |
+| **TOTAL** | **78,657** | **52,053** | **26,604** | **33.8%** |
+
+> **Re-measured (fix-loop, same day)** after restoring the 26 wrongly-translated placeholder/template strings to Thai (§ "What stayed in Thai" correction above, `docs/audit/2026-08-16-267-translation-crosscheck.md` Major 1). The `after` column and everything derived from it below is the corrected number — savings are slightly lower than the flawed first pass (33.8% vs the earlier 34.2%) because more literal Thai text is back in the staged files, which is the intended, correct behavior.
+
+**Reads lower than the earlier ~45-55% estimate in §"ประมาณ"** — expected and explainable, not a measurement error: that estimate was a pure char/token-efficiency ratio projection ("แปลแล้วยาวขึ้น/สั้นลงแค่ไหนจริง" was explicitly flagged as the unknown); the actual translation kept every `takkub done`/`takkub send` example string and critic's document template in Thai (rule 2), which the estimate didn't carve out. 33.8% is the number that's actually measured, not projected.
+
+Resend-weighted ceiling using the same formula as §4 (133.4 mean turns/session, today's spawn frequency for this project — backend×5, devops×2, frontend×7 non-Lead spawns counted in §4's methodology; the other 13 roles didn't spawn today so their ceiling isn't in today's actual total, only the per-spawn saving is real): **backend/devops/frontend alone → (1,818+2,031+1,897) tok/spawn × 14 non-Lead spawns × 133.4 ≈ 10.7M tok-equivalent/day**, on top of and independent from §5's root-CLAUDE.md diet (different file, same pane, savings stack).
+
+### Finding — reported per task instructions, not touched (§ "ห้ามแตะโค้ด .py … ถ้าเจอให้รายงาน อย่าเดา")
+
+`config.py` contains **4 centrally-appended Thai hygiene blocks** injected into *every* role's staged `CLAUDE.md` at spawn time by Python code, not by the `.claude/agents/*.md` source — outside this task's scope (`.claude/agents/*.md` only) and outside the "prompt builder .py" carve-out without a separate task, so left untouched and reported instead of guessed at:
+
+- `_DEV_SERVER_HYGIENE` (`config.py:603-614`) — appended to every role `role_needs_dev_server_guard()` says needs it (all except `reviewer`/`gemini`/`docs`/`analyst`/`security`/`codex`/`opencode`/`kimi`/`cursor`)
+- `_NON_INTERACTIVE_HYGIENE` (`config.py:622-634`) — appended to every role
+- `_TOKEN_DISCIPLINE_HYGIENE` (`config.py:648-656`) — appended to every role
+- a 4th block (`STALE_FILE_GUARD`, referenced in `config.py:661-663` but defined in `spawn_engine.py`'s `_appendix` builder) — appended to every role except `role_needs_stale_file_guard()`'s exempt set (`reviewer`, `gemini`)
+
+These 3-4 blocks are **not counted** in either the before or after numbers in this section (they're identical Thai text in both cases, added after `agent_role_dir()` builds the base `CLAUDE.md`) — the §2 audit table already flagged this category as measured-but-out-of-scope for #267's role-file-only ask. Translating them is a legitimate follow-up (same token-efficiency logic applies, they're pure model-facing rules with zero example-string content) but requires editing `.py`, which this task explicitly scoped out — flagging for Lead to route as a separate ticket if wanted.
+
+### Regression found + fixed: 4 test files pinned the old Thai wording literally
+
+Running the guard-test suite for `.claude/agents/*.md` (`test_agent_role_files_have_{browser,git,host_destructive,pip_editable}_guard.py`) after translating surfaced real failures — these tests exist specifically to catch exactly this class of change (they're the load-bearing enforcement for non-claude panes per #103, so they pin exact wording on purpose), and the failures were genuine regressions from this task, not pre-existing:
+
+| Test file | Assertion that broke | Fix |
+|---|---|---|
+| `test_agent_role_files_have_browser_guard.py` | `SECTION = "## Browser & เครื่องมือหนัก"`; `"ห้ามสแกนทั้งไดรฟ์"`; `"ได้สิทธิ์ขับ browser"`; `"ห้ามติดตั้งหรือรัน browser driver เอง"` | updated all 4 literals to the new English wording (`"## Browser & heavy tooling"`, `"Never scan the whole drive"`, `"is granted browser access"`, `"Never install or run a browser driver yourself"`) |
+| `test_agent_role_files_have_git_guard.py` | `has_marker = "ห้าม" in content or "NEVER" in content` (my translation uses title-case "Never", not all-caps) | changed to `"ห้าม" in content or "never" in content.lower()` — case-insensitive, still accepts either language |
+| `test_agent_role_files_have_host_destructive_guard.py` | `SECTION = "ห้าม kill process ด้วยชื่อ"`; `"ห้ามสั่ง kill process ด้วยชื่อ"` | updated both to `"Never kill a process by name"` |
+| `test_agent_role_files_have_pip_editable_guard.py` | `SECTION = "ห้าม pip install -e"`; `` "ห้ามรัน `pip install -e" `` | updated both to `"Never run pip install -e"` / `` "Never run `pip install -e" `` |
+
+All 4 files' English replacement strings verified present in all 16 `.claude/agents/*.md` with `grep -c` (exact expected count per file) before editing the tests, so the fix targets confirmed reality, not a guess. This is a deliberate, provable wording change (same class as the `test_kimi_provider.py` fix in §Fix-loop above) — not weakening the guard, since the assertions still require every role file to carry the safety rule, just in the language it's now written in.
+
+### Verification
+- `PYTHONPATH=<repo>/src` (conftest #202 guard, no `pip install -e`), venv = repo-root shared `.venv`: `test_agent_role_files_have_browser_guard.py`, `test_agent_role_files_have_git_guard.py`, `test_agent_role_files_have_host_destructive_guard.py`, `test_agent_role_files_have_pip_editable_guard.py` → 4/4 files green after the fix (were red before)
+- Also ran every other test that references `.claude/agents` / `AGENTS_DIR` / `agent_role_dir` / `ROLE_FILES` (found via `grep -rl`, 27 files total): `test_codex_crash_instrumentation.py`, `test_config.py`, `test_custom_roles.py`, `test_doctor.py`, `test_headless_entrypoint.py`, `test_installed_mode_gate.py`, `test_orchestrator_claude_env_leak.py`, `test_orchestrator_shard.py`, `test_pane_tools_policy.py`, `test_project_memory_inject.py`, `test_provider_models.py`, `test_provider_override.py`, `test_role_registry_sync.py`, `test_roles.py`, `test_settings_management_{roles,skills,ui,ui_phase2}.py`, `test_settings_window.py`, `test_setup_build.py`, `test_skill_audit.py`, `test_spawn_task_delivery.py`, `test_update_helper.py` — green
+- Also spot-checked `test_codex_task_rewrite.py` + `test_disk_usage.py` (both matched via a broader `grep -P '[Thai unicode range]'` sweep of `tests/*.py` for any other hardcoded-Thai dependency on role-file wording) — both use their own literal Thai fixture strings unrelated to `.claude/agents/*.md`, unaffected, green
+- `ruff check` on the 4 edited test files → clean
+- **`test_installed_mode_gate.py` (6 tests) failed** in this environment both **before and after** the translation — confirmed by `git stash` (reverting to the original Thai role files + unmodified test files) and re-running just that file: identical 6 failures (`takkub.exe` console script never materializes, `_venv_bin_dir` empty), same root cause the §Fix-loop entry above already documented (these wheel-build/install fixtures need a specially-prepared clean venv; running them through the shared repo `.venv` doesn't satisfy them) — **pre-existing environment gap, not a regression from this task, not fixed** (out of scope)
+- **Did not run the full suite** per project's targeted-tests-only directive — ran every test that touches the files this task changed (16 role `.md` files + 4 test files), nothing else
+- `git status --short` after all edits: only the 16 `.claude/agents/*.md` files + 4 `tests/test_agent_role_files_have_*_guard.py` files + this audit doc modified — no stray files, no `runtime/` artifacts left (gitignored, cleaned up anyway), `tiktoken` uninstalled from `.venv` (confirmed "Successfully uninstalled")
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786859852` (แนะนำให้ codex/gemini cross-check ความหมายก่อน merge ตามที่ task สั่ง — checklist ด้านบนออกแบบมาให้ตรวจ structural diff ก่อน แล้วค่อย spot-check เนื้อหา)

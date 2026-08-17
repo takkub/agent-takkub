@@ -1334,29 +1334,34 @@ def check_editable_install() -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_provider_bin(spec) -> str | None:
+    """Resolve `spec`'s binary via the SAME custom_discovery_fn the cockpit
+    uses at spawn time — e.g. gemini's `find_agy_executable()` falls back to
+    %LOCALAPPDATA%\\agy\\bin when the installer didn't register PATH, so
+    doctor doesn't falsely report "not installed" for a role that actually
+    works. Shared by check_providers() (version/install-state) and
+    check_provider_auth() (#248/#247 round 2) so both agree on whether a
+    provider is installed at all."""
+    try:
+        if spec.custom_discovery_fn is not None:
+            return spec.custom_discovery_fn()
+    except Exception:
+        pass
+    for name in spec.binary_names or (spec.name,):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def check_providers() -> list[Finding]:
     findings: list[Finding] = []
 
     # One row per registered non-claude provider (#103 Phase 1 — registry-
     # driven, so a new PROVIDER_REGISTRY entry shows up here automatically).
-    # Resolve via the SAME custom_discovery_fn the cockpit uses at spawn time —
-    # e.g. gemini's `find_agy_executable()` falls back to %LOCALAPPDATA%\agy\bin
-    # when the installer didn't register PATH, so doctor doesn't falsely report
-    # "not installed" for a role that actually works. Use the resolved absolute
-    # path in `_run` so `--version` succeeds even when the binary is off-PATH.
+    # Use the resolved absolute path in `_run` so `--version` succeeds even
+    # when the binary is off-PATH.
     from .provider_spec import PROVIDER_REGISTRY
-
-    def _resolve_provider_bin(spec) -> str | None:
-        try:
-            if spec.custom_discovery_fn is not None:
-                return spec.custom_discovery_fn()
-        except Exception:
-            pass
-        for name in spec.binary_names or (spec.name,):
-            found = shutil.which(name)
-            if found:
-                return found
-        return None
 
     for provider, spec in PROVIDER_REGISTRY.items():
         if provider == "claude":
@@ -1422,6 +1427,85 @@ def check_providers() -> list[Finding]:
                 )
             )
 
+    return findings
+
+
+def _codex_auth_finding() -> Finding:
+    """[providers/codex-auth] — presence-only check against
+    ``$CODEX_HOME/auth.json`` (``~/.codex/auth.json`` when CODEX_HOME is
+    unset), the same CODEX_HOME resolver ``codex_helper.py`` already uses
+    for its sessions dir. This is a well-known convention of the
+    ``@openai/codex`` CLI, not something empirically confirmed against a
+    real machine in this repo — presence proves *a* login happened at some
+    point, not that the token is still valid, so a stale/expired file still
+    reads OK here. Best-effort, not a guarantee; WARN (never FAIL) either
+    way so a wrong guess can't block `takkub doctor` on a healthy machine.
+    """
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    base = Path(codex_home) if codex_home else Path.home() / ".codex"
+    auth_file = base / "auth.json"
+    if not auth_file.is_file():
+        return Finding(
+            "providers",
+            "codex-auth",
+            Status.WARN,
+            f"{auth_file} not found (heuristic — presence check only, unverified "
+            "against a real codex auth failure; #248/#247)",
+            "run `codex login` once to sign in",
+        )
+    try:
+        json.loads(auth_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        return Finding(
+            "providers",
+            "codex-auth",
+            Status.WARN,
+            f"{auth_file} present but unreadable: {e}",
+            "run `codex login` again",
+        )
+    return Finding("providers", "codex-auth", Status.OK, f"{auth_file} present (heuristic)")
+
+
+def check_provider_auth() -> list[Finding]:
+    """[providers/*-auth] — auth status for every INSTALLED non-claude
+    provider in the registry (#248/#247 round 2). Before this, `takkub
+    doctor` had zero auth signal for any provider except claude
+    (check_claude's credential-file check) — codex/gemini/opencode/kimi/
+    cursor only ever got a binary-presence check from check_providers()
+    above.
+
+    Every provider's actual credential-storage location is otherwise a
+    black box the cockpit deliberately never reads (see
+    codex_helper.py/gemini_helper.py module docstrings: "the cockpit never
+    touches those credentials") — codex is the one exception with a
+    reasonably confident convention (CODEX_HOME/auth.json, see
+    `_codex_auth_finding`). Every other provider reports Status.INFO
+    "unknown" rather than a guessed "ok" — the explicit requirement here is
+    never claiming a provider is authenticated without proof. A provider
+    that isn't installed is skipped entirely; check_providers() already
+    reports that.
+    """
+    from .provider_spec import PROVIDER_REGISTRY
+
+    findings: list[Finding] = []
+    for provider, spec in PROVIDER_REGISTRY.items():
+        if provider == "claude":
+            continue  # own dedicated check in check_claude()
+        if _resolve_provider_bin(spec) is None:
+            continue  # not installed — check_providers() already reports this
+        if provider == "codex":
+            findings.append(_codex_auth_finding())
+            continue
+        display = spec.display_name or provider.capitalize()
+        findings.append(
+            Finding(
+                "providers",
+                f"{provider}-auth",
+                Status.INFO,
+                f"unknown — no confirmed credential-file location for {display} yet (#248/#247)",
+                spec.post_install_note or f"run the {provider} CLI once to verify sign-in manually",
+            )
+        )
     return findings
 
 
@@ -2089,6 +2173,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mcps", check_mcps),
         ("check_projects", check_projects),
         ("check_providers", check_providers),
+        ("check_provider_auth", check_provider_auth),
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),

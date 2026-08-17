@@ -30,7 +30,7 @@ import pytest
 
 AGENTS_DIR = Path(__file__).parent.parent / ".claude" / "agents"
 ROLE_FILES = sorted(AGENTS_DIR.glob("*.md"))
-SECTION = "ห้าม pip install -e"
+SECTION = "Never run pip install -e"
 
 
 @pytest.mark.parametrize("role_file", ROLE_FILES, ids=lambda p: p.name)
@@ -59,6 +59,6 @@ class TestRoleFilePipEditableGuard:
         """No role legitimately reinstalls the shared venv mid-task — every
         role file must carry the prohibition, never a grant."""
         content = role_file.read_text(encoding="utf-8")
-        assert "ห้ามรัน `pip install -e" in content, (
+        assert "Never run `pip install -e" in content, (
             f"{role_file.name} is missing the prohibition wording"
         )

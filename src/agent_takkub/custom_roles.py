@@ -65,7 +65,8 @@ def _default_role_template(name: str, label: str) -> str:
     return (
         f"# {label}\n\n"
         f"คุณคือ **{label}** — custom role ที่ user สร้างเองผ่าน Role Manager "
-        f"(`--role {name}`). ทำงานเองโดยตรง ห้าม spawn subagent.\n\n"
+        f"(`--role {name}`). ทำงานเองโดยตรง ห้าม spawn subagent เอง "
+        "เว้นแต่ Lead สั่ง task ปัจจุบันด้วย `--mode subagent`.\n\n"
         "## หน้าที่\n"
         "_(แก้ไฟล์นี้เพื่อกำหนดหน้าที่ + ขอบเขตงานของ role นี้ — "
         f"ไฟล์อยู่ที่ `{(CUSTOM_AGENTS_DIR / f'{name}.md').as_posix()}`)_\n\n"

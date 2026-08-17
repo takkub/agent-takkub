@@ -80,6 +80,18 @@ def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> Non
     assert s.is_at_ready_prompt() is True
 
 
+def test_kimi_idle_footer_is_ready() -> None:
+    # #257: kimi_spec.ready_rules was an empty tuple, so is_at_ready_prompt()
+    # could never return True for a kimi pane no matter what its screen
+    # showed — every assigned task sat undelivered until the busy-wait
+    # ceiling. Captured via direct ConPTY capture against a signed-in
+    # kimi-cli 1.49.x session on Windows, 2026-08-16.
+    s = _feed_screen(
+        "main  @: mention files | ctrl-x: toggle mode | shift-tab: plan mode | ctrl+o: editor"
+    )
+    assert s.is_at_ready_prompt() is True
+
+
 class TestIsAtTrustPrompt:
     """#186: agy's own folder-trust modal words the confirm hint "enter
     Confirm" (no "to"), unlike claude/codex's "Enter to confirm" — the
@@ -654,3 +666,135 @@ def test_stale_boot_line_in_scrollback_does_not_pin_startup_marker() -> None:
     )
     assert s.shows_startup_marker() is False
     assert s.is_at_ready_prompt() is True
+
+
+# ── boot-phase vs queued-message split (#281) ────────────────────────────────
+# `shows_startup_marker()` answers "not a genuine work turn" (idle watchdog).
+# `shows_boot_phase_marker()` answers "the composer does not exist yet"
+# (delivery / boot-stall / `takkub list`). Conflating them made a WORKING codex
+# pane read as a stuck boot — proven from events.log: panes flagged
+# `[delivery-boot-stall]` at 110s went on to call `done` minutes later.
+
+
+def test_boot_phase_marker_true_while_codex_boots_mcp() -> None:
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is True
+
+
+def test_boot_phase_marker_false_for_a_working_pane_with_a_queued_message() -> None:
+    """The #281 regression in one assertion: codex shows "tab to queue
+    message" the whole time it is working, which is not a boot phase."""
+    s = _feed_screen(
+        "• Ran Get-Content -Raw -LiteralPath 'spec.md'",
+        "esc to interrupt · tab to queue message",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is False
+    # the wider marker still reports True — the idle watchdog must keep
+    # suppressing its forgot-`takkub done` nag for this pane.
+    assert s.shows_startup_marker() is True
+
+
+def test_boot_phase_marker_ignores_a_stale_boot_line_in_scrollback() -> None:
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "• Ran Get-Content -Raw -LiteralPath 'spec.md'",
+        "• done reading the spec",
+        "",
+        "some later output line",
+        "another later output line",
+        "yet another later output line",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is False
+
+
+def test_boot_phase_detail_names_the_servers_being_waited_on() -> None:
+    """#281: `codex mcp list` cannot see cockpit-injected MCPs, so the pane's
+    own boot line is the only thing that names what a stuck boot is waiting
+    for."""
+    s = _feed_screen(
+        "OpenAI Codex (v0.147.0)",
+        "Starting MCP servers (0/3): codex_apps, context7, figma (12s • esc to interrupt)",
+    )
+    detail = s.boot_phase_detail()
+    assert "context7" in detail and "figma" in detail
+    assert len(detail) <= 200
+
+
+def test_boot_phase_detail_empty_when_not_booting() -> None:
+    s = _feed_screen("gpt-5.6 high · ~/project · Fast off")
+    assert s.boot_phase_detail() == ""
+
+
+# ── boot marker must survive a tall composer (#284) ──────────────────────────
+# `_READY_TAIL_ROWS` (6) is sized for claude's one-line footer. codex draws a
+# bordered composer + status bar, so its boot line sits higher and drops out of
+# a 6-row window the moment the composer grows — leaving only "Fast off" and a
+# READY verdict for a pane that is visibly still starting. That is the cockpit
+# sending the task too early.
+
+
+def _codex_booting_screen(composer_rows: int) -> list[str]:
+    return [
+        "Tip: Try the Desktop app.",
+        "",
+        "- Booting MCP server: codex_apps (0s - esc to interrupt)",
+        "",
+        "composer-top",
+        *[f"> line{i}" for i in range(composer_rows)],
+        "composer-bottom",
+        "gpt-5.6-terra medium - weekly 40% left - Fast off",
+    ]
+
+
+def test_boot_marker_survives_a_composer_tall_enough_to_hide_it() -> None:
+    """The exact regression: with a taller composer the ready window no longer
+    contains the boot line, so `is_at_ready_prompt()` says True. Delivery's
+    widened boot probe must still say "booting" — that is what stops the task
+    being pasted into a pane that has not started."""
+    from agent_takkub.pty_session import _BOOT_MARKER_TAIL_ROWS
+
+    s = _feed_screen(*_codex_booting_screen(composer_rows=2))
+    assert s.is_at_ready_prompt() is True, "precondition: the ready window has lost the boot line"
+    assert s.shows_boot_phase_marker() is False, "precondition: the tight window loses it too"
+    assert s.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS) is True, (
+        "delivery must still see the boot line the ready window dropped"
+    )
+
+
+def test_short_composer_case_still_reads_booting() -> None:
+    s = _feed_screen(*_codex_booting_screen(composer_rows=1))
+    assert s.shows_boot_phase_marker() is True
+
+
+def test_widened_window_does_not_pin_a_stale_boot_line_for_delivery_forever() -> None:
+    """The widened window is bounded, not unlimited — a boot line that has
+    scrolled well up the conversation must eventually stop counting."""
+    from agent_takkub.pty_session import _BOOT_MARKER_TAIL_ROWS
+
+    s = _feed_screen(
+        "- Booting MCP server: codex_apps (0s - esc to interrupt)",
+        *[f"- later output line {i}" for i in range(_BOOT_MARKER_TAIL_ROWS + 2)],
+        "gpt-5.6-terra medium - weekly 40% left - Fast off",
+    )
+    assert s.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS) is False
+
+
+def test_finished_boot_is_not_reported_as_booting() -> None:
+    """The gate must not become a permanent block — once the boot line is gone
+    the pane delivers normally."""
+    s = _feed_screen(
+        "- Ran Get-Content -Raw spec.md",
+        "",
+        "composer-top",
+        "> line0",
+        "> line1",
+        "composer-bottom",
+        "gpt-5.6-terra medium - weekly 40% left - Fast off",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.shows_boot_phase_marker() is False

@@ -93,6 +93,8 @@ class TestStuckRecoverPreservesState:
         ps.auto_chain = True
         ps.requires_commit_on_done = True
         ps.assign_base_sha = "snapshot-sha-xyz"
+        ps.assign_git_root = "/proj"
+        ps.assign_dirty_snapshot = {"stale.png": ("??", 123, 456)}
         return pane
 
     def test_session_uuid_restored_after_recover(self, orch: Orchestrator) -> None:
@@ -175,6 +177,24 @@ class TestStuckRecoverPreservesState:
             orch._auto_recover_stuck("designer", TEST_PROJECT, pane, now)
 
         assert (orch._pane_state.get(key) or PaneState()).assign_base_sha == "snapshot-sha-xyz"
+
+    def test_assign_dirty_snapshot_restored_after_recover(self, orch: Orchestrator) -> None:
+        """#251: the same task must retain its shared-tree dirty baseline."""
+        key = _exit_key(TEST_PROJECT, "designer")
+        pane = self._setup(orch, key)
+        now = 1_000_000.0
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer") as mock_timer,
+            patch.object(orch, "spawn", return_value=(True, "designer spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            mock_timer.singleShot.side_effect = lambda ms, fn: fn()
+            orch._auto_recover_stuck("designer", TEST_PROJECT, pane, now)
+
+        restored = orch._pane_state.get(key) or PaneState()
+        assert restored.assign_git_root == "/proj"
+        assert restored.assign_dirty_snapshot == {"stale.png": ("??", 123, 456)}
 
     def test_spawn_called_with_from_auto_respawn_true(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")

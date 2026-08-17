@@ -447,7 +447,7 @@ def _rewrite_task_for_codex(task: str) -> str:
     """Prepend an unambiguous override notice when sending a task to a codex pane.
 
     Codex tends to over-interpret Lead's standard
-    `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding any external
+    `[ROLE: ... ห้าม spawn subagent เอง เว้นแต่ ... --mode subagent]` prefix as forbidding any external
     orchestration — including the mandatory `takkub done` shell command.
     The planted AGENTS.md tries to prevent this but loses to the more-
     proximal inline ROLE prefix. We inject a same-proximity clarification
@@ -514,7 +514,9 @@ def _task_handoff_dir(project_ns: str) -> pathlib.Path:
     return day
 
 
-def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[str, str | None]:
+def _task_handoff_pointer(
+    task: str, project_ns: str, role_name: str, *, supports_file_read: bool = True
+) -> tuple[str, str | None]:
     """Write *task* to a handoff file when it's long, returning what to paste.
 
     Returns ``(paste_text, task_file_path)``. For a short composed task
@@ -526,6 +528,19 @@ def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[s
     this is the only thing that gets pasted into the pane's PTY, so it can't
     hit the paste-swallow bug family (#22/#26) the way a multi-KB task can.
 
+    ``supports_file_read`` — issue #273: pass the effective provider's
+    ``ProviderSpec.supports_agent_file_read``. When False, the pointer is
+    NEVER used regardless of length — a pane whose only file access is a
+    disallowed shell tool cannot act on "read this file yourself" at all,
+    so the handoff would just hand it a dead-end instruction and burn the
+    whole assign as an instant, un-analyzable [FAILED] before any real work
+    starts (confirmed live incident, #273). Falls back to the pre-#1 plain
+    inline paste unconditionally for that provider instead — no chunking
+    yet (``ponytail``: PTY paste already scales its enter-delay by content
+    size via ``ProviderSpec.enter_delay_per_kb_ms``, so this is a return to
+    a previously-working path, not a new risk; upgrade to chunked delivery
+    if a provider without file-read AND with paste-swallow trouble shows up).
+
     The caller MUST still store the full, untouched *task* (not the pointer)
     in ``PaneState.last_assigned_task`` — that field is the crash-replay unit
     (``spawn_engine._auto_respawn``) and must keep working even if the
@@ -534,6 +549,8 @@ def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[s
     On a write failure (disk full, permissions) this degrades to returning
     the full task unchanged rather than losing the assignment.
     """
+    if not supports_file_read:
+        return task, None
     if len(task) < TASK_HANDOFF_THRESHOLD:
         return task, None
     day = _task_handoff_dir(project_ns)
@@ -550,6 +567,52 @@ def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[s
         "รายงาน takkub done เมื่อเสร็จ"
     )
     return pointer, forward_path
+
+
+# #273: how long after assign a `done --fail` may still plausibly be about
+# the pointer delivery itself, not the actual work. Real work — success or
+# genuine failure — essentially never completes this fast; a report inside
+# this window plus the wording check below is what distinguishes "couldn't
+# open the handoff file" from an unusually-quick real task failure.
+DELIVERY_POINTER_FAILURE_WINDOW_SEC = 120.0
+
+# Matches the EXACT wording `_task_handoff_pointer` put in the pointer text
+# above ("เครื่องมืออ่านไฟล์ของคุณ (file-read tool)"), plus its natural English
+# echo — a pane reporting it can't act on that instruction quotes it back
+# rather than inventing new phrasing. Provider-agnostic on purpose: this
+# matches what COCKPIT ITSELF said, not any one CLI's own error text, so it
+# keeps working regardless of which provider hits the gap.
+_DELIVERY_POINTER_FAILURE_RE = re.compile(
+    r"(file-?read\s*tool|เครื่องมืออ่านไฟล์)",
+    re.IGNORECASE,
+)
+
+
+def is_delivery_pointer_failure(note: str, task_file: str | None, elapsed_sec: float) -> bool:
+    """True when a `done --fail` report is really a TASK-DELIVERY failure
+    (issue #273) — the pane couldn't open the file-pointer handoff
+    `_task_handoff_pointer` wrote, so the assigned work never started —
+    rather than a genuine failure of that work.
+
+    Requires BOTH signals so a real (if unusually fast) task failure is
+    never misclassified:
+      - structural: this assign actually used the pointer mechanism
+        (``task_file`` is not None) AND the report landed within
+        ``DELIVERY_POINTER_FAILURE_WINDOW_SEC`` of the assign;
+      - textual: the note echoes the pointer's own "file-read tool" wording.
+
+    Root cause is fixed separately (`_task_handoff_pointer`'s
+    ``supports_file_read`` gate skips the pointer entirely for a provider
+    without one) — this is the belt-and-suspenders net for any pane that
+    still hits an equivalent wall (a future provider, a mis-set capability
+    flag, ...), so Lead is never sent chasing a "root cause" for work that
+    never began.
+    """
+    if not task_file:
+        return False
+    if elapsed_sec > DELIVERY_POINTER_FAILURE_WINDOW_SEC:
+        return False
+    return bool(_DELIVERY_POINTER_FAILURE_RE.search(note or ""))
 
 
 def _append_worktree_hint(

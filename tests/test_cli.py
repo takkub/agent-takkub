@@ -41,6 +41,41 @@ class TestArgparse:
         cli.main(["assign", "--role", "backend", "--cwd", "/x", "do work"])
         assert fake_request[-1]["cwd"] == "/x"
 
+    def test_assign_mode_defaults_to_pane(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "scan auth"])
+        assert fake_request[-1]["mode"] == "pane"
+
+    def test_assign_subagent_mode_forwarded(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "--mode", "subagent", "scan auth"])
+        assert fake_request[-1]["mode"] == "subagent"
+
+    def test_subagent_mode_allows_twenty_shards(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "--mode", "subagent", "--shards", "20", "scan"])
+        assert len(fake_request) == 20
+        assert all(payload["mode"] == "subagent" for payload in fake_request)
+
+    def test_pane_mode_keeps_existing_eight_shard_cap(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        assert cli.main(["assign", "--role", "qa", "--shards", "9", "scan"]) == 1
+        assert fake_request == []
+
+    def test_subagent_mode_rejects_model_override(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(
+            ["assign", "--role", "reviewer", "--mode", "subagent", "--model", "x", "scan"]
+        )
+        assert rc == 1
+        assert fake_request == []
+
+    def test_subagent_done_payload(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        cli.main(["subagent-done", "--role", "reviewer", "audit clean"])
+        assert fake_request[-1]["cmd"] == "subagent-done"
+        assert fake_request[-1]["role"] == "reviewer"
+        assert fake_request[-1]["note"] == "audit clean"
+
     def test_assign_with_model_override(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "qa", "--model", "claude-haiku-4-5", "scan"])
         assert fake_request[-1]["model"] == "claude-haiku-4-5"
@@ -64,6 +99,84 @@ class TestArgparse:
         rc = cli.main(["assign", "--role", "qa", "--model", "flash", "scan"])
         assert rc == 1
         assert len(fake_request) == before
+
+    def test_assign_with_provider_override(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue #270: a validated --provider is a no-op stub here (offline
+        # test, orchestrator itself is mocked) — this only proves the CLI
+        # forwards it.
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+        cli.main(["assign", "--role", "backend", "--provider", "claude", "scan"])
+        assert fake_request[-1]["provider"] == "claude"
+
+    def test_provider_override_is_forwarded_to_every_shard(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+        cli.main(["assign", "--role", "backend", "--shards", "2", "--provider", "claude", "scan"])
+        assert [payload["provider"] for payload in fake_request[-2:]] == ["claude", "claude"]
+
+    def test_subagent_mode_rejects_provider_override(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        rc = cli.main(
+            ["assign", "--role", "reviewer", "--mode", "subagent", "--provider", "claude", "scan"]
+        )
+        assert rc == 1
+        assert fake_request == []
+
+    def test_assign_provider_validation_error_sends_nothing(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_args, **_kwargs: "--provider unavailable",
+        )
+        rc = cli.main(["assign", "--role", "backend", "--provider", "codex", "scan"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_model_override_validated_against_provider_override(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The --model check must be told about a validated --provider on
+        # the same assign, so it validates against what will actually
+        # spawn — capture the kwarg the CLI passes through.
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+
+        def _fake_model_error(role, model, project, provider_override=None):
+            captured["provider_override"] = provider_override
+            return None
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_model_override_error", _fake_model_error
+        )
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "backend",
+                "--provider",
+                "claude",
+                "--model",
+                "claude-opus-5",
+                "scan",
+            ]
+        )
+        assert captured["provider_override"] == "claude"
 
     def test_assign_model_warning_prints_but_does_not_block(
         self,

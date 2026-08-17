@@ -59,15 +59,18 @@ from .lead_context import (  # re-exported for test imports
 )
 from .lead_draft_state import LeadDraftState  # re-exported for test imports
 from .lead_inbox import (  # re-exported for test/compat imports; mixin provides methods
+    _BLOCKING_NOTICE_MARKERS,
     _SUBMIT_MAX_RESENDS,
     _SUBMIT_VERIFY_GRACE_MS,
     LEAD_NOTIFY_BUSY_CAP,
     LeadInboxMixin,
     _delayed_enter,
     _delayed_enter_verified,
+    _is_blocking_lead_notice,
     _notice_role_tag,
     _prompt_block_reason,
     _safe_session_write,
+    _system_marker_role,
     _unwrap_notice_item,
 )
 from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
@@ -110,6 +113,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _teammate_tier,
     _truncate_at_word_boundary,
     cwd_validation_error,
+    is_delivery_pointer_failure,
     prune_old_transcripts,
     scan_artifacts,
 )
@@ -395,6 +399,55 @@ STALL_THRESHOLD_SEC = int(os.environ.get("TAKKUB_STALL_THRESHOLD_SEC", "300"))
 # typical build/docker-pull waits, while still bounding an otherwise-
 # unbounded wait. Overrideable via env for slower CI/hardware.
 BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800"))
+
+# #248/#247 round 2: how long lead_inbox._send_when_ready's delivery poll
+# waits, past spawn, for a pane's provider CLI to render ANY content
+# (session.first_content_ts() staying None the whole time) before treating
+# it as a wedged spawn rather than a slow-but-healthy cold boot — the exact
+# "codex pane spawns, never produces output" symptom from #248. Chosen
+# comfortably above every provider's own ready_wait_ms cold-boot allowance
+# (claude 45s, codex/gemini/opencode/kimi/cursor 90s) would otherwise need,
+# but far below BUSY_WAIT_CEILING_SEC above, since a pane that has rendered
+# NOTHING at all (not even a boot banner) is a much stronger "something is
+# wedged" signal than one that's merely slow to reach its ready prompt.
+# Overrideable via env for slower CI/hardware.
+NO_CONTENT_WATCHDOG_SEC = int(os.environ.get("TAKKUB_NO_CONTENT_WATCHDOG_SEC", "75"))
+
+# Issue #254: a pane stuck showing a provider boot-phase marker (codex/agy
+# "Booting MCP server: …") redraws its spinner continuously, so
+# seconds_since_output() never grows and the #144 busy-wait extension above
+# silently renews itself with no further signal until BUSY_WAIT_CEILING_SEC
+# (30 min) — a real incident sat there with the task never delivered at all
+# (composer still showed the placeholder prompt) and Lead had nothing to act
+# on beyond the single "still waiting" notice #144 already sends. This bounds
+# how long lead_inbox._send_when_ready's poll loop tolerates a CONTINUOUS
+# boot-marker streak before escalating with a distinct, more actionable
+# warning naming the stuck phase (issue #254) — well above codex/agy's own
+# ready_wait_ms cold-boot allowance (90s, see provider_spec.py) so an
+# ordinary boot that finishes on time never trips it, but far below
+# BUSY_WAIT_CEILING_SEC so Lead hears about a genuinely wedged boot in
+# roughly two minutes instead of thirty. Overrideable via env.
+BOOT_STALL_GRACE_SEC = int(os.environ.get("TAKKUB_BOOT_STALL_GRACE_SEC", "110"))
+
+# Issue #276: hard ceiling on the SAME boot-marker streak the grace above only
+# warns about. Before this, a pane that never left its boot phase kept polling
+# until BUSY_WAIT_CEILING_SEC (30 min) and then blind-pasted the task onto a
+# splash screen that has no composer to receive it — so the task was neither
+# delivered nor failed, it just stopped existing, and the only thing standing
+# between that and a wrong answer was Lead noticing by hand. (The reported
+# incident is worse than "slow": Lead closed the pane at ~110-180s, a report
+# from a DIFFERENT task then arrived, and the work was marked done having
+# never run.)
+#
+# At this ceiling the delivery is failed explicitly instead: the task's ledger
+# row flips to fail, Lead gets a blocking notice naming the role and the
+# recovery command, and the pane is torn down — the outcome is wrong, but it
+# is never silent. 5 minutes is well past every provider's own cold-boot
+# allowance (`ready_wait_ms`, 90s max) plus codex's measured ~61s baseline for
+# even a trivial prompt (#278), so a genuinely slow boot still wins the race;
+# it is only a boot that is not going to finish that gets cut. Overrideable
+# via env for slower hardware.
+BOOT_STALL_CEILING_SEC = int(os.environ.get("TAKKUB_BOOT_STALL_CEILING_SEC", "300"))
 
 
 # Live probe for Qt main-thread heartbeat staleness (#133 — fan-out delivery
@@ -979,6 +1032,14 @@ class Orchestrator(
         self._lead_notify_pumping: set[str] = set()
         # Busy-retry counter per project_ns; reset on delivery or Lead-dies path.
         self._lead_notify_retry: dict[str, int] = {}
+        # #279: wall-clock the CURRENT busy streak started for this project's
+        # Lead. `_pump_lead_notify` prefers an idle Lead for
+        # `_LEAD_BUSY_DELIVER_AFTER_S` and then delivers into the busy one
+        # anyway — an autonomous Lead is almost never idle, so waiting for the
+        # ready prompt used to cost ~90 s per report via the spill → reaper →
+        # force-flush chain. Cleared together with _lead_notify_retry by
+        # LeadInboxMixin._reset_lead_notify_backoff.
+        self._lead_notify_busy_since: dict[str, float] = {}
         # #133: project_ns currently has an in-flight _delayed_enter_verified
         # submit-verify chain writing to the Lead session. Both
         # _pump_lead_notify (next queued item) and _force_deliver_done_notices
@@ -1007,6 +1068,18 @@ class Orchestrator(
         # submitted yet. Fed by _on_pane_input via
         # LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
         self._lead_draft_state: dict[str, LeadDraftState] = {}
+        # #265: wall-clock of the most recent byte `_on_pane_input` saw the
+        # Lead pane's owner actually type (submitted or still drafting —
+        # either way proves they're about to act). Stamped from the exact
+        # same choke point as `_lead_draft_state` above, so it inherits the
+        # same guarantee: engine-originated writes (notices/tasks) go
+        # straight to `session.write()` and never pass through here, so
+        # they can never be mistaken for the owner interrupting. Unlike
+        # `_lead_draft_state` (which resets to "empty"/pending_since=0.0 the
+        # instant Enter submits a line), this timestamp is never cleared —
+        # `LeadWaitMixin.poll_wait` needs "did the owner type ANYTHING
+        # after this wait started", not "is a draft currently held".
+        self._lead_last_user_input_ts: dict[str, float] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -1065,6 +1138,17 @@ class Orchestrator(
         # `wait` registration can tell "resolved before I started watching"
         # from "resolved just now" without racing the digest/live queues.
         self._wait_done_events: dict[tuple[str, str], dict] = {}
+        # #249 follow-up: when a registration naturally concludes (every role
+        # resolved, or the registration's own timeout elapsed) `poll_wait`
+        # pops it — but two+ attached `takkub wait` clients each poll on
+        # their own schedule, so only the poller whose tick happened to
+        # observe the conclusion gets the real result; every OTHER attacher's
+        # next poll used to find `active is None` and get a manufactured
+        # "wait session no longer active" error for what was actually a
+        # success. This caches that final result per project so a straggling
+        # attacher's poll echoes the real terminal outcome instead — see
+        # `poll_wait`'s docstring for the cancel/timeout-supersede exception.
+        self._wait_resolved_echo: dict[str, dict] = {}
         self._hot_md_timer = QTimer(self)
         self._hot_md_timer.setInterval(_HOT_MD_INTERVAL_MS)
         self._hot_md_timer.timeout.connect(self._write_hot_md)
@@ -1202,6 +1286,217 @@ class Orchestrator(
             return task
         return f"{_SESSION_GOAL_HEADER}\n{goal}\n\n{task}"
 
+    def _register_subagent(
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        *,
+        requires_commit: bool = False,
+        auto_chain: bool = False,
+        shard_total: int = 0,
+        isolation: str = "shared",
+        project: str | None = None,
+        feature: str = "",
+    ) -> tuple[bool, str]:
+        """Register a native child without opening a cockpit pane (#268).
+
+        The Lead process owns native-subagent execution; the cockpit owns the
+        durable task capsule and completion bookkeeping.  This boundary keeps
+        provider-native execution in-process while preserving the ledger,
+        inbox and wait semantics of a normal ``done`` report.
+        """
+        try:
+            role_name = validate_name(role_name, "role")
+        except ValueError as exc:
+            return False, str(exc)
+        if role_name == LEAD.name:
+            return False, "lead cannot assign itself as a subagent"
+        project_ns = self._resolve_project(project)
+        pending = getattr(self, "_subagent_assignments", None)
+        if pending is None:
+            pending = self._subagent_assignments = {}
+        key = (project_ns, role_name)
+        if key in pending:
+            return (
+                False,
+                f"subagent assignment already pending for {role_name}; use {role_name}#N for fan-out",
+            )
+
+        base_role = _split_shard(role_name)[0]
+        run_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
+        worktree = None
+        if isolation == "worktree":
+            from .worktree_manager import WorktreeManager, load_worktree_config
+
+            if run_cwd:
+                info, warning = WorktreeManager().create(
+                    run_cwd, project_ns, role_name, int(time.time()), exclude_ports=set()
+                )
+            else:
+                info, warning = None, "ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)"
+            if info is not None:
+                cfg, _ = load_worktree_config(info.git_root)
+                run_cwd = info.path
+                worktree = info.as_dict()
+                task = _append_worktree_hint(task, info.branch, cfg.post_create, info.port)
+            else:
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → subagent ใช้ shared cwd · {warning}",
+                    from_role=role_name,
+                    note="",
+                )
+
+        task = self._apply_session_goal(task, project_ns)
+        task_id = _uuid.uuid4().hex
+        capsule = (
+            f"[ROLE: {role_name} — Lead assigned this task with `takkub assign --mode subagent`]\n"
+            "You are a native subagent of the Lead's current provider. Work directly in the cwd below; "
+            "do not claim independent-provider or cross-model verification.\n"
+            f"cwd: {run_cwd or '(current project cwd)'}\n\n{task}\n\n"
+            f'When finished, run: takkub subagent-done --role {role_name} "<one-line summary>"\n'
+            "For analysis/review, save detailed findings under docs/ before that completion command."
+        )
+        capsule_dir = _task_handoff_dir(project_ns)
+        capsule_path = capsule_dir / (
+            f"{datetime.now().strftime('%H%M%S')}-{role_name}-subagent-{task_id[:8]}.md"
+        )
+        try:
+            capsule_path.write_text(capsule, encoding="utf-8")
+        except OSError as exc:
+            return False, f"could not write subagent task capsule: {exc}"
+
+        from .provider_config import effective_provider_for
+
+        parent_provider = effective_provider_for(LEAD.name, project=project_ns)
+        pending[key] = {
+            "task": task,
+            "task_id": task_id,
+            "cwd": run_cwd,
+            "assign_ts": time.time(),
+            "requires_commit": requires_commit,
+            "auto_chain": auto_chain,
+            "shard_total": shard_total,
+            "worktree": worktree,
+            "provider": parent_provider,
+            "capsule": str(capsule_path),
+        }
+        try:
+            from .task_ledger import create_assignment
+
+            warning = create_assignment(
+                project_ns,
+                role_name,
+                run_cwd,
+                task,
+                self.get_session_goal(project=project_ns),
+                feature,
+                parent_provider,
+            )
+            if warning:
+                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event(
+                "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-assign"
+            )
+
+        if shard_total > 0:
+            group_key = f"{project_ns}::{base_role}"
+            if group_key not in self._shard_groups:
+                self._shard_groups[group_key] = ShardGroup(base_role=base_role, total=shard_total)
+            else:
+                self._shard_groups[group_key].total = shard_total
+        _log_event(
+            "assign_subagent",
+            role=role_name,
+            project=project_ns,
+            effective_provider=parent_provider,
+            capsule=str(capsule_path),
+        )
+        forward = str(capsule_path).replace(os.sep, "/")
+        return True, (
+            f"subagent registered for {role_name} (provider={parent_provider}, no pane). "
+            f"Dispatch one native subagent with task capsule: {forward}; completion command is inside. "
+            "This mode is same-provider only and is not a cross-model check."
+        )
+
+    def subagent_done(
+        self, role_name: str, note: str = "", project: str | None = None, failed: bool = False
+    ) -> tuple[bool, str]:
+        """Complete a pending native child through done-equivalent sinks (#268)."""
+        try:
+            role_name = validate_name(role_name, "role")
+        except ValueError as exc:
+            return False, str(exc)
+        project_ns = self._resolve_project(project)
+        pending = getattr(self, "_subagent_assignments", {})
+        state = pending.pop((project_ns, role_name), None)
+        if state is None:
+            return False, f"no pending subagent assignment for {role_name}"
+        note = (note or "").strip()
+        now = datetime.now()
+        try:
+            from .task_ledger import mark_done
+
+            warning = mark_done(project_ns, role_name, "fail" if failed else "ok", ts=now)
+            if warning:
+                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event(
+                "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-done"
+            )
+
+        session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+        body = note if failed else self._condense_done_note(note, note, "", session_path)
+        notice = (
+            self._build_verify_fail_handoff(role_name, note)
+            if failed
+            else f"[{role_name} done · subagent] {body}".rstrip()
+        )
+        shard_total = int(state.get("shard_total", 0) or 0)
+        # Match pane done semantics: clean shard reports are consolidated;
+        # failures surface immediately as blocking notices.
+        if failed or shard_total == 0:
+            self._notify_lead(project_ns, notice, from_role=role_name, note=note)
+        if state.get("requires_commit") and not state.get("worktree") and state.get("cwd"):
+            self._check_uncommitted_async(project_ns, role_name, state["cwd"])
+        if state.get("worktree"):
+            self._finalize_worktree(project_ns, role_name, state["worktree"])
+        if state.get("auto_chain") and not any(
+            p == project_ns and other.get("auto_chain") for (p, _role), other in pending.items()
+        ):
+            self._maybe_fire_auto_chain_handoff(project_ns, True)
+
+        if shard_total > 0:
+            base_role = _split_shard(role_name)[0]
+            group_key = f"{project_ns}::{base_role}"
+            group = self._shard_groups.get(group_key)
+            if group and not group.closed:
+                if failed:
+                    group.failed.add(role_name)
+                    group.failed_notes[role_name] = body
+                else:
+                    group.done[role_name] = body
+                if len(group.done) + len(group.failed) >= group.total:
+                    group.closed = True
+                    self._inject_shard_fanout_handoff(project_ns, group)
+                    self._shard_groups.pop(group_key, None)
+
+        stamp = now.strftime("%Y-%m-%dT%H%M%S")
+        self._recent_done.insert(0, (project_ns, role_name, f"{stamp}-{role_name}.md"))
+        del self._recent_done[20:]
+        getattr(self, "_wait_done_events", {})[(project_ns, role_name)] = {
+            "ts": now.timestamp(),
+            "failed": bool(failed),
+        }
+        self._write_hot_md()
+        self.agentDone.emit(project_ns, role_name, note)
+        _log_event("done_subagent", role=role_name, project=project_ns, note=note[:200])
+        return True, f"{role_name} subagent reported done"
+
     def assign(
         self,
         role_name: str,
@@ -1215,13 +1510,44 @@ class Orchestrator(
         project: str | None = None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
+        mode: str = "pane",
         _resource_token: ResourceToken | None = None,
     ) -> tuple[bool, str]:
+        if mode not in {"pane", "subagent"}:
+            return False, "mode must be pane or subagent"
+        if mode == "subagent":
+            if model:
+                return False, "model override is not supported in subagent mode"
+            if provider:
+                return False, "provider override is not supported in subagent mode"
+            if plan:
+                return False, "plan mode is not supported in subagent mode"
+            return self._register_subagent(
+                role_name,
+                cwd,
+                task,
+                requires_commit=requires_commit,
+                auto_chain=auto_chain,
+                shard_total=shard_total,
+                isolation=isolation,
+                project=project,
+                feature=feature,
+            )
+        provider = (provider or "").strip().lower() or None
+        if provider:
+            from .provider_config import assign_provider_override_error
+
+            provider_error = assign_provider_override_error(provider)
+            if provider_error:
+                return False, provider_error
         model = (model or "").strip() or None
         if model:
             from .provider_config import assign_model_override_error
 
-            model_error = assign_model_override_error(role_name, model, project)
+            model_error = assign_model_override_error(
+                role_name, model, project, provider_override=provider
+            )
             if model_error:
                 return False, model_error
         # #162: a repeated `--isolation worktree` assign at the same BARE role
@@ -1260,7 +1586,7 @@ class Orchestrator(
                     task_id=task_id,
                     resource_class=resource_class,
                     reason=decision.reason,
-                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model: (
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider: (
                         self.assign(
                             r,
                             c,
@@ -1273,6 +1599,7 @@ class Orchestrator(
                             project=p,
                             feature=f,
                             model=m,
+                            provider=pr,
                             _resource_token=token,
                         )
                     ),
@@ -1317,6 +1644,7 @@ class Orchestrator(
                 project,
                 feature,
                 model,
+                provider,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -1334,6 +1662,7 @@ class Orchestrator(
                 project,
                 feature,
                 model,
+                provider,
             )
         else:
             result = self._assign_dispatch(
@@ -1348,6 +1677,7 @@ class Orchestrator(
                 worktree=None,
                 feature=feature,
                 model=model,
+                provider=provider,
             )
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
@@ -1413,6 +1743,7 @@ class Orchestrator(
         worktree: dict | None = None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -1430,7 +1761,48 @@ class Orchestrator(
         raw_task_for_ledger = task
         task = self._apply_session_goal(task, project_ns)
         base_role_a = _split_shard(role_name)[0]
-        effective_provider = effective_provider_for(base_role_a, project=project_ns)
+        # Fetched early (normally computed further down, right before spawn)
+        # so an explicit --provider (#270) can be validated against
+        # pane_is_running and folded into `effective_provider` BEFORE it's
+        # used below for the codex task-rewrite decision and the
+        # system_prompt_flag lookup — both must reflect the CLI that will
+        # actually run, not the role's static config, exactly like the
+        # model_override handling a few lines down.
+        key = _exit_key(project_ns, role_name)
+        ps_assign = self._ps(key)
+        ps_assign.task_id = _uuid.uuid4().hex
+        existing_pane = self._project_panes(project_ns).get(role_name)
+        pane_is_running = bool(
+            existing_pane is not None
+            and getattr(existing_pane, "session", None) is not None
+            and getattr(existing_pane.session, "is_alive", False)
+        )
+        if provider and pane_is_running:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --provider {provider!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "provider เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+            )
+            _log_event(
+                "assign_provider_override_ignored",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # Same "clear on a plain re-assign, survive gate/FIFO/respawn
+            # otherwise" contract as model_override below. A watchdog-set
+            # degrade (see PaneState.provider_override docstring) that this
+            # explicit call doesn't renew is intentionally dropped here —
+            # spawn()'s own fresh-spawn-clear block would reset it to None on
+            # the very next spawn anyway; this just does it one call sooner.
+            ps_assign.provider_override = provider
+        effective_provider = ps_assign.provider_override or effective_provider_for(
+            base_role_a, project=project_ns
+        )
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
@@ -1451,19 +1823,15 @@ class Orchestrator(
         # the full task to its per-spawn system-prompt file; the pointer remains
         # the fallback and is still the delivery path for a running pane and
         # providers without a confirmed file-backed equivalent.
+        # #273: gated on the EFFECTIVE provider's own file-read capability —
+        # a provider whose agent tool set has no structured file-read (only
+        # codex, confirmed) never gets the pointer at all, regardless of
+        # task length; see `_task_handoff_pointer`'s docstring.
         paste_text, task_file = _task_handoff_pointer(
             delivery_task,
             project_ns,
             role_name,
-        )
-        key = _exit_key(project_ns, role_name)
-        ps_assign = self._ps(key)
-        ps_assign.task_id = _uuid.uuid4().hex
-        existing_pane = self._project_panes(project_ns).get(role_name)
-        pane_is_running = bool(
-            existing_pane is not None
-            and getattr(existing_pane, "session", None) is not None
-            and getattr(existing_pane.session, "is_alive", False)
+            supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
         )
         if model and pane_is_running:
             self._notify_lead(
@@ -1577,22 +1945,28 @@ class Orchestrator(
             # (merge proposal if the branch has commits, else safe-remove).
             ps_assign.worktree = worktree
             ps_assign.assign_base_sha = None
+            ps_assign.assign_git_root = None
+            ps_assign.assign_dirty_snapshot = None
         else:
-            # #245 (follow-up to #244): a SHARED-tree pane has no
-            # WorktreeInfo.base_sha to diff "files touched" against — snapshot
-            # HEAD now, once, so done()'s digest fact table can diff against
-            # it later instead of guessing. One-shot per assign event, not
-            # per-tick (#229/#244 boundary): a single bounded `git rev-parse
-            # HEAD` in the pane's resolved cwd. Best-effort — None when the
-            # cwd isn't a git repo or HEAD is unborn; the digest then reports
-            # "ตรวจไม่ได้" rather than a misleading 0.
+            # #245/#251: a SHARED-tree pane has no WorktreeInfo baseline.
+            # Capture HEAD plus the current porcelain paths' status/mtime/size
+            # once per assign.  Comparing that cheap O(dirty paths) snapshot
+            # at done excludes unchanged work that pre-dated this assignment;
+            # no tracked-tree walk or content hash is performed.
             from .worktree_manager import WorktreeManager as _WorktreeManagerSnap
 
             _snap_pane = self._project_panes(project_ns).get(role_name)
             _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
-            ps_assign.assign_base_sha = (
-                _WorktreeManagerSnap().head_sha(_snap_cwd) if _snap_cwd else None
-            )
+            if _snap_cwd:
+                (
+                    ps_assign.assign_base_sha,
+                    ps_assign.assign_git_root,
+                    ps_assign.assign_dirty_snapshot,
+                ) = _WorktreeManagerSnap().shared_tree_baseline(_snap_cwd)
+            else:
+                ps_assign.assign_base_sha = None
+                ps_assign.assign_git_root = None
+                ps_assign.assign_dirty_snapshot = None
         initial_task_consumed = ps_assign.spawn_initial_task_state in {
             "pending",
             "delivered",
@@ -1670,6 +2044,7 @@ class Orchestrator(
             initial_delivery_reason=initial_delivery_reason,
             effective_provider=effective_provider,
             model_override=model,
+            provider_override=provider,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -1685,6 +2060,7 @@ class Orchestrator(
         project: str | None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -1720,6 +2096,7 @@ class Orchestrator(
                 worktree=None,
                 feature=feature,
                 model=model,
+                provider=provider,
             )
 
         if not base_cwd:
@@ -1782,6 +2159,7 @@ class Orchestrator(
             worktree=info.as_dict(),
             feature=feature,
             model=model,
+            provider=provider,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -1981,6 +2359,40 @@ class Orchestrator(
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
+        # #255: Lead sending straight into a pane that still has a task
+        # delivery retrying toward it is a strong signal Lead has taken
+        # over recovery by hand (e.g. after the delivery got stuck on a
+        # boot stall, #254) — leaving the old delivery armed means its
+        # self-heal resend re-pastes the ORIGINAL task on top of whatever
+        # Lead just sent the moment the pane reaches ready, silently
+        # duplicating the work. Scoped to Lead-originated sends only
+        # (from_role is None for the CLI's own default, or explicitly
+        # "lead") — a peer teammate messaging another teammate is not
+        # "Lead recovering delivery" and must not cancel anything.
+        if to_role != LEAD.name and from_role in (None, LEAD.name):
+            delivery_manager = getattr(self, "_delivery_manager", None)
+            if delivery_manager is not None:
+                generation = int(getattr(pane, "_session_generation", 0))
+                superseded = delivery_manager.cancel_for_session(project_ns, to_role, generation)
+                if superseded:
+                    last_ids = getattr(self, "_last_delivery_ids", None)
+                    if last_ids is not None:
+                        last_ids.pop((project_ns, to_role), None)
+                    self._notify_lead(
+                        project_ns,
+                        f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ค้างอยู่ "
+                        f"สำหรับ {to_role} อัตโนมัติ เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — เดิมจะ "
+                        f"paste task เก่าซ้ำทันทีที่ pane กลับมา ready (issue #255)",
+                        from_role="system",
+                        note="delivery_superseded",
+                    )
+                    _log_event(
+                        "delivery_superseded_by_send",
+                        role=to_role,
+                        project=project_ns,
+                        cancelled=superseded,
+                    )
+
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + _sanitize_pane_text(msg)
         _send_sess = pane.session
@@ -1988,13 +2400,23 @@ class Orchestrator(
         message_expires_at = time.time() + float(
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
+        # #277: record the message BEFORE writing it. `send` used to leave no
+        # trace at all, so a respawn (crash / stuck-recover / rate-limit
+        # resume) took the message with it and nothing — not the sender, not
+        # Lead, not a later audit — could tell it had ever existed. The
+        # generation stamp is what lets `_reap_role_messages` recognise, later,
+        # that this message was written into a session that no longer exists.
+        send_generation = int(getattr(pane, "_session_generation", 0))
+        message_id = self._record_role_message(
+            project_ns, to_role=to_role, from_role=from_role, body=body, generation=send_generation
+        )
         _safe_session_write(
             _send_sess,
             body_payload,
             priority=WritePriority.TASK,
             kind="task",
             expires_at=message_expires_at,
-            session_generation=getattr(pane, "_session_generation", None),
+            session_generation=send_generation,
         )
         # Self-healing submit (issue #22): resend Enter if the peer message's
         # submit was swallowed mid-paste-render. Safe — a busy target isn't at
@@ -2013,6 +2435,13 @@ class Orchestrator(
             ),
             on_repaste=lambda rem, r=to_role: _log_event(
                 "send_repaste", project=project_ns, role=r, remaining=rem
+            ),
+            # #277: the same accept signal task delivery already trusts — the
+            # pane left its ready prompt, so it took the paste. Until this
+            # fires the record stays "sent", which is the honest state: bytes
+            # written, receipt unproven.
+            on_settled=lambda p=project_ns, m=message_id, s=_send_sess: self._confirm_role_message(
+                p, m, s
             ),
             expires_at=message_expires_at,
         )
@@ -2064,8 +2493,193 @@ class Orchestrator(
             to=to_role,
             from_=from_role,
             body=msg[:_MAX_LOG_BODY] + ("…" if len(msg) > _MAX_LOG_BODY else ""),
+            message_id=message_id,
         )
-        return True, f"sent to {to_role}"
+        # #277: no longer claims receipt. Writing to the PTY is all that has
+        # happened at this point — the pane may still be booting, mid-turn, or
+        # about to be respawned out from under the paste. The record above is
+        # what turns that from an unanswerable question into a lookup.
+        return True, (
+            f"queued to {to_role} (id {message_id}) — "
+            f"ยืนยันว่าถึงมือจริงไหมด้วย `takkub messages --role {to_role}`"
+        )
+
+    # ------------------------------------------------------------------
+    # Pane health (#280) — watchdog observations are accumulated per pane
+    # lifecycle and reported at its terminal event instead of interrupting
+    # Lead with a status update every time something is noticed. See
+    # pane_health.py for what stays immediate and why.
+    # ------------------------------------------------------------------
+
+    def _record_pane_health(
+        self, project_ns: str, role: str, kind: str, detail: str, live_body: str | None = None
+    ) -> bool:
+        """Record one watchdog observation for (project, role).
+
+        Returns True when the caller should ALSO send *live_body* to Lead right
+        now — i.e. only under the `live` policy. Under the default `terminal`
+        policy the observation is kept for the pane's report; under `off` it is
+        dropped entirely.
+        """
+        from .pane_health import POLICY_LIVE, POLICY_OFF, PaneHealth, watch_policy
+
+        policy = watch_policy()
+        if policy == POLICY_OFF:
+            return False
+        store = self.__dict__.setdefault("_pane_health", {})
+        health = store.setdefault(f"{project_ns}::{role}", PaneHealth())
+        health.record(kind, detail, ts=time.time())
+        return policy == POLICY_LIVE and live_body is not None
+
+    def _drain_pane_health(self, project_ns: str, role: str) -> str:
+        """Pop this pane's accumulated observations and render them as one
+        line for its report. Popping (not peeking) is deliberate: a pane
+        lifecycle reports its own health exactly once, and a respawn under the
+        same role starts clean rather than inheriting the previous pane's."""
+        from .pane_health import summarize
+
+        store = getattr(self, "_pane_health", None)
+        if not store:
+            return ""
+        return summarize(store.pop(f"{project_ns}::{role}", None))
+
+    # ------------------------------------------------------------------
+    # Role-message durability (#277) — see role_messages.py for the store.
+    # ------------------------------------------------------------------
+
+    def _record_role_message(
+        self, project_ns: str, *, to_role: str, from_role: str | None, body: str, generation: int
+    ) -> str:
+        """Append one `takkub send` to the durable log; returns its id (empty
+        string if the store is unwritable — a broken audit log must never stop
+        the message itself from going out)."""
+        try:
+            from . import role_messages
+
+            return role_messages.append(
+                RUNTIME_DIR,
+                project_ns,
+                to_role=to_role,
+                from_role=from_role,
+                body=body,
+                generation=generation,
+            )
+        except Exception as exc:
+            _log_event("role_message_record_failed", project=project_ns, error=str(exc)[:200])
+            return ""
+
+    def role_message_log(
+        self, role: str, project: str | None = None, limit: int = 20
+    ) -> tuple[bool, str, list[str]]:
+        """`takkub messages --role <r>` (#277): the send-audit log for one
+        role, rendered for the CLI. Read-only — never mutates delivery state."""
+        try:
+            role = validate_name(role, "role")
+        except ValueError as exc:
+            return False, str(exc), []
+        project_ns = self._resolve_project(project)
+        try:
+            from . import role_messages
+
+            records = role_messages.read(RUNTIME_DIR, project_ns, role=role)
+            lines = role_messages.format_for_cli(records, limit=max(1, int(limit)))
+        except Exception as exc:
+            return False, f"อ่าน message log ไม่ได้: {exc}", []
+        pending = sum(1 for r in records if r.get("state") == "sent")
+        return (
+            True,
+            f"{len(records)} ข้อความถึง {role} (ยังไม่ยืนยันว่าถึงมือ {pending})",
+            lines,
+        )
+
+    def _confirm_role_message(self, project_ns: str, message_id: str, session) -> None:
+        """Mark a recorded message delivered once its submit chain settles and
+        the pane is demonstrably no longer at its ready prompt."""
+        if not message_id:
+            return
+        try:
+            accepted = not session.is_at_ready_prompt()
+        except Exception:
+            accepted = False
+        if not accepted:
+            return
+        try:
+            from . import role_messages
+
+            role_messages.mark_delivered(RUNTIME_DIR, project_ns, message_id)
+        except Exception:
+            pass
+
+    def _reap_role_messages(self) -> None:
+        """Re-deliver `takkub send` messages that a respawn swallowed (#277).
+
+        Rides the existing idle-watchdog tick rather than hooking each respawn
+        path separately: there are several (crash auto-respawn, stuck-recover,
+        rate-limit resume, a manual close+assign) and they have already drifted
+        apart once. The condition is the same for all of them and is checkable
+        from state alone — a message written into generation N while the pane
+        now runs generation N+1 was, by definition, never read by anyone.
+        """
+        try:
+            from . import role_messages
+        except Exception:
+            return
+        for project_ns, panes in list(getattr(self, "_panes_by_project", {}).items()):
+            # One read per project per tick, not one per pane — this runs on
+            # the Qt main thread every 5s.
+            try:
+                records = role_messages.read(RUNTIME_DIR, project_ns)
+            except Exception:
+                continue
+            if not records:
+                continue
+            for role, pane in list(panes.items()):
+                if role == LEAD.name:
+                    continue
+                session = getattr(pane, "session", None)
+                if session is None or not getattr(session, "is_alive", False):
+                    continue
+                generation = int(getattr(pane, "_session_generation", 0))
+                try:
+                    pending = role_messages.undelivered_in(records, role, generation)
+                except Exception:
+                    continue
+                if not pending:
+                    continue
+                for rec in pending:
+                    msg_id = str(rec.get("id", ""))
+                    body = str(rec.get("body", ""))
+                    if not body:
+                        role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "empty body")
+                        continue
+                    if int(rec.get("replays", 0)) + 1 > role_messages.MAX_REPLAYS:
+                        role_messages.mark_abandoned(
+                            RUNTIME_DIR, project_ns, msg_id, "replay cap reached"
+                        )
+                        continue
+                    # Reuse the ordinary ready-prompt-aware delivery path so a
+                    # replay lands under the same rules as any other write
+                    # (never into a boot splash or an open modal).
+                    self._send_when_ready(role, body, project=project_ns)
+                    role_messages.mark_replayed(RUNTIME_DIR, project_ns, msg_id, generation)
+                    _log_event(
+                        "role_message_replayed",
+                        project=project_ns,
+                        role=role,
+                        message_id=msg_id,
+                        generation=generation,
+                    )
+                self._notify_lead(
+                    project_ns,
+                    (
+                        f"♻️ [message-replayed] {role} pane ถูก respawn ระหว่างที่ยังมีข้อความจาก "
+                        f"`takkub send` ค้างอยู่ — cockpit ส่งซ้ำให้แล้ว {len(pending)} ข้อความ "
+                        f"(เดิมข้อความจะหายไปเงียบๆ พร้อม process เก่า) · "
+                        f"ตรวจได้ด้วย `takkub messages --role {role}` (issue #277)"
+                    ),
+                    from_role="system",
+                    note="message_replayed",
+                )
 
     def _warn_if_live_children(self, project_ns: str, role_name: str, session) -> None:
         """#234: best-effort check for a live subprocess tree under this
@@ -2079,6 +2693,15 @@ class Orchestrator(
         left guessing why a build silently vanished (#234's own repro: a
         `docker images`/`docker ps` hunt after the fact was the only way to
         find out nothing had actually run).
+
+        #272: `children` always includes the provider's own CLI-launcher
+        scaffolding (npm .cmd shim → cmd.exe/conhost.exe/node.exe on Windows,
+        codex's code-mode sandbox host, kimi's python interpreter, ...) —
+        that was every single close, 100% false-positive rate, so this now
+        subtracts each provider's confirmed `scaffolding_process_names` (via
+        `provider_spec.scaffolding_process_names_for`) before deciding
+        whether anything worth warning about is left. Only fires once real
+        work (docker/pytest/build tooling/etc.) survives the filter.
         """
         pid = getattr(session, "_pid", None)
         if not pid:
@@ -2091,16 +2714,26 @@ class Orchestrator(
             return
         if not children:
             return
+        from .provider_config import effective_provider_for
+        from .provider_spec import normalize_process_name, scaffolding_process_names_for
+
+        provider = effective_provider_for(role_name, project=project_ns)
+        scaffolding = scaffolding_process_names_for(provider)
         names: list[str] = []
         for child in children:
             try:
-                names.append(child.name())
+                child_name = child.name()
             except Exception:
-                pass
+                continue
+            if normalize_process_name(child_name) in scaffolding:
+                continue
+            names.append(child_name)
+        if not names:
+            return
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
         self._notify_lead(
             project_ns,
-            f"⚠️ [{role_name} closing] {len(children)} subprocess(es) still running under this "
+            f"⚠️ [{role_name} closing] {len(names)} subprocess(es) still running under this "
             f"pane are about to be killed{detail} — if the work wasn't actually finished, use "
             f"`takkub progress` next time instead of `done` until it is.",
             from_role=role_name,
@@ -2110,7 +2743,7 @@ class Orchestrator(
             "close_kills_live_children",
             role=role_name,
             project=project_ns,
-            count=len(children),
+            count=len(names),
             names=names[:10],
         )
 
@@ -2200,6 +2833,21 @@ class Orchestrator(
                 self.ledgerChanged.emit(project_ns)
             except Exception:
                 _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="close")
+
+        # #280: report-at-close. `_ps_close is not None` means this pane never
+        # called done(), so nothing else will ever carry what the watchdogs saw
+        # about it — this is the last moment it can be said. A pane that DID
+        # report has already drained its own health in done(), so this is
+        # silent for it rather than a second copy.
+        if _ps_close is not None and role_name != LEAD.name:
+            close_health = self._drain_pane_health(project_ns, role_name)
+            if close_health:
+                self._notify_lead(
+                    project_ns,
+                    f"🔚 [{role_name} closed] ปิดโดยไม่มีรายงาน done\n{close_health}",
+                    from_role=role_name,
+                    note="close_health",
+                )
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
@@ -2701,6 +3349,31 @@ class Orchestrator(
         )
 
     @staticmethod
+    def _build_delivery_pointer_failure_notice(
+        from_role: str, note: str, task_file: str | None
+    ) -> str:
+        """Lead-facing notice for a `done --fail` that `is_delivery_pointer_failure`
+        classified as a TASK-DELIVERY failure, not a work failure (issue
+        #273) — the pane couldn't open the file-pointer handoff, so the
+        assigned work never started.
+
+        Deliberately NOT `_build_verify_fail_handoff`'s fix-loop-propose
+        wording: there is no root cause in the WORK to find yet, so telling
+        Lead to hunt for one wastes time on a task that was never
+        attempted. Points straight at the fix instead — just reassign.
+        """
+        body = note.strip() or "(no detail given)"
+        file_note = f" ({task_file})" if task_file else ""
+        return (
+            f"[{from_role} delivery-failed] {body}\n\n"
+            f"⚠️ นี่คือ delivery failure ไม่ใช่ task failure (#273) — pane เปิด "
+            f"task-pointer file ไม่ได้{file_note} จึงยังไม่เคยเริ่มงานเลยแม้แต่บรรทัดเดียว "
+            "ไม่ต้องหา root cause ของ 'งาน' (ยังไม่มีงานให้หา) แค่ assign ใหม่ก็พอ — "
+            "ถ้า pane role/provider นี้ยังเจอซ้ำ ให้เช็ค "
+            "ProviderSpec.supports_agent_file_read ของ provider นั้น"
+        )
+
+    @staticmethod
     def _condense_done_note(
         raw_note: str, merged_note: str, evidence_line: str, session_md_path: str | None
     ) -> str:
@@ -2738,6 +3411,8 @@ class Orchestrator(
         had_worktree: dict | None,
         pane_cwd: str | None,
         assign_base_sha: str | None,
+        assign_git_root: str | None,
+        assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -2757,7 +3432,13 @@ class Orchestrator(
         a specific CLI's terminal output.
         """
         from .digest_facts import DigestFacts, union_files_touched
-        from .worktree_manager import WorktreeInfo, WorktreeManager, summarize_diffstat
+        from .worktree_manager import (
+            WorktreeInfo,
+            WorktreeManager,
+            changed_dirty_paths,
+            parse_porcelain_paths,
+            summarize_diffstat,
+        )
 
         mgr = WorktreeManager()
 
@@ -2798,16 +3479,16 @@ class Orchestrator(
             }
             return facts, precomputed
 
-        # Shared-tree pane (#245's explicit follow-up to #244, which "chose
-        # not to guess" here): no WorktreeInfo.base_sha to diff against, so
-        # use the HEAD snapshot _assign_dispatch captured at assign-time
-        # instead (PaneState.assign_base_sha, set only for shared-tree
-        # panes). Multiple panes can share this same tree, so a commit
-        # landing between assign and done is NOT necessarily this pane's own
-        # work — files_note says so explicitly rather than implying an exact
-        # attribution the cockpit cannot actually prove.
+        # Shared-tree pane: HEAD covers committed changes in the assignment
+        # interval; the dirty-path metadata snapshot covers uncommitted state
+        # while excluding unchanged dirt that pre-dated assign (#251).
         branch = mgr.current_branch(pane_cwd) if pane_cwd else None
-        if not pane_cwd or not assign_base_sha:
+        if (
+            not pane_cwd
+            or not assign_base_sha
+            or not assign_git_root
+            or assign_dirty_snapshot is None
+        ):
             return (
                 DigestFacts(
                     role=from_role,
@@ -2816,17 +3497,38 @@ class Orchestrator(
                     report_path=report_path,
                     headline=headline,
                     files_note=(
-                        "ตรวจไม่ได้ (ไม่มี snapshot ตอน assign — cwd ไม่ใช่ git repo "
-                        "หรือ HEAD ว่างตอน assign)"
+                        "ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ — cwd ไม่ใช่ git repo, "
+                        "HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
                     ),
                 ),
                 None,
             )
-        uncommitted = mgr.uncommitted_count_at(pane_cwd)
-        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        # One porcelain read feeds BOTH the uncommitted count and the metadata
+        # comparison; done() does not pay for two status subprocesses.
         commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
-        porcelain = mgr.status_porcelain(pane_cwd)
-        files_touched, dirs = union_files_touched(diffstat, porcelain)
+        porcelain = mgr.shared_tree_status_porcelain(pane_cwd)
+        if porcelain is None:
+            return (
+                DigestFacts(
+                    role=from_role,
+                    ref=ref,
+                    branch=branch,
+                    commits_ahead=commits_ahead,
+                    merge_conflicts=None,
+                    merge_note=(
+                        "N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"
+                    ),
+                    report_path=report_path,
+                    headline=headline,
+                    files_note="ตรวจไม่ได้ (อ่าน git status ตอน done ไม่สำเร็จ)",
+                ),
+                None,
+            )
+        uncommitted = len(parse_porcelain_paths(porcelain))
+        current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
+        changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
+        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)
         facts = DigestFacts(
             role=from_role,
             ref=ref,
@@ -2838,16 +3540,68 @@ class Orchestrator(
             files_touched=files_touched,
             files_dirs=tuple(dirs),
             files_note=(
-                "เทียบกับ snapshot ตอน assign — อาจรวม commit ของ pane อื่นถ้ามีคน commit "
-                "ทับ shared tree คาบเกี่ยวกัน"
+                "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
+                "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
             ),
             report_path=report_path,
             headline=headline,
         )
         return facts, None
 
+    def _pane_reports_undelivered_task(self, project_ns: str, role: str, pane) -> bool:
+        """(#278/#276) True when this pane is reporting on an assignment that
+        provably never reached it.
+
+        The failure this exists for (measured in #278): codex read the
+        injected orchestrator instructions, decided "answered the prompt =
+        finished the job", and ran `takkub done` before the task had landed.
+        `done()` accepted it, Lead got a complete-looking report, and the work
+        was closed having never run — the target file still held its original
+        code. #276 is the same hole from the other side: a pane wedged in its
+        provider's boot phase never receives its task, so any `done` it emits
+        belongs to something else.
+
+        The test is narrow on purpose — an assignment IS on record for this
+        pane, and none of the ways a task can actually arrive happened:
+
+          * `spawn_initial_task_state` — preloaded into the spawn itself;
+          * `_last_delivery_ids` — a delivery was written to its PTY;
+          * `last_send_ts` — Lead messaged it directly with `takkub send`;
+          * `pane.state == "working"` — the orchestrator itself believes it
+            is mid-task (deliberately last, and deliberately inclusive: a
+            state this gate did not model must never cost a real report).
+
+        A pane with NO assignment on record is explicitly allowed through:
+        `takkub spawn` followed by instructions typed into the pane by hand is
+        a legitimate flow the cockpit has no bookkeeping for, and refusing its
+        report would break a working habit to defend against a case that
+        cannot occur there anyway (with no assignment there is no task for a
+        premature `done` to close out).
+
+        Every signal is cockpit-owned bookkeeping, so it reads the same for a
+        codex/gemini/opencode pane as for claude (#103) — nothing is parsed
+        out of a specific CLI's terminal output.
+        """
+        ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role}")
+        if ps is None:
+            return False
+        if not ps.assign_ts and not ps.last_assigned_task:
+            return False  # no assignment on record — hand-driven pane
+        if ps.spawn_initial_task_state in ("delivered", "fallback"):
+            return False
+        if getattr(self, "_last_delivery_ids", {}).get((project_ns, role)):
+            return False
+        if ps.last_send_ts:
+            return False
+        return getattr(pane, "state", "") != "working"
+
     def done(
-        self, from_role: str, note: str = "", project: str | None = None, failed: bool = False
+        self,
+        from_role: str,
+        note: str = "",
+        project: str | None = None,
+        failed: bool = False,
+        force: bool = False,
     ) -> tuple[bool, str]:
         try:
             from_role = validate_name(from_role, "role")
@@ -2860,6 +3614,21 @@ class Orchestrator(
         pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
+
+        # #278/#276: refuse a report about an assignment that never reached
+        # this pane — see `_pane_reports_undelivered_task`. `--force` stays
+        # available for the case where the orchestrator's record is simply
+        # behind reality (work driven by hand in the pane's own terminal).
+        if not force and self._pane_reports_undelivered_task(project_ns, from_role, pane):
+            _log_event("done_rejected_no_task", role=from_role, project=project_ns)
+            return False, (
+                f"ปฏิเสธ done: pane '{from_role}' มี task ที่ถูก assign ไว้ แต่ task นั้น "
+                "**ยังไม่เคยถูกส่งถึง pane นี้เลย** (ไม่มี delivery / ไม่มี takkub send / "
+                "cockpit ไม่ได้ mark ว่า working) — แปลว่ายังไม่ได้เริ่มงานที่ถูกสั่ง. "
+                "`takkub done` ใช้รายงาน **task ที่ได้รับมอบหมาย** เท่านั้น ไม่ใช่เมื่อตอบคำถามจบ "
+                "หรือเมื่อจบ turn แรก. ถ้ากำลังรอ task อยู่ ให้รอของจริงเข้ามาก่อน; "
+                "ถ้าทำงานนั้นเสร็จจริงด้วยมือ ให้ใช้ `takkub done --force` (issue #278)"
+            )
 
         key = f"{project_ns}::{from_role}"
 
@@ -2896,7 +3665,10 @@ class Orchestrator(
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
         had_assign_ts = _ps_done.assign_ts
+        had_task_file = _ps_done.last_assigned_task_file
         had_assign_base_sha = _ps_done.assign_base_sha
+        had_assign_git_root = _ps_done.assign_git_root
+        had_assign_dirty_snapshot = _ps_done.assign_dirty_snapshot
         if not hasattr(self, "_last_done_task_ids"):
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
@@ -2981,19 +3753,41 @@ class Orchestrator(
         _worktree_digest_precomputed = None
         if failed:
             notice_body = note
-            notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
-            _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
-            # ReflexionMemory-style auto-capture: a FAILED report used to go to
-            # Lead and nowhere else, so the same role could repeat the same
-            # failure cold next spawn. No agent decision required here.
-            try:
-                from .role_memory import append_failure_entry
+            elapsed_since_assign = (time.time() - had_assign_ts) if had_assign_ts else float("inf")
+            if is_delivery_pointer_failure(note, had_task_file, elapsed_since_assign):
+                # #273: a pane that couldn't open the file-pointer handoff
+                # never started the assigned WORK at all — this is a
+                # delivery failure, not a task failure. Deliberately skip
+                # the fix-loop-propose wording (there is no root cause in
+                # the work to find yet) and the role_memory capture below
+                # (it would poison this role's future-spawn context with a
+                # failure that was never about anything it did).
+                notice = self._build_delivery_pointer_failure_notice(
+                    from_role, f"{ref_tag}{note}", had_task_file
+                )
+                _log_event(
+                    "delivery_pointer_failure",
+                    project=project_ns,
+                    role=from_role,
+                    note=(note or "")[:200],
+                    task_file=had_task_file,
+                )
+            else:
+                notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
+                _log_event(
+                    "verify_failed", project=project_ns, role=from_role, note=(note or "")[:200]
+                )
+                # ReflexionMemory-style auto-capture: a FAILED report used to go to
+                # Lead and nowhere else, so the same role could repeat the same
+                # failure cold next spawn. No agent decision required here.
+                try:
+                    from .role_memory import append_failure_entry
 
-                fail_role, _ = _split_shard(from_role)
-                fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
-                append_failure_entry(project_ns, fail_role, fail_reason)
-            except Exception:
-                pass
+                    fail_role, _ = _split_shard(from_role)
+                    fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
+                    append_failure_entry(project_ns, fail_role, fail_reason)
+                except Exception:
+                    pass
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
             notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()
@@ -3010,6 +3804,8 @@ class Orchestrator(
                     had_worktree,
                     pane_cwd,
                     had_assign_base_sha,
+                    had_assign_git_root,
+                    had_assign_dirty_snapshot,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
@@ -3025,6 +3821,16 @@ class Orchestrator(
                     files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
                 )
                 _worktree_digest_precomputed = None
+        # #280: fold everything the watchdogs observed about this pane into
+        # its own report instead of having interrupted Lead with each
+        # observation as it happened (slow boot, unconfirmed paste, degrade +
+        # respawn …). Drained unconditionally — even when the notice below is
+        # suppressed for a shard — so one pane lifecycle's health can never
+        # leak into the next pane that takes over this role slot.
+        health_line = self._drain_pane_health(project_ns, from_role)
+        if health_line:
+            notice = f"{notice}\n{health_line}"
+
         # Shard panes suppress clean per-shard notices in favour of the
         # consolidated handoff. Failures still surface immediately so the
         # fix-loop proposal cannot be delayed or lost.
@@ -3617,6 +4423,89 @@ class Orchestrator(
                 return True
         return False
 
+    def _pending_notice_outside(
+        self, project_ns: str, watched_roles: set[str]
+    ) -> dict[str, str] | None:
+        """(#253) The first pending Lead notice — digest, live, or durable
+        queue — whose origin role is outside *watched_roles* and needs
+        immediate Lead attention (FAILED / spawn-failed / delivery-
+        unconfirmed / spawn-stuck — same triage `_is_blocking_lead_notice`
+        already uses to jump the digest queue). `poll_wait` uses this to
+        wake a `takkub wait` early instead of leaving Lead deaf to a
+        blocking report from a role it isn't watching for up to the full
+        --timeout — the #253 incident: `wait --role qa` sat blind for 9
+        minutes while devops's done report queued up behind it.
+
+        Plain "done" notices from an unwatched role are deliberately NOT a
+        wake trigger — those are routine parallel-fan-out noise a Lead
+        doesn't need to react to mid-wait; only reports that need a
+        decision jump the wait early. Roles in *watched_roles* are
+        excluded so a role's own report never "interrupts" the very wait
+        that is watching for it — that path already resolves it normally.
+
+        Returns ``{"role": ..., "detail": ...}`` for the first match
+        (first-found, not severity-ranked — a second call after Lead
+        handles it and re-waits will surface the next one), else None.
+
+        #259: `inbox_report` tags [spawn-failed]/[delivery-unconfirmed]/
+        [spawn-stuck]/[delivery-boot-stall] notices "system" (`_notice_role_tag`
+        doesn't parse their shape — see `_system_marker_role`'s comment),
+        so before this fix EVERY notice of these 4 kinds was silently
+        dropped here regardless of watched/unwatched, not just for a
+        watched role as originally reported — `_system_marker_role` below
+        recovers the real target role so a genuinely outside role's
+        boot-stall/unconfirmed/stuck notice reaches this interrupt too.
+        """
+        for item in self.inbox_report(project=project_ns):
+            role = item.get("role")
+            body = str(item.get("body", ""))
+            if role == "system":
+                role = _system_marker_role(body)
+            if not role or role in watched_roles:
+                continue
+            if not _is_blocking_lead_notice(body):
+                continue
+            first_line = body.strip().splitlines()[0] if body.strip() else ""
+            return {"role": role, "detail": first_line[:200]}
+        return None
+
+    def _pending_system_notice_for_watched(
+        self, project_ns: str, pending_roles: set[str]
+    ) -> dict[str, str] | None:
+        """(#259) A delivery-health system notice about a role Lead IS
+        watching — [delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
+        [spawn-failed] — never calls `done()`/`failed()`, so unlike a
+        watched role's own done/FAILED report (already resolved every
+        poll tick via `_wait_done_events`), this class of notice used to
+        sit invisible in the inbox for the role's own wait until the full
+        --timeout elapsed: `_pending_notice_outside` deliberately skips
+        roles in the watched set (a role's own done/FAILED must resolve
+        through the normal path, not double-fire as an "interrupt"
+        against itself), and nothing else ever checked the watched set
+        for this notice class. Reported live: `wait --role kimi` sat
+        blind for the full 30 minutes while a `[delivery-unconfirmed]
+        kimi ...` notice had been sitting in the inbox since minute 1.5.
+
+        Deliberately restricted to `_system_marker_role` (the 4 system
+        markers only), NOT the broader `_is_blocking_lead_notice` (which
+        also matches `[role FAILED]`) — a watched role's own FAILED
+        already resolves through `_wait_done_events` the moment `failed()`
+        runs; matching it here too would be redundant and races the two
+        resolutions against each other for no benefit.
+
+        Only checked against *pending_roles* (this tick's still-pending
+        watched roles, passed by the caller) — a role that already
+        resolved this tick doesn't need waking.
+        """
+        for item in self.inbox_report(project=project_ns):
+            body = str(item.get("body", ""))
+            role = _system_marker_role(body)
+            if not role or role not in pending_roles:
+                continue
+            first_line = body.strip().splitlines()[0] if body.strip() else ""
+            return {"role": role, "detail": first_line[:200]}
+        return None
+
     def _pending_notice_roles(self, project_ns: str, known: dict) -> dict[str, str]:
         """Roles from `_recent_done` no longer in `known` whose report is
         still pending delivery — see `_has_pending_lead_notice` (#163)."""
@@ -3765,10 +4654,44 @@ class Orchestrator(
         from the list.
         """
         project_ns = self._resolve_project(project)
-        status = {name: p.state for name, p in self._project_panes(project_ns).items()}
+        status = {
+            name: self._pane_display_state(p) for name, p in self._project_panes(project_ns).items()
+        }
         status.update(self._pending_notice_roles(project_ns, status))
         status.update(self._queued_resource_roles(project_ns, status))
         return status
+
+    def _pane_display_state(self, pane: AgentPane) -> str:
+        """Refine `pane.state == "active"` into spawning/active/ready (#248/#247).
+
+        `pane.state` is set once at spawn (`AgentPane.attach_session` →
+        "active") and never distinguished "CLI process launched, nothing
+        printed yet" from "CLI is up and idle at its own ready prompt" — both
+        read identically as "active" to `takkub list`/`status`, which is
+        exactly what made a hung spawn (a codex pane whose CLI never printed
+        anything, an agy pane stuck spinning on "Signing in...") look the
+        same as a healthy idle pane waiting for a task.
+
+        Every other `pane.state` value ("working", "done", "empty", or a
+        pending-notice/queued label) is returned unchanged — this only adds
+        a richer label for the "active" case, so every existing
+        `pane.state == "working"` / etc. check elsewhere is unaffected."""
+        if pane.state != "active":
+            return pane.state
+        session = pane.session
+        if session is None:
+            return "spawning"
+        try:
+            has_content = session.first_content_ts() is not None
+        except Exception:
+            return "active"  # fail open to the old label
+        if not has_content:
+            return "spawning"
+        try:
+            ready = session.is_at_ready_prompt_cached()
+        except Exception:
+            ready = False
+        return "ready" if ready else "active"
 
     def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
         """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
@@ -3824,11 +4747,189 @@ class Orchestrator(
 
         return ts
 
+    def _role_delivery_unconfirmed(self, project_ns: str, role: str) -> bool:
+        """(#263) True when a "task may not have landed" system notice
+        (spawn-failed / delivery-unconfirmed / spawn-stuck / delivery-boot-stall
+        — `_BLOCKING_NOTICE_MARKERS`, NOT delivery-busy-wait: that one means
+        delivery DID land and the pane is just being slow) is currently
+        pending for *role*.
+
+        Exists because `pane.state` is an ORCHESTRATOR-DECLARED label
+        stamped optimistically at dispatch time ("task assigned = working"),
+        never derived from whether the paste actually reached the pane —
+        real evidence (#263): a gemini pane read "working" from minute one
+        while its screen was stuck on "Signing in..." and the task was
+        never pasted in at all, with the cockpit's own
+        `[delivery-unconfirmed]` notice sitting unread the whole time.
+        `list_status_detailed` surfaces this as an additive flag (not a
+        `pane.state` mutation, so every existing `pane.state == "working"`
+        check elsewhere is unaffected) — a Lead reading `takkub status` can
+        now tell "genuinely running" from "assigned, but delivery layer
+        itself isn't sure it landed" instead of both reading identically as
+        bare "working".
+
+        Deliberately NOT a full unification of the 3 signals #263
+        describes (declared state / ready marker / progress clock) — that
+        would mean re-deriving `pane.state` itself from ready-marker
+        scraping, which lives in provider-specific calibration
+        (`provider_spec.py` / pty_section fixtures) reserved for a parallel
+        fix (#256/#257) this change deliberately does not touch. This is
+        the narrower, safely-additive slice: expose the ALREADY-COMPUTED
+        delivery-health signal next to the existing state instead of
+        trusting `pane.state` alone.
+
+        Scans the 3 raw queues directly (same shape `_has_pending_lead_notice`
+        already reads) rather than going through `inbox_report` — that
+        method's side effect of fingerprinting every returned body into
+        `_inbox_seen` (so a LATER `takkub inbox` pull collapses a digest
+        line the reader already saw) is exactly wrong here: this check runs
+        on every `list_status_detailed()` call (i.e. every `takkub
+        status`/`takkub list`), and marking a still-pending digest item
+        "already read" just because Lead happened to check status would
+        make it render collapsed once it actually flushes — Lead never
+        explicitly read it.
+        """
+
+        def _matches(body: object) -> bool:
+            text = str(body)
+            lowered = text.lower()
+            if not any(marker in lowered for marker in _BLOCKING_NOTICE_MARKERS):
+                return False
+            return _system_marker_role(text) == role
+
+        for entry in getattr(self, "_lead_digest_queue", {}).get(project_ns, ()):
+            body, *_rest = _unwrap_notice_item(entry)
+            if _matches(body):
+                return True
+        for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
+            body, *_rest = _unwrap_notice_item(entry)
+            if _matches(body):
+                return True
+        for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
+            if isinstance(item, dict) and _matches(item.get("body", "")):
+                return True
+        return False
+
+    def _derive_display_state(
+        self,
+        pane: AgentPane,
+        base_state: str,
+        delivery_unconfirmed: bool,
+    ) -> str:
+        """(#263) Combine the 3 disagreeing sources of truth the issue names —
+        `pane.state` (orchestrator-declared at dispatch), the ready-marker
+        screen scrape, and the delivery-health notice signal — into ONE state
+        string for `takkub list`/`status`'s display, with an explicit
+        priority order so no two of them can silently contradict each other
+        on screen the way the issue's evidence showed (gemini read "working"
+        while stuck on "Signing in..."; codex read "active" while the screen
+        plainly showed "Working (0s - esc to interrupt)"; kimi read "active"
+        while stuck needing `/login`).
+
+        Deliberately layered ON TOP OF `_pane_display_state`'s existing
+        spawning/active/ready/pass-through refinement (`base_state` — the
+        `"state"` key `list_status_detailed` already returns) instead of
+        replacing it: every existing `pane.state`/`"state"`-keyed check
+        elsewhere (`_resolve_role_wait_status`'s `state == "working"`, stall
+        detection above, the pre-existing `_pane_display_state` unit tests)
+        keeps reading the UNCHANGED base value. This produces a SEPARATE
+        `"display_state"` key — additive only, same contract as
+        `blocked_reason`/`delivery_unconfirmed` before it.
+
+        Priority (first match wins — screen-scraped ground truth always beats
+        an orchestrator-declared or notice-derived label, since the CLI
+        itself cannot be doing two contradictory things at once):
+
+          1. **login-required** — `session.auth_failure_reason(provider)`
+             matches (kimi "send /login to login", gemini stuck "Signing
+             in..." past its grace period, ...). The screen is definitive: a
+             CLI stuck here cannot simultaneously be "working" or "ready" no
+             matter what `pane.state` optimistically claims.
+          2. **booting** — `session.shows_boot_phase_marker()` (codex/agy
+             MCP cold-boot chrome: "booting mcp server"). Distinct from
+             `base_state == "spawning"` (nothing printed at all yet) — this
+             is "printed a banner, still not at its own ready prompt".
+             Deliberately NOT the wider `shows_startup_marker()`, which also
+             matches a pane that is mid-turn with a queued message (#281).
+          3. **waiting-delivery** — `base_state == "working"` and
+             `delivery_unconfirmed` is True: the orchestrator declared the
+             task dispatched, but the delivery layer's own health notice
+             says it isn't sure the paste ever landed. Covers a provider
+             with no calibrated auth marker to catch tier 1's shape of the
+             same underlying problem.
+          4. **busy** — `base_state == "active"` (i.e. NOT yet promoted to
+             "working" by any dispatch) but `session.is_hard_blocked_for`
+             says the screen's own hard-blocker markers ("esc to
+             interrupt", ...) show the CLI actively generating/interrupting
+             anyway — the codex evidence above. Splits "genuinely idle"
+             apart from "busy for a reason the orchestrator doesn't know
+             about" instead of both reading as the same bare "active".
+          5. **unknown** — `base_state == "active"` and this pane's provider
+             is in `uncalibrated_providers()` (empty `ready_rules` —
+             currently only "cursor"): the active/ready split depends on a
+             ready-marker table never confirmed for this provider, so
+             claiming either confidently would be a guess dressed up as
+             fact (same "ตรวจไม่ได้ beats a confident wrong label"
+             principle as #251).
+          6. Otherwise `base_state` unchanged.
+
+        All screen-scrape checks are best-effort: any exception from a loose
+        test double or a torn-down session falls through to the next tier
+        instead of raising, matching `_pane_display_state`'s own
+        `except Exception` fallback.
+        """
+        if base_state not in ("active", "working"):
+            return base_state
+        session = pane.session
+        if session is None:
+            return base_state
+        provider = getattr(pane.model, "provider_name", None) or "claude"
+
+        try:
+            auth_reason = session.auth_failure_reason(provider)
+        except Exception:
+            auth_reason = None
+        if auth_reason:
+            return "login-required"
+
+        try:
+            # #281: boot-phase only. The wider `shows_startup_marker()` also
+            # matches "mid-turn with a queued message", so `takkub list` used
+            # to label a codex pane that was actively working as "booting".
+            booting = session.shows_boot_phase_marker()
+        except Exception:
+            booting = False
+        if booting:
+            return "booting"
+
+        if base_state == "working":
+            return "waiting-delivery" if delivery_unconfirmed else base_state
+
+        # base_state == "active" from here on.
+        try:
+            busy = session.is_hard_blocked_for(provider)
+        except Exception:
+            busy = False
+        if busy:
+            return "busy"
+
+        from .provider_spec import uncalibrated_providers
+
+        try:
+            uncalibrated = provider in uncalibrated_providers()
+        except Exception:
+            uncalibrated = False
+        if uncalibrated:
+            return "unknown"
+
+        return base_state
+
     def list_status_detailed(self, project: str | None = None) -> dict[str, dict]:
         """Extended status snapshot with stall detection.
 
         Returns `{role: {"state": str, "stall_minutes": int|None,
-        "last_progress_ts": float, "blocked_reason": str|None}}`.
+        "last_progress_ts": float, "blocked_reason": str|None,
+        "delivery_unconfirmed": bool}}`.
         `stall_minutes` is set when the pane is `working` and no progress signal
         has been seen for more than STALL_THRESHOLD_SEC.
 
@@ -3840,7 +4941,22 @@ class Orchestrator(
         permission dialog for 2h51m while status kept reporting "working,
         progress 0s ago"). `pane.state` itself is left untouched — this is
         additive reporting only, not a new internal pane-state value, so
-        every existing `pane.state == "working"` check elsewhere is unaffected."""
+        every existing `pane.state == "working"` check elsewhere is unaffected.
+
+        `delivery_unconfirmed` (#263) is True when a delivery-health system
+        notice is currently pending for this role — see
+        `_role_delivery_unconfirmed`. Same additive-only contract as
+        `blocked_reason`.
+
+        `display_state` (#263) is `_derive_display_state`'s unified verdict —
+        the same `"state"` value, further refined into "login-required" /
+        "booting" / "waiting-delivery" / "busy" / "unknown" where the raw
+        `"state"` would otherwise show a misleadingly bare "working"/"active"
+        (see that method's docstring for the full priority order). This is
+        what `takkub list`/`status` render to Lead; `"state"` itself stays
+        exactly as before for every internal consumer (wait resolution,
+        stall detection) that depends on its literal value.
+        """
         now = time.time()
         project_ns = self._resolve_project(project)
         result: dict[str, dict] = {}
@@ -3849,6 +4965,7 @@ class Orchestrator(
             stall_minutes: int | None = None
             last_progress_ts = 0.0
             blocked_reason: str | None = None
+            delivery_unconfirmed = False
             if state == "working" and pane.session is not None and pane.session.is_alive:
                 last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
                 if last_progress_ts > 0:
@@ -3859,25 +4976,42 @@ class Orchestrator(
                     blocked_reason = _prompt_block_reason(pane.session)
                 except Exception:
                     blocked_reason = None
+                try:
+                    delivery_unconfirmed = self._role_delivery_unconfirmed(project_ns, role)
+                except Exception:
+                    delivery_unconfirmed = False
+            display_state_base = self._pane_display_state(pane)
+            try:
+                display_state = self._derive_display_state(
+                    pane, display_state_base, delivery_unconfirmed
+                )
+            except Exception:
+                display_state = display_state_base
             result[role] = {
-                "state": state,
+                "state": display_state_base,
+                "display_state": display_state,
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
                 "blocked_reason": blocked_reason,
+                "delivery_unconfirmed": delivery_unconfirmed,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
                 "state": state,
+                "display_state": state,
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
+                "delivery_unconfirmed": False,
             }
         for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
                 "state": state,
+                "display_state": state,
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
+                "delivery_unconfirmed": False,
             }
         return result
 
@@ -4021,6 +5155,7 @@ class Orchestrator(
 
         for role, info in detailed.items():
             state = info["state"]
+            display_state = info.get("display_state", state)
             last_ts = info["last_progress_ts"]
             stall_min = info["stall_minutes"]
 
@@ -4088,11 +5223,13 @@ class Orchestrator(
 
             panes_out[role] = {
                 "state": state,
+                "display_state": display_state,
                 "stall_minutes": stall_min,
                 "last_progress_ts": last_ts,
                 "last_progress_human": human_ts,
                 "last_progress_abs": abs_ts,
                 "blocked_reason": info.get("blocked_reason"),
+                "delivery_unconfirmed": info.get("delivery_unconfirmed", False),
                 "transcript_tail": transcript_tail,
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
@@ -4175,6 +5312,39 @@ class Orchestrator(
                 return False, f"task file unreadable: {task_file} ({e})", {}
             return True, "task", {"task": content, "task_file": task_file}
         return True, "task", {"task": ps.last_assigned_task, "task_file": None}
+
+    def cancel_task_delivery(self, role: str, project: str | None = None) -> tuple[bool, str]:
+        """`takkub task cancel --role <r>` — cancel any task delivery still
+        retrying toward `role`'s CURRENT pane session (issue #255).
+
+        A delivery keeps self-healing (resend/repaste) until the target
+        pane reaches its ready prompt or BUSY_WAIT_CEILING_SEC elapses — up
+        to 30 minutes. If Lead recovers a wedged pane manually in the
+        meantime (`takkub send` straight into it once it becomes reachable
+        some other way — see `send()`'s own auto-cancel for that exact
+        case), the ORIGINAL delivery this method targets is for a pane
+        Lead is NOT actively fighting: e.g. Lead decided to abandon the
+        assign entirely and hand the role a different task by hand, or
+        wants to stop the resend storm before closing the pane. Without
+        this, the only way to stop a still-retrying delivery was
+        `close()` (which also tears down the session) —
+        `task_delivery.DeliveryManager.cancel_for_session` already existed
+        and is correct, it simply had no CLI entry point until now."""
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role)
+        if pane is None:
+            return False, self._unknown_pane_message(role, project_ns)
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_manager is None:
+            return True, f"no pending delivery for '{role}' (nothing has ever been delivered)"
+        generation = int(getattr(pane, "_session_generation", 0))
+        cancelled = delivery_manager.cancel_for_session(project_ns, role, generation)
+        if cancelled:
+            last_ids = getattr(self, "_last_delivery_ids", None)
+            if last_ids is not None:
+                last_ids.pop((project_ns, role), None)
+            return True, f"cancelled {cancelled} pending delivery(ies) for '{role}'"
+        return True, f"no pending delivery for '{role}'"
 
     def _live_roles(self, project_ns: str) -> frozenset[str]:
         """Roles in *project_ns* with a currently-alive pane session — the
@@ -4714,6 +5884,17 @@ class Orchestrator(
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.
         self._reap_pending_done_notices()
+        # #277: re-deliver `takkub send` messages a respawn swallowed. Same
+        # tick for the same reason as the line above — one sweep catches every
+        # respawn path instead of each one remembering to replay.
+        try:
+            self._reap_role_messages()
+        except Exception:
+            _log_event("role_message_reap_error")
+        # #255: sweep task deliveries stuck in-flight past their TTL and
+        # tell Lead, instead of a stale delivery going quiet until it
+        # resurfaces as a duplicate paste.
+        self._reap_stale_deliveries()
         # Surface panes whose idle prompt no marker recognises (structural #20
         # staleness detector) — makes an upstream-reword silent break LOUD.
         self._check_stale_markers(now)
@@ -5422,6 +6603,10 @@ class Orchestrator(
         # the resumed pane would lose its baseline and done()'s fact table
         # would report "ตรวจไม่ได้" for a pane that actually had one.
         snap_assign_base_sha = _ps_snap.assign_base_sha if _ps_snap is not None else None
+        snap_assign_git_root = _ps_snap.assign_git_root if _ps_snap is not None else None
+        snap_assign_dirty_snapshot = (
+            _ps_snap.assign_dirty_snapshot if _ps_snap is not None else None
+        )
         # #41: carry the stuck-recover attempt count across the close→respawn so
         # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
@@ -5486,6 +6671,10 @@ class Orchestrator(
                 self._ps(key).pipeline_run_id = snap_pipeline_run_id
             if snap_assign_base_sha is not None:
                 self._ps(key).assign_base_sha = snap_assign_base_sha
+            if snap_assign_git_root is not None:
+                self._ps(key).assign_git_root = snap_assign_git_root
+            if snap_assign_dirty_snapshot is not None:
+                self._ps(key).assign_dirty_snapshot = snap_assign_dirty_snapshot
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.
@@ -5711,11 +6900,12 @@ class Orchestrator(
         project: str | None,
         feature: str = "",
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
         flag (commit gate, auto-chain, shards, plan, isolation, feature,
-        per-assign model) survives unchanged."""
+        per-assign model/provider) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -5733,6 +6923,7 @@ class Orchestrator(
                 "project": project,
                 "feature": feature,
                 "model": model,
+                "provider": provider,
             }
         )
         depth = len(q[project_ns])
@@ -5794,6 +6985,7 @@ class Orchestrator(
                 project=item["project"],
                 feature=item.get("feature", ""),
                 model=item.get("model"),
+                provider=item.get("provider"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a
@@ -6131,6 +7323,13 @@ class Orchestrator(
         Used by Lead to reset the board and by the cockpit when a tab is
         closed."""
         project_ns = self._resolve_project(project)
+        # #249 item 5: a board reset should sweep away any `takkub wait`
+        # registration too — the roles it was watching are about to be
+        # closed out from under it, so leaving it behind just makes the
+        # next `takkub wait` stumble over a stale registration.
+        cancel_wait = getattr(self, "cancel_wait", None)
+        if cancel_wait is not None:
+            cancel_wait(project_ns)
         names = [n for n in list(self._project_panes(project_ns).keys()) if n != LEAD.name]
         if not names:
             return True, "no teammates to close"
@@ -6145,7 +7344,82 @@ class Orchestrator(
         self.spawn(role_name)
 
     def _on_pane_close_clicked(self, role_name: str) -> None:
+        # Pane-header × (AgentPane's own close button) — a USER click, so it
+        # gates on confirm_manual_pane_close(). Every automated close path
+        # (CLI `takkub close`, done-report auto-close, close_all_teammates,
+        # app shutdown) calls close()/close_all_teammates() directly and
+        # never routes through this signal, so automation never blocks on a
+        # human click.
+        pane = self.sender()
+        if not isinstance(pane, AgentPane | HeadlessPane):
+            pane = self.panes.get(role_name)
+        project_ns = self._project_ns_for_pane(pane) if pane is not None else None
+        if project_ns is None:
+            project_ns = self._resolve_project(None)
+        if not self.confirm_manual_pane_close(pane, role_name, project_ns):
+            return
         self.close(role_name)
+
+    def confirm_manual_pane_close(
+        self, pane: AgentPaneLike | None, role_name: str, project: str | None
+    ) -> bool:
+        """Confirm dialog gate for a USER-initiated pane close (pane-header
+        × or tab-bar ×) — issue "กันกดปิด pane ผิด". Returns True to proceed
+        with the close, False if the user cancelled.
+
+        Must NEVER be called from an automated close path: CLI `takkub
+        close`, the done-report auto-close 2.5s after a teammate reports
+        done, `close_all_teammates` (board reset / tab close), or app
+        shutdown. Those call `close()`/`close_all_teammates()` directly —
+        wiring this gate into `close()` itself would hang unattended
+        automation waiting for a click that never comes.
+        """
+        if role_name == LEAD.name:
+            # close() already no-ops Lead unless force=True (tab teardown) —
+            # a dialog here would just be a confusing extra click on what is
+            # already a guaranteed no-op.
+            return True
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from . import cockpit_theme as theme
+
+        project_ns = self._resolve_project(project)
+        working = bool(pane is not None and getattr(pane, "state", None) == "working")
+        role_obj = getattr(pane, "role", None) if pane is not None else None
+        label = getattr(role_obj, "label", None) or role_name
+
+        if working:
+            lines = [f"'{label}' กำลังทำงานอยู่ — ปิดตอนนี้จะตัดงานที่กำลังรันทิ้งทันที"]
+        else:
+            lines = [f"ปิด pane '{label}'?"]
+
+        key = f"{project_ns}::{role_name}"
+        ps = getattr(self, "_pane_state", {}).get(key)
+        if ps is not None and ps.worktree:
+            try:
+                from .worktree_manager import WorktreeInfo, WorktreeManager
+
+                info = WorktreeInfo.from_dict(ps.worktree)
+                mgr = WorktreeManager()
+                if mgr.is_dirty(info):
+                    n = mgr.uncommitted_count(info)
+                    lines.append(
+                        f"⚠ worktree ({info.branch}) มี {n} ไฟล์ที่ยังไม่ commit — จะหายถ้าปิดตอนนี้"
+                    )
+                commits = mgr.commit_count(info)
+                if commits > 0:
+                    lines.append(f"⚠ branch {info.branch} มี {commits} commit ที่ยังไม่ได้ merge กลับ")
+            except Exception:
+                _log_event("confirm_close_worktree_check_error", role=role_name, project=project_ns)
+
+        parent = pane.window() if isinstance(pane, AgentPane) else None
+        box = theme.themed_message_box(parent)
+        box.setWindowTitle("ปิด pane")
+        box.setText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Ok
 
     def _on_pane_input(self, role_name: str, data: bytes) -> None:
         # Route the keystrokes to the pane that ACTUALLY emitted them, not to
@@ -6171,4 +7445,11 @@ class Orchestrator(
             project_ns = self._project_ns_for_pane(pane)
             if project_ns is not None:
                 self._track_lead_draft_input(project_ns, data)
+                # #265: any byte here is proven to be the owner actually
+                # typing (see this method's comment above and
+                # `_lead_last_user_input_ts`'s own docstring) — stamp it so
+                # `LeadWaitMixin.poll_wait` can wake early instead of
+                # leaving the owner queued behind up to --timeout of
+                # teammate polling.
+                self._lead_last_user_input_ts[project_ns] = time.time()
         pane.session.write(data)

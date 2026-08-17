@@ -527,7 +527,12 @@ def browser_profile_mcp_config_path(
                 cfg["args"] = args
                 servers["graft"] = cfg
 
-    data["mcpServers"] = servers
+    # #281: applied again here, not only in the role-variant writer, so a
+    # variant file left on disk from before this fix (they are only rewritten
+    # when the master or the policy changes) still spawns panes with the
+    # registry round-trip suppressed. Idempotent — an entry that already
+    # carries the flag is returned untouched.
+    data["mcpServers"] = {name: _prefer_offline_npx(cfg) for name, cfg in servers.items()}
 
     out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"
     try:
@@ -741,6 +746,60 @@ _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
 }
 
 
+# #281: npx consults the npm registry on every launch to resolve a package
+# spec. For the MCPs the cockpit itself ships that cost is already avoided by
+# pinning an exact version (see `_PLAYWRIGHT_MCP_VERSION`'s comment) — but a
+# user-added entry like `npx -y @upstash/context7-mcp` carries no version, so
+# npx re-resolves the dist-tag every single time.
+#
+# codex pays that bill in the worst possible place: it BLOCKS on MCP startup
+# before accepting input (its composer keeps showing "esc to interrupt" the
+# whole time), so every pane spawn waits out the round-trips serially. Measured
+# on this machine, two unpinned servers on one spawn: 23.1s + 9.9s, then
+# 11.4s + 28.0s on the very next run — cached and still slow, because the
+# registry check happens regardless of the cache. That is the 90-150s cold boot
+# `provider_spec.py` records for every codex spawn, and the "pane ค้างที่ boot"
+# reports behind #276.
+#
+# `--prefer-offline` makes npm use what is already in the cache and only reach
+# the network on a genuine miss. Applied to npx-launched entries at the moment
+# a pane's config is written, so it covers user-added servers the cockpit does
+# not own without rewriting anybody's saved config. Deliberately NOT
+# `--offline`, which would turn a first-ever launch into a hard failure.
+_NPX_OFFLINE_FLAG = "--prefer-offline"
+
+
+def _prefer_offline_npx(cfg: dict) -> dict:
+    """Return *cfg* with `--prefer-offline` inserted for an npx-launched MCP.
+
+    Non-npx entries, malformed entries, and entries that already carry the
+    flag are returned untouched. The flag goes immediately after the npx
+    passthrough flags (`-y`/`--yes`) and before the package spec, since npm
+    only accepts its own flags ahead of the package argument.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    command = cfg.get("command")
+    # PureWindowsPath (not PurePath) on purpose: it splits on BOTH separators,
+    # so a Windows-style "C:\...\npx.cmd" read on a mac/linux cockpit — a
+    # shared-mcp.json synced across machines — still resolves to "npx".
+    # PurePath on POSIX treats "\\" as an ordinary character and misses it
+    # (caught by CI's ubuntu/macos legs, 2026-08-16).
+    if not isinstance(command, str) or pathlib.PureWindowsPath(command).stem.lower() != "npx":
+        return cfg
+    args = cfg.get("args")
+    if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+        return cfg
+    if _NPX_OFFLINE_FLAG in args:
+        return cfg
+    insert_at = 0
+    while insert_at < len(args) and args[insert_at] in ("-y", "--yes"):
+        insert_at += 1
+    patched = dict(cfg)
+    patched["args"] = [*args[:insert_at], _NPX_OFFLINE_FLAG, *args[insert_at:]]
+    return patched
+
+
 def _role_variant_path(role: str) -> pathlib.Path:
     """Path to the per-role MCP config variant (filtered from master).
     Derived from SHARED_MCP_FILE so test fixtures that redirect that
@@ -928,7 +987,14 @@ def regen_role_variants_checked() -> tuple[bool, list[str]]:
         allowed = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
         if allowed is None:
             continue  # no policy anywhere → master passthrough, no variant
-        filtered = {name: cfg for name, cfg in master_servers.items() if name in allowed}
+        # #281: `--prefer-offline` is applied here, on the way into the file a
+        # pane actually loads, rather than by rewriting the master — the master
+        # holds what the user configured and stays theirs.
+        filtered = {
+            name: _prefer_offline_npx(cfg)
+            for name, cfg in master_servers.items()
+            if name in allowed
+        }
         # An empty allowlist intentionally writes an EMPTY variant — that is
         # what makes shared_mcp_config_path_for_role return None (skip
         # --mcp-config) for the role.

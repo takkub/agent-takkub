@@ -311,10 +311,48 @@ def _model_family(model: str) -> str | None:
     return None
 
 
+def assign_provider_override_error(
+    provider: str | None,
+) -> str | None:
+    """Return a user-facing error when ``--provider`` cannot be honored.
+
+    Validates a Lead-issued PER-ASSIGN escape hatch (issue #270): when a
+    role's configured provider is stuck (boot-stalled CLI, broken MCP
+    config, auth wall, ...) and no auto-degrade has fired yet, Lead can
+    force this ONE assign's fresh spawn onto a different, working CLI
+    without hand-editing role-providers.json (which needs a cockpit
+    restart to take effect — see the module docstring). Only fires for a
+    genuinely unusable target: an unknown provider name, or a known one
+    that's disabled/not installed right now (that override would just fail
+    the exact same way). Deliberately does NOT special-case forced-identity
+    roles (codex/gemini/...) — the same pane-scoped substitution already
+    happens automatically via ``PaneState.provider_override`` when their
+    own CLI is unavailable (see :func:`effective_provider_for`); this just
+    lets Lead trigger the same substitution manually and earlier.
+    """
+    normalized = str(provider or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized not in VALID_PROVIDERS:
+        return (
+            f"--provider '{normalized}' is not a known provider "
+            f"(valid: {', '.join(sorted(VALID_PROVIDERS))})"
+        )
+    if not _provider_available(normalized):
+        return (
+            f"--provider '{normalized}' is not available right now (disabled in "
+            "Settings → Providers & Roles, or its CLI isn't installed) — this "
+            "override would just fail the same way; fix that first or pick a "
+            "different provider"
+        )
+    return None
+
+
 def assign_model_override_error(
     role: str,
     model: str | None,
     project: str | None = None,
+    provider_override: str | None = None,
 ) -> str | None:
     """Return a user-facing error when ``--model`` cannot reach this role.
 
@@ -327,6 +365,13 @@ def assign_model_override_error(
     that simply isn't recognized by any known pattern is NOT blocked here —
     see :func:`assign_model_override_warning` for that softer case, since a
     provider can ship a brand-new model id at any time.
+
+    ``provider_override`` — issue #270: when the SAME assign also carries a
+    validated ``--provider``, that provider is what will actually spawn, not
+    the role's normal config/availability resolution. Pass it through so
+    ``--model claude-opus-5 --provider claude`` on a codex-mapped role is
+    validated against claude (and succeeds) instead of against codex (and
+    wrongly blocked as a cross-provider id).
     """
     normalized = str(model or "").strip()
     if not normalized:
@@ -334,7 +379,7 @@ def assign_model_override_error(
 
     from .provider_spec import PROVIDER_REGISTRY
 
-    provider = effective_provider_for(role, project)
+    provider = (provider_override or "").strip().lower() or effective_provider_for(role, project)
     spec = PROVIDER_REGISTRY.get(provider)
     if spec is None:
         return (
@@ -349,11 +394,19 @@ def assign_model_override_error(
     family = _model_family(normalized)
     if family is not None and family != provider and provider in _MODEL_ID_PATTERNS:
         display = spec.display_name or provider.capitalize()
+        # #270: when the caller didn't already pass a --provider override,
+        # point at the actual escape hatch instead of leaving Lead stuck —
+        # the old message only said what was wrong, never what to do about it.
+        hint = (
+            ""
+            if provider_override
+            else f" · add --provider {family} to the same assign to force this"
+        )
         return (
             f"--model '{normalized}' looks like a {family} model id, but role "
             f"'{role}' → provider '{provider}' ({display}); use a {provider} "
             f"model id instead of a {family} one (role→provider mapping: "
-            f"'{role}' → '{provider}')"
+            f"'{role}' → '{provider}'){hint}"
         )
     return None
 
@@ -362,6 +415,7 @@ def assign_model_override_warning(
     role: str,
     model: str | None,
     project: str | None = None,
+    provider_override: str | None = None,
 ) -> str | None:
     """Return a non-blocking heads-up when ``--model`` isn't a recognized id
     for the effective provider, but also isn't confidently from a different
@@ -371,6 +425,9 @@ def assign_model_override_warning(
     Only fires for providers with a KNOWN naming scheme in
     ``_MODEL_ID_PATTERNS`` — router providers (opencode/cursor) accept model
     ids from many backends by design and are never warned about here.
+
+    ``provider_override`` — see :func:`assign_model_override_error`'s
+    docstring (issue #270); same "this is what will actually spawn" reasoning.
     """
     normalized = str(model or "").strip()
     if not normalized:
@@ -378,7 +435,7 @@ def assign_model_override_warning(
 
     from .provider_spec import PROVIDER_REGISTRY
 
-    provider = effective_provider_for(role, project)
+    provider = (provider_override or "").strip().lower() or effective_provider_for(role, project)
     spec = PROVIDER_REGISTRY.get(provider)
     if spec is None or spec.model_flag is None:
         return None

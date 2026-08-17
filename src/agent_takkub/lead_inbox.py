@@ -21,7 +21,8 @@ Layer rule (enforced by import-linter "lead-inbox-layer" contract):
 
 State ownership rule: _lead_notify_queue, _lead_digest_queue, _digest_timer,
 _pending_lead_cc, _pending_done_notices, _lead_notify_pumping,
-_lead_notify_retry, _lead_draft_state MUST stay in Orchestrator.__init__.  This mixin only
+_lead_notify_retry, _lead_notify_busy_since,
+_lead_draft_state MUST stay in Orchestrator.__init__.  This mixin only
 defines methods — never the initial dict assignments — so queue ownership
 stays centralised and divergence bugs cannot creep back in.
 """
@@ -36,9 +37,10 @@ import pathlib
 import re
 import sys as _sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QProcess, QTimer
 
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
@@ -52,6 +54,7 @@ from .lead_draft_state import (
 )
 from .orchestrator_text import (
     _enter_delay_ms,
+    _exit_key,
     _log_event,
     _notice_fingerprint,
     _paste_payload,
@@ -141,6 +144,17 @@ _READY_POLL_INTERVAL_MS = 150
 # ALREADY past its delivery timeout and STILL on a recognised prompt.
 _PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
 
+# #248/#247 round 2 follow-up: an auth-failure marker must be seen on this
+# many CONSECUTIVE polls before `_check` blind-delivers — a single poll that
+# happens to land while the footer region is mid-redraw (or still showing
+# stale text from a screen transition) must not be enough to convict. Small
+# relative to `_READY_POLL_INTERVAL_MS` (150ms) — 5 polls is ~750ms, trivial
+# next to the ceiling this whole fast-fail path exists to beat
+# (BUSY_WAIT_CEILING_SEC, 1800s) — but enough to filter a one-frame render
+# artifact. A pane genuinely stuck on auth keeps showing the marker on every
+# subsequent poll, so this costs it nothing.
+_AUTH_FAILURE_CONFIRM_POLLS = 5
+
 
 def _prompt_block_reason(session) -> str | None:
     """Return "trust" / "permission" / "tty" if *session* is currently
@@ -181,11 +195,73 @@ _MCP_READY_WAIT_MS = _SUBMIT_BUSY_MAX_RESENDS * _SUBMIT_VERIFY_GRACE_MS
 # occurs while Lead is alive-but-wedged.
 LEAD_NOTIFY_BUSY_CAP = 75
 
+# #279: how long the pump keeps PREFERRING an idle Lead before delivering into
+# a busy one anyway.
+#
+# The ready-prompt gate below was written for a Lead pane a human watches: wait
+# for idle, paste, done. An autonomous Lead is the opposite — it is busy nearly
+# all the time (mid-turn, running a tool, or blocked in its own `takkub wait`),
+# so "Lead reaches the ready prompt" mostly never comes true on its own and the
+# gate degenerates into the full escalation chain: 75 busy-retries (~30 s) →
+# spill to durable → reaper staleness window (`_DONE_NOTICE_STALE_S`, 60 s) →
+# `_force_deliver_done_notices` pastes it regardless. Measured on production
+# events.log (2026-08-16, saas_admin, one working day): 36 `done` calls against
+# 52 `lead_notify_spill` + 32 `done_notice_force_flush` — i.e. virtually every
+# report took that path, ~90 s from teammate-finished to text-in-Lead's-pane,
+# and arriving batched (count 2-4) instead of one at a time, which is the
+# "notices arrive in one huge pile" symptom.
+#
+# It is also self-reinforcing: `takkub wait` stays pending while
+# `_has_pending_lead_notice` is true (#163), so the wait that Lead is blocked in
+# is itself what keeps Lead un-ready — the gate can only clear by timing out.
+#
+# Delivering into a busy Lead is safe, and is exactly what the 60 s force-flush
+# already relies on: the bytes land in the composer and the CR queues them, so
+# the provider CLI processes them at the end of the current turn instead of
+# interrupting it. The two conditions that genuinely must NOT be written over
+# are checked separately and still hold: an unsubmitted user draft
+# (`_lead_can_accept_injection`) and an open trust/permission/tty prompt, where
+# a paste would answer the modal instead of reaching the composer
+# (`_prompt_block_reason` — the old force-flush path did NOT check this, so the
+# fast path is strictly safer than the escalation it replaces).
+#
+# 5 s is short enough that a report lands while it is still current, long
+# enough that a Lead which is about to go idle anyway (the case the polite gate
+# exists for) still receives it at the ready prompt.
+_LEAD_BUSY_DELIVER_AFTER_S = 5.0
+
 # Clean done notices and peer CCs are deliberately held for a short window so a
 # parallel burst wakes Lead once instead of once per teammate.  Read the env at
 # enqueue time (rather than only at import) so cockpit launches and tests can
 # configure the policy without rebuilding this module.
-_INBOX_DIGEST_WINDOW_MS = 60_000
+#
+# #264: was 60_000. A prod user described the cockpit as feeling like it
+# "always hangs on something" — traced to this constant applying in full
+# even to a solo done() with nothing else in flight to combine with (see
+# `_INBOX_DIGEST_ADAPTIVE_SETTLE_MS` below for that half of the fix).
+# Lowered to the top of the issue's own 10-15s suggested range rather than
+# the bottom: a genuine parallel fan-out (the case this window exists to
+# serve) can have real completion spread of several seconds under load, and
+# 15s still cuts the worst-case wait 4x versus the old value while keeping
+# more margin for that spread than 10s would.
+_INBOX_DIGEST_WINDOW_MS = 15_000
+
+# #264: used INSTEAD of the full window above once a notice's own enqueue
+# finds no OTHER role in the project still in a non-terminal state (see
+# `_DIGEST_TERMINAL_PANE_STATES`) — i.e. nothing else is plausibly about to
+# join this burst, so there is nothing left to wait for. Not 0: a burst can
+# still be "in flight" for a few seconds even after every role's pane looks
+# terminal (e.g. two shards' done() calls landing a beat apart under load),
+# so a short settle still catches that without paying the full window's
+# tax on the common solo-completion case.
+_INBOX_DIGEST_ADAPTIVE_SETTLE_MS = 3_000
+
+# States from which a role can never produce a NEW report without a fresh
+# assign — mirrors `lead_wait._WAIT_TERMINAL_PANE_STATES`. Duplicated
+# rather than imported to avoid coupling this module to LeadWaitMixin's
+# layer (see both modules' "Layer rule" header comments); both sets are
+# small, stable, and mean the same thing here as there.
+_DIGEST_TERMINAL_PANE_STATES = frozenset({"empty", "done", "exited", "error"})
 
 # Staleness escalation for the durable reaper (#70). When spilled done-notices
 # can't be flushed because the Lead reads as not-ready for this long, the
@@ -228,7 +304,63 @@ _FAILED_NOTICE_RE = re.compile(r"\[[^\]\r\n]*\bFAILED\b[^\]\r\n]*\]", re.IGNOREC
 # spawn-failed. A queued assign stuck past SPAWN_QUEUE_STUCK_SEC
 # (spawn_engine._check_spawn_queue_stuck) is the same "task may not have
 # landed" class of signal and jumps the queue for the same reason.
-_BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]", "[spawn-stuck]")
+# delivery-boot-stall (#254): same "task may not have landed" class as the
+# three above — fires while the target pane is still stuck loading a
+# provider boot-phase marker (MCP server), well before the ordinary
+# delivery timeout would even notice, so it deserves the same jump-the-
+# digest-queue urgency rather than waiting behind other mail.
+_BLOCKING_NOTICE_MARKERS = (
+    "[spawn-failed]",
+    "[delivery-unconfirmed]",
+    "[spawn-stuck]",
+    "[delivery-boot-stall]",
+)
+
+# #259: these 4 markers are authored by the orchestrator itself
+# (`_warn_lead_*`), not by a teammate's own `done()`/`failed()` call, so
+# they carry their target role as plain text right after the marker
+# (``⚠️ [delivery-unconfirmed] backend pane ...``) instead of the
+# `[role done]`/`[role FAILED]` shape `_notice_role_tag` parses.
+# `_notice_role_tag` returns None for these bodies — `inbox_report` then
+# falls back to `"system"` for them, which is why `_pending_notice_outside`
+# used to skip every one of these notices for every role (watched or not):
+# its `role == "system": continue` guard swallowed them before the
+# blocking-marker check ever ran. Deliberately a separate helper rather
+# than widening `_notice_role_tag` itself: that function's contract feeds
+# `_provenance_stale`'s pane_token verification (#228) for genuine
+# `done()`-authored bodies, and these system notices are never queued with
+# a pane_token to verify — widening it would add an unused, untested code
+# path there for no benefit.
+#
+# #266: also matches `[delivery-busy-wait]` (#144) — same "orchestrator-
+# authored, role name in plain text" shape, and one of the notice classes
+# #266's own evidence named as arriving after the pane it describes had
+# already closed. Not in `_BLOCKING_NOTICE_MARKERS` (it's informational,
+# not urgent) but the SAME re-checkable "is this role's pane still alive"
+# claim as the 4 blocking markers, so it belongs in this set even though it
+# doesn't belong in that one.
+_SYSTEM_MARKER_ROLE_RE = re.compile(
+    r"\[(?:spawn-failed|delivery-unconfirmed|spawn-stuck|delivery-boot-stall|delivery-busy-wait)\]"
+    r"\s+(\S+)",
+    re.IGNORECASE,
+)
+
+
+def _system_marker_parts(body: str) -> tuple[str, str] | None:
+    """``(marker, role)`` for a delivery-health system notice — e.g.
+    ``("delivery-boot-stall", "backend")`` — or None when *body* carries
+    none of the markers above. See the comment on `_SYSTEM_MARKER_ROLE_RE`
+    for why this is separate from `_notice_role_tag`."""
+    m = _SYSTEM_MARKER_ROLE_RE.search(body)
+    if m is None:
+        return None
+    return m.group(0).split("]")[0].lstrip("[").strip().lower(), m.group(1).strip()
+
+
+def _system_marker_role(body: str) -> str | None:
+    """Just the target role from `_system_marker_parts`, or None."""
+    parts = _system_marker_parts(body)
+    return parts[1] if parts else None
 
 
 def _is_digestible_lead_notice(body: str) -> bool:
@@ -325,6 +457,23 @@ def _format_notice_age(now_ts: float, queued_ts: float | None) -> str:
     return f" · {int(age // 3600)}h{int((age % 3600) // 60)}m ago"
 
 
+def _occurred_stamp(queued_ts: float | None, now_ts: float | None = None) -> str:
+    """Render a "[HH:MM:SS · age]" prefix (trailing space included) for the
+    wall-clock a notice's underlying event actually occurred, or "" when
+    unknown. Originally #241's digest-only treatment
+    (`_format_digest_item`); #266 extends it to live/durable notices too —
+    every notice class had this available in principle (`queued_ts` is
+    captured at enqueue time everywhere now), but only the digest queue
+    ever rendered it, so a notice that sat through the busy-retry/draft-hold
+    chain (#264) before finally landing looked exactly as fresh as one
+    delivered instantly."""
+    if queued_ts is None:
+        return ""
+    clock = datetime.fromtimestamp(queued_ts).strftime("%H:%M:%S")
+    age = _format_notice_age(now_ts if now_ts is not None else time.time(), queued_ts)
+    return f"[{clock}{age}] "
+
+
 def _format_digest_item(
     body: str,
     queued_ts: float | None = None,
@@ -345,12 +494,7 @@ def _format_digest_item(
     regex-on-prose rendering below, unchanged.
     """
     stripped = body.strip()
-    if queued_ts is not None:
-        clock = datetime.fromtimestamp(queued_ts).strftime("%H:%M:%S")
-        age = _format_notice_age(now_ts if now_ts is not None else time.time(), queued_ts)
-        stamp = f"[{clock}{age}] "
-    else:
-        stamp = ""
+    stamp = _occurred_stamp(queued_ts, now_ts)
 
     if facts is not None:
         return format_digest_fact_line(facts, stamp=stamp)
@@ -456,6 +600,7 @@ def _delayed_enter_verified(
     delivery_id: str | None = None,
     session_generation: int | None = None,
     expires_at: float | None = None,
+    validator: Callable[[], bool] | None = None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
@@ -495,6 +640,21 @@ def _delayed_enter_verified(
     with no args, when the chain stops trying — submitted, gave up, or the
     pane was torn down — so a caller can serialise further writes to the same
     session until this one is no longer in flight (#133).
+
+    ``validator`` (#258): forwarded to every `_safe_session_write` call this
+    function makes — the CR resend below AND the payload repaste — same as
+    the caller's OWN first write of this delivery. Before this fix only that
+    first write carried a validator; the QTimer chain here (queued when the
+    first write's own verify grace period began) kept resending/repasting
+    with no way to notice the delivery was cancelled out from under it in
+    the meantime (`takkub send`/`takkub task cancel`, #255) — a cancel that
+    landed after the chain was already queued still pasted the stale
+    payload straight into the composer. `_WriterThread.run` (pty_session.py)
+    checks
+    `message.validator()` immediately before every native write regardless
+    of which call site attached it, so passing the SAME validator through
+    here closes that gap without the writer needing to know anything about
+    delivery IDs itself.
     """
 
     def _settled() -> None:
@@ -523,6 +683,7 @@ def _delayed_enter_verified(
             delivery_id=delivery_id,
             session_generation=session_generation,
             expires_at=expires_at,
+            validator=validator,
         )
 
         def _verify(
@@ -657,6 +818,7 @@ def _delayed_enter_verified(
                     delivery_id=delivery_id,
                     session_generation=session_generation,
                     expires_at=expires_at,
+                    validator=validator,
                 )
                 paste_baseline[0] = session.last_output_monotonic()
                 QTimer.singleShot(
@@ -768,7 +930,7 @@ class LeadInboxMixin:
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
-            {"role": "system", "note": "lead prompt", "body": prompt}
+            {"role": "system", "note": "lead prompt", "body": prompt, "queued_ts": time.time()}
         )
         self._save_pending_done_notices(project_ns)
         _log_event("inject_lead_prompt_queued", project=project_ns)
@@ -898,6 +1060,21 @@ class LeadInboxMixin:
         # #186: accumulates only while _deliver() is deferring a would-be
         # blind paste because the pane is still on a recognised prompt.
         prompt_defer_elapsed = [0]
+        # #248/#247 round 2: logged/warned once, the first poll that
+        # recognises the pane's provider CLI showing an auth-failure marker.
+        auth_failure_warned = [False]
+        # #254: accumulates only while the pane CONTINUOUSLY shows a
+        # provider boot-phase marker (e.g. codex "Booting MCP server: …") —
+        # reset to 0 the instant a poll doesn't see it, so an intermittent
+        # boot flash never adds up across unrelated stalls. Warned once,
+        # separately from busy_wait_logged above, the first time the streak
+        # crosses BOOT_STALL_GRACE_SEC.
+        boot_stall_elapsed = [0]
+        boot_stall_warned = [False]
+        # Consecutive-poll counter gating the warn above — see
+        # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
+        # marker stops matching OR the pane reaches its own ready prompt.
+        auth_failure_streak = [0]
 
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
@@ -1025,6 +1202,9 @@ class LeadInboxMixin:
                 delivery_id=delivery.delivery_id,
                 session_generation=generation,
                 expires_at=delivery.expires_at,
+                validator=lambda d=delivery.delivery_id, g=generation: manager.validate_for_write(
+                    d, g
+                ),
             )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
@@ -1111,7 +1291,181 @@ class LeadInboxMixin:
                         reason=_reason,
                     )
                     self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
-            if pane.session.is_at_ready_prompt():
+            # #271: computed once per poll (not just while the #254 warning
+            # below is still armed) so the elapsed>=max_wait_ms blind-paste
+            # guard further down can reuse the SAME read instead of calling
+            # shows_startup_marker() a second time — a live session would
+            # answer identically either way, but a second call also desyncs
+            # any test double driven by a finite side_effect sequence.
+            try:
+                # #281: boot-phase ONLY. `shows_startup_marker()` also covers
+                # "mid-turn with a queued message", which codex displays the
+                # whole time it is working — reading that as "stuck at boot"
+                # is what warned about (and, under #276's ceiling, would have
+                # killed) panes that were working perfectly well.
+                # #284: widened window — see `shows_boot_phase_marker`'s
+                # docstring for why delivery specifically cannot use the tight
+                # one.
+                from .pty_session import _BOOT_MARKER_TAIL_ROWS
+
+                _still_booting = pane.session.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS)
+                if not isinstance(_still_booting, bool):
+                    # Defensive: a real PtySession always returns bool, but a
+                    # test double / unconfigured mock session returns a
+                    # truthy Mock object by default — never treat that as a
+                    # genuine boot-phase marker hit (same guard as the
+                    # auth-failure check below).
+                    _still_booting = False
+            except Exception:
+                _still_booting = False
+            if not boot_stall_warned[0]:
+                # #254: same "checked every poll, own escalation" shape as
+                # the prompt-block check above, for the same reason —
+                # a continuously-redrawing boot spinner (codex/agy loading a
+                # configured MCP server) keeps seconds_since_output() low
+                # forever, so the busy/stall split further below (which only
+                # engages once the ordinary delivery timeout has already
+                # fired) would silently extend #144's busy-wait for up to
+                # BUSY_WAIT_CEILING_SEC with no further signal. Escalating
+                # far earlier, on a short CONTINUOUS streak, gives Lead
+                # something concrete to act on well before that.
+                if _still_booting:
+                    boot_stall_elapsed[0] += _READY_POLL_INTERVAL_MS
+                    if boot_stall_elapsed[0] >= _orch_attr("BOOT_STALL_GRACE_SEC", 110) * 1000:
+                        boot_stall_warned[0] = True
+                        _log_event(
+                            "task_deliver_boot_stall",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            elapsed_sec=round(boot_stall_elapsed[0] / 1000, 1),
+                        )
+                        self._warn_lead_delivery_boot_stall(
+                            role_name, project, boot_stall_elapsed[0] / 1000
+                        )
+                else:
+                    boot_stall_elapsed[0] = 0
+            try:
+                _pane_ready_now = pane.session.is_at_ready_prompt()
+            except Exception:
+                _pane_ready_now = False
+            if not auth_failure_warned[0]:
+                if _pane_ready_now:
+                    # A CLI genuinely stuck on auth can never reach its own
+                    # ready prompt — seeing one is proof any auth-failure
+                    # marker still visible in the footer region is stale
+                    # (e.g. a just-finished test run that printed one of the
+                    # generic phrases, now scrolled into the tail rows with
+                    # the CLI back at idle). Ready wins: let the normal
+                    # ready_streak/_deliver() path below handle this poll
+                    # instead of blind-delivering, and reset the streak so a
+                    # later genuine relapse still needs its own confirmation.
+                    auth_failure_streak[0] = 0
+                else:
+                    # #248/#247 round 2: recognise a provider CLI's own
+                    # auth-failure text as its own state, checked on every
+                    # poll like the prompt-block check above — fails fast
+                    # instead of riding out the ordinary busy/stall path,
+                    # which could take up to BUSY_WAIT_CEILING_SEC (1800s
+                    # default) to say anything concrete about a pane that
+                    # was never going to recover on its own.
+                    try:
+                        _provider = getattr(pane.model, "provider_name", None) or "claude"
+                        _auth_reason = pane.session.auth_failure_reason(_provider)
+                        if not isinstance(_auth_reason, str):
+                            # Defensive: a real PtySession always returns str |
+                            # None, but a test double / unconfigured mock
+                            # session returns a truthy Mock object by default —
+                            # never treat that as a genuine auth failure.
+                            _auth_reason = None
+                    except Exception:
+                        _auth_reason = None
+                    if _auth_reason:
+                        auth_failure_streak[0] += 1
+                    else:
+                        auth_failure_streak[0] = 0
+                    if _auth_reason and auth_failure_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
+                        auth_failure_warned[0] = True
+                        sent[0] = True
+                        _log_event(
+                            "task_deliver_auth_failure",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            provider=_provider,
+                            reason=_auth_reason,
+                        )
+                        self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
+                        # #269: blind-pasting into a CLI that just told us it
+                        # isn't signed in only loses the task — unlike the
+                        # no-content watchdog's timeout (which can be a slow
+                        # boot), an auth-failure marker is a definitive
+                        # "this provider is unusable right now" signal, unaffected
+                        # by retrying the same provider. Route to the SAME
+                        # close+respawn+degrade-to-claude recovery the no-content
+                        # watchdog uses below instead, so any provider's auth
+                        # failure recovers the same way no-content already does
+                        # (previously ONLY no-content ever reached
+                        # `provider_override`, so a provider whose CLI prints a
+                        # recognisable auth-failure marker — e.g. gemini's "not
+                        # signed in" — never degraded at all, #269).
+                        self._recover_auth_failed_pane(
+                            role_name, project, pane, task, provider=_provider, reason=_auth_reason
+                        )
+                        return
+            no_content_ceiling_ms = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75) * 1000
+            try:
+                _no_content = (
+                    pane.session is not None
+                    and pane.session.is_alive
+                    and pane.session.first_content_ts() is None
+                )
+            except Exception:
+                _no_content = False
+            if _no_content and elapsed[0] >= no_content_ceiling_ms:
+                _no_content_key = _exit_key(project_ns, role_name)
+                _ps_watchdog = getattr(self, "_pane_state", {}).get(_no_content_key)
+                _no_content_attempts = (
+                    _ps_watchdog.no_content_recover_attempts if _ps_watchdog is not None else 0
+                )
+                # close()+spawn() destroys and recreates the AgentPane widget
+                # (paneClosed -> main_window._remove_teammate_pane tears it
+                # down; a respawn's _ensure_teammate_pane builds a brand new
+                # one) — this `pane`/`_check` closure would be polling a dead
+                # object afterward, so recovery hands off to a FRESH
+                # `_send_when_ready` call (started once the delayed respawn
+                # lands) instead of trying to keep this loop alive. Gated on
+                # the PERSISTED PaneState counter, not a local one-shot flag,
+                # because that fresh call has its own brand-new closure state
+                # — only a value that survives the close()/respawn cycle can
+                # cap this at exactly one retry + one degrade overall.
+                if _no_content_attempts < 2:
+                    sent[0] = True
+                    self._recover_no_content_pane(
+                        role_name, project, pane, task, degrade=_no_content_attempts >= 1
+                    )
+                    return
+                # Already used both the retry and the degrade attempt, still
+                # no content — fall through to the ordinary
+                # elapsed[0] >= max_wait_ms path below as the final safety
+                # net (blind-deliver, unconfirmed).
+            # #284: a ready verdict is not trustworthy while the provider is
+            # still booting. `is_at_ready_prompt()` only scans the bottom
+            # `_READY_TAIL_ROWS` (6) rows — sized for claude's one-line footer.
+            # codex renders a BORDERED composer plus a status bar, so its
+            # "esc to interrupt" boot line sits further up and drops out of
+            # that window the moment the composer grows by one row (proven:
+            # same screen, 3-row composer → not ready; 4-row composer → READY
+            # while "Booting MCP server: codex_apps (0s • esc to interrupt)"
+            # is plainly on screen). The task then gets pasted into a pane
+            # that has not finished starting — the "ส่งงานเร็วเกินไป" the
+            # cockpit was accused of, and a much better explanation for #276's
+            # lost tasks than anything in the delivery layer itself.
+            #
+            # The boot marker is checked over its own wider window (see
+            # `shows_boot_phase_marker`) precisely because it does NOT depend
+            # on where the composer happens to end. Treated as "not ready yet"
+            # rather than as a blocker so every existing timeout/ceiling path
+            # keeps behaving exactly as before.
+            if _pane_ready_now and not _still_booting:
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
                 # to ensure the CLI has finished async background loading (e.g. account verification).
@@ -1139,6 +1493,43 @@ class LeadInboxMixin:
                 # `takkub status` already uses to call a pane "stalled" —
                 # otherwise keep polling so the task still lands normally the
                 # moment the pane returns to ready.
+                if _still_booting:
+                    # #271: never blind-paste while the provider's own
+                    # boot-phase marker (codex "Booting MCP server: …", agy
+                    # equivalent) is still on screen — the composer hasn't
+                    # rendered yet, so the bytes land as raw keystrokes on
+                    # the boot splash and the task is lost outright, not
+                    # merely unconfirmed (same risk class as the trust-modal
+                    # defer in _deliver() above). Keep waiting past
+                    # max_wait_ms instead, capped at the same
+                    # BUSY_WAIT_CEILING_SEC ceiling as the busy-pane branch
+                    # below so a boot that genuinely never finishes still
+                    # gets a last-resort blind paste rather than polling
+                    # forever. The [delivery-boot-stall] notice (#254,
+                    # boot_stall_warned above) already tells Lead this pane
+                    # is stuck here — no separate warning needed.
+                    #
+                    # #276: the ceiling used to be BUSY_WAIT_CEILING_SEC (30
+                    # min) and ended in a blind paste. Both halves were wrong
+                    # for THIS state: a boot splash has no composer, so the
+                    # paste is lost outright (the comment above says as much),
+                    # and half an hour of silence is not a wait Lead can plan
+                    # around. Cut it at BOOT_STALL_CEILING_SEC and fail the
+                    # delivery out loud instead — a wrong outcome Lead can see
+                    # beats a task that quietly stops existing.
+                    boot_ceiling_ms = _orch_attr("BOOT_STALL_CEILING_SEC", 300) * 1000
+                    if elapsed[0] < boot_ceiling_ms:
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
+                    _log_event(
+                        "task_deliver_boot_marker_ceiling_timeout",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        elapsed_sec=round(elapsed[0] / 1000, 1),
+                    )
+                    sent[0] = True
+                    self._fail_boot_stalled_delivery(role_name, project, elapsed[0] / 1000)
+                    return
                 seconds_since_output = pane.session.seconds_since_output()
                 stall_threshold_sec = _orch_attr("STALL_THRESHOLD_SEC", 300)
                 if seconds_since_output < stall_threshold_sec:
@@ -1232,6 +1623,42 @@ class LeadInboxMixin:
             kwargs["allow_repaste"] = False
         target(role_name, task, **kwargs)
 
+    def _reap_stale_deliveries(self) -> None:
+        """Sweep `_delivery_manager` for deliveries that have been stuck in
+        an in-flight state (never confirmed accepted) past their TTL and
+        tell Lead about each one (issue #255 item 3).
+
+        `DeliveryManager.expire_stale()` existed with zero callers before
+        this — a delivery that never settles (never reaches ACCEPTED,
+        UNCERTAIN, or FAILED) just sat in the registry forever with no
+        signal to Lead beyond whatever the delivery poll loop itself
+        already sent while it was still running. Wired into the same 5s
+        tick as the other watchdog sub-checks in `_check_idle_teammates`
+        (orchestrator.py) so this runs even for a delivery whose owning
+        `_send_when_ready` poll loop already gave up and stopped ticking on
+        its own (`sent[0] = True` paths) without ever reaching a terminal
+        DeliveryManager state — the one gap none of the poll loop's own
+        one-shot warnings above cover."""
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_manager is None:
+            return
+        for delivery in delivery_manager.expire_stale():
+            self._notify_lead(
+                delivery.project_id,
+                f"⚠️ [delivery-stale-reap] task delivery ค้างอยู่สำหรับ {delivery.pane_id} "
+                f"นานเกิน {delivery.expires_at - delivery.created_at:.0f}s โดยไม่ยืนยันว่า "
+                f"ถึงมือ ({delivery.state.value}) — ยกเลิกอัตโนมัติแล้ว ถ้า {delivery.pane_id} "
+                f"ยังไม่ได้รับ task ให้ assign ใหม่ (issue #255)",
+                from_role="system",
+                note="delivery_stale_reap",
+            )
+            _log_event(
+                "delivery_stale_reaped",
+                role=delivery.pane_id,
+                project=delivery.project_id,
+                delivery_id=delivery.delivery_id,
+            )
+
     def _warn_lead_delivery_blocked_prompt(
         self, role_name: str, project: str | None, reason: str
     ) -> None:
@@ -1305,13 +1732,571 @@ class LeadInboxMixin:
             f"task ยังไม่ถึงมือ กำลังรอ/จะ resend ต่อจนกว่าจะ ready หรือครบ {ceiling_sec}s "
             f"(issue #144)"
         )
-        self._notify_lead(project_ns, msg)
+        # #280: the definition of a status update — the pane is alive, delivery
+        # is still trying, and the most likely next thing to happen is that it
+        # works. Held for the pane's own report unless the policy asks for live
+        # narration.
+        if self._record_pane_health(
+            project_ns,
+            role_name,
+            "delivery-busy-wait",
+            f"delivery รอ ready prompt (เงียบ {seconds_since_output:.0f}s)",
+            live_body=msg,
+        ):
+            self._notify_lead(project_ns, msg)
         _log_event(
             "delivery_busy_wait_warned",
             role=role_name,
             project=project_ns,
             seconds_since_output=round(seconds_since_output, 1),
         )
+
+    def _fail_boot_stalled_delivery(
+        self, role_name: str, project: str | None, elapsed_sec: float
+    ) -> None:
+        """(#276) End a delivery whose target pane never left its provider's
+        boot phase, as an explicit FAILURE rather than a blind paste.
+
+        Routed through `done(failed=True, force=True)` on purpose instead of
+        hand-rolling a notice: that is the one path that already flips the
+        task-ledger row to `fail`, marks the delivery failed, emits the
+        blocking FAILED notice with Lead's fix-loop proposal, and tears the
+        pane down — every consumer of "this task ended badly" stays consistent
+        with an ordinary `takkub done --fail`. `force=True` is required
+        because the pane never received the task (that is the whole point),
+        which is exactly what the #278 done-gate refuses for a pane reporting
+        on its own behalf.
+
+        Provider-neutral (#103): the boot-marker streak that leads here comes
+        from each provider spec's own startup markers, and nothing below is
+        claude- or codex-specific.
+        """
+        project_ns = self._resolve_project(project)
+        _log_event(
+            "delivery_boot_timeout_failed",
+            role=role_name,
+            project=project_ns,
+            elapsed_sec=round(elapsed_sec, 1),
+        )
+        note = (
+            f"[boot-timeout] pane ของ {role_name} ไม่เคยผ่าน boot phase เลยภายใน "
+            f"{elapsed_sec:.0f}s — task ไม่เคยถูกส่งเข้าไป จึงยังไม่ได้เริ่มทำแม้แต่นิดเดียว "
+            f"(ไม่ใช่งานที่ทำแล้วล้มเหลว) · cockpit ปิด pane นี้ทิ้งพร้อมเหตุผลแทนที่จะรอต่อ "
+            f"หรือ paste ลงหน้า boot ที่ไม่มีช่องรับข้อความ · task เดิมยังอยู่ครบ: "
+            f"`takkub task show --role {role_name}` · สั่งใหม่ด้วย provider อื่นได้ทันที: "
+            f"`takkub assign --role {role_name} --provider claude ...` "
+            f"(assign ใหม่แบบไม่ระบุ --provider จะไปติด provider เดิมซ้ำ) (issue #276)"
+        )
+        try:
+            self.done(role_name, note=note, project=project_ns, failed=True, force=True)
+        except Exception as exc:  # never let the failure path itself vanish
+            _log_event(
+                "delivery_boot_timeout_report_failed",
+                role=role_name,
+                project=project_ns,
+                error=str(exc)[:200],
+            )
+            self._notify_lead(project_ns, f"⛔ [{role_name} FAILED] {note}", from_role="system")
+
+    def _warn_lead_delivery_boot_stall(
+        self, role_name: str, project: str | None, elapsed_sec: float
+    ) -> None:
+        """Tell the Lead, once, when a delivery poll sees the target pane's
+        provider CLI CONTINUOUSLY showing its own boot-phase marker (e.g.
+        codex/agy "Booting MCP server: …") for BOOT_STALL_GRACE_SEC straight
+        — issue #254.
+
+        Deliberately a SEPARATE notice from the generic busy-wait one
+        (#144) above, fired much earlier (~BOOT_STALL_GRACE_SEC, ~2 min
+        default) and worded as an actionable escalation rather than a
+        progress update: a real incident sat in this exact state with the
+        task NEVER pasted at all (composer still on its startup
+        placeholder) all the way to the 30-minute BUSY_WAIT_CEILING_SEC —
+        #144's single "still waiting" notice at the top of that window gave
+        Lead nothing concrete to act on in the meantime. Names the specific
+        symptom (boot, not generic busy) and the manual recovery — the
+        escape hatch this issue asked for, short of a one-command restart
+        primitive: close the wedged pane and reassign, since the task text
+        itself survives via the ledger (`takkub task show`).
+
+        Callers gate on their own one-shot flag (``boot_stall_warned`` in
+        _send_when_ready's ``_check`` closure) so this fires at most once
+        per delivery. No-op when warning the Lead about itself.
+
+        #270: deliberately NOT auto-degraded like the no-content/auth-failure
+        watchdogs (see ``_recover_broken_pane``) — a continuous boot marker
+        means the CLI IS rendering and could still clear on its own (a slow
+        first-cold-start MCP handshake, for example), unlike those two which
+        are definitive dead ends. Auto-killing a pane that was about to
+        succeed would waste the boot time already sunk and could paper over
+        a real config bug (e.g. a broken MCP server entry) Lead should
+        actually see and fix rather than have silently substituted away.
+        So this stays Lead's call — but the notice now names the concrete
+        `--provider` escape hatch (issue #270) instead of only "close and
+        reassign", since a plain reassign to the SAME stuck provider just
+        stalls again."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        # #278 measured `codex exec "reply with the single word: ok"` at 61s
+        # wall-clock on this machine with `codex mcp list` reporting NO MCP
+        # servers configured at all — so the old wording's "(กำลังโหลด MCP
+        # server)" was an assertion the cockpit cannot make. All it actually
+        # observes is the provider's own startup marker still on screen; the
+        # cause may equally be the CLI's own slow cold start. Say only what
+        # was seen, and let `_run_boot_diagnostic_async` (#273) below supply
+        # the real per-provider detail when it can.
+        ceiling_sec = _orch_attr("BOOT_STALL_CEILING_SEC", 300)
+        # #281: the pane is displaying exactly which MCP servers it is waiting
+        # on ("Starting MCP servers (0/3): codex_apps, context7, figma"). That
+        # line is what makes a stuck boot actionable, and `codex mcp list` —
+        # the diagnostic this notice used to imply — cannot see cockpit-
+        # injected servers at all.
+        detail = ""
+        try:
+            pane_for_detail = self._project_panes(project_ns).get(role_name)
+            sess = getattr(pane_for_detail, "session", None)
+            raw_detail = sess.boot_phase_detail() if sess is not None else ""
+            if isinstance(raw_detail, str):
+                detail = raw_detail
+        except Exception:
+            detail = ""
+        detail_line = f"\nจอ pane บอกว่า: {detail}" if detail else ""
+        msg = (
+            f"⛔ [delivery-boot-stall] {role_name} pane ยังค้างอยู่ที่ boot phase "
+            f"(ยังโชว์ startup marker ของ provider) มาแล้ว {elapsed_sec:.0f}s ติดต่อกันโดยไม่ถึง "
+            f"ready prompt — task ยังไม่ถูกส่งเข้าไปเลย นี่ต่างจาก [delivery-busy-wait] ทั่วไป "
+            f"(#144) เพราะ pane นี้ยังไม่เริ่มทำงาน ไม่ใช่กำลังทำงานอยู่ "
+            f"ถ้าไม่คลี่คลายเองภายใน {ceiling_sec}s cockpit จะปิด pane + mark task เป็น FAILED ให้เอง "
+            f"(#276) ไม่ต้องเฝ้า · ถ้าจะลัดเลย: `takkub close --role {role_name}` แล้ว "
+            f"`takkub assign --role {role_name} --provider claude ...` เพื่อบังคับ spawn ใหม่ด้วย "
+            f"claude แทน provider เดิมที่ค้าง (#270 — assign ใหม่แบบไม่ระบุ --provider จะไปติด "
+            f"provider เดิมซ้ำ) task เดิมดูได้ผ่าน `takkub task show --role {role_name}` (issue #254)"
+            f"{detail_line}"
+        )
+        # #280: a slow boot is not yet news — either it clears (and the pane
+        # reports normally) or it hits BOOT_STALL_CEILING_SEC, where #276 fails
+        # the task explicitly. Both endings reach Lead on their own, so this
+        # rides along with whichever one happens instead of pre-announcing it.
+        if self._record_pane_health(
+            project_ns,
+            role_name,
+            "boot-stall",
+            f"boot ช้า {elapsed_sec:.0f}s (ยังโชว์ startup marker)",
+            live_body=msg,
+        ):
+            self._notify_lead(project_ns, msg)
+        _log_event(
+            "delivery_boot_stall_warned",
+            role=role_name,
+            project=project_ns,
+            elapsed_sec=round(elapsed_sec, 1),
+        )
+        # #273: best-effort follow-up — ask the stuck provider's own CLI
+        # what's actually wrong (e.g. `codex mcp list`) instead of leaving
+        # Lead with only the generic "boot phase" wording above. Async and
+        # fully optional: this notice has ALREADY been sent unchanged, so a
+        # missing/slow/failed diagnostic changes nothing about it.
+        self._run_boot_diagnostic_async(role_name, project, elapsed_sec)
+
+    @staticmethod
+    def _boot_diagnostic_notice_text(
+        role_name: str, provider: str, argv: tuple[str, ...], exit_code: int, output: str
+    ) -> str | None:
+        """Pure: build the Lead follow-up notice from a finished diagnostic
+        process's result, or None when nothing should be reported.
+
+        A clean exit (0) means the provider's own health-check found
+        nothing wrong — not itself news for a STUCK-boot diagnostic, so it
+        stays silent rather than adding noise. Split out from
+        `_run_boot_diagnostic_async`'s QProcess glue so this decision is
+        unit-testable without spawning a real process (mirrors
+        `Orchestrator._uncommitted_warning` next to
+        `_check_uncommitted_async`)."""
+        combined = (output or "").strip()
+        if exit_code == 0 or not combined:
+            return None
+        return (
+            f"🔎 [boot-diagnostic] {role_name} · `{provider} {' '.join(argv)}` "
+            f"ตอบ (#273):\n{combined[:500]}"
+        )
+
+    def _run_boot_diagnostic_async(
+        self, role_name: str, project: str | None, elapsed_sec: float
+    ) -> None:
+        """#273: probe the boot-stalled role's EFFECTIVE provider with its
+        own ``ProviderSpec.boot_diagnostic_argv`` health-check command (e.g.
+        ``codex mcp list``) and, only if it reports a real error, send Lead a
+        follow-up notice with that error verbatim instead of leaving the
+        generic `_warn_lead_delivery_boot_stall` wording as the only signal.
+
+        Real incident (#273): the actual codex failure —
+        ``Error: failed to load bootstrap configuration / Caused by: invalid
+        transport in ...`` — was fully diagnosable via `codex mcp list` in
+        under a second, but cockpit had no way to surface it, costing ~40
+        minutes of manual config-file guessing.
+
+        Runs via QProcess (mirrors `Orchestrator._check_uncommitted_async`)
+        — NEVER blocks the Qt main thread. No-op, silently, whenever:
+        the effective provider has no confirmed diagnostic command
+        (``boot_diagnostic_argv`` is None — most providers today), its
+        binary can't be found, the process errors/times out, OR it exits
+        clean (a clean run means the provider's config is fine — this is a
+        stuck-boot diagnostic, not a routine health poll, so a clean answer
+        is not itself news). Every one of those is a no-op by design: this
+        method may add a follow-up notice, never replace or delay the one
+        `_warn_lead_delivery_boot_stall` already sent (#254 must not
+        regress on providers without a confirmed diagnostic — the vast
+        majority)."""
+        from .provider_config import effective_provider_for
+        from .provider_spec import PROVIDER_REGISTRY
+
+        project_ns = self._resolve_project(project)
+        provider = effective_provider_for(role_name, project=project_ns)
+        spec = PROVIDER_REGISTRY.get(provider)
+        argv = spec.boot_diagnostic_argv if spec is not None else None
+        if not argv or spec.custom_discovery_fn is None:
+            return
+        try:
+            binary = spec.custom_discovery_fn()
+        except Exception:
+            binary = None
+        if not binary:
+            return
+
+        proc = QProcess(self)
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.setInterval(8_000)
+        state = {"done": False}
+
+        def _settle(notice_text: str | None) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            timeout.stop()
+            timeout.deleteLater()
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.deleteLater()
+            if not notice_text:
+                return
+            # #280: this is the detail behind the boot-stall observation, and
+            # that observation now waits for the pane's report — arriving on
+            # its own would be a diagnostic with nothing to attach itself to.
+            # Rides along with the same report instead. First line only: the
+            # full provider output stays in events.log below.
+            first_line = notice_text.strip().splitlines()[0]
+            if self._record_pane_health(
+                project_ns, role_name, "boot-diagnostic", first_line, live_body=notice_text
+            ):
+                self._notify_lead(project_ns, notice_text, from_role=role_name)
+            _log_event(
+                "boot_diagnostic_reported",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                elapsed_sec=round(elapsed_sec, 1),
+            )
+
+        def _on_finished(_code: int, _status: object) -> None:
+            try:
+                out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+            except Exception:
+                out, err = "", ""
+            notice_text = self._boot_diagnostic_notice_text(
+                role_name, provider, argv, proc.exitCode(), err or out
+            )
+            _settle(notice_text)
+
+        proc.finished.connect(_on_finished)
+        proc.errorOccurred.connect(lambda _e: _settle(None))
+        timeout.timeout.connect(lambda: _settle(None))
+        timeout.start()
+        proc.start(binary, list(argv))
+
+    def _warn_lead_auth_failure(
+        self, role_name: str, project: str | None, provider: str, reason: str
+    ) -> None:
+        """Tell the Lead, once, the first delivery poll that finds the
+        pane's provider CLI showing an auth-failure marker (#248/#247 round
+        2) — fired immediately on detection, like
+        `_warn_lead_delivery_blocked_prompt` above, instead of riding out
+        the ordinary busy/stall path which could otherwise take up to
+        BUSY_WAIT_CEILING_SEC (1800s default) to say anything concrete.
+        Names the provider and how to log back in
+        (`ProviderSpec.post_install_note`, the same login hint doctor/
+        install flows already surface) so the Lead doesn't have to go
+        spelunking in the pane to figure out which CLI is broken. Callers
+        gate on their own one-shot flag (`auth_failure_warned` in
+        `_send_when_ready`'s `_check` closure). No-op when warning the Lead
+        about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        login_hint = (spec.post_install_note if spec is not None else "") or (
+            f"log back into the {provider} CLI"
+        )
+        display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        msg = (
+            f'🔒 [auth-failure] {role_name} pane ({display}) ติด auth error: "{reason}" — '
+            f"{login_hint} แล้วสั่งงานใหม่อีกครั้ง (#248/#247)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "auth_failure_warned",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            reason=reason,
+        )
+
+    def _warn_lead_auth_failure_degrade(
+        self, role_name: str, project: str | None, provider: str, reason: str
+    ) -> None:
+        """Second Lead notice for an auth-failure recovery (#269), fired
+        right after `_warn_lead_auth_failure` above (which names the
+        provider/reason/login-hint) — tells Lead the pane is ALSO being
+        degraded to claude and respawned, mirroring `_warn_lead_no_content`'s
+        degrade message below for the no-content path. Split out the same
+        way that one is, so the message can be asserted on independently of
+        the close→respawn side effect."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        msg = (
+            f"⚠️ [auth-failure-degrade] {role_name} pane ({display}) ยัง auth ไม่ผ่าน "
+            f'("{reason}") — degrade เป็น claude substitute แล้ว spawn ใหม่ (#269); '
+            f"ถ้าต้องการใช้ {display} ต่อ ให้ login แล้วสั่งงานใหม่อีกครั้ง"
+        )
+        # #280: the auth failure itself already fired immediately (Lead cannot
+        # log a provider in from a report at close). This second notice only
+        # says what the cockpit did about it automatically — that rides along
+        # with the pane's report.
+        if self._record_pane_health(
+            project_ns,
+            role_name,
+            "auth-failure-degrade",
+            f"{display} auth ไม่ผ่าน → degrade เป็น claude แล้ว spawn ใหม่",
+            live_body=msg,
+        ):
+            self._notify_lead(project_ns, msg)
+        _log_event(
+            "auth_failure_degrade_warned",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            reason=reason,
+        )
+
+    def _warn_lead_no_content(self, role_name: str, project: str | None, *, degrade: bool) -> None:
+        """One-line Lead notice for `_recover_no_content_pane` below — split
+        out from the respawn logic so the message can be asserted on
+        independently of the close→respawn side effect. No-op when warning
+        the Lead about itself or when Lead itself is not reachable."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        ceiling = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75)
+        if degrade:
+            msg = (
+                f"⚠️ [no-content-degrade] {role_name} pane ไม่มี output เลยแม้ retry แล้ว 1 ครั้ง "
+                f"(รอบละ {ceiling}s) — degrade เป็น claude substitute แล้ว spawn ใหม่ (#248/#247)"
+            )
+        else:
+            msg = (
+                f"🔁 [no-content-retry] {role_name} pane spawn แล้วไม่มี output เลยเกิน {ceiling}s "
+                f"— กำลัง kill pane + retry spawn อีกครั้ง (#248/#247)"
+            )
+        # #280: this is the cockpit narrating its own automatic recovery. The
+        # recovery either works (pane comes back and reports, carrying this
+        # line with it) or exhausts its attempts, which has its own terminal
+        # notice. Nothing here needs Lead mid-flight.
+        if self._record_pane_health(
+            project_ns,
+            role_name,
+            "no-content-degrade" if degrade else "no-content-retry",
+            (
+                f"pane ไม่มี output เกิน {ceiling}s → degrade เป็น claude แล้ว spawn ใหม่"
+                if degrade
+                else f"pane ไม่มี output เกิน {ceiling}s → retry spawn"
+            ),
+            live_body=msg,
+        ):
+            self._notify_lead(project_ns, msg)
+        _log_event(
+            "no_content_pane_warned",
+            role=role_name,
+            project=project_ns,
+            degrade=degrade,
+        )
+
+    def _recover_no_content_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        degrade: bool,
+    ) -> None:
+        """#248/#247 round 2: a pane whose provider CLI never rendered ANY
+        content within NO_CONTENT_WATCHDOG_SEC of spawn — the exact "spawn
+        succeeded, CLI never printed anything" symptom that made
+        `orchestrator._pane_display_state` add the "spawning" label in
+        round 1 (first_content_ts() staying None is otherwise
+        indistinguishable from a slow-but-healthy cold boot).
+
+        First occurrence (``degrade=False``): close + respawn once. No
+        conversation has actually started (zero content ever rendered), so
+        none of `_auto_recover_stuck`'s snapshot/--resume machinery is
+        needed — a plain fresh spawn is equivalent and far simpler.
+
+        Second occurrence (``degrade=True``): the retry ALSO produced
+        nothing, so stop trying this provider for this pane — force the
+        next spawn to claude via `PaneState.provider_override`. See
+        `_recover_broken_pane` for the shared close+respawn+degrade
+        mechanics (also used by `_recover_auth_failed_pane` below, #269)."""
+        self._warn_lead_no_content(role_name, self._resolve_project(project), degrade=degrade)
+        self._recover_broken_pane(
+            role_name, project, pane, task, degrade=degrade, kind="no_content"
+        )
+
+    def _recover_auth_failed_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        provider: str,
+        reason: str,
+    ) -> None:
+        """#269: a pane whose provider CLI is showing its own auth-failure
+        marker (confirmed over `_AUTH_FAILURE_CONFIRM_POLLS` consecutive
+        polls by `_check` above) — unlike the no-content watchdog's timeout
+        (which can just mean a slow boot), an auth-failure marker is a
+        definitive "this provider is unusable right now" signal. Retrying
+        the same provider cannot help (a CLI stuck on login stays stuck
+        until a human logs it in out-of-band — proven in #269 by Lead
+        manually close+reassigning the same role 3 times with identical
+        results), so this degrades straight to claude — no non-degraded
+        retry step, unlike `_recover_no_content_pane`'s first occurrence.
+
+        Before this, ONLY the no-content watchdog ever reached
+        `PaneState.provider_override` — a provider whose CLI renders a
+        recognisable auth-failure marker (e.g. gemini's "not signed in")
+        never has `first_content_ts()` stay ``None`` (the marker text IS
+        content), so the no-content branch's `_no_content` check never
+        fires and this path never engaged, leaving that role permanently
+        stuck reassigning into the same broken login every time (#269)."""
+        self._warn_lead_auth_failure_degrade(
+            role_name, self._resolve_project(project), provider, reason
+        )
+        self._recover_broken_pane(role_name, project, pane, task, degrade=True, kind="auth_failure")
+
+    def _recover_broken_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        degrade: bool,
+        kind: str,
+    ) -> None:
+        """Shared close+respawn(+degrade-to-claude) mechanics for
+        `_recover_no_content_pane` and `_recover_auth_failed_pane` (#269) —
+        see those two for why/when each calls in with ``degrade``.
+
+        ``degrade=True`` forces the next spawn to claude via
+        `PaneState.provider_override` (mirrors `model_override`'s existing
+        per-pane precedent in spawn_engine.py; consulted ahead of
+        `provider_config.effective_provider_for`'s normal config/
+        availability resolution), the same "unavailable provider → claude
+        substitute" idea the cockpit already applies globally, just
+        triggered per-pane here instead of by the disabled-providers/
+        binary-missing check that mechanism normally runs on.
+        `provider_override` naturally clears the next time this role's
+        PaneState is popped (a plain `close()`/`done()`, or the
+        `self.close()` a few lines below), so a later fresh `assign()` for
+        this role tries the real provider again rather than staying
+        degraded forever.
+
+        The caller (`_check`) does NOT keep polling the same closure
+        afterward — `close()` tears the AgentPane widget down entirely
+        (`paneClosed` → `main_window._remove_teammate_pane`) and a respawn
+        builds a brand new one (`_ensure_teammate_pane`), so the `pane`
+        object this call was given goes stale the moment `close()` returns.
+        Instead this starts a FRESH `_send_when_ready` call once the
+        delayed respawn lands (which re-fetches the pane from the registry
+        at its own top), the same way `_auto_recover_stuck`'s
+        `_do_respawn` re-sends a snapshot task after ITS close→respawn
+        cycle. The 2s close-then-respawn pause also mirrors
+        `_auto_recover_stuck` — it lets the PTY/WebEngine teardown finish
+        before a new session binds to the same role slot."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        key = _exit_key(project_ns, role_name)
+        cwd = getattr(pane, "_session_cwd", None)
+        # Snapshot before close() pops the whole PaneState — restored into
+        # the fresh one _do_respawn creates so the attempt count survives
+        # the pop (same snapshot/restore shape _auto_recover_stuck uses for
+        # its own counters). Shared across both `kind`s: an auth-failure
+        # recovery bumping this is harmless (it only ever makes a LATER
+        # no-content check on this same pane degrade sooner, never later).
+        _ps_snap = getattr(self, "_pane_state", {}).get(key)
+        snap_attempts = _ps_snap.no_content_recover_attempts if _ps_snap is not None else 0
+        _log_event(
+            f"{kind}_pane_recover",
+            role=role_name,
+            project=project_ns,
+            degrade=degrade,
+            prior_attempts=snap_attempts,
+        )
+        self.close(role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True)
+
+        def _do_respawn() -> None:
+            ps = self._ps(key)
+            ps.no_content_recover_attempts = snap_attempts + 1
+            if degrade:
+                ps.provider_override = "claude"
+            ok, msg = self.spawn(role_name, cwd=cwd, project=project_ns, _from_auto_respawn=True)
+            _log_event(
+                f"{kind}_pane_respawned",
+                role=role_name,
+                project=project_ns,
+                degrade=degrade,
+                ok=ok,
+                msg=msg[:160],
+            )
+            if ok and task:
+                self._send_when_ready(role_name, task, project=project_ns)
+
+        QTimer.singleShot(2_000, _do_respawn)
 
     def _warn_lead_delivery_unconfirmed(
         self,
@@ -1355,7 +2340,19 @@ class LeadInboxMixin:
                 f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
                 f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
             )
-        self._notify_lead(project_ns, msg)
+        # #280: "the paste may not have landed" resolves itself one way or the
+        # other — either the pane picks the task up and reports, or it stays
+        # idle and the idle/no-content watchdogs escalate. Neither ending needs
+        # Lead to be interrupted at the moment of the blind paste; both carry
+        # this observation with them when they arrive.
+        if self._record_pane_health(
+            project_ns,
+            role_name,
+            "delivery-unconfirmed",
+            f"task ถูก paste แบบ blind (ไม่ถึง ready ใน {wait_label})",
+            live_body=msg,
+        ):
+            self._notify_lead(project_ns, msg)
         _log_event(
             "delivery_unconfirmed_busy_ceiling" if busy_ceiling else "delivery_unconfirmed",
             role=role_name,
@@ -1595,7 +2592,13 @@ class LeadInboxMixin:
     # ------------------------------------------------------------------
 
     def _enqueue_live_lead_notice(
-        self, project_ns: str, body: str, *, front: bool = False, pane_token: str | None = None
+        self,
+        project_ns: str,
+        body: str,
+        *,
+        front: bool = False,
+        pane_token: str | None = None,
+        queued_ts: float | None = None,
     ) -> None:
         """Append one ready-to-deliver body without starting the pump.
 
@@ -1604,13 +2607,21 @@ class LeadInboxMixin:
         delivery time whether that role slot has since been respawned. None
         for system-authored bodies (combined digests, CC relays, engine
         notices) that carry no single-pane origin claim.
+
+        *queued_ts* (#266): defaults to now — pass the original occurrence
+        time through on a requeue so it survives round-trips through the
+        durable store instead of resetting on every hop (see `_notify_lead`).
+        Previously this queue never carried a timestamp at all (documented
+        as "the live queue delivers promptly enough that staleness isn't a
+        concern" — #264/#266 proved that wrong: busy-retry + draft-hold +
+        durable spill can delay live-queue delivery by minutes).
         """
         if not hasattr(self, "_lead_notify_queue"):
             self._lead_notify_queue = {}
         if not hasattr(self, "_lead_notify_pumping"):
             self._lead_notify_pumping = set()
         queue = self._lead_notify_queue.setdefault(project_ns, collections.deque())
-        item = (body, pane_token)
+        item = (body, pane_token, queued_ts if queued_ts is not None else time.time())
         if front:
             # Keep blocking notices FIFO with each other while placing them
             # ahead of informational/digest bodies already waiting on a busy
@@ -1718,6 +2729,113 @@ class LeadInboxMixin:
         current = self._current_pane_identity(project_ns, role)
         return current != pane_token
 
+    def _other_roles_still_active(self, project_ns: str, exclude_role: str) -> bool:
+        """(#264) True if some role OTHER than Lead and *exclude_role* (the
+        one that just produced the notice currently being enqueued) is
+        still in a non-terminal state — i.e. could plausibly still produce
+        its own digestible notice soon enough to join the SAME burst.
+
+        Read via `list_status` — the exact same role→state snapshot
+        `takkub list` shows — rather than a bespoke check, so this can
+        never disagree with what Lead sees when they look. `exclude_role`
+        matters because `_notify_lead` runs from inside `done()` BEFORE
+        that pane's own `pane.set_state("done", ...)` call lands (the
+        notice must exist before the state transition that would otherwise
+        make it "terminal"), so the reporting role's own pane still reads
+        "working" at this exact moment — excluding it by name is the only
+        way to avoid it always counting as its own reason to wait.
+        """
+        status = self.list_status(project=project_ns)
+        for role, state in status.items():
+            if role in (LEAD.name, exclude_role):
+                continue
+            if state not in _DIGEST_TERMINAL_PANE_STATES:
+                return True
+        return False
+
+    def _wait_is_watching_role(self, project_ns: str, role: str | None) -> bool:
+        """(#279) True when a `takkub wait` registration for *project_ns* is
+        blocked on *role*'s report right now.
+
+        The digest window (`_INBOX_DIGEST_WINDOW_MS`, 15 s) exists to combine
+        a parallel burst into one Lead turn instead of waking Lead once per
+        teammate. That trade is pure loss for a role Lead is already blocked
+        waiting on: `poll_wait` keeps the wait pending until the report has
+        genuinely left this pipeline (`_has_pending_lead_notice`, #163), so
+        every second of debounce is a second `takkub wait` sits idle for mail
+        that already exists — and Lead being stuck in that wait is itself
+        what keeps the pane busy for the pump downstream.
+
+        Shard names are matched on their base role too (`backend#2` satisfies
+        a wait watching `backend`), since that's the same identity
+        `list_status` presents to `begin_wait`.
+        """
+        if not role:
+            return False
+        active = getattr(self, "_active_waits", {}).get(project_ns)
+        if not active:
+            return False
+        watched = set(active.get("roles", ()))
+        return role in watched or _split_shard(role)[0] in watched
+
+    def _revalidate_system_notice(self, project_ns: str, body: str) -> str:
+        """(#266) A delivery-health system notice
+        ([delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
+        [spawn-failed]/[delivery-busy-wait]) is enqueued the moment the
+        condition is DETECTED, but can then sit in the live/durable queue
+        through the busy-retry cap (~30s), a durable spill, and the reaper's
+        staleness window (up to another 60s) before it's actually pasted —
+        #264's delivery chain. Nothing re-checked whether the condition was
+        still true by the time it finally landed. Real evidence: a
+        `[delivery-unconfirmed] codex ...` notice arrived at Lead's pane
+        AFTER that codex pane had already finished its task and closed.
+
+        Called right before a matching notice is actually written — if the
+        target role's pane has since reached a terminal state (closed,
+        crashed, or simply never existed to begin with — nothing left to
+        confirm or deny), the underlying claim ("still hasn't reached ready
+        / still stuck") can no longer be true, so it is not presented as
+        Lead's current reality.
+
+        #279: it is collapsed to a single "already resolved" line rather
+        than that line ON TOP OF the full original body, which is what the
+        first version did. Every one of these notices is several lines of
+        remediation prose (`takkub close --role X` then reassign with
+        `--provider …`, ledger pointers, issue refs) whose entire value is
+        acting on it — once the pane is gone there is nothing left to act
+        on, so pasting it in full spends 8-10 lines of Lead's pane on
+        instructions Lead must NOT follow. The marker, the role and the
+        occurred-at stamp `_occurred_stamp` adds are what remains useful
+        (spotting a pattern of stalls for that role); the full text stays in
+        events.log for anyone who wants it.
+
+        Bodies that aren't one of these 5 markers (including plain done/CC/
+        FAILED notices) pass through completely unchanged — this only ever
+        touches the specific claim class that's cheaply re-checkable via
+        the pane registry alone.
+
+        `[spawn-failed]` is excluded (#279): the other four all claim "a pane
+        exists but hasn't reached its ready prompt", which a terminal/absent
+        pane genuinely refutes. spawn-failed claims the pane never came up at
+        all — an absent pane CONFIRMS it. Re-checking it the same way told
+        Lead a real spawn failure had "resolved itself" purely because the
+        pane it was reporting the absence of was, indeed, absent.
+        """
+        parts = _system_marker_parts(body)
+        if parts is None:
+            return body
+        marker, role = parts
+        if marker == "spawn-failed":
+            return body
+        status = self.list_status(project=project_ns)
+        state = status.get(role)
+        if state is not None and state not in _DIGEST_TERMINAL_PANE_STATES:
+            return body  # role's pane is still around and non-terminal — still live
+        return (
+            f"✅ [คลี่คลายแล้ว] [{marker}] {role} — pane ปิด/จบไปแล้วก่อนข้อความนี้จะถึง Lead "
+            "จึงไม่ต้องทำอะไรต่อ (ย่อจากข้อความเต็ม; รายละเอียดอยู่ใน events.log)"
+        )
+
     def _notify_lead(
         self,
         project_ns: str,
@@ -1727,13 +2845,21 @@ class LeadInboxMixin:
         note: str = "notify",
         pane_token: str | None = None,
         digest_facts: DigestFacts | None = None,
+        queued_ts: float | None = None,
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
-        If Lead is alive, clean done and peer-CC notices are debounced into one
-        digest (60 s by default). Blocking failures and sequencing handoffs
-        bypass the window. The ready-prompt-aware pump then serialises writes so
-        concurrent notices never overwrite each other mid-generation.
+        If Lead is alive, clean done and peer-CC notices are debounced into
+        one digest (`_INBOX_DIGEST_WINDOW_MS`, 15s by default) — UNLESS
+        (#264) no other role in the project is still active, in which case
+        the much shorter `_INBOX_DIGEST_ADAPTIVE_SETTLE_MS` window applies
+        instead, since there's nothing left to wait for a combine with. See
+        `_other_roles_still_active`. (#279) A role a `takkub wait` is
+        currently blocked on skips the window altogether — see
+        `_wait_is_watching_role`. Blocking failures and sequencing
+        handoffs bypass the window entirely. The ready-prompt-aware pump
+        then serialises writes so concurrent notices never overwrite each
+        other mid-generation.
 
         If Lead is absent the item falls directly into the durable
         _pending_done_notices (survives a restart, delivered on next Lead spawn).
@@ -1755,7 +2881,16 @@ class LeadInboxMixin:
         Lazy-initialises queue / pumping-set so partial test fixtures (those that
         use Orchestrator.__new__ and bypass __init__) don't need to pre-populate
         these attributes.
+
+        *queued_ts* (#266): the wall-clock the underlying event actually
+        OCCURRED, defaulting to now. A caller re-routing an item that was
+        already queued once (durable requeue, e.g. `_flush_pending_done_notices`)
+        should pass the ORIGINAL timestamp through here rather than letting
+        it default — otherwise every requeue hop resets "when did this
+        happen" to "whenever it happened to be re-processed", defeating the
+        whole point of stamping it.
         """
+        occurred_ts = queued_ts if queued_ts is not None else time.time()
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
             window_ms = _inbox_digest_window_ms()
@@ -1767,14 +2902,34 @@ class LeadInboxMixin:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
                 self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
-                    (body, pane_token, time.time(), digest_facts)
+                    (body, pane_token, occurred_ts, digest_facts)
                 )
-                self._arm_lead_digest(project_ns, window_ms)
+                # #279: Lead is blocked in `takkub wait` on exactly this role
+                # — debouncing its report is time the wait spends idle for
+                # mail that already exists (and being stuck in that wait is
+                # what keeps Lead's pane busy for the pump downstream). Flush
+                # the whole pending burst at once, chronological order and
+                # single-Lead-turn framing intact.
+                if self._wait_is_watching_role(project_ns, _notice_role_tag(body) or from_role):
+                    self._flush_lead_digest(project_ns)
+                else:
+                    # #264: adaptive window — if nothing else could plausibly
+                    # still join this burst, don't make Lead pay the full
+                    # window's tax waiting for a combine that will never
+                    # happen. Re-evaluated on EVERY notice added to the burst
+                    # (each one re-arms via _arm_lead_digest), so the LAST
+                    # item in a genuine multi-role burst is the one that
+                    # switches to the short settle — not the first.
+                    if not self._other_roles_still_active(project_ns, from_role):
+                        window_ms = min(window_ms, _INBOX_DIGEST_ADAPTIVE_SETTLE_MS)
+                    self._arm_lead_digest(project_ns, window_ms)
             elif blocking:
                 # Failures are explicitly outside the digest policy. Do not
                 # make Lead read an older informational digest turn before the
                 # blocking alert; the digest keeps its original timer.
-                self._enqueue_live_lead_notice(project_ns, body, front=True, pane_token=pane_token)
+                self._enqueue_live_lead_notice(
+                    project_ns, body, front=True, pane_token=pane_token, queued_ts=occurred_ts
+                )
                 self._arm_lead_notify_pump(project_ns)
             elif "[auto-chain handoff]" in body.lower():
                 combined = self._flush_lead_digest(
@@ -1783,7 +2938,9 @@ class LeadInboxMixin:
                     trailing_body=body,
                 )
                 if not combined:
-                    self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
+                    self._enqueue_live_lead_notice(
+                        project_ns, body, pane_token=pane_token, queued_ts=occurred_ts
+                    )
                 self._arm_lead_notify_pump(project_ns)
             else:
                 # A sequencing handoff must not sit behind the debounce window.
@@ -1791,7 +2948,9 @@ class LeadInboxMixin:
                 # done notes it explicitly tells Lead to re-read. Other
                 # immediate engine notices follow the same chronological rule.
                 self._flush_lead_digest(project_ns, arm_pump=False)
-                self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
+                self._enqueue_live_lead_notice(
+                    project_ns, body, pane_token=pane_token, queued_ts=occurred_ts
+                )
                 self._arm_lead_notify_pump(project_ns)
 
             # Tell the UI Lead has new mail so it can red-dot the Lead pane-tab
@@ -1805,7 +2964,13 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": from_role, "note": note, "body": body, "pane_token": pane_token}
+                {
+                    "role": from_role,
+                    "note": note,
+                    "body": body,
+                    "pane_token": pane_token,
+                    "queued_ts": occurred_ts,
+                }
             )
             self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
@@ -1828,6 +2993,19 @@ class LeadInboxMixin:
         pumping.add(project_ns)
         self._pump_lead_notify(project_ns)
 
+    def _reset_lead_notify_backoff(self, project_ns: str) -> None:
+        """Clear both busy-backoff counters for *project_ns*.
+
+        `_lead_notify_retry` (retry count → spill cap) and
+        `_lead_notify_busy_since` (#279, wall-clock → deliver-anyway
+        escalation) measure the same condition on two different clocks and
+        must always be cleared together — a stale `_lead_notify_busy_since`
+        left behind by one exit path would make the NEXT burst escalate
+        instantly on its very first poll, skipping the prefer-idle window
+        entirely."""
+        getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+        getattr(self, "_lead_notify_busy_since", {}).pop(project_ns, None)
+
     def _pump_lead_notify(self, project_ns: str) -> None:
         """Deliver one notice to Lead when it is at the ready prompt, then re-arm.
 
@@ -1838,12 +3016,19 @@ class LeadInboxMixin:
         Busy-retry cap: after LEAD_NOTIFY_BUSY_CAP consecutive retries (~30 s) the
         remaining items are spilled to _pending_done_notices so they survive a crash
         and the hot-loop stops.
+
+        #279: the ready-prompt gate is a PREFERENCE, not a precondition —
+        after `_LEAD_BUSY_DELIVER_AFTER_S` of a busy-but-alive Lead the item
+        is delivered anyway (see that constant for the production evidence),
+        so the retry cap and its durable spill now only bite while Lead is
+        blocked on an interactive prompt, where a paste would answer the
+        modal instead of reaching the composer.
         """
         queue = getattr(self, "_lead_notify_queue", {}).get(project_ns)
         if not queue:
             pumping: set = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
-            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+            self._reset_lead_notify_backoff(project_ns)
             return
 
         # #133: a previous item's self-heal submit-verify chain is still
@@ -1866,13 +3051,19 @@ class LeadInboxMixin:
             queue.clear()
             pumping = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
-            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+            self._reset_lead_notify_backoff(project_ns)
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
-                    {"role": "system", "note": "notify", "body": b_body, "pane_token": b_pane_token}
+                    {
+                        "role": "system",
+                        "note": "notify",
+                        "body": b_body,
+                        "pane_token": b_pane_token,
+                        "queued_ts": b_ts,
+                    }
                 )
             if items:
                 self._save_pending_done_notices(project_ns)
@@ -1884,32 +3075,54 @@ class LeadInboxMixin:
                 self._lead_notify_retry = {}
             count = self._lead_notify_retry.get(project_ns, 0) + 1
             self._lead_notify_retry[project_ns] = count
-            if count > LEAD_NOTIFY_BUSY_CAP:
+            # #279: an autonomous Lead is busy nearly all the time, so waiting
+            # out the whole retry budget here only to spill and have the reaper
+            # force-deliver 60 s later is ~90 s of pure latency for a write
+            # that was always going to happen. Prefer idle for
+            # _LEAD_BUSY_DELIVER_AFTER_S, then fall through to the ordinary
+            # delivery below (the draft gate still runs, and still holds). The
+            # one state where a paste would land somewhere other than the
+            # composer is an open trust/permission/tty prompt — keep waiting
+            # for those, exactly as before.
+            busy_since = self.__dict__.setdefault("_lead_notify_busy_since", {}).setdefault(
+                project_ns, time.time()
+            )
+            waited = time.time() - busy_since
+            if waited >= _LEAD_BUSY_DELIVER_AFTER_S and not _prompt_block_reason(lead.session):
+                _log_event(
+                    "lead_notify_busy_deliver",
+                    project=project_ns,
+                    waited_s=round(waited, 1),
+                    queued=len(queue),
+                )
+            elif count > LEAD_NOTIFY_BUSY_CAP:
                 # Lead has been wedged too long — spill to durable and stop.
                 items = list(queue)
                 queue.clear()
                 pumping = getattr(self, "_lead_notify_pumping", set())
                 pumping.discard(project_ns)
-                self._lead_notify_retry.pop(project_ns, None)
+                self._reset_lead_notify_backoff(project_ns)
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                    b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
                             "note": "notify_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
+                            "queued_ts": b_ts,
                         }
                     )
                 if items:
                     self._save_pending_done_notices(project_ns)
                 _log_event("lead_notify_spill", project=project_ns, count=len(items))
                 return
-            # Retry after a short delay without consuming the item.
-            QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
-            return
+            else:
+                # Retry after a short delay without consuming the item.
+                QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
+                return
 
         if not self._lead_can_accept_injection(project_ns):
             # Lead is idle but the user has an unsubmitted draft in its input
@@ -1925,17 +3138,18 @@ class LeadInboxMixin:
                 queue.clear()
                 pumping = getattr(self, "_lead_notify_pumping", set())
                 pumping.discard(project_ns)
-                getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+                self._reset_lead_notify_backoff(project_ns)
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                    b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
                             "note": "notify_draft_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
+                            "queued_ts": b_ts,
                         }
                     )
                 if items:
@@ -1945,16 +3159,30 @@ class LeadInboxMixin:
                 QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
             return
 
-        # Lead is alive and idle — deliver one item; reset retry counter.
+        # Lead is alive and deliverable — deliver one item; reset retry counter.
+        # #279: the busy clock deliberately stays armed while items remain — a
+        # drain that already waited out the prefer-idle window must not serve
+        # that same wait to every other item in the same burst (4 spilled
+        # notices would take 4x5 s). It is cleared at the bottom, once the
+        # queue is actually empty.
         getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
         # Deliver-then-ack: peek instead of pop so a write() exception (session
         # torn down between the liveness checks above and this write) never
         # drops the item — see HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md.
-        raw_body, item_pane_token, _item_ts = _unwrap_notice_item(queue[0])
+        raw_body, item_pane_token, item_ts = _unwrap_notice_item(queue[0])
+        # #266: re-check delivery-health system notices right before they
+        # actually land — see _revalidate_system_notice's docstring for why
+        # (the queue can sit for minutes between enqueue and this point).
+        # No-op for every other notice shape (plain done/CC/FAILED bodies).
+        raw_body = self._revalidate_system_notice(project_ns, raw_body)
         item_role = _notice_role_tag(raw_body)
         if self._provenance_stale(project_ns, item_role, item_pane_token):
             raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
+        # #266: stamp every notice with when it actually occurred, not just
+        # when it happened to be flushed — this queue previously carried no
+        # timestamp at all (see _enqueue_live_lead_notice's docstring).
+        raw_body = f"{_occurred_stamp(item_ts)}{raw_body}"
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         payload = _paste_payload(body)
@@ -1981,17 +3209,18 @@ class LeadInboxMixin:
             queue.clear()
             pumping = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
-            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+            self._reset_lead_notify_backoff(project_ns)
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {
                         "role": "system",
                         "note": "notify_write_failed",
                         "body": b_body,
                         "pane_token": b_pane_token,
+                        "queued_ts": b_ts,
                     }
                 )
             self._save_pending_done_notices(project_ns)
@@ -2037,6 +3266,9 @@ class LeadInboxMixin:
         else:
             pumping = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
+            # Burst fully drained — the next one starts its own prefer-idle
+            # window rather than inheriting this one's expired clock (#279).
+            self._reset_lead_notify_backoff(project_ns)
 
     def _flush_pending_done_notices(self, project_ns: str) -> None:
         """Deliver queued done notices to Lead if it is currently alive.
@@ -2083,7 +3315,16 @@ class LeadInboxMixin:
                     self._pending_done_notices.pop(project_ns, None)
                 self._save_pending_done_notices(project_ns)
             try:
-                self._notify_lead(project_ns, item["body"], pane_token=item.get("pane_token"))
+                # #266: preserve the ORIGINAL occurrence time through this
+                # requeue hop — without it, every durable→live round-trip
+                # would reset "when did this happen" to "whenever it got
+                # reprocessed", defeating _occurred_stamp's whole purpose.
+                self._notify_lead(
+                    project_ns,
+                    item["body"],
+                    pane_token=item.get("pane_token"),
+                    queued_ts=item.get("queued_ts"),
+                )
             except Exception:
                 self._pending_done_notices.setdefault(project_ns, []).insert(0, item)
                 self._save_pending_done_notices(project_ns)
@@ -2123,7 +3364,13 @@ class LeadInboxMixin:
                 # delivery regardless of the gate so the chain can never stall
                 # indefinitely.
                 since = self._pending_done_since.setdefault(project_ns, now)
-                if now - since >= _DONE_NOTICE_STALE_S:
+                if now - since >= _DONE_NOTICE_STALE_S and not _prompt_block_reason(lead.session):
+                    # #279: never force a paste while Lead sits on a
+                    # trust/permission/tty prompt — those bytes answer the
+                    # modal instead of landing in the composer, which loses
+                    # the notice AND makes a choice on the user's behalf. The
+                    # staleness clock keeps running, so delivery resumes on
+                    # the first tick after the prompt clears.
                     _log_event(
                         "done_notice_force_flush",
                         project=project_ns,
@@ -2194,10 +3441,16 @@ class LeadInboxMixin:
             return
 
         def _flagged(item: dict) -> str:
-            item_body = item.get("body", "")
+            # #266: same re-validate + occurred-at stamping _pump_lead_notify
+            # applies to its own live-queue delivery — this force-deliver
+            # path exists specifically for items that have been stuck
+            # durable through _DONE_NOTICE_STALE_S (60s) of a not-ready
+            # Lead, so it's at LEAST as likely to be carrying stale claims.
+            item_body = self._revalidate_system_notice(project_ns, item.get("body", ""))
             role = _notice_role_tag(item_body)
             if self._provenance_stale(project_ns, role, item.get("pane_token")):
                 item_body = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{item_body}"
+            item_body = f"{_occurred_stamp(item.get('queued_ts'))}{item_body}"
             return _sanitize_pane_text(item_body)
 
         body = "\n\n".join(_flagged(item) for item in valid)
