@@ -338,6 +338,96 @@ class TestWarnIfLiveChildren:
         lead = orch._panes_by_project[PROJECT][LEAD.name]
         lead.session.write.assert_not_called()
 
+    @pytest.mark.parametrize("shell_name", ["pwsh.exe", "powershell.exe"])
+    def test_codex_powershell_shell_host_stays_silent(
+        self, orch: Orchestrator, monkeypatch, shell_name: str
+    ) -> None:
+        """#286: codex's Windows shell-tool host outlives each command, so it
+        stands under the pane at close time on EVERY done — prod events.log
+        for 2026-08-17 shows all 10 codex-pane closes firing with exactly
+        `["pwsh.exe"]`, one extra Lead message after every single report.
+        `powershell.exe` is parametrised in because spawn_engine falls back to
+        it when PowerShell 7 is absent from PATH."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        child = MagicMock()
+        child.name.return_value = shell_name
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    @pytest.mark.parametrize("platform", ["win32", "linux"])
+    @pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
+    def test_own_takkub_cli_call_stays_silent(
+        self, orch: Orchestrator, monkeypatch, platform: str, provider: str
+    ) -> None:
+        """#286: the pane's own in-flight `takkub done` is what SCHEDULED the
+        close this warning fires from, so it is guaranteed present on every
+        done-close regardless of provider or OS. Warning that it is about to
+        be killed is self-reference, never a report of lost work."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: provider,
+        )
+        child = MagicMock()
+        child.name.return_value = "takkub.exe" if platform == "win32" else "takkub"
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "devops", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_real_work_beside_scaffolding_still_warns(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """The filter must stay a subtraction, not a mute button: a codex pane
+        closing on a live `docker` build still gets reported even though its
+        own pwsh/takkub scaffolding is standing right beside it (#286 widened
+        the filter — this pins that #234's actual purpose survived it)."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        children = []
+        for name in ("pwsh.exe", "takkub.exe", "docker.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "frontend closing" in written
+        assert "1 subprocess" in written
+        assert "docker.exe" in written
+        assert "pwsh" not in written
+
     def test_codex_scaffolding_stays_silent_posix(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())
         monkeypatch.setattr(sys, "platform", "darwin")

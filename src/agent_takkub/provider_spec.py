@@ -584,11 +584,29 @@ codex_spec = ProviderSpec(
     # claude/opencode) plus its own `code_mode`/`codex_apps` sandbox host
     # process — both confirmed always-present under a live codex pane at
     # close time, not evidence of unfinished work (#272).
+    #
+    # #286: PowerShell is codex's shell-tool host on Windows and it outlives
+    # the individual command, so it is standing under the pane at every
+    # close. Evidence (prod events.log, 2026-08-17): all 10 codex-pane closes
+    # that day fired `close_kills_live_children` with exactly
+    # `count: 1, names: ["pwsh.exe"]` — a constant, across tasks as unrelated
+    # as a pg_dump, a full test suite and a frontend build, where genuinely
+    # unfinished work would vary. The day before, `pwsh.exe` appears paired
+    # with `codex-code-mode-host.exe` on every codex close; once #283's
+    # `--disable apps` removed the host from that same tree, `pwsh.exe` was
+    # what remained. `powershell.exe` is listed alongside because
+    # spawn_engine's own PowerShell discovery falls back to it when `pwsh` is
+    # absent from PATH — a machine without PowerShell 7 must get the same
+    # silence, not a warning every close.
     scaffolding_process_names=(
         "node.exe",
         "node",
         "codex-code-mode-host.exe",
         "codex-code-mode-host",
+        "pwsh.exe",
+        "pwsh",
+        "powershell.exe",
+        "powershell",
     ),
 )
 
@@ -1185,6 +1203,15 @@ def effort_levels_for(provider: str, model: str | None) -> tuple[str, ...]:
 # may not actually appear (#272's evidence is Windows-only).
 GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32: tuple[str, ...] = ("cmd.exe", "conhost.exe")
 
+# #286: every platform, every provider — the cockpit's OWN CLI. The close
+# this warning fires from is, on the overwhelmingly common path, the 2.5s
+# auto-close that `done()` scheduled, and the `takkub done` process that
+# asked for it is still standing in the pane's tree at that moment BY
+# CONSTRUCTION. Warning Lead that the cockpit is about to kill the very
+# call that triggered the warning is pure self-reference, and it is the
+# only child guaranteed to be there on every single done-close.
+GENERIC_SCAFFOLDING_PROCESS_NAMES: tuple[str, ...] = ("takkub", "takkub.exe")
+
 
 def normalize_process_name(name: str) -> str:
     """Lowercase a process name and drop a trailing ``.exe`` so the same
@@ -1198,12 +1225,15 @@ def normalize_process_name(name: str) -> str:
 def scaffolding_process_names_for(provider: str) -> frozenset[str]:
     """Normalized (``normalize_process_name``) set of process names that are
     *expected* scaffolding under a live ``provider`` pane — this provider's
-    own confirmed ``scaffolding_process_names`` plus the Windows-universal
+    own confirmed ``scaffolding_process_names``, the all-platform cockpit
+    baseline (``GENERIC_SCAFFOLDING_PROCESS_NAMES``) and the Windows-universal
     ConPTY baseline (``GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32``) when running
-    on Windows. Unknown provider name → baseline only, same as an
+    on Windows. Unknown provider name → baselines only, same as an
     unrecognized name having no provider-specific scaffolding confirmed.
     """
     spec = PROVIDER_REGISTRY.get(provider)
     own = spec.scaffolding_process_names if spec is not None else ()
-    generic = GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 if sys.platform == "win32" else ()
-    return frozenset(normalize_process_name(n) for n in (*own, *generic))
+    win32 = GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32 if sys.platform == "win32" else ()
+    return frozenset(
+        normalize_process_name(n) for n in (*own, *GENERIC_SCAFFOLDING_PROCESS_NAMES, *win32)
+    )

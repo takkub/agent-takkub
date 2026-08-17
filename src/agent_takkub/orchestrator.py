@@ -2702,6 +2702,17 @@ class Orchestrator(
         `provider_spec.scaffolding_process_names_for`) before deciding
         whether anything worth warning about is left. Only fires once real
         work (docker/pytest/build tooling/etc.) survives the filter.
+
+        #286: the same 100%-false-positive shape came back for codex panes
+        via `pwsh.exe` (its Windows shell-tool host) and, on every provider,
+        via the pane's own in-flight `takkub done` call. Both are now in the
+        filter — see `provider_spec.GENERIC_SCAFFOLDING_PROCESS_NAMES` and
+        codex_spec's note. Worth remembering when the next name shows up:
+        the discriminator that settled both cases was CONSTANCY, not
+        plausibility — a child present on every close with an identical
+        count, across tasks with nothing in common, is scaffolding; genuine
+        unfinished work varies with the work. Check events.log's
+        `close_kills_live_children` history before adding a name here.
         """
         pid = getattr(session, "_pid", None)
         if not pid:

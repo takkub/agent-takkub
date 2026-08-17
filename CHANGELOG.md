@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.71] - 2026-08-17
+
+### Fixed (แก้)
+
+**ทุกครั้งที่ pane เสร็จงาน มีข้อความที่ 2 ตามมาซ้ำเสมอ — "1 subprocess(es) still running… (pwsh.exe)" (#286)**
+- warning นี้ (#234) มีไว้บอก Lead ว่า close กำลังจะฆ่างานที่ยังรันค้าง เช่น `docker compose build` · #272 เคยกรอง scaffolding ของแต่ละ provider ออกไปแล้วรอบหนึ่ง แต่ **`pwsh.exe` ของ codex หลุดตะแกรง**
+- codex บน Windows รัน shell tool ผ่าน PowerShell และ**ถือ host process นั้นค้างตลอดอายุ pane** → ยืนอยู่ในทรีทุกครั้งที่ปิด
+- หลักฐาน (prod events.log 2026-08-17): pane codex ปิด **10 ครั้ง ยิง warning 10 ครั้ง** ทุกครั้ง `count:1 names:["pwsh.exe"]` เป๊ะ ทั้งที่งานคนละเรื่องกันหมด (pg_dump / รัน test suite / build frontend) — งานค้างจริงต้องผันแปร ไม่ใช่ค่าคงที่ · เมื่อวานเจอคู่กับ `codex-code-mode-host.exe` เสมอ พอ #283 ใส่ `--disable apps` ตัว host หายไป เหลือ pwsh ตัวเดียว
+- แก้: `pwsh/powershell` เข้า `codex_spec.scaffolding_process_names` (ใส่ `powershell.exe` ด้วยเพราะ spawn_engine fallback ไปตัวนี้เมื่อไม่มี PowerShell 7)
+
+**`takkub done` ของ pane เอง ถูกนับเป็น "งานที่กำลังจะถูกฆ่า" (#286)**
+- close ที่ warning นี้ยิงออกมา คือ auto-close 2.5 วิที่ `done()` ตั้งไว้ — และ process `takkub done` ที่ขอ close นั้น **ยังยืนอยู่ในทรีแน่นอนโดยนิยาม** ตอนที่เช็ค
+- เตือนว่ากำลังจะฆ่า "การเรียกที่ทริกเกอร์คำเตือนนี้เอง" = self-reference ล้วนๆ และเป็นลูกตัวเดียวที่การันตีว่าอยู่ครบทุก done-close
+- แก้: เพิ่ม `GENERIC_SCAFFOLDING_PROCESS_NAMES` (ข้ามทุก platform ทุก provider) = `takkub`
+
+**ยังเตือนเหมือนเดิมถ้ามีงานจริงค้าง** — filter เป็นการ "ลบออก" ไม่ใช่ปิดเสียง: pane codex ที่ปิดตอน `docker` ยังรันอยู่ ยังได้ warning ครบ (มีเทสพินไว้)
+
 ## [1.0.70] - 2026-08-16
 
 ### Fixed (แก้)
