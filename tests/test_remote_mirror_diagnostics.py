@@ -88,7 +88,7 @@ class TestRemoteMirrorStatusCommand:
 
     def test_reports_live_pane_provider_over_config_fallback(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch(
-            panes_by_project={"proj-a": {"lead": _FakePane("opencode")}},
+            panes_by_project={"proj-a": {"lead": _FakePane("kimi")}},
             pane_state={"proj-a::lead": _FakePaneState(None)},
         )
         srv = CliServer(orch)
@@ -98,7 +98,7 @@ class TestRemoteMirrorStatusCommand:
 
         r = _replies(sock)[0]
         assert r["lead_pane_open"] is True
-        assert r["provider"] == "opencode"
+        assert r["provider"] == "kimi"
         assert r["supports_remote_history"] is False
         assert r["session_uuid"] is None
         assert r["transcript_exists"] is None

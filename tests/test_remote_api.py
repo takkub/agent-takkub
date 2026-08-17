@@ -749,7 +749,21 @@ class TestLeadSay:
         (opencode/kimi/cursor) still delivers the message, but the response
         must tell the PWA not to expect a live mirrored reply — this is the
         signal that stops the phone's spinner from hanging forever with zero
-        explanation (the reported BlueParking/OpenCode bug)."""
+        explanation (e.g. for providers without remote history support)."""
+        monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "kimi")
+        srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.lead_say(fake_orch, "hello lead", None)
+        finally:
+            srv.close()
+        assert result["ok"] is True
+        assert result["provider"] == "kimi"
+        assert result["mirror_supported"] is False
+        assert result["lead_provider_note"] is not None
+        assert "kimi" in result["lead_provider_note"]
+
+    def test_opencode_mirror_supported(self, monkeypatch, fake_orch):
         monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "opencode")
         srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
         _patch_port(monkeypatch, srv.port)
@@ -759,9 +773,8 @@ class TestLeadSay:
             srv.close()
         assert result["ok"] is True
         assert result["provider"] == "opencode"
-        assert result["mirror_supported"] is False
-        assert result["lead_provider_note"] is not None
-        assert "opencode" in result["lead_provider_note"]
+        assert result["mirror_supported"] is True
+        assert result["lead_provider_note"] is None
 
     def test_forwards_from_project_to_cli_server(self, monkeypatch, fake_orch):
         srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
@@ -1097,18 +1110,18 @@ class TestLeadHistory:
         """A provider using the live visible-screen fallback still explains
         that saved history/session browsing is unavailable."""
         monkeypatch.setattr(
-            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("opencode", [])
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("kimi", [])
         )
         monkeypatch.setattr(
             api.notify,
             "lead_mirror_diagnosis",
-            lambda orch, ns: {"code": "provider_unsupported", "provider": "opencode"},
+            lambda orch, ns: {"code": "provider_unsupported", "provider": "kimi"},
         )
         result = api.lead_history(self._Orch(), "proj-a")
-        assert result["provider"] == "opencode"
+        assert result["provider"] == "kimi"
         assert result["messages"] == []
         assert result["lead_provider_note"] is not None
-        assert "opencode" in result["lead_provider_note"]
+        assert "kimi" in result["lead_provider_note"]
 
     def test_empty_reason_omitted_when_messages_present(self, monkeypatch):
         """Diagnosis is skipped entirely for a populated chat — it must never
@@ -1213,14 +1226,14 @@ class TestLeadSessions:
 
     def test_exposes_provider_and_clean_unsupported_state(self, monkeypatch):
         monkeypatch.setattr(
-            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("opencode", [])
+            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("kimi", [])
         )
         result = api.lead_sessions(self._Orch(), "proj-a")
         assert result == {
             "project": "proj-a",
-            "provider": "opencode",
+            "provider": "kimi",
             "sessions": [],
-            "lead_provider_note": "Lead provider = opencode — remote history/session unavailable",
+            "lead_provider_note": "Lead provider = kimi — remote history/session unavailable",
         }
 
     def test_supported_provider_has_no_degradation_note(self, monkeypatch):

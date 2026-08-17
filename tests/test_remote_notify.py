@@ -530,9 +530,9 @@ class TestLeadMirrorDiagnosis:
 
     def test_no_scanner_is_provider_unsupported(self, config_dir):
         orch = _FakeOrch()
-        orch.set_lead("proj", None, provider="opencode")
+        orch.set_lead("proj", None, provider="kimi")
         result = notify_mod.lead_mirror_diagnosis(orch, "proj")
-        assert result == {"code": "provider_unsupported", "provider": "opencode"}
+        assert result == {"code": "provider_unsupported", "provider": "kimi"}
 
     def test_claude_without_session_uuid_is_no_session_uuid(self, config_dir):
         orch = _FakeOrch()
