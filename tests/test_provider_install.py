@@ -126,12 +126,21 @@ class TestDoctorWiring:
 
         Discovery is neutralized per-helper (the spec wrappers lazily re-import
         these names at call time — the documented monkeypatch seam) plus a
-        global which() stub, so the verdict is machine-independent."""
+        global which() stub, so the verdict is machine-independent.
+
+        opencode needs its own patch, not just the which() stub:
+        `find_opencode_executable` falls back to `_default_opencode_paths()`
+        and probes them with `Path.is_file()`, which walks straight past a
+        patched `shutil.which`. On a developer box that actually has opencode
+        installed, the real binary leaked in and the provider came back INFO
+        with a version string instead of SKIP-with-installer — a machine-
+        dependent failure that CI (no opencode installed) could never see."""
         from agent_takkub import doctor as doctor_mod
 
         with (
             patch("agent_takkub.codex_helper.find_codex_executable", return_value=None),
             patch("agent_takkub.gemini_helper.find_agy_executable", return_value=None),
+            patch("agent_takkub.opencode_helper.find_opencode_executable", return_value=None),
             patch("shutil.which", _which_missing),
         ):
             findings = doctor_mod.check_providers()

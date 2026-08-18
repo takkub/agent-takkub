@@ -692,7 +692,16 @@ class StatusHeaderMixin:
             return
         self._performance_status_cache = snap
         cpu = round(float(snap.get("cpu_percent", 0)))
-        ram = round(float(snap.get("available_memory_percent", 0)))
+        # #292: the chip shows RAM *used*, not the governor's internal
+        # available_memory_percent. `CPU` right next to it is a used-percent,
+        # and every tool the user cross-checks against (Task Manager, htop,
+        # Activity Monitor) means used by "RAM" — printing 69 for a box with
+        # 31% used read as "nearly full" and, worse, showed a *low* number
+        # exactly when memory was about to run out. The tooltip and the
+        # dialog keep the available-side value (labelled "Available RAM")
+        # because the governor's thresholds are defined on that side.
+        ram_available = round(float(snap.get("available_memory_percent", 0)))
+        ram = 100 - ram_available
         heavy = int(snap.get("active_heavy_tasks", 0))
         limits = snap.get("resource_limits") or {}
         heavy_limit = int(limits.get("max_heavy_global", 0))
@@ -729,7 +738,8 @@ class StatusHeaderMixin:
             resource_queue_line += f" (waiting: {', '.join(waiting_reasons)})"
         self._chip_performance.setToolTip(
             "System Load: " + state + "\n"
-            f"CPU: {cpu}%\nAvailable RAM: {ram}% ({available_gb:.1f}/{total_gb:.1f} GiB)\n"
+            f"CPU: {cpu}%\nRAM used: {ram}%\n"
+            f"Available RAM: {ram_available}% ({available_gb:.1f}/{total_gb:.1f} GiB)\n"
             f"Heavy agents: {heavy}/{heavy_limit or '—'}\n"
             f"Browser agents: {browser}/{browser_limit or '—'}\n"
             f"{resource_queue_line}\nSpawn queue: {spawn_queue}\n"

@@ -131,6 +131,17 @@ class _FakeSplashOrch:
     def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
         pass  # no-op stub — #104 tripwire covered in test_stuck_recover.py
 
+    def _live_non_scaffolding_children(self, project_ns, role_name, session) -> list[str]:
+        # #288: injected by tests — the real probe walks a live OS process tree,
+        # which a stubbed session doesn't have. Default [] = "no live work",
+        # which is the pre-#288 behaviour every existing test was written against.
+        return list(getattr(self, "live_children", []))
+
+    def _defer_stuck_recover_for_live_children(self, role, project, pane, ps_ck, now) -> bool:
+        return Orchestrator._defer_stuck_recover_for_live_children(  # type: ignore[arg-type]
+            self, role, project, pane, ps_ck, now
+        )
+
 
 @pytest.fixture(autouse=True)
 def _patch_qtimer(monkeypatch: pytest.MonkeyPatch) -> list:

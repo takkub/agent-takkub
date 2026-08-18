@@ -4,6 +4,55 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed (แก้)
+
+**status-bar chip เขียน "RAM 69%" ทั้งที่หมายถึง RAM ว่าง — อ่านกลับด้านจาก Task Manager (#292)**
+- chip ดึง `available_memory_percent` มาโชว์ แต่ติดป้ายแค่ `RAM` ซึ่งทุกเครื่องมือมาตรฐาน (Task Manager / htop / Activity Monitor) หมายถึง RAM **ที่ใช้ไป** → เครื่องที่ใช้จริง 31% แสดงเป็น "RAM 69%" อ่านแล้วนึกว่าใกล้เต็ม
+- จุดที่แย่กว่าคือทิศทาง: ตอน RAM ใกล้หมดจริง chip จะโชว์เลข **ต่ำ** (เช่น "RAM 8%") — เตือนไม่ติดตอนที่ควรเตือนที่สุด และย้อนแย้งกับ `SYS OVERLOAD` ที่ trigger จาก available ต่ำ
+- chip โชว์ RAM ที่ใช้ไปแล้ว (`100 − available`) ทิศเดียวกับ `CPU` ที่อยู่ติดกัน · tooltip เพิ่มบรรทัด `RAM used:` และคง `Available RAM:` ไว้ เพราะ threshold ของ governor นิยามบนฝั่ง available
+- test กันถอย: RAM ว่าง 8% ต้องแสดง "RAM 92%" คู่กับ "SYS OVERLOAD"
+
+**cockpit กระตุกเป็นวินาทีทั้งที่ CPU/RAM ต่ำ — git subprocess ยิงทีละ dir บน Qt main thread (#291)**
+- `events.log` 2 วัน (2026-08-16 → 08-18) มี `main_thread_stall` **203 ครั้ง** — median 1.1 วิ, p90 2.3 วิ, สูงสุด 24.9 วิ · `spawn_in_progress=true` **0/203** · 64/203 เกิดตอน pane พ่น output น้อยกว่า 1KB/s · 12 ครั้งเกิดตอน **ไม่มี pane เปิดเลย**
+- CPU ไม่ขึ้นเพราะ main thread ไม่ได้ compute — มันรอ process spawn + file I/O ซึ่งไม่นับเป็น CPU load
+- stack dump ชี้ว่า `takkub done`/`assign` วิ่งเข้า `cli_server._dispatch` แบบ synchronous บน GUI thread แล้ว `snapshot_porcelain_paths` ยิง `git status` **หนึ่ง process ต่อ `?? dir/` หนึ่งอัน** เรียงกัน (วัดบนเครื่องอ้างอิง 29–42 ms ต่อครั้งแม้ tree สะอาด) — tree ที่มี untracked dir สิบกว่าอันจึงแช่แข็ง UI เกินวินาที
+- `_expand_dir_entries()` รวบเป็น **git call เดียว** ไม่ว่าจะมีกี่ directory แล้วแบ่งผลกลับตาม path prefix (longest-prefix first เพื่อให้ `a/b/` ชนะ `a/`) · cap ยังคิดแยกต่อ directory ตัวที่ล้น cap จึงไม่ลากตัวอื่นตกไปด้วย · path ที่ไม่ตรง pathspec ไหนเลยถูกส่งกลับเข้า snapshot ไม่ถูกทิ้ง — การ batch ต้องไม่กลายเป็นการเปลี่ยน correctness
+- event ที่มาก่อน stall บ่อยสุดคือ `assign` (27) · `done` (20) · `session_report` (8) · `spawn` (7) — ทั้งหมดคือ handler ของ `cli_server`
+- เป็นของเก่าที่กลับมา: #194 กับ #229 ปิดไปโดยแก้ทีละจุด และข้อ 3 ของ #194 ("regression guard") ไม่เคยถูกทำ — รอบนี้มี test ที่ fail ถ้าจำนวน git process โตตามจำนวน directory
+
+**Lead = codex/gemini ใช้ไม่ได้จริง: resolve_session กิน 1.3–2.7 วิ บน GUI thread ทุก 5 วิ (#293, #103)**
+- provider ที่ `requires_session_uuid=False` (codex/gemini/opencode) ถูก resolve ใหม่ทุก `_UUIDLESS_RESYNC_THROTTLE_S` — ทางลัด "ข้าม glob เมื่อ tail มีอยู่แล้ว" ของ #229 ใช้กับมันไม่ได้ตามนิยาม
+- วัดจริงบนเครื่องอ้างอิง (`~/.codex/sessions` 738 ไฟล์): **codex 2,716 ms** · gemini 1,278 ms · claude 62.8 ms — ทั้งหมดบน Qt main thread
+- ต้นเหตุคือ `sorted(root.rglob("rollout-*.jsonl"), key=mtime)` ซึ่ง stat ทุกไฟล์ในคลังก่อนจะมองไฟล์แรกด้วยซ้ำ
+- codex partition คลังเป็น `sessions/YYYY/MM/DD/` อยู่แล้ว — `_codex_rollout_candidates()` เดินไล่ทีละวันจากใหม่ไปเก่าแบบ lazy (ทุก caller return ที่ match แรก การเจอในวันนี้จึงไม่ต้องจ่ายค่าของเมื่อวาน) และ **bound ด้วยวันที่** จาก spawn timestamp แทน `break` ตาม mtime ที่จะตัดการค้นสั้นเกินไปถ้าไฟล์ถูกแตะหลังวันของตัวเอง (เผื่อ 1 วันเต็มสำหรับ session ที่เริ่มก่อนเที่ยงคืน)
+- ผลวัดหลังแก้: **2,716 ms → 41 ms** (cold) · เทียบ apples-to-apples บน cache อุ่นเท่ากัน: whole-store sort 60.6 ms → first-candidate 4.3 ms
+- คลังที่ไม่ได้ partition ตามวันที่ยัง fallback ไปเดินทั้งต้นไม้เหมือนเดิม — ไม่ใช่รายงานว่าไม่มี session
+
+**watchdog ฆ่า pane ที่ยังทำงานอยู่ — stuck detection ดูแค่หน้าจอนิ่ง ไม่ดู child process (#288)**
+- เคสจริง 2026-08-17: pane QA (gemini) เขียนสคริปต์ Playwright แล้วรัน `node <script>.js` ซึ่งไม่พ่น output ออกจอเป็นนาที watchdog อ่านจอที่นิ่งว่าค้าง แล้ว respawn แบบ `resumed: false` → งาน 15 นาทีหายหมด และ pane เริ่มใหม่ตั้งแต่ข้อ 1 **กดปุ่มจริงในระบบจริงซ้ำรอบสอง**
+- event เดียวกันนั้นบันทึก `content_static_s: 600` คู่กับ `close_kills_live_children count: 8` (node.exe + chrome-headless-shell.exe 5 ตัว) — หลักฐานว่า pane ไม่ได้ค้างถูกเก็บ**ตอนกำลังฆ่า** ช้าไปหนึ่งก้าวจนเปลี่ยนการตัดสินใจไม่ได้
+- ตัวนับ live children ถูกแยกออกมาเป็น `_live_non_scaffolding_children()` แล้วเรียก**ก่อน**ตัดสินใจ recover (ตัวกรอง scaffolding ของ #272/#286 ยังทำงานเหมือนเดิม) ราคาถูกเพราะไม่มีอะไรมาถึงบรรทัดนั้นจนกว่า pane จะนิ่งครบ `STUCK_THRESHOLD_S` แล้ว
+- การเลื่อนมีเพดาน `STUCK_LIVE_CHILD_GRACE_S` (ค่าเริ่มต้น 60 นาที ปรับผ่าน `TAKKUB_STUCK_LIVE_CHILD_GRACE_S`) — child ที่ตัวเองค้างต้องไม่สามารถยึด pane ไว้ตลอดกาล
+- Lead ได้ notice ครั้งเดียวต่อ episode (cooldown 15 นาที) ว่า watchdog เลื่อนการ respawn เพราะงานยังเดินอยู่ ไม่ใช่ทุก tick
+
+**`/api/history` ของ OpenCode คืน transcript ของโปรเจกต์อื่น (#285 follow-up)**
+- adapter opencode เลือก session id ด้วย `list(_LAST_OPENCODE_SESSION_BY_PROJECT.values())[-1]` = โปรเจกต์ที่ถูก**ใส่เข้า dict ล่าสุด** ไม่ใช่โปรเจกต์ที่ร้องขอ (dict ไม่ย้ายลำดับ key เดิมตอน re-assign) — เปิด A ก่อน B แล้วทุกการอ่านของ A จะได้ id ของ B
+- opencode เก็บทุก session ไว้ใน sqlite **ก้อนเดียวร่วมกันทุกโปรเจกต์** session id จึงเป็นสิ่งเดียวที่แยกกันได้ → หยิบผิดคือเสิร์ฟ transcript ข้ามโปรเจกต์
+- รากปัญหาคือ `_HistoryScanner.read_messages` ไม่มี project context ให้ส่ง — เติม `project_ns` เข้า signature แล้วให้ adapter ทุกตัวรับ (ตัวที่ resolve เป็นไฟล์ต่อโปรเจกต์อยู่แล้วก็แค่ไม่ใช้) แทนที่จะเลี่ยงด้วย global
+
+**`test_missing_installable_provider_gets_auto_fix` แดงบนเครื่องที่ติดตั้ง opencode จริง**
+- เทสอ้างในคอมเมนต์ว่า "machine-independent" แต่ neutralize discovery แค่ codex/gemini + stub `shutil.which` ส่วน `find_opencode_executable` มี fallback ไป `_default_opencode_paths()` แล้วเช็คด้วย `Path.is_file()` ซึ่งเดินผ่าน stub ไปเลย
+- บนเครื่อง dev ที่มี opencode ติดตั้งอยู่จริง binary ตัวจริงจึงรั่วเข้ามา provider กลับมาเป็น INFO พร้อมเลขเวอร์ชันแทนที่จะเป็น SKIP-พร้อม-installer — CI (ไม่มี opencode) ไม่มีทางเห็น
+- เติม patch seam ของ opencode ให้ครบเหมือน codex/gemini
+
+### Changed (เปลี่ยน)
+
+- ruff 0.16.2 → **0.16.3** ขยับพร้อมกันทั้ง `pyproject.toml` และ `.pre-commit-config.yaml` ตามที่ #246 บังคับ (PR #290 ของ dependabot ขยับแค่ไฟล์เดียวจึงทำ CI แดง และพ่วงการขยาย PyQt6 เป็น `<6.12` ที่ขัดกับ pin LTS ที่ตั้งใจ — ปิดใบนั้นไปแล้ว PyQt6 ยังอยู่ที่ 6.8 LTS)
+
+### Docs (เอกสาร)
+
+- `docs/audit/takkub-brain-v1-current-head.md` เพิ่มภาคผนวก re-verification ที่ HEAD 1.0.72 (#275): ตรวจ `file:line` ที่ audit เดิมอ้างครบทุกจุด (drift 2 จาก 15) · แก้ข้อสรุปเรื่อง common assign boundary (subagent แตกทางที่ `orchestrator.py:1537` ก่อนถึง `_assign_dispatch`) · วัด token ratio แบบ corpus ทั้ง store แทนไฟล์เดียว (2.91 chars/token ไม่ใช่ 3.573) · วัด MAX_PATH headroom จริง
+
 ## [1.0.72] - 2026-08-17
 
 ### Changed (เปลี่ยน)

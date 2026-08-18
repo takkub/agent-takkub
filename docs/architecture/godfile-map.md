@@ -97,6 +97,7 @@ this lives in one file)
 - ถือ: session-goal apply + uncommitted-commit gate + fanout-queue (new since 2026-06-21) + done-evidence auto-scan (#5, plan item 5)
 - `assign`, `_assign_dispatch`, `_assign_with_worktree`, `request_restart`, `_tag_pane_worktree`, `_finalize_worktree`, `send`, `close`, `done`, `set_session_goal`, `clear_session_goal`, `get_session_goal`, `_apply_session_goal`, `toggle_provider`, `set_plan_tier`, `set_exec_mode`, `close_all_teammates`, `harvest_info`, `task_show_info`, `_uncommitted_warning`, `_check_uncommitted_async`, `_save_decision_note`, `consume_pane_hook`, `consume_session_report`, `_condense_done_note`, `_build_verify_fail_handoff`
 - evidence sub-cluster (#5): `_evidence_stat_mtime`, `_find_evidence_files`, `_scan_done_evidence`
+- live-children sub-cluster: `_live_non_scaffolding_children` (psutil child walk minus the provider's scaffolding names) feeds BOTH `_warn_if_live_children` (close-time notice, #234/#272/#286) and the `watchdogs` cluster's `_defer_stuck_recover_for_live_children` (#288 — same evidence, consulted before the kill instead of during it)
 - fanout-queue sub-cluster (not in the original plan doc — added later): `_should_queue_assign`, `_enqueue_assign`, `_drain_fanout_queue`, `_fanout_queue_path`, `_save_fanout_queue`, `_load_fanout_queue`
 
 **`session_persistence`** — durability ข้าม restart + reporting
@@ -105,7 +106,7 @@ this lives in one file)
 
 **`watchdogs`** — QTimer health monitors
 - ถือ: `_idle_state`, `_idle_err_last` + stuck/rate-limit bookkeeping
-- `_check_idle_teammates`, `_check_stale_markers`, `_check_shell_open_dialog`, `_check_stuck_panes`, `_auto_recover_stuck`, `_give_up_stuck`, `_inject_idle_reminder`, `_warn_lead_runaway_pane`, `_warn_lead_over_cap`, `_maybe_submit_stuck_paste`, `_rate_limit_suppressed`, `_schedule_rate_limit_notice`, `_emit_rate_limit_reset`, `_maybe_surface_tty_block`, `_surface_tty_block_notice`, `_maybe_surface_malformed_xml`
+- `_check_idle_teammates`, `_check_stale_markers`, `_check_shell_open_dialog`, `_check_stuck_panes`, `_defer_stuck_recover_for_live_children` (#288 — last gate before `_auto_recover_stuck`; reads `_live_non_scaffolding_children` from the `pane_lifecycle` cluster), `_auto_recover_stuck`, `_give_up_stuck`, `_inject_idle_reminder`, `_warn_lead_runaway_pane`, `_warn_lead_over_cap`, `_maybe_submit_stuck_paste`, `_rate_limit_suppressed`, `_schedule_rate_limit_notice`, `_emit_rate_limit_reset`, `_maybe_surface_tty_block`, `_surface_tty_block_notice`, `_maybe_surface_malformed_xml`
 
 **pane-input bridge** (small, not previously mapped — Qt slot wiring only)
 - `_on_pane_spawn_clicked`, `_on_pane_close_clicked`, `_on_pane_input` (feeds `LeadInboxMixin._track_lead_draft_input` — see `lead_notify_pump` above)

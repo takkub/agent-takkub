@@ -35,7 +35,7 @@ dev = [
     # a newer release land there than the one developers run locally — the
     # local gate passed while CI failed on a rule the old version didn't have.
     # Bump this and .pre-commit-config.yaml's rev together, deliberately.
-    "ruff==0.16.2",
+    "ruff==0.16.3",
     "pre-commit>=3.7",
     "grimp>=3.14,<4",      # dep-graph generation for tools/gen_import_graph.py; major bump can change graph semantics — bump deliberately
     "import-linter>=2.9", # architecture contracts (lint-imports)

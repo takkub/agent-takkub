@@ -1491,3 +1491,66 @@ class TestRepairEditablePthIfStale:
         msg = repair_editable_pth_if_stale(str(tmp_path), str(removed_worktree))
         assert "ไม่เจอ" in msg or "ไม่ได้" in msg
         assert str(tmp_path / ".venv") in msg
+
+
+class TestDirExpansionIsBatched:
+    """#291: expanding collapsed `?? dir/` entries must cost ONE git process
+    no matter how many directories are involved.
+
+    The per-directory version ran inside `done`/`assign`'s digest, which
+    `cli_server._dispatch` executes inline on the Qt main thread — each spawn
+    measured 29-42 ms on the reference Windows box, so a working copy with a
+    dozen untracked directories froze the cockpit for over a second on every
+    `takkub done` (`main_thread_stall` peaks of 1.5 s, with the stack sitting
+    in `subprocess.run` under `_expand_dir_entry`).
+    """
+
+    def test_many_dirs_expand_in_one_git_call(self):
+        dirs = [f"d{i}/" for i in range(12)]
+        listing = "\0".join(f"?? d{i}/f.txt" for i in range(12)) + "\0"
+        runner = FakeRunner([(["-uall"], _ok(listing))])
+
+        snapshot = snapshot_porcelain_paths("/root", "".join(f"?? {d}\n" for d in dirs), runner)
+
+        expand_calls = [call for call in runner.calls if "-uall" in call]
+        assert len(expand_calls) == 1
+        # Every directory still resolved to its own file, attributed by prefix.
+        for i in range(12):
+            assert f"d{i}/f.txt" in snapshot
+        assert not any(path.endswith("/") for path in snapshot)
+
+    def test_nested_pathspecs_attribute_to_the_deepest_match(self):
+        listing = "\0".join(["?? a/top.txt", "?? a/b/deep.txt"]) + "\0"
+        runner = FakeRunner([(["-uall"], _ok(listing))])
+
+        snapshot = snapshot_porcelain_paths("/root", "?? a/\n?? a/b/\n", runner)
+
+        assert "a/top.txt" in snapshot
+        assert "a/b/deep.txt" in snapshot
+
+    def test_paths_outside_every_pathspec_are_kept_not_dropped(self):
+        # Batching must not become a correctness change: anything git reports
+        # that matches none of the pathspecs still belongs in the snapshot.
+        listing = "\0".join(["?? a/f.txt", "?? elsewhere/g.txt"]) + "\0"
+        runner = FakeRunner([(["-uall"], _ok(listing))])
+
+        snapshot = snapshot_porcelain_paths("/root", "?? a/\n?? b/\n", runner)
+
+        assert "a/f.txt" in snapshot
+        assert "elsewhere/g.txt" in snapshot
+
+    def test_one_oversized_dir_does_not_degrade_its_siblings(self):
+        listing = (
+            "\0".join(["?? big/1.txt", "?? big/2.txt", "?? big/3.txt", "?? small/ok.txt"]) + "\0"
+        )
+        runner = FakeRunner([(["-uall"], _ok(listing))])
+
+        snapshot = snapshot_porcelain_paths(
+            "/root", "?? big/\n?? small/\n", runner, dir_expand_cap=2
+        )
+
+        # `big/` blew the cap → kept as the always-changed bare directory.
+        assert "big/" in snapshot
+        assert "big/1.txt" not in snapshot
+        # `small/` is unaffected.
+        assert "small/ok.txt" in snapshot

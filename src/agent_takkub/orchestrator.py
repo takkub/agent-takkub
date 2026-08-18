@@ -562,6 +562,17 @@ STUCK_RECOVER_COOLDOWN_S = 5 * 60
 # pane for the operator instead of looping. ~3 strikes ≈ 30 min of repeated
 # wedging (STUCK_THRESHOLD_S + STUCK_RECOVER_COOLDOWN_S per cycle).
 STUCK_RECOVER_MAX = 3
+# #288: how long the watchdog keeps deferring a recover for a pane that is
+# content-static but still has real (non-scaffolding) child processes running.
+# Sized for the workload that produced the bug — a QA pane driving a browser
+# through a multi-step Playwright script, which routinely runs 10-30 min with a
+# frozen screen. Past this the deferral stops: a child process that is itself
+# hung must not be able to pin a pane out of recovery indefinitely.
+STUCK_LIVE_CHILD_GRACE_S = int(os.environ.get("TAKKUB_STUCK_LIVE_CHILD_GRACE_S", 60 * 60))
+# Cooldown between "watchdog held off, work is still running" notices to Lead.
+# A silent long-running script is normal, so this reports the situation once per
+# episode rather than on every watchdog tick.
+STUCK_LIVE_CHILD_NOTICE_COOLDOWN_S = 15 * 60
 
 # TTY prompt block detection (issue #54). When a pane's subprocess is waiting
 # for interactive input (y/N, passphrase, "press any key"), close→respawn won't
@@ -2681,6 +2692,44 @@ class Orchestrator(
                     note="message_replayed",
                 )
 
+    def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
+        """Names of the processes running under *session* that represent real
+        work, with the provider's own launcher scaffolding filtered out.
+
+        #288 split this out of :meth:`_warn_if_live_children`: the same list
+        that explains what a close is about to kill is also the proof that a
+        screen-silent pane is not actually wedged, and the stuck watchdog has
+        to consult it *before* deciding to kill (see `_check_stuck_panes`).
+        Returns ``[]`` on any probe failure — every caller must treat "no
+        evidence of live work" as inconclusive, never as proof of idleness.
+        """
+        pid = getattr(session, "_pid", None)
+        if not pid:
+            return []
+        try:
+            import psutil
+
+            children = psutil.Process(pid).children(recursive=True)
+        except Exception:
+            return []
+        if not children:
+            return []
+        from .provider_config import effective_provider_for
+        from .provider_spec import normalize_process_name, scaffolding_process_names_for
+
+        provider = effective_provider_for(role_name, project=project_ns)
+        scaffolding = scaffolding_process_names_for(provider)
+        names: list[str] = []
+        for child in children:
+            try:
+                child_name = child.name()
+            except Exception:
+                continue
+            if normalize_process_name(child_name) in scaffolding:
+                continue
+            names.append(child_name)
+        return names
+
     def _warn_if_live_children(self, project_ns: str, role_name: str, session) -> None:
         """#234: best-effort check for a live subprocess tree under this
         pane's shell right before `terminate()` kills it (`taskkill /T` /
@@ -2714,31 +2763,7 @@ class Orchestrator(
         unfinished work varies with the work. Check events.log's
         `close_kills_live_children` history before adding a name here.
         """
-        pid = getattr(session, "_pid", None)
-        if not pid:
-            return
-        try:
-            import psutil
-
-            children = psutil.Process(pid).children(recursive=True)
-        except Exception:
-            return
-        if not children:
-            return
-        from .provider_config import effective_provider_for
-        from .provider_spec import normalize_process_name, scaffolding_process_names_for
-
-        provider = effective_provider_for(role_name, project=project_ns)
-        scaffolding = scaffolding_process_names_for(provider)
-        names: list[str] = []
-        for child in children:
-            try:
-                child_name = child.name()
-            except Exception:
-                continue
-            if normalize_process_name(child_name) in scaffolding:
-                continue
-            names.append(child_name)
+        names = self._live_non_scaffolding_children(project_ns, role_name, session)
         if not names:
             return
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
@@ -6581,9 +6606,87 @@ class Orchestrator(
                         if (now - _ps_sp.splash_dismiss_ts) < SPLASH_DISMISS_COOLDOWN_S:
                             continue
                         # Dismiss didn't clear the splash — fall through to close→respawn
+                    # #288: LAST gate before the kill. A static screen is not
+                    # proof of a wedge — a QA pane that writes a Playwright
+                    # script and runs `node <script>.js` prints nothing for
+                    # minutes while node + chrome-headless-shell do the work.
+                    # The 2026-08-17 field case killed exactly that pane and
+                    # logged `close_kills_live_children count=8` in the same
+                    # event as `content_static_s=600`: the process list proving
+                    # the pane was busy was collected on the way out, one step
+                    # too late to change the decision. Re-using it here is
+                    # cheap because nothing reaches this line until a pane has
+                    # already been content-static for STUCK_THRESHOLD_S.
+                    #
+                    # Respawning a live QA pane is worse than leaving it alone:
+                    # the respawn is `resumed: false`, so it restarts the task
+                    # from step 1 and re-clicks buttons it has already clicked
+                    # in whatever real system it is driving.
+                    if self._defer_stuck_recover_for_live_children(
+                        role, project_name, pane, ps_ck, now
+                    ):
+                        continue
                     self._auto_recover_stuck(role, project_name, pane, now)
                 except Exception:
                     _log_event("stuck_watchdog_pane_error", role=role, project=project_name)
+
+    def _defer_stuck_recover_for_live_children(
+        self, role: str, project: str, pane: AgentPane, ps_ck: PaneState, now: float
+    ) -> bool:
+        """True when the stuck watchdog must NOT recover *pane* because real
+        work is still running under it (#288).
+
+        The grace is bounded: a child that is itself hung would otherwise pin
+        the pane forever, so once the deferral has run past
+        ``STUCK_LIVE_CHILD_GRACE_S`` the watchdog takes the pane back and
+        recovers it, with the reason recorded. Lead is told once per pane per
+        deferral episode — the point is that a silent 10-minute pane is
+        expected for script-running work, not that every tick needs a notice.
+        """
+        try:
+            names = self._live_non_scaffolding_children(project, role, pane.session)
+        except Exception:
+            names = []
+        if not names:
+            ps_ck.live_child_defer_since = 0.0
+            return False
+        if ps_ck.live_child_defer_since == 0.0:
+            ps_ck.live_child_defer_since = now
+        deferred_for = now - ps_ck.live_child_defer_since
+        if deferred_for >= STUCK_LIVE_CHILD_GRACE_S:
+            _log_event(
+                "stuck_recover_live_children_grace_expired",
+                role=role,
+                project=project,
+                deferred_for_s=int(deferred_for),
+                children=names[:10],
+            )
+            ps_ck.live_child_defer_since = 0.0
+            return False
+        if (now - ps_ck.last_live_child_defer_log_ts) >= STUCK_LIVE_CHILD_NOTICE_COOLDOWN_S:
+            ps_ck.last_live_child_defer_log_ts = now
+            _log_event(
+                "stuck_recover_deferred_live_children",
+                role=role,
+                project=project,
+                deferred_for_s=int(deferred_for),
+                count=len(names),
+                children=names[:10],
+            )
+            self._notify_lead(
+                project,
+                f"⏳ [{role}] จอไม่ขยับเกิน {int(STUCK_THRESHOLD_S / 60)} นาที แต่ยังมี "
+                f"{len(names)} process ทำงานอยู่ใต้ pane ({', '.join(names[:5])}) — "
+                "watchdog เลื่อนการ respawn ออกไปแทนที่จะฆ่าทิ้ง งานยังเดินอยู่",
+                from_role=role,
+                note="stuck_recover_deferred",
+            )
+        # The pane is demonstrably alive, so give the content clock a fresh
+        # window instead of letting it keep accumulating — otherwise the very
+        # next tick after the children exit would recover a pane whose only
+        # crime was doing long quiet work.
+        ps_ck.last_content_change_ts = now
+        return True
 
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The

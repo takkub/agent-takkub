@@ -52,8 +52,9 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
@@ -841,6 +842,95 @@ def _codex_sessions_root() -> Path:
     return codex_sessions_root()
 
 
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _codex_day_dirs(root: Path) -> list[tuple[object, Path]]:
+    """`(date, dir)` for every `sessions/YYYY/MM/DD` leaf, newest first.
+
+    Only directory names are read — no `stat()` — so this stays cheap however
+    many rollout files have accumulated. Returns `[]` when the tree doesn't
+    have the date layout, which tells the caller to fall back to a whole-tree
+    walk rather than silently finding nothing.
+    """
+    days: list[tuple[object, Path]] = []
+    try:
+        years = [d for d in root.iterdir() if d.is_dir() and d.name.isdigit()]
+    except OSError:
+        return []
+    for year in years:
+        try:
+            months = [d for d in year.iterdir() if d.is_dir() and d.name.isdigit()]
+        except OSError:
+            continue
+        for month in months:
+            try:
+                day_dirs = [d for d in month.iterdir() if d.is_dir() and d.name.isdigit()]
+            except OSError:
+                continue
+            for day in day_dirs:
+                try:
+                    stamp = datetime(int(year.name), int(month.name), int(day.name)).date()
+                except ValueError:
+                    continue
+                days.append((stamp, day))
+    days.sort(key=lambda item: item[0], reverse=True)
+    return days
+
+
+def _codex_rollout_candidates(root: Path, *, not_before: float = 0.0) -> Iterator[Path]:
+    """Codex rollout files, newest first, yielded lazily (#293).
+
+    The previous form was `sorted(root.rglob("rollout-*.jsonl"), key=mtime)`,
+    which stat'ed every file in the store before looking at even one of them.
+    Measured on the reference box (813 entries): **2716 ms** — paid on the Qt
+    main thread every `_UUIDLESS_RESYNC_THROTTLE_S` seconds, because codex has
+    `requires_session_uuid=False` and so can never be skipped the way #229
+    lets claude's resolver be skipped. That made `Lead = codex` unusable in
+    practice while looking like a working feature.
+
+    Codex already partitions the store as `sessions/YYYY/MM/DD/`, so walking
+    day directories newest-first turns the whole-store scan into "look at
+    today, stop". Laziness matters as much as the ordering: every caller
+    returns on its first match, so a hit in today's directory never pays for
+    yesterday's.
+
+    *not_before* (a spawn timestamp) bounds the walk by DATE rather than by
+    the old mtime `break`. A day directory is a reliable stopping point; an
+    mtime comparison inside a lazily-ordered stream is not, because a file
+    touched later than its own day directory would end the scan early and
+    hide a session that is really there.
+    """
+    day_dirs = _codex_day_dirs(root)
+    if not day_dirs:
+        # Unknown/flat layout — keep the original whole-tree behaviour rather
+        # than reporting "no sessions" for a store we simply don't recognise.
+        try:
+            files = list(root.rglob("rollout-*.jsonl"))
+        except OSError:
+            return
+        yield from sorted(files, key=_safe_mtime, reverse=True)
+        return
+    cutoff = None
+    if not_before:
+        # One full day of slack: file dates come from the local clock, the
+        # spawn timestamp from ours, and a session started just before
+        # midnight must not fall off the edge of the window.
+        cutoff = datetime.fromtimestamp(max(0.0, float(not_before) - 86400.0)).date()
+    for stamp, day_dir in day_dirs:
+        if cutoff is not None and stamp < cutoff:
+            return
+        try:
+            files = list(day_dir.glob("rollout-*.jsonl"))
+        except OSError:
+            continue
+        yield from sorted(files, key=_safe_mtime, reverse=True)
+
+
 def _norm_cwd(value: object) -> str:
     from ..codex_helper import normalize_codex_cwd
 
@@ -874,21 +964,13 @@ def _resolve_codex_jsonl_path(
     root = _codex_sessions_root()
     if not root.is_dir():
         return None
-    try:
-        candidates = sorted(
-            root.rglob("rollout-*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return None
-
     # A picker/desktop resume supplies Codex's authoritative thread id. Its
     # rollout can be days old and may not receive a new write until the user
     # submits another prompt, so spawn-time filtering must not hide it from
-    # Mobile history immediately after resume.
+    # Mobile history immediately after resume — this lookup is deliberately
+    # unbounded by date, unlike the spawn-time one below.
     if wanted_uuid:
-        for path in candidates:
+        for path in _codex_rollout_candidates(root):
             meta = _codex_session_meta(path)
             meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
             if meta_id != wanted_uuid or _norm_cwd(meta.get("cwd")) != wanted_cwd:
@@ -900,11 +982,12 @@ def _resolve_codex_jsonl_path(
     # file may be created just before AgentPane stamps spawn_ts after attach,
     # so allow a small clock/order tolerance without admitting old sessions.
     earliest = max(0.0, float(not_before or 0.0) - 15.0)
-    for path in candidates:
-        try:
-            if earliest and path.stat().st_mtime < earliest:
-                break
-        except OSError:
+    for path in _codex_rollout_candidates(root, not_before=not_before):
+        # `continue`, not `break` (#293): the candidate stream is ordered by
+        # day directory then mtime, so a single file whose mtime trails its
+        # own day would otherwise cut the scan short and hide a live session.
+        # The generator's date cutoff already bounds how far this walks.
+        if earliest and _safe_mtime(path) < earliest:
             continue
         meta = _codex_session_meta(path)
         if _norm_cwd(meta.get("cwd")) != wanted_cwd:
@@ -1087,12 +1170,24 @@ def _resolve_opencode_db_path(
     return db_path
 
 
-def _read_recent_opencode_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+def _read_recent_opencode_messages(
+    path: Path, limit: int = _DEFAULT_HISTORY_LIMIT, project_ns: str = ""
+) -> list[dict]:
+    """Messages for *project_ns*'s OpenCode session inside the shared DB.
+
+    The session id has to come from the resolver's per-project record, keyed
+    by the project being read. The first version of this adapter took
+    `list(_LAST_OPENCODE_SESSION_BY_PROJECT.values())[-1]` instead — the value
+    of whichever project was inserted into the dict *first-most-recently*,
+    which is not the same thing: re-assigning an existing key leaves its
+    position alone, so with projects A then B every later read for A returned
+    B's id. `opencode_db_path()` is one shared database for all projects, so
+    the session id is the ONLY thing separating them — picking the wrong one
+    means `/api/history` for A serves B's transcript.
+    """
     from ..opencode_helper import read_opencode_session_messages
 
-    sid = None
-    if _LAST_OPENCODE_SESSION_BY_PROJECT:
-        sid = list(_LAST_OPENCODE_SESSION_BY_PROJECT.values())[-1]
+    sid = _LAST_OPENCODE_SESSION_BY_PROJECT.get(project_ns) if project_ns else None
     return read_opencode_session_messages(path, sid, limit)
 
 
@@ -1119,7 +1214,12 @@ class _HistoryScanner:
     """
 
     resolve_session: Callable[[str, str | None, float], Path | None]
-    read_messages: Callable[[Path, int], list[dict]]
+    # (path, limit, project_ns). The project is part of the contract, not an
+    # optional extra: a provider whose store is shared across projects (opencode
+    # keeps every session in ONE sqlite db) can only tell them apart by the
+    # session id recorded for that project. Adapters that resolve to a
+    # per-project file ignore it.
+    read_messages: Callable[[Path, int, str], list[dict]]
     list_sessions: Callable[[str, int], list[dict]]
     live_texts: Callable[[dict], list[str]]
     live_users: Callable[[dict], list[dict]] = lambda _rec: []
@@ -1131,7 +1231,7 @@ class _HistoryScanner:
 _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
     "claude": _HistoryScanner(
         resolve_session=lambda project, uuid, _spawn_ts: _resolve_claude_jsonl_path(project, uuid),
-        read_messages=_read_recent_claude_messages,
+        read_messages=lambda path, limit, _project: _read_recent_claude_messages(path, limit),
         list_sessions=_list_recent_claude_sessions,
         live_texts=_lead_text_blocks,
         live_users=_claude_live_users,
@@ -1140,7 +1240,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
     ),
     "gemini": _HistoryScanner(
         resolve_session=lambda project, uuid, _spawn_ts: _resolve_gemini_jsonl_path(project, uuid),
-        read_messages=_read_recent_gemini_messages,
+        read_messages=lambda path, limit, _project: _read_recent_gemini_messages(path, limit),
         list_sessions=_list_recent_gemini_sessions,
         live_texts=_gemini_live_text_blocks,
         live_users=_gemini_live_users,
@@ -1148,7 +1248,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
     ),
     "codex": _HistoryScanner(
         resolve_session=_resolve_codex_jsonl_path,
-        read_messages=_read_recent_codex_messages,
+        read_messages=lambda path, limit, _project: _read_recent_codex_messages(path, limit),
         list_sessions=_list_recent_codex_sessions,
         live_texts=_codex_live_text_blocks,
         live_users=_codex_live_users,
@@ -1189,14 +1289,18 @@ def supports_remote_history(provider: str) -> bool:
 
 
 def read_recent_lead_messages(
-    path: Path, limit: int = _DEFAULT_HISTORY_LIMIT, *, provider: str = "claude"
+    path: Path,
+    limit: int = _DEFAULT_HISTORY_LIMIT,
+    *,
+    provider: str = "claude",
+    project_ns: str = "",
 ) -> list[dict]:
     """Provider-dispatched history reader; unsupported providers return []."""
     scanner = history_scanner(provider)
     if scanner is None:
         return []
     try:
-        return scanner.read_messages(path, limit)
+        return scanner.read_messages(path, limit, project_ns)
     except (OSError, ValueError, TypeError):
         return []
 
@@ -1227,7 +1331,9 @@ def lead_history_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list[
     path = resolve_lead_jsonl(orch, project_ns, provider)
     if path is None:
         return provider, []
-    return provider, read_recent_lead_messages(path, limit, provider=provider)
+    return provider, read_recent_lead_messages(
+        path, limit, provider=provider, project_ns=project_ns
+    )
 
 
 def lead_sessions_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list[dict]]:
@@ -1257,7 +1363,7 @@ def read_resume_session_messages(
     if path is None:
         return []
     capped = max(1, min(int(limit), _DEFAULT_HISTORY_LIMIT))
-    return scanner.read_messages(path, capped)
+    return scanner.read_messages(path, capped, project_ns)
 
 
 _FALLBACK_UI_MARKERS = (

@@ -1603,3 +1603,59 @@ def test_gemini_and_codex_live_user_parsers_are_provider_native():
     }
     assert notify_mod._gemini_live_users(gemini) == [{"text": "desktop gemini", "remote": False}]
     assert notify_mod._codex_live_users(codex) == [{"text": "desktop codex", "remote": False}]
+
+
+class TestOpenCodeHistoryIsProjectScoped:
+    """OpenCode keeps every project's session in ONE shared sqlite db, so the
+    session id is the only thing separating them. The first version of the
+    adapter picked it with `list(_LAST_OPENCODE_SESSION_BY_PROJECT.values())[-1]`
+    — the newest *insertion*, not the requested project. Re-assigning an
+    existing dict key doesn't move it, so once two projects had resolved,
+    every history read for the first one served the second one's transcript.
+    """
+
+    def test_read_uses_the_requested_projects_session(self, monkeypatch):
+        seen: list[str | None] = []
+
+        def _fake_read(path, sid, limit):
+            seen.append(sid)
+            return [{"role": "lead", "text": f"from {sid}"}]
+
+        monkeypatch.setattr(
+            "agent_takkub.opencode_helper.read_opencode_session_messages", _fake_read
+        )
+        monkeypatch.setattr(
+            notify_mod,
+            "_LAST_OPENCODE_SESSION_BY_PROJECT",
+            {"project-a": "sid-a", "project-b": "sid-b"},
+        )
+
+        out = notify_mod._read_recent_opencode_messages(Path("db.sqlite"), 10, "project-a")
+
+        assert seen == ["sid-a"]
+        assert out == [{"role": "lead", "text": "from sid-a"}]
+
+    def test_unknown_project_does_not_borrow_another_ones_session(self, monkeypatch):
+        seen: list[str | None] = []
+
+        def _fake_read(path, sid, limit):
+            seen.append(sid)
+            return []
+
+        monkeypatch.setattr(
+            "agent_takkub.opencode_helper.read_opencode_session_messages", _fake_read
+        )
+        monkeypatch.setattr(notify_mod, "_LAST_OPENCODE_SESSION_BY_PROJECT", {"project-b": "sid-b"})
+
+        notify_mod._read_recent_opencode_messages(Path("db.sqlite"), 10, "project-a")
+
+        assert seen == [None]
+
+    def test_every_scanner_accepts_the_project_argument(self):
+        # The project is part of the read_messages contract now — a provider
+        # adapter that silently dropped it would reintroduce the same class of
+        # bug the moment its store stopped being one-file-per-project.
+        for provider in ("claude", "gemini", "codex", "opencode"):
+            scanner = notify_mod.history_scanner(provider)
+            assert scanner is not None
+            scanner.read_messages(Path("missing-on-purpose"), 1, "project-a")

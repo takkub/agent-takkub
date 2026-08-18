@@ -51,13 +51,34 @@ def test_health_chip_surfaces_load_limits_queues_and_reliability_metrics() -> No
     holder = _Holder()
     holder._refresh_performance_health_chip()
     assert "CPU 73%" in holder._chip_performance.text()
-    assert "RAM 41%" in holder._chip_performance.text()
+    # #292: chip prints RAM *used* (100 - available), same direction as the
+    # CPU figure beside it — 41% available means 59% used.
+    assert "RAM 59%" in holder._chip_performance.text()
     assert "H 2/4" in holder._chip_performance.text()
     assert "Q 5" in holder._chip_performance.text()
     tooltip = holder._chip_performance.toolTip()
+    # The tooltip keeps the available side, explicitly labelled.
+    assert "Available RAM: 41%" in tooltip
     assert "16.0/32.0 GiB" in tooltip
     assert "Writer depth: 4" in tooltip
     assert "Duplicate notices prevented: 5" in tooltip
+
+
+def test_health_chip_ram_climbs_as_memory_fills() -> None:
+    """Regression guard for #292: the chip number must rise when memory runs
+    out, never fall. The old chip printed `available_memory_percent`, so a box
+    down to its last 8% of RAM displayed "RAM 8%" — a reassuring-looking figure
+    at the exact moment the governor was about to declare OVERLOAD."""
+    holder = _Holder()
+    holder.orch.performance_status = lambda project=None: {
+        "cpu_percent": 12,
+        "available_memory_percent": 8,
+        "overloaded": True,
+        "resource_limits": {"max_heavy_global": 4},
+    }
+    holder._refresh_performance_health_chip()
+    assert "RAM 92%" in holder._chip_performance.text()
+    assert "SYS OVERLOAD" in holder._chip_performance.text()
 
 
 class _WaitingResumeOrch:

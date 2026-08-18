@@ -545,6 +545,15 @@ class PaneState:
     stuck_recover_attempts: int = 0
     # _stuck_recover_gave_up: True once STUCK_RECOVER_MAX hit — watchdog stops recovering this pane
     stuck_recover_gave_up: bool = False
+    # #288: wall-clock of the first tick where the stuck watchdog wanted to
+    # recover this pane but found real (non-scaffolding) child processes still
+    # running under it — a QA pane running `node playwright.js` prints nothing
+    # for minutes, so a static screen is not proof of a wedge. Cleared whenever
+    # the children go away or the pane produces content; a defer that outlasts
+    # STUCK_LIVE_CHILD_GRACE_S stops protecting the pane so a genuinely hung
+    # child can't hold the slot forever.
+    live_child_defer_since: float = 0.0
+    last_live_child_defer_log_ts: float = 0.0
     # tty_blocked_since / last_tty_block_surface_ts: TTY-prompt block tracking (issue #54).
     # tty_blocked_since is set on first detection; last_tty_block_surface_ts gates re-surface.
     tty_blocked_since: float | None = None

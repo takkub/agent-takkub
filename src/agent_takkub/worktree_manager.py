@@ -1279,13 +1279,64 @@ def _expand_dir_entry(
     directory as a single always-changed entry. An empty list is a genuine
     (if unusual) "nothing there" result and is returned as-is.
     """
-    res = runner(["-C", git_root, "status", "--porcelain", "-z", "-uall", "--", dir_path], None)
+    expanded, _extra = _expand_dir_entries(runner, git_root, [dir_path], cap)
+    return expanded.get(dir_path)
+
+
+def _expand_dir_entries(
+    runner: GitRunner, git_root: str, dir_paths: list[str], cap: int
+) -> tuple[dict[str, list[tuple[str, str]] | None], list[tuple[str, str]]]:
+    """Batch form of :func:`_expand_dir_entry` — ONE git process for all dirs.
+
+    #291: the per-directory version spawned one `git status` per collapsed
+    `?? dir/` entry, serially, on whichever thread called it — which for the
+    `done`/`assign` digest is the Qt main thread (`cli_server._dispatch` runs
+    handlers inline). Each spawn measured 29-42 ms on the reference Windows
+    box even against a clean tree, so a working copy with a dozen untracked
+    directories froze the whole cockpit for over a second on every `takkub
+    done`. Git accepts many pathspecs in one invocation, so the cost becomes
+    one process regardless of how many directories are involved.
+
+    Attribution back to each directory is by path prefix, which is exactly how
+    git reports scoped results (every returned path lives under the pathspec
+    that matched it). The per-directory *cap* is applied after attribution, so
+    an oversized directory still degrades to ``None`` on its own without
+    dragging its siblings down with it.
+
+    Returns ``(per_directory, unattributed)``. Anything git reports that sits
+    under none of the pathspecs is handed back rather than dropped — it is
+    still a real dirty path, and silently losing it would turn a batching
+    optimisation into a correctness change.
+    """
+    if not dir_paths:
+        return {}, []
+    res = runner(
+        ["-C", git_root, "status", "--porcelain", "-z", "-uall", "--", *dir_paths],
+        None,
+    )
     if not res.ok:
-        return None
+        return dict.fromkeys(dir_paths), []
     entries = _parse_porcelain_entries(res.stdout)
-    if len(entries) > cap:
-        return None
-    return entries
+    if len(dir_paths) == 1:
+        # Single pathspec: no attribution to do, and skipping it keeps this
+        # byte-identical to the pre-batching behaviour.
+        only = dir_paths[0]
+        return {only: (None if len(entries) > cap else entries)}, []
+    buckets: dict[str, list[tuple[str, str]]] = {path: [] for path in dir_paths}
+    unattributed: list[tuple[str, str]] = []
+    # Longest prefix first: with both `a/` and `a/b/` in the pathspec list, a
+    # file under `a/b/` belongs to `a/b/`, not to `a/`.
+    ordered = sorted(dir_paths, key=len, reverse=True)
+    for status, path in entries:
+        for dir_path in ordered:
+            if path.startswith(dir_path):
+                buckets[dir_path].append((status, path))
+                break
+        else:
+            unattributed.append((status, path))
+    return {
+        dir_path: (None if len(bucket) > cap else bucket) for dir_path, bucket in buckets.items()
+    }, unattributed
 
 
 def _lstat_fingerprint(root: Path, path: str) -> tuple[int | None, int | None]:
@@ -1323,9 +1374,20 @@ def snapshot_porcelain_paths(
     """
     root = Path(git_root)
     snapshot: DirtyTreeSnapshot = {}
-    for status, path in _parse_porcelain_entries(porcelain):
+    entries = _parse_porcelain_entries(porcelain)
+    # #291: resolve every collapsed directory in a single git call up front
+    # instead of shelling out once per directory inside the loop below.
+    expansions: dict[str, list[tuple[str, str]] | None] = {}
+    if runner is not None:
+        collapsed = [path for _status, path in entries if path.endswith("/")]
+        if collapsed:
+            expansions, extra = _expand_dir_entries(runner, git_root, collapsed, dir_expand_cap)
+            for extra_status, extra_path in extra:
+                mtime_ns, size = _lstat_fingerprint(root, extra_path)
+                snapshot[extra_path] = (extra_status, mtime_ns, size)
+    for status, path in entries:
         if path.endswith("/") and runner is not None:
-            expanded = _expand_dir_entry(runner, git_root, path, dir_expand_cap)
+            expanded = expansions.get(path)
             if expanded is not None:
                 for sub_status, sub_path in expanded:
                     mtime_ns, size = _lstat_fingerprint(root, sub_path)

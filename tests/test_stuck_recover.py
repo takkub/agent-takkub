@@ -19,6 +19,7 @@ import pytest
 
 from agent_takkub.orchestrator import (
     LEAD,
+    STUCK_LIVE_CHILD_GRACE_S,
     STUCK_RECOVER_COOLDOWN_S,
     STUCK_RECOVER_MAX,
     STUCK_THRESHOLD_S,
@@ -138,6 +139,19 @@ class _FakeOrch:
 
     def _notify_lead(self, project, notice, from_role=None, note="") -> None:
         self.notify_calls.append((project, notice, from_role))
+
+    def _live_non_scaffolding_children(self, project_ns, role_name, session) -> list[str]:
+        # #288: injected by tests — the real probe walks a live OS process tree,
+        # which a stubbed session doesn't have. Default [] = "no live work",
+        # which is the pre-#288 behaviour every existing test was written against.
+        return list(getattr(self, "live_children", []))
+
+    def _defer_stuck_recover_for_live_children(self, role, project, pane, ps_ck, now) -> bool:
+        # Delegate to the real gate so its grace window and notice cooldown run
+        # for real, the same way _check_shell_open_dialog is driven here.
+        return Orchestrator._defer_stuck_recover_for_live_children(  # type: ignore[arg-type]
+            self, role, project, pane, ps_ck, now
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -969,3 +983,70 @@ class TestShellOpenDialogScanThrottle:
         ps = fake._pane_state["p::backend"]
         assert ps.dialog_scan_in_flight is False
         assert ps.last_dialog_scan_ts == now
+
+
+class TestLiveChildrenDefer:
+    """#288: a content-static pane with real work still running under it must
+    not be killed. Field case (2026-08-17): a QA pane wrote a Playwright script
+    and ran `node <script>.js`, which prints nothing for minutes — the watchdog
+    read the frozen screen as a wedge and respawned it `resumed: false`, so the
+    pane restarted the task from step 1 and re-clicked buttons it had already
+    clicked in a real system. The same event that recorded the kill also
+    recorded `close_kills_live_children count=8`: the proof was collected on
+    the way out, one step too late to change the decision."""
+
+    def _stuck_pane_orch(self, children: list[str]) -> tuple[_FakeOrch, float]:
+        fake = _FakeOrch()
+        fake.live_children = children
+        now = 1_000_000.0
+        fake._panes_by_project["agent-takkub"] = {
+            "qa": _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1, cwd="C:/foo")
+        }
+        return fake, now
+
+    def test_live_children_block_the_recover(self) -> None:
+        fake, now = self._stuck_pane_orch(["node.exe", "chrome-headless-shell.exe"])
+        _check(fake, now)
+        assert fake.close_calls == []
+        assert fake.spawn_calls == []
+
+    def test_lead_is_told_the_watchdog_held_off(self) -> None:
+        fake, now = self._stuck_pane_orch(["node.exe"])
+        _check(fake, now)
+        assert len(fake.notify_calls) == 1
+        _project, notice, _from_role = fake.notify_calls[0]
+        assert "node.exe" in notice
+
+    def test_notice_is_not_repeated_every_tick(self) -> None:
+        fake, now = self._stuck_pane_orch(["node.exe"])
+        for offset in range(0, 60, 5):
+            _check(fake, now + offset)
+        assert len(fake.notify_calls) == 1
+        assert fake.close_calls == []
+
+    def test_children_exiting_lets_the_pane_be_recovered_again(self) -> None:
+        fake, now = self._stuck_pane_orch(["node.exe"])
+        _check(fake, now)
+        assert fake.close_calls == []
+        # Script finished; the screen is still static, and now nothing is left
+        # running — this is the genuine wedge the watchdog exists for.
+        fake.live_children = []
+        _check(fake, now + STUCK_THRESHOLD_S + 1)
+        assert fake.close_calls == [("qa", "agent-takkub")]
+
+    def test_grace_expires_so_a_hung_child_cannot_pin_the_pane_forever(self) -> None:
+        fake, now = self._stuck_pane_orch(["node.exe"])
+        _check(fake, now)
+        assert fake.close_calls == []
+        # The child is still there much later — it is hung too. Protecting the
+        # pane indefinitely would strand the slot, so the grace window ends.
+        _check(fake, now + STUCK_LIVE_CHILD_GRACE_S + 1)
+        assert fake.close_calls == [("qa", "agent-takkub")]
+
+    def test_scaffolding_only_children_do_not_defer(self) -> None:
+        # _live_non_scaffolding_children already subtracts the provider's own
+        # launcher processes (#272/#286), so an empty list here is exactly the
+        # "nothing but scaffolding is running" case — still a real wedge.
+        fake, now = self._stuck_pane_orch([])
+        _check(fake, now)
+        assert fake.close_calls == [("qa", "agent-takkub")]

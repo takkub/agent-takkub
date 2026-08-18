@@ -318,3 +318,164 @@ RUNTIME_DIR = C:\Users\monch\WebstormProjects\agent-takkub\runtime   (config.py:
 7. **D.2:** ต้องตัดสินใจว่า Brain project-key encode จาก cwd ไหน (project root ที่เสถียร ไม่ใช่ per-worktree cwd) ก่อนเขียน `paths.py`
 8. **D.4:** task-key ต้องมี prefix กัน bare-reserved-name เหมือน pattern ที่มีอยู่แล้วทั้งระบบ
 9. **D.6:** Phase 2 CLI ควรผ่าน socket เข้า orchestrator (คง single-writer invariant) ไม่ควร direct-write แบบ disk_usage/worktree_manager — ต่างจาก precedent ที่มีอยู่ตรงๆ ต้องตัดสินใจชัดเจนไม่ใช่เดินตาม precedent โดยอัตโนมัติ
+
+---
+
+# ภาคผนวก — re-verification ที่ HEAD ปัจจุบัน (2026-08-18)
+
+> audit ข้างบนถูกเขียนที่ baseline `0aee262` / **1.0.68** ตั้งแต่นั้น main ขยับไป 4 patch release
+> ภาคผนวกนี้รันการตรวจซ้ำทุก `file:line` ที่เอกสารข้างบนอ้าง เทียบกับ HEAD ปัจจุบัน แล้วบันทึกว่าอันไหนยังตรง อันไหน drift
+>
+> **HEAD ที่ตรวจ:** `ea6feb7a5d56f21b0894f4f0bea14ae5a5afa2c9` · `pyproject.toml:3` → **1.0.72**
+
+## AP.1 ผลตรวจ `file:line` ทุกจุดที่เอกสารข้างบนอ้าง
+
+ตรวจด้วยการอ่านบรรทัดนั้นจริงแล้วแมตช์กับ symbol ที่เอกสารบอกว่าอยู่ตรงนั้น (ไม่ใช่แค่เช็คว่าไฟล์ยังอยู่)
+
+| citation เดิม | สถานะที่ HEAD 1.0.72 |
+|---|---|
+| `digest_facts.py:29` `class DigestFacts` | ✅ ยังตรง |
+| `orchestrator.subagent_done():1397` | ❌ **drift → `orchestrator.py:1436`** |
+| `config.py:318` `RUNTIME_DIR` | ✅ ยังตรง |
+| `task_ledger.py:62` `_ledger_dir` | ✅ ยังตรง |
+| `task_ledger.py:207` `f"{hhmmss}-{role}-ledger.md"` | ✅ ยังตรง |
+| `role_memory.py:30` `ROLE_MEMORY_DIR` | ✅ ยังตรง |
+| `orchestrator_text.py:509` `_task_handoff_dir` | ❌ **drift → `orchestrator_text.py:500`** |
+| `orchestrator_text.py:251` `_log_event` | ✅ ยังตรง |
+| `orchestrator_text.py:557` `f"{HHMMSS}-{role_name}.md"` | ✅ ยังตรง |
+| `token_meter.py:92` `_NON_ALNUM_RE` · `:95` `encode_path_for_claude` | ✅ ยังตรงทั้งคู่ |
+| `config.py:17` `_SAFE_NAME` · `:50` `validate_name` | ✅ ยังตรงทั้งคู่ |
+| `lead_context.py:283` · `pipeline_executor.py:69` `_log_event` proxies | ✅ ยังตรงทั้งคู่ |
+| `pyproject.toml:141` `cli-ipc-boundary` | ✅ ยังตรง |
+
+**สรุป:** 2 จาก 15 จุด drift ที่เหลือยังใช้อ้างอิงได้ ข้อสรุปเชิงสถาปัตยกรรมของ audit ข้างบน **ไม่มีข้อไหนล้ม**จากการขยับ 4 release นี้
+
+### ตำแหน่งที่อัปเดตแล้วของ hook หลัก (ใช้ชุดนี้แทนช่วงบรรทัดในเอกสารข้างบน)
+
+| hook | HEAD 1.0.72 |
+|---|---|
+| `assign()` public entry | `orchestrator.py:1511` |
+| แตกไป subagent | `orchestrator.py:1537` |
+| `_register_subagent()` | `orchestrator.py:1300` |
+| `_assign_dispatch()` (boundary ร่วมของ pane + worktree) | `orchestrator.py:1744` |
+| เข้า dispatch จาก normal path · worktree path | `orchestrator.py:1679` · `:2098` |
+| `done()` | `orchestrator.py:3634` |
+| `subagent_done()` | `orchestrator.py:1436` |
+| `_compute_digest_facts()` | `orchestrator.py:3442` |
+| ledger write ตอน assign (pane · subagent) | `orchestrator.py:1926` · `:1399` |
+| ledger flip ตอน done (pane · subagent · close) | `orchestrator.py:3757` · `:1454` · `:2866` |
+| role memory inject ตอน spawn | `spawn_engine.py:2079` · `:2106` |
+| role memory write ตอน done ที่ fail | `orchestrator.py:3824` |
+| vault / knowledge base write | `orchestrator.py:4284` · `:4299` · `:4389` |
+
+### ลำดับการแปลง task ที่ยืนยันซ้ำ (ทั้งหมดใน `_assign_dispatch`)
+
+| # | สิ่งที่เกิด | HEAD 1.0.72 |
+|---|---|---|
+| 1 | เก็บ `raw_task_for_ledger` (ledger บันทึกของดิบ ก่อนกลไก delivery) | `orchestrator.py:1772` |
+| 2 | `_apply_session_goal` | `orchestrator.py:1773` |
+| 3 | `_rewrite_task_for_codex` (provider-specific) | `orchestrator.py:1818` |
+| 4 | `_append_verify_fail_hint` | `orchestrator.py:1819` |
+| 5 | wrap planner / shard | `orchestrator.py:1825` · `:1831` |
+| 6 | `_task_handoff_pointer` (task ย้ายลงไฟล์ เหลือ pointer) | `orchestrator.py:1841` |
+
+**จุดแทรก Brain block ที่ถูกต้อง = ระหว่าง 2 กับ 3** — หลัง session goal (Brain จะได้เห็น goal) แต่ก่อน provider rewrite (ข้อ 3 ผูกกับ codex; Brain ต้อง provider-neutral ตาม #103) หลังข้อ 6 แทรกไม่ได้เพราะ task ไม่ได้อยู่ใน prompt แล้ว
+
+## AP.2 สิ่งที่ต้องแก้ในข้อสรุปเดิม — 2 ข้อ
+
+### AP.2.1 A.1 เดิมสรุปว่า `_assign_dispatch` คือ common boundary — **ไม่ครอบ subagent**
+
+ตรวจซ้ำที่ HEAD นี้: `assign()` แตกไป `_register_subagent()` ที่ `orchestrator.py:1537` **ก่อน**ถึง `_assign_dispatch()` (`:1744`) และไม่มี call จาก `_register_subagent` กลับเข้า dispatch
+
+`_assign_dispatch` ถูกเรียกจาก 2 ที่เท่านั้น — `orchestrator.py:1679` (normal) และ `:2098` (worktree) ทั้งคู่เป็น pane path
+
+**สิ่งเดียวที่ทั้ง pane และ subagent เดินผ่านร่วมกันจริงคือ ledger API:** `create_assignment()` (เรียกที่ `:1926` และ `:1399`) กับ `mark_done()` (`:3757` และ `:1454`)
+
+ผลต่อ Phase 1 — hook เดียวที่ครอบทั้งสองทางมี 2 ทางเลือก:
+1. hook ที่ `task_ledger.create_assignment` / `mark_done` — จุดร่วมที่มีอยู่แล้ว แต่ทำให้ leaf store กลายเป็นจุดเชื่อม ต้องเช็ค `leaf-modules-pure` ก่อน
+2. สร้าง boundary ใหม่ใน `assign()` **ก่อน**บรรทัด `:1537` — สะอาดกว่าและตรงเจตนา Rule 1 มากกว่า
+
+### AP.2.2 D.4 เดิมสรุปว่า Brain "ปลอดภัยจาก reserved name โดยบังเอิญ" — จริงเฉพาะถ้าเลือก `encode_path_for_claude` เท่านั้น
+
+ข้อสรุปเดิมถูกในเงื่อนไขของมัน แต่ยังไม่ได้ตรวจ `_safe()` ของ `role_memory` ซึ่งเป็นตัวเลือกที่ D.2 เปิดประเด็นว่าอาจเหมาะกว่า (เพราะ key ด้วย `project_ns` เหมือนระบบอื่นทั้งหมด)
+
+รัน `role_memory._safe()` (`role_memory.py:105`) จริงกับ input ชุดทดสอบ:
+
+| input | output | ประเมิน |
+|---|---|---|
+| `agent-takkub` | `agent-takkub` | ok |
+| `my_app.web` | `my_app.web` | ok |
+| `a:b<c>d\|e?f*g` | `a_b_c_d_e_f_g` | ok — reserved **chars** ครอบคลุม |
+| `../escape` · `..` | `__escape` · `_` | ok — traversal กันได้ |
+| `CON` · `NUL` | `CON` · `NUL` | ❌ reserved **name** ไม่ถูกกัน |
+| `โปรเจกต์ไทย` | `___________` | ❌ **ชื่อไทยทั้งชื่อกลายเป็น underscore ล้วน** |
+| `"a"*300` | ยาว 300 ไม่ถูกตัด | ❌ ไม่มี length cap |
+
+**บรรทัดที่ต้องเน้น:** `_safe()` แปลงอักขระที่ไม่ใช่ `[A-Za-z0-9._-]` เป็น `_` ทีละตัว ดังนั้นชื่อโปรเจกต์ภาษาไทย**ทุกชื่อ**จะกลายเป็น underscore ล้วน และ**สองโปรเจกต์ไทยที่ยาวเท่ากันจะได้ path เดียวกัน**
+
+นี่ไม่ใช่ความเสี่ยงของ Brain ในอนาคต — เป็นบั๊กที่มีผลกับ `role-memory` **วันนี้** (`role_memory.py:119` `role_memory_path`) และควรแยกเป็น issue ต่างหาก ไม่ใช่รวมเข้า Phase 1
+
+ผลต่อการตัดสินใจ D.2: ถ้า Phase 1 เลือก key ด้วย `project_ns` (แทน `encode_path_for_claude`) **ห้ามใช้ `_safe()` ตามที่เป็นอยู่** ต้องแก้ให้กัน reserved name + มี length cap + ไม่ collapse non-ASCII ทั้งชื่อก่อน
+
+## AP.3 ข้อมูลวัดเพิ่มที่ audit เดิมไม่มี
+
+### AP.3.1 corpus-level token ratio (เดิมวัดจาก role-memory ไฟล์เดียว)
+
+audit เดิมใช้ `runtime/role-memory/agent-takkub/backend.md` ไฟล์เดียว ได้ 3.573 chars/token วัดซ้ำแบบ corpus ทั้ง store:
+
+| corpus | chars | tokens | chars/token |
+|---|---:|---:|---:|
+| **role-memory ทั้ง store — 75 ไฟล์** | 433,309 | 148,791 | **2.91** |
+| `docs/lead/role-and-workflow.md` | 14,333 | 7,048 | 2.03 |
+| root `CLAUDE.md` | 2,108 | 966 | 2.18 |
+| control: อังกฤษล้วน | 3,599 | 800 | 4.50 |
+| control: ไทยล้วน | 4,239 | 3,839 | 1.10 |
+
+ไฟล์เดียวที่ audit เดิมเลือก (3.573) **ดีกว่าค่าเฉลี่ยจริงของ store ราว 23%** — ตัวเลขที่ควรใช้ตั้ง budget คือ **2.91** ไม่ใช่ 3.573
+
+ที่ budget 4,000 chars: EN-pure 889 tok · **corpus จริง 1,375 tok** · TH-pure 3,636 tok — ช่วงกว้าง **4.1 เท่า** ยืนยันข้อสรุปเดิมว่าหน่วย chars ใช้ไม่ได้ และตอกย้ำว่าเพดานต้องเป็น token
+
+เทียบกับกำไร #267 (5,780 tok/spawn): 4,000 chars แบบไทยล้วน = คืนกลับ **63%** ของที่ประหยัดมา
+
+**ข้อเสนอตัวเลข:** เพดาน **1,200 tokens** ต่อ Brain block (≈ 21% ของกำไร #267 · ≈ 3,500 chars แบบ role-memory จริง · ≈ 1,300 chars ถ้าไทยล้วน) และ **measurement gate ต้องอยู่ที่ Phase 4** (จุดแรกที่ block เข้า prompt จริง) ไม่ใช่ Phase 8
+
+### AP.3.2 MAX_PATH — วัดจริงบนเครื่องอ้างอิง
+
+```
+RUNTIME_DIR (dev)              = C:\Users\monch\WebstormProjects\agent-takkub\runtime   (52 chars)
+ตัวอย่าง path Brain แบบเต็ม     = <RUNTIME_DIR>\brain\<project>\continuations\<task-key>.json
+                                 ยาว 188 chars -> headroom ถึง 260 เหลือ 72 chars
+LongPathsEnabled (HKLM\SYSTEM\CurrentControlSet\Control\FileSystem) = 1
+```
+
+- เครื่องนี้เปิด long path แล้ว แต่**ห้ามพึ่ง** — เป็นค่า per-machine และยังต้องมี manifest ฝั่ง Python ด้วย
+- headroom 72 chars หมดทันทีถ้า task-key เป็น encoded cwd (`C--Users-monch-WebstormProjects-agent-takkub` ยาว 46 เอง) → **task-key ต้องเป็น hash สั้น** ตรงกับข้อเสนอ D.5 เดิม ตอนนี้มีตัวเลขรองรับแล้ว
+- prod install path สั้นกว่า (`C:\Users\<u>\.agent-takkub\runtime` = 40 chars) → **dev คือเคสที่แคบกว่า ใช้ dev เป็นเกณฑ์**
+
+### AP.3.3 ที่เก็บที่ใช้ชื่อ project เป็น path segment — ครบ 3 ที่ ไม่ตรงกันสักคู่
+
+D.2 เดิมระบุไว้ 3 ที่แล้ว ภาคผนวกนี้เพิ่มมิติที่ยังไม่มี: **ระดับการ sanitize ที่ต่างกัน**
+
+| ที่ | file:line | สร้าง path | sanitize |
+|---|---|---|---|
+| `task_ledger` | `task_ledger.py:62` | `RUNTIME_DIR / "tasks" / project` | **ไม่มีเลย** |
+| `role_memory` | `role_memory.py:119` | `ROLE_MEMORY_DIR / _safe(project) / ...` | `_safe()` (มีช่องโหว่ตาม AP.2.2) |
+| `lead_context` | `lead_context.py:759` | `RUNTIME_DIR / f"lead-guard-{project}.json"` | **ไม่มีเลย** — อยู่ใน filename |
+
+ยืนยันบนดิสก์: ทั้ง `runtime/tasks/` และ `runtime/role-memory/` มีโฟลเดอร์ชื่อโปรเจกต์จริงอยู่แล้ว
+
+**ผลต่อ Phase 1:** Brain เป็นรายที่ 4 ไม่ใช่รายแรก งานที่แท้จริงคือ**ทำให้ทั้ง 4 ใช้ตัวเดียวกัน** ไม่ใช่คิดวิธีที่ 4 ขึ้นมาเพิ่ม
+
+## AP.4 เครื่องมือที่ใช้วัด
+
+`tiktoken` (cl100k_base) ถูกติดตั้งใน `.venv` เพื่อการวัดรอบนี้ **ไม่ได้**เพิ่มเข้า `pyproject.toml` — ตรงกับข้อสังเกตในหัวข้อ C ของ audit เดิม ถ้า Phase 4 gate ต้องใช้ประจำ ต้องเพิ่มเป็น dev-dependency พร้อมเหตุผลกำกับ
+
+## AP.5 สรุปสิ่งที่ Phase 1 ต้องรู้ (รวมของเดิม + ที่เพิ่มรอบนี้)
+
+1. **ไม่มี common assign boundary** — subagent แตกทางที่ `orchestrator.py:1537` ก่อนถึง `_assign_dispatch` ต้องสร้างใหม่ หรือ hook ที่ ledger API (AP.2.1)
+2. **ไม่มี task_id** — ledger identity คือ `(project, role, open row)` (`task_ledger.py:290` `_resolve_open_row`) ไม่ใช่ key ที่อ้างอิงได้จากภายนอก
+3. **budget ต้องเป็น token ไม่ใช่ chars** — corpus จริง 2.91 · ไทยล้วน 1.10 · ช่วงกว้าง 4.1 เท่า เสนอเพดาน 1,200 tok gate ที่ Phase 4 (AP.3.1)
+4. **path identity มีอยู่แล้ว 3 แบบที่ไม่ตรงกัน** — งานคือรวมให้เหลือหนึ่ง (AP.3.3)
+5. **`_safe()` มีบั๊กที่กระทบวันนี้** — ชื่อโปรเจกต์ภาษาไทยชนกันใน `role-memory` อยู่แล้ว ควรแยก issue (AP.2.2)
+6. **role memory inject ที่ spawn (`spawn_engine.py:2079`) ไม่ใช่ที่ assign** — ถ้า Brain inject ที่ assign จะคนละจังหวะกัน pane ที่ถูก assign ซ้ำโดยไม่ respawn จะได้ Brain block ใหม่แต่ role memory เดิม
+7. **จุดแทรก Brain block = ระหว่าง `_apply_session_goal` กับ `_rewrite_task_for_codex`** (`orchestrator.py:1773` → `:1818`)
