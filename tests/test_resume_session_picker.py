@@ -734,7 +734,7 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "opencode",
+            lambda role, project=None: "kimi",
         )
         fake_orch = MagicMock()
         with pytest.raises(api.RemoteApiError) as exc:
@@ -743,6 +743,39 @@ class TestApiResumeLead:
         assert "resume unavailable" in exc.value.msg
         fake_orch.close.assert_not_called()
         fake_orch.spawn.assert_not_called()
+
+    def test_opencode_lead_uses_provider_aware_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "opencode",
+        )
+        seen: dict = {}
+
+        def _matches(project, provider, uuid, cwd):
+            seen.update(project=project, provider=provider, uuid=uuid, cwd=cwd)
+            return True
+
+        monkeypatch.setattr("agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd", _matches)
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (True, "ok")
+
+        assert api.resume_lead(fake_orch, "proj", "uuid-opencode") == {
+            "ok": True,
+            "project": "proj",
+            "provider": "opencode",
+            "messages": [],
+        }
+        assert seen == {
+            "project": "proj",
+            "provider": "opencode",
+            "uuid": "uuid-opencode",
+            "cwd": "/proj/web",
+        }
 
     def test_codex_lead_uses_provider_aware_validation(
         self, monkeypatch: pytest.MonkeyPatch

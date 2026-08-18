@@ -1066,6 +1066,48 @@ def _codex_live_users(rec: dict) -> list[dict]:
     return _live_user_payload(parsed[1]) if parsed is not None and parsed[0] == "me" else []
 
 
+# ── OpenCode SQLite transcript adapter ────────────────────────────────────
+_LAST_OPENCODE_SESSION_BY_PROJECT: dict[str, str] = {}
+
+
+def _resolve_opencode_db_path(
+    project_ns: str, session_uuid: str | None, not_before: float = 0.0
+) -> Path | None:
+    from .. import config as _config
+    from ..opencode_helper import resolve_opencode_session
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return None
+    res = resolve_opencode_session(cwd, session_uuid, not_before=not_before)
+    if res is None:
+        return None
+    db_path, sid = res
+    _LAST_OPENCODE_SESSION_BY_PROJECT[project_ns] = sid
+    return db_path
+
+
+def _read_recent_opencode_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+    from ..opencode_helper import read_opencode_session_messages
+
+    sid = None
+    if _LAST_OPENCODE_SESSION_BY_PROJECT:
+        sid = list(_LAST_OPENCODE_SESSION_BY_PROJECT.values())[-1]
+    return read_opencode_session_messages(path, sid, limit)
+
+
+def _list_recent_opencode_sessions(
+    project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
+) -> list[dict]:
+    from .. import config as _config
+    from ..opencode_helper import list_recent_opencode_sessions
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return []
+    return list_recent_opencode_sessions(cwd, limit)
+
+
 @dataclass(frozen=True)
 class _HistoryScanner:
     """Provider adapter for remote history/session reads.
@@ -1110,6 +1152,14 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         list_sessions=_list_recent_codex_sessions,
         live_texts=_codex_live_text_blocks,
         live_users=_codex_live_users,
+        requires_session_uuid=False,
+    ),
+    "opencode": _HistoryScanner(
+        resolve_session=_resolve_opencode_db_path,
+        read_messages=_read_recent_opencode_messages,
+        list_sessions=_list_recent_opencode_sessions,
+        live_texts=lambda _rec: [],
+        live_users=lambda _rec: [],
         requires_session_uuid=False,
     ),
 }
@@ -1356,7 +1406,12 @@ class LeadNotifier(QObject):
         # (respawn/resume), or whose provider changed — a stale tail must
         # never keep feeding events from another provider's store.
         for project_ns, tail in list(self._tails.items()):
-            if wanted.get(project_ns) != (tail.provider, tail.session_uuid, tail.spawn_ts):
+            w = wanted.get(project_ns)
+            if w is None:
+                del self._tails[project_ns]
+            elif w[0] != tail.provider or w[2] != tail.spawn_ts:
+                del self._tails[project_ns]
+            elif w[1] and w[1] != tail.session_uuid:
                 del self._tails[project_ns]
 
         # start tailing newly-discovered sessions — a project already
@@ -1405,19 +1460,39 @@ class LeadNotifier(QObject):
             if path is None:
                 continue
             if existing is not None and path == existing.path:
-                continue
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
-            offset = _tail_start_offset(path, size)
-            self._tails[project_ns] = _Tail(
-                path=path,
-                session_uuid=session_uuid,
-                provider=provider,
-                spawn_ts=spawn_ts,
-                offset=offset,
-            )
+                if provider == "opencode":
+                    sid = _LAST_OPENCODE_SESSION_BY_PROJECT.get(project_ns, session_uuid)
+                    if sid and sid != existing.session_uuid:
+                        pass  # session rotated -> recreate tail
+                    else:
+                        continue
+                else:
+                    continue
+            if provider == "opencode":
+                from ..opencode_helper import get_opencode_latest_part_time
+
+                sid = _LAST_OPENCODE_SESSION_BY_PROJECT.get(project_ns, session_uuid)
+                offset = get_opencode_latest_part_time(path, sid)
+                self._tails[project_ns] = _Tail(
+                    path=path,
+                    session_uuid=sid,
+                    provider=provider,
+                    spawn_ts=spawn_ts,
+                    offset=offset,
+                )
+            else:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = 0
+                offset = _tail_start_offset(path, size)
+                self._tails[project_ns] = _Tail(
+                    path=path,
+                    session_uuid=session_uuid,
+                    provider=provider,
+                    spawn_ts=spawn_ts,
+                    offset=offset,
+                )
             if project_ns in self._pending_session_changes or existing is not None:
                 self._broadcaster.push("session_changed", {"provider": provider}, project_ns)
                 self._pending_session_changes.discard(project_ns)
@@ -1473,6 +1548,42 @@ class LeadNotifier(QObject):
         self._emit_lead_working_transitions()
 
     def _poll_one(self, project_ns: str, tail: _Tail) -> None:
+        if tail.provider == "opencode":
+            from ..opencode_helper import poll_opencode_delta
+
+            new_offset, events = poll_opencode_delta(
+                tail.path, tail.session_uuid, since_time_ms=tail.offset
+            )
+            if new_offset > tail.offset:
+                tail.offset = new_offset
+            activity: str | None = None
+            ask_payload: dict | None = None
+            pushed_text = False
+            for ev_type, payload in events:
+                if ev_type == "user":
+                    self._broadcaster.push("user", payload, project_ns)
+                elif ev_type == "lead":
+                    joined = str(payload)[:_MAX_EVENT_CHARS]
+                    self._broadcaster.push("lead", joined, project_ns)
+                    pushed_text = True
+                    self._structured_text_seen.add(project_ns)
+                    ask_payload = None
+                elif ev_type == "working":
+                    activity = str(payload)
+                elif ev_type == "blocked_on_picker" and isinstance(payload, dict):
+                    ask_payload = payload
+            if ask_payload is not None and not pushed_text:
+                self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
+            elif activity is not None and not pushed_text:
+                if not self._lead_working.get(project_ns, False):
+                    self._structured_text_seen.discard(project_ns)
+                    panes = getattr(self._orch, "_panes_by_project", {}).get(project_ns, {})
+                    pane = panes.get("lead") if isinstance(panes, dict) else None
+                    self._screen_baselines[project_ns] = _pane_screen_lines(pane)
+                self._lead_working[project_ns] = True
+                self._broadcaster.push("working", activity, project_ns)
+            return
+
         try:
             size = tail.path.stat().st_size
         except OSError:

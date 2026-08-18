@@ -416,6 +416,7 @@ class TestQuickTunnelMode:
 
         monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
         monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr("shutil.which", lambda name: None)
         return captured
 
     def test_needs_no_credentials_or_public_url(self, monkeypatch):
