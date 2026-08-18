@@ -4,6 +4,36 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added (เพิ่ม)
+
+**`takkub ma` — maintenance sweep คำสั่งเดียวเดิน checklist ให้ครบ**
+- เปิด cockpit dev แล้วพิมพ์ `takkub ma` จะไล่เช็คทีละข้อ: (1) issue ที่เปิดค้าง + ค้างมากี่วัน (2) PR ที่เปิดค้าง + สถานะ CI ต่อใบ (แดง/กำลังรัน/เขียว) + conflict (3) `events.log` ของ cockpit ที่รันอยู่ — แยก 🔴 หนัก / 🟡 เตือน พร้อมเรียก stall ที่นานเกิน 2 วิ ออกมาเป็นรายตัว (4) สภาพ repo: branch, ไฟล์ที่ยังไม่ commit, ahead/behind origin, CI ล่าสุดของ branch นี้
+- ปิดท้ายด้วย **แผนทำต่อที่สร้างจากสิ่งที่เจอจริง** เท่านั้น — ไม่มีหัวข้อไหนเจอปัญหา ก็ไม่มีข้อนั้นในแผน และเลขข้อไม่กระโดด
+- ธง: `--since-hours N` (default 24) · `--no-net` ดูเฉพาะ log ในเครื่องไม่แตะ `gh` · `--json`
+- **อ่านอย่างเดียวโดยตั้งใจ** ขั้นที่ 4-5 ของ checklist (แก้ตามที่เจอ / push รอ CI แล้ว publish) เป็นงานตัดสินใจของ Lead ไม่ใช่ของสคริปต์ — คำสั่งนี้จึงส่งแผนให้ ไม่ใช่ลงมือแทน
+- `maintenance.py` เป็น leaf module (พึ่งแค่ `config` + subprocess) เพื่อไม่ให้ `cli.py` ลาก orchestrator engine เข้า process ของ CLI ตาม contract `cli-ipc-boundary`
+- รายชื่อ event ที่ถือว่าผิดปกติ อ้างจาก `events.log` จริงที่ cockpit เขียน ไม่ได้เดาจากฝั่งผู้ส่ง
+
+**`takkub done --blocked` — รายงานว่า "ติด blocker" แยกจาก "เจอบั๊ก" (#296)**
+- BLOCKED = งาน**รันไม่ได้**เพราะขาดของนอกระบบ (credential, บัญชีทดสอบ, สิทธิ์, ข้อมูล, บริการภายนอก) · FAILED = งานรันแล้ว**มีของพัง** — มีแค่อย่างหลังที่มี role ให้ route กลับ
+- ยังนับเป็น "ไม่เสร็จ" ใน ledger เหมือนเดิม (ส่ง `failed=True` ไปด้วย) ต่างกันที่ **ใครถูกถามต่อ**
+
+### Fixed (แก้)
+
+**QA ที่ติด blocker ถูกตีเป็น FAIL แล้วเสนอ route กลับ backend (#296)**
+- เคสจริง 2026-08-18: qa#1 และ qa#2 รายงานว่าสร้าง tenant ทดสอบไม่ได้เพราะไม่มีรหัสผ่าน super admin — ไม่มีโค้ดผิดสักบรรทัด แต่ signature matcher อ่านคำกลุ่ม credential เป็น "server/API signature" แล้วเสนอส่ง backend ไปแก้ระบบ auth ที่ไม่ได้พัง
+- ความเสี่ยงจริงไม่ใช่แค่เสีย pane: backend อาจไป "แก้" ทางเข้าระบบ auth ของจริงเพื่อให้ qa ผ่าน
+- `routing_planner.classify_blocked()` ตัดสินก่อน `classify_failure` โดยใช้ตัวแยกว่า **สิ่งที่ขาด ไม่ใช่สิ่งที่พัง** — ทุก pattern ต้องมีคำบอกการขาด (ไม่มี/ขาด/ต้องขอ/รอ/missing/no/waiting for) อยู่ติดกับสิ่งนั้น `401 unauthorized ทั้งที่ควรเข้าได้` จึงยัง route ไป backend ตามเดิม ส่วน `ไม่มีรหัสผ่าน super admin` ไม่ route ไปไหน
+- เมื่อเป็น blocked, Lead ได้ handoff คนละแบบ: บอกว่าติด blocker ไม่ใช่บั๊ก · **ไม่เสนอ role ใดๆ** · สั่งให้สรุปสิ่งที่ขาดให้เจ้าของ · และห้าม propose ให้ใครไปแก้ระบบเพื่อให้ผ่าน (รีเซ็ต/เดารหัสผ่าน ปลดการยืนยันตัวตน)
+
+**`delivery-superseded` ยกเลิกใบงานแรกที่ยังไม่ถึงมือได้ (#295)**
+- เคสจริง: `assign --isolation worktree` 11:35:25 → `send` แก้ path 11:35:39 → cockpit ยกเลิก pending delivery แล้วรายงานด้วยข้อความเดียวกับกรณี "ยกเลิก re-paste ของงานเก่า" ซึ่งปลอดภัย — Lead แยกไม่ออกว่าเพื่อนร่วมทีมยังมีงานอยู่ไหม ต้องเสีย 2 รอบถามยืนยัน และถ้าเป็นโหมด unattended กลางคืน pane นั้นจะเงียบไปทั้งคืน
+- เหตุผลของ #255 (กัน self-heal resend paste task เดิมทับสิ่งที่ Lead เพิ่งส่ง) ใช้ได้เฉพาะกับ delivery ที่ **เคย paste ไปแล้ว** — ตัวที่ยัง `QUEUED`/`WAITING_RESOURCE` ไม่มีอะไรให้ซ้ำ การยกเลิกมันคือการทำลายสำเนาเดียวที่มี
+- `supersede_for_session()` (ใช้โดย `send`) ยกเลิกเฉพาะตัวที่ถึง pane แล้ว ส่วนตัวที่ยังไม่ถึง **ปล่อยไว้ให้ส่งต่อ** แล้วเตือน Lead แยกอีกข้อความว่าใบงานไหนยังไม่ถึงมือและข้อความที่เพิ่ง send อาจถึงก่อน
+- `cancel_for_session()` เดิม (ใช้โดย verb `takkub cancel` และตอนปิด pane) **ไม่เปลี่ยน** — ตรงนั้นผู้เรียกบอกเจตนาชัดว่าจะยกเลิกทุกอย่าง
+
+**worktree merge cleanup พังบน Windows 'Filename too long' (#226)** — แก้ไปแล้วตั้งแต่ 2026-08-15 คู่กับ #227 แต่ใบไม่ได้ปิด ตรวจซ้ำที่ HEAD แล้วว่า `_stage_for_delete` / `_rmtree_long_path_safe` / `remove_worktree_tree` ยังอยู่ครบและเทสเขียว
+
 ### Fixed (แก้)
 
 **status-bar chip เขียน "RAM 69%" ทั้งที่หมายถึง RAM ว่าง — อ่านกลับด้านจาก Task Manager (#292)**

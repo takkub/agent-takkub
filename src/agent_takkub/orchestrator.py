@@ -2384,16 +2384,27 @@ class Orchestrator(
             delivery_manager = getattr(self, "_delivery_manager", None)
             if delivery_manager is not None:
                 generation = int(getattr(pane, "_session_generation", 0))
-                superseded = delivery_manager.cancel_for_session(project_ns, to_role, generation)
+                # #295: the two outcomes below mean opposite things to Lead, so
+                # they are reported as two different notices instead of one
+                # count. Cancelling a delivery that already pasted once only
+                # suppresses a duplicate re-paste; a delivery that never
+                # reached the pane is the pane's ONLY copy of its task, and the
+                # old single-count message made "harmless" and "your teammate
+                # now has no work" look identical.
+                cancelled_list, kept_undelivered = delivery_manager.supersede_for_session(
+                    project_ns, to_role, generation
+                )
+                superseded = len(cancelled_list)
                 if superseded:
                     last_ids = getattr(self, "_last_delivery_ids", None)
                     if last_ids is not None:
                         last_ids.pop((project_ns, to_role), None)
                     self._notify_lead(
                         project_ns,
-                        f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ค้างอยู่ "
-                        f"สำหรับ {to_role} อัตโนมัติ เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — เดิมจะ "
-                        f"paste task เก่าซ้ำทันทีที่ pane กลับมา ready (issue #255)",
+                        f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ "
+                        f"**paste ไปถึง {to_role} แล้ว** เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — "
+                        f"ที่ยกเลิกคือ re-paste ซ้ำของ task เดิม ไม่ใช่ใบงาน **ปลอดภัย ไม่ต้องทำอะไร** "
+                        f"(issue #255)",
                         from_role="system",
                         note="delivery_superseded",
                     )
@@ -2402,6 +2413,24 @@ class Orchestrator(
                         role=to_role,
                         project=project_ns,
                         cancelled=superseded,
+                    )
+                if kept_undelivered:
+                    task_ids = ", ".join(sorted({d.task_id[:8] for d in kept_undelivered}))
+                    self._notify_lead(
+                        project_ns,
+                        f"⚠️ [delivery-pending] {to_role} มีใบงาน {len(kept_undelivered)} ใบที่ "
+                        f"**ยังไม่ถึงมือ** (task {task_ids}) — ไม่ถูกยกเลิก จะส่งให้เมื่อ pane ready "
+                        f"แต่ข้อความที่เพิ่ง `takkub send` อาจถึงก่อนใบงาน ถ้าข้อความนั้นอ้างถึงใบงาน "
+                        f"ให้ส่งซ้ำหลัง pane รับงานแล้ว",
+                        from_role="system",
+                        note="delivery_pending_not_cancelled",
+                    )
+                    _log_event(
+                        "delivery_kept_undelivered_on_send",
+                        role=to_role,
+                        project=project_ns,
+                        kept=len(kept_undelivered),
+                        states=sorted({str(d.state) for d in kept_undelivered}),
                     )
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
@@ -3355,6 +3384,25 @@ class Orchestrator(
         return "⚠ no evidence cited"
 
     @staticmethod
+    def _build_blocked_handoff(from_role: str, body: str, what: str) -> str:
+        """Lead-facing prompt for a report that is BLOCKED, not FAILED (#296).
+
+        Deliberately offers no role and no fix loop: the next action belongs to
+        a human, and naming a role here is exactly what made Lead route a
+        missing super-admin password to backend twice in one session.
+        """
+        missing = f" — {what}" if what else ""
+        return (
+            f"[{from_role} BLOCKED] {body}\n\n"
+            f"🚧 รายงานนี้คือ **ติด blocker ไม่ใช่เจอบั๊ก**{missing}\n"
+            "งานรันไม่ได้เพราะขาดของนอกระบบ ไม่ใช่โค้ดพัง — **ไม่มี role ไหนแก้ได้**\n"
+            "1. อ่านว่าขาดอะไร แล้วสรุปให้เจ้าของเป็นข้อๆ (ต้องการอะไร เพื่ออะไร)\n"
+            "2. รอเจ้าของจัดหาให้ แล้วค่อย re-assign งานเดิมกลับไปที่ role เดิม\n"
+            "**ห้าม** propose ให้ role อื่นไปแก้ระบบเพื่อให้ผ่าน (เช่น รีเซ็ต/เดารหัสผ่าน "
+            "หรือปลดการยืนยันตัวตน) — นั่นคือการแก้ของที่ไม่ได้พัง"
+        )
+
+    @staticmethod
     def _build_verify_fail_handoff(from_role: str, note: str) -> str:
         """Lead-facing prompt when a pane reports `done --fail` (QA/verify failed).
 
@@ -3363,6 +3411,20 @@ class Orchestrator(
         matching the cockpit's safety doctrine.
         """
         body = note.strip() or "(no detail given)"
+        # #296: BLOCKED before FAILED. A pane that couldn't run because
+        # something outside the codebase is missing has found no bug, so the
+        # whole fix-loop framing is wrong — there is no role to route to, only
+        # a human who can supply the missing thing. Routing it anyway sends a
+        # teammate to "fix" working code; in the reported case that meant
+        # backend touching a live auth system so QA could get in.
+        try:
+            from .routing_planner import classify_blocked
+
+            is_blocked, what = classify_blocked(body)
+        except Exception:
+            is_blocked, what = False, ""
+        if is_blocked:
+            return Orchestrator._build_blocked_handoff(from_role, body, what)
         # Tier 2c: signature-based suggestion for which role the fix loop
         # should target. A suggestion only — the Lead proposes, user confirms.
         suggest = ""
@@ -3637,8 +3699,13 @@ class Orchestrator(
         note: str = "",
         project: str | None = None,
         failed: bool = False,
+        blocked: bool = False,
         force: bool = False,
     ) -> tuple[bool, str]:
+        """`blocked=True` (#296) means the work could not RUN — something
+        outside the codebase is missing. It still counts as not-done (callers
+        pass `failed=True` alongside it), but the Lead-facing handoff asks the
+        owner for the missing thing instead of proposing a fix loop."""
         try:
             from_role = validate_name(from_role, "role")
         except ValueError as exc:
@@ -3807,6 +3874,22 @@ class Orchestrator(
                     role=from_role,
                     note=(note or "")[:200],
                     task_file=had_task_file,
+                )
+            elif blocked:
+                # Reported BLOCKED outright (#296) — no signature guessing
+                # needed, the pane said so. Still recorded as a failure for
+                # the ledger (the task is not done), but routed to a human.
+                from .routing_planner import classify_blocked
+
+                notice = self._build_blocked_handoff(
+                    from_role, f"{ref_tag}{note}".strip(), classify_blocked(note)[1]
+                )
+                _log_event(
+                    "verify_blocked",
+                    project=project_ns,
+                    role=from_role,
+                    note=(note or "")[:200],
+                    declared=True,
                 )
             else:
                 notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")

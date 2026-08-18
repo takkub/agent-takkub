@@ -472,6 +472,74 @@ _FAILURE_RULES: list[tuple[re.Pattern, str, str]] = [
 ]
 
 
+# #296: BLOCKED is not FAILED. A pane that could not run because something
+# OUTSIDE the codebase is missing (a credential, a test account, a permission,
+# data, an external service the team doesn't own) has found no bug — there is
+# no role to route the work back to, only a human who can supply the missing
+# thing.
+#
+# The discriminator is "สิ่งที่ขาด, ไม่ใช่สิ่งที่พัง": every pattern below needs
+# an ABSENCE cue (missing / ไม่มี / ขาด / ต้องขอ / รอ) next to the thing, so a
+# genuine `401 unauthorized` bug report still routes to backend while
+# "สร้าง tenant ไม่ได้เพราะไม่มีรหัสผ่าน super admin" does not. Without that
+# pairing the old signature matcher read `password`/`auth` as a backend fault
+# and proposed sending backend to "fix" a working auth system — the field case
+# that produced this rule (2026-08-18, two qa panes, identical text).
+_BLOCKED_RULES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"(ไม่มี|ขาด|ยังไม่ได้รับ|ต้องขอ|ขอ(รับ)?|รอ)\s*"
+            r"[^\n]{0,20}"
+            r"(รหัสผ่าน|พาสเวิร์ด|บัญชี|สิทธิ|สิทธิ์|credential|password|api\s*key|"
+            r"token|account|login|access|permission|licen[cs]e|โควต้า|quota)",
+            re.IGNORECASE,
+        ),
+        "ขาด credential/สิทธิ์เข้าระบบ",
+    ),
+    (
+        re.compile(
+            r"(missing|no|without|need(s|ed)?|require[sd]?|waiting\s+for|blocked\s+(on|by))\s+"
+            r"[^\n]{0,20}"
+            r"(credential|password|api\s*key|secret|token|account|login|access|permission|"
+            r"licen[cs]e|quota|approval)",
+            re.IGNORECASE,
+        ),
+        "missing credential/access",
+    ),
+    (
+        re.compile(
+            r"(ไม่มี|ขาด|ยังไม่มี|ต้องใช้|รอ)\s*[^\n]{0,20}"
+            r"(ข้อมูลทดสอบ|test\s+data|seed\s+data|sandbox|environment|ตัวอย่างข้อมูล)",
+            re.IGNORECASE,
+        ),
+        "ขาดข้อมูล/สภาพแวดล้อมสำหรับทดสอบ",
+    ),
+    (
+        re.compile(
+            r"(ต้องให้|ต้องรอ)\s*[^\n]{0,20}(เจ้าของ|มนุษย์|คน|admin|ผู้ดูแล|user)|"
+            r"(human|owner|manual)\s+(action|step|intervention)\s+required",
+            re.IGNORECASE,
+        ),
+        "ต้องให้มนุษย์ทำเอง",
+    ),
+]
+
+
+def classify_blocked(note: str) -> tuple[bool, str]:
+    """True when *note* describes work that could not RUN, not work that broke.
+
+    Returns ``(is_blocked, what_is_missing)``. See ``_BLOCKED_RULES`` for why
+    the absence cue is required rather than the noun alone (#296).
+    """
+    s = (note or "").strip()
+    if not s:
+        return False, ""
+    for pattern, what in _BLOCKED_RULES:
+        if pattern.search(s):
+            return True, what
+    return False, ""
+
+
 def classify_failure(note: str) -> tuple[str | None, str]:
     """Map a verify-fail note to the role a fix loop should target (Tier 2c).
 
@@ -479,9 +547,15 @@ def classify_failure(note: str) -> tuple[str | None, str]:
     ``(None, "")`` when nothing matches — the Lead diagnoses manually then.
     Rule order encodes root-cause priority (infra > server > UI > test);
     this is a SUGGESTION for the fix-loop proposal, never an auto-route.
+
+    A note that reads as BLOCKED (#296) never yields a role: routing it would
+    send a teammate to fix something that isn't broken, and in the reported
+    case risked backend "fixing" a live auth system so QA could get in.
     """
     s = (note or "").strip()
     if not s:
+        return None, ""
+    if classify_blocked(s)[0]:
         return None, ""
     for pattern, role, reason in _FAILURE_RULES:
         if pattern.search(s):

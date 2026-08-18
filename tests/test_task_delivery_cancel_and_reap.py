@@ -102,7 +102,11 @@ class TestCancelTaskDelivery:
 
 
 class TestSendAutoCancelsStaleDelivery:
-    def test_lead_send_cancels_stale_delivery_and_notifies(self, orch: Orchestrator) -> None:
+    def test_lead_send_cancels_delivery_that_already_reached_the_pane(
+        self, orch: Orchestrator
+    ) -> None:
+        """#255's actual case: the task was pasted once already, so the only
+        thing cancelling suppresses is an idempotent re-paste."""
         lead = _pane(_live_session())
         backend = _pane(_live_session(), generation=1)
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
@@ -110,6 +114,8 @@ class TestSendAutoCancelsStaleDelivery:
         delivery = manager.create(
             task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
         )
+        manager.begin_write(delivery.delivery_id, 1)
+        manager.mark_written(delivery.delivery_id)
         orch._delivery_manager = manager
         with (
             patch("agent_takkub.orchestrator._log_event"),
@@ -123,6 +129,63 @@ class TestSendAutoCancelsStaleDelivery:
         assert delivery.state.value == "cancelled"
         notices = _written_strings(lead.session)
         assert any("[delivery-superseded]" in m and "#255" in m for m in notices)
+
+    def test_lead_send_keeps_a_delivery_that_never_reached_the_pane(
+        self, orch: Orchestrator
+    ) -> None:
+        """#295: a QUEUED delivery is the pane's ONLY copy of its task.
+
+        Field case: `assign` at 11:35:25 then `send` at 11:35:39 — the old
+        code cancelled the brand-new assignment and reported it with the same
+        wording used for a harmless stale re-paste, so Lead could not tell
+        whether the teammate still had work. Under unattended overnight
+        operation that pane goes silent until morning.
+        """
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t1abc999",
+            project_id="P",
+            pane_id="backend",
+            session_generation=1,
+            payload="do X",
+        )
+        orch._delivery_manager = manager
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            ok, _msg = orch.send("backend", "correction: use src/", from_role="lead", project="P")
+
+        assert ok is True
+        # Still armed — the task must still land, or the pane has no work.
+        assert delivery.state.value == "queued"
+        notices = _written_strings(lead.session)
+        assert any("[delivery-pending]" in m for m in notices)
+        # And Lead is NOT told something was superseded, which would read as
+        # "safe, nothing to do".
+        assert not any("[delivery-superseded]" in m for m in notices)
+
+    def test_explicit_cancel_verb_still_cancels_an_undelivered_delivery(
+        self, orch: Orchestrator
+    ) -> None:
+        """`takkub cancel` states the intent outright — unlike `send`, it must
+        drop the delivery however far it got (#295 must not weaken it)."""
+        backend = _pane(_live_session(), generation=1)
+        orch._panes_by_project["P"] = {"backend": backend}
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+        )
+        orch._delivery_manager = manager
+
+        ok, msg = orch.cancel_task_delivery("backend", project="P")
+
+        assert ok is True
+        assert "cancelled 1" in msg
+        assert delivery.state.value == "cancelled"
 
     def test_peer_send_does_not_cancel_delivery(self, orch: Orchestrator) -> None:
         """A teammate messaging another teammate (from_role != lead/None)

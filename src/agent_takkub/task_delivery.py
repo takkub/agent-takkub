@@ -63,6 +63,17 @@ _IN_FLIGHT_STATES = {
     DeliveryState.UNCERTAIN,
 }
 
+# States in which the task text has NOT yet been put in front of the pane —
+# nothing has been written to the PTY at all (#295). The distinction matters
+# because "cancel the pending delivery" means two opposite things: for a
+# delivery that already pasted once, cancelling only suppresses an idempotent
+# re-paste (harmless); for one of these, cancelling means the pane never
+# receives the task and simply sits with no work.
+_UNDELIVERED_STATES = {
+    DeliveryState.QUEUED,
+    DeliveryState.WAITING_RESOURCE,
+}
+
 
 @dataclass(slots=True)
 class TaskDelivery:
@@ -84,6 +95,15 @@ class TaskDelivery:
 
     def expired(self, now: float | None = None) -> bool:
         return (time.time() if now is None else now) >= self.expires_at
+
+
+def has_reached_pane(delivery: TaskDelivery) -> bool:
+    """True once *delivery*'s task text has been written toward its pane.
+
+    `WRITING` counts: the write is already in progress, so a second delivery
+    of the same task would duplicate rather than deliver.
+    """
+    return DeliveryState(delivery.state) not in _UNDELIVERED_STATES
 
 
 class DeliveryManager:
@@ -279,7 +299,53 @@ class DeliveryManager:
         return True
 
     def cancel_for_session(self, project_id: str, pane_id: str, session_generation: int) -> int:
+        """Cancel EVERY pending delivery for this pane-session; returns how many.
+
+        Unconditional on purpose — this backs the explicit `takkub cancel`
+        verb and pane teardown, where "cancel it" is the caller's stated
+        intent regardless of how far the delivery got. The selective variant
+        used when Lead merely *sends* into a busy pane is
+        :meth:`supersede_for_session` (#295).
+        """
+        cancelled, _kept = self._cancel_for_session(
+            project_id, pane_id, session_generation, only_delivered=False
+        )
+        return len(cancelled)
+
+    def supersede_for_session(
+        self, project_id: str, pane_id: str, session_generation: int
+    ) -> tuple[list[TaskDelivery], list[TaskDelivery]]:
+        """Cancel only the deliveries whose task text already reached the pane.
+
+        Returns ``(cancelled, kept_undelivered)``.
+
+        #255 cancels a pane's pending deliveries when Lead sends into it by
+        hand, because the old delivery's self-heal resend would otherwise
+        re-paste the ORIGINAL task on top of whatever Lead just sent. That
+        reasoning only holds for a delivery that has already pasted once —
+        there is nothing to duplicate otherwise.
+
+        #295: a delivery still in QUEUED/WAITING_RESOURCE has never put the
+        task in front of the pane, so cancelling it doesn't suppress a
+        duplicate, it destroys the only copy — the pane ends up with no work
+        at all, and from Lead's side the "superseded" notice looked identical
+        to the harmless case. Those are left armed so the task still lands;
+        the caller is handed them so it can say so instead of staying quiet.
+        """
+        return self._cancel_for_session(
+            project_id, pane_id, session_generation, only_delivered=True
+        )
+
+    def _cancel_for_session(
+        self,
+        project_id: str,
+        pane_id: str,
+        session_generation: int,
+        *,
+        only_delivered: bool,
+    ) -> tuple[list[TaskDelivery], list[TaskDelivery]]:
         cancelled: list[TaskDelivery] = []
+        kept: list[TaskDelivery] = []
         with self._lock:
             for delivery in self._deliveries.values():
                 if (
@@ -288,12 +354,17 @@ class DeliveryManager:
                     and delivery.session_generation == int(session_generation)
                     and delivery.state not in _TERMINAL_STATES
                 ):
+                    if only_delivered and not has_reached_pane(delivery):
+                        kept.append(delivery)
+                        continue
                     delivery.state = DeliveryState.CANCELLED
                     self._release_active(delivery)
                     cancelled.append(delivery)
         for delivery in cancelled:
             self._emit("task_delivery_cancelled", delivery)
-        return len(cancelled)
+        for delivery in kept:
+            self._emit("task_delivery_kept_undelivered", delivery, state=str(delivery.state))
+        return cancelled, kept
 
     def expire_stale(self) -> list[TaskDelivery]:
         """Reap deliveries stuck in an in-flight state (see

@@ -598,6 +598,7 @@ class CliServer(QObject):
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
+                    blocked=bool(req.get("blocked", False)),
                     force=bool(req.get("force", False)),
                 )
             elif cmd == "subagent-done":

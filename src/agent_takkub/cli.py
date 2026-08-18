@@ -690,11 +690,44 @@ def cmd_done(args: argparse.Namespace) -> dict:
                 "cmd": "done",
                 "from": _from_role(),
                 "note": args.note or "",
-                "failed": bool(getattr(args, "fail", False)),
+                # #296: --blocked implies a non-success outcome (the task did
+                # NOT get done) but carries the reason that it could not RUN,
+                # which routes to a human instead of back to a role.
+                "failed": bool(getattr(args, "fail", False))
+                or bool(getattr(args, "blocked", False)),
+                "blocked": bool(getattr(args, "blocked", False)),
                 "force": bool(getattr(args, "force", False)),
             }
         )
     )
+
+
+def cmd_ma(args: argparse.Namespace) -> dict:
+    """(operator) run the standing maintenance checklist over this cockpit.
+
+    Read-only by design — it reports what the checks found and the ordered plan
+    that follows from them; deciding which findings to act on is Lead's call,
+    not a script's. See `maintenance.py`.
+    """
+    from pathlib import Path
+
+    from .maintenance import render_report, run_maintenance
+
+    report = run_maintenance(
+        Path.cwd(),
+        since_hours=float(getattr(args, "since_hours", 24.0)),
+        include_network=not bool(getattr(args, "no_net", False)),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(render_report(report))
+    attention = len(report.needs_attention)
+    return {
+        "ok": True,
+        "msg": ("ไม่มีอะไรต้องทำ" if not attention else f"{attention} หัวข้อต้องดูต่อ"),
+        "quiet": True,
+    }
 
 
 def cmd_progress(args: argparse.Namespace) -> dict:
@@ -2266,6 +2299,16 @@ def main(argv: list[str] | None = None) -> int:
         help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
     )
     sd.add_argument(
+        "--blocked",
+        action="store_true",
+        help=(
+            "report BLOCKED — the work could not RUN because something outside the "
+            "codebase is missing (credential, test account, permission, data, an "
+            "external service). Nothing is broken, so Lead asks the owner for the "
+            "missing thing instead of routing a fix loop to a teammate (#296)"
+        ),
+    )
+    sd.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -2283,6 +2326,29 @@ def main(argv: list[str] | None = None) -> int:
     ssd.add_argument("note", nargs="?", default="")
     ssd.add_argument("--fail", action="store_true")
     ssd.set_defaults(func=cmd_subagent_done)
+
+    sma = sub.add_parser(
+        "ma",
+        help="(operator) maintenance sweep: issues → PRs → runtime log → repo → แผนทำต่อ",
+        description=(
+            "เดิน checklist บำรุงรักษา cockpit ทีละข้อ: issue ที่ค้าง, PR + สถานะ CI, "
+            "สิ่งที่ events.log ของ cockpit ที่รันอยู่บอกว่าพังจริงในช่วงที่ผ่านมา, และ "
+            "สภาพ repo ว่าพร้อม ship ไหม — แล้วสรุปเป็นแผนทำต่อ (อ่านอย่างเดียว ไม่แก้ไฟล์)"
+        ),
+    )
+    sma.add_argument(
+        "--since-hours",
+        type=float,
+        default=24.0,
+        help="ย้อนดู events.log กี่ชั่วโมง (default 24)",
+    )
+    sma.add_argument(
+        "--no-net",
+        action="store_true",
+        help="ข้ามส่วนที่ต้องใช้เครือข่าย (gh issue/pr/run) — ดูเฉพาะ log ในเครื่อง",
+    )
+    sma.add_argument("--json", action="store_true", help="พิมพ์เป็น JSON แทนรายงานอ่านง่าย")
+    sma.set_defaults(func=cmd_ma)
 
     spg = sub.add_parser(
         "progress",

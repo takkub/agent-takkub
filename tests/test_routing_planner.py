@@ -11,7 +11,13 @@ Coverage:
 
 from __future__ import annotations
 
-from agent_takkub.routing_planner import ActionKind, RoutingAction, classify, classify_failure
+from agent_takkub.routing_planner import (
+    ActionKind,
+    RoutingAction,
+    classify,
+    classify_blocked,
+    classify_failure,
+)
 
 
 class TestAssignModeSuggestion:
@@ -1051,3 +1057,60 @@ class TestClassifyFailure:
 
     def test_empty_note(self):
         assert classify_failure("") == (None, "")
+
+
+class TestClassifyBlockedVsFailed:
+    """#296: BLOCKED is not FAILED.
+
+    Field case (2026-08-18, two qa panes, identical text): QA could not create
+    a test tenant because it had no super-admin password. Nothing was broken —
+    but the signature matcher read the credential words as a backend fault and
+    proposed routing the fix loop to backend. Acting on that sends a teammate
+    to "fix" a working auth system, and the worst version of that is backend
+    resetting a real password so QA can get in.
+
+    The discriminator is an ABSENCE cue next to the thing, so a genuine auth
+    bug still routes to backend.
+    """
+
+    def test_missing_super_admin_password_is_blocked_not_backend(self) -> None:
+        note = "สร้าง tenant ทดสอบไม่ได้เพราะไม่มีรหัสผ่าน super admin"
+        is_blocked, what = classify_blocked(note)
+        assert is_blocked is True
+        assert what
+        assert classify_failure(note) == (None, "")
+
+    def test_english_missing_credentials_is_blocked(self) -> None:
+        note = "Cannot run the suite: missing API credentials for the staging tenant"
+        assert classify_blocked(note)[0] is True
+        assert classify_failure(note)[0] is None
+
+    def test_waiting_for_access_is_blocked(self) -> None:
+        assert classify_blocked("blocked on access to the reporting dashboard")[0] is True
+
+    def test_missing_test_data_is_blocked(self) -> None:
+        assert classify_blocked("รันไม่ได้ ยังไม่มีข้อมูลทดสอบของเดือนนี้")[0] is True
+
+    def test_human_step_required_is_blocked(self) -> None:
+        assert classify_blocked("ต้องให้เจ้าของกดอนุมัติในระบบก่อน")[0] is True
+
+    # ── the other side: real bugs must still route ──────────────────────────
+
+    def test_real_401_bug_still_routes_to_backend(self) -> None:
+        role, _why = classify_failure("login endpoint returns 401 unauthorized for valid users")
+        assert role == "backend"
+
+    def test_expired_token_bug_still_routes_to_backend(self) -> None:
+        note = "API คืน token invalid ทั้งที่เพิ่ง login — jwt พัง"
+        assert classify_blocked(note)[0] is False
+        assert classify_failure(note)[0] == "backend"
+
+    def test_container_down_still_routes_to_devops(self) -> None:
+        assert classify_failure("ECONNREFUSED :5310 — container ยังไม่ขึ้น")[0] == "devops"
+
+    def test_ui_bug_still_routes_to_frontend(self) -> None:
+        assert classify_failure("ปุ่ม submit กดไม่ได้ console error")[0] == "frontend"
+
+    def test_empty_note_is_not_blocked(self) -> None:
+        assert classify_blocked("") == (False, "")
+        assert classify_blocked("   ") == (False, "")

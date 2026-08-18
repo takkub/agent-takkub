@@ -46,6 +46,7 @@ takkub send --to <role> "<msg>" · takkub goal "<objective>"
 takkub wait [--role <r>]... [--timeout <s>]            # บล็อกจนกว่า report ถึง Lead จริง — ใช้แทน loop เอง (#242)
 takkub inbox [--role <r>]                              # ดึงเนื้อหา report ที่ยังค้างส่ง (#231)
 takkub worktree list | merge --role <r> | clean        # จัดการ wt/* (merge = --no-ff + cleanup)
+takkub ma [--since-hours N] [--no-net]                 # maintenance sweep: issues → PRs+CI → runtime log → repo → แผนทำต่อ (read-only)
 takkub close --role <r> | close-all | restart | doctor [--live]
 takkub issue list | new "<title>" --severity <s> --body "..."   # default ลง repo agent-takkub
 ```

@@ -38,6 +38,7 @@ takkub provider list                                   # provider ทั้ง�
 takkub provider install <name>                         # ติดตั้ง CLI ของ provider นั้น (lead only · cursor/gemini ติดตั้งเองเท่านั้น)
 takkub provider model <name>                           # ดู model ที่ provider นั้นใช้
 takkub provider model <name> <model>                   # ตั้ง model (ว่าง/--clear = ใช้ default ของ CLI) · ต่อ role ตั้งที่ Settings
+takkub ma [--since-hours N] [--no-net] [--json]         # (operator) maintenance sweep: issue ค้าง → PR + สถานะ CI → สิ่งที่ events.log ของ cockpit ที่รันอยู่บอกว่าพังจริง → repo พร้อม ship ไหม → แผนทำต่อ · **อ่านอย่างเดียว ไม่แก้อะไร** (การตัดสินใจว่าจะแก้อะไรเป็นงานของ Lead ไม่ใช่สคริปต์) · --no-net = ดูเฉพาะ log ในเครื่อง
 takkub restart                                         # restart cockpit ทั้งแอปจาก terminal (persist state → relaunch · panes respawn) — lead/terminal only
 takkub search "<query>"                                # grep บทสนทนา Claude Code เก่าทุกโปรเจค (--days N · --all · --project)
 takkub services start|stop|ps|logs                     # docker compose ของ project ที่ active (cwd)
