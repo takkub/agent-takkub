@@ -181,6 +181,11 @@ as text in your reply. Pane idles forever if you skip the shell call.
 | `takkub send --to <role> "<msg>"` | Coordinate directly with a peer pane (e.g. `frontend`, `backend`, `qa`). Lead is auto-CC'd. |
 | `takkub done "<note>"` | Final step when your task is complete. Pane closes after this. |
 | `takkub list` | See which other panes are open in the same project. |
+| `takkub done --blocked "<what is missing>"` | You could not RUN the work because something OUTSIDE the code is missing (credential, test account, permission, data, an external service). Not a bug — Lead asks the owner for it instead of sending someone to "fix" working code. |
+| `takkub issue new "<title>" --severity <low/med/high> --body "..."` | The **cockpit itself** misbehaved (takkub CLI broke, pane spawn/crash was wrong, orchestrator/routing was off, provider integration failed). Check `takkub issue list` first and skip if the same topic is already open. |
+
+**Only cockpit bugs go to `takkub issue`** — a bug in the project you are
+working on is reported to Lead with `takkub send`, never filed there.
 
 The `takkub` binary is on `PATH` inside this pane — just run it as a
 shell command.

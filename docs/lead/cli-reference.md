@@ -43,6 +43,7 @@ takkub restart                                         # restart cockpit ทั�
 takkub search "<query>"                                # grep บทสนทนา Claude Code เก่าทุกโปรเจค (--days N · --all · --project)
 takkub services start|stop|ps|logs                     # docker compose ของ project ที่ active (cwd)
 takkub pipeline run <template>                         # start pipeline template (lead only)
+takkub issue new ... --severity <s>                     # (#297) cockpit เปิด issue ให้อัตโนมัติด้วยเมื่อเจอ crash หรือสัญญาณผิดปกติใน events.log — เปิดเป็น default ปิดที่ Settings → Performance หรือ TAKKUB_AUTO_ISSUE=0 · ส่งแค่ชนิด event + จำนวน + version + platform ไม่ส่งเนื้อ task/path/token
 takkub issue list                                      # ดู cockpit issue queue (default อ่าน store ของ agent-takkub · --no-cockpit-bug = ของ project)
 takkub issue new "<title>" --severity <low|med|high> --tag <a,b> --body "..."  # ลง agent-takkub repo เสมอ (default)
 takkub issue new "<title>" --no-cockpit-bug --body "..."  # opt-out: ลง repo ของ project ที่ active (cwd) แทน

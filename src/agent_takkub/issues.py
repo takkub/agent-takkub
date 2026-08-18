@@ -47,6 +47,15 @@ _ROLES = (
 # ── gh helpers ────────────────────────────────────────────────────────────────
 
 
+# gh subcommands that CHANGE something on GitHub. Read-only calls (view/list)
+# stay allowed in tests — they can't pollute a tracker.
+_MUTATING_GH = {("issue", "create"), ("issue", "close"), ("issue", "reopen"), ("label", "create")}
+
+
+def _is_mutating_gh(args: tuple[str, ...]) -> bool:
+    return tuple(args[:2]) in _MUTATING_GH
+
+
 def _gh(
     *args: str,
     cwd: str | Path | None = None,
@@ -61,6 +70,13 @@ def _gh(
     (create/close) pass a longer value (issue #12).
     """
     _require_gh()
+    if _is_mutating_gh(args) and in_test_or_ci_process():
+        raise RuntimeError(
+            f"refusing to run mutating `gh {' '.join(args[:2])}` from a test/CI "
+            "process (see issues.in_test_or_ci_process). Patch `issues._gh` in "
+            "the test, or set TAKKUB_ALLOW_REAL_ISSUE_WRITE=1 for a deliberate "
+            "manual smoke test."
+        )
     cmd = ["gh", *args]
     try:
         result = subprocess.run(
@@ -103,6 +119,40 @@ def _require_gh() -> None:
         raise RuntimeError(
             "gh CLI not found — install from https://cli.github.com/ and authenticate with 'gh auth login'"
         )
+
+
+def in_test_or_ci_process() -> bool:
+    """True when this process must never create a REAL GitHub issue.
+
+    `auto_issue_capture` has had this guard since #188, but only for its own
+    crash path — the `gh` layer itself was never gated, because before #297 a
+    test could not reach a live mutating call anyway: with no resolvable
+    checkout every cockpit-bug op fell into the local store. Making the repo a
+    constant removed that accidental safety net and the very first suite run
+    filed three junk issues against the public tracker.
+
+    Enforced in `_gh` rather than in `new_issue`, for two reasons: it is the
+    single place a real subprocess is spawned, and a test that patches `_gh`
+    (most of them) is by definition not touching the network, so it stays
+    unaffected instead of having its assertions rerouted.
+    """
+    if os.environ.get("TAKKUB_ALLOW_REAL_ISSUE_WRITE") == "1":
+        return False  # deliberate escape hatch for a real manual smoke test
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    if os.environ.get("CI"):
+        return True
+    return "pytest" in sys.modules
+
+
+def _looks_like_label_error(exc: Exception) -> bool:
+    """True when a `gh issue create` failure is about labels, not the issue.
+
+    Kept narrow on purpose: retrying an auth/network/rate-limit failure
+    without labels would just fail again and hide the real reason.
+    """
+    msg = str(exc).lower()
+    return "label" in msg
 
 
 def _detect_repo(cwd: str | Path | None = None) -> str:
@@ -216,6 +266,19 @@ def _cockpit_repo_cwd() -> Path | None:
     return None
 
 
+# The cockpit's own issue tracker. A constant, not something to derive: every
+# install files cockpit bugs here regardless of what (if anything) is checked
+# out locally. Overridable so a fork can retarget its own tracker.
+_DEFAULT_COCKPIT_REPO_SLUG = "takkub/agent-takkub"
+
+
+def cockpit_repo_slug() -> str:
+    """`owner/repo` of the cockpit's issue tracker (env-overridable)."""
+    return (
+        os.environ.get("AGENT_TAKKUB_COCKPIT_REPO_SLUG", "").strip() or _DEFAULT_COCKPIT_REPO_SLUG
+    )
+
+
 def _warn_cockpit_repo_unresolved(op: str, reason: str) -> None:
     """Loud stderr warning when a **cockpit-bug** op (``cockpit_bug=True``)
     can't resolve a real agent-takkub GitHub repo at all.
@@ -258,19 +321,24 @@ def _resolve_repo_for_op(
         except RuntimeError:
             return detect_cwd, None, True
 
+    # A local checkout still wins when there is one: a contributor working on
+    # a fork should file against the remote they actually work with, not the
+    # upstream tracker.
     repo_cwd = _cockpit_repo_cwd()
-    if repo_cwd is None:
-        _warn_cockpit_repo_unresolved(
-            op, f"no agent-takkub git checkout found; REPO_ROOT={REPO_ROOT}"
-        )
-        return None, None, True
+    if repo_cwd is not None:
+        detect_cwd = str(repo_cwd)
+        try:
+            return detect_cwd, _detect_repo(detect_cwd), False
+        except RuntimeError:
+            pass  # checkout found but no usable remote — fall through to upstream
 
-    detect_cwd = str(repo_cwd)
-    try:
-        return detect_cwd, _detect_repo(detect_cwd), False
-    except RuntimeError as exc:
-        _warn_cockpit_repo_unresolved(op, str(exc))
-        return detect_cwd, None, True
+    # #297: no checkout, or one without a usable remote. The cockpit's tracker
+    # is a FIXED repo, so deriving it from a git checkout was never necessary —
+    # and requiring one meant every plain `npm i -g` install (where DATA_HOME
+    # != REPO_ROOT, no env override, no agent-takkub project registered) filed
+    # cockpit bugs into a local JSON file nobody outside that machine ever saw.
+    # Every dev box IS a checkout, which is exactly why this went unnoticed.
+    return None, cockpit_repo_slug(), False
 
 
 def _get_local_issues_path(cwd: str | Path | None) -> Path:
@@ -382,11 +450,27 @@ def new_issue(
             )
 
         try:
-            gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
+            base_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
+            gh_args = list(base_args)
             for lbl in labels:
                 gh_args += ["--label", lbl]
 
-            out = _gh(*gh_args, cwd=detect_cwd, timeout=60)
+            try:
+                out = _gh(*gh_args, cwd=detect_cwd, timeout=60)
+            except RuntimeError as label_exc:
+                # #297: filing into the shared cockpit tracker from a machine
+                # that only has read access means `_ensure_labels` above could
+                # not create anything, and `gh issue create --label <missing>`
+                # is a hard error — so an install with no write access would
+                # lose the whole report over a label. The report matters, the
+                # labels do not: retry once without them.
+                if not labels or not _looks_like_label_error(label_exc):
+                    raise
+                print(
+                    f"warn: issue labels rejected by {repo} ({label_exc}); filing without labels",
+                    file=sys.stderr,
+                )
+                out = _gh(*base_args, cwd=detect_cwd, timeout=60)
             url = out.splitlines()[-1] if out else ""
             number = 0
             if url:

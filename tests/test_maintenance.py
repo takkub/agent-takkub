@@ -165,7 +165,13 @@ class TestRunMaintenance:
         )
         payload = json.loads(json.dumps(report.to_dict(), ensure_ascii=False))
         assert payload["since_hours"] == 1
-        assert {c["key"] for c in payload["checks"]} == {"issues", "prs", "logs", "repo"}
+        assert {c["key"] for c in payload["checks"]} == {
+            "issues",
+            "prs",
+            "logs",
+            "local_issues",
+            "repo",
+        }
 
     def test_render_lists_every_check(self, tmp_path: Path) -> None:
         log = _write_events(tmp_path / "events.log", [])
@@ -182,3 +188,48 @@ class TestRunHelper:
         ok, msg = maintenance._run(["takkub-does-not-exist-xyz"])
         assert ok is False
         assert "ไม่พบคำสั่ง" in msg
+
+
+class TestLocalIssueBacklog:
+    """#297: a cockpit bug that fell back to the local store is invisible —
+    the existing warning goes to stderr, which a GUI-hosted cockpit never
+    shows. `takkub ma` is where the operator would actually notice."""
+
+    def test_no_store_is_ok(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path)
+        assert maintenance.check_local_issue_backlog().status == "ok"
+
+    def test_open_local_issues_need_attention(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path)
+        (tmp_path / ".takkub_issues.json").write_text(
+            json.dumps(
+                [
+                    {"number": 1, "title": "stuck pane", "status": "open"},
+                    {"number": 2, "title": "already handled", "status": "closed"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        check = maintenance.check_local_issue_backlog()
+        assert check.status == "attention"
+        assert check.data["count"] == 1
+        assert any("stuck pane" in d for d in check.details)
+
+    def test_closed_only_store_is_ok(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path)
+        (tmp_path / ".takkub_issues.json").write_text(
+            json.dumps([{"number": 1, "title": "done", "status": "closed"}]), encoding="utf-8"
+        )
+        assert maintenance.check_local_issue_backlog().status == "ok"
+
+    def test_corrupt_store_is_reported_not_swallowed(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path)
+        (tmp_path / ".takkub_issues.json").write_text("{not json", encoding="utf-8")
+        assert maintenance.check_local_issue_backlog().status == "error"
+
+    def test_plan_tells_you_to_send_the_backlog_first(self) -> None:
+        checks = [
+            maintenance.Check("local_issues", "l", "attention", "2 ใบ", data={"count": 2}),
+        ]
+        actions = maintenance.build_actions(checks)
+        assert any("ค้างในเครื่อง" in a for a in actions)

@@ -105,6 +105,7 @@ from PyQt6.QtWidgets import (
 
 from . import __version__ as _COCKPIT_VERSION
 from . import (
+    auto_issue_signals,
     autoskills_installer,
     cockpit_theme,
     config,
@@ -1207,6 +1208,38 @@ class SettingsWindow(QDialog):
         note.setObjectName("panelHint")
         note.setWordWrap(True)
         lay.addWidget(note)
+
+        # #297: the switch for automatic cockpit bug reports. Lives here rather
+        # than buried in a config file because it decides whether something
+        # leaves the user's machine — that has to be findable and reversible.
+        report_panel = QWidget(view)
+        report_panel.setObjectName("panel")
+        report_lay = QVBoxLayout(report_panel)
+        report_lay.setContentsMargins(16, 16, 16, 16)
+        report_lay.setSpacing(8)
+        self._auto_issue_chk = QCheckBox("ส่งรายงานบั๊กของ cockpit อัตโนมัติ", report_panel)
+        self._auto_issue_chk.setToolTip(
+            "เปิดอยู่โดยค่าเริ่มต้น เมื่อ cockpit เองมีปัญหา (crash หรือสัญญาณผิดปกติ\n"
+            "ใน events.log เช่น UI ค้างยาวซ้ำ / watchdog respawn ถี่ผิดปกติ)\n"
+            "จะเปิด issue ให้อัตโนมัติที่ takkub/agent-takkub\n\n"
+            "ส่งเฉพาะชนิดของ event + จำนวนครั้ง + เวอร์ชัน + platform\n"
+            "ไม่ส่งเนื้อ task, path ของโปรเจกต์ หรือ token (scrub + redact ก่อนส่ง)\n"
+            "จำกัดไม่เกิน 5 ใบ/24 ชม. และหัวข้อเดิมซ้ำได้ไม่เกิน 1 ครั้ง/24 ชม.\n\n"
+            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_AUTO_ISSUE=0"
+        )
+        report_lay.addWidget(self._auto_issue_chk)
+        report_hint = QLabel(
+            "ปิดสวิตช์นี้แล้ว cockpit จะไม่ส่งอะไรออกจากเครื่องเลย — ปัญหาที่เจอจะถูกเก็บไว้ในเครื่องอย่างเดียว",
+            report_panel,
+        )
+        report_hint.setObjectName("panelHint")
+        report_hint.setWordWrap(True)
+        report_lay.addWidget(report_hint)
+        lay.addWidget(report_panel)
+
+        self._auto_issue_chk.setChecked(auto_issue_signals.auto_issue_enabled())
+        self._auto_issue_chk.toggled.connect(self._on_auto_issue_toggled)
+
         lay.addStretch(1)
 
         self._load_performance_form(performance_settings.load())
@@ -1214,6 +1247,11 @@ class SettingsWindow(QDialog):
         for spin in self._performance_fields.values():
             spin.valueChanged.connect(self._mark_dirty)
         return view
+
+    def _on_auto_issue_toggled(self, enabled: bool) -> None:
+        """Applied immediately, not on Save & Apply — a privacy switch that
+        needs a second confirming click is a switch people mistrust."""
+        auto_issue_signals.set_auto_issue_enabled(bool(enabled))
 
     def _load_performance_form(self, settings: performance_settings.PerformanceSettings) -> None:
         controls = [self._performance_mode, *self._performance_fields.values()]

@@ -752,6 +752,17 @@ def main(argv: list[str] | None = None) -> int:
     w = MainWindow()
     _install_signal_handlers(w)
     _start_deadman_watchdog(w)
+    # #297: report cockpit defects that never raise. The crash hook above only
+    # sees unhandled exceptions; every field defect so far (UI freezes, the
+    # watchdog killing a working pane, deliveries lost before they landed) was
+    # visible only as a pattern in events.log. Own daemon thread — reading that
+    # log on the Qt main thread is the very bug it exists to report (#291).
+    try:
+        from .auto_issue_signals import start_watch
+
+        start_watch()
+    except Exception:
+        pass
     w.show()
     return app.exec()
 

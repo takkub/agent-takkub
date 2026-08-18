@@ -4,6 +4,33 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.73] - 2026-08-18
+
+### Added (เพิ่ม)
+
+**cockpit รายงานบั๊กของตัวเองอัตโนมัติได้จริงแล้ว — เปิดเป็นค่าเริ่มต้น (#297)**
+
+> **ผู้ใช้ต้องรู้:** ตั้งแต่เวอร์ชันนี้ cockpit จะเปิด issue ที่ `takkub/agent-takkub` ให้อัตโนมัติเมื่อ **ตัว cockpit เอง** มีปัญหา — **ปิดได้ที่ Settings → Performance → "ส่งรายงานบั๊กของ cockpit อัตโนมัติ"** หรือ `TAKKUB_AUTO_ISSUE=0`
+>
+> ส่งเฉพาะ: ชนิดของ event + จำนวนครั้ง + เวอร์ชัน + platform · **ไม่ส่ง** เนื้อ task, path ของโปรเจกต์ หรือ token (ผ่าน `_scrub_home` + `_redact` ก่อนส่งทุกครั้ง) · จำกัด 5 ใบ/24 ชม. และหัวข้อเดิมซ้ำได้ไม่เกิน 1 ครั้ง/24 ชม.
+
+สามช่องโหว่ที่ทำให้ของเดิมใช้ไม่ได้จริง แก้ครบทั้งสาม:
+
+1. **ยิงเฉพาะตอน crash** → `auto_issue_signals` อ่านสัญญาณจาก `events.log` ตามเกณฑ์ที่**วัดจากข้อมูลจริง** ไม่ใช่เดา: watchdog respawn ≥3/6ชม. · ส่งใบงานไม่สำเร็จ ≥3/6ชม. · pane boot ตาย ≥2/6ชม. · UI ค้าง ≥40 ครั้งที่นานเกิน 5 วิ ใน 6 ชม. — เกณฑ์สุดท้ายเงียบกับสภาพหลังแก้ #291 (13 ครั้ง/ชม. สูงสุด 3.3 วิ) และดังกับสภาพก่อนแก้ (1,448 ครั้ง/6ชม. สูงสุด 21 วิ) ทั้งสองเคสมีเทสยืนยัน
+2. **user ที่ลงผ่าน npm ยิงไม่ถึง GitHub** → repo ปลายทางเป็นค่าคงที่อยู่แล้ว (`takkub/agent-takkub`) จึงไม่ต้อง derive จาก git checkout อีก · checkout ในเครื่องยังชนะถ้ามี (คนที่ fork จะได้ยิงเข้า remote ของตัวเอง) · ตั้ง `AGENT_TAKKUB_COCKPIT_REPO_SLUG` เพื่อ retarget ได้
+3. **ยิงไม่ได้แล้วเงียบ** → `takkub ma` เพิ่มหัวข้อ "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)" และแผนทำต่อจะบอกให้ส่งขึ้นก่อน (เดิมเตือนที่ stderr ซึ่ง cockpit แบบ GUI ไม่มีใครเห็น)
+
+พ่วง: ถ้า user ไม่มีสิทธิ์สร้าง label บน repo กลาง เดิม `gh issue create --label <ไม่มี>` จะพังทั้งใบ ตอนนี้ retry ใหม่โดยไม่ใส่ label — รายงานสำคัญกว่า label
+
+**ปิดช่อง #103 ของ auto-issue** — `CODEX_AGENTS_MD` (ไฟล์ที่ plant ให้ pane codex/gemini/opencode) เดิม**ไม่มีคำว่า `issue` สักคำ** ตอนนี้มีทั้ง `takkub issue new` (พร้อมกฎว่าเฉพาะบั๊กของ cockpit เท่านั้น บั๊กของโปรเจกต์ user ให้ `takkub send` หา Lead) และ `takkub done --blocked`
+
+### Fixed (แก้)
+
+**เทสยิง issue จริงขึ้น repo สาธารณะได้ (พบตอนแก้ #297 — สร้างไปจริง 3 ใบ ลบแล้ว)**
+- ก่อนหน้านี้เทสแตะ `gh issue create` จริงไม่ได้โดยบังเอิญ: ไม่มี checkout ที่ resolve ได้ ทุก cockpit-bug op เลยตกลง local store การทำให้ repo เป็นค่าคงที่ลบตาข่ายนิรภัยที่ไม่ได้ตั้งใจนั้นทิ้ง แล้ว suite รอบแรกก็ยิง issue จริง 3 ใบทันที
+- `issues._gh` ปฏิเสธ subcommand ที่**เปลี่ยนของบน GitHub** (`issue create/close/reopen`, `label create`) เมื่ออยู่ใน process ของเทส/CI · คำสั่งอ่านอย่างเดียวยังผ่านได้ (ทำ tracker เสียไม่ได้) · เทสที่ patch `_gh` ไว้ไม่กระทบเลยเพราะไม่ได้แตะเน็ตอยู่แล้ว · `TAKKUB_ALLOW_REAL_ISSUE_WRITE=1` เป็นทางออกสำหรับ smoke test จริง
+- guard วางที่ `_gh` ไม่ใช่ที่ `new_issue` เพราะเป็นจุดเดียวที่ spawn subprocess จริง และไม่ไปเปลี่ยนเส้นทางของเทสที่ mock ไว้แล้ว
+
 ### Added (เพิ่ม)
 
 **`takkub ma` — maintenance sweep คำสั่งเดียวเดิน checklist ให้ครบ**

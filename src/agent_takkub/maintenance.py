@@ -314,6 +314,48 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     )
 
 
+# ── 3b. unsent local issues ──────────────────────────────────────────────────
+
+
+def check_local_issue_backlog() -> Check:
+    """Cockpit bugs that never made it to GitHub and are sitting on disk (#297).
+
+    The fallback store warns on stderr, which nothing in a GUI-hosted cockpit
+    ever shows — so a backlog could grow indefinitely while looking like
+    everything had been reported. Surfacing it here makes it something the
+    operator actually sees.
+    """
+    from .config import DATA_HOME
+
+    store = DATA_HOME / ".takkub_issues.json"
+    if not store.is_file():
+        return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "ok", "ไม่มี")
+    try:
+        rows = json.loads(store.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return Check(
+            "local_issues",
+            "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)",
+            "error",
+            f"อ่าน {store} ไม่ได้: {exc}",
+        )
+    if not isinstance(rows, list):
+        rows = []
+    open_rows = [r for r in rows if isinstance(r, dict) and r.get("status") == "open"]
+    if not open_rows:
+        return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "ok", "ไม่มี")
+    details = [f"#{r.get('number')} {str(r.get('title') or '')[:70]}" for r in open_rows[:10]]
+    details.append(f"ไฟล์: {store}")
+    return Check(
+        "local_issues",
+        "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)",
+        "attention",
+        f"{len(open_rows)} ใบ — ไม่มีใครนอกเครื่องนี้เห็น",
+        details,
+        {"count": len(open_rows)},
+    )
+
+
 # ── 4. repo shippability ─────────────────────────────────────────────────────
 
 
@@ -419,6 +461,9 @@ def build_actions(checks: list[Check]) -> list[str]:
     prs = by_key.get("prs")
     if prs is not None and prs.status == "attention":
         steps.append("เคลียร์ PR: CI แดง = ดู log ก่อนตัดสิน · CI เขียว = review แล้ว merge")
+    backlog = by_key.get("local_issues")
+    if backlog is not None and backlog.status == "attention":
+        steps.append("ส่ง issue ที่ค้างในเครื่องขึ้น GitHub ก่อน — ตอนนี้ยังไม่มีใครนอกเครื่องนี้เห็น")
     issues = by_key.get("issues")
     if issues is not None and issues.status == "attention":
         steps.append("เลือก issue ที่จะปิดรอบนี้ — พิสูจน์ก่อนแก้ ทุกใบต้องมีหลักฐาน")
@@ -447,6 +492,7 @@ def run_maintenance(
         checks.append(Check("issues", "Issue ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
         checks.append(Check("prs", "Pull request ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
     checks.append(scan_events(log_path or EVENTS_LOG, since_hours=since_hours))
+    checks.append(check_local_issue_backlog())
     checks.append(
         check_repo(repo_dir)
         if include_network

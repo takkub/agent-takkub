@@ -204,6 +204,63 @@ def _auto_issue_suppressed() -> bool:
     return False
 
 
+def reserve_signature(sig: str) -> bool:
+    """Claim a filing slot for *sig*, or return False if it must be skipped.
+
+    Extracted from `capture_cockpit_crash`'s worker (#297) so the runtime-signal
+    reporter in `auto_issue_signals` shares ONE dedup + rate cap with crashes
+    rather than getting a second, independently-capped channel — two channels
+    would mean a bad hour could file 10 issues while each one believed it was
+    obeying a cap of 5.
+
+    Enforces both caps against disk state merged with the in-memory mirror, and
+    reserves the slot BEFORE the caller's (slow, networked) create call so two
+    racing reporters can't both slip past the cap.
+    """
+    global _cap_blocked_until
+    with _lock:
+        now = time.time()
+        if now < _cap_blocked_until:
+            return False
+        disk_state = _load_state()
+
+        signatures = dict(_signatures_mem)
+        for s, ts in disk_state.get("signatures", {}).items():
+            if isinstance(ts, (int, float)) and (s not in signatures or ts > signatures[s]):
+                signatures[s] = ts
+
+        last_filed = signatures.get(sig)
+        if isinstance(last_filed, (int, float)) and now - last_filed < _COOLDOWN_SECONDS:
+            return False
+
+        fired_raw = list(disk_state.get("fired", [])) + _fired_mem
+        fired = sorted(
+            {
+                ts
+                for ts in fired_raw
+                if isinstance(ts, (int, float)) and now - ts < _RATE_WINDOW_SECONDS
+            }
+        )
+        if len(fired) >= _RATE_CAP:
+            signatures = _prune(signatures, now)
+            _save_state({"fired": fired, "signatures": signatures})
+            _fired_mem[:] = fired
+            _signatures_mem.clear()
+            _signatures_mem.update(signatures)
+            _cap_blocked_until = fired[0] + _RATE_WINDOW_SECONDS
+            return False
+
+        stamp = now if not fired or now > fired[-1] else fired[-1] + 1e-6
+        fired.append(stamp)
+        signatures[sig] = now
+        signatures = _prune(signatures, now)
+        _save_state({"fired": fired, "signatures": signatures})
+        _fired_mem[:] = fired
+        _signatures_mem.clear()
+        _signatures_mem.update(signatures)
+        return True
+
+
 def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
     """Fire-and-forget: file an auto-captured GitHub issue for a cockpit crash.
 

@@ -657,10 +657,19 @@ def test_cockpit_repo_cwd_installed_build_returns_none_when_unresolved(
         assert _cockpit_repo_cwd() is None
 
 
-def test_new_issue_cockpit_bug_unresolved_warns_loudly(tmp_path, monkeypatch, capsys) -> None:
-    """Core regression for #237: cockpit_bug=True with no resolvable
-    checkout must warn loudly on stderr, unlike the quiet no-remote-project
-    fallback used by cockpit_bug=False."""
+def test_new_issue_cockpit_bug_with_no_checkout_targets_the_upstream_tracker(
+    tmp_path, monkeypatch
+) -> None:
+    """#297 replaces #237's behaviour here.
+
+    #237 made an unresolvable checkout warn loudly and fall into the local
+    store. That was the best available answer while the repo had to be derived
+    from a git remote — but it means a plain `npm i -g` install (no checkout,
+    no env override, no agent-takkub project registered) files every cockpit
+    bug into a JSON file nobody outside that machine ever sees. The tracker is
+    a fixed repo, so it is now used directly and the local store is only a
+    fallback for when `gh` itself can't run.
+    """
     fake_repo_root = tmp_path / "venv" / "Lib"
     fake_repo_root.mkdir(parents=True)
     fake_data_home = tmp_path / "agent-takkub-home"
@@ -668,15 +677,53 @@ def test_new_issue_cockpit_bug_unresolved_warns_loudly(tmp_path, monkeypatch, ca
     monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
     monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO", raising=False)
+    monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO_SLUG", raising=False)
 
     with patch("agent_takkub.issues.load_projects", return_value={}):
-        number, url = new_issue("cockpit bug", "body", cockpit_bug=True)
+        with patch("agent_takkub.issues._gh") as mock_gh:
+            mock_gh.return_value = "https://github.com/takkub/agent-takkub/issues/42"
+            number, url = new_issue("cockpit bug", "body", cockpit_bug=True)
 
-    assert number == 1
-    assert url == "local://issue/1"
-    err = capsys.readouterr().err
-    assert "could not resolve the agent-takkub GitHub repo" in err
-    assert "AGENT_TAKKUB_COCKPIT_REPO" in err
+    assert number == 42
+    assert url.endswith("/42")
+    create_call = next(c for c in mock_gh.call_args_list if c[0][:2] == ("issue", "create"))
+    assert "takkub/agent-takkub" in create_call[0]
+
+
+def test_cockpit_repo_slug_is_env_overridable(monkeypatch) -> None:
+    """A fork retargets its own tracker without touching code."""
+    from agent_takkub.issues import cockpit_repo_slug
+
+    monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO_SLUG", raising=False)
+    assert cockpit_repo_slug() == "takkub/agent-takkub"
+    monkeypatch.setenv("AGENT_TAKKUB_COCKPIT_REPO_SLUG", "someone/their-fork")
+    assert cockpit_repo_slug() == "someone/their-fork"
+
+
+def test_mutating_gh_is_refused_in_a_test_process() -> None:
+    """The guard that had to exist after this change filed 3 junk issues.
+
+    Read-only calls stay allowed — they cannot pollute a tracker — so only
+    the mutating subcommands are blocked.
+    """
+    from agent_takkub import issues as issues_mod
+
+    assert issues_mod.in_test_or_ci_process() is True
+    assert issues_mod._is_mutating_gh(("issue", "create")) is True
+    assert issues_mod._is_mutating_gh(("label", "create")) is True
+    assert issues_mod._is_mutating_gh(("issue", "list")) is False
+    assert issues_mod._is_mutating_gh(("repo", "view")) is False
+
+    with pytest.raises(RuntimeError, match="refusing to run mutating"):
+        issues_mod._gh("issue", "create", "--repo", "takkub/agent-takkub", "--title", "x")
+
+
+def test_real_issue_write_escape_hatch(monkeypatch) -> None:
+    """An explicit env flag re-enables real writes for a manual smoke test."""
+    from agent_takkub import issues as issues_mod
+
+    monkeypatch.setenv("TAKKUB_ALLOW_REAL_ISSUE_WRITE", "1")
+    assert issues_mod.in_test_or_ci_process() is False
 
 
 def test_cmd_issue_new_flags_local_only_in_msg() -> None:
