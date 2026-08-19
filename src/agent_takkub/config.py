@@ -197,6 +197,77 @@ def default_claude_config_dir() -> Path:
     return DATA_HOME / "claude-config"
 
 
+# ── Non-claude provider homes (user directive 2026-08-19) ─────────────────
+#
+# "ทุกอย่างที่รันบน cockpit ที่เป็น prod ให้เก็บใน DATA_HOME ให้หมด."
+#
+# claude has had this since the C5 isolation audit (``default_claude_config_dir``
+# above → ``CLAUDE_CONFIG_DIR``); every other provider was still writing to its
+# own OS-wide home, so an installed cockpit shared codex/opencode sessions and
+# auth with a dev checkout and with the user's own hand-run CLI. This is the
+# single source of truth for where an installed build puts each one.
+#
+# Read by BOTH sides on purpose:
+#   * spawn  — `pane_env.inject_provider_home_env` exports these into the pane.
+#   * mirror — `codex_helper.codex_sessions_root` / `opencode_helper` resolve
+#     transcripts through the same function.
+# Splitting those two would point the Remote mirror at a directory no pane
+# writes to — silent-blank-phone, the exact class of bug this release fixes.
+#
+# Dev checkouts (``DATA_HOME == REPO_ROOT``) are deliberately excluded: a
+# from-source run keeps using the plain provider defaults, unchanged.
+_PROVIDER_HOME_SUBDIRS: dict[str, dict[str, str]] = {
+    # `CODEX_HOME` is Codex's own documented knob (74 references in the
+    # 0.147 binary) — sessions/, auth.json and config.toml all move with it.
+    "codex": {"CODEX_HOME": "codex-home"},
+    # OpenCode has no single home var: it reads the XDG pair (verified in the
+    # shipped binary), storing `opencode.db` under XDG_DATA_HOME/opencode and
+    # its config under XDG_CONFIG_HOME/opencode. Both are scoped to the
+    # OpenCode pane only — never exported cockpit-wide, or every other XDG
+    # tool in a pane (gh, uv, …) would silently lose its config too.
+    "opencode": {
+        "XDG_DATA_HOME": "opencode-home/data",
+        "XDG_CONFIG_HOME": "opencode-home/config",
+    },
+}
+
+# Providers with NO isolation knob, kept explicit so the gap is visible
+# instead of looking like an oversight (#103). Surfaced by `takkub doctor`.
+PROVIDER_ISOLATION_GAPS: dict[str, str] = {
+    "gemini": (
+        "gemini-cli joins the constant `.gemini` onto os.homedir() and exposes no "
+        "directory env var — isolating it would need a full HOME override"
+    ),
+    "kimi": "no documented home/config env var found in the shipped kimi binary",
+    "cursor": "cursor-agent home layout not yet verified on this machine",
+}
+
+
+def provider_home_env(provider: str) -> dict[str, str]:
+    """Env overrides that move *provider*'s state into DATA_HOME.
+
+    Empty for dev checkouts, for claude (handled by ``CLAUDE_CONFIG_DIR``),
+    and for any provider with no isolation knob (``PROVIDER_ISOLATION_GAPS``).
+    Never creates directories — the provider CLI makes its own, and a
+    read-side caller must be able to ask "where would it be?" without
+    causing a write.
+    """
+    if DATA_HOME == REPO_ROOT:
+        return {}
+    subdirs = _PROVIDER_HOME_SUBDIRS.get(str(provider or "").strip().lower())
+    if not subdirs:
+        return {}
+    return {var: str(DATA_HOME / sub) for var, sub in subdirs.items()}
+
+
+def provider_home_dir(provider: str, var: str) -> Path | None:
+    """The isolated directory *provider* uses for *var*, or None when this
+    build/provider has no isolated home (caller falls back to the OS default).
+    """
+    value = provider_home_env(provider).get(var)
+    return Path(value) if value else None
+
+
 def instance_display_version() -> str:
     """Best-effort version string for the window title / audit breadcrumb.
 

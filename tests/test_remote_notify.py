@@ -1438,6 +1438,81 @@ class TestCodexRemoteHistory:
             {"text": "final answer", "kind": "lead"},
         ]
 
+    def _item_event(self, item: dict) -> dict:
+        return {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+
+    def test_reads_item_completed_messages_from_codex_0_147(self):
+        """Codex 0.147's TUI dropped the flat agent_message/user_message pair
+        for `item_completed` items. `codex exec` still writes the old form, so
+        every exec-based probe kept passing while Mobile went blank for
+        `Lead = codex` — both schemas must parse."""
+        path = self._write(
+            "codex-0147",
+            [
+                self._item_event(
+                    {
+                        "type": "UserMessage",
+                        "content": [
+                            {"type": "local_image", "path": "/tmp/pasted.png"},
+                            {"type": "text", "text": "[remote → lead] hello"},
+                        ],
+                    }
+                ),
+                self._item_event({"type": "Reasoning", "summary_text": ["hidden thinking"]}),
+                self._item_event(
+                    {"type": "CommandExecution", "command": ["pwsh", "-Command", "secret args"]}
+                ),
+                self._item_event(
+                    {
+                        "type": "AgentMessage",
+                        "phase": "commentary",
+                        "content": [{"type": "Text", "text": "working update"}],
+                    }
+                ),
+                self._item_event(
+                    {
+                        "type": "AgentMessage",
+                        "phase": "final_answer",
+                        "content": [{"type": "Text", "text": "final answer"}],
+                    }
+                ),
+            ],
+        )
+
+        assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
+            {"text": "hello", "kind": "me"},
+            {"text": "working update", "kind": "lead"},
+            {"text": "final answer", "kind": "lead"},
+        ]
+
+    def test_live_codex_0_147_reply_is_pushed(self, qapp):
+        path = self._write("codex-live-0147", [])
+        os.utime(path, (time.time(), time.time()))
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="codex")
+        orch._panes_by_project["proj"]["lead"].model.spawn_ts = time.time() - 1
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            assert notifier._tails["proj"].path == path
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        self._item_event(
+                            {
+                                "type": "AgentMessage",
+                                "phase": "final_answer",
+                                "content": [{"type": "Text", "text": "codex 0.147 reply"}],
+                            }
+                        )
+                    )
+                    + "\n"
+                )
+            notifier._poll_all()
+            assert broadcaster.events == [("lead", "codex 0.147 reply", "proj")]
+        finally:
+            notifier.stop()
+
     def test_uuidless_live_codex_session_is_resolved_by_cwd_and_spawn_time(self, qapp):
         path = self._write("codex-live", [])
         os.utime(path, (time.time(), time.time()))
