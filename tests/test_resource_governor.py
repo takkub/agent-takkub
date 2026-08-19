@@ -299,14 +299,32 @@ def test_waiting_tasks_snapshot_exposes_reason() -> None:
 
 
 def test_holders_for_class_reports_pane_holding_the_slot() -> None:
-    """Issue #240 point 3: a denied caller should be able to find out *who*
-    it's waiting behind, not just the bare limit-name reason."""
+    """Issue #240 point 3 (extended #303): a denied caller should be able to
+    find out *who* — AND which project — it's waiting behind, not just the
+    bare limit-name reason. `holders_for_class` returns (project_id, pane_id)
+    pairs; `snapshot()`'s `resource_holders` (pane-id-only, project-agnostic)
+    is a separate, unrelated view and is unaffected."""
     governor = ResourceGovernor(_limits())
     held = _request(governor, "a", "backend#1", ResourceClass.PACKAGE_INSTALL)
     assert held.allowed
-    assert governor.holders_for_class(ResourceClass.PACKAGE_INSTALL) == ["backend#1"]
+    assert governor.holders_for_class(ResourceClass.PACKAGE_INSTALL) == [("a", "backend#1")]
     assert governor.snapshot()["resource_holders"]["package_install"] == ["backend#1"]
     assert governor.holders_for_class(ResourceClass.BUILD) == []
+
+
+def test_queue_length_for_class_counts_across_projects() -> None:
+    """#303 item 4: a queued role's status line needs to know how deep the
+    MACHINE-WIDE queue for its resource class actually is, not just its own
+    position — `queue_length_for_class` is that count."""
+    governor = ResourceGovernor(_limits())
+    governor.enqueue(
+        project_id="a", pane_id="qa#1", task_id="t1", resource_class=ResourceClass.BROWSER
+    )
+    governor.enqueue(
+        project_id="b", pane_id="qa#2", task_id="t2", resource_class=ResourceClass.BROWSER
+    )
+    assert governor.queue_length_for_class(ResourceClass.BROWSER) == 2
+    assert governor.queue_length_for_class(ResourceClass.BUILD) == 0
 
 
 def test_gate_block_heartbeat_throttles_long_running_waits() -> None:

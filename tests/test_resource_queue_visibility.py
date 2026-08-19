@@ -71,7 +71,7 @@ class TestDescribeResourceWait:
             "backend#2",
             ResourceClass.PACKAGE_INSTALL,
             "package_install_global_limit",
-            ["backend#1"],
+            [("proj", "backend#1")],
         )
         assert msg == (
             "backend#2 queued — waiting for package_install slot "
@@ -82,6 +82,44 @@ class TestDescribeResourceWait:
         msg = _describe_resource_wait("backend#2", ResourceClass.BUILD, "cpu_high", [])
         assert msg == "backend#2 queued — waiting for build slot (cpu_high)"
         assert "blocked by" not in msg
+
+    def test_qualifies_holder_from_a_different_project(self) -> None:
+        """#303 item 4: the real incident this fixes — a holder from a
+        DIFFERENT project used to render identically to one in the caller's
+        own project ("blocked by qa#1, qa"), reading exactly like a stale
+        lock in the caller's own project. A holder outside `own_project`
+        must now name its project."""
+        msg = _describe_resource_wait(
+            "qa",
+            ResourceClass.BROWSER,
+            "browser_global_limit",
+            [("other-proj", "qa#1")],
+            own_project="my-proj",
+        )
+        assert "blocked by qa#1 (project 'other-proj')" in msg
+
+    def test_same_project_holder_stays_unqualified(self) -> None:
+        msg = _describe_resource_wait(
+            "qa#2",
+            ResourceClass.BROWSER,
+            "browser_global_limit",
+            [("my-proj", "qa#1")],
+            own_project="my-proj",
+        )
+        assert "blocked by qa#1" in msg
+        assert "project" not in msg
+
+    def test_appends_machine_wide_queue_length_when_more_than_one(self) -> None:
+        msg = _describe_resource_wait(
+            "qa#2", ResourceClass.BROWSER, "browser_global_limit", [], queue_len=3
+        )
+        assert "3 queued machine-wide for browser" in msg
+
+    def test_omits_queue_length_note_for_a_single_waiter(self) -> None:
+        msg = _describe_resource_wait(
+            "qa#2", ResourceClass.BROWSER, "browser_global_limit", [], queue_len=1
+        )
+        assert "queued machine-wide" not in msg
 
 
 class TestQueuedResourceRolesSurfacedInList:

@@ -29,7 +29,7 @@ def _index_text() -> str:
 
 class TestCreateAssignment:
     def test_writes_detail_file_and_index_row(self) -> None:
-        warning = task_ledger.create_assignment(
+        warning, returned_path = task_ledger.create_assignment(
             PROJECT,
             "backend",
             "/api",
@@ -44,6 +44,7 @@ class TestCreateAssignment:
         row = state["groups"][0]["features"][0]["rows"][0]
         detail_path = task_ledger._ledger_dir(PROJECT) / row["detail_rel"]
         assert detail_path.exists()
+        assert returned_path == detail_path
         detail_text = detail_path.read_text(encoding="utf-8")
         assert "role: backend" in detail_text
         assert "status: working" in detail_text
@@ -82,6 +83,106 @@ class TestCreateAssignment:
         index_text = _index_text()
         assert "1. feature-A" in index_text
         assert "2. feature-B" in index_text
+
+
+class TestQueuedStatus:
+    """#303 item 1: a resource-gate-blocked assign writes its ledger row/
+    detail file with status="queued" the moment it's queued, not only once
+    a pane finally spawns for it — so Lead has something on disk to read
+    (and edit) while it waits."""
+
+    def test_queued_status_writes_detail_file_and_row(self) -> None:
+        warning, detail_path = task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "run e2e", "goal", "feat", "claude", status="queued"
+        )
+        assert warning == ""
+        assert detail_path is not None
+        assert "status: queued" in detail_path.read_text(encoding="utf-8")
+
+        state = task_ledger._load_state(PROJECT)
+        row = state["groups"][0]["features"][0]["rows"][0]
+        assert row["status"] == "queued"
+        index_text = _index_text()
+        assert "🕓 อยู่ในคิว" in index_text
+
+    def test_admission_supersedes_the_queued_row(self) -> None:
+        """Once the gate-blocked assign is actually admitted,
+        `_assign_dispatch`'s normal (status="working") `create_assignment`
+        call re-fires for the same role — same stale-open-row supersede
+        path a plain re-assign already goes through."""
+        task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "run e2e", "goal", "feat", "claude", status="queued"
+        )
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "run e2e", "goal", "feat", "claude")
+
+        state = task_ledger._load_state(PROJECT)
+        rows = state["groups"][0]["features"][0]["rows"]
+        assert rows[0]["status"] == "superseded"
+        assert rows[1]["status"] == "working"
+
+    def test_close_role_works_on_a_queued_row_with_no_live_pane(self) -> None:
+        """#303 item 2: `takkub task cancel` on a still-queued (no pane at
+        all) role reuses `close_role` — must succeed since the role is,
+        by definition, never in `live_roles`."""
+        task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "run e2e", "goal", "feat", "claude", status="queued"
+        )
+        ok, _msg = task_ledger.close_role(PROJECT, "qa", frozenset())
+        assert ok is True
+        state = task_ledger._load_state(PROJECT)
+        assert "qa" not in state["open"]
+        assert state["groups"][0]["features"][0]["rows"][0]["status"] == "closed"
+
+
+class TestReadDetailTask:
+    def test_reads_body_after_frontmatter(self) -> None:
+        _warning, detail_path = task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "do the thing\nline two", "goal", "feat", "claude"
+        )
+        assert task_ledger.read_detail_task(detail_path) == "do the thing\nline two"
+
+    def test_reflects_a_hand_edit_made_while_queued(self) -> None:
+        """The exact scenario #303 item 1 exists for: Lead edits the file by
+        hand (e.g. tightening a safety condition) before the task is ever
+        admitted — the next read must see the edit, not the original text."""
+        _warning, detail_path = task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "original task", "goal", "feat", "claude", status="queued"
+        )
+        edited = detail_path.read_text(encoding="utf-8").replace(
+            "original task", "original task\nห้ามรัน rebuild ถ้า docker engine ยังไม่นิ่ง"
+        )
+        detail_path.write_text(edited, encoding="utf-8")
+
+        assert "ห้ามรัน rebuild" in task_ledger.read_detail_task(detail_path)
+
+    def test_missing_file_returns_none(self, tmp_path: pathlib.Path) -> None:
+        assert task_ledger.read_detail_task(tmp_path / "nope.md") is None
+
+    def test_no_frontmatter_returns_text_unchanged(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "plain.md"
+        path.write_text("just a plain body, no frontmatter", encoding="utf-8")
+        assert task_ledger.read_detail_task(path) == "just a plain body, no frontmatter"
+
+
+class TestFlipDetailStatusFromQueued:
+    def test_flip_from_queued_status_line_works(self) -> None:
+        """Regression guard: the old `_flip_detail_status` only ever matched
+        the literal string "status: working\\n", so a detail file created
+        with a non-"working" initial status (queued) never got its
+        frontmatter updated on close/mark_done — the on-disk status silently
+        stuck at "queued" forever even after the ledger row itself moved on."""
+        task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "run e2e", "goal", "feat", "claude", status="queued"
+        )
+        ok, _msg = task_ledger.close_role(PROJECT, "qa", frozenset())
+        assert ok is True
+        state = task_ledger._load_state(PROJECT)
+        # close_role already popped "qa" from open — re-derive the row path
+        # via the group/feature we know this test used.
+        detail_rel = state["groups"][0]["features"][0]["rows"][0]["detail_rel"]
+        detail_text = (task_ledger._ledger_dir(PROJECT) / detail_rel).read_text(encoding="utf-8")
+        assert "status: closed" in detail_text
+        assert "status: queued" not in detail_text
 
 
 class TestReassignBeforeDone:
@@ -194,11 +295,12 @@ class TestWriteFailureDegrades:
             raise OSError("disk full")
 
         monkeypatch.setattr(pathlib.Path, "write_text", _boom)
-        warning = task_ledger.create_assignment(
+        warning, detail_path = task_ledger.create_assignment(
             PROJECT, "backend", "/api", "task", "goal", "feat", "claude"
         )
         assert warning != ""
         assert "backend" in warning
+        assert detail_path is None
 
     def test_mark_done_detail_flip_failure_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         task_ledger.create_assignment(PROJECT, "backend", "/api", "task", "goal", "feat", "claude")

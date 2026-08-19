@@ -101,6 +101,41 @@ def _write_all(runtime_dir: pathlib.Path, project_ns: str, records: list[dict]) 
         pass  # an audit record must never break the send it describes
 
 
+def _append_record(
+    runtime_dir: pathlib.Path,
+    project_ns: str,
+    *,
+    to_role: str,
+    from_role: str | None,
+    body: str,
+    generation: int,
+    state: str,
+) -> str:
+    msg_id = uuid.uuid4().hex[:12]
+    records = read(runtime_dir, project_ns)
+    records.append(
+        {
+            "id": msg_id,
+            "ts": time.time(),
+            "to": to_role,
+            "from": from_role or "lead",
+            "body": body,
+            "generation": int(generation),
+            "state": state,
+            "replays": 0,
+        }
+    )
+    per_role: dict[str, int] = {}
+    kept_reversed: list[dict] = []
+    for rec in reversed(records):
+        role = str(rec.get("to", ""))
+        per_role[role] = per_role.get(role, 0) + 1
+        if per_role[role] <= MAX_RECORDS_PER_ROLE:
+            kept_reversed.append(rec)
+    _write_all(runtime_dir, project_ns, list(reversed(kept_reversed)))
+    return msg_id
+
+
 def append(
     runtime_dir: pathlib.Path,
     project_ns: str,
@@ -116,29 +151,50 @@ def append(
     single fact that later distinguishes "still sitting in the session it was
     written to" from "written into a session that has since been replaced".
     """
-    msg_id = uuid.uuid4().hex[:12]
-    records = read(runtime_dir, project_ns)
-    records.append(
-        {
-            "id": msg_id,
-            "ts": time.time(),
-            "to": to_role,
-            "from": from_role or "lead",
-            "body": body,
-            "generation": int(generation),
-            "state": "sent",
-            "replays": 0,
-        }
+    return _append_record(
+        runtime_dir,
+        project_ns,
+        to_role=to_role,
+        from_role=from_role,
+        body=body,
+        generation=generation,
+        state="sent",
     )
-    per_role: dict[str, int] = {}
-    kept_reversed: list[dict] = []
-    for rec in reversed(records):
-        role = str(rec.get("to", ""))
-        per_role[role] = per_role.get(role, 0) + 1
-        if per_role[role] <= MAX_RECORDS_PER_ROLE:
-            kept_reversed.append(rec)
-    _write_all(runtime_dir, project_ns, list(reversed(kept_reversed)))
-    return msg_id
+
+
+def append_queued_no_pane(
+    runtime_dir: pathlib.Path,
+    project_ns: str,
+    *,
+    to_role: str,
+    from_role: str | None,
+    body: str,
+) -> str:
+    """Record a `takkub send` aimed at a role with no pane open yet (#303
+    item 3) — `to_role` is a known role, but nothing to write the bytes
+    into exists. `state="queued_no_pane"` keeps this out of
+    `undelivered_in`'s respawn-reap filter (which only ever looks at
+    generation-stale ``"sent"`` records) and is exactly what
+    `queued_no_pane_for_role` looks for once that role's pane spawns."""
+    return _append_record(
+        runtime_dir,
+        project_ns,
+        to_role=to_role,
+        from_role=from_role,
+        body=body,
+        generation=-1,
+        state="queued_no_pane",
+    )
+
+
+def queued_no_pane_for_role(runtime_dir: pathlib.Path, project_ns: str, role: str) -> list[dict]:
+    """Messages `takkub send` recorded while *role* had no pane open (#303
+    item 3), still waiting to be delivered once it spawns."""
+    return [
+        rec
+        for rec in read(runtime_dir, project_ns)
+        if rec.get("to") == role and rec.get("state") == "queued_no_pane"
+    ]
 
 
 def _update(runtime_dir: pathlib.Path, project_ns: str, msg_id: str, **fields) -> bool:
@@ -228,6 +284,7 @@ def format_for_cli(records: list[dict], *, limit: int = 20) -> list[str]:
             "delivered": "✅ ถึงแล้ว",
             "sent": "⏳ ส่งแล้วยังไม่ยืนยัน",
             "abandoned": "⛔ ส่งไม่สำเร็จ",
+            "queued_no_pane": "🕓 รอ pane เปิด",
         }.get(state, state)
         replays = int(rec.get("replays", 0))
         replay_note = f" · ส่งซ้ำหลัง respawn {replays}x" if replays else ""

@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 from datetime import datetime
 
 from .config import RUNTIME_DIR
@@ -54,9 +55,17 @@ logger = logging.getLogger(__name__)
 _FALLBACK_GOAL = "(ไม่ระบุเป้าหมาย)"
 _FALLBACK_FEATURE = "งานทั่วไป"
 
-_ROW_SYMBOL = {"working": "~", "ok": "x", "fail": "!", "closed": "-", "superseded": ">"}
+_ROW_SYMBOL = {
+    "queued": " ",
+    "working": "~",
+    "ok": "x",
+    "fail": "!",
+    "closed": "-",
+    "superseded": ">",
+}
 _VALID_STATUSES = ("ok", "fail", "closed")
 _TERMINAL_STATUSES = frozenset({"ok", "closed", "superseded"})
+_STATUS_LINE_RE = re.compile(r"(?m)^status: \w+\n")
 
 
 def _ledger_dir(project: str) -> pathlib.Path:
@@ -187,13 +196,25 @@ def create_assignment(
     goal: str | None,
     feature: str | None,
     provider: str,
-) -> str:
+    status: str = "working",
+) -> tuple[str, pathlib.Path | None]:
     """Record a fresh assignment: per-task detail `.md` + an upserted `INDEX.md` row.
 
     Called on every assign (write-on-assign rule), not just long tasks.
     Never raises — a write failure degrades to returning a Lead-facing
     warning string while the caller's assign proceeds unaffected. Returns
-    `""` on success.
+    ``(warning, detail_path)`` — ``warning`` is ``""`` on success;
+    ``detail_path`` is the absolute per-task detail file (or ``None`` if
+    that write itself failed).
+
+    *status* defaults to ``"working"`` (a pane is about to receive the task
+    right now). Callers still parked behind the resource-governor's
+    admission queue (#303 — `Orchestrator.assign`'s gate-blocked branch)
+    pass ``status="queued"`` instead: the detail file, and therefore the row
+    in `INDEX.md`, exists from the moment the task is queued rather than
+    only once a pane finally spawns for it — Lead can read *and edit* it
+    (`takkub task show` / a plain text editor) while it's still waiting,
+    where before there was nothing on disk to point at.
     """
     now = datetime.now()
     date = now.strftime("%Y-%m-%d")
@@ -206,12 +227,13 @@ def create_assignment(
 
     detail_name = f"{hhmmss}-{role}-ledger.md"
     detail_rel = f"{date}/{detail_name}"
+    detail_path = _ledger_dir(project) / detail_rel
 
     warning = ""
     detail_written = True
     try:
         _atomic_write(
-            _ledger_dir(project) / date / detail_name,
+            detail_path,
             f"---\n"
             f"date: {date}\n"
             f"role: {role}\n"
@@ -220,7 +242,7 @@ def create_assignment(
             f"goal: {goal_text}\n"
             f"feature: {feature_text}\n"
             f"provider: {provider}\n"
-            f"status: working\n"
+            f"status: {status}\n"
             f"assign_ts: {now.strftime('%H:%M:%S')}\n"
             f"---\n\n{task}\n",
         )
@@ -233,7 +255,7 @@ def create_assignment(
         "role": role,
         "cwd": cwd_disp,
         "summary": summary,
-        "status": "working",
+        "status": status,
         "assign_hhmmss": now.strftime("%H:%M:%S"),
         "done_hhmmss": None,
         "detail_rel": detail_rel if detail_written else None,
@@ -266,12 +288,35 @@ def create_assignment(
         logger.warning("task_ledger INDEX write failed for %s: %s", project, exc)
         warning = f"{warning}\n{w2}" if warning else w2
 
-    return warning
+    return warning, (detail_path if detail_written else None)
+
+
+def read_detail_task(path: pathlib.Path | str) -> str | None:
+    """Read back a per-task detail file's task body (everything after the
+    YAML frontmatter), skipping the frontmatter itself.
+
+    Used at resource-gate admission time (#303) to pick up an edit Lead made
+    to the still-queued file by hand — the in-memory copy captured at
+    `assign()`'s enqueue time would otherwise always win, silently
+    discarding the edit. Returns ``None`` if the file is missing/unreadable
+    (caller falls back to its own in-memory copy).
+    """
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[i + 1 :]).strip("\n")
+    return text
 
 
 def _flip_detail_status(path: pathlib.Path, status: str) -> None:
     text = path.read_text(encoding="utf-8")
-    new_text = text.replace("status: working\n", f"status: {status}\n", 1)
+    new_text = _STATUS_LINE_RE.sub(f"status: {status}\n", text, count=1)
     if new_text != text:
         _atomic_write(path, new_text)
 
@@ -484,6 +529,8 @@ def close_role(
 def _status_suffix(row: dict) -> str:
     status = row["status"]
     done_hhmm = row.get("done_hhmmss") or ""
+    if status == "queued":
+        return "🕓 อยู่ในคิว (รอ resource slot ว่าง)"
     if status == "working":
         return "⏳ กำลังทำ"
     if status == "ok":
