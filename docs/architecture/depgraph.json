@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 258,
+  "module_count": 261,
   "modules": [
     {
       "module": "agent_takkub",
@@ -491,13 +491,30 @@
     {
       "module": "agent_takkub.core.accounts",
       "imports": [
+        "agent_takkub.core.accounts.facade",
         "agent_takkub.core.accounts.legacy_reader",
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.selector",
         "agent_takkub.core.accounts.switch_log"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.accounts.facade",
+      "imports": [
+        "agent_takkub.core.accounts.legacy_reader",
+        "agent_takkub.core.accounts.registry",
+        "agent_takkub.core.accounts.selector",
+        "agent_takkub.core.models.account"
+      ],
+      "imported_by": [
+        "agent_takkub.core.accounts"
+      ],
+      "fan_in": 1,
       "fan_out": 4
     },
     {
@@ -507,9 +524,10 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
-        "agent_takkub.core.accounts"
+        "agent_takkub.core.accounts",
+        "agent_takkub.core.accounts.facade"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 2
     },
     {
@@ -520,9 +538,10 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
-        "agent_takkub.core.accounts"
+        "agent_takkub.core.accounts",
+        "agent_takkub.core.accounts.facade"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 3
     },
     {
@@ -534,9 +553,10 @@
         "agent_takkub.provider_usage"
       ],
       "imported_by": [
-        "agent_takkub.core.accounts"
+        "agent_takkub.core.accounts",
+        "agent_takkub.core.accounts.facade"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 4
     },
     {
@@ -1176,12 +1196,16 @@
       "module": "agent_takkub.core.models.account",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.accounts.facade",
         "agent_takkub.core.accounts.legacy_reader",
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.selector",
-        "agent_takkub.core.contracts.account_selector"
+        "agent_takkub.core.contracts.account_selector",
+        "agent_takkub.core.providers.claude_adapter",
+        "agent_takkub.core.providers.cli_adapter",
+        "agent_takkub.core.providers.plan"
       ],
-      "fan_in": 4,
+      "fan_in": 8,
       "fan_out": 0
     },
     {
@@ -1257,6 +1281,17 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.core.models.spawn_plan",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.providers.claude_adapter",
+        "agent_takkub.core.providers.cli_adapter",
+        "agent_takkub.core.providers.plan"
+      ],
+      "fan_in": 3,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.core.models.task",
       "imports": [],
       "imported_by": [],
@@ -1279,17 +1314,23 @@
         "agent_takkub.core.providers.claude_adapter",
         "agent_takkub.core.providers.cli_adapter",
         "agent_takkub.core.providers.errors",
+        "agent_takkub.core.providers.plan",
         "agent_takkub.core.providers.registry"
       ],
-      "imported_by": [],
-      "fan_in": 0,
-      "fan_out": 4
+      "imported_by": [
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.core.providers.claude_adapter",
       "imports": [
+        "agent_takkub.core.models.account",
         "agent_takkub.core.models.agent",
+        "agent_takkub.core.models.spawn_plan",
         "agent_takkub.core.providers.errors",
+        "agent_takkub.core.providers.plan",
         "agent_takkub.provider_config"
       ],
       "imported_by": [
@@ -1297,13 +1338,16 @@
         "agent_takkub.core.providers.registry"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.providers.cli_adapter",
       "imports": [
+        "agent_takkub.core.models.account",
         "agent_takkub.core.models.agent",
+        "agent_takkub.core.models.spawn_plan",
         "agent_takkub.core.providers.errors",
+        "agent_takkub.core.providers.plan",
         "agent_takkub.provider_config"
       ],
       "imported_by": [
@@ -1311,7 +1355,7 @@
         "agent_takkub.core.providers.registry"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.providers.errors",
@@ -1323,6 +1367,20 @@
       ],
       "fan_in": 3,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.providers.plan",
+      "imports": [
+        "agent_takkub.core.models.account",
+        "agent_takkub.core.models.spawn_plan"
+      ],
+      "imported_by": [
+        "agent_takkub.core.providers",
+        "agent_takkub.core.providers.claude_adapter",
+        "agent_takkub.core.providers.cli_adapter"
+      ],
+      "fan_in": 3,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core.providers.registry",
@@ -1369,9 +1427,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.core.routing",
-        "agent_takkub.core.routing.facade"
+        "agent_takkub.core.routing.facade",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -3470,8 +3529,11 @@
         "agent_takkub.codex_agents_md",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.accounts",
         "agent_takkub.core.capabilities.skill_store",
+        "agent_takkub.core.providers",
         "agent_takkub.core.routing",
+        "agent_takkub.core.routing.flag",
         "agent_takkub.gemini_helper",
         "agent_takkub.headless_pane",
         "agent_takkub.hook_wiring",
@@ -3502,7 +3564,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 31
+      "fan_out": 34
     },
     {
       "module": "agent_takkub.spawn_gate",

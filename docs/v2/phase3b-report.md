@@ -54,7 +54,7 @@ actually changed:
 - **Generic non-claude branch is now genuinely adapter-driven for its pure parts.**
   `CliProviderAdapter.build_plan()` (→ `core.providers.plan.build_generic_spawn_plan` →
   `assemble_generic_argv` + `account_env_overrides`) is real, tested, order-verified against
-  the branch's own argv assembly (`spawn_engine.py` ~1873-1977, read verbatim before writing
+  the branch's own argv assembly (`src/agent_takkub/spawn_engine.py` ~1873-1977, read verbatim before writing
   the golden-order test in `test_core_providers_plan.py`). It is **not yet the branch's own
   code path** — spawn_engine.py's inline `provider_argv = [...]` / `.extend()` sequence is
   untouched, so flag-off behavior for argv is unaffected by construction, not just by a flag
@@ -140,7 +140,7 @@ PYTHONPATH=<worktree>/src <shared-venv>/python -m pytest \
   (`project_id=None`) one for the same provider, and only ever inspects the first match of
   each — no pool ever populates today outside tests, so this ordering is a forward-looking
   default, not a proven-necessary one.
-- `_apply_v2_account_env_override` lives as one module-level function in `spawn_engine.py`
+- `_apply_v2_account_env_override` lives as one module-level function in `src/agent_takkub/spawn_engine.py`
   (not duplicated per branch) — both call sites pass a different `provider_id` (`spec.name` vs
   the already-bound `CLAUDE` constant) but share the same fail-open body, mirroring
   `core.routing.facade`'s single-function-two-call-sites shape from Phase 3.
