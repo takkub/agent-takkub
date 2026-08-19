@@ -682,6 +682,41 @@ def _worktree_categories(data_home: Path, mgr: WorktreeManager) -> dict:
     return {"orphan": orphan_rows, "registered": registered_rows}
 
 
+def runtime_layout_triage(data_home: Path | None = None) -> dict:
+    """Read-only classification of `runtime/`'s direct children into
+    permanent-state vs cache/junk (#309 Phase 8b, audit D6: "runtime/
+    ปนกัน 3 ชนิดข้อมูล"), reusing `core.migration.steps_v1`'s own
+    classification tables so this and `takkub migrate`'s step 7 never
+    drift apart. Awareness only — never deletes or moves anything; that
+    stays `takkub prune`'s job (unchanged, no new category added here).
+    """
+    from .core.migration.steps_v1 import RUNTIME_CACHE_ENTRIES, RUNTIME_STATE_TARGETS
+
+    home = (data_home or DATA_HOME).resolve()
+    runtime_dir = home / "runtime"
+    if not runtime_dir.is_dir():
+        return {"state_dirs": {}, "cache_dirs": {}, "unclassified_dirs": {}}
+
+    known = set(RUNTIME_STATE_TARGETS) | set(RUNTIME_CACHE_ENTRIES)
+    state_dirs: dict[str, dict] = {}
+    cache_dirs: dict[str, dict] = {}
+    unclassified: dict[str, dict] = {}
+    try:
+        children = [p for p in runtime_dir.iterdir() if p.is_dir()]
+    except OSError:
+        children = []
+    for child in children:
+        size, count = _dir_stats(child)
+        entry = {"size_bytes": size, "file_count": count}
+        if child.name in RUNTIME_STATE_TARGETS:
+            state_dirs[child.name] = entry
+        elif child.name in RUNTIME_CACHE_ENTRIES:
+            cache_dirs[child.name] = entry
+        elif child.name not in known:
+            unclassified[child.name] = entry
+    return {"state_dirs": state_dirs, "cache_dirs": cache_dirs, "unclassified_dirs": unclassified}
+
+
 def disk_report(data_home: Path | None = None) -> dict:
     """Full categorized disk-usage report for `takkub disk`."""
     home = (data_home or DATA_HOME).resolve()
@@ -851,6 +886,7 @@ def disk_report(data_home: Path | None = None) -> dict:
         "categories": [c.as_dict() for c in categories],
         "worktrees": wt,
         "node_modules": nm,
+        "runtime_triage": runtime_layout_triage(home),
     }
 
 

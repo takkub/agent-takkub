@@ -193,14 +193,29 @@ class _FakeStep:
         return StepReport(self.step_id, "rollback", self.ok, "ok" if self.ok else "failed")
 
 
-def test_engine_default_steps_is_version_marker(tmp_path, monkeypatch):
+def test_engine_default_steps_starts_with_version_marker(tmp_path, monkeypatch):
+    """The default ladder (#309 Phase 8b, plan §5.3) is version-marker + the
+    7 V1->V2 steps, in risk order — version-marker stays first since it
+    predates the ladder and other code (doctor) depends on it running."""
     monkeypatch.setattr(
         "agent_takkub.core.migration.steps.version_doc_path", lambda: tmp_path / "version.json"
     )
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path / "data_home")
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", tmp_path / "settings_home")
     engine = MigrationEngine()
     reports = engine.inspect()
-    assert len(reports) == 1
+    assert len(reports) == 8
     assert reports[0].step_id == "version-marker"
+    assert [r.step_id for r in reports[1:]] == [
+        "readonly-registries",
+        "role-agent",
+        "capability",
+        "project",
+        "state",
+        "credential-reference",
+        "runtime-triage",
+    ]
+    assert all(r.ok for r in reports)
 
 
 def test_engine_apply_stops_on_first_failure():

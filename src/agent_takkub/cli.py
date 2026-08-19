@@ -1467,6 +1467,11 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
         findings += check_core_version_compat()
 
+    if getattr(args, "storage_layout", False):
+        from .doctor import check_storage_layout_state
+
+        findings += check_storage_layout_state()
+
     if args.json:
         import json as _json
 
@@ -2860,6 +2865,12 @@ def main(argv: list[str] | None = None) -> int:
         "--core-version",
         action="store_true",
         help="also run Core V2 Schema/Adapter/Compat checks per provider (#309 Phase 4); "
+        "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
+    sdoc.add_argument(
+        "--storage-layout",
+        action="store_true",
+        help="also report V1/V2/mixed storage layout state (#309 Phase 8b); "
         "opt-in, off by default so plain `takkub doctor` is unchanged",
     )
     sdoc.set_defaults(func=cmd_doctor)
