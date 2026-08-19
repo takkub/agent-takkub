@@ -187,7 +187,10 @@ def _provider_body_entries(
         else:
             entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
     else:
-        entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
+        if stale and u.fetched_at:
+            entries.append(("text", "ข้อมูลโควต้าหมดอายุ (ยังไม่อัปเดต)", cockpit_theme.TEXT_FAINT))
+        else:
+            entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
 
     age = fmt_age(u.fetched_at, now)
     stale_enough = u.fetched_at is not None and (now - _aware(u.fetched_at)).total_seconds() > 900

@@ -400,7 +400,9 @@ class TestGeminiAdapter:
     def test_fresh_data_is_active_with_worst_case_model(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
         cache_dir.mkdir()
-        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        now = datetime.now(tz=UTC)
+        now_ms = int(now.timestamp() * 1000)
+        future_iso = (now + timedelta(days=1)).isoformat().replace("+00:00", "Z")
         payload = {
             "email": "user@example.com",
             "updatedAt": now_ms,
@@ -409,13 +411,13 @@ class TestGeminiAdapter:
                     "gemini-3-flash": {
                         "quotaInfo": {
                             "remainingFraction": 0.9,
-                            "resetTime": "2026-08-14T00:00:00Z",
+                            "resetTime": future_iso,
                         }
                     },
                     "gemini-3.1-pro": {
                         "quotaInfo": {
                             "remainingFraction": 0.2,
-                            "resetTime": "2026-08-15T00:00:00Z",
+                            "resetTime": future_iso,
                         }
                     },
                 }
@@ -428,6 +430,8 @@ class TestGeminiAdapter:
         # worst-case model (lowest remaining fraction 0.2) drives the meter
         assert result.utilization == pytest.approx(80.0)
         assert result.raw_data["model_count"] == 2
+        assert result.windows is not None
+        assert len(result.windows) == 2
 
     def test_stale_data_is_flagged_stale_not_active(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
@@ -446,6 +450,7 @@ class TestGeminiAdapter:
         monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
         result = pu.fetch_gemini_usage()
         assert result.status == "stale"
+        assert result.utilization is None
 
     def test_picks_newest_file_when_multiple_accounts_cached(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"

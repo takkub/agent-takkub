@@ -425,6 +425,19 @@ def fetch_codex_usage(
 _GEMINI_STALE_THRESHOLD_S = 24 * 3600.0
 
 
+def _antigravity_authorized_cache_dirs() -> list[Path]:
+    """Candidate cache directories where Antigravity / Gemini quota files may be written."""
+    home = Path.home()
+    return [
+        home / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized",
+        home / ".antigravity_cockpit" / "cache" / "quota" / "authorized",
+        home / ".gemini" / "cache" / "quota_api_v1_plugin" / "authorized",
+        home / ".gemini" / "antigravity-cli" / "cache" / "quota_api_v1_plugin" / "authorized",
+        home / ".antigravity" / "cache" / "quota_api_v1_plugin" / "authorized",
+        home / ".antigravity-ide" / "cache" / "quota_api_v1_plugin" / "authorized",
+    ]
+
+
 def _antigravity_authorized_cache_dir() -> Path:
     return Path.home() / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized"
 
@@ -435,13 +448,32 @@ def fetch_gemini_usage() -> ProviderUsage:
     main thread like every other adapter here for consistency, though it's
     fast enough it would rarely matter.
     """
-    cache_dir = _antigravity_authorized_cache_dir()
-    try:
-        candidates = sorted(cache_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        return _unsupported("gemini", "no Antigravity quota cache directory found")
+    primary_dir = _antigravity_authorized_cache_dir()
+    # Only widen discovery when the primary is the real default location.
+    # A redirected primary (tests, or a future per-account config_dir) must
+    # stay scoped — a "startswith(home)" guard is not enough on Windows
+    # where pytest's tmp_path itself lives under the user's home.
+    if (
+        primary_dir
+        != Path.home() / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized"
+    ):
+        dirs_to_check = [primary_dir]
+    else:
+        dirs_to_check = [primary_dir] + [
+            d for d in _antigravity_authorized_cache_dirs() if d != primary_dir
+        ]
+    candidates: list[Path] = []
+    for cache_dir in dirs_to_check:
+        try:
+            if cache_dir.is_dir():
+                candidates.extend(cache_dir.glob("*.json"))
+        except OSError:
+            pass
+
     if not candidates:
         return _unsupported("gemini", "no Antigravity quota cache file found (not logged in?)")
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
     try:
         raw = json.loads(candidates[0].read_text(encoding="utf-8"))
@@ -464,10 +496,11 @@ def fetch_gemini_usage() -> ProviderUsage:
 
     # Aggregate to the worst-case (lowest remaining fraction) tracked model —
     # a single meter is what a status-bar chip needs; per-model detail rides
-    # along in raw_data for anything that wants more.
+    # along in raw_data and windows for anything that wants more.
     best_fraction: float | None = None
     resets_at: datetime | None = None
-    for info in models.values():
+    windows: list[dict[str, Any]] = []
+    for model_name, info in models.items():
         if not isinstance(info, dict):
             continue
         quota = info.get("quotaInfo")
@@ -480,6 +513,24 @@ def fetch_gemini_usage() -> ProviderUsage:
             fraction = float(fraction)
         except (TypeError, ValueError):
             continue
+        m_utilization = max(0.0, min(100.0, (1.0 - fraction) * 100.0))
+        m_reset_raw = quota.get("resetTime")
+        m_resets_at_iso = None
+        if isinstance(m_reset_raw, str):
+            try:
+                m_resets_at_iso = datetime.fromisoformat(
+                    m_reset_raw.replace("Z", "+00:00")
+                ).isoformat()
+            except ValueError:
+                m_resets_at_iso = None
+        display_name = info.get("displayName") or model_name
+        windows.append(
+            {
+                "name": str(display_name),
+                "utilization": m_utilization,
+                "resets_at": m_resets_at_iso,
+            }
+        )
         if best_fraction is None or fraction < best_fraction:
             best_fraction = fraction
             reset_raw = quota.get("resetTime")
@@ -490,14 +541,32 @@ def fetch_gemini_usage() -> ProviderUsage:
                 except ValueError:
                     resets_at = None
 
-    utilization = None
-    if best_fraction is not None:
-        utilization = max(0.0, min(100.0, (1.0 - best_fraction) * 100.0))
+    now = datetime.now(tz=UTC)
+    age_s = (now - fetched_at).total_seconds() if fetched_at else None
+    is_stale = age_s is None or age_s > _GEMINI_STALE_THRESHOLD_S
+    is_expired = resets_at is not None and resets_at < now
 
-    age_s = (datetime.now(tz=UTC) - fetched_at).total_seconds() if fetched_at else None
-    status = STATUS_ACTIVE
-    if age_s is None or age_s > _GEMINI_STALE_THRESHOLD_S:
+    if is_stale or is_expired:
         status = STATUS_STALE
+        # If the quota window expired (resets_at in past) or data is ancient (>7d),
+        # utilization must be None rather than a misleading stale 0% (which renders as 100% left).
+        if is_expired or (age_s is not None and age_s > 7 * 86400):
+            utilization = None
+            resets_at = None
+            windows_out = None
+        else:
+            utilization = (
+                None
+                if best_fraction is None
+                else max(0.0, min(100.0, (1.0 - best_fraction) * 100.0))
+            )
+            windows_out = windows or None
+    else:
+        status = STATUS_ACTIVE
+        utilization = (
+            None if best_fraction is None else max(0.0, min(100.0, (1.0 - best_fraction) * 100.0))
+        )
+        windows_out = windows or None
 
     return ProviderUsage(
         provider="gemini",
@@ -506,6 +575,7 @@ def fetch_gemini_usage() -> ProviderUsage:
         resets_at=resets_at,
         fetched_at=fetched_at,
         raw_data={"email": raw.get("email"), "model_count": len(models)},
+        windows=windows_out,
     )
 
 

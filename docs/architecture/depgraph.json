@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 266,
+  "module_count": 267,
   "modules": [
     {
       "module": "agent_takkub",
@@ -60,6 +60,7 @@
         "agent_takkub.claude_update",
         "agent_takkub.codex_helper",
         "agent_takkub.core.secrets.backends.keychain_backend",
+        "agent_takkub.cursor_helper",
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
         "agent_takkub.git_status",
@@ -88,7 +89,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 32,
+      "fan_in": 33,
       "fan_out": 0
     },
     {
@@ -1842,6 +1843,17 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.cursor_helper",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.remote.notify"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.custom_roles",
       "imports": [
         "agent_takkub.config",
@@ -2902,6 +2914,7 @@
         "agent_takkub.config",
         "agent_takkub.core.conversation.flag",
         "agent_takkub.core.conversation.store",
+        "agent_takkub.cursor_helper",
         "agent_takkub.gemini_helper",
         "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
@@ -2916,7 +2929,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.remote.session_store",

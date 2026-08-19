@@ -50,25 +50,30 @@ class TestOpencodeSpec:
 
     def test_ready_rule_in_global_table(self) -> None:
         assert (True, "ctrl+p commands") in READY_RULES
+        assert (True, "ctrl+p cmd") in READY_RULES
+        assert (True, "tab agents") in READY_RULES
+        assert (True, "ask anything...") in READY_RULES
 
     def test_ready_marker_no_substring_collision(self) -> None:
-        """opencode's marker must not be a substring of (or contain) any other
-        provider's marker/blocker — position in the ordered concat then
-        carries no precedence weight (see _READY_RULES_BY_PROVIDER comment)."""
-        marker = "ctrl+p commands"
-        others = [m for _, m in READY_RULES if m != marker] + list(READY_HARD_BLOCKERS)
-        for other in others:
-            assert marker not in other and other not in marker, (
-                f"collision between {marker!r} and {other!r}"
-            )
+        """opencode's markers must not collide with other providers' markers or blockers."""
+        opencode_markers = {"ctrl+p commands", "ctrl+p cmd", "tab agents", "ask anything..."}
+        others = [m for _, m in READY_RULES if m not in opencode_markers] + list(
+            READY_HARD_BLOCKERS
+        )
+        for marker in opencode_markers:
+            for other in others:
+                assert marker not in other and other not in marker, (
+                    f"collision between {marker!r} and {other!r}"
+                )
 
     def test_classify_ready_on_captured_footer(self) -> None:
-        """The footer captured from a real opencode 1.18.3 ConPTY session
-        (2026-07-17 calibration) must classify as ready."""
+        """The footer and composer markers across opencode variants must classify as ready."""
         from agent_takkub.pty_session import _classify_ready
 
-        footer = "tab agents  ctrl+p commands"
-        assert _classify_ready(footer) is True
+        assert _classify_ready("tab agents  ctrl+p commands") is True
+        assert _classify_ready("tab agents\n● tip...") is True
+        assert _classify_ready('ask anything... "fix tests"\nbuild   ctrl+p cmd') is True
+        assert _classify_ready('ask anything... "what is the stack?"') is True
 
     def test_busy_blockers_still_win(self) -> None:
         """Global hard blockers must override the idle footer if both render
@@ -76,6 +81,13 @@ class TestOpencodeSpec:
         from agent_takkub.pty_session import _classify_ready
 
         assert _classify_ready("esc to interrupt\ntab agents  ctrl+p commands") is False
+        assert _classify_ready("esc to cancel\nask anything...") is False
+        assert (
+            _classify_ready(
+                "⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                             tab agents  ctrl+p commands"
+            )
+            is False
+        )
 
 
 @pytest.fixture(scope="module")

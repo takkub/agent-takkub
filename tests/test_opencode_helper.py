@@ -145,6 +145,36 @@ class TestOpencodeSessionResolution:
         assert resolved is not None
         assert resolved[1] == "ses_new"
 
+    def test_resolve_by_cwd_session_rotation_not_stuck_in_cache(self, tmp_path):
+        db_path = tmp_path / "opencode.db"
+        conn = _create_test_db(db_path)
+        cur = conn.cursor()
+        proj_dir = str(tmp_path / "myproj")
+        cur.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?)",
+            ("ses_1", proj_dir, "Session 1", 1000, 2000),
+        )
+        conn.commit()
+
+        # First resolution gets ses_1
+        resolved_1 = opencode_helper.resolve_opencode_session(proj_dir, db_path=db_path)
+        assert resolved_1 is not None
+        assert resolved_1[1] == "ses_1"
+
+        # Rotate to a newer session in the same directory
+        cur.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?)",
+            ("ses_2", proj_dir, "Session 2", 3000, 4000),
+        )
+        conn.commit()
+        conn.close()
+
+        # Second resolution without session_id (past cache TTL or after cache clear) must find the newer ses_2
+        opencode_helper._OPENCODE_RESOLVE_CACHE.clear()
+        resolved_2 = opencode_helper.resolve_opencode_session(proj_dir, db_path=db_path)
+        assert resolved_2 is not None
+        assert resolved_2[1] == "ses_2"
+
 
 class TestOpencodeMessageReading:
     def test_read_messages_formats_kinds_and_strips_prefix(self, tmp_path):
