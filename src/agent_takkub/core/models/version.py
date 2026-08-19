@@ -1,5 +1,5 @@
-"""Version/compatibility vocabulary (Phase 3 target — version.json, compat
-matrix, migration engine). NEW.
+"""Version/compatibility vocabulary — version.json, compat matrix, migration
+engine (#309 Phase 4, docs/v2/V2_IMPLEMENTATION_PLAN.md §5).
 """
 
 from __future__ import annotations
@@ -24,6 +24,13 @@ class CompatibilityRule:
     component: str
     min_version: str | None = None
     max_version: str | None = None
+    # True (default): max_version is an exclusive ceiling (installed must be
+    # STRICTLY below it). False: max_version is inclusive. Additive field —
+    # every existing construction of this dataclass keeps its old meaning.
+    max_exclusive: bool = True
+    # Feature flags this component's version range unlocks — checked via
+    # CompatibilityMatrix.supports_feature(), not compared numerically.
+    features: tuple[str, ...] = ()
     note: str = ""
     user_id: str | None = None
     workspace_id: str | None = None
