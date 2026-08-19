@@ -10,6 +10,36 @@ the plan (§3.4).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    """One normalized turn, provider-agnostic (plan §5.1 ingest contract).
+
+    `source` names where the record came from — `"live_pty"` (transcript
+    ingest from a provider's own store) vs `"done_note"` (the summary an
+    agent wrote via `takkub done`) — so a reader can tell an ingested
+    transcript line apart from cockpit-authored summary text without
+    guessing from content shape.
+    """
+
+    id: str
+    conversation_id: str
+    role: MessageRole
+    text: str
+    created_at: float | None = None
+    provider_id: str | None = None
+    source: str = "live_pty"
+    user_id: str | None = None
+    workspace_id: str | None = None
+    project_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

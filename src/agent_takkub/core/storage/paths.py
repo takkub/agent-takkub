@@ -18,3 +18,16 @@ def core_home() -> Path:
 
 def core_store_path(name: str) -> Path:
     return core_home() / f"{name}.jsonl"
+
+
+def conversations_root() -> Path:
+    return core_home() / "conversations"
+
+
+def conversation_dir(project_id: str, conversation_id: str) -> Path:
+    """One directory per conversation, project-scoped (plan §5.2) — never a
+    single flat file, so a size cap / rotation only ever touches its own
+    conversation's data.
+    """
+    safe_project = project_id or "_no_project"
+    return conversations_root() / safe_project / conversation_id

@@ -63,6 +63,57 @@ def test_read_all_skips_corrupt_lines_and_counts_them(tmp_path):
     assert result.corrupt_lines == 1
 
 
+def test_true_append_writes_single_line_without_rewrite(tmp_path, monkeypatch):
+    path = tmp_path / "records.jsonl"
+    store = JsonlStore(path, true_append=True)
+    store.append({"id": "a"})
+
+    replace_calls = []
+    monkeypatch.setattr(
+        "agent_takkub.core.storage.jsonl_store.os.replace",
+        lambda *a: replace_calls.append(a),
+    )
+    store.append({"id": "b"})
+    assert replace_calls == []  # true_append never goes through the rewrite path
+    result = store.read_all()
+    assert result.records == [{"id": "a"}, {"id": "b"}]
+
+
+def test_true_append_default_is_off_preserves_old_behavior(tmp_path):
+    store = JsonlStore(tmp_path / "records.jsonl")
+    store.append({"id": "a"})
+    store.append({"id": "b"})
+    assert store.read_all().records == [{"id": "a"}, {"id": "b"}]
+
+
+def test_read_from_offset_returns_only_new_records(tmp_path):
+    path = tmp_path / "records.jsonl"
+    store = JsonlStore(path, true_append=True)
+    store.append({"id": "a"})
+    first = store.read_from(0)
+    assert first.records == [{"id": "a"}]
+    store.append({"id": "b"})
+    second = store.read_from(first.next_offset)
+    assert second.records == [{"id": "b"}]
+    assert second.next_offset > first.next_offset
+
+
+def test_read_from_offset_missing_file_is_empty(tmp_path):
+    result = JsonlStore(tmp_path / "missing.jsonl").read_from(0)
+    assert result.records == []
+    assert result.next_offset == 0
+
+
+def test_read_from_offset_past_size_returns_empty_clamped(tmp_path):
+    path = tmp_path / "records.jsonl"
+    store = JsonlStore(path, true_append=True)
+    store.append({"id": "a"})
+    size = path.stat().st_size
+    result = store.read_from(size + 500)
+    assert result.records == []
+    assert result.next_offset == size
+
+
 def test_core_store_path_lives_under_core_home():
     path = core_store_path("tasks")
     assert path == core_home() / "tasks.jsonl"
@@ -116,6 +167,17 @@ import agent_takkub.core.storage.legacy_reader
 import agent_takkub.core.providers
 import agent_takkub.core.accounts
 import agent_takkub.core.routing
+import agent_takkub.core.conversation
+import agent_takkub.core.conversation.store
+import agent_takkub.core.conversation.summary
+import agent_takkub.core.conversation.checkpoint
+import agent_takkub.core.conversation.resume
+import agent_takkub.core.conversation.facade
+import agent_takkub.core.conversation.ingest
+import agent_takkub.core.conversation.ingest.claude_adapter
+import agent_takkub.core.conversation.ingest.codex_adapter
+import agent_takkub.core.conversation.ingest.gemini_adapter
+import agent_takkub.core.conversation.ingest.opencode_adapter
 
 qt_modules = [m for m in sys.modules if m.startswith("PyQt6")]
 print(",".join(qt_modules))
