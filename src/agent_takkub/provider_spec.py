@@ -293,6 +293,20 @@ class ProviderSpec:
     #                  lesson in docs/v2/CURRENT_ARCHITECTURE_AUDIT.md).
     compat_range: str = ""
 
+    # ─── 17. Quota/usage-limit detection (#301) ───
+    # Lower-case substrings that unambiguously mean "this provider just hit
+    # its account-level quota/rate/usage limit" when seen anywhere on the
+    # pane's screen — same REACHED-STATE-only discipline as
+    # auth_error_markers above (never a bare topic word: the claude Fable-5
+    # promo banner false-positived on the bare word "usage limit" while only
+    # talking about limits hypothetically — see GENERIC_QUOTA_MARKERS below).
+    # Checked by PtySession.rate_limit_reset_at()/quota_stall_marker() via
+    # quota_markers_for(), which ORs this in with GENERIC_QUOTA_MARKERS for
+    # every provider. Empty here means no provider-specific wording has been
+    # confirmed yet — never guess a marker from a provider's docs alone (a
+    # wrong guess either matches ordinary conversation text or never fires).
+    quota_markers: tuple[str, ...] = field(default_factory=tuple)
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -609,6 +623,19 @@ codex_spec = ProviderSpec(
     # error) — no confirmed in-pane error text exists to list here.
     # GENERIC_AUTH_ERROR_MARKERS is the only signal until one is observed.
     auth_error_markers=(),
+    # #301: NOT yet verified against a real codex quota banner either — no
+    # screenshot/transcript evidence exists yet the way gemini's "Individual
+    # quota reached" text below does. Deliberately REACHED-STATE phrasing
+    # (never the bare "rate limit"/"usage limit" topic words #301 itself
+    # suggested) — a bare topic word is the exact false-positive class
+    # GENERIC_QUOTA_MARKERS's own module note documents (claude's Fable-5
+    # promo banner). Revise once a real codex limit screen is captured.
+    quota_markers=(
+        "rate limit reached",
+        "you've hit your rate limit",
+        "usage limit reached",
+        "you have reached your usage limit",
+    ),
     # codex is an npm-installed CLI on a node runtime (same shim shape as
     # claude/opencode) plus its own `code_mode`/`codex_apps` sandbox host
     # process — both confirmed always-present under a live codex pane at
@@ -748,6 +775,13 @@ gemini_spec = ProviderSpec(
     # the "override a stale marker once a newer identity is on screen"
     # mechanism #256 asked for, with no separate identity-parsing needed.
     auth_transient_markers=("signing in", "verifying your account", "not signed in"),
+    # #301: field-verified 2026-08-18 19:06, frontend#2 pane — the pane
+    # printed exactly "⚠ Individual quota reached. Please upgrade your
+    # subscription to increase your limits. Resets in 1h53m57s." before
+    # auto-downgrading itself Pro→Flash. Duration-style reset ("Resets in
+    # XhYmZs"), not claude's clock-time ("resets 3pm") — see
+    # _parse_duration_reset in pty_session.py.
+    quota_markers=("individual quota reached",),
 )
 
 
@@ -825,6 +859,11 @@ opencode_spec = ProviderSpec(
     # ⚠ NOT yet verified — no authenticated opencode session was available
     # for calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
     auth_error_markers=(),
+    # TODO(#103/#301): opencode's quota/rate-limit wording is unconfirmed —
+    # no authenticated session hit a limit during calibration. Leave empty
+    # (GENERIC_QUOTA_MARKERS only) rather than guess; fill in once a real
+    # banner is captured.
+    quota_markers=(),
     # opencode-ai is npm-installed (same shim shape as claude/codex), so a
     # `node` child is expected scaffolding, not evidence of unfinished work
     # (#272).
@@ -930,6 +969,10 @@ kimi_spec = ProviderSpec(
     # convict the pane on login grounds. "send /login to login" is
     # first-person CLI chrome no unrelated dev-output plausibly reproduces.
     auth_error_markers=("send /login to login",),
+    # TODO(#103/#301): kimi's quota/rate-limit wording is unconfirmed — no
+    # authenticated session hit a limit during calibration. Leave empty
+    # (GENERIC_QUOTA_MARKERS only) rather than guess.
+    quota_markers=(),
     # kimi-cli is installed via `uv tool install` and runs on a python
     # interpreter (uv shims resolve to a python entry point), so a `python`
     # child is expected scaffolding under a live kimi pane, not evidence of
@@ -1012,6 +1055,12 @@ cursor_spec = ProviderSpec(
     # ⚠ NOT yet verified — no Cursor TUI auth-failure screen has been
     # observed (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
     auth_error_markers=(),
+    # TODO(#103/#301): Cursor's quota/rate-limit wording is unconfirmed — no
+    # authenticated session hit a limit during calibration. Leave empty
+    # (GENERIC_QUOTA_MARKERS only) rather than guess. Note cursor is also in
+    # uncalibrated_providers() (empty ready_rules), so display_state already
+    # reads "unknown" for it ahead of any quota tier anyway.
+    quota_markers=(),
 )
 
 
@@ -1150,6 +1199,37 @@ def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
     boot-time account-check text."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.auth_transient_markers if spec is not None else ()
+
+
+# ── quota/usage-limit detection (#301) ──────────────────────────────────────
+# Cross-provider REACHED-STATE baseline, field-verified against real claude
+# usage-limit banners (see pty_session.py's pre-#301 "Claude usage-limit
+# detection" module note — this is the same table, moved here so a
+# non-claude provider can OR its own confirmed wording into the same
+# baseline via quota_markers_for(), mirroring GENERIC_AUTH_ERROR_MARKERS
+# above). Never a bare topic word ("usage limit", "rate limit") — a v2.1.198
+# Fable-5 promo notice false-positived on the bare phrase because it merely
+# *talked about* limits hypothetically ("if you hit your limit"); a real
+# banner declares the limit HIT or names the reset.
+GENERIC_QUOTA_MARKERS: tuple[str, ...] = (
+    "limit reached",
+    "limit will reset",
+    "reached your usage",
+    "hit your usage limit",
+    "hit your session limit",
+    "hit your weekly limit",
+    "out of usage",
+)
+
+
+def quota_markers_for(provider: str) -> tuple[str, ...]:
+    """Quota/usage-limit REACHED markers for `provider`: its own confirmed
+    list (``ProviderSpec.quota_markers``) plus the generic cross-provider
+    baseline, deduped — same shape as ``auth_error_markers_for``. Unknown
+    provider name → generic markers only."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    own = spec.quota_markers if spec is not None else ()
+    return tuple(dict.fromkeys((*own, *GENERIC_QUOTA_MARKERS)))
 
 
 # ── ready-marker calibration status (#257) ──────────────────────────────────

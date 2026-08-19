@@ -23,7 +23,7 @@ from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from . import browser_chrome
 from .config import write_port
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, _human_duration
 from .spawn_queue_health import SpawnQueueHealthMonitor
 
 # Maximum allowed frame size (bytes). Frames larger than this are rejected so
@@ -658,6 +658,15 @@ class CliServer(QObject):
                     stall_min = info.get("stall_minutes")
                     if stall_min is not None:
                         state = f"{state} (stalled {stall_min}m)"
+                    # #301: quote the quota reset window right on the compact
+                    # `takkub list` line too, not just the detailed `status`
+                    # report — this is the line a Lead skims most often.
+                    quota_resets_at = info.get("quota_resets_at") or 0.0
+                    if quota_resets_at:
+                        state = f"{state} (resets {_human_duration(quota_resets_at - time.time())})"
+                    model = info.get("model")
+                    if model:
+                        state = f"{state} [{model}]"
                     status[role] = state
                 self._reply(sock, ok=True, msg="status", status=status)
                 return

@@ -34,7 +34,9 @@ from .provider_spec import (
     PROVIDER_REGISTRY,
     auth_error_markers_for,
     auth_transient_markers_for,
+    quota_markers_for,
 )
+from .provider_spec import GENERIC_QUOTA_MARKERS as _DEFAULT_RATE_LIMIT_MARKERS
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
 
@@ -126,6 +128,18 @@ _SPINNER_GLYPH_RE = re.compile(
     # ("a-b", "--force", "a/b" are left untouched)
 )
 _TRAILING_DOTS_RE = re.compile(r"\.+\s*$")
+# #301/#308: a live elapsed-seconds counter next to a busy indicator ("esc to
+# cancel · 412s)", "Running command... (5s)") changes every tick just like a
+# spinner glyph, but isn't a glyph — it's plain digits — so it defeated the
+# spinner-only normalization above. Real incident: an agy pane wedged on
+# "Running command..." kept reading `takkub status` as "last progress: 1s
+# ago" the whole time it was stuck, because the growing counter alone was
+# enough to change the fingerprint every second. `\bNs\b` matches the counter
+# regardless of what follows it (paren, "·", end of line) — deliberately NOT
+# scoped to a specific provider's busy phrase the way orchestrator.py's
+# `_check_stuck_panes` line-filter is, since this fingerprint has no
+# provider context to key off of.
+_ELAPSED_COUNTER_RE = re.compile(r"\b\d+s\b")
 
 
 def _content_fingerprint(lines: list[str]) -> str:
@@ -139,6 +153,7 @@ def _content_fingerprint(lines: list[str]) -> str:
         if not stripped:
             continue
         stripped = _SPINNER_GLYPH_RE.sub("", stripped)
+        stripped = _ELAPSED_COUNTER_RE.sub("", stripped)
         stripped = _TRAILING_DOTS_RE.sub("", stripped).rstrip()
         if stripped:
             rows.append(stripped)
@@ -637,19 +652,13 @@ def ready_marker_selftest() -> list[str]:
 # about limits hypothetically ("if you hit your limit"); a real banner declares
 # the limit HIT ("limit reached", "you've reached your usage limit") or names
 # the reset ("your limit will reset at 3pm").
-_DEFAULT_RATE_LIMIT_MARKERS = (
-    "limit reached",  # "usage limit reached", "5-hour limit reached ∙ resets 3pm"
-    "limit will reset",  # "your limit will reset at 11pm"
-    "reached your usage",  # "you've reached your usage limit"
-    "hit your usage limit",  # "you've hit your usage limit"
-    # v2.1.198 real banner, field-verified 2026-07-02: "You've hit your
-    # session limit · resets 1:10pm (Asia/Bangkok)". Weekly variant assumed
-    # same shape. Neither is matchable by the promo text ("if you hit your
-    # limit" — no qualifier word).
-    "hit your session limit",
-    "hit your weekly limit",
-    "out of usage",
-)
+#
+# #301: this table now lives as provider_spec.GENERIC_QUOTA_MARKERS (imported
+# above as _DEFAULT_RATE_LIMIT_MARKERS) so a non-claude provider can OR its
+# own confirmed wording into the same baseline via quota_markers_for() — see
+# that module's "quota/usage-limit detection" section for the content itself
+# and the per-provider tables (gemini/agy's field-verified "individual quota
+# reached", codex's provisional reached-state phrasing).
 
 
 def _rate_limit_markers() -> tuple[str, ...]:
@@ -663,20 +672,57 @@ def _rate_limit_markers() -> tuple[str, ...]:
 _RESET_TIME_RE = re.compile(
     r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
 )
+# Reset DURATION, e.g. gemini/agy's "Resets in 1h53m57s" (#301, field-verified
+# 2026-08-18) — a countdown from now, not a clock-time-of-day like claude's
+# banner above, so it needs its own parser rather than reusing _RESET_TIME_RE.
+# At least one of h/m/s must be present with a real digit (an empty match —
+# "resets in" with nothing after it — must not silently mean "0 seconds").
+_DURATION_RESET_RE = re.compile(
+    r"resets?\s+in\s+(?:(?P<h>\d+)\s*h)?\s*(?:(?P<m>\d+)\s*m)?\s*(?:(?P<s>\d+)\s*s)?",
+    re.IGNORECASE,
+)
 # Fallback window when the banner is present but no parseable time is found —
 # Anthropic's rolling window is ~5h, so wait that long before re-checking.
 _RATE_LIMIT_FALLBACK_SEC = 5 * 60 * 60
 
 
-def _parse_rate_limit_reset(text: str, now: float) -> float | None:
+def _parse_duration_reset(text: str, now: float) -> float | None:
+    """Given lower-cased pane text, return `now` + the "resets in XhYmZs"
+    countdown, or None if no such duration phrase is present / it has no
+    digits at all (see _DURATION_RESET_RE's module note)."""
+    m = _DURATION_RESET_RE.search(text)
+    if not m:
+        return None
+    h = int(m.group("h") or 0)
+    mnt = int(m.group("m") or 0)
+    s = int(m.group("s") or 0)
+    if h == 0 and mnt == 0 and s == 0:
+        return None
+    return now + h * 3600 + mnt * 60 + s
+
+
+def _parse_rate_limit_reset(
+    text: str, now: float, markers: tuple[str, ...] | None = None
+) -> float | None:
     """Given lower-cased pane text, return the epoch the usage limit resets at,
     or None if no limit banner is present.
 
-    If a banner is present but the reset time can't be parsed, fall back to
-    now + ~5h so the watchdog still backs off rather than nagging forever.
+    *markers* defaults to the claude-only env-overridable table
+    (`_rate_limit_markers()`) for back-compat; a caller checking a specific
+    provider passes its own resolved list instead (#301) —
+    `PtySession.rate_limit_reset_at()` does this via `_resolve_quota_markers()`.
+
+    If a banner is present, tries the duration form first ("resets in
+    XhYmZs" — gemini/agy, #301) then the clock-time form ("resets 3pm" —
+    claude); if neither parses, falls back to now + ~5h so the watchdog
+    still backs off rather than nagging forever.
     """
-    if not any(m in text for m in _rate_limit_markers()):
+    active_markers = markers if markers is not None else _rate_limit_markers()
+    if not any(m in text for m in active_markers):
         return None
+    duration = _parse_duration_reset(text, now)
+    if duration is not None:
+        return duration
     m = _RESET_TIME_RE.search(text)
     if not m:
         return now + _RATE_LIMIT_FALLBACK_SEC
@@ -697,6 +743,27 @@ def _parse_rate_limit_reset(text: str, now: float) -> float | None:
     if epoch <= now:  # clock time already passed today → it means tomorrow
         epoch += 24 * 60 * 60
     return epoch
+
+
+def _resolve_quota_markers(provider: str) -> tuple[str, ...]:
+    """Markers to check for `provider`'s quota/usage-limit state (#301):
+    the `TAKKUB_RATE_LIMIT_MARKERS` env override if set (same override
+    `_rate_limit_markers()` honors, useful for debugging any provider), else
+    `provider_spec.quota_markers_for(provider)` (that provider's own
+    confirmed list + the generic cross-provider baseline)."""
+    override = os.environ.get("TAKKUB_RATE_LIMIT_MARKERS", "").strip()
+    if override:
+        return tuple(m.strip().lower() for m in override.split(",") if m.strip())
+    return quota_markers_for(provider)
+
+
+# gemini/agy footer model label, e.g. "Gemini 3.1 Pro · high" (idle) or
+# "Gemini 3.5 Flash (Medium)" (legacy CLI, see the ready-marker fixture at
+# module top) — confirmed shape only; used by PtySession.current_model_label()
+# to surface a silent Pro→Flash quota-downgrade (#301).
+_GEMINI_MODEL_RE = re.compile(
+    r"(Gemini [\d.]+ (?:Pro|Flash)(?:\s*\([^)]*\))?(?:\s*[·:]\s*\w+)?)", re.IGNORECASE
+)
 
 
 class WritePriority(IntEnum):
@@ -1691,17 +1758,52 @@ class PtySession(QObject):
         "spawning" apart from "active"/"ready"."""
         return self._first_content_ts
 
-    def rate_limit_reset_at(self) -> float | None:
-        """If the pane is showing claude's usage-limit banner, return the epoch
-        the limit resets at; else None.
+    def rate_limit_reset_at(self, provider: str = "claude") -> float | None:
+        """If the pane is showing `provider`'s quota/usage-limit banner,
+        return the epoch the limit resets at; else None.
 
         Used by the orchestrator's idle watchdog to tell "rate-limited, can't
         work until reset" apart from "idle, forgot takkub done" so it suppresses
         the reminder loop and notifies at reset time instead. See the marker
         notes at module top — detection wording needs real-banner verification.
+
+        `provider` defaults to "claude" for back-compat with existing call
+        sites; #301 generalized detection to every provider via
+        `_resolve_quota_markers(provider)` — gemini/agy's field-verified
+        "individual quota reached" (duration-style reset) and codex's
+        provisional reached-state phrasing are checked the same way.
         """
         text = "\n".join(self.display_lines()).lower()
-        return _parse_rate_limit_reset(text, time.time())
+        return _parse_rate_limit_reset(text, time.time(), _resolve_quota_markers(provider))
+
+    def quota_stall_marker(self, provider: str = "claude") -> str | None:
+        """The matched quota/usage-limit phrase currently shown for
+        `provider`, or None (#301). Companion to `rate_limit_reset_at()` —
+        same detection, exposes WHICH phrase matched so a caller can quote it
+        in the Lead-facing notice instead of a bare "quota hit"."""
+        text = "\n".join(self.display_lines()).lower()
+        for marker in _resolve_quota_markers(provider):
+            if marker in text:
+                return marker
+        return None
+
+    def current_model_label(self, provider: str) -> str | None:
+        """Best-effort model name currently shown on this pane's screen, or
+        None (#301). Exists so `takkub status`/`list` can surface a silent
+        model downgrade — real incident: a gemini/agy pane hit its quota,
+        auto-downgraded Pro→Flash, and kept working with Lead never told
+        which model actually produced the result.
+
+        Only gemini is calibrated (its footer prints e.g. "Gemini 3.1 Pro ·
+        high" / "Gemini 3.5 Flash (Medium)" — confirmed wording, see
+        `_ready_rules` fixtures). Every other provider returns None until a
+        real screen is captured — never guess a regex from docs alone, same
+        policy as every other marker table in this module."""
+        if provider != "gemini":
+            return None
+        text = "\n".join(self.display_lines())
+        m = _GEMINI_MODEL_RE.search(text)
+        return m.group(1) if m else None
 
     def auth_failure_reason(self, provider: str) -> str | None:
         """Return the matched marker if this pane's screen currently shows
