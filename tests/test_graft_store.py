@@ -35,6 +35,30 @@ def test_graph_key_is_stable_across_calls(tmp_path):
     assert graft_store.graph_key(d) == graft_store.graph_key(d)
 
 
+def test_graph_key_resolves_each_path_once(monkeypatch, tmp_path):
+    """#312: repeated graph/instance key lookups reuse the resolved path."""
+    from pathlib import Path
+
+    d = tmp_path / "proj"
+    d.mkdir()
+    graft_store._resolved_path_for_key.cache_clear()
+    real_resolve = Path.resolve
+    calls = 0
+
+    def _counted_resolve(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _counted_resolve)
+
+    graft_store.graph_key(d)
+    graft_store.graph_key(d)
+
+    assert calls == 1
+    graft_store._resolved_path_for_key.cache_clear()
+
+
 def test_graph_key_differs_for_different_paths(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"

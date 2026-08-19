@@ -1060,6 +1060,13 @@ class PtySession(QObject):
         # the reader thread while the main thread reads display_lines() /
         # is_at_*_prompt() — without this lock those race.
         self._screen_lock = threading.Lock()
+        # Rendering pyte is O(rows * columns). Orchestrator timers call several
+        # predicates per pane per tick, so memoize rows by a generation bumped
+        # after every successful byte feed. Represent the initial blank screen
+        # without walking pyte at all.
+        self._output_generation = 0
+        self._display_cache_generation = 0
+        self._display_lines_cache = tuple(" " * cols for _ in range(rows))
         self._proc = None
         # Root PID of the spawned command (claude.exe), captured at spawn so
         # terminate() can tree-kill descendants even after _proc is torn down.
@@ -1232,7 +1239,8 @@ class PtySession(QObject):
         try:
             with self._screen_lock:
                 self.stream.feed(data)
-                lines = _safe_screen_display(self.screen)
+                self._output_generation += 1
+                lines = self._display_lines_locked()
                 # Classify ready state here, while we already hold the lock
                 # feed() just used — the reader thread pays this cost instead
                 # of the Qt main thread (#106: agent_pane._sync_idle_flag was
@@ -1337,6 +1345,9 @@ class PtySession(QObject):
         self.rows = rows
         with self._screen_lock:
             self.screen.resize(rows, cols)
+            # Resize mutates the visible screen without a byte feed; invalidate
+            # so the next reader preserves the existing resize semantics.
+            self._display_cache_generation = -1
         if self._alive and self._proc is not None:
             try:
                 self._proc.setwinsize(rows, cols)
@@ -1473,10 +1484,18 @@ class PtySession(QObject):
     # ──────────────────────────────────────────────────────────────
     # screen access
     # ──────────────────────────────────────────────────────────────
+    def _display_lines_locked(self) -> list[str]:
+        """Return memoized rows; caller must hold ``_screen_lock``."""
+        generation = self._output_generation
+        if self._display_cache_generation != generation:
+            self._display_lines_cache = tuple(_safe_screen_display(self.screen))
+            self._display_cache_generation = generation
+        return list(self._display_lines_cache)
+
     def display_lines(self) -> list[str]:
         """Return the visible screen as a list of rows (top → bottom)."""
         with self._screen_lock:
-            return _safe_screen_display(self.screen)
+            return self._display_lines_locked()
 
     def cursor(self) -> tuple[int, int]:
         with self._screen_lock:
@@ -1931,7 +1950,7 @@ class PtySession(QObject):
         content of the matched line, suitable for watchdog log messages.
         """
         with self._screen_lock:
-            lines = _safe_screen_display(self.screen)
+            lines = self._display_lines_locked()
             cursor_row = self.screen.cursor.y
         if not lines:
             return None
@@ -1960,7 +1979,7 @@ class PtySession(QObject):
         within the dialog box, not the same line.
         """
         with self._screen_lock:
-            lines = _safe_screen_display(self.screen)
+            lines = self._display_lines_locked()
             cursor_row = self.screen.cursor.y
         if not lines:
             return None
@@ -1996,7 +2015,7 @@ class PtySession(QObject):
         suitable for watchdog log messages.
         """
         with self._screen_lock:
-            lines = _safe_screen_display(self.screen)
+            lines = self._display_lines_locked()
             cursor_row = self.screen.cursor.y
         if not lines:
             return None

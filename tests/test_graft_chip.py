@@ -9,6 +9,7 @@ window construction needed.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -307,6 +308,52 @@ class TestRefreshGraftChip:
         stub = _Stub()
         del stub._chip_graft
         stub._refresh_graft_chip()  # must not raise
+
+    def test_main_thread_refresh_reads_cache_without_filesystem_calls(self, monkeypatch):
+        """#312: the Qt slot paints worker data; it never resolves/stats paths."""
+        stub = _Stub()
+        snapshot = {
+            "available": True,
+            "total": 1,
+            "completed": 1,
+            "eligible_total": 1,
+            "building": 0,
+            "failed": [],
+            "skipped": [],
+        }
+        stub._graft_status_cache = snapshot
+        calls = []
+
+        def _filesystem_call(*_args, **_kwargs):
+            calls.append(1)
+            raise AssertionError("filesystem call reached the Qt refresh slot")
+
+        monkeypatch.setattr(Path, "resolve", _filesystem_call)
+        monkeypatch.setattr(Path, "stat", _filesystem_call)
+
+        stub._refresh_graft_chip()
+        stub._on_graft_snapshot_ready(snapshot)
+
+        assert calls == []
+        assert stub._chip_graft.text() == "🧠 Graft ready"
+
+    def test_snapshot_scan_is_dispatched_once_to_thread_pool(self, monkeypatch):
+        stub = _Stub()
+        stub._graft_snapshot_worker_busy = False
+        worker = MagicMock()
+        pool = MagicMock()
+        worker_type = MagicMock(return_value=worker)
+        pool_type = MagicMock()
+        pool_type.globalInstance.return_value = pool
+        monkeypatch.setattr(sh_mod, "_GraftSnapshotWorker", worker_type)
+        monkeypatch.setattr(sh_mod, "QThreadPool", pool_type)
+
+        stub._schedule_graft_snapshot()
+        stub._schedule_graft_snapshot()
+
+        worker.signals.finished.connect.assert_called_once_with(stub._on_graft_snapshot_ready)
+        pool.start.assert_called_once_with(worker)
+        assert stub._graft_snapshot_worker_busy is True
 
     def test_cli_missing_shows_attention_state(self, monkeypatch):
         stub = _Stub()

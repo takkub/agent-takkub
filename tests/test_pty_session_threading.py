@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 
+import agent_takkub.pty_session as pty_mod
 from agent_takkub.pty_session import PtySession
 
 
@@ -17,6 +18,36 @@ def test_feed_and_log_updates_screen() -> None:
     s = PtySession(cols=80, rows=24)
     s._feed_and_log(b"hello world")
     assert "hello world" in "\n".join(s.display_lines())
+
+
+def test_watchdog_predicates_render_once_per_output_generation(monkeypatch) -> None:
+    """#312: one timer tick's predicates share the render made by feed()."""
+    real_render = pty_mod._safe_screen_display
+    render_calls = 0
+
+    def _counted_render(screen):
+        nonlocal render_calls
+        render_calls += 1
+        return real_render(screen)
+
+    monkeypatch.setattr(pty_mod, "_safe_screen_display", _counted_render)
+    s = PtySession(cols=80, rows=24)
+    assert render_calls == 0
+
+    s._feed_and_log(b"bypass permissions")
+    assert render_calls == 1
+
+    for _ in range(5):
+        s.display_lines()
+        s.is_at_ready_prompt()
+        s.is_blocked_on_tty_prompt()
+        s.is_blocked_on_permission_prompt()
+        s.tool_running_marker("claude")
+        s.rate_limit_reset_at("claude")
+    assert render_calls == 1
+
+    s._feed_and_log(b"\r\nnext output")
+    assert render_calls == 2
 
 
 def test_on_bytes_no_longer_feeds_pyte() -> None:
