@@ -40,6 +40,7 @@ def read_legacy_accounts(project: str | None = None) -> list[ProviderAccount]:
         name = str(entry.get("name", "")).strip()
         if not name:
             continue
+        config_dir = str(entry.get("config_dir", "")).strip() or None
         accounts.append(
             ProviderAccount(
                 id=_account_id(provider, name),
@@ -49,6 +50,7 @@ def read_legacy_accounts(project: str | None = None) -> list[ProviderAccount]:
                 status=AccountStatus.ACTIVE,
                 priority=0 if name == user_profile.DEFAULT_PROFILE else 10,
                 project_id=project,
+                config_dir=config_dir,
             )
         )
     return accounts

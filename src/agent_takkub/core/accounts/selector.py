@@ -94,24 +94,55 @@ def _default_usage_lookup(provider_id: str) -> float | None:
     return usage.utilization if usage is not None else None
 
 
+def _default_account_usage_lookup(account: ProviderAccount) -> float | None:
+    """Per-account usage when the account carries a real `config_dir`
+    (epic #309 Phase 3b — closes the "known limitation" below): reads the
+    `provider_usage.ProviderUsageStore` cache keyed by `(provider,
+    config_dir)`. A cache miss triggers a non-blocking background fetch
+    (`refresh_now`) and returns `None` for THIS call, same
+    never-block-here contract `_default_usage_lookup` already has — the
+    figure lands on the account's next selection. Falls back to the plain
+    per-provider lookup when the account has no `config_dir` (legacy
+    single-account-per-provider case, unchanged behavior)."""
+    from agent_takkub.provider_usage import get_store
+
+    if not account.config_dir:
+        return _default_usage_lookup(account.provider_id)
+    store = get_store()
+    usage = store.get(account.provider_id, config_dir=account.config_dir)
+    if usage is None:
+        store.refresh_now(account.provider_id, config_dir=account.config_dir)
+        return None
+    return usage.utilization
+
+
 class QuotaAwareAccountSelector:
     """Prefers the ACTIVE account whose provider currently has the LOWEST
     known usage utilization (`provider_usage.ProviderUsage`, the same cache
     `/api/usage` reads — never a live fetch here).
 
-    ponytail: utilization is per-PROVIDER, not per-account — no adapter
-    fetches usage scoped to one credential yet (would need a per-account
-    `config_dir`/`secret_ref` plumbed through `fetch_claude_usage`/
-    `fetch_codex_usage`). Every account in a single-provider pool therefore
-    sees the SAME figure today, so this selector cannot yet differentiate
-    two real accounts of the same provider by usage — it still behaves
-    correctly (falls through to priority when nothing is known).
-    `usage_lookup` is injectable so a future per-account fetch, or a test,
-    can supply real per-account numbers without changing this class.
+    `account_usage_lookup` (per-`ProviderAccount`) differentiates two real
+    accounts of the same provider via `ProviderAccount.config_dir` — the
+    per-account gap this class used to carry as a documented limitation is
+    closed by `_default_account_usage_lookup` when an account has one set;
+    an account with no `config_dir` still falls back to the old
+    per-provider figure. `usage_lookup` (per-provider-id string) is kept
+    for backward compatibility — passing it alone (without
+    `account_usage_lookup`) still selects by provider-level usage only,
+    unchanged from before this phase.
     """
 
-    def __init__(self, usage_lookup: Callable[[str], float | None] | None = None) -> None:
-        self._usage_lookup = usage_lookup or _default_usage_lookup
+    def __init__(
+        self,
+        usage_lookup: Callable[[str], float | None] | None = None,
+        account_usage_lookup: Callable[[ProviderAccount], float | None] | None = None,
+    ) -> None:
+        self._usage_lookup = usage_lookup
+        self._account_usage_lookup = account_usage_lookup or (
+            (lambda a: usage_lookup(a.provider_id))
+            if usage_lookup
+            else _default_account_usage_lookup
+        )
 
     def select(
         self, pool: AccountPool, accounts: Sequence[ProviderAccount]
@@ -119,7 +150,7 @@ class QuotaAwareAccountSelector:
         candidates = _active(_in_pool(pool, accounts))
         if not candidates:
             return None
-        known = [(self._usage_lookup(a.provider_id), a) for a in candidates]
+        known = [(self._account_usage_lookup(a), a) for a in candidates]
         known = [(u, a) for u, a in known if u is not None]
         if not known:
             return _highest_priority(candidates)

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -372,14 +373,23 @@ def _parse_codex_rate_limits(rate_limits: dict[str, Any]) -> ProviderUsage:
     )
 
 
-def fetch_codex_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
+def fetch_codex_usage(
+    timeout: float = _FETCH_TIMEOUT_S, config_dir: Path | None = None
+) -> ProviderUsage:
     """Spawns a throwaway `codex app-server`, does one JSON-RPC round trip,
     then kills the subprocess — never reuses/pools it. Blocking (subprocess
     I/O bounded by *timeout*) — run off the Qt main thread.
+
+    `config_dir` (epic #309 Phase 3b): when given, scopes the probe to one
+    account's isolated `CODEX_HOME` (same var `pane_env.inject_provider_home_env`/
+    `config.provider_home_env` already use) instead of whatever CODEX_HOME
+    this process inherited — the per-account counterpart of
+    `fetch_claude_usage`'s `config_dir` param.
     """
     exe = _codex_executable()
     if not exe:
         return _unsupported("codex", "codex binary not found on PATH")
+    env = {**os.environ, "CODEX_HOME": str(config_dir)} if config_dir is not None else None
     try:
         proc = subprocess.Popen(
             [exe, "app-server"],
@@ -390,6 +400,7 @@ def fetch_codex_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=env,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
     except OSError as exc:
@@ -613,10 +624,35 @@ _FETCHERS: dict[str, Callable[[], ProviderUsage]] = {
 }
 
 
-def fetch_provider_usage(provider: str) -> ProviderUsage:
+# Providers with a real per-account isolation knob (config.py's
+# `_PROVIDER_HOME_SUBDIRS` / user_profile's CLAUDE_CONFIG_DIR) that
+# `fetch_provider_usage`'s `config_dir` param can actually scope a probe to.
+# Every other provider has no such knob yet (config.PROVIDER_ISOLATION_GAPS)
+# so `config_dir` is silently ignored for them rather than guessed at.
+_CONFIG_DIR_AWARE_FETCHERS: dict[str, Callable[..., ProviderUsage]] = {
+    "claude": fetch_claude_usage,
+    "codex": fetch_codex_usage,
+}
+
+
+def fetch_provider_usage(provider: str, config_dir: Path | None = None) -> ProviderUsage:
     """Single-provider fetch with a catch-all safety net. Blocking — run off
     the Qt main thread (same contract as the individual `fetch_*` functions
-    above)."""
+    above).
+
+    `config_dir` (epic #309 Phase 3b): scopes the probe to one account's
+    isolated config/home dir for the providers that support it
+    (`_CONFIG_DIR_AWARE_FETCHERS`) — ignored (provider-level fetch, same as
+    before) for every other provider.
+    """
+    if config_dir is not None:
+        aware_fetcher = _CONFIG_DIR_AWARE_FETCHERS.get(provider)
+        if aware_fetcher is not None:
+            try:
+                return aware_fetcher(config_dir=config_dir)
+            except Exception:
+                _log.exception("unexpected error fetching usage for %s", provider)
+                return _error(provider, "unexpected error")
     fetcher = _FETCHERS.get(provider)
     if fetcher is None:
         return _unsupported(provider, f"unknown provider: {provider}")
@@ -649,6 +685,11 @@ class ProviderUsageStore:
         self._on_update = on_update
         self._lock = threading.Lock()
         self._cache: dict[str, ProviderUsage] = {}
+        # Account-scoped cache, keyed by (provider, str(config_dir)) — kept
+        # separate from `_cache` so `get_all()`/the background poll loop
+        # (both provider-level, unchanged since before Phase 3b) never see
+        # an account-scoped entry mixed in.
+        self._account_cache: dict[tuple[str, str], ProviderUsage] = {}
         self._running = False
         self._wake = threading.Event()
 
@@ -660,33 +701,55 @@ class ProviderUsageStore:
         self._running = False
         self._wake.set()
 
-    def get(self, provider: str) -> ProviderUsage | None:
+    def get(self, provider: str, config_dir: Path | str | None = None) -> ProviderUsage | None:
+        if config_dir is None:
+            with self._lock:
+                return self._cache.get(provider)
         with self._lock:
-            return self._cache.get(provider)
+            return self._account_cache.get((provider, str(config_dir)))
 
     def get_all(self) -> dict[str, ProviderUsage]:
         with self._lock:
             return dict(self._cache)
 
-    def refresh_now(self, provider: str) -> None:
-        """Fire a background fetch for one provider outside the regular
-        interval (e.g. right after an AI generation completes — design doc
-        §4). Non-blocking: returns immediately, cache updates asynchronously.
+    def refresh_now(self, provider: str, config_dir: Path | str | None = None) -> None:
+        """Fire a background fetch for one provider (or, with *config_dir*,
+        one ACCOUNT — epic #309 Phase 3b) outside the regular interval (e.g.
+        right after an AI generation completes — design doc §4). Non-
+        blocking: returns immediately, cache updates asynchronously.
         """
+        # 1-arg call when config_dir is None (unchanged from before Phase
+        # 3b) — a caller-supplied `_fetch_one` stand-in (tests) that only
+        # accepts `provider` keeps working; only the new per-account path
+        # needs the extra arg.
+        args = (provider,) if config_dir is None else (provider, config_dir)
         threading.Thread(
-            target=self._fetch_one, args=(provider,), daemon=True, name=f"usage-fetch-{provider}"
+            target=self._fetch_one,
+            args=args,
+            daemon=True,
+            name=f"usage-fetch-{provider}",
         ).start()
 
     # ── internal ──────────────────────────────────────────────────
 
-    def _fetch_one(self, provider: str) -> None:
+    def _fetch_one(self, provider: str, config_dir: Path | str | None = None) -> None:
+        if config_dir is None:
+            with self._lock:
+                if provider not in self._cache:
+                    self._cache[provider] = ProviderUsage(provider=provider, status=STATUS_LOADING)
+                    self._emit(provider, self._cache[provider])
+            data = fetch_provider_usage(provider)
+            with self._lock:
+                self._cache[provider] = data
+            self._emit(provider, data)
+            return
+        key = (provider, str(config_dir))
         with self._lock:
-            if provider not in self._cache:
-                self._cache[provider] = ProviderUsage(provider=provider, status=STATUS_LOADING)
-                self._emit(provider, self._cache[provider])
-        data = fetch_provider_usage(provider)
+            if key not in self._account_cache:
+                self._account_cache[key] = ProviderUsage(provider=provider, status=STATUS_LOADING)
+        data = fetch_provider_usage(provider, config_dir=Path(config_dir))
         with self._lock:
-            self._cache[provider] = data
+            self._account_cache[key] = data
         self._emit(provider, data)
 
     def _emit(self, provider: str, data: ProviderUsage) -> None:

@@ -37,6 +37,7 @@ def _record_to_account(record: Mapping[str, Any]) -> ProviderAccount:
         user_id=record.get("user_id"),
         workspace_id=record.get("workspace_id"),
         project_id=record.get("project_id"),
+        config_dir=record.get("config_dir"),
     )
 
 

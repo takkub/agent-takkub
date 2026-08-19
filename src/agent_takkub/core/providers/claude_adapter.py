@@ -26,9 +26,14 @@ re-deriving the answer, so the two can never drift). `spawn()`/`send()`/
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+from agent_takkub.core.models.account import ProviderAccount
 from agent_takkub.core.models.agent import AgentInstance
+from agent_takkub.core.models.spawn_plan import SpawnPlan
 
 from .errors import ProviderAdapterNotWired
+from .plan import account_env_overrides
 
 _PROVIDER_ID = "claude"
 
@@ -46,6 +51,27 @@ class ClaudeCliAdapter:
         from agent_takkub.provider_config import _provider_available
 
         return _provider_available(_PROVIDER_ID)
+
+    def build_plan(
+        self,
+        *,
+        argv: Sequence[str],
+        base_env: dict[str, str],
+        cwd: str,
+        account: ProviderAccount | None = None,
+    ) -> SpawnPlan:
+        """Pure `SpawnPlan` for a claude spawn. `argv` is caller-built
+        (spawn_engine.py's ~800-line claude branch stays the one place that
+        assembles claude's argv — see module docstring / phase3-report.md
+        §3; extracting it is a tracked gap, not this method's job) — this
+        method's real, load-bearing contribution is turning *account* into
+        the same `CLAUDE_CONFIG_DIR` override `pane_env.inject_user_profile_env`
+        already applies from the legacy profile, so a future V2 account pool
+        can win the same way without a second env-injection mechanism.
+        """
+        env = dict(base_env)
+        env.update(account_env_overrides(_PROVIDER_ID, account))
+        return SpawnPlan(provider_id=_PROVIDER_ID, argv=tuple(argv), env=env, cwd=cwd)
 
     def spawn(self, instance: AgentInstance) -> None:
         raise ProviderAdapterNotWired(_PROVIDER_ID, "spawn")
