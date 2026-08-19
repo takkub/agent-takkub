@@ -18,12 +18,14 @@ from agent_takkub.resource_governor import GovernorLimits, ResourceClass, Resour
 
 @pytest.fixture(autouse=True)
 def _isolate_core_v2_settings(tmp_path, monkeypatch):
-    from agent_takkub import config
+    from agent_takkub import config, core_v2_settings
 
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     scheduling_facade._policy_cache = None
+    core_v2_settings._reset_cache()
     yield
     scheduling_facade._policy_cache = None
+    core_v2_settings._reset_cache()
 
 
 def _limits(**overrides) -> GovernorLimits:

@@ -125,6 +125,27 @@ def test_get_conversation_missing_is_none(tmp_path):
     assert store.get_conversation("proj-a", "nope") is None
 
 
+def test_append_message_redacts_secret_before_writing_to_disk(tmp_path):
+    """PR #311 review gap #2: a note that leaks a credential must never land
+    in messages.jsonl as plaintext."""
+    store = ConversationStore(root=tmp_path)
+    conv_id = conversation_id_for("proj-a", "backend")
+    secret = "sk-ant-api03-abcdefghijklmnop1234567890"  # gitleaks:allow (fake test fixture)
+    saved = store.append_message(
+        "proj-a", conv_id, role=MessageRole.USER, text=f"env dump: token={secret}"
+    )
+
+    assert secret not in saved.text
+    assert "***REDACTED***" in saved.text
+
+    messages_path = store.conversation_dir("proj-a", conv_id) / "messages.jsonl"
+    on_disk = messages_path.read_text(encoding="utf-8")
+    assert secret not in on_disk
+
+    reloaded = store.read_messages("proj-a", conv_id)
+    assert secret not in reloaded[0].text
+
+
 # ── RollingSummary ────────────────────────────────────────────────────────
 
 

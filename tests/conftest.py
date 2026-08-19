@@ -211,6 +211,8 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if cvs is not None:
         _v2_path = tmp_path / "_isolated_takkub" / "core-v2-settings.json"
         monkeypatch.setattr(cvs, "path", lambda: _v2_path, raising=False)
+        if hasattr(cvs, "_reset_cache"):
+            cvs._reset_cache()  # (mtime,size) cache must not leak across tests
 
     # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
     # password-session store unconditionally (not opt-in like the P0 remote

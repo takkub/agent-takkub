@@ -16,7 +16,9 @@ without pulling anything UI-shaped into the Core V2 bottom layer (pyproject's
 
 from __future__ import annotations
 
+import copy
 import json
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -62,32 +64,75 @@ def _default_payload() -> dict:
     }
 
 
+# (stat key, parsed payload) — key is `(st_mtime_ns, st_size)` when the file
+# exists, or `None` when it's missing/unreadable, so a still-missing file
+# hits the cache too instead of rebuilding `_default_payload()` every call.
+# Same "reload only when the file actually changed" shape as
+# `core.scheduling.facade._policy_cache`. `load()` still `stat()`s on every
+# call (one cheap syscall) to detect that change — same tradeoff that
+# module's own `effective_slot_policy()` already accepts.
+_cache_lock = threading.Lock()
+_cache: tuple[tuple[int, int] | None, dict] | None = None
+
+
+def _reset_cache() -> None:
+    """Test-only escape hatch: forces the next `load()` to re-stat/re-parse.
+    Needed whenever a test redirects `path()` to a different file — the
+    stat-key namespace isn't unique across roots, so a stale cache entry
+    from a previous test could otherwise leak in as a coincidental hit."""
+    global _cache
+    with _cache_lock:
+        _cache = None
+
+
 def load() -> dict:
     """Missing/corrupt file reads as all-defaults — fail-open, same contract
-    as `performance_settings.load()`."""
+    as `performance_settings.load()`. Cached by the file's `(mtime_ns, size)`
+    so repeated calls (e.g. once per `flag_enabled()` check per Qt tick) only
+    re-`read_text()`/`json.loads()` when the Settings UI actually rewrote the
+    file — see `_cache` above."""
+    global _cache
     target = path()
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return _default_payload()
-    except (OSError, ValueError, json.JSONDecodeError):
-        return _default_payload()
-    merged = _default_payload()
-    flags = payload.get("flags")
-    if isinstance(flags, dict):
-        merged["flags"].update({k: bool(v) for k, v in flags.items() if k in FLAG_NAMES})
-    policy = payload.get("scheduler_policy")
-    if isinstance(policy, dict):
-        merged["scheduler_policy"].update(
-            {k: v for k, v in policy.items() if k in merged["scheduler_policy"]}
-        )
-    return merged
+        st = target.stat()
+        cache_key: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+
+    with _cache_lock:
+        if _cache is not None and _cache[0] == cache_key:
+            return copy.deepcopy(_cache[1])
+
+    if cache_key is None:
+        merged = _default_payload()
+    else:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("core-v2-settings.json root is not an object")
+            merged = _default_payload()
+            flags = payload.get("flags")
+            if isinstance(flags, dict):
+                merged["flags"].update({k: bool(v) for k, v in flags.items() if k in FLAG_NAMES})
+            policy = payload.get("scheduler_policy")
+            if isinstance(policy, dict):
+                merged["scheduler_policy"].update(
+                    {k: v for k, v in policy.items() if k in merged["scheduler_policy"]}
+                )
+        except (OSError, ValueError, json.JSONDecodeError):
+            merged = _default_payload()
+
+    with _cache_lock:
+        _cache = (cache_key, merged)
+    return copy.deepcopy(merged)
 
 
 def save(payload: dict) -> bool:
     target = path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    return config._write_json_atomic(target, payload)
+    ok = config._write_json_atomic(target, payload)
+    _reset_cache()
+    return ok
 
 
 def flag_enabled(name: str) -> bool:

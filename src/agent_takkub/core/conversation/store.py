@@ -27,6 +27,7 @@ from agent_takkub.core.models.conversation import (
     MessageRole,
     ProviderSessionBinding,
 )
+from agent_takkub.core.secrets.redact import redact
 from agent_takkub.core.storage.jsonl_store import JsonlStore
 from agent_takkub.core.storage.legacy_reader import read_json
 from agent_takkub.core.storage.paths import conversations_root
@@ -138,7 +139,7 @@ class ConversationStore:
             id=message_id or uuid.uuid4().hex,
             conversation_id=conversation_id,
             role=role,
-            text=text,
+            text=redact(text),
             created_at=created_at if created_at is not None else time.time(),
             provider_id=provider_id,
             source=source,

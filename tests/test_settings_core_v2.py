@@ -8,6 +8,7 @@ Offscreen QPA (session-scoped QApplication from tests/conftest.py), same
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -25,10 +26,12 @@ def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
+    core_v2_settings._reset_cache()
     saved = dict(roles_mod._CUSTOM)
     yield
     roles_mod._CUSTOM.clear()
     roles_mod._CUSTOM.update(saved)
+    core_v2_settings._reset_cache()
 
 
 class TestCoreV2SettingsStore:
@@ -63,6 +66,65 @@ class TestCoreV2SettingsStore:
         core_v2_settings.path().parent.mkdir(parents=True, exist_ok=True)
         core_v2_settings.path().write_text("not json", encoding="utf-8")
         assert core_v2_settings.flag_enabled("router") is False
+
+
+class TestCoreV2SettingsCache:
+    """`load()` reloads only when `core-v2-settings.json`'s (mtime, size)
+    actually changes — PR #311 review must-fix #1."""
+
+    def test_load_twice_unchanged_file_reads_disk_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        core_v2_settings.set_flag("router", True)  # creates the file, primes nothing
+        core_v2_settings._reset_cache()
+
+        calls = []
+        real_read_text = Path.read_text
+
+        def counting_read_text(self, *a, **kw):
+            calls.append(self)
+            return real_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        first = core_v2_settings.load()
+        second = core_v2_settings.load()
+        assert first == second
+        assert len(calls) == 1  # second load() is a pure cache hit
+
+    def test_load_after_file_edit_rereads(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        core_v2_settings.set_flag("router", True)
+        assert core_v2_settings.load()["flags"]["router"] is True
+
+        # Edit the file directly (bypassing save()) so mtime/size change
+        # without going through the cache-invalidating path — proves load()
+        # itself detects the change, not just save()'s _reset_cache().
+        raw = json.loads(core_v2_settings.path().read_text(encoding="utf-8"))
+        raw["flags"]["router"] = False
+        core_v2_settings.path().write_text(json.dumps(raw), encoding="utf-8")
+
+        assert core_v2_settings.load()["flags"]["router"] is False
+
+    def test_set_flag_invalidates_cache_immediately(self) -> None:
+        assert core_v2_settings.flag_enabled("brain") is False
+        core_v2_settings.set_flag("brain", True)
+        assert core_v2_settings.flag_enabled("brain") is True
+
+    def test_missing_file_caches_default_and_still_detects_creation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert core_v2_settings.load()["flags"]["router"] is False  # cache = (None, defaults)
+        assert core_v2_settings.load()["flags"]["router"] is False  # cache hit, no crash
+
+        core_v2_settings.set_flag("router", True)  # file now exists
+        assert core_v2_settings.load()["flags"]["router"] is True
+
+    def test_load_returns_independent_copies(self) -> None:
+        core_v2_settings.set_flag("router", True)
+        first = core_v2_settings.load()
+        first["flags"]["router"] = False  # mutate the caller's copy
+        second = core_v2_settings.load()
+        assert second["flags"]["router"] is True  # cache itself is untouched
 
 
 class TestFlagConfigFallback:
