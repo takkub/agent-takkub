@@ -419,6 +419,9 @@ class CoreV2SettingsMixin:
         save_row.addWidget(self._cv2_flags_status)
         save_row.addStretch(1)
         lay.addLayout(save_row)
+        save_scope_hint = QLabel("บันทึกทันทีที่นี่ — แยกจากปุ่ม Save & Apply ด้านล่าง", flags_panel)
+        save_scope_hint.setObjectName("panelHint")
+        lay.addWidget(save_scope_hint)
 
         version_panel = QWidget(view)
         version_panel.setObjectName("panel")
@@ -484,7 +487,7 @@ class CoreV2SettingsMixin:
         ap_lay.addLayout(header_row)
         self._cv2_accounts_list = QListWidget(accounts_panel)
         self._cv2_accounts_list.setFrameShape(QFrame.Shape.NoFrame)
-        self._cv2_accounts_list.setMaximumHeight(160)
+        self._cv2_accounts_list.setUniformItemSizes(True)
         ap_lay.addWidget(self._cv2_accounts_list)
         acct_btn_row = QHBoxLayout()
         edit_account_btn = cockpit_theme.secondary_button("Edit", accounts_panel)
@@ -512,7 +515,7 @@ class CoreV2SettingsMixin:
         pp_lay.addLayout(pool_header_row)
         self._cv2_pools_list = QListWidget(pools_panel)
         self._cv2_pools_list.setFrameShape(QFrame.Shape.NoFrame)
-        self._cv2_pools_list.setMaximumHeight(160)
+        self._cv2_pools_list.setUniformItemSizes(True)
         pp_lay.addWidget(self._cv2_pools_list)
         pool_btn_row = QHBoxLayout()
         edit_pool_btn = cockpit_theme.secondary_button("Edit", pools_panel)
@@ -532,6 +535,17 @@ class CoreV2SettingsMixin:
 
         self._reload_cv2_accounts()
         return view
+
+    def _cv2_fit_list_height(self, list_widget: QListWidget, *, cap: int = 160) -> None:
+        """Size-to-content up to `cap`, instead of always reserving a fixed
+        160px box that leaves ~120px of empty panel below a single row
+        (design critic nice #1, `docs/v2/phase9-critic-review.md`)."""
+        row_height = list_widget.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = 24
+        frame = 2 * list_widget.frameWidth()
+        content_height = list_widget.count() * row_height + frame
+        list_widget.setFixedHeight(min(cap, max(content_height, row_height + frame)))
 
     def _cv2_provider_ids(self) -> tuple[str, ...]:
         from . import provider_spec
@@ -569,6 +583,9 @@ class CoreV2SettingsMixin:
             )
             item.setData(Qt.ItemDataRole.UserRole, pool.id)
             self._cv2_pools_list.addItem(item)
+
+        self._cv2_fit_list_height(self._cv2_accounts_list)
+        self._cv2_fit_list_height(self._cv2_pools_list)
 
     def _cv2_selected_account_id(self) -> str | None:
         item = self._cv2_accounts_list.currentItem()
@@ -805,6 +822,9 @@ class CoreV2SettingsMixin:
         sp_lay.addLayout(search_row)
         self._cv2_brain_results = QListWidget(search_panel)
         self._cv2_brain_results.setFrameShape(QFrame.Shape.NoFrame)
+        placeholder = QListWidgetItem("พิมพ์คำค้นแล้วกด Search เพื่อดูผลลัพธ์")
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._cv2_brain_results.addItem(placeholder)
         sp_lay.addWidget(self._cv2_brain_results)
         lay.addWidget(search_panel, 1)
 
@@ -946,6 +966,9 @@ class CoreV2SettingsMixin:
         save_row.addWidget(self._cv2_scheduler_status)
         save_row.addStretch(1)
         pol_lay.addLayout(save_row)
+        save_scope_hint = QLabel("บันทึกทันทีที่นี่ — แยกจากปุ่ม Save & Apply ด้านล่าง", policy_panel)
+        save_scope_hint.setObjectName("panelHint")
+        pol_lay.addWidget(save_scope_hint)
         lay.addWidget(policy_panel)
 
         lay.addWidget(self._build_cv2_backpressure_panel(view))
@@ -1087,7 +1110,7 @@ class CoreV2SettingsMixin:
         )
         self._cv2_migration_refresh_btn.clicked.connect(self._on_cv2_migration_refresh_clicked)
         btn_row.addWidget(self._cv2_migration_refresh_btn)
-        self._cv2_migration_dry_run_btn = cockpit_theme.gold_button("Dry-run", view)
+        self._cv2_migration_dry_run_btn = cockpit_theme.secondary_button("Dry-run", view)
         self._cv2_migration_dry_run_btn.clicked.connect(self._on_cv2_migration_dry_run_clicked)
         btn_row.addWidget(self._cv2_migration_dry_run_btn)
         btn_row.addStretch(1)

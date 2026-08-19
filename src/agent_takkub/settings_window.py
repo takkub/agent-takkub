@@ -185,6 +185,17 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_CORE_V2_MIGRATION, "Migration", "CORE V2"),
 )
 
+# Core V2 pages each save through their own dedicated button (Overview's
+# "Save flags", Scheduler's "Save policy", Accounts & Pools' immediate
+# add/edit/remove) and never join the footer's dirty-tracking transaction
+# (`settings_core_v2`'s own module docstring) — the footer "Save & Apply" /
+# "Revert unsaved changes" pair is disabled whenever the sidebar is on one
+# of these views so it can't be mistaken for controlling them (design critic
+# should #1, `docs/v2/phase9-critic-review.md`).
+_CORE_V2_VIEWS: frozenset[int] = frozenset(
+    view_idx for view_idx, _label, section in _NAV_VIEWS if section == "CORE V2"
+)
+
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
 # (⌘ ◇ ◉ ⊞ ✦ ♙) were ported 1:1 from the web mockup but IBM Plex Sans/Mono
 # don't ship those code points, so every nav item tofu'd (□) on this desktop
@@ -871,6 +882,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         title, sub = _VIEW_HEADERS.get(view_idx, ("", ""))
         self._content_title.setText(title)
         self._content_sub.setText(sub)
+        self._refresh_dirty_indicator()
 
     # ──────────────────────────────────────────────────────────
     # chrome: content (header + stack + footer)
@@ -946,9 +958,9 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         # state (i.e. discards staged edits), it does not restore factory
         # defaults. "Reset to default" over-promised; label it for what it
         # actually does.
-        reset_btn = cockpit_theme.secondary_button("Revert unsaved changes", footer)
-        reset_btn.clicked.connect(self._on_reset_clicked)
-        lay.addWidget(reset_btn)
+        self._reset_btn = cockpit_theme.secondary_button("Revert unsaved changes", footer)
+        self._reset_btn.clicked.connect(self._on_reset_clicked)
+        lay.addWidget(self._reset_btn)
         lay.addStretch(1)
 
         # Design review 2026-07-24 #4 — real painted dot widget, not the "●"
@@ -986,11 +998,19 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
 
     def _refresh_dirty_indicator(self) -> None:
         """Recompute the aggregate `_dirty` flag from `_dirty_views` and sync
-        the footer's unsaved-dot/label + Save & Apply enabled state."""
+        the footer's unsaved-dot/label + Save & Apply enabled state.
+
+        Also disables Save & Apply / Revert unsaved changes outright while a
+        Core V2 page is showing (`_CORE_V2_VIEWS`) — those pages save through
+        their own dedicated button and never stage into `_dirty_views`, so
+        the footer pair would otherwise sit there gold/clickable while doing
+        nothing for the visible page (design critic should #1)."""
         self._dirty = bool(self._dirty_views)
         self._unsaved_dot.setVisible(self._dirty)
         self._unsaved_label.setVisible(self._dirty)
-        self._save_btn.setEnabled(self._dirty)
+        on_core_v2 = self._stack.currentIndex() in _CORE_V2_VIEWS
+        self._save_btn.setEnabled(self._dirty and not on_core_v2)
+        self._reset_btn.setEnabled(not on_core_v2)
 
     def _on_reset_clicked(self) -> None:
         """Revert the currently-visible view's editable fields back to the
