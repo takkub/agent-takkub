@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 256,
+  "module_count": 258,
   "modules": [
     {
       "module": "agent_takkub",
@@ -593,33 +593,56 @@
         "agent_takkub.core.brain.sources.decision_note_source",
         "agent_takkub.core.brain.sources.digest_facts_source",
         "agent_takkub.core.brain.sources.knowledge_source",
+        "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.brain.sources.role_memory_source"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.brain.context_builder",
+      "imports": [
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.brain.store",
+        "agent_takkub.core.conversation.flag",
+        "agent_takkub.core.conversation.store",
+        "agent_takkub.core.conversation.summary",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 1,
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.brain.facade",
       "imports": [
         "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.flag",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.brain.sources.digest_facts_source",
+        "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.brain.store",
         "agent_takkub.core.models.memory"
       ],
-      "imported_by": [],
-      "fan_in": 0,
-      "fan_out": 6
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.core.brain.flag",
       "imports": [],
       "imported_by": [
         "agent_takkub.core.brain",
-        "agent_takkub.core.brain.facade"
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.orchestrator"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -648,9 +671,10 @@
       "imported_by": [
         "agent_takkub.core.brain",
         "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.facade"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 3
     },
     {
@@ -677,8 +701,10 @@
         "agent_takkub.core.models.memory",
         "agent_takkub.digest_facts"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 1,
       "fan_out": 3
     },
     {
@@ -689,6 +715,18 @@
       ],
       "imported_by": [],
       "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.brain.sources.reflection_source",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 1,
       "fan_out": 2
     },
     {
@@ -710,11 +748,12 @@
       ],
       "imported_by": [
         "agent_takkub.core.brain",
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.facade",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 3
     },
     {
@@ -907,11 +946,12 @@
       "module": "agent_takkub.core.conversation.flag",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.notify"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -1030,12 +1070,13 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.core.conversation.ingest",
         "agent_takkub.remote.notify"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 5
     },
     {
@@ -1045,10 +1086,11 @@
         "agent_takkub.core.storage.legacy_reader"
       ],
       "imported_by": [
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.facade"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {
@@ -1185,17 +1227,19 @@
       "imported_by": [
         "agent_takkub.core.brain.adapter",
         "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.facade",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval",
         "agent_takkub.core.brain.sources.decision_note_source",
         "agent_takkub.core.brain.sources.digest_facts_source",
         "agent_takkub.core.brain.sources.knowledge_source",
+        "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.brain.sources.role_memory_source",
         "agent_takkub.core.brain.store",
         "agent_takkub.core.contracts.brain_adapter"
       ],
-      "fan_in": 11,
+      "fan_in": 13,
       "fan_out": 0
     },
     {
@@ -2114,6 +2158,8 @@
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.brain.flag",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.core.conversation.flag",
         "agent_takkub.digest_facts",
@@ -2158,7 +2204,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 40
+      "fan_out": 42
     },
     {
       "module": "agent_takkub.orchestrator_text",

@@ -11,7 +11,7 @@ injects it into a freshly-assigned task, and a **Reflection hook** that turns
 a pane's own `done()`/`subagent_done()` note (plus cockpit-measured
 `DigestFacts`) into new `MemoryCandidate`s. Both hooks are flag-gated
 (`TAKKUB_V2_CONTEXT` new, `TAKKUB_V2_BRAIN` reused) and fail-open, following
-Phase 6's exact hook pattern in `orchestrator.py`.
+Phase 6's exact hook pattern in `src/agent_takkub/orchestrator.py`.
 
 ## 7c-1 — Context Builder
 
@@ -19,7 +19,7 @@ Phase 6's exact hook pattern in `orchestrator.py`.
   orchestrator/PyQt/UI import):
   - `budget_tokens_for(context_window, *, file_read_supported=True) -> int`
     — ~12% of the model's context window, clamped to a floor/ceiling
-    (`400`–`6000` tokens); falls back to `token_meter.py`'s own default
+    (`400`–`6000` tokens); falls back to `src/agent_takkub/token_meter.py`'s own default
     context size (200k) when the window is unknown; halved (with its own
     smaller floor) for a provider whose CLI has no structured file-read
     tool (`ProviderSpec.supports_agent_file_read=False`, #273 — e.g. codex).
@@ -41,12 +41,12 @@ Phase 6's exact hook pattern in `orchestrator.py`.
     `summary.json` (never the raw message log); record counts are further
     capped (8 project-scoped + 4 global) on top of `RetrievalEngine`'s own
     token-budget trim.
-- **`core/brain/flag.py`** (EXTEND): `v2_context_enabled()` reads
+- **`src/agent_takkub/core/brain/flag.py`** (EXTEND): `v2_context_enabled()` reads
   `TAKKUB_V2_CONTEXT` — a **separate** flag from `TAKKUB_V2_BRAIN` on
   purpose (see the module's updated docstring): Context Builder only
   *reads* whatever the Second Brain already has on disk, so it can be
   enabled independently of the write-path flag.
-- **`core/brain/facade.py`** (EXTEND): `build_context_for_assign(project,
+- **`src/agent_takkub/core/brain/facade.py`** (EXTEND): `build_context_for_assign(project,
   role, task_text, *, context_window=None, file_read_supported=True) ->
   str` — the stable entry point the orchestrator hook calls; flag-gated on
   `v2_context_enabled()`, fail-open (any exception → `""`).
@@ -90,7 +90,7 @@ Phase 6's exact hook pattern in `orchestrator.py`.
   `MemoryKind.PROJECT` (clean — a fact about what changed), always
   `trust=AGENT_REPORTED`/`scope=AGENT`/`confidence=INFERRED` — never
   `COCKPIT_MEASURED` (that split stays `digest_facts_source.py`'s job).
-- **`core/brain/facade.py`** (EXTEND): `on_pane_done(project, role, *,
+- **`src/agent_takkub/core/brain/facade.py`** (EXTEND): `on_pane_done(project, role, *,
   note, digest_facts=None, failed=False, task_id=None) -> None` — flag-
   gated on the SAME `TAKKUB_V2_BRAIN` flag `recall`/`submit` already use
   (this is just another write path into the same Second Brain, not a
@@ -99,7 +99,7 @@ Phase 6's exact hook pattern in `orchestrator.py`.
   submits `sources.digest_facts_source.from_digest_facts(...)` too (Phase
   7a's existing adapter, unchanged, now given a real call site). Fail-open,
   same pattern as `recall`/`submit`.
-- **`orchestrator.py`**: two call sites, both placed AFTER the Phase 6
+- **`src/agent_takkub/orchestrator.py`**: two call sites, both placed AFTER the Phase 6
   Conversation hook (same comment cross-references it) and both
   `threading.Thread`-wrapped/fail-open/flag-checked-before-import,
   identical shape to Phase 6's hooks:
