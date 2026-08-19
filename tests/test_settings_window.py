@@ -61,6 +61,13 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # ~/.takkub/role-models.json.
     monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
     monkeypatch.setattr(performance_settings, "path", lambda: tmp_path / "performance.json")
+    # Core V2 views (VIEW_CORE_V2_*, epic #309 Phase 9) build unconditionally
+    # in _build_content — every SettingsWindow() construction now touches
+    # core_v2_settings' file (under config.SETTINGS_HOME) and every
+    # core.accounts/brain/versioning store (under config.RUNTIME_DIR), same
+    # isolation pattern test_core_brain_adapter.py uses for RUNTIME_DIR.
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
+    monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -69,10 +76,11 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_eleven_stacked_views(self) -> None:
-        # Existing 10 stable views + appended Performance view (index 10).
+    def test_has_seventeen_stacked_views(self) -> None:
+        # 10 stable views + Performance (10) + 6 Core V2 views (11-16,
+        # epic #309 Phase 9).
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 11
+        assert dlg._stack.count() == 17
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:

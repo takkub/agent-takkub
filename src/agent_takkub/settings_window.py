@@ -129,6 +129,7 @@ from . import (
 from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 from .lead_context import _allowed_project_roots
+from .settings_core_v2 import CoreV2SettingsMixin
 
 # ── view indices (QStackedWidget page order) ────────────────────
 # Order is stable for indices 0–7 (external callers/tests reference these
@@ -150,6 +151,14 @@ VIEW_USERS = 7
 VIEW_SKILL_CATALOG = 8
 VIEW_SKILL_MATRIX = 9
 VIEW_PERFORMANCE = 10
+# Core V2 (epic #309 Phase 9) — appended after Performance rather than
+# inserted, same "append, never renumber" rule as Skill Catalog/Matrix above.
+VIEW_CORE_V2_OVERVIEW = 11
+VIEW_CORE_V2_ACCOUNTS = 12
+VIEW_CORE_V2_ROUTING = 13
+VIEW_CORE_V2_BRAIN = 14
+VIEW_CORE_V2_SCHEDULER = 15
+VIEW_CORE_V2_MIGRATION = 16
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -168,6 +177,12 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
     (VIEW_PERFORMANCE, "Performance", "SYSTEM"),
     (VIEW_USERS, "Users", "ACCOUNT"),
+    (VIEW_CORE_V2_OVERVIEW, "Overview", "CORE V2"),
+    (VIEW_CORE_V2_ACCOUNTS, "Accounts & Pools", "CORE V2"),
+    (VIEW_CORE_V2_ROUTING, "Routing", "CORE V2"),
+    (VIEW_CORE_V2_BRAIN, "Brain", "CORE V2"),
+    (VIEW_CORE_V2_SCHEDULER, "Scheduler", "CORE V2"),
+    (VIEW_CORE_V2_MIGRATION, "Migration", "CORE V2"),
 )
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
@@ -189,6 +204,14 @@ _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_SKILL_MATRIX: "star",
     VIEW_PERFORMANCE: "grid",
     VIEW_USERS: "user",
+    # Icon set is fixed at 6 names (diamond/grid/pipeline/star/target/user,
+    # see static/icons/nav/) — reused rather than adding new SVG assets.
+    VIEW_CORE_V2_OVERVIEW: "target",
+    VIEW_CORE_V2_ACCOUNTS: "user",
+    VIEW_CORE_V2_ROUTING: "pipeline",
+    VIEW_CORE_V2_BRAIN: "star",
+    VIEW_CORE_V2_SCHEDULER: "grid",
+    VIEW_CORE_V2_MIGRATION: "diamond",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
 
@@ -228,6 +251,30 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_PERFORMANCE: (
         "Performance",
         "กำหนดเพดานงานหนัก, จุดพัก CPU/RAM และ cadence การ render เบื้องหลัง",
+    ),
+    VIEW_CORE_V2_OVERVIEW: (
+        "Core V2 — Overview",
+        "สถานะ feature flag ทั้ง 5 ตัว (router/conversation/context/brain/scheduler) + version.json",
+    ),
+    VIEW_CORE_V2_ACCOUNTS: (
+        "Core V2 — Accounts & Pools",
+        "ProviderAccount + AccountPool registry (secretRef เท่านั้น ไม่มี credential)",
+    ),
+    VIEW_CORE_V2_ROUTING: (
+        "Core V2 — Routing",
+        "preview ว่า role หนึ่งจะ resolve ไป provider/account ไหน (read-only)",
+    ),
+    VIEW_CORE_V2_BRAIN: (
+        "Core V2 — Brain",
+        "จำนวน memory ต่อ scope/trust + ค้นหาผ่าน RetrievalEngine",
+    ),
+    VIEW_CORE_V2_SCHEDULER: (
+        "Core V2 — Scheduler",
+        "SlotPolicy (global/provider/account/project) + priority default + backpressure estimate",
+    ),
+    VIEW_CORE_V2_MIGRATION: (
+        "Core V2 — Migration",
+        "inspect/plan/dry-run เท่านั้น — apply ทำผ่าน CLI",
     ),
 }
 
@@ -620,7 +667,7 @@ class _AutoskillsConfirmDialog(QDialog):
         return [cand.name for cand, chk in self._checks if chk.isChecked()]
 
 
-class SettingsWindow(QDialog):
+class SettingsWindow(QDialog, CoreV2SettingsMixin):
     """The unified Settings window. One instance per open — construct fresh
     each time (mirrors the old, now-removed ``PaneToolsDialog``/
     ``PipelineSettingsDialog``'s no-singleton/no-caching pattern), so it
@@ -868,6 +915,12 @@ class SettingsWindow(QDialog):
         self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_overview_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_accounts_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_routing_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_migration_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)

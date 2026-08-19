@@ -3,6 +3,9 @@
 (7c Context Builder is the first real caller), so today this flag only
 gates `core.brain.facade` — but it's defined up front so 7c doesn't need to
 invent its own gate.
+
+Env wins when set; unset falls back to the Settings UI's persisted toggle
+(epic #309 Phase 9, `core_v2_settings.flag_enabled`).
 """
 
 from __future__ import annotations
@@ -11,4 +14,9 @@ import os
 
 
 def v2_brain_enabled() -> bool:
-    return os.environ.get("TAKKUB_V2_BRAIN", "0") == "1"
+    raw = os.environ.get("TAKKUB_V2_BRAIN")
+    if raw is not None:
+        return raw == "1"
+    from agent_takkub import core_v2_settings
+
+    return core_v2_settings.flag_enabled("brain")
