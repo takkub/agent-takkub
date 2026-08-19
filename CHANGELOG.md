@@ -4,6 +4,39 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.77] - 2026-08-19
+
+### Added (เพิ่ม)
+
+- **Remote/มือถือเห็นประวัติ pane ที่เป็น Cursor** — `cursor_helper.py` อ่าน transcript ของ Cursor
+  (`~/.cursor/projects/<encoded-cwd>/agent-transcripts/`) + ลง scanner ใน remote/notify (#310, than-aa)
+- **`takkub mcp-fallback request`** — shard (qa#N) ที่ Playwright MCP ต่อไม่ติดจริง ขอสิทธิ์ใช้ `mb`
+  แบบ single-holder time-boxed (กันชน CDP 9222 #92) แทนทางตัน · `takkub doctor --pane <role>` โชว์
+  MCP handshake ของ spawn ล่าสุด · event `mcp_handshake_argv` ทุก spawn · qa.md มีขั้นตอน (#304, #146)
+- **Lead รู้ทันทีเมื่อ pane ชน quota/usage limit** — detector ต่อ provider (gemini "Individual quota
+  reached … Resets in XhYm" field-verified · codex provisional · claude เดิม) → state `stalled:quota`
+  ใน `takkub status/list` + `[system]` notice ถึง Lead + โชว์ model ปัจจุบัน (gemini Pro→Flash) (#301)
+- **stuck-tool watchdog** — pane ค้างใน shell tool (`Running command...`) เกิน 3 นาทีโดยไม่มี output
+  จริง → `stalled:tool` + notice ถึง Lead · auto-Esc 1 ครั้งเฉพาะ provider ที่ยืนยันอาการ (gemini)
+  · `takkub status` tail โชว์บรรทัด tool แทน input box ว่าง · heartbeat ไม่นับ elapsed counter เป็น progress (#308)
+- **task ที่ติด resource gate แก้/ยกเลิก/ต่อท้ายได้** — ใบงานเขียนลง `runtime/tasks/` ตั้งแต่ queue
+  (status=queued) · `takkub task cancel` ยกเลิกใบที่ยังติด gate · `takkub send` ถึง role ที่ยังไม่ spawn
+  = queue ไว้ส่งตอน spawn · `takkub status` บอกว่าใครถือ slot อยู่โปรเจกต์ไหน + จำนวนคิว (#303)
+
+### Fixed (แก้)
+
+- **main thread ค้าง 1–7 s เมื่อมีหลาย pane** — graft chip snapshot (resolve/stat ทุก project) ย้ายไป
+  worker + cache · pyte `display_lines()` memo ต่อ output generation (orchestrator timers เรียก 3–4
+  predicate ต่อ tick ไม่ render ซ้ำ) (#312)
+- **overload latch ค้างถาวร** ในช่วง RAM 20–25% → auto-release หลังอยู่ใน dead-band 120 s (ตั้งได้
+  `overload_deadband_timeout_s`) · status header บอกเหตุผลจริง "machine overloaded (CPU x% · RAM free y%)"
+  แทน "waiting for browser slot" (#305)
+- **ชื่อ project/role ภาษาไทย/reserved/ยาว** — `path_safe.safe_segment()` กลาง (hash suffix กันชน,
+  กัน CON/NUL, cap 64) ใช้ใน role_memory · task_ledger · lead_context; ชื่อ ascii เดิมไม่เปลี่ยน (#294)
+- opencode/codex ready detection เร็วขึ้น · ชื่อ app บน macOS menu bar = agent-takkub · gemini usage
+  meter ไม่ขึ้น 100% ปลอมจาก cache เก่า (#310, than-aa)
+
+
 ## [1.0.76] - 2026-08-19
 
 ### Added (เพิ่ม) — Core V2 ชั้นล่างใหม่ ปิดด้วย feature flag ทั้งหมด (epic #309, PR #311)
