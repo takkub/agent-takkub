@@ -1557,6 +1557,44 @@ def supports_remote_history(provider: str) -> bool:
     return history_scanner(provider) is not None
 
 
+def _read_from_conversation_store_v2(project_ns: str, limit: int) -> list[dict] | None:
+    """Core V2 Conversation read-through (#309 Phase 6). Flag
+    `TAKKUB_V2_CONVERSATION` is off by default; this is the ONE touch point
+    `remote/` makes into `core.*` (plan §6d "แก้ remote/ น้อยที่สุด 1 จุด
+    fail-open") — the dependency direction is remote -> core only, which
+    `core-is-bottom-layer`/`remote-bolt-on-isolation` both allow (neither
+    forbids `core` from being imported, only from importing PyQt6/engine/UI
+    or being imported the other way round).
+
+    Returns `None` — "fall through to the normal scanner path" — whenever
+    the flag is off, nothing has been ingested into the store yet for this
+    project's Lead conversation, or anything raises. Never lets a Core V2
+    bug break the existing scanner-backed mirror.
+    """
+    try:
+        from ..core.conversation.flag import v2_conversation_enabled
+
+        if not v2_conversation_enabled() or not project_ns:
+            return None
+        from ..core.conversation.store import ConversationStore, conversation_id_for
+
+        store = ConversationStore()
+        conversation_id = conversation_id_for(project_ns, "lead")
+        messages = store.read_messages(project_ns, conversation_id)
+        if not messages:
+            return None
+        kind_by_role = {"user": "me", "assistant": "lead", "system": "lead"}
+        return [
+            {
+                "text": m.text[:_MAX_EVENT_CHARS],
+                "kind": kind_by_role.get(str(m.role), "lead"),
+            }
+            for m in messages[-limit:]
+        ]
+    except Exception:
+        return None
+
+
 def read_recent_lead_messages(
     path: Path,
     limit: int = _DEFAULT_HISTORY_LIMIT,
@@ -1565,6 +1603,9 @@ def read_recent_lead_messages(
     project_ns: str = "",
 ) -> list[dict]:
     """Provider-dispatched history reader; unsupported providers return []."""
+    v2_messages = _read_from_conversation_store_v2(project_ns, limit)
+    if v2_messages is not None:
+        return v2_messages
     scanner = history_scanner(provider)
     if scanner is None:
         return []

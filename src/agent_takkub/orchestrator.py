@@ -1461,6 +1461,33 @@ class Orchestrator(
             )
 
         session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+
+        # Core V2 Conversation hook (#309 Phase 6) — see done()'s identical
+        # comment. Subagents have no pane/PTY, so there is no cwd/session_id
+        # to pass through for transcript ingest; the note itself still gets
+        # recorded as a conversation message + rolling-summary update.
+        try:
+            from .core.conversation.flag import v2_conversation_enabled
+
+            if v2_conversation_enabled():
+                import threading
+
+                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
+
+                threading.Thread(
+                    target=_cv_on_pane_done,
+                    args=(project_ns, role_name),
+                    kwargs={"note": note, "failed": failed},
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "conversation_v2_hook_error",
+                role=role_name,
+                project=project_ns,
+                stage="subagent-done",
+            )
+
         body = note if failed else self._condense_done_note(note, note, "", session_path)
         notice = (
             self._build_verify_fail_handoff(role_name, note)
@@ -3831,6 +3858,39 @@ class Orchestrator(
         session_md_path = self._save_decision_note(
             project_ns, from_role, note, now=now, transcript_path=transcript_path
         )
+
+        # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
+        # circuits before any import, so done() stays byte-identical; flag ON
+        # runs in a background thread (I/O must never land on the Qt main
+        # thread) and is fail-open around both the flag check and the thread
+        # body itself (core.conversation.facade.on_pane_done already wraps
+        # its own body in try/except, this is belt-and-suspenders).
+        try:
+            from .core.conversation.flag import v2_conversation_enabled
+
+            if v2_conversation_enabled():
+                import threading
+
+                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
+                from .provider_config import effective_provider_for as _cv_provider_for
+
+                threading.Thread(
+                    target=_cv_on_pane_done,
+                    args=(project_ns, from_role),
+                    kwargs={
+                        "note": raw_note,
+                        "failed": failed,
+                        "task_id": had_task_id,
+                        "provider_id": _cv_provider_for(from_role, project_ns),
+                        "cwd": getattr(pane, "_session_cwd", None),
+                        "session_id": _ps_done.session_uuid,
+                    },
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "conversation_v2_hook_error", role=from_role, project=project_ns, stage="done"
+            )
 
         # notify Lead in the same project (a teammate in project-a mustn't
         # nudge the Lead in project-b by mistake). `done --fail` swaps the plain

@@ -151,9 +151,14 @@ class CooldownFailoverSelector:
         # the very first select() for a pool (prior_id is None) is an
         # initial assignment, not a failover, and must not log.
         if prior_id is not None and prior_id != picked_id:
+            from agent_takkub.core.conversation.facade import on_account_switch
+
             from .switch_log import log_switch
 
             log_switch(pool.id, pool.provider_id, prior_id, picked_id, reason="cooldown_failover")
+            on_account_switch(
+                pool.id, pool.provider_id, prior_id, picked_id, reason="cooldown_failover"
+            )
         if picked_id is not None:
             self._last[pool.id] = picked_id
         elif pool.id in self._last:
