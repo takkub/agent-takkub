@@ -113,6 +113,16 @@ class TestRenderLeadSettings:
         assert "deny" in data["permissions"]
         assert isinstance(data["permissions"]["deny"], list)
 
+    def test_thai_project_name_produces_sanitized_filename(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        # #294: the filename used to embed the raw project name unsanitized.
+        result = render_lead_settings("โปรเจกต์ไทย")
+        assert result.parent == tmp_path / "runtime"
+        assert result.name.startswith("lead-guard-")
+        assert result.name.endswith(".json")
+        assert result.exists()
+
     def test_deny_rules_contain_all_write_tools_for_each_path(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:

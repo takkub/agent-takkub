@@ -48,6 +48,7 @@ import pathlib
 from datetime import datetime
 
 from .config import RUNTIME_DIR
+from .path_safe import safe_segment
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ _TERMINAL_STATUSES = frozenset({"ok", "closed", "superseded"})
 
 
 def _ledger_dir(project: str) -> pathlib.Path:
-    return RUNTIME_DIR / "tasks" / project
+    return RUNTIME_DIR / "tasks" / safe_segment(project)
 
 
 def _state_path(project: str) -> pathlib.Path:

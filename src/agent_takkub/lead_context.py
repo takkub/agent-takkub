@@ -47,6 +47,7 @@ from .config import (
     load_projects,
 )
 from .pane_tools_policy import effective_plugins
+from .path_safe import safe_segment
 from .plugin_installer import normalize_plugin_hook_timeout
 from .user_profile import config_dir_for
 from .vault_mirror import _is_junk_note
@@ -756,7 +757,7 @@ def render_lead_settings(project: str) -> pathlib.Path:
     }
 
     ensure_runtime()
-    out = RUNTIME_DIR / f"lead-guard-{project}.json"
+    out = RUNTIME_DIR / f"lead-guard-{safe_segment(project)}.json"
     out.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
     return out
 
