@@ -829,6 +829,26 @@ class TestDiskReport:
         never = next(c for c in report["categories"] if c["key"] == "venv")
         assert never["level"] == "never"
 
+    def test_runtime_triage_classifies_state_vs_cache_read_only(self, tmp_path, monkeypatch):
+        """#309 Phase 8b: `runtime_triage` awareness folded into disk_report()
+        — read-only classification, never deletes/copies anything itself."""
+        cfg_dir = tmp_path / "claude-config"
+        (cfg_dir / "projects").mkdir(parents=True)
+        (cfg_dir / "shell-snapshots").mkdir(parents=True)
+        monkeypatch.setattr(disk_usage, "default_claude_config_dir", lambda: cfg_dir)
+        runtime_dir = tmp_path / "runtime"
+        (runtime_dir / "tasks" / "demo").mkdir(parents=True)
+        (runtime_dir / "tasks" / "demo" / "INDEX.md").write_text("x", encoding="utf-8")
+        (runtime_dir / "tunnel").mkdir(parents=True)
+        (runtime_dir / "some-unclassified-dir").mkdir(parents=True)
+
+        report = disk_usage.disk_report(tmp_path)
+        triage = report["runtime_triage"]
+        assert "tasks" in triage["state_dirs"]
+        assert "tunnel" in triage["cache_dirs"]
+        assert "some-unclassified-dir" in triage["unclassified_dirs"]
+        assert (runtime_dir / "tunnel").is_dir()  # never touched by the report itself
+
     def test_orphan_with_source_files_counted_under_review_not_safe(self, tmp_path, monkeypatch):
         cfg_dir = tmp_path / "claude-config"
         (cfg_dir / "projects").mkdir(parents=True)

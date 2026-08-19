@@ -2395,6 +2395,57 @@ def check_core_version_compat() -> list[Finding]:
     return findings
 
 
+def check_storage_layout_state() -> list[Finding]:
+    """[storage-layout/*] — V1/V2/mixed layout state (#309 Phase 8b) +
+    which legacy files are still sitting unmigrated.
+
+    Deliberately NOT part of `run_all_checks()`'s default tuple — opt-in
+    only via `takkub doctor --storage-layout`, same "--live"/"--core-
+    version" pattern this module already uses, so a plain `takkub doctor`
+    stays byte-identical to before this landed. Never FAILs — a V1-only
+    machine (every install today) is OK, not broken.
+    """
+    try:
+        from .core.storage.layout import LEGACY_MAPPING, layout_state, storage_layout_v2
+    except Exception as e:
+        return [
+            Finding(
+                "storage-layout", "core-v2", Status.INFO, f"core.storage.layout unavailable: {e}"
+            )
+        ]
+
+    state = layout_state()
+    findings = [
+        Finding(
+            "storage-layout",
+            "state",
+            Status.OK,
+            f"{state} — {storage_layout_v2().root}",
+        )
+    ]
+    if state == "v1":
+        findings.append(
+            Finding(
+                "storage-layout",
+                "ladder",
+                Status.INFO,
+                f"{len({e.ladder_step for e in LEGACY_MAPPING if e.ladder_step > 0})} ladder step(s) "
+                "not yet applied — `takkub migrate inspect` for detail",
+            )
+        )
+    elif state == "mixed":
+        findings.append(
+            Finding(
+                "storage-layout",
+                "legacy-leftover",
+                Status.INFO,
+                "V2 layout exists alongside V1 files — expected until the deprecation ladder "
+                "(plan §2, Phase 10) removes V1; not itself a problem",
+            )
+        )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (

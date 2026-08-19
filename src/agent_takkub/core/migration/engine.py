@@ -20,6 +20,15 @@ from .backup import BackupManager
 from .journal import MigrationJournal
 from .report import StepReport
 from .steps import VersionMarkerStep
+from .steps_v1 import (
+    CredentialReferenceStep,
+    ProjectMigrationStep,
+    RoleAgentMigrationStep,
+    RuntimeTriageStep,
+    build_capability_step,
+    build_readonly_registries_step,
+    build_state_step,
+)
 
 
 class MigrationEngine:
@@ -29,7 +38,19 @@ class MigrationEngine:
         else:
             journal = MigrationJournal()
             backups = BackupManager()
-            self._steps = [VersionMarkerStep(journal=journal, backups=backups)]
+            # Ladder order (plan §5.3), lowest risk first. Every step shares
+            # one journal/backup store so `takkub migrate rollback` can walk
+            # the whole ladder in reverse from a single source of truth.
+            self._steps = [
+                VersionMarkerStep(journal=journal, backups=backups),
+                build_readonly_registries_step(journal, backups),
+                RoleAgentMigrationStep(journal=journal, backups=backups),
+                build_capability_step(journal, backups),
+                ProjectMigrationStep(journal=journal, backups=backups),
+                build_state_step(journal, backups),
+                CredentialReferenceStep(journal=journal, backups=backups),
+                RuntimeTriageStep(journal=journal, backups=backups),
+            ]
 
     def inspect(self) -> list[StepReport]:
         return [s.inspect() for s in self._steps]
