@@ -20,7 +20,6 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
