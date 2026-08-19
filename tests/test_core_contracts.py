@@ -12,6 +12,7 @@ from agent_takkub.core.contracts import (
     brain_adapter,
     migration,
     provider_adapter,
+    routing_policy,
     secret_manager,
     store,
 )
@@ -24,6 +25,7 @@ CONTRACT_MODULES = [
     brain_adapter,
     migration,
     provider_adapter,
+    routing_policy,
     secret_manager,
     store,
 ]
@@ -153,3 +155,12 @@ class _FakeMigrationStep:
 
 def test_fake_migration_step_satisfies_protocol():
     assert isinstance(_FakeMigrationStep(), migration.MigrationStep)
+
+
+class _FakeRoutingPolicy:
+    def resolve(self, role: str, project: str | None = None) -> str:
+        return "claude"
+
+
+def test_fake_routing_policy_satisfies_protocol():
+    assert isinstance(_FakeRoutingPolicy(), routing_policy.RoutingPolicy)

@@ -1453,14 +1453,19 @@ class SpawnEngineMixin:
         # append-system-prompt flag. Marking it pending above the gate/FIFO
         # returns lets deferred spawns retain the task without adding it to a
         # long PTY paste or command-line argument.
-        from .provider_config import CLAUDE, effective_provider_for
+        from .core.routing import effective_provider_for_v2
+        from .provider_config import CLAUDE
         from .provider_spec import PROVIDER_REGISTRY
 
         _ps_initial = self._ps(_exit_key(project_ns, role_name))
         # #248/#247 round 2: a pane-scoped degrade (no-content watchdog gave
         # up on this role's real provider after a retry) wins over the
         # normal config/availability resolution — see PaneState.provider_override.
-        effective_provider = _ps_initial.provider_override or effective_provider_for(
+        # epic #309 Phase 3: routed through core.routing's façade instead of
+        # calling provider_config.effective_provider_for directly — this is
+        # THE single connection point TAKKUB_V2_ROUTER gates (off by default,
+        # byte-identical to the direct call; see core/routing/facade.py).
+        effective_provider = _ps_initial.provider_override or effective_provider_for_v2(
             base_role, project=project_ns
         )
         if (

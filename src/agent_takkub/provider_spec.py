@@ -261,6 +261,38 @@ class ProviderSpec:
     # worse, mutate state).
     boot_diagnostic_argv: tuple[str, ...] | None = None
 
+    # ─── 16. Core V2 provider/account/routing vocabulary (Phase 3, epic #309) ───
+    # REUSE_VS_REWRITE_MATRIX.md §2: "EXTEND — เติม transport/auth kinds/
+    # adapter id/compatibility range". All four are additive with safe
+    # defaults reproducing today's implicit reality (every registered
+    # provider is a PTY-driven CLI with an unconfirmed auth story) — no
+    # existing PROVIDER_REGISTRY entry needs to change, and nothing reads
+    # these yet outside `core.providers`/`core.contracts.provider_adapter`.
+    # transport      — how the cockpit talks to this CLI. Every current
+    #                  provider is "cli" (PTY-driven interactive process);
+    #                  "rest"/"openai_compatible"/"local" are placeholders
+    #                  for a future non-PTY adapter (plan §1 module tree).
+    transport: str = "cli"
+    # auth_kinds     — credential mechanism(s) this provider's CLI uses,
+    #                  informational only (doctor/Settings display) until a
+    #                  SecretManager backend keys off it. Empty = not yet
+    #                  confirmed (never guess — same policy as
+    #                  auth_error_markers above).
+    auth_kinds: tuple[str, ...] = field(default_factory=tuple)
+    # adapter_id     — key `core.providers.registry.adapter_for()` uses to
+    #                  pick a `ProviderAdapter` implementation. Defaults to
+    #                  the provider's own `name` (1:1 today); only a future
+    #                  provider that shares an adapter with another one
+    #                  (e.g. two OpenAI-compatible backends) would override.
+    adapter_id: str = ""
+    # compat_range   — CLI version range this spec's fields were captured
+    #                  against, `"<min>,<max-exclusive>"` (empty max = no
+    #                  known ceiling). Empty = not yet tracked (doctor's
+    #                  existing per-provider version check is the source of
+    #                  truth until this is wired — see D3 schema-drift
+    #                  lesson in docs/v2/CURRENT_ARCHITECTURE_AUDIT.md).
+    compat_range: str = ""
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
