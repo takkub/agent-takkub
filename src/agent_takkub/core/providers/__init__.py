@@ -7,11 +7,15 @@ from __future__ import annotations
 from .claude_adapter import ClaudeCliAdapter
 from .cli_adapter import CliProviderAdapter
 from .errors import ProviderAdapterNotWired
+from .plan import account_env_overrides, assemble_generic_argv, build_generic_spawn_plan
 from .registry import adapter_for
 
 __all__ = [
     "ClaudeCliAdapter",
     "CliProviderAdapter",
     "ProviderAdapterNotWired",
+    "account_env_overrides",
     "adapter_for",
+    "assemble_generic_argv",
+    "build_generic_spawn_plan",
 ]

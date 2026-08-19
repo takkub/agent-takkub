@@ -154,6 +154,7 @@ import agent_takkub.core.models.conversation
 import agent_takkub.core.models.capability
 import agent_takkub.core.models.memory
 import agent_takkub.core.models.version
+import agent_takkub.core.models.spawn_plan
 import agent_takkub.core.contracts.provider_adapter
 import agent_takkub.core.contracts.account_selector
 import agent_takkub.core.contracts.brain_adapter
@@ -165,7 +166,9 @@ import agent_takkub.core.storage.paths
 import agent_takkub.core.storage.jsonl_store
 import agent_takkub.core.storage.legacy_reader
 import agent_takkub.core.providers
+import agent_takkub.core.providers.plan
 import agent_takkub.core.accounts
+import agent_takkub.core.accounts.facade
 import agent_takkub.core.routing
 import agent_takkub.core.conversation
 import agent_takkub.core.conversation.store

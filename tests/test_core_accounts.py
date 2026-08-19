@@ -107,6 +107,18 @@ def test_read_legacy_accounts_default_only():
     assert accounts[0].priority == 0
 
 
+def test_read_legacy_accounts_populates_config_dir(tmp_path):
+    from agent_takkub import user_profile as up
+
+    accounts = read_legacy_accounts()
+    assert accounts[0].config_dir == str(up._DEFAULT_CONFIG_DIR)
+
+    up.add_profile("work", str(tmp_path / "claude-work"))
+    accounts = read_legacy_accounts()
+    work = next(a for a in accounts if a.id == "legacy-claude-work")
+    assert work.config_dir == str(tmp_path / "claude-work")
+
+
 def test_read_legacy_accounts_includes_registered_profile():
     from agent_takkub import user_profile as up
 
@@ -219,6 +231,59 @@ def test_quota_aware_selector_falls_back_to_priority_when_usage_unknown():
     assert selector.select(pool, accounts).id == "a2"
 
 
+def test_quota_aware_selector_differentiates_same_provider_by_account(monkeypatch):
+    # epic #309 Phase 3b: closes the old "same-provider accounts always see
+    # the same figure" limitation — account A pinned near its limit must
+    # lose to account B of the SAME provider once utilization differs.
+    from agent_takkub.core.accounts.selector import _default_account_usage_lookup
+    from agent_takkub.core.models.account import ProviderAccount
+
+    a_hot = ProviderAccount(id="a1", provider_id="claude", config_dir="/cfg/a")
+    b_cool = ProviderAccount(id="a2", provider_id="claude", config_dir="/cfg/b")
+    pool = AccountPool(id="pool-1", name="pool", provider_id="claude", account_ids=("a1", "a2"))
+
+    fake_usage = {"/cfg/a": 97.0, "/cfg/b": 12.0}
+
+    class _FakeStore:
+        def get(self, provider, config_dir=None):
+            class _U:
+                utilization = fake_usage[str(config_dir)]
+
+            return _U() if str(config_dir) in fake_usage else None
+
+        def refresh_now(self, provider, config_dir=None):
+            pass
+
+    monkeypatch.setattr("agent_takkub.provider_usage.get_store", lambda: _FakeStore())
+
+    selector = QuotaAwareAccountSelector()
+    picked = selector.select(pool, [a_hot, b_cool])
+    assert picked.id == "a2"
+    # Direct lookup-function proof, independent of the selector's own sort.
+    assert _default_account_usage_lookup(a_hot) == 97.0
+    assert _default_account_usage_lookup(b_cool) == 12.0
+
+
+def test_quota_aware_selector_account_with_no_config_dir_falls_back_to_provider_lookup(
+    monkeypatch,
+):
+    from agent_takkub.core.accounts.selector import _default_account_usage_lookup
+    from agent_takkub.core.models.account import ProviderAccount
+
+    account = ProviderAccount(id="a1", provider_id="claude", config_dir=None)
+
+    class _FakeUsage:
+        utilization = 42.0
+
+    class _FakeStore:
+        def get(self, provider, config_dir=None):
+            assert config_dir is None
+            return _FakeUsage()
+
+    monkeypatch.setattr("agent_takkub.provider_usage.get_store", lambda: _FakeStore())
+    assert _default_account_usage_lookup(account) == 42.0
+
+
 def test_cooldown_failover_selector_picks_priority_first_time():
     accounts = [_account("a1", priority=5), _account("a2", priority=1)]
     pool = _pool(["a1", "a2"])
@@ -257,6 +322,56 @@ def test_cooldown_failover_selector_logs_switch_when_account_drops_out(tmp_path,
 def test_selector_for_manual_raises():
     with pytest.raises(ValueError):
         selector_for(SelectionStrategy.MANUAL)
+
+
+# ── AccountRegistry config_dir round-trip ────────────────────────────────
+
+
+def test_account_registry_round_trips_config_dir(tmp_path):
+    reg = AccountRegistry(JsonlStore(tmp_path / "accounts.jsonl"))
+    reg.upsert(ProviderAccount(id="a1", provider_id="claude", config_dir="/home/u/.claude-work"))
+    got = reg.get("a1")
+    assert got.config_dir == "/home/u/.claude-work"
+
+
+# ── resolve_account_for façade ───────────────────────────────────────────
+
+
+def test_resolve_account_for_falls_back_to_legacy_when_no_pool(tmp_path):
+    from agent_takkub.core.accounts.facade import resolve_account_for
+    from agent_takkub.core.accounts.registry import AccountPoolRegistry
+    from agent_takkub.core.storage.jsonl_store import JsonlStore as _JsonlStore
+
+    empty_pools = AccountPoolRegistry(_JsonlStore(tmp_path / "pools.jsonl"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("agent_takkub.core.accounts.facade.AccountPoolRegistry", lambda: empty_pools)
+        account = resolve_account_for("claude", "some-project")
+    assert account is not None
+    assert account.id == "legacy-claude-default"
+
+
+def test_resolve_account_for_prefers_registered_pool(tmp_path):
+    from agent_takkub.core.accounts.facade import resolve_account_for
+    from agent_takkub.core.accounts.registry import AccountPoolRegistry, AccountRegistry
+    from agent_takkub.core.storage.jsonl_store import JsonlStore as _JsonlStore
+
+    pools = AccountPoolRegistry(_JsonlStore(tmp_path / "pools.jsonl"))
+    accounts = AccountRegistry(_JsonlStore(tmp_path / "accounts.jsonl"))
+    accounts.upsert(_account("pool-a1", provider="claude", priority=5))
+    pools.upsert(
+        AccountPool(
+            id="p1",
+            name="p1",
+            provider_id="claude",
+            account_ids=("pool-a1",),
+            strategy=SelectionStrategy.PRIORITY,
+        )
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("agent_takkub.core.accounts.facade.AccountPoolRegistry", lambda: pools)
+        mp.setattr("agent_takkub.core.accounts.facade.AccountRegistry", lambda: accounts)
+        account = resolve_account_for("claude", "some-project")
+    assert account.id == "pool-a1"
 
 
 @pytest.mark.parametrize(

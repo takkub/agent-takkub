@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .facade import resolve_account_for
 from .legacy_reader import read_legacy_accounts, read_selected_account_id
 from .registry import AccountPoolRegistry, AccountRegistry
 from .selector import (
@@ -26,5 +27,6 @@ __all__ = [
     "read_legacy_accounts",
     "read_selected_account_id",
     "read_switches",
+    "resolve_account_for",
     "selector_for",
 ]

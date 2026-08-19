@@ -55,6 +55,12 @@ class ProviderAccount:
     workspace_id: str | None = None
     project_id: str | None = None
     limits: AccountLimits = field(default_factory=AccountLimits)
+    # Phase 3b (epic #309): the isolated config/home dir this credential's
+    # provider CLI reads from (CLAUDE_CONFIG_DIR-shaped — codex's CODEX_HOME
+    # is the same concept under a different provider). None = no known
+    # isolation for this account (falls back to the provider's OS default).
+    # See `core.providers.plan.account_env_overrides`.
+    config_dir: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
