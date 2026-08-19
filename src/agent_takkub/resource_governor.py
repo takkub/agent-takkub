@@ -41,6 +41,13 @@ class GovernorLimits:
     cpu_resume_percent: float = 65.0
     min_available_ram_percent: float = 20.0
     resume_ram_percent: float = 25.0
+    # overload_deadband_timeout_s (#305): a latch can sit forever in the gap
+    # between cpu_resume_percent/min_available_ram_percent (either metric
+    # already below ITS OWN pause line) and the stricter both-must-hold
+    # resume_ram_percent/cpu_resume_percent condition below — e.g. available
+    # RAM parked at 23% (above min_available=20 but below resume_ram=25)
+    # with CPU idle. See `ResourceGovernor.sample()`'s dead-band handling.
+    overload_deadband_timeout_s: float = 120.0
 
     @classmethod
     def from_environment(cls) -> GovernorLimits:
@@ -75,6 +82,9 @@ class GovernorLimits:
                 "TAKKUB_MIN_AVAILABLE_RAM_PERCENT", persisted.min_available_ram_percent
             ),
             resume_ram_percent=_float("TAKKUB_RESUME_RAM_PERCENT", persisted.resume_ram_percent),
+            overload_deadband_timeout_s=_float(
+                "TAKKUB_OVERLOAD_DEADBAND_TIMEOUT_S", persisted.overload_deadband_timeout_s
+            ),
         )
 
 
@@ -244,6 +254,11 @@ class ResourceGovernor:
         self._available_memory_bytes = 0
         self._total_memory_bytes = 0
         self._overloaded = False
+        # deadband_since (#305): wall-clock time this latch entered the
+        # dead-band (neither metric over its own pause line, yet the
+        # both-must-hold resume condition still unmet) — None whenever not
+        # currently in that state. See `sample()`.
+        self._deadband_since: float | None = None
         self._tokens: dict[str, ResourceToken] = {}
         self._waiting: OrderedDict[str, deque[QueuedTask]] = OrderedDict()
         self._project_cursor = 0
@@ -317,16 +332,58 @@ class ResourceGovernor:
                     and self._available_ram_percent >= self.limits.resume_ram_percent
                 ):
                     self._overloaded = False
+                    self._deadband_since = None
+                elif (
+                    self._cpu_percent < self.limits.cpu_pause_percent
+                    and self._available_ram_percent >= self.limits.min_available_ram_percent
+                ):
+                    # Dead-band (#305): neither metric is over ITS OWN pause
+                    # line anymore (this is exactly `_overload_state_reason`'s
+                    # "waiting_resume" case), but the stricter both-must-hold
+                    # resume condition above isn't satisfied either — e.g.
+                    # available RAM parked between min_available_ram_percent
+                    # and resume_ram_percent. Left alone this never clears on
+                    # its own. Escape hatch: once the machine has sat in this
+                    # zone continuously for overload_deadband_timeout_s,
+                    # release the latch — the zone's own definition already
+                    # proves neither metric is actually breaching its limit.
+                    now = self._clock()
+                    if self._deadband_since is None:
+                        self._deadband_since = now
+                    elif now - self._deadband_since >= self.limits.overload_deadband_timeout_s:
+                        waited_s = now - self._deadband_since
+                        self._overloaded = False
+                        self._deadband_since = None
+                        self._emit(
+                            "overload_deadband_released",
+                            cpu_percent=self._cpu_percent,
+                            available_ram_percent=self._available_ram_percent,
+                            waited_s=round(waited_s, 1),
+                        )
+                else:
+                    # Actively over one metric's own pause line — not a
+                    # dead-band wait, so any in-progress dead-band timer is
+                    # stale and must not carry over once that metric clears.
+                    self._deadband_since = None
             elif (
                 self._cpu_percent >= self.limits.cpu_pause_percent
                 or self._available_ram_percent < self.limits.min_available_ram_percent
             ):
                 self._overloaded = True
+                self._deadband_since = None
             return self.snapshot()
 
     def overloaded(self) -> bool:
         with self._lock:
             return self._overloaded
+
+    def current_metrics(self) -> tuple[float, float]:
+        """Latest sampled ``(cpu_percent, available_ram_percent)`` — a cheap
+        accessor for callers (#305's status-header wording) that only need
+        the numbers behind an overload reason, without `snapshot()`'s full
+        token/queue bookkeeping."""
+        with self._lock:
+            return self._cpu_percent, self._available_ram_percent
 
     def _counts(
         self,

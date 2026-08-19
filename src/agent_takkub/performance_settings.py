@@ -9,7 +9,7 @@ CLI, and tests all use one schema.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass
 from pathlib import Path
 
 import psutil
@@ -34,6 +34,12 @@ class PerformanceSettings:
     min_available_ram_percent: float
     resume_ram_percent: float
     hidden_render_ms: int
+    # overload_deadband_timeout_s (#305): seconds the overload latch may sit
+    # in the CPU<pause/RAM<resume_ram "dead-band" (see resource_governor's
+    # `sample()`) before it auto-releases. Added after the schema shipped, so
+    # `from_dict` below defaults it for settings files saved before this
+    # field existed rather than discarding the whole persisted file.
+    overload_deadband_timeout_s: float = 120.0
 
     def to_dict(self) -> dict:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
@@ -132,6 +138,8 @@ def validate(settings: PerformanceSettings) -> PerformanceSettings:
         raise ValueError("RAM resume threshold must be higher than pause threshold")
     if not 50 <= settings.hidden_render_ms <= 2_000:
         raise ValueError("background render cadence must be between 50 and 2000 ms")
+    if not 10 <= settings.overload_deadband_timeout_s <= 1_800:
+        raise ValueError("overload dead-band timeout must be between 10 and 1800 seconds")
     return settings
 
 
@@ -139,7 +147,15 @@ def from_dict(payload: dict) -> PerformanceSettings:
     values = {
         name: payload[name] for name in PerformanceSettings.__dataclass_fields__ if name in payload
     }
+    # Fields with a dataclass default (currently just overload_deadband_timeout_s,
+    # #305) may be absent from a settings file saved before that field existed —
+    # fall back to its default instead of discarding the whole persisted file.
     missing = set(PerformanceSettings.__dataclass_fields__) - set(values)
+    missing = {
+        name
+        for name in missing
+        if PerformanceSettings.__dataclass_fields__[name].default is MISSING
+    }
     if missing:
         raise ValueError(f"missing performance settings: {', '.join(sorted(missing))}")
     return validate(PerformanceSettings(**values))
