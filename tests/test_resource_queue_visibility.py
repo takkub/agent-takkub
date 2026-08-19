@@ -79,8 +79,26 @@ class TestDescribeResourceWait:
         )
 
     def test_omits_blocked_by_clause_when_no_holder_known(self) -> None:
-        msg = _describe_resource_wait("backend#2", ResourceClass.BUILD, "cpu_high", [])
-        assert msg == "backend#2 queued — waiting for build slot (cpu_high)"
+        msg = _describe_resource_wait("backend#2", ResourceClass.BUILD, "build_global_limit", [])
+        assert msg == "backend#2 queued — waiting for build slot (build_global_limit)"
+        assert "blocked by" not in msg
+
+    def test_overload_latch_reason_names_the_machine_not_the_class(self) -> None:
+        """#305: an overload-latch reason (cpu_high/memory_low/waiting_resume)
+        used to be worded identically to a class slot-limit reason — e.g.
+        "qa queued — waiting for browser slot (waiting_resume)" sent Lead
+        hunting for a browser-lock holder that never existed. These reasons
+        come from the machine-wide latch, not the class's own slot count, and
+        must say so."""
+        msg = _describe_resource_wait(
+            "qa", ResourceClass.BROWSER, "waiting_resume", [], metrics=(26.3, 23.1)
+        )
+        assert msg == "qa queued — machine overloaded (waiting_resume: CPU 26% · RAM free 23%)"
+        assert "browser slot" not in msg
+
+    def test_overload_latch_reason_without_metrics_omits_stats(self) -> None:
+        msg = _describe_resource_wait("qa", ResourceClass.BROWSER, "cpu_high", ["other#1"])
+        assert msg == "qa queued — machine overloaded (cpu_high)"
         assert "blocked by" not in msg
 
 

@@ -101,6 +101,72 @@ def test_request_slot_unblocks_once_both_resume_thresholds_clear() -> None:
     assert decision.allowed
 
 
+def test_deadband_releases_latch_after_timeout() -> None:
+    # #305 real-world case: RAM parks at 23.1% — above min_available (20%)
+    # but below the stricter resume_ram (25%) — with CPU idle throughout, so
+    # the both-must-hold resume condition never clears on its own. The
+    # dead-band escape hatch must release the latch once it's sat there
+    # continuously for overload_deadband_timeout_s.
+    now = [0.0]
+    events: list[tuple[str, dict]] = []
+    samples = iter([(29.0, 15.0, 10), (29.0, 23.1, 10), (29.0, 23.1, 10), (29.0, 23.1, 10)])
+    governor = ResourceGovernor(
+        _limits(overload_deadband_timeout_s=60.0),
+        sampler=lambda: next(samples),
+        clock=lambda: now[0],
+        event_sink=lambda event, details: events.append((event, details)),
+    )
+    governor.sample()  # RAM 15% < min_available 20% -> latch trips
+    snap = governor.sample()  # RAM recovers to 23.1% -> enters dead-band
+    assert snap["overloaded"]
+    assert snap["overload_reason"] == "waiting_resume"
+
+    now[0] = 30.0
+    snap = governor.sample()  # only 30s into the dead-band, timeout not hit
+    assert snap["overloaded"]
+    assert not any(event == "overload_deadband_released" for event, _ in events)
+
+    now[0] = 65.0
+    snap = governor.sample()  # 65s continuously in the dead-band -> release
+    assert not snap["overloaded"]
+    assert snap["overload_reason"] == ""
+    released = [details for event, details in events if event == "overload_deadband_released"]
+    assert len(released) == 1
+    assert released[0]["waited_s"] == 65.0
+
+    decision = _request(governor, "p", "pane")
+    assert decision.allowed
+
+
+def test_deadband_timer_resets_if_a_metric_crosses_back_over_its_pause_line() -> None:
+    # Sitting in the dead-band, then a fresh CPU spike back over its own
+    # pause line is a genuinely-overloaded state again, not a dead-band wait
+    # — the stale dead-band clock must not let a later dip straight through.
+    now = [0.0]
+    samples = iter(
+        [(29.0, 15.0, 10), (29.0, 23.1, 10), (90.0, 23.1, 10), (29.0, 23.1, 10), (29.0, 23.1, 10)]
+    )
+    governor = ResourceGovernor(
+        _limits(overload_deadband_timeout_s=60.0),
+        sampler=lambda: next(samples),
+        clock=lambda: now[0],
+    )
+    governor.sample()  # trips on RAM
+    governor.sample()  # dead-band since t=0.0
+    now[0] = 10.0
+    snap = governor.sample()  # CPU 90% >= pause -> actively overloaded again
+    assert snap["overloaded"]
+    assert snap["overload_reason"] == "cpu_high"
+
+    now[0] = 40.0
+    snap = governor.sample()  # back to dead-band, but the clock must restart
+    assert snap["overloaded"]
+
+    now[0] = 65.0  # 65s since t=0, but only 25s since the dead-band restarted at t=40
+    snap = governor.sample()
+    assert snap["overloaded"], "dead-band timer must reset on re-entry, not carry over"
+
+
 def test_waiting_queue_is_round_robin_by_project() -> None:
     governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
     held = _request(governor, "held", "one")

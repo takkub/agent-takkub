@@ -735,14 +735,39 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
 
+# Reasons `resource_governor._overload_state_reason()` can return while the
+# machine-wide overload latch is held (#305) — distinct from the per-class
+# slot-limit reasons ("heavy_global_limit", "browser_global_limit", etc.):
+# those two groups need entirely different fixes (wait for another pane to
+# release its slot vs. free up CPU/RAM on the machine itself), so they must
+# never be worded the same way.
+_OVERLOAD_LATCH_REASONS = frozenset({"cpu_high", "memory_low", "waiting_resume"})
+
+
 def _describe_resource_wait(
-    role_name: str, resource_class: ResourceClass, reason: str, holders: list[str]
+    role_name: str,
+    resource_class: ResourceClass,
+    reason: str,
+    holders: list[str],
+    *,
+    metrics: tuple[float, float] | None = None,
 ) -> str:
     """Human-readable queued message for a role denied a resource-governor
     slot (#240 point 3) — names the blocking pane(s) instead of just the bare
     limit reason, and is the single formatting source shared by `assign`'s
     return value and `_queued_resource_roles`'s `takkub list`/`status`
-    surfacing so the two never drift apart."""
+    surfacing so the two never drift apart.
+
+    #305: `reason` used to always be worded as "waiting for {resource_class}
+    slot (...)" even when the machine-wide overload latch — not the class's
+    own slot count — was what actually denied it (e.g. "qa queued — waiting
+    for browser slot (waiting_resume)" sent Lead hunting for a browser-lock
+    holder that didn't exist). Overload-latch reasons now get their own
+    wording naming the machine, not the resource class, plus the CPU/RAM
+    numbers that were actually measured."""
+    if reason in _OVERLOAD_LATCH_REASONS:
+        stats = f": CPU {metrics[0]:.0f}% · RAM free {metrics[1]:.0f}%" if metrics else ""
+        return f"{role_name} queued — machine overloaded ({reason}{stats})"
     blocked_by = f", blocked by {', '.join(holders)}" if holders else ""
     return f"{role_name} queued — waiting for {resource_class.value} slot ({reason}{blocked_by})"
 
@@ -1727,7 +1752,11 @@ class Orchestrator(
                     blocked_by=holders,
                 )
                 return True, _describe_resource_wait(
-                    role_name, resource_class, decision.reason, holders
+                    role_name,
+                    resource_class,
+                    decision.reason,
+                    holders,
+                    metrics=governor.current_metrics(),
                 )
             if decision.token is not None:
                 self._resource_tokens[resource_key] = decision.token
@@ -4826,7 +4855,9 @@ class Orchestrator(
                 extra[role] = f"{role} queued — waiting for resources ({reason})"
                 continue
             holders = governor.holders_for_class(resource_class)
-            extra[role] = _describe_resource_wait(role, resource_class, reason, holders)
+            extra[role] = _describe_resource_wait(
+                role, resource_class, reason, holders, metrics=governor.current_metrics()
+            )
         return extra
 
     def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:

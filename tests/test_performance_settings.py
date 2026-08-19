@@ -44,6 +44,31 @@ def test_safe_and_maximum_bound_balanced() -> None:
     assert safe.hidden_render_ms > balanced.hidden_render_ms > maximum.hidden_render_ms
 
 
+def test_missing_overload_deadband_field_defaults_instead_of_resetting(tmp_path) -> None:
+    """#305: `overload_deadband_timeout_s` was added after the schema
+    shipped. A settings file saved before it existed is otherwise complete —
+    it must load with the new field defaulted, not be discarded wholesale
+    back to the balanced preset the way a genuinely-missing field is."""
+    target = tmp_path / "performance.json"
+    desired = performance_settings.preset("maximum", logical_cpus=24, total_memory_gb=64)
+    payload = desired.to_dict()
+    del payload["overload_deadband_timeout_s"]
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = performance_settings.load(target)
+    assert loaded.mode == "maximum"
+    assert loaded.max_heavy_global == desired.max_heavy_global
+    assert loaded.overload_deadband_timeout_s == 120.0
+
+
+def test_overload_deadband_timeout_bounds_are_validated() -> None:
+    base = performance_settings.preset("balanced", logical_cpus=16, total_memory_gb=32)
+    with pytest.raises(ValueError, match="dead-band"):
+        performance_settings.validate(replace(base, overload_deadband_timeout_s=5.0))
+    with pytest.raises(ValueError, match="dead-band"):
+        performance_settings.validate(replace(base, overload_deadband_timeout_s=3_600.0))
+
+
 def test_package_install_limit_not_one_in_balanced_or_maximum() -> None:
     """Issue #240 point 2: a global limit of 1 turned a single misclassified
     task into a full serializer for every other task sharing its resource
