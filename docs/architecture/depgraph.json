@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 247,
+  "module_count": 256,
   "modules": [
     {
       "module": "agent_takkub",
@@ -1356,6 +1356,101 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.core.scheduling",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.scheduling.backpressure",
+      "imports": [
+        "agent_takkub.core.scheduling.models"
+      ],
+      "imported_by": [
+        "agent_takkub.core.scheduling.facade",
+        "agent_takkub.resource_governor"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.scheduling.facade",
+      "imports": [
+        "agent_takkub.core.scheduling.backpressure",
+        "agent_takkub.core.scheduling.flag",
+        "agent_takkub.core.scheduling.models",
+        "agent_takkub.core.scheduling.policy",
+        "agent_takkub.core.scheduling.priority_queue"
+      ],
+      "imported_by": [
+        "agent_takkub.resource_governor"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.scheduling.flag",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.scheduling.facade",
+        "agent_takkub.core.scheduling.runtime_control"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.scheduling.models",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.scheduling.backpressure",
+        "agent_takkub.core.scheduling.facade",
+        "agent_takkub.core.scheduling.policy",
+        "agent_takkub.core.scheduling.priority_queue",
+        "agent_takkub.resource_governor"
+      ],
+      "fan_in": 5,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.scheduling.policy",
+      "imports": [
+        "agent_takkub.core.scheduling.models"
+      ],
+      "imported_by": [
+        "agent_takkub.core.scheduling.facade"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.scheduling.priority_queue",
+      "imports": [
+        "agent_takkub.core.scheduling.models"
+      ],
+      "imported_by": [
+        "agent_takkub.core.scheduling.facade"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.scheduling.process_registry",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.scheduling.runtime_control",
+      "imports": [
+        "agent_takkub.core.scheduling.flag"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.core.secrets",
       "imports": [],
       "imported_by": [],
@@ -2647,13 +2742,16 @@
     {
       "module": "agent_takkub.resource_governor",
       "imports": [
+        "agent_takkub.core.scheduling.backpressure",
+        "agent_takkub.core.scheduling.facade",
+        "agent_takkub.core.scheduling.models",
         "agent_takkub.performance_settings"
       ],
       "imported_by": [
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.role_memory",

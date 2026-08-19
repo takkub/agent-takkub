@@ -6,7 +6,7 @@
 
 เพิ่ม `src/agent_takkub/core/scheduling/` (**NEW**, pure — ไม่มี case ตรง
 `REUSE_VS_REWRITE_MATRIX.md` เพราะ scheduling-policy vocabulary เป็นชั้นที่
-ว่างเปล่ามาก่อน) แล้ว **EXTEND** `resource_governor.py` (§5: "EXTEND — มี
+ว่างเปล่ามาก่อน) แล้ว **EXTEND** `src/agent_takkub/resource_governor.py` (§5: "EXTEND — มี
 admission + fair queue + resource class แล้ว · เติม dimension: provider
 slot, account slot, project slot, priority, GPU") ให้เรียกเข้า
 `core.scheduling.facade` — จุดเชื่อมเดียวตาม plan §0 rule 4. `TAKKUB_V2_SCHEDULER`
@@ -18,7 +18,7 @@ GPU dimension **ไม่ได้ทำ** — ไม่มี GPU signal ใด
 โดยไม่ตรวจสอบ backend จริง (nvidia-smi/DirectX) จะเป็นแค่ mock — ประกาศเป็น gap
 ด้านล่าง ไม่เงียบ.
 
-## `core/scheduling/` (pure, ไม่แตะ PyQt6/orchestrator/UI)
+## `src/agent_takkub/core/scheduling/` (pure, ไม่แตะ PyQt6/orchestrator/UI)
 
 - **`flag.py`**: `v2_scheduler_enabled()` อ่าน `TAKKUB_V2_SCHEDULER` (เดียวกับ
   pattern `core.conversation.flag`/`core.routing.flag`)
@@ -52,7 +52,7 @@ GPU dimension **ไม่ได้ทำ** — ไม่มี GPU signal ใด
   off = no-op คืนค่าที่ทำให้ caller เหมือนเดิม, flag on = fail-open (exception
   ในนี้ไม่เคยกลายเป็นการ deny slot ที่ legacy check อนุญาตอยู่แล้ว)
 
-## `resource_governor.py` (EXTEND, backward-compat)
+## `src/agent_takkub/resource_governor.py` (EXTEND, backward-compat)
 
 - `ResourceGovernor.__init__` เติม `slot_policy: SlotPolicy | None = None`
   keyword-only — ไม่ให้ = `SlotPolicy()` (unlimited)
@@ -75,7 +75,7 @@ GPU dimension **ไม่ได้ทำ** — ไม่มี GPU signal ใด
   — นับทุก token เข้า project (ไม่ใช่แค่ heavy class) เพราะ "project
   maxAgents/maxPanes" ใน §07 §7 เป็น cap รวม ไม่ผูก resource class
 
-## `core/models/account.py` (EXTEND, backward-compat)
+## `src/agent_takkub/core/models/account.py` (EXTEND, backward-compat)
 
 - `AccountLimits` ใหม่ (`max_concurrent: int | None = None`) + `ProviderAccount`
   เติม field `limits: AccountLimits = field(default_factory=AccountLimits)`
@@ -85,7 +85,7 @@ GPU dimension **ไม่ได้ทำ** — ไม่มี GPU signal ใด
 
 ## Multi-provider / cross-platform
 
-- ไม่มี path/command เฉพาะ platform ใน `core/scheduling/*` — pure dataclass +
+- ไม่มี path/command เฉพาะ platform ใน `src/agent_takkub/core/scheduling/*` — pure dataclass +
   stdlib เท่านั้น, ไม่มี `sys.platform` branch
 - `provider_id`/`account_id` เป็น string ทั่วไป ไม่ผูก claude/codex/gemini
   เฉพาะเจาะจง — `SlotPolicy.provider_max_concurrent`/`account_max_concurrent`
@@ -132,7 +132,7 @@ GPU dimension **ไม่ได้ทำ** — ไม่มี GPU signal ใด
 `lint-imports` (28 contracts): **28 kept, 0 broken** — `core-is-bottom-layer`
 ครอบ `agent_takkub.core` ทั้งต้นไม้อยู่แล้ว (`core.scheduling.*` ไม่ import
 PyQt6/orchestrator/main_window/app/cli/cli_server/agent_pane/terminal_widget)
-ไม่ต้องเพิ่ม contract ใหม่ — `resource_governor.py` import ลงมาที่
+ไม่ต้องเพิ่ม contract ใหม่ — `src/agent_takkub/resource_governor.py` import ลงมาที่
 `core.scheduling` ทิศทางเดียว (governor → core) ไม่มี cycle
 
 ## Ruff
