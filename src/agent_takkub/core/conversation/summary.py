@@ -55,20 +55,45 @@ def _prepend_unique(items: list[str], entry: str) -> list[str]:
     return ([entry, *rest])[:_MAX_ITEMS]
 
 
+_ALL_PREFIXES: tuple[str, ...] = DECISION_PREFIXES + LESSON_PREFIXES
+
+
+def _prefix_spans(text: str, prefixes: tuple[str, ...]) -> list[tuple[int, int]]:
+    """(start, end) of every occurrence of a *prefixes* member in *text*,
+    sorted by position. A match must sit on a word boundary — the char right
+    before it (if any) must not be alnum — so "undecided:" doesn't match
+    "decided:" and bare "decision" (no colon) never matches at all."""
+    lowered = text.casefold()
+    spans: list[tuple[int, int]] = []
+    for prefix in prefixes:
+        needle = prefix.casefold()
+        start = 0
+        while (idx := lowered.find(needle, start)) != -1:
+            if idx == 0 or not text[idx - 1].isalnum():
+                spans.append((idx, idx + len(prefix)))
+            start = idx + 1
+    spans.sort()
+    return spans
+
+
 def extract_prefixed_lines(note: str, prefixes: tuple[str, ...]) -> list[str]:
-    """Every line in *note* that starts with one of *prefixes* (English
-    prefixes matched case-insensitively, Thai exactly), with the prefix
-    stripped off. A note is free-form text a role writes for `takkub done`
-    — decisions/lessons can land on any line, not just the headline."""
+    """Every occurrence of one of *prefixes* in *note* (English matched
+    case-insensitively, Thai exactly), whether it opens a line or sits mid
+    line — a done note is often a single line like "E2E ok. DECISION: foo.
+    LESSON: bar". Each match's segment runs from right after the prefix to
+    the next DECISION/LESSON-family prefix (any of them, not just this
+    call's *prefixes*) or end of text, with trailing "."/whitespace trimmed."""
+    text = note or ""
+    spans = _prefix_spans(text, _ALL_PREFIXES)
+    wanted = {p.casefold() for p in prefixes}
     out: list[str] = []
-    for line in (note or "").splitlines():
-        stripped = line.strip()
-        for prefix in prefixes:
-            if stripped[: len(prefix)].casefold() == prefix.casefold():
-                rest = stripped[len(prefix) :].strip()
-                if rest:
-                    out.append(rest)
-                break
+    for i, (start, end) in enumerate(spans):
+        if text[start:end].casefold() not in wanted:
+            continue
+        segment_end = spans[i + 1][0] if i + 1 < len(spans) else len(text)
+        segment = text[end:segment_end].strip().rstrip(".").strip()
+        if segment:
+            out.append(segment)
     return out
 
 

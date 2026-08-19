@@ -174,6 +174,14 @@ def test_apply_done_note_extracts_decision_and_lesson_from_any_line():
     assert updated.lessons == ["[backend] back up first"]
 
 
+def test_apply_done_note_extracts_decision_and_lesson_from_single_line():
+    summary = RollingSummary()
+    note = "E2E ok. DECISION: checkpoint ต้องมี binding. LESSON: hook ที่ไม่ถูกเรียกคือ bug เงียบ"
+    updated = apply_done_note(summary, role="backend", note=note, failed=False)
+    assert updated.decisions == ["[backend] checkpoint ต้องมี binding"]
+    assert updated.lessons == ["[backend] hook ที่ไม่ถูกเรียกคือ bug เงียบ"]
+
+
 def test_apply_done_note_no_prefix_leaves_decisions_and_lessons_empty():
     summary = RollingSummary()
     updated = apply_done_note(summary, role="backend", note="just a plain note", failed=False)

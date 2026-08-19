@@ -202,6 +202,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
         monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
 
+    # Core V2 (#309): the five TAKKUB_V2_* flags fall back to the Settings UI's
+    # persisted toggle in ~/.takkub/core-v2-settings.json when the env var is
+    # unset. On a dev box where the user flipped them on, every "flag off by
+    # default" test would otherwise read the real file and fail (proven
+    # 2026-08-19). Redirect the settings path to the isolated tmp dir.
+    cvs = _maybe_module("agent_takkub.core_v2_settings", force=True)
+    if cvs is not None:
+        _v2_path = tmp_path / "_isolated_takkub" / "core-v2-settings.json"
+        monkeypatch.setattr(cvs, "path", lambda: _v2_path, raising=False)
+
     # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
     # password-session store unconditionally (not opt-in like the P0 remote
     # scaffold — any test that builds a real RemoteHttpServer/AuthGate, not

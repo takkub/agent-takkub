@@ -9,6 +9,7 @@ import pytest
 import agent_takkub.core.brain.facade as facade
 from agent_takkub.core.brain.sources import reflection_source
 from agent_takkub.core.brain.store import BrainStore
+from agent_takkub.core.conversation.summary import LESSON_PREFIXES, extract_prefixed_lines
 from agent_takkub.core.models.memory import MemoryKind, RecordStatus, Trust
 from agent_takkub.digest_facts import DigestFacts
 
@@ -74,6 +75,15 @@ def test_decisions_from_note_extracts_prefixed_lines():
     assert candidates[0].project_id == "demo"
     assert candidates[0].agent_id == "backend"
     assert candidates[0].task_id == "task-9"
+
+
+def test_decisions_from_note_extracts_mid_line_prefix_alongside_lesson():
+    note = "E2E ok. DECISION: checkpoint ต้องมี binding. LESSON: hook ที่ไม่ถูกเรียกคือ bug เงียบ"
+    decisions = reflection_source.decisions_from_note(note, project="demo", role="backend")
+    lessons = extract_prefixed_lines(note, LESSON_PREFIXES)
+    assert len(decisions) == 1
+    assert decisions[0].content == "checkpoint ต้องมี binding"
+    assert lessons == ["hook ที่ไม่ถูกเรียกคือ bug เงียบ"]
 
 
 def test_decisions_from_note_no_prefix_yields_nothing():
