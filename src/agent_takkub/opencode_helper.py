@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -169,8 +170,22 @@ def _live_user_payload(text: str) -> list[dict]:
     return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
 
 
-# Cache for resolved (db_path, cwd, session_uuid, not_before) -> session_id
-_OPENCODE_RESOLVE_CACHE: dict[tuple[str, str, str, int], tuple[Path, str]] = {}
+# Cache for resolved (db_path, cwd, session_uuid, not_before) -> session_id.
+#
+# Entries carry an expiry because the cache key is CONSTANT for the whole life
+# of a pane (the db path, the cwd, the empty uuid and the spawn timestamp never
+# change) while the answer is not: OpenCode can start a fresh session inside a
+# pane that is still running — `/new` in its TUI, or a `session_id` rotation
+# after a compaction — and an entry with no expiry pinned the Remote mirror to
+# the retired session until the cockpit was restarted, with no error anywhere.
+# A hit resolved from an EXPLICIT session id is exempt: it verified that this
+# id belongs to this cwd, and a session never changes directory, so that fact
+# cannot go stale.
+#
+# The TTL is short because re-resolving is one indexed sqlite read, and the
+# notifier already throttles how often it asks (`_UUIDLESS_RESYNC_THROTTLE_S`).
+_OPENCODE_RESOLVE_TTL_S = 10.0
+_OPENCODE_RESOLVE_CACHE: dict[tuple[str, str, str, int], tuple[Path, str, float]] = {}
 _LAST_RESOLVED_SESSION_BY_PROJECT: dict[str, str] = {}
 
 
@@ -193,8 +208,11 @@ def resolve_opencode_session(
     wanted_uuid = str(session_id or "").strip()
     cache_key = (str(real_db.resolve()), wanted_cwd, wanted_uuid, int(not_before or 0.0))
     cached = _OPENCODE_RESOLVE_CACHE.get(cache_key)
-    if cached is not None and cached[0].is_file():
-        return cached
+    if cached is not None:
+        cached_db, cached_sid, expires_at = cached
+        if cached_db.is_file() and (expires_at == 0.0 or time.monotonic() < expires_at):
+            return cached_db, cached_sid
+        del _OPENCODE_RESOLVE_CACHE[cache_key]
 
     conn = _connect_ro(real_db)
     if conn is None:
@@ -208,9 +226,10 @@ def resolve_opencode_session(
             if row is not None:
                 row_dir = normalize_opencode_cwd(row["directory"])
                 if row_dir == wanted_cwd:
-                    res = (real_db, wanted_uuid)
-                    _OPENCODE_RESOLVE_CACHE[cache_key] = res
-                    return res
+                    # expiry 0.0 = never: an explicit id verified against its
+                    # own directory is a fact, not a "newest right now" guess.
+                    _OPENCODE_RESOLVE_CACHE[cache_key] = (real_db, wanted_uuid, 0.0)
+                    return real_db, wanted_uuid
 
         earliest_ms = max(0, int((float(not_before or 0.0) - 15.0) * 1000))
         cur.execute(
@@ -220,9 +239,14 @@ def resolve_opencode_session(
             if earliest_ms and row["time_updated"] < earliest_ms:
                 break
             if normalize_opencode_cwd(row["directory"]) == wanted_cwd:
-                res = (real_db, str(row["id"]))
-                _OPENCODE_RESOLVE_CACHE[cache_key] = res
-                return res
+                sid = str(row["id"])
+                # "newest session for this cwd" — true now, not forever.
+                _OPENCODE_RESOLVE_CACHE[cache_key] = (
+                    real_db,
+                    sid,
+                    time.monotonic() + _OPENCODE_RESOLVE_TTL_S,
+                )
+                return real_db, sid
     except (sqlite3.Error, OSError):
         return None
     finally:
@@ -358,15 +382,42 @@ def list_recent_opencode_sessions(
         conn.close()
 
 
+def _opencode_part_settled(pdata: dict) -> bool:
+    """Whether an OpenCode part has finished being written.
+
+    OpenCode inserts a `text`/`reasoning` part the moment the model starts
+    emitting it and then keeps UPDATING that same row while the tokens stream
+    in — measured on a live session: `step-start`/`step-finish` land with
+    `time_updated - time_created` of 1-2 ms, while `text` rows take 660-720 ms
+    and `reasoning` rows 850-1370 ms to fill. The row carries its own
+    `time: {"start": …, "end": …}` and **`end` appears only once the stream
+    for that part is complete**, so it is an exact, poll-rate-independent
+    completion signal — no quiet-period heuristic needed.
+
+    Parts with no `time` block at all (`step-start`, `step-finish`, `tool`)
+    are written once and are settled on sight.
+    """
+    time_block = pdata.get("time")
+    if not isinstance(time_block, dict):
+        return True
+    return time_block.get("end") is not None
+
+
 def get_opencode_latest_part_time(db_path: Path, session_id: str) -> int:
-    """Return the highest `p.time_created` for `session_id` in `opencode.db`."""
+    """Return the newest write timestamp for `session_id` in `opencode.db`.
+
+    `COALESCE(time_updated, time_created)` — not the bare `time_created` this
+    used to read — so it lines up with the cursor `poll_opencode_delta` keeps
+    (see its docstring for why an immutable-`time_created` cursor silently
+    dropped every streamed reply).
+    """
     conn = _connect_ro(db_path)
     if conn is None:
         return 0
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT MAX(time_created) FROM part WHERE session_id = ?",
+            "SELECT MAX(COALESCE(time_updated, time_created)) FROM part WHERE session_id = ?",
             (session_id,),
         )
         row = cur.fetchone()
@@ -382,40 +433,77 @@ def poll_opencode_delta(
     db_path: Path,
     session_id: str,
     since_time_ms: int = 0,
+    *,
+    emitted: set[str] | None = None,
 ) -> tuple[int, list[tuple[str, object]]]:
-    """Poll incremental parts for `session_id` created after `since_time_ms`.
+    """Poll incremental parts for `session_id` written after `since_time_ms`.
 
-    Returns `(new_max_time_ms, [(event_type, payload), ...])`.
+    Returns `(new_cursor_ms, [(event_type, payload), ...])`.
     `event_type` is one of `"lead"`, `"user"`, `"working"`, `"blocked_on_picker"`.
+
+    **Why the cursor is `time_updated`, not `time_created`:** OpenCode creates
+    a `text` part and then streams the tokens into that same row over the next
+    ~700 ms (see `_opencode_part_settled`). The original implementation
+    filtered on `p.time_created` — which never changes — *and* advanced the
+    cursor past every row it looked at, including one whose text was still
+    empty. With the notifier polling every 200 ms, the first poll inside that
+    ~700 ms window pushed the cursor past the row, so the finished reply was
+    never queried again: the phone got a truncated reply, or (when the row was
+    still empty) nothing at all while the preceding tool part left the "…"
+    spinner up forever. This is the sqlite equivalent of the half-written
+    trailing line the JSONL tails already hold back in `_Tail.partial`.
+
+    Two guards replace it:
+
+    * an **unsettled part never lets the cursor past it** — its `time_updated`
+      keeps bumping, so it is re-queried on each poll until `time.end` lands;
+    * `emitted` (part ids already pushed) makes the re-queries idempotent, so
+      holding the cursor back cannot double-push anything.
+
+    Pass the same `emitted` set across polls of one session (the caller owns
+    it, keyed by tail); omitting it degrades to at-most-once-per-call dedupe.
     """
     conn = _connect_ro(db_path)
     if conn is None:
         return since_time_ms, []
 
+    seen = emitted if emitted is not None else set()
     events: list[tuple[str, object]] = []
-    max_time = since_time_ms
+    settled_max = since_time_ms
+    pending_min: int | None = None
     try:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT m.id, json_extract(m.data, '$.role') AS role,
-                   p.id AS part_id, p.time_created, p.data
+                   p.id AS part_id, p.time_created, p.time_updated, p.data
             FROM message m
             JOIN part p ON p.message_id = m.id
-            WHERE m.session_id = ? AND p.time_created > ?
+            WHERE m.session_id = ?
+              AND COALESCE(p.time_updated, p.time_created) > ?
             ORDER BY p.time_created ASC
             """,
             (session_id, since_time_ms),
         )
         for row in cur.fetchall():
-            ptime = int(row["time_created"])
-            if ptime > max_time:
-                max_time = ptime
+            ptime = int(row["time_updated"] or row["time_created"])
             role = row["role"]
             try:
                 pdata = json.loads(row["data"])
             except (json.JSONDecodeError, TypeError):
+                # Unparseable rows are settled as far as this poll can tell —
+                # holding the cursor on one would stall the stream forever.
+                settled_max = max(settled_max, ptime)
                 continue
+            if not _opencode_part_settled(pdata):
+                pending_min = ptime if pending_min is None else min(pending_min, ptime)
+                continue
+            part_id = str(row["part_id"])
+            if part_id in seen:
+                settled_max = max(settled_max, ptime)
+                continue
+            seen.add(part_id)
+            settled_max = max(settled_max, ptime)
             ptype = pdata.get("type")
 
             if ptype == "text":
@@ -456,7 +544,14 @@ def poll_opencode_delta(
                             continue
                 activity = _TOOL_ACTIVITY.get(tool_name, "working")
                 events.append(("working", activity))
-        return max_time, events
+        # Never let the cursor cross a part that is still streaming: it would
+        # be excluded from every later query and its finished text lost. The
+        # query filtered on `> since_time_ms`, so `pending_min` is always
+        # greater than it and this can only hold the cursor still, never
+        # rewind it below where the caller already was.
+        if pending_min is not None:
+            return min(settled_max, pending_min - 1), events
+        return settled_max, events
     except (sqlite3.Error, OSError):
         return since_time_ms, []
     finally:

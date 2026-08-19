@@ -54,7 +54,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -111,6 +111,11 @@ class _Tail:
     # `\n` yet — Claude Code writes one JSON object per line, and a poll can
     # land mid-write.
     partial: bytes = b""
+    # OpenCode's sqlite equivalent of `partial`: part ids already pushed for
+    # this session. Its poll cursor deliberately stalls on a part that is
+    # still streaming (see `opencode_helper.poll_opencode_delta`), which
+    # re-queries settled neighbours — this makes those re-reads idempotent.
+    emitted_parts: set[str] = field(default_factory=set)
 
 
 # Map a Claude tool name → a coarse activity category the phone can show as
@@ -1922,7 +1927,10 @@ class LeadNotifier(QObject):
             from ..opencode_helper import poll_opencode_delta
 
             new_offset, events = poll_opencode_delta(
-                tail.path, tail.session_uuid, since_time_ms=tail.offset
+                tail.path,
+                tail.session_uuid,
+                since_time_ms=tail.offset,
+                emitted=tail.emitted_parts,
             )
             if new_offset > tail.offset:
                 tail.offset = new_offset
