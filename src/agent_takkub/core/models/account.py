@@ -31,6 +31,16 @@ class SelectionStrategy(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class AccountLimits:
+    """Scheduler-facing cap for one account (epic #309 Phase 8a,
+    docs/v2/07_SCHEDULER_RESOURCE_RUNTIME.md §6). `max_concurrent=None` is
+    unlimited — the default, so an account built without limits behaves
+    exactly as before `core.scheduling` existed."""
+
+    max_concurrent: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderAccount:
     """One credentialed identity for a provider. `secret_ref` is a pointer
     into the future SecretManager (Phase 3) — never a raw credential."""
@@ -44,6 +54,7 @@ class ProviderAccount:
     user_id: str | None = None
     workspace_id: str | None = None
     project_id: str | None = None
+    limits: AccountLimits = field(default_factory=AccountLimits)
 
 
 @dataclass(frozen=True, slots=True)
