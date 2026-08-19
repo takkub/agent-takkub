@@ -4,6 +4,57 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.76] - 2026-08-19
+
+### Added (เพิ่ม) — Core V2 ชั้นล่างใหม่ ปิดด้วย feature flag ทั้งหมด (epic #309, PR #311)
+
+**เวอร์ชันนี้ไม่เปลี่ยนพฤติกรรมที่ผู้ใช้เห็น** — โค้ด Core V2 ทั้งหมดติดมาแต่ flag ปิด
+(`TAKKUB_V2_ROUTER / CONVERSATION / CONTEXT / BRAIN / SCHEDULER` = off) พิสูจน์ด้วย suite
+เดิม 7,134 tests เขียวโดยไม่แก้ expected + e2e บน cockpit จริง 5 รอบ · ทุก hook fail-open
+และรันใน thread แยก
+
+สิ่งที่เพิ่มเข้ามา (package ใหม่ `src/agent_takkub/core/` 13 sub-package ~8,000 บรรทัด):
+
+- **models / contracts / storage** — domain model แบบ frozen dataclass, contract เป็น Protocol,
+  jsonl store append-only · import-linter 25 → 28 contracts บังคับว่า core ห้ามดึง Qt/orchestrator
+- **Secret Manager** — อ่าน credential ทุก provider ผ่าน interface เดียว (file · macOS Keychain ·
+  Windows Credential Manager) + `redact()` กลาง · `takkub doctor` บอก secret backend ต่อ provider
+- **Provider Adapter + Account + Router** (flag `router`) — หลาย account ต่อ provider, selector
+  5 แบบ, ชน limit แล้ว pane ใหม่สลับ account แทนจอดรอ
+- **Version / Compatibility / Migration engine** — `version.json`, compat matrix + live-store probe
+  (บทเรียน codex 0.147), `takkub migrate inspect|plan|dry-run|apply|validate|rollback`
+  copy-never-move · `takkub doctor --core-version --storage-layout`
+- **Capability Hub** — คลัง skill ย้ายจาก `.claude/skills` → `capabilities/skills/` (เป็นกลางทุก
+  provider) และสร้าง `.claude/skills` เป็น junction/symlink ตอน spawn ให้ claude ยัง discover ได้
+- **Conversation V2 + Checkpoint** (flag `conversation`) — บทสนทนาทุก pane เก็บ jsonl ของเรา +
+  summary structured (decisions/lessons จาก `DECISION:`/`LESSON:` ใน done note) + checkpoint
+  พร้อม provider-binding · ข้อความผ่าน redact ก่อนลงดิสก์
+- **Second Brain + Context Builder** (flag `brain` / `context`) — ความจำ 5 ระดับ trust, reflection
+  จาก done note, แนบบล็อก `## Context (Takkub brain)` ให้ task ตอน assign (งบ 12% ของ context
+  window, timeout 300 ms)
+- **Scheduler extend + Storage V2 layout** (flag `scheduler`) — slot policy ต่อ provider/account/
+  project + backpressure · โครง `~/.agent-takkub` ใหม่ (config/providers/accounts/capabilities/
+  agents/projects/<id>/brain/state/runtime/cache/secrets/system) ผ่าน migration ladder 7 ขั้น —
+  **ยังไม่ apply** (รอ 2.0.0)
+- **Settings → หน้า "Core V2"** — เปิด/ปิด flag ทั้ง 5 จากหน้าจอ (persist ที่
+  `~/.takkub/core-v2-settings.json`, env ชนะ) + ตั้ง scheduler policy + ดู migration report
+
+### Fixed (แก้)
+
+- `core_v2_settings.load()` cache ด้วย (mtime, size) — flag check บน Qt main thread ไม่อ่านไฟล์ทุกครั้ง
+  (0.62 → 0.20 ms median, worst 78 → 7 ms) ตามรีวิว PR #311
+- `tests/conftest.py` isolate `core-v2-settings.json` ของเครื่อง dev ออกจาก flag-off tests
+
+### Notes (หมายเหตุ)
+
+- gap ที่ประกาศ (ไม่กระทบเพราะ flag ปิด): claude argv builder ยังอยู่ใน spawn_engine ·
+  kimi/cursor ingest/secret · PermissionEngine ยังไม่ rewire cmd_guard · context_window default 200k ·
+  native resume ไม่ต่อ spawn · storage apply รอ 2.0.0
+- แผนเปิด flag ทีละตัวในเวอร์ชันถัดไป: router → conversation → brain+context → scheduler →
+  2.0.0 `takkub migrate apply` · เอกสาร: `docs/v2/` (audit · matrix · plan · phase reports ·
+  critic review · pr311-review)
+
+
 ## [1.0.75] - 2026-08-19
 
 ### Fixed (แก้)
