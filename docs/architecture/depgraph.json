@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 178,
+  "module_count": 185,
   "modules": [
     {
       "module": "agent_takkub",
@@ -57,6 +57,7 @@
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
         "agent_takkub.codex_helper",
+        "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
         "agent_takkub.git_status",
@@ -84,7 +85,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 30,
+      "fan_in": 31,
       "fan_out": 0
     },
     {
@@ -367,13 +368,14 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.secrets.manager",
         "agent_takkub.doctor",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 2
     },
     {
@@ -392,6 +394,7 @@
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.codex_helper",
+        "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.paths",
         "agent_takkub.custom_roles",
         "agent_takkub.disk_usage",
@@ -463,7 +466,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 82,
+      "fan_in": 83,
       "fan_out": 0
     },
     {
@@ -605,6 +608,80 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.core.secrets",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.secrets.backends",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.secrets.backends.file_backend",
+        "agent_takkub.core.secrets.backends.keychain_backend",
+        "agent_takkub.core.secrets.backends.wincred_backend",
+        "agent_takkub.core.secrets.manager",
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 5,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.secrets.backends.file_backend",
+      "imports": [
+        "agent_takkub.core.secrets.backends"
+      ],
+      "imported_by": [
+        "agent_takkub.core.secrets.manager"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.secrets.backends.keychain_backend",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.core.secrets.backends"
+      ],
+      "imported_by": [
+        "agent_takkub.core.secrets.manager"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.secrets.backends.wincred_backend",
+      "imports": [
+        "agent_takkub.core.secrets.backends"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.secrets.manager",
+      "imports": [
+        "agent_takkub.codex_helper",
+        "agent_takkub.config",
+        "agent_takkub.core.secrets.backends",
+        "agent_takkub.core.secrets.backends.file_backend",
+        "agent_takkub.core.secrets.backends.keychain_backend"
+      ],
+      "imported_by": [
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.secrets.redact",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.core.storage",
       "imports": [],
       "imported_by": [],
@@ -703,6 +780,8 @@
         "agent_takkub._win_console",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.secrets.backends",
+        "agent_takkub.core.secrets.manager",
         "agent_takkub.disk_usage",
         "agent_takkub.hook_wiring",
         "agent_takkub.limit_status",
@@ -719,7 +798,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 13
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.exec_mode",

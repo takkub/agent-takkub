@@ -1514,6 +1514,76 @@ def check_provider_auth() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [secrets]
+# ---------------------------------------------------------------------------
+
+
+def check_secret_backend() -> list[Finding]:
+    """[secrets/*-backend] — added alongside `check_provider_auth()` (never
+    replacing it), Phase 3 (epic #309): reports which `core.secrets`
+    backend each installed provider resolves to, and whether that backend
+    actually finds a credential. Same installed-provider filtering as
+    `check_provider_auth()` via `_resolve_provider_bin`, so an uninstalled
+    provider is skipped exactly like it is there (check_providers() already
+    reports install state)."""
+    from .core.secrets.backends import BackendStatus
+    from .core.secrets.manager import default_backends
+    from .provider_spec import PROVIDER_REGISTRY
+
+    findings: list[Finding] = []
+    backends = default_backends()
+    for provider, spec in PROVIDER_REGISTRY.items():
+        if _resolve_provider_bin(spec) is None:
+            continue  # not installed — check_providers() already reports this
+        backend = backends.get(provider)
+        if backend is None:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.INFO,
+                    "no secret backend registered yet — credential location unconfirmed (#309)",
+                )
+            )
+            continue
+        try:
+            status = backend.status("default")
+        except Exception as e:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.WARN,
+                    f"check errored: {type(e).__name__}: {e}",
+                )
+            )
+            continue
+        detail = f"backend={backend.name}"
+        if status is BackendStatus.FOUND:
+            findings.append(Finding("secrets", f"{provider}-backend", Status.OK, detail))
+        elif status is BackendStatus.MISSING:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.WARN,
+                    f"{detail} — credential not found",
+                    f"run the {provider} CLI once to sign in",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.INFO,
+                    f"{detail} — unavailable on this platform",
+                )
+            )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [hooks]
 # ---------------------------------------------------------------------------
 
@@ -2232,6 +2302,7 @@ def run_all_checks() -> list[Finding]:
         ("check_providers", check_providers),
         ("check_provider_isolation", check_provider_isolation),
         ("check_provider_auth", check_provider_auth),
+        ("check_secret_backend", check_secret_backend),
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),

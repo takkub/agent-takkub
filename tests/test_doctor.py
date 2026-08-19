@@ -1026,36 +1026,44 @@ class TestCheckEditableInstall:
 
 
 class TestRunAllChecks:
-    def test_returns_list_of_findings(self) -> None:
-        with (
-            patch(
-                "agent_takkub.doctor.check_claude",
-                return_value=[Finding("claude", "binary", Status.OK)],
-            ),
-            patch(
-                "agent_takkub.doctor.check_runtime",
-                return_value=[Finding("runtime", "node", Status.OK)],
-            ),
-            patch("agent_takkub.doctor.check_installed_integrity", return_value=[]),
-            patch("agent_takkub.doctor.check_env_path", return_value=[]),
-            patch("agent_takkub.doctor.check_npm_registry", return_value=[]),
-            patch("agent_takkub.doctor.check_mini_browser", return_value=[]),
-            patch("agent_takkub.doctor.check_graft", return_value=[]),
-            patch("agent_takkub.doctor.check_arch", return_value=[]),
-            patch("agent_takkub.doctor.check_qt", return_value=[]),
-            patch("agent_takkub.doctor.check_plugins", return_value=[]),
-            patch("agent_takkub.doctor.check_mcps", return_value=[]),
-            patch("agent_takkub.doctor.check_projects", return_value=[]),
-            patch("agent_takkub.doctor.check_providers", return_value=[]),
-            patch("agent_takkub.doctor.check_provider_isolation", return_value=[]),
-            patch("agent_takkub.doctor.check_provider_auth", return_value=[]),
-            patch("agent_takkub.doctor.check_hooks", return_value=[]),
-            patch("agent_takkub.doctor.check_hook_wiring", return_value=[]),
-            patch("agent_takkub.doctor.check_ready_markers", return_value=[]),
-            patch("agent_takkub.doctor.check_version", return_value=[]),
-            patch("agent_takkub.doctor.check_editable_install", return_value=[]),
-        ):
-            findings = run_all_checks()
+    def test_returns_list_of_findings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `unittest.mock.patch` as one big `with (...)` hit CPython's 20-block
+        # nesting limit once check_secret_backend joined the roster
+        # (SyntaxError: too many statically nested blocks) — monkeypatch.setattr
+        # sets each attribute procedurally instead of opening a context-manager
+        # block per check, so the count here has no such ceiling.
+        no_findings = (
+            "check_installed_integrity",
+            "check_env_path",
+            "check_npm_registry",
+            "check_mini_browser",
+            "check_graft",
+            "check_arch",
+            "check_qt",
+            "check_plugins",
+            "check_mcps",
+            "check_projects",
+            "check_providers",
+            "check_provider_isolation",
+            "check_provider_auth",
+            "check_secret_backend",
+            "check_hooks",
+            "check_hook_wiring",
+            "check_ready_markers",
+            "check_version",
+            "check_editable_install",
+        )
+        for name in no_findings:
+            monkeypatch.setattr(f"agent_takkub.doctor.{name}", lambda: [])
+        monkeypatch.setattr(
+            "agent_takkub.doctor.check_claude",
+            lambda: [Finding("claude", "binary", Status.OK)],
+        )
+        monkeypatch.setattr(
+            "agent_takkub.doctor.check_runtime",
+            lambda: [Finding("runtime", "node", Status.OK)],
+        )
+        findings = run_all_checks()
 
         assert isinstance(findings, list)
         assert all(isinstance(f, Finding) for f in findings)
