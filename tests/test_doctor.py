@@ -15,6 +15,7 @@ from agent_takkub.doctor import (
     Finding,
     Status,
     check_arch,
+    check_capability_skill_store,
     check_claude,
     check_editable_install,
     check_graft,
@@ -907,6 +908,76 @@ class TestCheckInstalledIntegrity:
 
 
 # ---------------------------------------------------------------------------
+# check_capability_skill_store — Phase 5a skill store migration (#309)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCapabilitySkillStore:
+    def test_legacy_layout_reports_info(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No `capabilities/skills` dir at all — legacy layout, no surface
+        to repair; INFO not FAIL/WARN (never a hard break)."""
+        import agent_takkub.config as config_mod
+
+        assets_root = tmp_path / "assets"
+        legacy_skills = assets_root / ".claude" / "skills" / "some-skill"
+        legacy_skills.mkdir(parents=True)
+        (legacy_skills / "SKILL.md").write_text("# some-skill", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / ".claude" / "skills")
+
+        findings = check_capability_skill_store()
+
+        assert len(findings) == 1
+        assert findings[0].name == "skill-store-location"
+        assert findings[0].status == Status.INFO
+
+    def test_new_layout_links_surface_and_reports_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        assets_root = tmp_path / "assets"
+        real_skill = assets_root / "capabilities" / "skills" / "debug-mantra"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / "capabilities" / "skills")
+
+        findings = check_capability_skill_store()
+
+        names = {f.name: f for f in findings}
+        assert names["skill-store-location"].status == Status.OK
+        assert names["skill-store-surface"].status == Status.OK
+        surface = assets_root / ".claude" / "skills" / "debug-mantra"
+        assert surface.is_dir()
+        assert (surface / "SKILL.md").is_file()
+
+    def test_surface_link_failure_reports_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+        from agent_takkub.core.capabilities import skill_store as skill_store_mod
+
+        assets_root = tmp_path / "assets"
+        real_skill = assets_root / "capabilities" / "skills" / "debug-mantra"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / "capabilities" / "skills")
+        monkeypatch.setattr(
+            skill_store_mod, "ensure_shipped_skill_surface", lambda: ["debug-mantra: boom"]
+        )
+
+        findings = check_capability_skill_store()
+
+        names = {f.name: f for f in findings}
+        assert names["skill-store-surface"].status == Status.WARN
+        assert "boom" in names["skill-store-surface"].detail
+
+
+# ---------------------------------------------------------------------------
 # check_editable_install — dev-checkout shared editable install (#202)
 # ---------------------------------------------------------------------------
 
@@ -1034,6 +1105,7 @@ class TestRunAllChecks:
         # block per check, so the count here has no such ceiling.
         no_findings = (
             "check_installed_integrity",
+            "check_capability_skill_store",
             "check_env_path",
             "check_npm_registry",
             "check_mini_browser",

@@ -39,6 +39,18 @@ def _project_roots() -> list[Path]:
 def _shipped_roots() -> list[Path]:
     from ... import config
 
+    # Phase 5a (epic #309): repair the `.claude/skills` discovery surface
+    # before scanning it — the real files now live under
+    # `ASSETS_ROOT/capabilities/skills`, and `scan_skills` still only ever
+    # looks under `.claude/skills`. Best-effort; a UI picker running before
+    # any pane has spawned this session must not show an empty list.
+    try:
+        from ...core.capabilities.skill_store import ensure_shipped_skill_surface
+
+        ensure_shipped_skill_surface()
+    except Exception:
+        pass
+
     roots = [config.REPO_ROOT]
     if config.ASSETS_ROOT != config.REPO_ROOT:
         roots.append(config.ASSETS_ROOT)

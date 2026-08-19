@@ -373,12 +373,37 @@ CLI_BIN_DIR = _resolve_cli_bin_dir()
 
 PROJECTS_JSON = DATA_HOME / "projects.json"
 AGENTS_DIR = ASSETS_ROOT / ".claude" / "agents"
+
+
+def _resolve_skills_dir() -> Path:
+    """Where the shipped skill bundle physically lives (Phase 5a, epic
+    #309 Capability Hub — a skill store is provider-neutral, not
+    claude-only, so it moved out from under ``.claude/``; see
+    ``docs/v2/REUSE_VS_REWRITE_MATRIX.md`` §3 "Skill store path").
+
+    * new layout → ``ASSETS_ROOT/capabilities/skills`` — the real,
+      git-tracked storage. ``.claude/skills`` is kept only as a per-skill
+      junction/symlink SURFACE so claude's own Skill tool (which
+      auto-discovers ``.claude/skills`` from cwd) and every existing
+      `skill_scan.scan_skills` caller — none of which changed — keep
+      finding the exact same skills at the path they already look at.
+      See `core.capabilities.skill_store.ensure_shipped_skill_surface`.
+    * legacy fallback → ``ASSETS_ROOT/.claude/skills`` when the new dir
+      doesn't exist yet (an older installed build that shipped before
+      this migration) — never a hard break.
+    """
+    new_dir = ASSETS_ROOT / "capabilities" / "skills"
+    if new_dir.is_dir():
+        return new_dir
+    return ASSETS_ROOT / ".claude" / "skills"
+
+
 # Default (built-in) skill bundle shipped alongside the role files — same
 # read path as AGENTS_DIR (dev checkout: repo root; installed: staged wheel
 # data under _assets/, see setup.py's _stage_assets). Reference material for
 # the New Role / Skill Catalog pickers (`skill_scan.scan_skills`); unlike
 # AGENTS_DIR nothing at spawn time depends on it being present.
-SKILLS_DIR = ASSETS_ROOT / ".claude" / "skills"
+SKILLS_DIR = _resolve_skills_dir()
 # Writable counterpart to AGENTS_DIR for user-created custom roles (A6). AGENTS_DIR
 # sits under ASSETS_ROOT, which is READ-ONLY app-shipped assets on an installed
 # build (see `_resolve_assets_root`) — a custom role's .md file can never be

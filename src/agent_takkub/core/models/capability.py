@@ -14,6 +14,7 @@ class CapabilityScope(StrEnum):
     WORKSPACE = "workspace"
     PROJECT = "project"
     AGENT = "agent"
+    SESSION = "session"
 
 
 @dataclass(frozen=True, slots=True)

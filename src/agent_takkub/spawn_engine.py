@@ -335,7 +335,21 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
     name collision), plus the cockpit's own checkout as a fallback (same
     roots `settings_window._new_role_skill_roots` scans, so the Skill
     Matrix and the actual spawn-time injection agree on what "exists").
+
+    Best-effort (re)creates the shipped-skill surface first (Phase 5a,
+    epic #309): the cockpit's own checkout's real skill files now live
+    under `capabilities/skills/`, and `scan_skills` — called against
+    `REPO_ROOT` below, unchanged — still only ever looks under
+    `.claude/skills/`, so every spawn must repair that junction/symlink
+    surface before scanning or a moved/renamed skill would silently stop
+    being discovered. Never blocks a spawn on a link failure.
     """
+    try:
+        from .core.capabilities.skill_store import ensure_shipped_skill_surface
+
+        ensure_shipped_skill_surface()
+    except Exception:
+        _log.exception("could not repair shipped-skill surface; spawning without it")
     roots = list(_allowed_project_roots(project_ns)) if project_ns else []
     roots.append(REPO_ROOT)
     return roots
