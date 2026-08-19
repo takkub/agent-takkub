@@ -1472,6 +1472,55 @@ def _list_recent_opencode_sessions(
     return list_recent_opencode_sessions(cwd, limit)
 
 
+# ── Cursor JSONL transcript adapter ──────────────────────────────────────────
+def _resolve_cursor_jsonl_path(
+    project_ns: str, session_uuid: str | None, not_before: float = 0.0
+) -> Path | None:
+    from .. import config as _config
+    from ..cursor_helper import resolve_cursor_jsonl_for_cwd
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return None
+    return resolve_cursor_jsonl_for_cwd(cwd, session_uuid, not_before=not_before)
+
+
+def _read_recent_cursor_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+    from ..cursor_helper import read_recent_cursor_messages
+
+    return read_recent_cursor_messages(path, limit)
+
+
+def _list_recent_cursor_sessions(
+    project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
+) -> list[dict]:
+    from .. import config as _config
+    from ..cursor_helper import list_recent_cursor_sessions
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return []
+    return list_recent_cursor_sessions(cwd, limit)
+
+
+def _cursor_live_text_blocks(rec: dict) -> list[str]:
+    from ..cursor_helper import cursor_live_text_blocks
+
+    return cursor_live_text_blocks(rec)
+
+
+def _cursor_live_users(rec: dict) -> list[dict]:
+    from ..cursor_helper import cursor_live_users
+
+    return cursor_live_users(rec)
+
+
+def _cursor_live_activity(rec: dict) -> str | None:
+    from ..cursor_helper import cursor_live_activity
+
+    return cursor_live_activity(rec)
+
+
 @dataclass(frozen=True)
 class _HistoryScanner:
     """Provider adapter for remote history/session reads.
@@ -1529,6 +1578,15 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         list_sessions=_list_recent_opencode_sessions,
         live_texts=lambda _rec: [],
         live_users=lambda _rec: [],
+        requires_session_uuid=False,
+    ),
+    "cursor": _HistoryScanner(
+        resolve_session=_resolve_cursor_jsonl_path,
+        read_messages=lambda path, limit, _project: _read_recent_cursor_messages(path, limit),
+        list_sessions=_list_recent_cursor_sessions,
+        live_texts=_cursor_live_text_blocks,
+        live_users=_cursor_live_users,
+        live_activity=_cursor_live_activity,
         requires_session_uuid=False,
     ),
 }

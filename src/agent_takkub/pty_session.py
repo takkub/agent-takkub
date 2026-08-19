@@ -427,14 +427,26 @@ def _ready_region(lines: list[str]) -> str:
     footer/status/input region where ready & blocker markers actually render.
 
     Trailing blank rows are stripped first so the window lands on real chrome on
-    a partially-filled screen rather than empty padding. Short screens (≤ tail
-    rows, e.g. test fixtures and fresh panes) are returned whole, so existing
-    behaviour is unchanged there."""
+    a partially-filled screen rather than empty padding. If a full-screen TUI has
+    a pinned bottom status line at the terminal floor with blank padding above it
+    (e.g. OpenCode), also scan the content block above the blank gap."""
     end = len(lines)
     while end > 0 and not lines[end - 1].strip():
         end -= 1
-    start = max(0, end - _READY_TAIL_ROWS)
-    return "\n".join(lines[start:end]).lower()
+    candidate_ends = [end]
+    # Check for a pinned floor status bar separated by blank lines in a full-height screen
+    if end >= len(lines) - 2 and end > 1 and not lines[end - 2].strip():
+        inner_end = end - 1
+        while inner_end > 0 and not lines[inner_end - 1].strip():
+            inner_end -= 1
+        if inner_end > 0:
+            candidate_ends.append(inner_end)
+
+    chunks = []
+    for e in candidate_ends:
+        s = max(0, e - _READY_TAIL_ROWS)
+        chunks.append("\n".join(lines[s:e]).lower())
+    return "\n".join(chunks)
 
 
 # Placeholder claude renders in its input box for a bracketed multi-line paste,

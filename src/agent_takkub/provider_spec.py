@@ -506,6 +506,9 @@ codex_spec = ProviderSpec(
         ReadyRule("update available!", False),  # pty_session.py:225
         ReadyRule("fast off", True),  # pty_session.py:247
         ReadyRule("fast on", True),  # pty_session.py:248
+        ReadyRule("% left", True),  # model context/quota status bar on accounts without Fast mode
+        ReadyRule("? for help", True),
+        ReadyRule("ask codex", True),
     ),
     # #271: 90s was set before codex grew the `code_mode`/`codex_apps`
     # feature — measured cold-boot on real hardware now runs 90-150s EVERY
@@ -776,22 +779,16 @@ opencode_spec = ProviderSpec(
     # GAP (opencode 1.18.4 --help, checked 2026-07-24): --prompt is a string;
     # there is no file-backed append-system-prompt option.
     system_prompt_flag=None,
-    ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
-    # enter to continue) still apply via the cross-provider dedup table below.
+    ready_hard_blockers=("esc interrupt",),  # opencode shows "esc interrupt" without "to"
     ready_rules=(
-        # Idle composer footer, verified by direct ConPTY capture against
-        # opencode 1.18.3 on Windows (2026-07-17): the bottom hint row reads
-        # "tab agents  ctrl+p commands" once the TUI reaches its input box.
-        # "ctrl+p commands" is the distinctive half (no collision with any
-        # other provider's markers).
+        # Idle composer markers across OpenCode versions and terminal layouts:
+        # - Full TUI idle footer: "tab agents  ctrl+p commands" / "tab agents"
+        # - Compact / mini mode: "ctrl+p cmd"
+        # - Input box placeholder: "ask anything..."
         ReadyRule("ctrl+p commands", True),
-        # ⚠ BUSY marker NOT yet calibrated: needs an authenticated session to
-        # observe what the footer shows mid-generation (no provider was
-        # connected on the calibration machine). Until then the global
-        # "esc to interrupt"/"esc to cancel" blockers are the only busy
-        # signal — if opencode words its interrupt hint differently, a
-        # working pane may read idle. Re-probe after `opencode auth login`
-        # and add the observed marker here (#103).
+        ReadyRule("ctrl+p cmd", True),
+        ReadyRule("tab agents", True),
+        ReadyRule("ask anything...", True),
     ),
     ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
     context_strategy="agents_md_file",  # opencode reads AGENTS.md natively
@@ -1000,12 +997,12 @@ cursor_spec = ProviderSpec(
     # GAP (#103): Cursor's official CLI parameter reference lists no reasoning
     # effort option. Keep None until Cursor documents a session-scoped surface.
     effort_flag=None,
-    produces_jsonl_transcript=False,
+    # Cursor CLI writes conversation JSONL transcripts under
+    # ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<session-uuid>/<session-uuid>.jsonl.
+    # The cursor_helper module resolves and parses these records for Remote Mobile mirroring.
+    produces_jsonl_transcript=True,
     supports_token_meter=False,
-    # GAP (#103): same remote-mirror gap as opencode_spec's note above — no
-    # _HistoryScanner entry exists for cursor, so a cursor Lead pane never
-    # mirrors a reply to Remote Mobile even though delivery itself works.
-    supports_remote_history=False,
+    supports_remote_history=True,
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,

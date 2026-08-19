@@ -1730,7 +1730,7 @@ class TestOpenCodeHistoryIsProjectScoped:
         # The project is part of the read_messages contract now — a provider
         # adapter that silently dropped it would reintroduce the same class of
         # bug the moment its store stopped being one-file-per-project.
-        for provider in ("claude", "gemini", "codex", "opencode"):
+        for provider in ("claude", "gemini", "codex", "opencode", "cursor"):
             scanner = notify_mod.history_scanner(provider)
             assert scanner is not None
             scanner.read_messages(Path("missing-on-purpose"), 1, "project-a")

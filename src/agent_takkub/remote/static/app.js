@@ -106,6 +106,9 @@
       // in sendLeadMessage's `mirror_supported` check below.
       if (!lead.workingConfirmed) {
         setProjectWorking(project, false, null, false);
+        if (typeof loadHistory === "function") {
+          loadHistory(project, true, false).catch(function () {});
+        }
         appendProjectMessage(project, "sys", "ยังไม่เห็นคำตอบใน 30 วิ — เช็คที่เดสก์ท็อปว่า Lead ตอบหรือยัง");
       }
     }, 30000);
