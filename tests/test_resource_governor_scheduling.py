@@ -9,8 +9,21 @@ add NEW behavior that only exists once the flag/policy is explicitly set.
 
 from __future__ import annotations
 
+import pytest
+
+from agent_takkub.core.scheduling import facade as scheduling_facade
 from agent_takkub.core.scheduling.models import Priority, SlotPolicy
 from agent_takkub.resource_governor import GovernorLimits, ResourceClass, ResourceGovernor
+
+
+@pytest.fixture(autouse=True)
+def _isolate_core_v2_settings(tmp_path, monkeypatch):
+    from agent_takkub import config
+
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
+    scheduling_facade._policy_cache = None
+    yield
+    scheduling_facade._policy_cache = None
 
 
 def _limits(**overrides) -> GovernorLimits:
@@ -44,6 +57,46 @@ def test_flag_on_default_slot_policy_still_denies_nothing(monkeypatch):
     governor = ResourceGovernor(_limits())  # no slot_policy given -> SlotPolicy()
     decision = governor.request_slot(
         project_id="p", pane_id="pane", task_id="t", resource_class=ResourceClass.HEAVY
+    )
+    assert decision.allowed
+
+
+def test_flag_on_no_explicit_policy_uses_settings_persisted_policy(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(provider_max_concurrent={"claude": 1})
+    )
+    governor = ResourceGovernor(_limits())  # no slot_policy given -> Settings policy applies
+    first = governor.request_slot(
+        project_id="p",
+        pane_id="one",
+        task_id="t1",
+        resource_class=ResourceClass.NORMAL,
+        provider_id="claude",
+    )
+    assert first.allowed
+    second = governor.request_slot(
+        project_id="p",
+        pane_id="two",
+        task_id="t2",
+        resource_class=ResourceClass.NORMAL,
+        provider_id="claude",
+    )
+    assert not second.allowed and second.reason == "provider_limit"
+
+
+def test_explicit_slot_policy_wins_over_settings_persisted_policy(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_agents_global=0)
+    )
+    governor = ResourceGovernor(_limits(), slot_policy=SlotPolicy())  # explicit override wins
+    decision = governor.request_slot(
+        project_id="p", pane_id="pane", task_id="t", resource_class=ResourceClass.LIGHT
     )
     assert decision.allowed
 

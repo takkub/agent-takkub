@@ -10,6 +10,7 @@ fact about what changed) — trust=AGENT_REPORTED, never COCKPIT_MEASURED
 
 from __future__ import annotations
 
+from agent_takkub.core.conversation.summary import DECISION_PREFIXES, extract_prefixed_lines
 from agent_takkub.core.models.memory import CandidateConfidence, MemoryKind, Scope, Trust
 
 from ..candidate import MemoryCandidate
@@ -46,4 +47,31 @@ def from_done_note(
     )
 
 
-__all__ = ["from_done_note"]
+def decisions_from_note(
+    note: str,
+    *,
+    project: str | None,
+    role: str,
+    task_id: str | None = None,
+) -> list[MemoryCandidate]:
+    """One `kind=DECISION` candidate per `DECISION:`/`ตัดสินใจ:`/`decided:`
+    line in *note* — same prefixes `core.conversation.summary.apply_done_note`
+    uses to populate `RollingSummary.decisions`, imported directly so the two
+    call sites can never drift on what counts as a decision line."""
+    return [
+        MemoryCandidate(
+            kind=MemoryKind.DECISION,
+            content=line,
+            scope=Scope.AGENT,
+            trust=Trust.AGENT_REPORTED,
+            confidence=CandidateConfidence.INFERRED,
+            source="reflection_decision",
+            project_id=project,
+            agent_id=role,
+            task_id=task_id,
+        )
+        for line in extract_prefixed_lines(note, DECISION_PREFIXES)
+    ]
+
+
+__all__ = ["decisions_from_note", "from_done_note"]

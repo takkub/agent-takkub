@@ -58,6 +58,30 @@ def test_task_id_is_threaded_through():
     assert candidate.task_id == "task-9"
 
 
+# ── reflection_source.decisions_from_note ───────────────────────────────
+
+
+def test_decisions_from_note_extracts_prefixed_lines():
+    candidates = reflection_source.decisions_from_note(
+        "wired the endpoint\nDECISION: ใช้ jsonl สำหรับ conversation store เพราะ append-only",
+        project="demo",
+        role="backend",
+        task_id="task-9",
+    )
+    assert len(candidates) == 1
+    assert candidates[0].kind == MemoryKind.DECISION
+    assert candidates[0].content == "ใช้ jsonl สำหรับ conversation store เพราะ append-only"
+    assert candidates[0].project_id == "demo"
+    assert candidates[0].agent_id == "backend"
+    assert candidates[0].task_id == "task-9"
+
+
+def test_decisions_from_note_no_prefix_yields_nothing():
+    assert (
+        reflection_source.decisions_from_note("just a plain note", project="demo", role="x") == []
+    )
+
+
 # ── facade.on_pane_done ──────────────────────────────────────────────────
 
 
@@ -96,6 +120,22 @@ def test_on_pane_done_submits_note_and_digest_facts_candidates(monkeypatch, runt
     digest_record = next(r for r in records if r.source == "digest_facts")
     assert digest_record.trust == Trust.COCKPIT_MEASURED
     assert digest_record.status == RecordStatus.ACTIVE
+
+
+def test_on_pane_done_submits_decision_candidate_from_prefixed_line(monkeypatch, runtime):
+    monkeypatch.setenv("TAKKUB_V2_BRAIN", "1")
+    facade.on_pane_done(
+        "demo",
+        "backend",
+        note="wired the endpoint\nDECISION: use jsonl because it is append-only",
+        failed=False,
+    )
+    records = BrainStore("demo").load_active()
+    sources = {r.source for r in records}
+    assert sources == {"reflection_note", "reflection_decision"}
+    decision_record = next(r for r in records if r.source == "reflection_decision")
+    assert decision_record.kind == MemoryKind.DECISION
+    assert decision_record.content == "use jsonl because it is append-only"
 
 
 def test_on_pane_done_without_digest_facts_still_submits_the_note(monkeypatch, runtime):

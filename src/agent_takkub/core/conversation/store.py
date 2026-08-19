@@ -176,12 +176,31 @@ class ConversationStore:
         *,
         provider_id: str,
         session_id: str,
+        cwd: str | None = None,
+        account_id: str | None = None,
     ) -> ProviderSessionBinding:
+        """Upsert: a repeat call with the same (provider_id, session_id, cwd,
+        account_id) as the most recent binding is a no-op — a long-lived
+        conversation calls this on every `done()`, and `bindings.jsonl` is a
+        true-append stream, so without this check it would grow one
+        identical row per done() instead of only recording real changes."""
+        existing = self.provider_bindings(project_id, conversation_id)
+        if existing:
+            last = existing[-1]
+            if (
+                last.provider_id == provider_id
+                and last.session_id == session_id
+                and last.cwd == cwd
+                and last.account_id == account_id
+            ):
+                return last
         binding = ProviderSessionBinding(
             id=uuid.uuid4().hex,
             conversation_id=conversation_id,
             provider_id=provider_id,
             session_id=session_id,
+            cwd=cwd,
+            account_id=account_id,
             bound_at=time.time(),
             project_id=project_id,
         )

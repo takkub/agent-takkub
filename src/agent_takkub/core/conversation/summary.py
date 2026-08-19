@@ -22,6 +22,14 @@ from ._json_io import write_json_atomic
 
 _MAX_ITEMS = 20
 
+# Prefixes a done note's author uses to flag a line as a decision/lesson
+# worth surfacing in the structured summary instead of just riding along in
+# `completed`/`current_state` as undifferentiated text. Shared with
+# `core.brain.sources.reflection_source` (imports these directly) so the two
+# call sites never drift on what counts as a decision line.
+DECISION_PREFIXES: tuple[str, ...] = ("DECISION:", "ตัดสินใจ:", "decided:")
+LESSON_PREFIXES: tuple[str, ...] = ("LESSON:", "บทเรียน:")
+
 
 @dataclass(frozen=True, slots=True)
 class RollingSummary:
@@ -33,6 +41,7 @@ class RollingSummary:
     pending: list[str] = field(default_factory=list)
     important_files: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
     next_action: str = ""
 
 
@@ -46,6 +55,23 @@ def _prepend_unique(items: list[str], entry: str) -> list[str]:
     return ([entry, *rest])[:_MAX_ITEMS]
 
 
+def extract_prefixed_lines(note: str, prefixes: tuple[str, ...]) -> list[str]:
+    """Every line in *note* that starts with one of *prefixes* (English
+    prefixes matched case-insensitively, Thai exactly), with the prefix
+    stripped off. A note is free-form text a role writes for `takkub done`
+    — decisions/lessons can land on any line, not just the headline."""
+    out: list[str] = []
+    for line in (note or "").splitlines():
+        stripped = line.strip()
+        for prefix in prefixes:
+            if stripped[: len(prefix)].casefold() == prefix.casefold():
+                rest = stripped[len(prefix) :].strip()
+                if rest:
+                    out.append(rest)
+                break
+    return out
+
+
 def apply_done_note(
     summary: RollingSummary, *, role: str, note: str, failed: bool
 ) -> RollingSummary:
@@ -53,6 +79,12 @@ def apply_done_note(
     if not headline:
         return summary
     entry = f"[{role}] {headline}"
+    decisions = summary.decisions
+    for line in extract_prefixed_lines(note, DECISION_PREFIXES):
+        decisions = _prepend_unique(decisions, f"[{role}] {line}")
+    lessons = summary.lessons
+    for line in extract_prefixed_lines(note, LESSON_PREFIXES):
+        lessons = _prepend_unique(lessons, f"[{role}] {line}")
     if failed:
         return replace(
             summary,
@@ -60,6 +92,8 @@ def apply_done_note(
             pending=_prepend_unique(summary.pending, entry),
             warnings=_prepend_unique(summary.warnings, entry),
             next_action=f"fix: {entry}",
+            decisions=decisions,
+            lessons=lessons,
         )
     return replace(
         summary,
@@ -67,6 +101,8 @@ def apply_done_note(
         completed=_prepend_unique(summary.completed, entry),
         in_progress=[x for x in summary.in_progress if x != entry][:_MAX_ITEMS],
         pending=[x for x in summary.pending if x != entry][:_MAX_ITEMS],
+        decisions=decisions,
+        lessons=lessons,
     )
 
 

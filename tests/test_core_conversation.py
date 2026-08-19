@@ -91,11 +91,33 @@ def test_messages_rotate_past_size_cap(tmp_path, monkeypatch):
 def test_provider_session_binding_round_trip(tmp_path):
     store = ConversationStore(root=tmp_path)
     conv_id = conversation_id_for("proj-a", "backend")
-    store.bind_provider_session("proj-a", conv_id, provider_id="claude", session_id="uuid-1")
+    store.bind_provider_session(
+        "proj-a",
+        conv_id,
+        provider_id="claude",
+        session_id="uuid-1",
+        cwd="/repo",
+        account_id="acc-1",
+    )
     bindings = store.provider_bindings("proj-a", conv_id)
     assert len(bindings) == 1
     assert bindings[0].provider_id == "claude"
     assert bindings[0].session_id == "uuid-1"
+    assert bindings[0].cwd == "/repo"
+    assert bindings[0].account_id == "acc-1"
+
+
+def test_bind_provider_session_upserts_identical_binding(tmp_path):
+    store = ConversationStore(root=tmp_path)
+    conv_id = conversation_id_for("proj-a", "backend")
+    store.bind_provider_session("proj-a", conv_id, provider_id="claude", session_id="uuid-1")
+    store.bind_provider_session("proj-a", conv_id, provider_id="claude", session_id="uuid-1")
+    assert len(store.provider_bindings("proj-a", conv_id)) == 1  # no duplicate row
+
+    store.bind_provider_session("proj-a", conv_id, provider_id="claude", session_id="uuid-2")
+    bindings = store.provider_bindings("proj-a", conv_id)
+    assert len(bindings) == 2  # a real change still appends
+    assert bindings[-1].session_id == "uuid-2"
 
 
 def test_get_conversation_missing_is_none(tmp_path):
@@ -127,6 +149,36 @@ def test_apply_done_note_blank_note_is_noop():
     summary = RollingSummary(objective="ship v2")
     updated = apply_done_note(summary, role="backend", note="   \n  ", failed=False)
     assert updated == summary
+
+
+def test_apply_done_note_extracts_decision_prefixed_line():
+    summary = RollingSummary()
+    updated = apply_done_note(
+        summary,
+        role="backend",
+        note="DECISION: ใช้ jsonl สำหรับ conversation store เพราะ append-only",
+        failed=False,
+    )
+    assert updated.decisions == ["[backend] ใช้ jsonl สำหรับ conversation store เพราะ append-only"]
+    # still lands in completed/current_state too — extraction is additive.
+    assert updated.completed == [
+        "[backend] DECISION: ใช้ jsonl สำหรับ conversation store เพราะ append-only"
+    ]
+
+
+def test_apply_done_note_extracts_decision_and_lesson_from_any_line():
+    summary = RollingSummary()
+    note = "shipped the migration\ndecided: keep the old table for a release\nLESSON: back up first"
+    updated = apply_done_note(summary, role="backend", note=note, failed=False)
+    assert updated.decisions == ["[backend] keep the old table for a release"]
+    assert updated.lessons == ["[backend] back up first"]
+
+
+def test_apply_done_note_no_prefix_leaves_decisions_and_lessons_empty():
+    summary = RollingSummary()
+    updated = apply_done_note(summary, role="backend", note="just a plain note", failed=False)
+    assert updated.decisions == []
+    assert updated.lessons == []
 
 
 def test_apply_done_note_bounds_list_length():
@@ -276,6 +328,56 @@ def test_facade_on_pane_done_flag_on_creates_conversation_and_checkpoint(tmp_pat
     assert any(m.text == "did the thing" for m in messages)
     mgr = CheckpointManager(store)
     assert mgr.latest_checkpoint("proj-a", conv_id) == "checkpoint-00001"
+
+
+def test_facade_on_pane_done_binds_provider_session_and_checkpoint_carries_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "1")
+    monkeypatch.setattr("agent_takkub.core.storage.paths.core_home", lambda: tmp_path / "_core")
+    from agent_takkub.core.conversation.facade import on_pane_done
+
+    store = ConversationStore(root=tmp_path)
+    on_pane_done(
+        "proj-a",
+        "backend",
+        note="did the thing",
+        failed=False,
+        provider_id="claude",
+        cwd=str(tmp_path),
+        session_id="uuid-1",
+        store=store,
+    )
+
+    conv_id = conversation_id_for("proj-a", "backend")
+    bindings = store.provider_bindings("proj-a", conv_id)
+    assert len(bindings) == 1
+    assert bindings[0].provider_id == "claude"
+    assert bindings[0].session_id == "uuid-1"
+
+    mgr = CheckpointManager(store)
+    loaded = mgr.load("proj-a", conv_id)
+    assert loaded["provider-binding"]["bindings"][0]["session_id"] == "uuid-1"
+
+
+def test_facade_on_pane_done_no_session_id_skips_binding(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "1")
+    from agent_takkub.core.conversation.facade import on_pane_done
+
+    store = ConversationStore(root=tmp_path)
+    on_pane_done(
+        "proj-a",
+        "backend",
+        note="subagent done",
+        failed=False,
+        provider_id="claude",
+        cwd=str(tmp_path),
+        session_id=None,
+        store=store,
+    )
+
+    conv_id = conversation_id_for("proj-a", "backend")
+    assert store.provider_bindings("proj-a", conv_id) == []
 
 
 def test_facade_on_pane_done_flag_on_never_raises_on_internal_error(tmp_path, monkeypatch):

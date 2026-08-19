@@ -62,6 +62,8 @@ class ProviderSessionBinding:
     conversation_id: str
     provider_id: str
     session_id: str
+    cwd: str | None = None
+    account_id: str | None = None
     bound_at: float | None = None
     user_id: str | None = None
     workspace_id: str | None = None

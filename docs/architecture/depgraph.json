@@ -516,9 +516,10 @@
         "agent_takkub.core.models.account"
       ],
       "imported_by": [
-        "agent_takkub.core.accounts"
+        "agent_takkub.core.accounts",
+        "agent_takkub.core.conversation.facade"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 4
     },
     {
@@ -751,13 +752,14 @@
       "module": "agent_takkub.core.brain.sources.reflection_source",
       "imports": [
         "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.conversation.summary",
         "agent_takkub.core.models.memory"
       ],
       "imported_by": [
         "agent_takkub.core.brain.facade"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.core.brain.sources.role_memory_source",
@@ -959,6 +961,7 @@
     {
       "module": "agent_takkub.core.conversation.facade",
       "imports": [
+        "agent_takkub.core.accounts.facade",
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.flag",
         "agent_takkub.core.conversation.ingest",
@@ -971,7 +974,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.conversation.flag",
@@ -1120,10 +1123,11 @@
       ],
       "imported_by": [
         "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.facade"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -1545,13 +1549,14 @@
         "agent_takkub.core.scheduling.flag",
         "agent_takkub.core.scheduling.models",
         "agent_takkub.core.scheduling.policy",
-        "agent_takkub.core.scheduling.priority_queue"
+        "agent_takkub.core.scheduling.priority_queue",
+        "agent_takkub.core_v2_settings"
       ],
       "imported_by": [
         "agent_takkub.resource_governor"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.scheduling.flag",
@@ -1826,10 +1831,11 @@
         "agent_takkub.core.brain.flag",
         "agent_takkub.core.conversation.flag",
         "agent_takkub.core.routing.flag",
+        "agent_takkub.core.scheduling.facade",
         "agent_takkub.core.scheduling.flag",
         "agent_takkub.settings_core_v2"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {

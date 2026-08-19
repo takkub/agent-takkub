@@ -115,13 +115,18 @@ def on_pane_done(
     if not v2_brain_enabled():
         return
     try:
-        from .sources.reflection_source import from_done_note
+        from .sources.reflection_source import decisions_from_note, from_done_note
 
         note_candidate = from_done_note(
             note, project=project, role=role, failed=failed, task_id=task_id
         )
         if note_candidate is not None:
             submit(note_candidate, project=project)
+
+        for decision_candidate in decisions_from_note(
+            note, project=project, role=role, task_id=task_id
+        ):
+            submit(decision_candidate, project=project)
 
         if digest_facts is not None and project is not None:
             from .sources.digest_facts_source import from_digest_facts

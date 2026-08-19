@@ -6,6 +6,8 @@ and the fail-open `.facade` `resource_governor.py` calls into.
 
 from __future__ import annotations
 
+import pytest
+
 from agent_takkub.core.scheduling import backpressure, policy
 from agent_takkub.core.scheduling import facade as scheduling_facade
 from agent_takkub.core.scheduling.backpressure import BackpressureSignal
@@ -20,6 +22,17 @@ from agent_takkub.core.scheduling.models import (
 from agent_takkub.core.scheduling.priority_queue import order_by_priority
 from agent_takkub.core.scheduling.process_registry import ProcessRegistry, ProcessStatus
 from agent_takkub.core.scheduling.runtime_control import AgentRuntimeControl, RunState
+
+
+@pytest.fixture(autouse=True)
+def _isolate_core_v2_settings(tmp_path, monkeypatch):
+    from agent_takkub import config
+
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
+    scheduling_facade._policy_cache = None
+    yield
+    scheduling_facade._policy_cache = None
+
 
 # ── flag ──────────────────────────────────────────────────────────────────
 
@@ -325,6 +338,85 @@ def test_facade_extended_denial_reason_fails_open(monkeypatch):
     monkeypatch.setattr(scheduling_facade.policy, "evaluate", boom)
     request = SlotRequest(project_id="p", pane_id="pane", task_id="t")
     assert scheduling_facade.extended_denial_reason(request, ActiveCounts(), SlotPolicy()) == ""
+
+
+# ── facade.effective_slot_policy ────────────────────────────────────────
+
+
+def test_effective_slot_policy_flag_off_never_touches_settings_file(monkeypatch):
+    # env explicitly "0" so v2_scheduler_enabled() short-circuits without
+    # itself reading core_v2_settings to resolve the flag (see flag.py) —
+    # isolates the "flag off never touches the file" claim to this function.
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
+    from agent_takkub import core_v2_settings
+
+    def boom():
+        raise AssertionError("settings file must not be read when the flag is off")
+
+    monkeypatch.setattr(core_v2_settings, "path", boom)
+    assert scheduling_facade.effective_slot_policy() == SlotPolicy()
+
+
+def test_effective_slot_policy_flag_on_reads_persisted_config(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(
+            max_agents_global=4, provider_max_concurrent={"codex": 2}
+        )
+    )
+    got = scheduling_facade.effective_slot_policy()
+    assert got.max_agents_global == 4
+    assert got.provider_max_concurrent == {"codex": 2}
+
+
+def test_effective_slot_policy_missing_file_fails_open_to_default(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    assert scheduling_facade.effective_slot_policy() == SlotPolicy()
+
+
+def test_effective_slot_policy_caches_until_file_mtime_changes(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_agents_global=1)
+    )
+    first = scheduling_facade.effective_slot_policy()
+    assert first.max_agents_global == 1
+
+    calls = []
+    real_load = core_v2_settings.load_scheduler_policy
+    monkeypatch.setattr(
+        core_v2_settings,
+        "load_scheduler_policy",
+        lambda: (calls.append(1), real_load())[1],
+    )
+    second = scheduling_facade.effective_slot_policy()
+    assert second.max_agents_global == 1
+    assert calls == []  # unchanged mtime -> cache hit, no reparse
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_agents_global=2)
+    )
+    third = scheduling_facade.effective_slot_policy()
+    assert third.max_agents_global == 2
+    assert calls == [1]  # mtime changed -> reloaded once
+
+
+def test_effective_slot_policy_fails_open_on_load_exception(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.path().parent.mkdir(parents=True, exist_ok=True)
+    core_v2_settings.path().write_text("{}", encoding="utf-8")
+
+    def boom():
+        raise RuntimeError("config blew up")
+
+    monkeypatch.setattr(core_v2_settings, "load_scheduler_policy", boom)
+    assert scheduling_facade.effective_slot_policy() == SlotPolicy()
 
 
 def test_facade_backpressure_level_fails_open(monkeypatch):

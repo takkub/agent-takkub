@@ -33,6 +33,7 @@ class MemoryKind(StrEnum):
     FEEDBACK = "feedback"
     PROJECT = "project"
     REFERENCE = "reference"
+    DECISION = "decision"
 
 
 class Scope(StrEnum):

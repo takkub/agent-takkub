@@ -27,6 +27,23 @@ from .summary import apply_done_note, load_summary, save_summary
 _log = logging.getLogger(__name__)
 
 
+def _resolve_account_id(provider_id: str, project_id: str | None, role: str) -> str | None:
+    try:
+        from agent_takkub.core.accounts.facade import resolve_account_for
+
+        account = resolve_account_for(provider_id, project_id or "", role)
+        return account.id if account is not None else None
+    except Exception:
+        _log.exception(
+            "core.conversation.facade._resolve_account_id failed for provider=%r project=%r "
+            "role=%r (fail-open — binding still created without account_id)",
+            provider_id,
+            project_id,
+            role,
+        )
+        return None
+
+
 def on_pane_done(
     project_id: str | None,
     role: str,
@@ -81,6 +98,19 @@ def _on_pane_done_impl(
     if provider_id and cwd:
         ingest_provider_transcript(
             provider_id, project_id, conversation_id, cwd=cwd, session_id=session_id, store=cs
+        )
+
+    # session_id is None for a subagent (no pane/session of its own) — skip
+    # rather than record an empty/meaningless binding (plan: pointer only).
+    if provider_id and session_id:
+        account_id = _resolve_account_id(provider_id, project_id, role)
+        cs.bind_provider_session(
+            project_id,
+            conversation_id,
+            provider_id=provider_id,
+            session_id=session_id,
+            cwd=cwd,
+            account_id=account_id,
         )
 
     if note.strip():

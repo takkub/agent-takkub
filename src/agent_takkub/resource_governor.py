@@ -230,7 +230,11 @@ class ResourceGovernor:
         # nothing (see core.scheduling.models), and `_denial_reason` only
         # ever consults it via the flag-gated `scheduling_facade` — so a
         # governor built without one is byte-identical to pre-Phase-8a.
-        self.slot_policy = slot_policy or SlotPolicy()
+        # A caller-supplied policy always wins; otherwise fall back to the
+        # Settings UI's persisted Scheduler Policy (flag-gated, fail-open to
+        # the same `SlotPolicy()` default — see `effective_slot_policy`'s
+        # own docstring).
+        self.slot_policy = slot_policy or scheduling_facade.effective_slot_policy()
         self._sampler = sampler or self._sample_psutil
         self._clock = clock
         self._event_sink = event_sink
