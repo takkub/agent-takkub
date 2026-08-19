@@ -588,6 +588,26 @@ TTY_BLOCK_SURFACE_COOLDOWN_S = 3 * 60  # minimum gap between repeated surface no
 # before we declare the dismiss a failure and fall back to close→respawn.
 SPLASH_DISMISS_COOLDOWN_S = 30
 
+# Stuck-tool watchdog (#308). A pane wedged inside a shell/tool call the
+# CLI never returns from — real incident: an agy pane sat on "Running
+# command..." for ~13 minutes while its OWN idle footer stayed visible below
+# it, so `is_at_ready_prompt()` read the pane as normal the whole time and
+# neither the content-hash stuck watchdog (STUCK_THRESHOLD_S, 10 min, ALSO
+# gated on screen content — same false-idle blind spot) nor the idle-reminder
+# loop ever suppressed themselves correctly. This is independent of both:
+# `ProviderSpec.tool_running_markers` + `PtySession.seconds_since_output()`
+# (spinner-normalized, same clock #130's fix already relies on) is the only
+# signal, so it fires even while the ready-marker classifier is fooled.
+# Overrideable — the field incident used a ~10 min recursive filesystem scan;
+# a slower/loaded machine may need more headroom before this is "stuck".
+TOOL_STUCK_TIMEOUT_SEC = float(os.environ.get("TAKKUB_TOOL_STUCK_TIMEOUT_SEC", "180"))
+# How long to wait after the one-shot Esc recovery keystroke before deciding
+# it didn't work and recommending a manual close+respawn to Lead. Short on
+# purpose — Esc either interrupts the wedged tool call within a few seconds
+# or it doesn't, and #308's own workaround (close+respawn) doesn't get any
+# safer by waiting longer to suggest it.
+TOOL_STUCK_ESC_GRACE_S = 15
+
 # Malformed tool-call XML detection (issue #59). When a model outputs tool-call
 # XML without the `antml:` namespace prefix the harness silently no-ops it and
 # the pane appears to hang. Nudge the pane at most this often.
@@ -5127,6 +5147,14 @@ class Orchestrator(
              in..." past its grace period, ...). The screen is definitive: a
              CLI stuck here cannot simultaneously be "working" or "ready" no
              matter what `pane.state` optimistically claims.
+          1b. **stalled:tool** (#308) — `base_state == "working"` and
+             `session.tool_running_marker(provider)` has matched with no
+             other content change for `TOOL_STUCK_TIMEOUT_SEC`. Checked here
+             (ahead of booting/waiting-delivery) for the same "screen is
+             definitive" reason as login-required: real incident evidence
+             was a pane whose idle footer stayed visible the entire time it
+             was wedged, so this must not wait behind a tier that a false
+             idle-looking screen could otherwise satisfy first.
           2. **booting** — `session.shows_boot_phase_marker()` (codex/agy
              MCP cold-boot chrome: "booting mcp server"). Distinct from
              `base_state == "spawning"` (nothing printed at all yet) — this
@@ -5173,6 +5201,23 @@ class Orchestrator(
             auth_reason = None
         if auth_reason:
             return "login-required"
+
+        if base_state == "working":
+            try:
+                _tool_marker = session.tool_running_marker(provider)
+                _tool_stale = session.seconds_since_output()
+            except Exception:
+                _tool_marker = None
+                _tool_stale = 0.0
+            # Same isinstance guard as _check_stuck_tool_panes: a loosely
+            # mocked test session's un-stubbed attribute call returns a
+            # truthy MagicMock, not None/str/float.
+            if not isinstance(_tool_marker, str) or not _tool_marker:
+                _tool_marker = None
+            if not isinstance(_tool_stale, (int, float)):
+                _tool_stale = 0.0
+            if _tool_marker is not None and _tool_stale >= TOOL_STUCK_TIMEOUT_SEC:
+                return "stalled:tool"
 
         try:
             # #281: boot-phase only. The wider `shows_startup_marker()` also
@@ -5468,6 +5513,31 @@ class Orchestrator(
                         tail_lines = [_ANSI.sub("", ln) for ln in tail_lines]
                         transcript_tail = "\n".join(tail_lines)
                     except OSError:
+                        pass
+
+                # #308: the transcript-file tail above is the last N raw
+                # rendered lines, which is dominated by whatever chrome sits
+                # at the BOTTOM of the screen — usually the composer/idle
+                # footer, even while a tool call is genuinely wedged higher
+                # up (agy's "? for shortcuts" stayed visible below "Running
+                # command..." the whole 13-minute #308 incident). When the
+                # LIVE screen shows a tool-running marker right now, surface
+                # that real line instead of the misleading empty-looking
+                # footer tail — cheap best-effort, never raises.
+                if pane.session is not None:
+                    try:
+                        from .provider_config import effective_provider_for
+
+                        _provider = effective_provider_for(role, project=project_ns)
+                        _marker = pane.session.tool_running_marker(_provider)
+                        # Guard against a loosely-mocked session in tests —
+                        # same isinstance idiom as _check_stuck_tool_panes.
+                        if isinstance(_marker, str) and _marker:
+                            for _ln in reversed(pane.session.display_lines()):
+                                if _marker in _ln.lower():
+                                    transcript_tail = _ln.strip()
+                                    break
+                    except Exception:
                         pass
 
             last_screenshot = ""
@@ -6158,6 +6228,15 @@ class Orchestrator(
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
         self._check_stuck_panes(now)
+        # #308: independent stuck-tool watchdog — see its own docstring for
+        # why this can't be folded into `_check_stuck_panes` above (that
+        # detector's content-hash clock has the SAME false-idle blind spot
+        # the #308 incident exposed, since a provider's idle footer can sit
+        # right below the hung tool-call line the whole time). Runs before
+        # the per-pane idle-reminder loop below so a fresh escalation this
+        # tick is visible to the `tool_stuck_escalated` suppression check in
+        # that loop on the very same pass.
+        self._check_stuck_tool_panes(now)
         # Spawn FIFO queue escape hatch rides the same tick (#139/#140) — a
         # wedged arbiter is caught even with no new spawn() call arriving to
         # trip over it.
@@ -6307,6 +6386,24 @@ class Orchestrator(
                     _ps_tty = getattr(self, "_pane_state", {}).get(key)
                     if _ps_tty is not None and _ps_tty.tty_blocked_since is not None:
                         _ps_tty.tty_blocked_since = None
+
+                    # #308: suppress the forgot-done reminder while
+                    # `_check_stuck_tool_panes` (above, same tick) has this
+                    # pane flagged stuck in a shell/tool call — that watchdog
+                    # already escalated to Lead and attempted its one-shot Esc
+                    # recovery, so nagging "run `takkub done`" on top is noise
+                    # a pane genuinely wedged in a tool call cannot act on.
+                    # Deliberately checked BEFORE the `is_at_ready_prompt()`
+                    # gate below: #308's own evidence is a pane whose idle
+                    # footer stayed visible the whole time it was stuck, so
+                    # that gate alone would never have caught this case.
+                    _ps_ts = getattr(self, "_pane_state", {}).get(key)
+                    if _ps_ts is not None and _ps_ts.tool_stuck_escalated:
+                        entry["first_idle_ts"] = None
+                        entry["last_reminder_ts"] = 0.0
+                        entry["notice_rounds"] = 0
+                        entry["escalated"] = False
+                        continue
 
                     if not pane.session.is_at_ready_prompt():
                         # claude is processing — reset the idle streak so a long
@@ -6933,6 +7030,125 @@ class Orchestrator(
         # crime was doing long quiet work.
         ps_ck.last_content_change_ts = now
         return True
+
+    def _check_stuck_tool_panes(self, now: float) -> None:
+        """Escalate + attempt one-shot recovery for a pane wedged inside a
+        shell/tool call the underlying CLI never returns from (#308).
+
+        Deliberately a SEPARATE watchdog from `_check_stuck_panes` above,
+        not a branch inside it: that one's content-hash detector (and the
+        idle-reminder loop's `is_at_ready_prompt()` gate) both read the
+        pane's screen as normal the whole time #308's own incident ran,
+        because the provider's idle footer ("? for shortcuts") stayed
+        visible on screen below the "Running command..." status line the
+        entire 13 minutes. This checks `ProviderSpec.tool_running_markers`
+        directly, independent of what the ready-marker classifier says,
+        paired with `PtySession.seconds_since_output()` (spinner-normalized)
+        for "has this been sitting here with no real change underneath it".
+
+        Recovery is ONE automatic step only, never a loop: send Esc once (the
+        same key every provider's own screen already advertises as "esc to
+        interrupt"/"esc to cancel" while busy), wait
+        `TOOL_STUCK_ESC_GRACE_S`, then either tell Lead it cleared or tell
+        Lead once that it didn't and a manual `takkub close` + respawn is the
+        only way out (#308's own confirmed workaround) — this never closes
+        or respawns the pane itself; that stays Lead's call.
+        """
+        from .provider_config import effective_provider_for
+
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                try:
+                    if role == LEAD.name:
+                        continue
+                    if pane.state != "working":
+                        continue
+                    session = pane.session
+                    if session is None or not session.is_alive:
+                        continue
+                    key = f"{project_name}::{role}"
+                    provider = effective_provider_for(role, project=project_name)
+                    try:
+                        marker = session.tool_running_marker(provider)
+                        stale_for = session.seconds_since_output()
+                    except Exception:
+                        marker = None
+                        stale_for = 0.0
+                    # Guard against a loosely-mocked session in tests: an
+                    # un-stubbed MagicMock attribute call returns a truthy
+                    # MagicMock, not None/str — same isinstance guard
+                    # `_check_stuck_panes` already uses for `last_out` above.
+                    if not isinstance(marker, str) or not marker:
+                        marker = None
+                    if not isinstance(stale_for, (int, float)):
+                        stale_for = 0.0
+                    ps = self._ps(key)
+                    stuck = marker is not None and stale_for >= TOOL_STUCK_TIMEOUT_SEC
+                    if not stuck:
+                        if ps.tool_stuck_escalated:
+                            _log_event("tool_stuck_recovered", role=role, project=project_name)
+                            nudge = (
+                                "🔧 [auto-recovery] pane นี้ค้างอยู่ในเครื่องมือ shell เกิน "
+                                f"{int(TOOL_STUCK_TIMEOUT_SEC // 60)} นาที ระบบส่ง Esc ให้ไปแล้ว "
+                                "และตอนนี้กลับมาที่ composer แล้ว — คำสั่งก่อนหน้าค้าง ข้ามแล้ว "
+                                "ทำงานต่อได้เลย (ถ้าคำสั่งนั้นยังไม่เสร็จจริง ให้สั่งใหม่)"
+                            )
+                            try:
+                                session.write(nudge)
+                                _delayed_enter(pane, session, 150)
+                            except Exception:
+                                pass
+                            self._notify_lead(
+                                project_name,
+                                f"✅ [system] {role} หลุดจาก shell tool ที่ค้างแล้ว กลับมาทำงานต่อเอง",
+                                from_role=role,
+                                note="tool_stuck_recovered",
+                            )
+                        ps.tool_stuck_escalated = False
+                        ps.tool_stuck_esc_sent_ts = 0.0
+                        ps.tool_stuck_close_recommended = False
+                        continue
+
+                    if not ps.tool_stuck_escalated:
+                        _log_event(
+                            "tool_stuck",
+                            role=role,
+                            project=project_name,
+                            marker=marker,
+                            stuck_for_s=int(stale_for),
+                        )
+                        self._notify_lead(
+                            project_name,
+                            f"⚠ [system] {role} ค้างอยู่ใน shell tool เกิน "
+                            f'{int(TOOL_STUCK_TIMEOUT_SEC // 60)} นาที (จอโชว์: "{marker}") '
+                            "— ส่ง Esc ให้ 1 ครั้งแล้ว กำลังรอดูว่าหลุดไหม",
+                            from_role=role,
+                            note="tool_stuck",
+                        )
+                        ps.tool_stuck_escalated = True
+                        try:
+                            session.write("\x1b")
+                        except Exception:
+                            pass
+                        ps.tool_stuck_esc_sent_ts = now
+                        continue
+
+                    if (
+                        not ps.tool_stuck_close_recommended
+                        and ps.tool_stuck_esc_sent_ts
+                        and (now - ps.tool_stuck_esc_sent_ts) >= TOOL_STUCK_ESC_GRACE_S
+                    ):
+                        self._notify_lead(
+                            project_name,
+                            f"⛔ [system] {role} ยังค้างใน shell tool อยู่ แม้ส่ง Esc ไปแล้ว "
+                            "— auto-recovery ทำต่อให้ไม่ได้ (root cause อยู่ใน provider CLI เอง) "
+                            f"แนะนำ `takkub close --role {role}` แล้ว assign งานใหม่",
+                            from_role=role,
+                            note="tool_stuck_esc_failed",
+                        )
+                        ps.tool_stuck_close_recommended = True
+                except Exception:
+                    _log_event("tool_stuck_watchdog_error", role=role, project=project_name)
 
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The

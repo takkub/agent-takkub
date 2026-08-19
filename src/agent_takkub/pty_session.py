@@ -34,6 +34,7 @@ from .provider_spec import (
     PROVIDER_REGISTRY,
     auth_error_markers_for,
     auth_transient_markers_for,
+    tool_running_markers_for,
 )
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
@@ -1775,6 +1776,28 @@ class PtySession(QObject):
                     continue
                 return True
         return False
+
+    def tool_running_marker(self, provider: str) -> str | None:
+        """Return the matched marker if this pane's screen currently shows
+        `provider`'s CLI actively running a shell/tool call (#308), else
+        ``None``.
+
+        Same `_ready_region` scoping as every other prompt-state check in
+        this class, but deliberately checked INDEPENDENTLY of
+        `is_at_ready_prompt()`/`is_hard_blocked_for()`: the #308 incident
+        showed a provider's idle footer ("? for shortcuts") can stay visible
+        on screen below a tool-running status line the entire time the tool
+        call is hung, so both of those already-classify-ready methods keep
+        reading the pane as idle/normal while it is genuinely wedged. This
+        is an instantaneous check only — the caller
+        (`orchestrator._check_stuck_tool_panes`) is the one that pairs it
+        with `seconds_since_output()` to decide "stuck", not "merely running
+        a tool right now"."""
+        text = _ready_region(self.display_lines())
+        for marker in tool_running_markers_for(provider):
+            if marker in text:
+                return marker
+        return None
 
     def is_blocked_on_tty_prompt(self) -> str | None:
         """Return the first matching line if the pane is stuck on an interactive

@@ -88,6 +88,22 @@ class ProviderSpec:
     ready_hard_blockers: tuple[str, ...] = field(default_factory=tuple)
     ready_rules: tuple[ReadyRule, ...] = field(default_factory=tuple)
     ready_wait_ms: int = 45_000
+    # Lower-case substrings this provider's CLI shows on screen while it is
+    # actively running a shell/tool call (#308). Narrower than
+    # ready_hard_blockers: a generic busy indicator ("esc to interrupt")
+    # covers ANY generation, but this specifically identifies a tool call in
+    # flight — orchestrator._check_stuck_tool_panes pairs it with
+    # PtySession.seconds_since_output() to catch a pane wedged inside a
+    # shell/tool call the CLI itself never returns from. Deliberately
+    # independent of ready_hard_blockers/is_at_ready_prompt(): the real
+    # incident (#308, agy transcript) showed the provider's own idle footer
+    # ("? for shortcuts") staying visible on screen the whole time the tool
+    # call was hung, so is_at_ready_prompt() read True throughout and never
+    # suppressed the idle-reminder loop — this check must fire regardless of
+    # what the ready-marker classifier says. Empty = no such marker confirmed
+    # yet for this provider (never guess one from docs alone — same "prove
+    # from a real screen first" policy as auth_error_markers above).
+    tool_running_markers: tuple[str, ...] = field(default_factory=tuple)
 
     # ─── 5. Context injection strategy ───
     context_strategy: str = "none"
@@ -433,6 +449,15 @@ claude_spec = ProviderSpec(
     # error text exists to list here. GENERIC_AUTH_ERROR_MARKERS is the only
     # signal for this provider until one is observed.
     auth_error_markers=(),
+    # #308 mitigation task's own reference table ("claude: 'Running…'/tool
+    # spinner") — claude's Ink TUI prints an ellipsis-suffixed status line
+    # while a tool call is in flight. ⚠ Not yet confirmed against a captured
+    # hang transcript the way gemini's marker below is (#308's own incident
+    # was a gemini pane) — a wrong string here only costs a missed detection,
+    # never a false one (still gated behind TOOL_STUCK_TIMEOUT_SEC + no other
+    # content change), so it stays populated pending real-incident proof
+    # rather than left empty like an unconfirmed auth marker would be.
+    tool_running_markers=("running…", "running..."),
     # config.py's find_claude_executable() deliberately prefers the real
     # claude.exe over the claude.cmd npm shim specifically to avoid the
     # visible cmd.exe console window (see that function's own docstring) —
@@ -609,6 +634,14 @@ codex_spec = ProviderSpec(
     # error) — no confirmed in-pane error text exists to list here.
     # GENERIC_AUTH_ERROR_MARKERS is the only signal until one is observed.
     auth_error_markers=(),
+    # #308 mitigation task's own reference table ("codex: 'running command'")
+    # — codex's shell-tool call renders this in its ratatui status area.
+    # ⚠ Same confidence caveat as claude_spec's tool_running_markers above:
+    # not yet confirmed against a captured hang transcript for THIS provider
+    # (#308's own incident was a gemini pane) — kept populated because a
+    # miss just means a missed detection, never a false stuck report (still
+    # gated behind TOOL_STUCK_TIMEOUT_SEC with no other content change).
+    tool_running_markers=("running command",),
     # codex is an npm-installed CLI on a node runtime (same shim shape as
     # claude/opencode) plus its own `code_mode`/`codex_apps` sandbox host
     # process — both confirmed always-present under a live codex pane at
@@ -748,6 +781,12 @@ gemini_spec = ProviderSpec(
     # the "override a stale marker once a newer identity is on screen"
     # mechanism #256 asked for, with no separate identity-parsing needed.
     auth_transient_markers=("signing in", "verifying your account", "not signed in"),
+    # CONFIRMED (#308, 2026-08-19): the exact incident transcript quote — an
+    # agy pane called a shell tool and its screen showed "Running command..."
+    # (verbatim, from `gemini-135008.transcript.log`) permanently, for ~13
+    # minutes, until Lead closed it by hand. Matched without the trailing
+    # ellipsis so both the ASCII "..." and a rendered unicode "…" hit.
+    tool_running_markers=("running command",),
 )
 
 
@@ -1150,6 +1189,16 @@ def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
     boot-time account-check text."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.auth_transient_markers if spec is not None else ()
+
+
+def tool_running_markers_for(provider: str) -> tuple[str, ...]:
+    """Tool-running markers for `provider` (see
+    ``ProviderSpec.tool_running_markers``, #308). Empty for a provider with
+    none confirmed, or an unknown provider name — same "no generic fallback"
+    reasoning as ``auth_transient_markers_for``: this is exact CLI wording,
+    not a cross-provider phrase."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.tool_running_markers if spec is not None else ()
 
 
 # ── ready-marker calibration status (#257) ──────────────────────────────────

@@ -438,6 +438,72 @@ class TestIdleWatchdog:
         assert "takkub harvest --role backend" in notify_lead.call_args.args[1]
 
 
+class TestStuckToolSuppressesIdleReminder:
+    """#308: the forgot-`takkub done` reminder must not nag a pane the
+    stuck-tool watchdog has already escalated to Lead — real incident
+    evidence was a pane wedged in a shell tool call whose idle footer stayed
+    visible on screen, which `is_at_ready_prompt()` alone would have read as
+    genuinely idle and reminded forever with nobody hearing about the hang."""
+
+    def test_tool_stuck_pane_gets_no_idle_reminder(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.tool_running_marker.return_value = "running command"
+        pane.session.seconds_since_output.return_value = orch_mod.TOOL_STUCK_TIMEOUT_SEC
+        orch.panes["gemini"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()  # escalates the stuck-tool watchdog
+        assert orch._pane_state[_key("gemini")].tool_stuck_escalated is True
+
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + orch_mod.IDLE_REMIND_COOLDOWN_S + 10
+        orch._check_idle_teammates()
+
+        assert notices == []
+        assert orch._idle_state[_key("gemini")]["first_idle_ts"] is None
+
+    def test_recovered_pane_resumes_normal_idle_reminders(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.tool_running_marker.return_value = "running command"
+        pane.session.seconds_since_output.return_value = orch_mod.TOOL_STUCK_TIMEOUT_SEC
+        orch.panes["gemini"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # escalates
+
+        # Tool call clears: marker gone, screen changed.
+        pane.session.tool_running_marker.return_value = None
+        pane.session.seconds_since_output.return_value = 0.0
+        clock[0] += 1
+        orch._check_idle_teammates()
+        assert orch._pane_state[_key("gemini")].tool_stuck_escalated is False
+
+        # `seen_working` never latched (this pane was "ready" from the very
+        # first tick) — cross the unlatched fallback threshold too, same as
+        # test_fast_task_still_reminded_via_unlatched_fallback above.
+        clock[0] += orch_mod.IDLE_REMIND_UNLATCHED_AFTER_S + orch_mod.IDLE_REMIND_COOLDOWN_S + 10
+        orch._check_idle_teammates()
+        assert notices == [(TEST_PROJECT, "gemini", 1, False)]
+
+
 class TestIdleReminderUi:
     def test_status_handler_describes_non_turn_notice(self) -> None:
         window = MagicMock()

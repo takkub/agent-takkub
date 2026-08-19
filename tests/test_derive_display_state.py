@@ -35,7 +35,7 @@ import types
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import TOOL_STUCK_TIMEOUT_SEC, Orchestrator
 from agent_takkub.provider_spec import AUTH_TRANSIENT_GRACE_SEC
 from agent_takkub.pty_session import PtySession
 
@@ -62,17 +62,29 @@ class _StubSession:
         booting: bool = False,
         hard_blocked: bool = False,
         raise_on: tuple[str, ...] = (),
+        tool_marker: str | None = None,
+        seconds_since_output: float = 0.0,
     ) -> None:
         self._auth_reason = auth_reason
         self._booting = booting
         self._hard_blocked = hard_blocked
         self._raise_on = raise_on
+        self._tool_marker = tool_marker
+        self._seconds_since_output = seconds_since_output
         self.is_alive = True
 
     def auth_failure_reason(self, provider: str) -> str | None:
         if "auth" in self._raise_on:
             raise RuntimeError("boom")
         return self._auth_reason
+
+    def tool_running_marker(self, provider: str) -> str | None:
+        if "tool_stuck" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._tool_marker
+
+    def seconds_since_output(self) -> float:
+        return self._seconds_since_output
 
     def shows_startup_marker(self) -> bool:
         if "booting" in self._raise_on:
@@ -152,12 +164,47 @@ class TestPriorityOrder:
         assert Orchestrator._derive_display_state(None, pane, "working", False) == "working"
 
     def test_each_signal_check_fails_open_on_exception(self) -> None:
-        for which in ("auth", "booting", "busy"):
+        for which in ("auth", "booting", "busy", "tool_stuck"):
             session = _StubSession(raise_on=(which,))
             pane = _pane("active", session=session, provider="cursor")
             # No crash; falls through to whatever the next tier decides —
             # here that's "unknown" (cursor, active, no other signal fired).
             assert Orchestrator._derive_display_state(None, pane, "active", False) == "unknown"
+
+    def test_tool_stuck_beats_waiting_delivery(self) -> None:
+        # #308: ground-truth screen scrape wins over the delivery-health
+        # notice signal, same as every other tier in this priority chain.
+        session = _StubSession(
+            tool_marker="running command", seconds_since_output=TOOL_STUCK_TIMEOUT_SEC
+        )
+        pane = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "working", True) == "stalled:tool"
+
+    def test_tool_marker_before_timeout_is_not_stuck_yet(self) -> None:
+        session = _StubSession(
+            tool_marker="running command", seconds_since_output=TOOL_STUCK_TIMEOUT_SEC - 1
+        )
+        pane = _pane("working", session=session)
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "waiting-delivery"
+
+    def test_tool_stuck_only_applies_to_working(self) -> None:
+        # An "active" pane (never dispatched a task) has no shell-tool call
+        # to be wedged in from the orchestrator's point of view.
+        session = _StubSession(
+            tool_marker="running command", seconds_since_output=TOOL_STUCK_TIMEOUT_SEC
+        )
+        pane = _pane("active", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "active", False) != "stalled:tool"
+
+    def test_login_required_beats_tool_stuck(self) -> None:
+        session = _StubSession(
+            auth_reason="send /login to login",
+            tool_marker="running command",
+            seconds_since_output=TOOL_STUCK_TIMEOUT_SEC,
+        )
+        pane = _pane("working", session=session)
+        assert Orchestrator._derive_display_state(None, pane, "working", False) == "login-required"
 
 
 class _RealSignalSession:
@@ -190,6 +237,9 @@ class _RealSignalSession:
 
     def is_hard_blocked_for(self, provider: str) -> bool:
         return PtySession.is_hard_blocked_for(self, provider)
+
+    def tool_running_marker(self, provider: str) -> str | None:
+        return PtySession.tool_running_marker(self, provider)
 
 
 class TestRealTranscriptFixtures:
@@ -260,6 +310,19 @@ class TestRealTranscriptFixtures:
         pane = _pane("active", session=session, provider="codex")
         result = Orchestrator._derive_display_state(None, pane, "active", False)
         assert result == "busy"
+
+    def test_gemini_footer_below_running_command_still_reads_stalled_tool(self) -> None:
+        # #308's own incident shape: agy's idle footer ("? for shortcuts")
+        # stayed visible on screen the whole time "Running command..." was
+        # wedged above it — proves the tier fires from the real marker
+        # method + real ready-region scoping, not just the abstract stub.
+        session = _RealSignalSession(
+            ["", "Running command...", "", "? for shortcuts   Gemini 3.1 Pro (high)"],
+            seconds_since_output=TOOL_STUCK_TIMEOUT_SEC,
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", False)
+        assert result == "stalled:tool"
 
     def test_cursor_uncalibrated_active_reads_unknown_not_active(self) -> None:
         session = _RealSignalSession(["cursor-agent", "> "], seconds_since_output=50.0)
