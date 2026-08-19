@@ -51,27 +51,15 @@ class Finding:
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
-    """Run *argv* with timeout=5. Returns (returncode, combined output)."""
-    from ._win_console import SUBPROCESS_NO_WINDOW
+    """Run *argv* with timeout=5. Returns (returncode, combined output).
 
-    try:
-        r = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        out = (r.stdout or "").strip() or (r.stderr or "").strip()
-        return r.returncode, out
-    except FileNotFoundError:
-        return 1, f"not found: {argv[0]}"
-    except subprocess.TimeoutExpired:
-        return 1, "timed out"
-    except Exception as e:
-        return 1, str(e)
+    Moved to `agent_takkub.provider_probe.run_probe` (#309 Phase 4) so
+    `core.versioning.detector` shares the exact same subprocess-probe
+    behavior; kept as a thin re-export here so this module's ~40 existing
+    call sites are untouched."""
+    from .provider_probe import run_probe
+
+    return run_probe(argv, timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -1335,23 +1323,17 @@ def check_editable_install() -> list[Finding]:
 
 
 def _resolve_provider_bin(spec) -> str | None:
-    """Resolve `spec`'s binary via the SAME custom_discovery_fn the cockpit
-    uses at spawn time — e.g. gemini's `find_agy_executable()` falls back to
-    %LOCALAPPDATA%\\agy\\bin when the installer didn't register PATH, so
-    doctor doesn't falsely report "not installed" for a role that actually
-    works. Shared by check_providers() (version/install-state) and
-    check_provider_auth() (#248/#247 round 2) so both agree on whether a
-    provider is installed at all."""
-    try:
-        if spec.custom_discovery_fn is not None:
-            return spec.custom_discovery_fn()
-    except Exception:
-        pass
-    for name in spec.binary_names or (spec.name,):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
+    """Resolve `spec`'s binary — shared by check_providers()
+    (version/install-state) and check_provider_auth() (#248/#247 round 2) so
+    both agree on whether a provider is installed at all.
+
+    Moved to `agent_takkub.provider_probe.resolve_provider_bin` (#309 Phase
+    4) so `core.versioning.detector` uses the identical resolution logic
+    instead of a second, independently-drifting copy; kept as a thin
+    re-export here for the existing call sites."""
+    from .provider_probe import resolve_provider_bin
+
+    return resolve_provider_bin(spec)
 
 
 def check_providers() -> list[Finding]:
@@ -2280,6 +2262,82 @@ def check_provider_isolation() -> list[Finding]:
                 "no action available yet; tracked as a multi-provider gap (#103)",
             )
         )
+    return findings
+
+
+def check_core_version_compat() -> list[Finding]:
+    """[version/*] — Core V2 Schema/Adapter/Compat verdict per provider
+    (#309 Phase 4): detected CLI version vs `core.versioning.compatibility`,
+    plus a live-store schema fingerprint from `core.versioning.probe`.
+
+    Deliberately NOT part of `run_all_checks()`'s default tuple — opt-in
+    only via `takkub doctor --core-version` (cli.cmd_doctor), the same
+    pattern `check_spawn_queue_live`/`check_remote_mirror_live` already use
+    for "--live" — so a plain `takkub doctor` stays byte-identical to
+    before this landed (project rule: every new connection point to
+    existing behavior sits behind a flag that leaves the old path
+    untouched when off). Never FAILs: an unregistered/unparseable provider
+    is INFO, not a broken machine.
+    """
+    try:
+        from .core.versioning.compatibility import DEFAULT_MATRIX, CompatVerdict
+        from .core.versioning.detector import ProviderVersionDetector
+        from .core.versioning.probe import probe_store
+        from .provider_spec import PROVIDER_REGISTRY
+    except Exception as e:
+        return [Finding("version", "core-v2", Status.INFO, f"core.versioning unavailable: {e}")]
+
+    findings: list[Finding] = []
+    detector = ProviderVersionDetector()
+    for provider in PROVIDER_REGISTRY:
+        detected = detector.detect(provider)
+        ev = DEFAULT_MATRIX.evaluate(provider, detected.version_text)
+        shown = detected.version_text or "(not detected)"
+        if ev.verdict == CompatVerdict.OK:
+            findings.append(Finding("version", f"{provider}-compat", Status.OK, shown))
+        elif ev.verdict == CompatVerdict.BELOW_MIN:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-compat",
+                    Status.WARN,
+                    f"{shown} (below calibrated minimum)",
+                )
+            )
+        elif ev.verdict == CompatVerdict.ABOVE_MAX:
+            findings.append(
+                Finding(
+                    "version", f"{provider}-compat", Status.WARN, f"{shown} (above calibrated max)"
+                )
+            )
+        elif ev.verdict == CompatVerdict.UNKNOWN:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-compat",
+                    Status.INFO,
+                    f"{shown} (version string unparseable)",
+                )
+            )
+        else:
+            findings.append(
+                Finding("version", f"{provider}-compat", Status.INFO, f"{shown} (not calibrated)")
+            )
+
+        probe = probe_store(provider)
+        if probe.found:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-store",
+                    Status.INFO,
+                    f"live store found — schema fingerprint: {len(probe.fingerprint)} keys/tables",
+                )
+            )
+        else:
+            findings.append(
+                Finding("version", f"{provider}-store", Status.SKIP, probe.note or "no store found")
+            )
     return findings
 
 
