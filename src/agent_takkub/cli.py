@@ -278,6 +278,28 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
     )
 
 
+def _browser_shard_warning(role: str, shards: int) -> str:
+    """#304 point 5: tell Lead up front, in the `assign` response itself,
+    that a browser-role shard fan-out may not be able to open a browser at
+    all — Playwright MCP has been observed failing to connect under
+    concurrent shard spawn (#146/#304, root cause not yet proven) and the
+    `mb` fallback is blocked for shards by design (#92 — no per-shard CDP
+    port). Surfacing this at assign time, not after minutes of a stuck pane,
+    is the point of #304's item 5."""
+    if shards <= 1:
+        return ""
+    from . import pane_guard
+
+    if not pane_guard.is_browser_role(role):
+        return ""
+    return (
+        "\n⚠️ shard เปิดเบราว์เซอร์อาจไม่ได้: Playwright MCP บาง shard เคย connect ไม่ติดภายใต้ "
+        "concurrent spawn (#146/#304, สาเหตุยังไม่พิสูจน์) แล้ว mb ก็โดน guard บล็อคสำหรับ shard เสมอ "
+        "(#92 — ไม่มี per-shard CDP port) — ถ้า shard ไหนพัง ให้มันลอง `takkub mcp-fallback request` "
+        "ก่อนรายงาน FAILED, หรือใช้ `takkub doctor --pane <role>` วินิจฉัย"
+    )
+
+
 def cmd_assign(args: argparse.Namespace) -> dict:
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
@@ -365,7 +387,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "(use a plain assign for a single tester)"
                 ),
             }
-        return _request(
+        resp = _request(
             _with_project(
                 {
                     "cmd": "assign",
@@ -382,6 +404,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 }
             )
         )
+        if resp.get("ok"):
+            resp["msg"] = str(resp.get("msg", "")) + _browser_shard_warning(args.role, shards)
+        return resp
     if shards > 1:
         # Fan-out: spawn <role>#1 … <role>#N in parallel; each carries shard_total.
         results = []
@@ -408,13 +433,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
+        warn = _browser_shard_warning(args.role, shards)
         if mode == "subagent":
             details = "\n".join(str(r.get("msg", "")) for r in results if r.get("msg"))
             return {
                 "ok": ok_count == shards,
-                "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip(),
+                "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip() + warn,
             }
-        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards"}
+        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards{warn}"}
     return _request(
         _with_project(
             {
@@ -1472,6 +1498,14 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
         findings += check_storage_layout_state()
 
+    pane_role = getattr(args, "pane", None)
+    if pane_role:
+        from .config import active_project
+        from .doctor import check_pane_mcp_handshake
+
+        pane_project = getattr(args, "project", None) or _from_project() or active_project()[0]
+        findings += check_pane_mcp_handshake(pane_role, pane_project)
+
     if args.json:
         import json as _json
 
@@ -1871,13 +1905,77 @@ def cmd_guard(_: argparse.Namespace) -> dict:
             return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
         tool_input = payload.get("tool_input")
         command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-        verdict = pane_guard.classify(command, role)
+
+        def _mb_fallback_check() -> bool:
+            # #304 point 3: lazy on purpose — pane_guard only calls this in
+            # its one mb-shard-deny branch, so a plain Bash call from every
+            # other pane never touches disk here.
+            from . import mcp_fallback
+
+            granted = mcp_fallback.is_granted(role)
+            if granted:
+                from .orchestrator_text import _log_event
+
+                _log_event("mcp_fallback_used", role=role, project=_from_project())
+            return granted
+
+        verdict = pane_guard.classify(command, role, mb_fallback_check=_mb_fallback_check)
         if verdict.allowed:
             return {"ok": True, "msg": ""}
         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
         return {"ok": True, "msg": "", "exit_code": 2}
     except Exception:
         return {"ok": True, "msg": ""}
+
+
+def cmd_mcp_fallback(args: argparse.Namespace) -> dict:
+    """(agent, browser-role shard only) request or check the single,
+    time-boxed `mb` escape hatch for when Playwright MCP genuinely never
+    connected (#146/#304).
+
+    Local-only, no orchestrator IPC — same as `takkub doctor`/`takkub
+    worktree`. Only call `request` AFTER confirming via ToolSearch that the
+    browser MCP tools are unavailable, never speculatively: this hands out
+    ONE grant at a time (`mcp_fallback.py`'s module docstring explains why —
+    `mb` shares a single CDP endpoint machine-wide, #92), so a request made
+    "just in case" can block a shard that genuinely needs it.
+    """
+    from . import mcp_fallback
+
+    role = _from_role()
+    if not role:
+        return {"ok": False, "msg": "TAKKUB_ROLE not set — run this from inside a cockpit pane"}
+
+    if args.mcp_fallback_cmd == "status":
+        info = mcp_fallback.status()
+        if info is None:
+            return {"ok": True, "msg": "no active mb fallback grant"}
+        remaining = int(info.get("expires_at", 0) - time.time())
+        return {"ok": True, "msg": f"held by {info.get('holder')} for {max(0, remaining)}s more"}
+
+    project = _from_project() or ""
+    reason = getattr(args, "reason", "") or ""
+    grant = mcp_fallback.request(role, project, reason=reason)
+
+    from .orchestrator_text import _log_event
+
+    _log_event(
+        "mcp_fallback_granted" if grant.granted else "mcp_fallback_denied",
+        role=role,
+        project=project,
+        reason=reason,
+        holder=grant.holder,
+    )
+    if grant.granted:
+        remaining = int((grant.expires_at or 0) - time.time())
+        return {
+            "ok": True,
+            "msg": (
+                f"granted: mb ใช้ได้ชั่วคราวอีก {remaining}s — ใช้เท่าที่จำเป็นแล้วเลิกใช้ "
+                "(ยังแชร์ CDP 9222 กับทุก pane บนเครื่อง #92, อย่าเปิดค้าง)"
+            ),
+        }
+    return {"ok": False, "msg": grant.reason}
 
 
 def cmd_services(args: argparse.Namespace) -> dict:
@@ -2538,6 +2636,25 @@ def main(argv: list[str] | None = None) -> int:
     sgd = sub.add_parser("_guard", help=argparse.SUPPRESS)
     sgd.set_defaults(func=cmd_guard)
 
+    smf = sub.add_parser(
+        "mcp-fallback",
+        help="(browser-role shard) request the single, time-boxed mb fallback "
+        "when Playwright MCP genuinely never connects (#146/#304)",
+    )
+    smf_sub = smf.add_subparsers(dest="mcp_fallback_cmd", required=True)
+    smf_req = smf_sub.add_parser(
+        "request",
+        help="request the fallback grant — only after ToolSearch confirms no browser MCP tools",
+    )
+    smf_req.add_argument(
+        "--reason", default="", help="why the browser MCP is unavailable (goes into the audit log)"
+    )
+    smf_req.set_defaults(func=cmd_mcp_fallback)
+    smf_status = smf_sub.add_parser(
+        "status", help="show who currently holds the fallback grant, if anyone"
+    )
+    smf_status.set_defaults(func=cmd_mcp_fallback)
+
     sst = sub.add_parser(
         "status",
         help="per-pane progress summary with stall detection (post-compact awareness)",
@@ -2872,6 +2989,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also report V1/V2/mixed storage layout state (#309 Phase 8b); "
         "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
+    sdoc.add_argument(
+        "--pane",
+        metavar="ROLE",
+        default=None,
+        help="cross-check a role's (e.g. 'qa#2') last recorded spawn-time MCP "
+        "handshake against its shared-MCP config on disk (#304); does not "
+        "prove a live MCP connection — the cockpit can't observe that",
+    )
+    sdoc.add_argument(
+        "--project",
+        default=None,
+        help="project namespace for --pane (default: current pane's project, or the active project)",
     )
     sdoc.set_defaults(func=cmd_doctor)
 

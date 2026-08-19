@@ -1981,6 +1981,23 @@ class SpawnEngineMixin:
                     f"{role_name} was not spawned (refusing to guess a deny-list): {exc}"
                 )
             provider_argv.extend(mcp_argv)
+            # #304 point 2: log what actually made it into this pane's argv —
+            # separate from whether the provider binary goes on to connect it
+            # (unobservable from here, see mcp_bridge.describe_mcp_handshake's
+            # docstring) — so a shard whose spawn never got a browser MCP at
+            # all is distinguishable from one that did but still failed to
+            # connect at runtime.
+            from .mcp_bridge import describe_mcp_handshake
+
+            _log_event(
+                "mcp_handshake_argv",
+                role=role_name,
+                base_role=base_role,
+                shard=shard_idx,
+                provider=spec.name,
+                project=project_ns,
+                **describe_mcp_handshake(spec.name, mcp_argv),
+            )
             # Project/session scoping (#132): opt-in per provider via
             # ProviderSpec.project_scope_flag — currently only gemini/agy,
             # whose own conversation history isn't keyed by cwd otherwise.
@@ -2635,10 +2652,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # provider branch uses, dispatched by PROVIDER_REGISTRY's
         # mcp_adapter_variant; claude's own resulting argv is byte-identical
         # to the pre-#100 inline `--mcp-config`/`--strict-mcp-config` code.
-        from .mcp_bridge import mcp_argv_for_provider
+        from .mcp_bridge import describe_mcp_handshake, mcp_argv_for_provider
 
-        argv.extend(
-            mcp_argv_for_provider("claude", base_role, shard_idx, project_ns, cwd=spawn_cwd)
+        _claude_mcp_argv = mcp_argv_for_provider(
+            "claude", base_role, shard_idx, project_ns, cwd=spawn_cwd
+        )
+        argv.extend(_claude_mcp_argv)
+        # #304 point 2 — see the matching call in the generic provider branch
+        # above for why this is argv-time evidence, not a live connect probe.
+        _log_event(
+            "mcp_handshake_argv",
+            role=role_name,
+            base_role=base_role,
+            shard=shard_idx,
+            provider="claude",
+            project=project_ns,
+            **describe_mcp_handshake("claude", _claude_mcp_argv),
         )
 
         # Hard-deny built-in tools that don't fit the cockpit's

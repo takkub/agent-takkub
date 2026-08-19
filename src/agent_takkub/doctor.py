@@ -995,6 +995,124 @@ def check_mcps(shared_mcp_file: Path | None = None) -> list[Finding]:
     return findings
 
 
+def check_pane_mcp_handshake(role: str, project: str | None = None) -> list[Finding]:
+    """`takkub doctor --pane <role>` (#304 point 2).
+
+    Cross-checks the most recent `mcp_handshake_argv` event (logged by
+    `spawn_engine.spawn()` at argv-build time, one per `mcp_argv_for_provider`
+    call site — see `mcp_bridge.describe_mcp_handshake`) against the shared-
+    MCP config that role/shard would resolve to right now. Catches the
+    #146/#304 failure SHAPE — a shard whose spawn-time argv never carried
+    `--mcp-config` at all, or whose resolved config no longer exists on disk
+    — without a live cockpit connection or browser access, neither of which
+    this role has (see docs/audit/2026-08-04-issue-146-playwright-shards.md).
+
+    Deliberately does NOT resolve `browser_profile_mcp_config_path` (the
+    writing function) — that `mkdir`s profile dirs and clears Chromium
+    singleton-lock files as a side effect, which is safe right before a spawn
+    but never safe from a read-only diagnostic that might run while that same
+    pane's browser is still live. Uses `browser_profile_mcp_config_path_
+    readonly` instead, which only does path string math.
+
+    Cannot tell you whether the provider binary actually connected the MCP —
+    that state lives entirely inside the provider process and the cockpit has
+    no channel to observe it. This narrows the search space (spawn-time argv
+    correct + config on disk correct → the failure is at MCP-connect time,
+    not argv construction) rather than closing the issue outright.
+    """
+    from . import config
+
+    findings: list[Finding] = []
+    role = role.strip()
+    base_role = role.split("#", 1)[0].strip().lower()
+    shard_idx: int | None = None
+    if "#" in role:
+        try:
+            shard_idx = int(role.split("#", 1)[1])
+        except ValueError:
+            shard_idx = None
+
+    events_log = config.EVENTS_LOG
+    last_event: dict | None = None
+    if events_log.is_file():
+        try:
+            lines = events_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        # Most recent match wins — scan from the tail. events.log is capped at
+        # 2MB (orchestrator_text._EVENTS_LOG_MAX_BYTES) so this is bounded.
+        for line in reversed(lines):
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("event") != "mcp_handshake_argv" or rec.get("role") != role:
+                continue
+            if project and rec.get("project") not in (None, project):
+                continue
+            last_event = rec
+            break
+
+    if last_event is None:
+        findings.append(
+            Finding(
+                "mcp-handshake",
+                role,
+                Status.WARN,
+                "no mcp_handshake_argv event yet for this role — spawn it at least once first",
+                f"takkub assign --role {role.split('#', 1)[0]} ... then re-run "
+                f"'takkub doctor --pane {role}'",
+            )
+        )
+    else:
+        has_cfg = bool(last_event.get("has_mcp_config"))
+        servers = last_event.get("server_names") or []
+        status = Status.OK if has_cfg else Status.FAIL
+        findings.append(
+            Finding(
+                "mcp-handshake",
+                role,
+                status,
+                f"last spawn @ {last_event.get('ts')} provider={last_event.get('provider')}: "
+                f"has_mcp_config={has_cfg} servers={servers}",
+                ""
+                if has_cfg
+                else "role's MCP policy resolved to nothing at spawn time — check shared-mcp.json / role allowlist",
+            )
+        )
+
+    try:
+        from .shared_dev_tools import browser_profile_mcp_config_path_readonly
+
+        cfg_path = browser_profile_mcp_config_path_readonly(base_role, shard_idx, project or "")
+    except Exception as exc:
+        findings.append(
+            Finding(
+                "mcp-handshake",
+                f"{role}:config-file",
+                Status.WARN,
+                f"could not resolve expected config path: {exc}",
+            )
+        )
+    else:
+        if cfg_path.is_file():
+            findings.append(
+                Finding("mcp-handshake", f"{role}:config-file", Status.OK, str(cfg_path))
+            )
+        else:
+            findings.append(
+                Finding(
+                    "mcp-handshake",
+                    f"{role}:config-file",
+                    Status.WARN,
+                    f"expected config not on disk right now: {cfg_path} "
+                    "(normal if this role/shard has never spawned)",
+                )
+            )
+
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # [projects]
 # ---------------------------------------------------------------------------

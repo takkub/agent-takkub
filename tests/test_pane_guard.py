@@ -153,6 +153,49 @@ class TestMiniBrowserShardConstraint:
     def test_mb_is_allowed_for_unsharded_browser_roles(self, role: str) -> None:
         assert pane_guard.classify("mb go http://localhost:3000", role).allowed
 
+    def test_mb_fallback_granted_allows_shard(self) -> None:
+        """#304 point 3: an explicit, caller-supplied grant lets the mb-shard
+        deny branch through instead of hard-blocking."""
+        verdict = pane_guard.classify(
+            "mb go http://localhost:3000", "qa#1", mb_fallback_check=lambda: True
+        )
+        assert verdict.allowed
+
+    def test_mb_fallback_denied_still_blocks(self) -> None:
+        verdict = pane_guard.classify(
+            "mb go http://localhost:3000", "qa#1", mb_fallback_check=lambda: False
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "browser_driver:mb-shard-cdp-9222"
+
+    def test_mb_fallback_check_not_called_for_non_mb_commands(self) -> None:
+        """The callback must be lazy — never invoked outside the one branch
+        it exists for, so pane_guard stays free of unconditional I/O."""
+        calls: list[None] = []
+
+        def _spy() -> bool:
+            calls.append(None)
+            return True
+
+        pane_guard.classify("npm test", "qa#1", mb_fallback_check=_spy)
+        assert calls == []
+
+    def test_mb_fallback_check_not_called_for_unsharded_roles(self) -> None:
+        calls: list[None] = []
+
+        def _spy() -> bool:
+            calls.append(None)
+            return True
+
+        pane_guard.classify("mb go http://localhost:3000", "qa", mb_fallback_check=_spy)
+        assert calls == []
+
+    def test_no_fallback_check_defaults_to_hard_deny(self) -> None:
+        """Omitting mb_fallback_check (every pre-#304 caller) behaves exactly
+        as before: unconditional deny, no behavior change for them."""
+        verdict = pane_guard.classify("mb go http://localhost:3000", "qa#1")
+        assert not verdict.allowed
+
 
 class TestDiskScanDenied:
     @pytest.mark.parametrize(

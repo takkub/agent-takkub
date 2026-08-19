@@ -26,6 +26,7 @@ from agent_takkub.shared_dev_tools import (
     BROWSER_MCPS,
     _role_variant_path,
     browser_profile_mcp_config_path,
+    browser_profile_mcp_config_path_readonly,
     ensure_browser_mcps,
     shared_mcp_config_path,
     shared_mcp_config_path_for_role,
@@ -403,6 +404,38 @@ class TestBrowserProfileMcpConfigPath:
         lock.write_text("stale", encoding="utf-8")
         browser_profile_mcp_config_path("qa", 1, "proj_a")  # regenerate
         assert not lock.exists()
+
+
+class TestBrowserProfileMcpConfigPathReadonly:
+    """`browser_profile_mcp_config_path_readonly` (#304 point 2) — must match
+    the writing function's own filename formula without doing any I/O."""
+
+    def test_matches_writing_function_output_path(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        written = browser_profile_mcp_config_path("qa", 1, "proj_a")
+        readonly = browser_profile_mcp_config_path_readonly("qa", 1, "proj_a")
+        assert written == str(readonly)
+
+    def test_matches_for_non_shard_pane_too(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        written = browser_profile_mcp_config_path("qa", None, "proj_a")
+        readonly = browser_profile_mcp_config_path_readonly("qa", None, "proj_a")
+        assert written == str(readonly)
+
+    def test_never_creates_the_file(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        path = browser_profile_mcp_config_path_readonly("qa", 1, "proj_a")
+        assert not path.exists()
+
+    def test_never_creates_profile_dirs_or_touches_singleton_locks(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        # The writing function mkdir's a profile dir and clears any stale
+        # SingletonLock as a side effect — must never happen from the
+        # read-only accessor (a live pane's browser could still be using it).
+        browser_profile_mcp_config_path_readonly("qa", 1, "proj_a")
+        prof = isolated_mcp_file.parent / "browser-profiles" / "proj_a-qa-shard1-playwright"
+        assert not prof.exists()
 
 
 class TestBrowserProfileOutputDir:

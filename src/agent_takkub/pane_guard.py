@@ -74,6 +74,7 @@ See its pattern block below for why the #242 prose ban never bound.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Roles allowed to drive a browser. `qa` owns e2e/smoke; `critic` and
@@ -355,7 +356,12 @@ def is_browser_role(role: str | None) -> bool:
     return normalise_role(role) in BROWSER_ROLES
 
 
-def classify(command: str, role: str | None) -> Verdict:
+def classify(
+    command: str,
+    role: str | None,
+    *,
+    mb_fallback_check: Callable[[], bool] | None = None,
+) -> Verdict:
     """Decide whether `role` may run `command`.
 
     Fail-open by design: an unknown/empty role means the CLI was invoked
@@ -363,6 +369,15 @@ def classify(command: str, role: str | None) -> Verdict:
     means the hook payload was malformed. Neither is worth blocking on — the
     guard exists to stop an agent routing around policy, not to police
     people.
+
+    *mb_fallback_check* (#304 point 3): an optional, lazily-called predicate
+    the caller supplies — `cli.cmd_guard` passes one bound to `mcp_fallback.
+    is_granted()`. Only invoked in the one mb-shard-deny branch below (never
+    on every command), so this module's "stdlib only, no I/O" guarantee
+    (see module docstring) holds for every OTHER rule — the fallback state
+    itself lives in `mcp_fallback.py`, not here, precisely so this stays a
+    pure leaf. `None` (the default, and every caller that doesn't pass one)
+    behaves exactly as before: unconditional deny.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -402,13 +417,17 @@ def classify(command: str, role: str | None) -> Verdict:
 
     raw_role = (role or "").strip().lower()
     if "#" in raw_role and is_browser_role(name) and _MB_INVOKE.search(cmd):
+        if mb_fallback_check is not None and mb_fallback_check():
+            return Verdict(True)
         return Verdict(
             False,
             rule="browser_driver:mb-shard-cdp-9222",
             reason=(
                 f"role `{raw_role}` ใช้ mb ไม่ได้: mb client hardcode CDP 9222 "
                 "ทำให้ทุก shard ขับ Chrome ตัวเดียวกัน (#92). "
-                "ใช้ Playwright MCP ที่ cockpit แยก profile ให้ต่อ shard แทน"
+                "ใช้ Playwright MCP ที่ cockpit แยก profile ให้ต่อ shard แทน — "
+                "ถ้า Playwright MCP ต่อไม่ติดจริง (#146/#304) ให้ขอ fallback ก่อน: "
+                '`takkub mcp-fallback request --reason "..."`'
             ),
         )
 
