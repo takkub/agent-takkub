@@ -792,9 +792,11 @@ def _describe_resource_wait(
     role_name: str,
     resource_class: ResourceClass,
     reason: str,
-    holders: list[str],
+    holders: list[tuple[str, str]],
     *,
     metrics: tuple[float, float] | None = None,
+    own_project: str = "",
+    queue_len: int = 0,
 ) -> str:
     """Human-readable queued message for a role denied a resource-governor
     slot (#240 point 3) — names the blocking pane(s) instead of just the bare
@@ -808,12 +810,33 @@ def _describe_resource_wait(
     for browser slot (waiting_resume)" sent Lead hunting for a browser-lock
     holder that didn't exist). Overload-latch reasons now get their own
     wording naming the machine, not the resource class, plus the CPU/RAM
-    numbers that were actually measured."""
+    numbers that were actually measured.
+
+    *holders* is `ResourceGovernor.holders_for_class`'s ``(project_id,
+    pane_id)`` list. #303: heavy/browser/build/... classes are capped
+    machine-wide, so a holder is routinely a pane from a DIFFERENT project —
+    the old pane-id-only rendering (e.g. "blocked by qa#1, qa") read exactly
+    like a stale lock in the caller's OWN project and cost a real debugging
+    session before anyone thought to check `runtime/events.log`. A holder
+    outside *own_project* is now qualified with its project name; *queue_len*
+    (machine-wide waiters for this same resource class) is appended when
+    there's more than the one role asking.
+    """
     if reason in _OVERLOAD_LATCH_REASONS:
         stats = f": CPU {metrics[0]:.0f}% · RAM free {metrics[1]:.0f}%" if metrics else ""
         return f"{role_name} queued — machine overloaded ({reason}{stats})"
-    blocked_by = f", blocked by {', '.join(holders)}" if holders else ""
-    return f"{role_name} queued — waiting for {resource_class.value} slot ({reason}{blocked_by})"
+    parts = [
+        pane if (not own_project or proj == own_project) else f"{pane} (project '{proj}')"
+        for proj, pane in holders
+    ]
+    blocked_by = f", blocked by {', '.join(parts)}" if parts else ""
+    queue_note = (
+        f" · {queue_len} queued machine-wide for {resource_class.value}" if queue_len > 1 else ""
+    )
+    return (
+        f"{role_name} queued — waiting for {resource_class.value} slot "
+        f"({reason}{blocked_by}){queue_note}"
+    )
 
 
 # Restart-reason marker (#232): `cockpit_restart` events.log lines only ever
@@ -1757,17 +1780,51 @@ class Orchestrator(
                 resource_class=resource_class,
             )
             if not decision.allowed:
+                # #303 item 1: write the task ledger's detail file the moment
+                # the task is QUEUED, not only once a pane finally spawns for
+                # it — before this, a gate-blocked assign left absolutely
+                # nothing on disk under runtime/tasks/ until admission, so
+                # there was no file Lead could read or edit while it waited
+                # (only `runtime/events.log`, and even that gave no way to
+                # act). Best-effort: a write failure here degrades to the
+                # in-memory `task` text below, same as the working-status
+                # ledger write already does.
+                base_role_q = _split_shard(role_name)[0]
+                detail_path = None
+                try:
+                    from .task_ledger import create_assignment as _create_ledger_row
+
+                    ledger_cwd_q = cwd or default_cwd_for_role(base_role_q, project=project_ns)
+                    ledger_warning_q, detail_path = _create_ledger_row(
+                        project_ns,
+                        role_name,
+                        ledger_cwd_q,
+                        task,
+                        self.get_session_goal(project=project_ns),
+                        feature,
+                        provider or "",
+                        status="queued",
+                    )
+                    if ledger_warning_q:
+                        self._notify_lead(
+                            project_ns, ledger_warning_q, from_role=role_name, note=""
+                        )
+                    self.ledgerChanged.emit(project_ns)
+                except Exception:
+                    _log_event(
+                        "ledger_hook_error", role=role_name, project=project_ns, stage="enqueue"
+                    )
                 governor.enqueue(
                     project_id=project_ns,
                     pane_id=role_name,
                     task_id=task_id,
                     resource_class=resource_class,
                     reason=decision.reason,
-                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider: (
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider, dp=detail_path: (
                         self.assign(
                             r,
                             c,
-                            t,
+                            self._latest_queued_task_text(dp, t),
                             requires_commit=rc,
                             auto_chain=ac,
                             shard_total=st,
@@ -1781,19 +1838,26 @@ class Orchestrator(
                         )
                     ),
                 )
-                # #240 point 3: name the blocking pane(s) — `assign` used to
+                # #240 point 3 (extended #303 item 4): name the blocking
+                # pane(s) AND which project holds them — `assign` used to
                 # answer only a bare limit-name reason with no way for Lead
                 # to tell which pane to look at, and the queued role vanished
                 # from `takkub list`/`status` entirely (see
-                # `_queued_resource_roles` below) until the slot freed.
+                # `_queued_resource_roles` below) until the slot freed. A
+                # bare pane-id-only holder list also used to read exactly
+                # like a stale lock in the caller's own project even when the
+                # real holder was a totally different project sharing this
+                # machine's global limit — see `_describe_resource_wait`.
                 holders = governor.holders_for_class(resource_class)
+                queue_len = governor.queue_length_for_class(resource_class)
                 _log_event(
                     "assign_resource_wait",
                     project=project_ns,
                     role=role_name,
                     resource_class=resource_class.value,
                     reason=decision.reason,
-                    blocked_by=holders,
+                    blocked_by=[f"{pane}@{proj}" for proj, pane in holders],
+                    queue_len=queue_len,
                 )
                 return True, _describe_resource_wait(
                     role_name,
@@ -1801,6 +1865,8 @@ class Orchestrator(
                     decision.reason,
                     holders,
                     metrics=governor.current_metrics(),
+                    own_project=project_ns,
+                    queue_len=queue_len,
                 )
             if decision.token is not None:
                 self._resource_tokens[resource_key] = decision.token
@@ -1864,6 +1930,26 @@ class Orchestrator(
             token = self._resource_tokens.pop(resource_key, None)
             governor.release_slot(token)
         return result
+
+    def _latest_queued_task_text(self, detail_path: pathlib.Path | None, fallback: str) -> str:
+        """Resolve the text to actually deliver once a gate-blocked assign is
+        finally admitted (#303 item 1).
+
+        Reads *detail_path* — the ledger detail file written at enqueue
+        time — back off disk so a task edit Lead made by hand while the
+        assign was still queued (e.g. tightening a safety condition before
+        it could run unattended) is what ships, not the stale in-memory copy
+        captured in the `on_admitted` closure at the moment it was queued.
+        Falls back to that in-memory copy if there's no detail file (write
+        failed, or the task was short enough it was never split into one) or
+        it's no longer readable.
+        """
+        if detail_path is None:
+            return fallback
+        from . import task_ledger
+
+        text = task_ledger.read_detail_task(detail_path)
+        return text if text else fallback
 
     def _tick_resource_governor(self) -> None:
         governor = getattr(self, "_resource_governor", None)
@@ -2094,7 +2180,7 @@ class Orchestrator(
             from .task_ledger import create_assignment
 
             ledger_cwd = cwd or default_cwd_for_role(base_role_a, project=project_ns)
-            ledger_warning = create_assignment(
+            ledger_warning, _detail_path = create_assignment(
                 project_ns,
                 role_name,
                 ledger_cwd,
@@ -2522,6 +2608,71 @@ class Orchestrator(
             )
         return hint
 
+    def _queue_message_for_unspawned_role(
+        self, to_role: str, msg: str, from_role: str | None, project_ns: str
+    ) -> tuple[bool, str]:
+        """`takkub send --to <r>` when `<r>` is a known role with no pane
+        open right now (#303 item 3) — used to fail outright
+        (`_unknown_pane_message`'s "known role but has no pane open"
+        wording), which left Lead unable to hand a not-yet-spawned
+        teammate anything — e.g. a safety condition worth adding to the
+        task BEFORE it starts — until it happened to spawn on its own,
+        reported as blocking for up to an hour in the field.
+
+        Durably records the message via `role_messages` (same JSONL store
+        `takkub messages --role` already reads, so it survives a cockpit
+        restart for free) instead of adding a second, parallel persistence
+        mechanism. `spawn()` flushes it once `to_role`'s pane actually comes
+        up — see `_flush_queued_no_pane_messages`.
+        """
+        base_role, _shard_idx = _split_shard(to_role)
+        if _role_by_name(base_role) is None:
+            return False, f"unknown role: {to_role}"
+        from . import role_messages
+
+        role_messages.append_queued_no_pane(
+            RUNTIME_DIR, project_ns, to_role=to_role, from_role=from_role, body=msg
+        )
+        _log_event("send_queued_no_pane", project=project_ns, to=to_role, from_role=from_role)
+        return True, (
+            f"'{to_role}' has no pane open right now — message queued, will be delivered "
+            f'as soon as it spawns (`takkub assign --role {to_role} "<task>"` to open it now)'
+        )
+
+    def _flush_queued_no_pane_messages(self, project_ns: str, role_name: str) -> None:
+        """Deliver `takkub send` messages queued while `role_name` had no
+        pane open (#303 item 3), now that it has one. Mirrors
+        `_flush_pending_lead_cc`'s retry shape: a no-op if the pane went
+        busy/died again before this fired (5s after spawn — see
+        spawn_engine.py) — the records stay `"queued_no_pane"` on disk and
+        the next spawn retries them."""
+        from . import role_messages
+
+        pending = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
+        if not pending:
+            return
+        pane = self._project_panes(project_ns).get(role_name)
+        if not (pane and pane.session and pane.session.is_alive):
+            return
+        delivered = 0
+        for rec in pending:
+            body = rec.get("body")
+            msg_id = rec.get("id", "")
+            if not isinstance(body, str):
+                role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "empty body")
+                continue
+            self.send(role_name, body, from_role=rec.get("from"), project=project_ns)
+            # #303: `send()` above already appended a fresh "sent" record for
+            # the real delivery — mark the queued placeholder terminal so it
+            # is never picked up again, without double-counting it as a
+            # second live delivery attempt.
+            role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "flushed_after_spawn")
+            delivered += 1
+        if delivered:
+            _log_event(
+                "send_queued_no_pane_flushed", project=project_ns, role=role_name, count=delivered
+            )
+
     def send(
         self,
         to_role: str,
@@ -2537,7 +2688,7 @@ class Orchestrator(
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:
-            return False, self._unknown_pane_message(to_role, project_ns)
+            return self._queue_message_for_unspawned_role(to_role, msg, from_role, project_ns)
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
@@ -2797,9 +2948,13 @@ class Orchestrator(
         except Exception as exc:
             return False, f"อ่าน message log ไม่ได้: {exc}", []
         pending = sum(1 for r in records if r.get("state") == "sent")
+        queued_no_pane = sum(1 for r in records if r.get("state") == "queued_no_pane")
+        note = f"ยังไม่ยืนยันว่าถึงมือ {pending}"
+        if queued_no_pane:
+            note += f" · รอ pane เปิด {queued_no_pane}"
         return (
             True,
-            f"{len(records)} ข้อความถึง {role} (ยังไม่ยืนยันว่าถึงมือ {pending})",
+            f"{len(records)} ข้อความถึง {role} ({note})",
             lines,
         )
 
@@ -4899,8 +5054,15 @@ class Orchestrator(
                 extra[role] = f"{role} queued — waiting for resources ({reason})"
                 continue
             holders = governor.holders_for_class(resource_class)
+            queue_len = governor.queue_length_for_class(resource_class)
             extra[role] = _describe_resource_wait(
-                role, resource_class, reason, holders, metrics=governor.current_metrics()
+                role,
+                resource_class,
+                reason,
+                holders,
+                metrics=governor.current_metrics(),
+                own_project=project_ns,
+                queue_len=queue_len,
             )
         return extra
 
@@ -5742,7 +5904,7 @@ class Orchestrator(
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role)
         if pane is None:
-            return False, self._unknown_pane_message(role, project_ns)
+            return self._cancel_queued_resource_task(role, project_ns)
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_manager is None:
             return True, f"no pending delivery for '{role}' (nothing has ever been delivered)"
@@ -5754,6 +5916,34 @@ class Orchestrator(
                 last_ids.pop((project_ns, role), None)
             return True, f"cancelled {cancelled} pending delivery(ies) for '{role}'"
         return True, f"no pending delivery for '{role}'"
+
+    def _cancel_queued_resource_task(self, role: str, project_ns: str) -> tuple[bool, str]:
+        """`takkub task cancel --role <r>` for a role that never got a pane
+        at all — still parked behind the resource governor's admission
+        queue (#303 item 2).
+
+        The pane-session cancel path above only ever handled a task that had
+        already spawned; a gate-blocked assign has no pane, no session, no
+        `PaneState`, so `cancel_task_delivery` used to be unreachable for it
+        entirely (`_unknown_pane_message` unconditionally) — the only way
+        out was waiting for a slot to free on its own, which reported as
+        taking up to an hour in the field. Removes the item from the
+        governor's waiting list (so it's never admitted later) and closes
+        its `"queued"` ledger row (written at `assign()`'s enqueue time —
+        see `_latest_queued_task_text`) the same way an ordinary `takkub
+        task close` would.
+        """
+        governor = getattr(self, "_resource_governor", None)
+        removed = governor.cancel_waiting(project_id=project_ns, pane_id=role) if governor else 0
+        if not removed:
+            return False, self._unknown_pane_message(role, project_ns)
+        from . import task_ledger
+
+        _closed, ledger_msg = task_ledger.close_role(project_ns, role, self._live_roles(project_ns))
+        msg = f"cancelled {removed} queued task(s) for '{role}' waiting on a resource-governor slot"
+        if ledger_msg:
+            msg = f"{msg}\n{ledger_msg}"
+        return True, msg
 
     def _live_roles(self, project_ns: str) -> frozenset[str]:
         """Roles in *project_ns* with a currently-alive pane session — the

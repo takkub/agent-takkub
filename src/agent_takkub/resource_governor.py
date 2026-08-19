@@ -423,12 +423,35 @@ class ResourceGovernor:
             by_project_panes=by_project,
         )
 
-    def holders_for_class(self, resource_class: ResourceClass) -> list[str]:
-        """Pane ids currently holding a token of `resource_class` (#240 point
-        3) — lets a denied caller be told *who* it's waiting behind instead
-        of just a bare limit-name reason."""
+    def holders_for_class(self, resource_class: ResourceClass) -> list[tuple[str, str]]:
+        """(project_id, pane_id) pairs currently holding a token of
+        `resource_class` (#240 point 3, extended #303). Global classes
+        (BROWSER/BUILD/TEST/...) are capped machine-wide, so a holder is
+        routinely a DIFFERENT project than the caller's own — the bare
+        pane-id-only version of this used to render as e.g. "blocked by
+        qa#1, qa", which reads exactly like a stale lock from the caller's
+        own project and cost a live incident's worth of confused debugging
+        before anyone thought to check `runtime/events.log` by hand. The
+        project id travels with each holder now so a caller can tell the
+        two cases apart."""
         with self._lock:
-            return [t.pane_id for t in self._tokens.values() if t.resource_class == resource_class]
+            return [
+                (t.project_id, t.pane_id)
+                for t in self._tokens.values()
+                if t.resource_class == resource_class
+            ]
+
+    def queue_length_for_class(self, resource_class: ResourceClass) -> int:
+        """Total items waiting on `resource_class` across every project
+        (#303) — a queued role's own status line otherwise gives no sense of
+        how deep the machine-wide queue actually is, just that it's blocked."""
+        with self._lock:
+            return sum(
+                1
+                for queue in self._waiting.values()
+                for item in queue
+                if item.resource_class == resource_class
+            )
 
     def _overload_state_reason(self) -> str:
         """Why the overload latch is currently held (issue #274): the old

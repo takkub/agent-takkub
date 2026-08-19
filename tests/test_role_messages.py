@@ -95,6 +95,43 @@ class TestRespawnDetection:
         assert records[0]["abandoned_reason"] == "replay cap reached"
 
 
+class TestQueuedNoPane:
+    """#303 item 3: `takkub send` to a role with no pane open yet records a
+    distinct, retryable state instead of failing outright."""
+
+    def test_append_queued_no_pane_is_excluded_from_respawn_reap(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        role_messages.append_queued_no_pane(
+            tmp_path, "proj", to_role="backend", from_role="lead", body="safety note"
+        )
+        # A never-delivered generation=-1 record must never be picked up by
+        # the #277 respawn-reap filter — it isn't "lost to a respawn", it
+        # was never sent in the first place.
+        assert role_messages.undelivered_for_generation(tmp_path, "proj", "backend", 999) == []
+
+    def test_queued_no_pane_for_role_finds_only_that_state_and_role(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        role_messages.append_queued_no_pane(
+            tmp_path, "proj", to_role="backend", from_role="lead", body="for backend"
+        )
+        role_messages.append_queued_no_pane(
+            tmp_path, "proj", to_role="frontend", from_role="lead", body="for frontend"
+        )
+        _append(tmp_path, to_role="backend", body="already sent, not queued")
+
+        pending = role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend")
+        assert [r["body"] for r in pending] == ["for backend"]
+
+    def test_mark_abandoned_removes_it_from_the_queued_view(self, tmp_path: pathlib.Path) -> None:
+        msg_id = role_messages.append_queued_no_pane(
+            tmp_path, "proj", to_role="backend", from_role="lead", body="safety note"
+        )
+        role_messages.mark_abandoned(tmp_path, "proj", msg_id, "flushed_after_spawn")
+        assert role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend") == []
+
+
 class TestCliRendering:
     def test_states_are_distinguishable_at_a_glance(self, tmp_path: pathlib.Path) -> None:
         delivered = _append(tmp_path, body="ถึงแล้วแน่นอน")

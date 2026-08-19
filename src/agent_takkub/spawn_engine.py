@@ -2853,6 +2853,23 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     5_000,
                     lambda p=project_ns: self._flush_pending_done_notices(p),
                 )
+            # #303 item 3: deliver any `takkub send` aimed at this role while
+            # it had no pane open yet. Any role, not just Lead — unlike the
+            # two queues above this one isn't Lead-specific, since a teammate
+            # can `takkub send` a peer that hasn't spawned. Cheap to check
+            # unconditionally (a single small JSONL read); only schedules the
+            # flush timer when there's actually something queued.
+            try:
+                from . import role_messages
+
+                _runtime_dir = _from_orch("RUNTIME_DIR")
+                if role_messages.queued_no_pane_for_role(_runtime_dir, project_ns, role_name):
+                    QTimer.singleShot(
+                        5_000,
+                        lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),
+                    )
+            except Exception:
+                pass
             _log_event(
                 "spawn",
                 role=role_name,
