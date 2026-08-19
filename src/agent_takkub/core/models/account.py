@@ -19,11 +19,15 @@ class AccountStatus(StrEnum):
 
 class SelectionStrategy(StrEnum):
     """How `AccountSelector` (core/contracts/account_selector.py) picks
-    one account out of a pool — plan §2 Phase 2: "priority/sticky/quota-aware"."""
+    one account out of a pool — plan §2 Phase 2: "priority/sticky/quota-aware".
+    MANUAL and COOLDOWN_FAILOVER added Phase 3 (epic #309) per the task's
+    5-strategy list; additive to the Phase 1 enum, no existing member changed."""
 
+    MANUAL = "manual"
     PRIORITY = "priority"
     STICKY = "sticky"
     QUOTA_AWARE = "quota_aware"
+    COOLDOWN_FAILOVER = "cooldown_failover"
 
 
 @dataclass(frozen=True, slots=True)

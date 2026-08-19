@@ -109,9 +109,13 @@ import agent_takkub.core.contracts.brain_adapter
 import agent_takkub.core.contracts.secret_manager
 import agent_takkub.core.contracts.store
 import agent_takkub.core.contracts.migration
+import agent_takkub.core.contracts.routing_policy
 import agent_takkub.core.storage.paths
 import agent_takkub.core.storage.jsonl_store
 import agent_takkub.core.storage.legacy_reader
+import agent_takkub.core.providers
+import agent_takkub.core.accounts
+import agent_takkub.core.routing
 
 qt_modules = [m for m in sys.modules if m.startswith("PyQt6")]
 print(",".join(qt_modules))
