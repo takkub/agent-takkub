@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 156,
+  "module_count": 178,
   "modules": [
     {
       "module": "agent_takkub",
@@ -392,6 +392,7 @@
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.codex_helper",
+        "agent_takkub.core.storage.paths",
         "agent_takkub.custom_roles",
         "agent_takkub.disk_usage",
         "agent_takkub.doctor",
@@ -462,8 +463,176 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 81,
+      "fan_in": 82,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.contracts",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.contracts.account_selector",
+      "imports": [
+        "agent_takkub.core.models.account"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.contracts.brain_adapter",
+      "imports": [
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.contracts.migration",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.contracts.provider_adapter",
+      "imports": [
+        "agent_takkub.core.models.agent"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.contracts.secret_manager",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.contracts.store",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.account",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.contracts.account_selector"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.agent",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.contracts.provider_adapter"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.capability",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.conversation",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.memory",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.contracts.brain_adapter"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.model",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.provider",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.task",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.models.version",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.storage",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.storage.jsonl_store",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.storage.legacy_reader",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.storage.paths",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.custom_roles",

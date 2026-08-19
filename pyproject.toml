@@ -127,6 +127,9 @@ addopts = "-q"
 # ──────────────────────────────────────────────────────────────────
 [tool.importlinter]
 root_packages = ["agent_takkub"]
+# core-is-bottom-layer (Phase 1, epic #309) forbids PyQt6 by name — a
+# "forbidden" contract can only name an external package when this is on.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "engine-ui-separation"
@@ -550,4 +553,53 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
     "agent_takkub.cli_server",
+]
+
+[[tool.importlinter.contracts]]
+name = "core-is-bottom-layer"
+type = "forbidden"
+# Core V2 (docs/v2/V2_IMPLEMENTATION_PLAN.md, epic #309) is the bottom layer
+# of the eventual V2 stack: importable standalone, wired into nothing yet.
+# It must never import PyQt6, the engine, or any UI/CLI entry point.
+source_modules = ["agent_takkub.core"]
+forbidden_modules = [
+    "PyQt6",
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+    "agent_takkub.agent_pane",
+    "agent_takkub.terminal_widget",
+]
+
+[[tool.importlinter.contracts]]
+name = "core-models-pure"
+type = "forbidden"
+# core.models.* is pure vocabulary (plan §3.4): stdlib + core.models siblings
+# only. No contracts, no storage, no engine/UI — a model must never depend
+# on how it gets persisted or wired.
+source_modules = ["agent_takkub.core.models"]
+forbidden_modules = [
+    "agent_takkub.core.contracts",
+    "agent_takkub.core.storage",
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "core-contracts-pure"
+type = "forbidden"
+# core.contracts.* (typing.Protocol only, plan §3.4 R1) may depend on
+# core.models but never on storage (a Protocol must not assume one
+# implementation) or the engine/UI/CLI layers.
+source_modules = ["agent_takkub.core.contracts"]
+forbidden_modules = [
+    "agent_takkub.core.storage",
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
 ]
