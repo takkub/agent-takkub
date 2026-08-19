@@ -394,6 +394,53 @@ class TestPaneStatusReport:
         # Should end with the last 5 non-empty lines
         assert "line 19" in tail
 
+    def test_transcript_tail_overridden_by_live_tool_running_marker(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#308: the transcript-FILE tail is dominated by whatever chrome sits
+        at the bottom of the screen — usually the idle footer — even while a
+        tool call is genuinely wedged higher up (agy's "? for shortcuts"
+        stayed visible below "Running command..." the whole 13-minute
+        incident). When the pane's LIVE screen shows a tool-running marker
+        right now, that real status line must win over the misleading
+        file-tail text."""
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        transcript = tmp_path / "gemini.transcript.log"
+        transcript.write_text("? for shortcuts\nGemini 3.1 Pro (high)", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        pane.session.tool_running_marker.return_value = "running command"
+        pane.session.display_lines.return_value = [
+            "",
+            "Running command...",
+            "",
+            "? for shortcuts",
+        ]
+        orch._panes_by_project["default"] = {"gemini": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["gemini"]["transcript_tail"]
+        assert tail == "Running command..."
+
+    def test_transcript_tail_unaffected_when_no_tool_marker(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        transcript = tmp_path / "gemini2.transcript.log"
+        transcript.write_text("? for shortcuts", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        pane.session.tool_running_marker.return_value = None
+        orch._panes_by_project["default"] = {"gemini": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["gemini"]["transcript_tail"]
+        assert tail == "? for shortcuts"
+
     def test_transcript_tail_strips_ansi(
         self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:

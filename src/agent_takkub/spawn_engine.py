@@ -754,6 +754,24 @@ class PaneState:
     # orchestrator.PROACTIVE_COMPACT_PENDING_CEILING_S, past which it's
     # treated as stale and cleared like any other new-work not-ready.
     proactive_compact_pending: bool = False
+    # ── stuck-tool watchdog (#308) ───────────────────────────────────────
+    # tool_stuck_escalated: True from the tick a ProviderSpec.tool_running_
+    # markers hit has sat on screen for TOOL_STUCK_TIMEOUT_SEC with no other
+    # content change, until the marker clears or the pane is closed/done.
+    # Set together with the one-shot Esc send (both happen on the SAME tick,
+    # see orchestrator._check_stuck_tool_panes) — never True without an Esc
+    # already having been sent for this episode.
+    tool_stuck_escalated: bool = False
+    # tool_stuck_esc_sent_ts: wall-clock the one-shot Esc was written, or 0.0.
+    # Gates the TOOL_STUCK_ESC_GRACE_S wait before recommending a manual
+    # close+respawn to Lead when the marker still hasn't cleared.
+    tool_stuck_esc_sent_ts: float = 0.0
+    # tool_stuck_close_recommended: True once Lead has already been told the
+    # Esc recovery didn't clear it — stops that specific notice from
+    # repeating every tick while still allowing a later natural recovery to
+    # be reported (see the "not stuck any more" branch, which checks
+    # tool_stuck_escalated, not this flag).
+    tool_stuck_close_recommended: bool = False
 
 
 @dataclass
