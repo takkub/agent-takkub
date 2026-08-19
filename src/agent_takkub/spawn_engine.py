@@ -518,6 +518,14 @@ class PaneState:
     blocked_on_lead_ts: float | None = None
     # _rate_limited_until: epoch at which the usage-rate limit resets (0 = no limit)
     rate_limited_until: float = 0.0
+    # quota_marker / quota_provider (#301): which phrase + provider tripped
+    # rate_limited_until above, captured at detection time so the immediate
+    # Lead notice and takkub status/list's "stalled:quota" display_state can
+    # quote the real screen text instead of a bare "quota hit". Cleared
+    # implicitly whenever rate_limited_until returns to 0 (no separate reset
+    # needed — nothing reads these unless rate_limited_until is set).
+    quota_marker: str = ""
+    quota_provider: str = ""
     # _auto_respawn_attempts: consecutive crash-respawn count (capped at AUTO_RESPAWN_MAX)
     auto_respawn_attempts: int = 0
     # _last_assigned_task: FULL composed task text (never a pointer); replayed

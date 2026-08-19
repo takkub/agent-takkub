@@ -699,11 +699,55 @@ def _fanout_queue_enabled() -> bool:
 # Spinner-line filtering for content-delta stuck detection (Fix 3).
 # Lines matching any interrupt phrase or volatile counter pattern are excluded
 # from the hash so a pane that only emits spinner bytes is still detected as stuck.
-_SPINNER_INTERRUPT_PHRASES = ("esc to interrupt", "esc to stop", "ctrl-c to", "ctrl+c to")
+#
+# #308: this table used to be a hand-copied 4-item subset ("esc to interrupt",
+# "esc to stop", "ctrl-c to", "ctrl+c to") of provider_spec's own
+# READY_HARD_BLOCKERS — missing gemini/agy's confirmed "esc to cancel" (agy's
+# own footer wording, cited directly by #308's report) among others. That
+# drift is exactly why a #308 agy pane wedged on "Running command..." kept
+# reading `takkub status` as "last progress: 1s ago": the phrase guard never
+# matched agy's own busy chrome, so only the volatile-counter regex below was
+# left to filter the line — and it separately failed on a trailing counter
+# like "(esc to cancel · 412s)" (see that regex's own note). Unioned with
+# READY_HARD_BLOCKERS (rather than replaced by it) so a provider's confirmed
+# busy phrase can never drift out of sync with this filter again, while
+# keeping "esc to stop"/"ctrl-c to"/"ctrl+c to" — observed CLI phrasing not
+# (yet) captured in any ProviderSpec.ready_hard_blockers table.
+_SPINNER_INTERRUPT_PHRASES_BASELINE = ("esc to interrupt", "esc to stop", "ctrl-c to", "ctrl+c to")
+
+
+def _spinner_interrupt_phrases() -> tuple[str, ...]:
+    from .provider_spec import READY_HARD_BLOCKERS
+
+    return tuple(dict.fromkeys((*_SPINNER_INTERRUPT_PHRASES_BASELINE, *READY_HARD_BLOCKERS)))
+
+
 _SPINNER_VOLATILE_RE = re.compile(
-    r"\d+s[\s·]|[↑↓]\s*[\d.,]+k?\s*tokens?",
+    # #308: was `\d+s[\s·]` — required a trailing space/middot after the
+    # counter, so a line ending "...412s)" (paren right after the digits,
+    # agy's own busy-line shape) never matched at all and kept resetting the
+    # stuck-content clock every tick even though nothing real had changed.
+    # `\b` matches a closing paren/end-of-line/anything non-word just as well
+    # as whitespace, so the counter is stripped regardless of what follows it.
+    r"\d+s\b|[↑↓]\s*[\d.,]+k?\s*tokens?",
     re.IGNORECASE,
 )
+
+
+def _human_duration(total_seconds: float) -> str:
+    """Coarse "in Xh Ym" / "in Xm" / "in Xs" phrasing for a Lead-facing
+    notice (#301) — matches _RATE_LIMIT_FALLBACK-scale windows (minutes to
+    hours), so seconds only show up for a duration under a minute."""
+    secs = max(0, int(total_seconds))
+    hours, rem = divmod(secs, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
 IDLE_REMINDER_TEXT = (
     "🔔 [auto-reminder] pane นี้ idle อยู่ — ถ้า task เสร็จแล้วต้อง run "
@@ -5128,6 +5172,7 @@ class Orchestrator(
         pane: AgentPane,
         base_state: str,
         delivery_unconfirmed: bool,
+        quota_stalled: bool = False,
     ) -> str:
         """(#263) Combine the 3 disagreeing sources of truth the issue names —
         `pane.state` (orchestrator-declared at dispatch), the ready-marker
@@ -5153,6 +5198,16 @@ class Orchestrator(
         an orchestrator-declared or notice-derived label, since the CLI
         itself cannot be doing two contradictory things at once):
 
+          0. **stalled:quota** (#301) — `quota_stalled` is True, i.e. the
+             idle watchdog's own `_rate_limit_suppressed` already recorded
+             `PaneState.rate_limited_until` for this role this tick. Checked
+             FIRST, ahead of even login-required: a pane frozen on its own
+             quota banner cannot simultaneously be doing anything else, and
+             re-deriving the same verdict here from a second screen-scrape
+             risks disagreeing with the watchdog's own recorded state
+             (`rate_limit_reset_at()` is a live scrape — the banner text can
+             scroll out of view a tick after the watchdog captured it).
+             Reuses that ALREADY-COMPUTED signal instead.
           1. **login-required** — `session.auth_failure_reason(provider)`
              matches (kimi "send /login to login", gemini stuck "Signing
              in..." past its grace period, ...). The screen is definitive: a
@@ -5193,6 +5248,8 @@ class Orchestrator(
         """
         if base_state not in ("active", "working"):
             return base_state
+        if quota_stalled:
+            return "stalled:quota"
         session = pane.session
         if session is None:
             return base_state
@@ -5263,12 +5320,21 @@ class Orchestrator(
 
         `display_state` (#263) is `_derive_display_state`'s unified verdict —
         the same `"state"` value, further refined into "login-required" /
-        "booting" / "waiting-delivery" / "busy" / "unknown" where the raw
-        `"state"` would otherwise show a misleadingly bare "working"/"active"
-        (see that method's docstring for the full priority order). This is
-        what `takkub list`/`status` render to Lead; `"state"` itself stays
-        exactly as before for every internal consumer (wait resolution,
-        stall detection) that depends on its literal value.
+        "booting" / "waiting-delivery" / "busy" / "unknown" / "stalled:quota"
+        (#301) where the raw `"state"` would otherwise show a misleadingly
+        bare "working"/"active" (see that method's docstring for the full
+        priority order). This is what `takkub list`/`status` render to Lead;
+        `"state"` itself stays exactly as before for every internal consumer
+        (wait resolution, stall detection) that depends on its literal value.
+
+        `quota_resets_at` / `quota_marker` (#301) mirror `PaneState`'s own
+        fields whenever `display_state == "stalled:quota"`, else `0.0`/`""` —
+        so `takkub status`/`list` can render "resets in Xh" and quote the
+        matched banner phrase without a second screen-scrape. `model` (#301)
+        is `PtySession.current_model_label(provider)` — non-None only for a
+        calibrated provider (currently gemini) that is actually showing a
+        model label on screen; surfaces a silent quota-downgrade (Pro→Flash)
+        Lead would otherwise never see.
         """
         now = time.time()
         project_ns = self._resolve_project(project)
@@ -5279,6 +5345,15 @@ class Orchestrator(
             last_progress_ts = 0.0
             blocked_reason: str | None = None
             delivery_unconfirmed = False
+            quota_stalled = False
+            quota_resets_at = 0.0
+            quota_marker = ""
+            model: str | None = None
+            ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role}")
+            if ps is not None and ps.rate_limited_until > now:
+                quota_stalled = True
+                quota_resets_at = ps.rate_limited_until
+                quota_marker = ps.quota_marker
             if state == "working" and pane.session is not None and pane.session.is_alive:
                 last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
                 if last_progress_ts > 0:
@@ -5293,10 +5368,15 @@ class Orchestrator(
                     delivery_unconfirmed = self._role_delivery_unconfirmed(project_ns, role)
                 except Exception:
                     delivery_unconfirmed = False
+                try:
+                    provider = getattr(pane.model, "provider_name", None) or "claude"
+                    model = pane.session.current_model_label(provider)
+                except Exception:
+                    model = None
             display_state_base = self._pane_display_state(pane)
             try:
                 display_state = self._derive_display_state(
-                    pane, display_state_base, delivery_unconfirmed
+                    pane, display_state_base, delivery_unconfirmed, quota_stalled
                 )
             except Exception:
                 display_state = display_state_base
@@ -5307,6 +5387,9 @@ class Orchestrator(
                 "last_progress_ts": last_progress_ts,
                 "blocked_reason": blocked_reason,
                 "delivery_unconfirmed": delivery_unconfirmed,
+                "quota_resets_at": quota_resets_at,
+                "quota_marker": quota_marker,
+                "model": model,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
@@ -5316,6 +5399,9 @@ class Orchestrator(
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
                 "delivery_unconfirmed": False,
+                "quota_resets_at": 0.0,
+                "quota_marker": "",
+                "model": None,
             }
         for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
@@ -5325,6 +5411,9 @@ class Orchestrator(
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
                 "delivery_unconfirmed": False,
+                "quota_resets_at": 0.0,
+                "quota_marker": "",
+                "model": None,
             }
         return result
 
@@ -5534,6 +5623,9 @@ class Orchestrator(
                         except OSError:
                             pass
 
+            quota_resets_at = info.get("quota_resets_at") or 0.0
+            quota_resets_human = _human_duration(quota_resets_at - now) if quota_resets_at else ""
+
             panes_out[role] = {
                 "state": state,
                 "display_state": display_state,
@@ -5543,6 +5635,10 @@ class Orchestrator(
                 "last_progress_abs": abs_ts,
                 "blocked_reason": info.get("blocked_reason"),
                 "delivery_unconfirmed": info.get("delivery_unconfirmed", False),
+                "quota_resets_at": quota_resets_at,
+                "quota_resets_human": quota_resets_human,
+                "quota_marker": info.get("quota_marker") or "",
+                "model": info.get("model"),
                 "transcript_tail": transcript_tail,
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
@@ -6768,7 +6864,7 @@ class Orchestrator(
                         _filtered_lines = "\n".join(
                             ln
                             for ln in disp
-                            if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
+                            if not any(p in ln.lower() for p in _spinner_interrupt_phrases())
                             and not _SPINNER_VOLATILE_RE.search(ln)
                         )
                         non_spinner_hash = hashlib.blake2b(
@@ -7500,18 +7596,43 @@ class Orchestrator(
 
         if pane.session is None or not pane.session.is_alive:
             return False
-        reset_at = pane.session.rate_limit_reset_at()
+        provider = getattr(pane.model, "provider_name", None) or "claude"
+        reset_at = pane.session.rate_limit_reset_at(provider)
         if reset_at is None:
             return False
 
-        self._ps(key).rate_limited_until = reset_at
+        marker = ""
+        try:
+            marker = pane.session.quota_stall_marker(provider) or ""
+        except Exception:
+            marker = ""
+        ps = self._ps(key)
+        ps.rate_limited_until = reset_at
+        ps.quota_marker = marker
+        ps.quota_provider = provider
         self._schedule_rate_limit_notice(project, role, reset_at)
         _log_event(
             "rate_limit_detected",
             role=role,
             project=project,
+            provider=provider,
+            marker=marker,
             resets_in_s=int(max(0, reset_at - now)),
         )
+        # #301: tell Lead the instant a pane hits quota — the reset-time
+        # notice above only fires hours later when the window lifts, so
+        # without this Lead has no signal at all that a "working" pane is
+        # actually frozen until it either notices `takkub status` staying
+        # stale or the user reports it by hand (real incident, issue #301:
+        # a gemini/agy pane silently downgraded Pro→Flash and kept going
+        # while Lead's own status read "working / progress 2s ago").
+        # Best-effort (try/except): must never let a Lead-delivery failure
+        # take down the gate itself, and keeps this call harmless against
+        # minimal test fixtures that don't wire the full notify plumbing.
+        try:
+            self._notify_quota_hit(project, role, provider, reset_at, marker, pane)
+        except Exception:
+            pass
         # v2.1.198 pairs the banner with an interactive chooser whose
         # preselected option 1 is "Stop and wait for limit to reset" — confirm
         # it once so the pane waits out the window and auto-resumes, instead of
@@ -7524,6 +7645,30 @@ class Orchestrator(
         except Exception:
             pass
         return True
+
+    def _notify_quota_hit(
+        self,
+        project: str,
+        role: str,
+        provider: str,
+        reset_at: float,
+        marker: str,
+        pane: AgentPane,
+    ) -> None:
+        """Inject an immediate `[system]` notice into Lead the moment a pane
+        hits its quota/usage limit (#301) — same channel `toggle_provider`
+        uses for `[system] <provider> ENABLED/DISABLED`, so it reads as
+        cockpit-authored chrome rather than the teammate's own words."""
+        human = _human_duration(max(0, reset_at - time.time()))
+        model = None
+        try:
+            model = pane.session.current_model_label(provider)
+        except Exception:
+            model = None
+        model_note = f" · model now: {model}" if model else ""
+        marker_note = f' ("{marker}")' if marker else ""
+        msg = f"[system] {role} ({provider}) hit quota{marker_note} — resets in {human}{model_note}"
+        self._notify_lead(project, msg)
 
     def _schedule_rate_limit_notice(self, project: str, role: str, reset_at: float) -> None:
         """Fire a single reset notice when the usage limit lifts."""

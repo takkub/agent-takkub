@@ -994,6 +994,17 @@ def _print_status_report(report: object) -> None:
         unconfirmed_str = " ❓ delivery unconfirmed" if info.get("delivery_unconfirmed") else ""
         print(f"\n  [{role}] {state}{stall_str}{blocked_str}{unconfirmed_str}")
         print(f"    last progress: {human_ts} ({abs_ts})")
+        # #301: quota-stalled panes carry their own reset-window/marker
+        # instead of a bare "working" — surface both so Lead doesn't have to
+        # go read the pane itself to know why it's frozen.
+        if state == "stalled:quota":
+            quota_marker = info.get("quota_marker") or ""
+            quota_human = info.get("quota_resets_human") or "?"
+            marker_str = f' — "{quota_marker}"' if quota_marker else ""
+            print(f"    ⏳ quota resets in {quota_human}{marker_str}")
+        model = info.get("model")
+        if model:
+            print(f"    model: {model}")
         tail = (info.get("transcript_tail") or "").strip()
         if tail:
             for line in tail.splitlines()[-3:]:
