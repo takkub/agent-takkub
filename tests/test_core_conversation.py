@@ -182,6 +182,13 @@ def test_apply_done_note_extracts_decision_and_lesson_from_single_line():
     assert updated.lessons == ["[backend] hook ที่ไม่ถูกเรียกคือ bug เงียบ"]
 
 
+def test_apply_done_note_ignores_junk_segment_from_meta_mention():
+    note = "extractor จับ prefix กลางบรรทัด (mid-line DECISION:/LESSON: segmentation) เสร็จ"
+    updated = apply_done_note(RollingSummary(), role="backend", note=note, failed=False)
+    assert updated.decisions == []
+    assert updated.lessons == ["[backend] segmentation) เสร็จ"]
+
+
 def test_apply_done_note_no_prefix_leaves_decisions_and_lessons_empty():
     summary = RollingSummary()
     updated = apply_done_note(summary, role="backend", note="just a plain note", failed=False)

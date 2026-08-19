@@ -56,6 +56,7 @@ def _prepend_unique(items: list[str], entry: str) -> list[str]:
 
 
 _ALL_PREFIXES: tuple[str, ...] = DECISION_PREFIXES + LESSON_PREFIXES
+_MIN_SEGMENT_CHARS = 3
 
 
 def _prefix_spans(text: str, prefixes: tuple[str, ...]) -> list[tuple[int, int]]:
@@ -92,7 +93,9 @@ def extract_prefixed_lines(note: str, prefixes: tuple[str, ...]) -> list[str]:
             continue
         segment_end = spans[i + 1][0] if i + 1 < len(spans) else len(text)
         segment = text[end:segment_end].strip().rstrip(".").strip()
-        if segment:
+        # Skip junk like "/" from a note that merely *mentions* the prefixes
+        # ("DECISION:/LESSON: segmentation", seen live 2026-08-19).
+        if len(segment) >= _MIN_SEGMENT_CHARS:
             out.append(segment)
     return out
 
