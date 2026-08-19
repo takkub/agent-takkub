@@ -84,6 +84,23 @@ class TestCreateAssignment:
         assert "2. feature-B" in index_text
 
 
+class TestLedgerDirSanitized:
+    """#294: `_ledger_dir` used the raw project name as a path segment with no
+    sanitizing at all — a Thai or Windows-reserved project name would either
+    collide with another project or fail to create the directory."""
+
+    def test_distinct_thai_project_names_get_distinct_ledger_dirs(self) -> None:
+        a = task_ledger._ledger_dir("โปรเจกต์ไทย")
+        b = task_ledger._ledger_dir("ระบบขายของ")
+        assert a != b
+
+    def test_windows_reserved_project_name_is_guarded(self) -> None:
+        assert task_ledger._ledger_dir("CON").name != "CON"
+
+    def test_ascii_project_name_unchanged(self) -> None:
+        assert task_ledger._ledger_dir(PROJECT).name == PROJECT
+
+
 class TestReassignBeforeDone:
     """A7-followup: re-assign to the same role before its open row is `done`
     must not leave an orphaned `[~]` row or double-count progress."""

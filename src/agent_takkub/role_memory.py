@@ -24,6 +24,7 @@ import pathlib
 import re
 
 from .config import RUNTIME_DIR
+from .path_safe import safe_segment
 
 _log = logging.getLogger(__name__)
 
@@ -103,18 +104,7 @@ _ROLE_SECTIONS: dict[str, str] = {
 }
 
 
-def _safe(name: str) -> str:
-    """Sanitize a project / role name into ONE safe path segment.
-
-    Single dots in project names are preserved (e.g. ``www.abc.com``).
-    Leading/trailing dots and double/consecutive dots are stripped or replaced
-    so path traversal is impossible.
-    """
-    s = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-    while ".." in s:
-        s = s.replace("..", "_")
-    s = s.strip(".")
-    return s or "default"
+_safe = safe_segment
 
 
 def role_memory_path(project: str, base_role: str) -> pathlib.Path:

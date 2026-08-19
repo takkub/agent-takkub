@@ -72,10 +72,12 @@ class TestEnsureRoleMemory:
 
     def test_sanitizes_unsafe_names(self, isolated_role_memory: pathlib.Path) -> None:
         path = role_memory_path("my proj/weird:name", "qa")
-        assert path.parent.name == "my_proj_weird_name"  # no / or : in the segment
+        # #294: names that need sanitizing get a hash suffix so two distinct
+        # unsafe names never collapse onto the same directory.
+        assert path.parent.name.startswith("my_proj_weird_name-")
         assert path.name == "qa.md"
         domain_path = role_memory_path("www.abc.com", "qa")
-        assert domain_path.parent.name == "www.abc.com"  # single dots preserved
+        assert domain_path.parent.name == "www.abc.com"  # already safe, unchanged
 
     def test_no_parent_dir_traversal(self, isolated_role_memory: pathlib.Path) -> None:
         # Double/leading/trailing dots sanitized so a `..` project/role can't escape ROLE_MEMORY_DIR.
@@ -83,7 +85,27 @@ class TestEnsureRoleMemory:
             p = role_memory_path(evil, "qa")
             assert ".." not in p.parts
             assert isolated_role_memory in p.parents
-        assert role_memory_path("p", "..").name == "_.md"
+        assert role_memory_path("p", "..").name != "_.md"  # no longer collapses to bare "_"
+        assert role_memory_path("p", "..").name.endswith(".md")
+
+    def test_distinct_thai_project_names_get_distinct_dirs(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        # Proven bug (#294): _safe() used to collapse both of these (11 and 10
+        # Thai chars) to a run of underscores, colliding on the same directory.
+        a = role_memory_path("โปรเจกต์ไทย", "qa")
+        b = role_memory_path("ระบบขายของ", "qa")
+        assert a.parent != b.parent
+
+    def test_windows_reserved_project_name_is_guarded(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        path = role_memory_path("CON", "qa")
+        assert path.parent.name != "CON"
+
+    def test_very_long_project_name_is_capped(self, isolated_role_memory: pathlib.Path) -> None:
+        path = role_memory_path("a" * 300, "qa")
+        assert len(path.parent.name) <= 64
 
 
 class TestCuration:

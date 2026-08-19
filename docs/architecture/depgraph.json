@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 266,
+  "module_count": 267,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2102,6 +2102,7 @@
         "agent_takkub.config",
         "agent_takkub.exec_mode",
         "agent_takkub.pane_tools_policy",
+        "agent_takkub.path_safe",
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_config",
@@ -2121,7 +2122,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 9,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -2477,6 +2478,17 @@
       ],
       "fan_in": 15,
       "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.path_safe",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.lead_context",
+        "agent_takkub.role_memory",
+        "agent_takkub.task_ledger"
+      ],
+      "fan_in": 3,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.performance_settings",
@@ -2971,7 +2983,8 @@
     {
       "module": "agent_takkub.role_memory",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.path_safe"
       ],
       "imported_by": [
         "agent_takkub.bm25_search",
@@ -2979,7 +2992,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 3,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.role_messages",
@@ -3786,7 +3799,8 @@
     {
       "module": "agent_takkub.task_ledger",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.path_safe"
       ],
       "imported_by": [
         "agent_takkub.orchestrator",
@@ -3794,7 +3808,7 @@
         "agent_takkub.task_dock"
       ],
       "fan_in": 3,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.terminal_widget",
