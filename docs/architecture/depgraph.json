@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 213,
+  "module_count": 219,
   "modules": [
     {
       "module": "agent_takkub",
@@ -399,6 +399,8 @@
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.codex_helper",
+        "agent_takkub.core.capabilities.audit",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.paths",
         "agent_takkub.core.versioning.probe",
@@ -472,7 +474,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 84,
+      "fan_in": 86,
       "fan_out": 0
     },
     {
@@ -543,6 +545,72 @@
         "agent_takkub.core.accounts.selector"
       ],
       "fan_in": 2,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.capabilities",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.capabilities.audit",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.core.capabilities.permission_engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.capabilities.permission_engine",
+      "imports": [
+        "agent_takkub.core.capabilities.audit",
+        "agent_takkub.pane_guard",
+        "agent_takkub.pane_tools_policy"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.capabilities.plugin_manager",
+      "imports": [
+        "agent_takkub.plugin_installer"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.capabilities.registry",
+      "imports": [
+        "agent_takkub.core.models.capability",
+        "agent_takkub.mcp_bridge",
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.skill_policy",
+        "agent_takkub.skill_scan"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.capabilities.skill_store",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.worktree_manager"
+      ],
+      "imported_by": [
+        "agent_takkub.doctor",
+        "agent_takkub.settings_management.repositories.skills",
+        "agent_takkub.settings_window",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -718,8 +786,10 @@
     {
       "module": "agent_takkub.core.models.capability",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.core.capabilities.registry"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {
@@ -1136,6 +1206,7 @@
         "agent_takkub._win_console",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.secrets.backends",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.versioning.compatibility",
@@ -1158,7 +1229,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 19
+      "fan_out": 20
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -1507,9 +1578,10 @@
         "agent_takkub.shared_dev_tools"
       ],
       "imported_by": [
+        "agent_takkub.core.capabilities.registry",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 4
     },
     {
@@ -1632,9 +1704,10 @@
       "imported_by": [
         "agent_takkub.browser_chrome",
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.permission_engine",
         "agent_takkub.pipeline_executor"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -1674,6 +1747,8 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.permission_engine",
+        "agent_takkub.core.capabilities.registry",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
@@ -1687,7 +1762,7 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 13,
+      "fan_in": 15,
       "fan_out": 5
     },
     {
@@ -1767,11 +1842,12 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.plugin_manager",
         "agent_takkub.lead_context",
         "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 2
     },
     {
@@ -2529,6 +2605,7 @@
       "module": "agent_takkub.settings_management.repositories.skills",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.settings_management.commands",
         "agent_takkub.settings_management.models",
         "agent_takkub.settings_management.transaction",
@@ -2540,7 +2617,7 @@
         "agent_takkub.settings_management.pages.skills_page"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.settings_management.services",
@@ -2726,6 +2803,7 @@
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_dialog",
@@ -2750,7 +2828,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 24
+      "fan_out": 25
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -2802,6 +2880,7 @@
         "agent_takkub.skill_scan"
       ],
       "imported_by": [
+        "agent_takkub.core.capabilities.registry",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_management.services.cleanup",
@@ -2809,7 +2888,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 4
     },
     {
@@ -2821,13 +2900,14 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.registry",
         "agent_takkub.main_window",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_window",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 3
     },
     {
@@ -2839,6 +2919,7 @@
         "agent_takkub.codex_agents_md",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.routing",
         "agent_takkub.gemini_helper",
         "agent_takkub.headless_pane",
@@ -2870,7 +2951,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 30
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.spawn_gate",
@@ -3153,6 +3234,7 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
         "agent_takkub.orchestrator",
@@ -3161,7 +3243,7 @@
         "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 2
     }
   ]

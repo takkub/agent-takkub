@@ -28,7 +28,7 @@ logic") ดังนั้นวิธีย้ายจริงคือ **ย
   `_resolve_skills_dir()` — คืน `ASSETS_ROOT/capabilities/skills` ถ้ามี
   ไม่งั้น fallback `ASSETS_ROOT/.claude/skills` (legacy) — แก้เฉพาะ
   constant นี้ตามที่ task ระบุ
-- **`core/capabilities/skill_store.py`** (ใหม่): `shipped_skills_root()`
+- **`src/agent_takkub/core/capabilities/skill_store.py`** (ใหม่): `shipped_skills_root()`
   + `ensure_shipped_skill_surface()` — สร้าง **junction/symlink ต่อ-skill**
   (ไม่ใช่ทั้งโฟลเดอร์) ที่ `.claude/skills/<name>` ชี้กลับไปที่
   `capabilities/skills/<name>` โดยใช้ primitive เดิม
@@ -68,7 +68,7 @@ surface path เดิม → Skill tool ของ pane นี้เอง (sess
 
 ## 5b — CapabilityRegistry + PluginManager
 
-- **`core/capabilities/registry.py`**: `CapabilityRegistry` ห่อ
+- **`src/agent_takkub/core/capabilities/registry.py`**: `CapabilityRegistry` ห่อ
   `skill_policy.effective_skills` + `skill_scan.scan_skills` →
   `resolve_skills()` (คืน `core.models.capability.Skill`),
   `pane_tools_policy.effective_mcps`/`effective_plugins` →
@@ -76,19 +76,19 @@ surface path เดิม → Skill tool ของ pane นี้เอง (sess
   `mcp_bridge.mcp_argv_for_provider` → `mcp_argv_for_provider()`
   (pass-through, ไม่ swallow `McpResolutionError`) และ `snapshot()` รวม
   ทั้งหมดเป็น `CapabilitySnapshot` เดียว
-- **`core/capabilities/plugin_manager.py`**: `PluginManager` — backend
+- **`src/agent_takkub/core/capabilities/plugin_manager.py`**: `PluginManager` — backend
   `claude` เท่านั้น (`plugin_installer.install_by_id`/`uninstall_plugin`
   ตรงๆ) ทุก provider อื่น (`codex`/`gemini`/`opencode`/`kimi`/`cursor`
   ใน `NO_BACKEND_PROVIDERS`) ได้ `PluginBackendGapError` ชัดเจนแทนการ
   no-op เงียบ — ตรงกับ #103 ที่ task สั่งให้ประกาศ gap
-- **`core/models/capability.py`**: เพิ่ม `CapabilityScope.SESSION`
+- **`src/agent_takkub/core/models/capability.py`**: เพิ่ม `CapabilityScope.SESSION`
   (มีแค่ GLOBAL/WORKSPACE/PROJECT/AGENT มาจาก Phase 1) — task ระบุ scope
   ชุด "global/project/agent/session" ชัดเจน เป็น additive-only ไม่กระทบ
   `CapabilityScope.PROJECT == "project"` ที่ test เดิม pin ไว้
 
 ## 5c — PermissionEngine (2 ชั้น) + audit
 
-- **`core/capabilities/permission_engine.py`**: `PermissionEngine` มี
+- **`src/agent_takkub/core/capabilities/permission_engine.py`**: `PermissionEngine` มี
   2 method แยกกันชัดเจน **ไม่มี method รวม** —
   `mcp_allowed(role)` (layer 1: `pane_tools_policy.effective_mcps`) กับ
   `evaluate_shell_command(command, role, ...)` (layer 2:
@@ -99,7 +99,7 @@ surface path เดิม → Skill tool ของ pane นี้เอง (sess
   `core.capabilities.audit.log_capability_event` (ไม่ log ทุก allowed
   call เพราะ `pane_guard.classify` รันทุก Bash call ในทุก guarded pane
   — log ทุกอันจะทำให้ EVENTS_LOG เป็น firehose โดยไม่มีประโยชน์เพิ่ม)
-- **`core/capabilities/audit.py`**: `log_capability_event()` — เขียน
+- **`src/agent_takkub/core/capabilities/audit.py`**: `log_capability_event()` — เขียน
   JSONL เข้า **ไฟล์ `EVENTS_LOG` ไฟล์เดียวกัน** กับที่
   `orchestrator_text._log_event`/`lead_context._log_event`/
   `pipeline_executor._log_event` ใช้อยู่ (ไม่เพิ่ม event stream ที่สอง
@@ -188,7 +188,7 @@ management-talk, post-mortem, provider-integration, scrutinize
 ## Lint-imports
 
 `lint-imports` (28 contracts): **28 kept, 0 broken** — ยืนยันว่า
-`core/capabilities/*` ไม่ import PyQt6/orchestrator/main_window/app/
+`src/agent_takkub/core/capabilities/*` ไม่ import PyQt6/orchestrator/main_window/app/
 cli/cli_server/agent_pane/terminal_widget (ตรง `core-is-bottom-layer`)
 และไม่มี contract อื่นพังจากการแก้ `spawn_engine.py`/`doctor.py`/
 `settings_window.py`/`config.py`
