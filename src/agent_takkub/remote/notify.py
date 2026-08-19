@@ -50,6 +50,7 @@ way, per-project, for the same reason.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -490,11 +491,97 @@ _SESSION_GOAL_TASK_PREFIX = "[SESSION GOAL"
 _TEAMMATE_TASK_PREFIXES = (_TEAMMATE_TASK_PREFIX, _SESSION_GOAL_TASK_PREFIX)
 
 
+# Every cockpit spawn that carries a one-shot task opens the session with
+# this exact synthetic user line (`spawn_engine._CURRENT_TASK_TRIGGER` — the
+# literal is mirrored here rather than imported, like the teammate prefixes
+# above, because remote/ must not pull in the spawn engine; a test pins the
+# two together). It is machine-written, identical across sessions, and made
+# the Mobile resume picker a wall of the same sentence — never a preview.
+_SPAWN_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
+_GENERATED_FIRST_LINES = (_SPAWN_TASK_TRIGGER,)
+# Claude records its own session title (the one its native `/resume` picker
+# shows) as repeated `ai-title` records. Reading the file's TAIL finds the
+# newest one cheaply — titles are rewritten as the conversation evolves, so
+# the last is the current one, and a session long enough to matter always
+# has one within this window.
+_AI_TITLE_TAIL_BYTES = 64 * 1024
+
+
+def _claude_ai_title(path: Path) -> str:
+    """Claude's own title for this session, or "" when it has none yet."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > _AI_TITLE_TAIL_BYTES:
+                fh.seek(size - _AI_TITLE_TAIL_BYTES)
+            raw = fh.read()
+    except OSError:
+        return ""
+    title = ""
+    for raw_line in raw.split(b"\n"):
+        if b'"ai-title"' not in raw_line:
+            continue
+        try:
+            rec = json.loads(raw_line)
+        except ValueError:
+            continue  # first line of a mid-record seek window
+        if isinstance(rec, dict) and rec.get("type") == "ai-title":
+            value = rec.get("aiTitle")
+            if isinstance(value, str) and value.strip():
+                title = value.strip()
+    return title[:_SESSION_PREVIEW_CHARS]
+
+
 def _first_user_preview(path: Path) -> str:
-    """Best-effort: the first human-typed line in `path`, truncated. Returns
-    "" on any read/parse failure or if the session has no user turn yet —
-    never raises (this feeds a listing endpoint, one bad file must not break
-    the whole picker)."""
+    """Best-effort label for one session in the Mobile resume picker.
+
+    Claude's own `ai-title` wins when present, so the phone shows the same
+    human-readable names as the desktop `/resume` picker ("โหลๆ") instead of
+    the cockpit's synthetic opening line repeated down the whole list.
+    Falls back to the first human-typed line, skipping generated openers.
+    Returns "" on any read/parse failure or if the session has no user turn
+    yet — never raises (this feeds a listing endpoint, one bad file must not
+    break the whole picker)."""
+    title = _claude_ai_title(path)
+    if title:
+        return title
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                text = _lead_user_text(rec)
+                if not text:
+                    continue
+                text = _strip_remote_prefix(text).strip()
+                if _is_generated_opener(text):
+                    continue  # keep scanning for a line the human actually typed
+                if text:
+                    return text[:_SESSION_PREVIEW_CHARS]
+    except OSError:
+        pass
+    return ""
+
+
+def _is_generated_opener(text: str) -> bool:
+    """True for a cockpit-written first user line (never a useful preview)."""
+    stripped = (text or "").strip()
+    return any(stripped.startswith(opener) for opener in _GENERATED_FIRST_LINES)
+
+
+def _first_user_line(path: Path) -> str:
+    """The raw first human-typed line, used for role classification only.
+
+    Deliberately separate from `_first_user_preview`: the preview may now be
+    Claude's `ai-title`, which says nothing about whether the session is a
+    teammate's. Filtering on the displayed string instead of this one would
+    put every teammate session back into the Lead picker.
+    """
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -507,10 +594,15 @@ def _first_user_preview(path: Path) -> str:
                     continue
                 text = _lead_user_text(rec)
                 if text:
-                    return _strip_remote_prefix(text).strip()[:_SESSION_PREVIEW_CHARS]
+                    return _strip_remote_prefix(text).strip()
     except OSError:
         pass
     return ""
+
+
+def _is_teammate_session_line(first_line: str) -> bool:
+    """True when a session's opening line marks it as an assigned task."""
+    return first_line.startswith(_TEAMMATE_TASK_PREFIXES)
 
 
 def _list_recent_claude_sessions(
@@ -572,10 +664,9 @@ def _list_recent_claude_sessions(
     capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
     out: list[dict] = []
     for mtime, jsonl in found:
-        preview = _first_user_preview(jsonl)
-        if preview.startswith(_TEAMMATE_TASK_PREFIXES):
+        if _is_teammate_session_line(_first_user_line(jsonl)):
             continue
-        out.append({"uuid": jsonl.stem, "mtime": mtime, "preview": preview})
+        out.append({"uuid": jsonl.stem, "mtime": mtime, "preview": _first_user_preview(jsonl)})
         if len(out) >= capped:
             break
     return out
@@ -666,10 +757,54 @@ def _resolve_gemini_jsonl_for_cwd(cwd: str, session_uuid: str | None) -> Path | 
 
 
 def _resolve_gemini_jsonl_path(project_ns: str, session_uuid: str | None) -> Path | None:
+    """Resolve an agy Lead transcript — new store first, legacy fallback.
+
+    agy's 2026-08 layout is checked before `~/.gemini/tmp/.../chats/` because
+    a machine that has used both still holds the (frozen) old files: picking
+    the newest of the two stores by mtime would keep resolving a months-old
+    conversation, which is exactly how this broke silently.
+    """
     from .. import config as _config
 
     cwd = _config.lead_cwd(project_ns)
-    return _resolve_gemini_jsonl_for_cwd(cwd, session_uuid) if cwd else None
+    if not cwd:
+        return None
+    transcript = gemini_helper.resolve_antigravity_transcript(cwd, session_uuid)
+    if transcript is not None:
+        return transcript
+    return _resolve_gemini_jsonl_for_cwd(cwd, session_uuid)
+
+
+# ── agy (Antigravity CLI) transcript records ──────────────────────────────
+# One JSON object per line, e.g.
+#   {"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>…"}
+#   {"type":"PLANNER_RESPONSE","source":"MODEL","content":"…","thinking":"…"}
+# `thinking` is never forwarded (same text-only contract as every other
+# provider), and CHECKPOINT / CONVERSATION_HISTORY / ERROR_MESSAGE records
+# are dropped — they carry state dumps, not conversation.
+_ANTIGRAVITY_KINDS = {"USER_INPUT": "me", "PLANNER_RESPONSE": "lead"}
+_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>(.*?)</USER_REQUEST>", re.DOTALL)
+
+
+def _antigravity_record_message(rec: object) -> tuple[str, str] | None:
+    if not isinstance(rec, dict):
+        return None
+    kind = _ANTIGRAVITY_KINDS.get(str(rec.get("type") or "").strip())
+    if kind is None:
+        return None
+    content = rec.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    if kind == "me":
+        # agy wraps the human's text in <USER_REQUEST> and appends its own
+        # <ADDITIONAL_METADATA>/<USER_SETTINGS_CHANGE> blocks — mirror only
+        # what the user actually typed.
+        match = _USER_REQUEST_RE.search(content)
+        if match is None:
+            return None
+        content = match.group(1)
+    text = content.strip()
+    return (kind, text) if text else None
 
 
 def _gemini_record_messages(rec: object) -> list[dict]:
@@ -721,6 +856,7 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
 
     messages_by_id: dict[str, dict] = {}
     ordered_ids: list[str] = []
+    antigravity: list[dict] = []
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -731,6 +867,14 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
         except ValueError:
             continue
 
+        parsed = _antigravity_record_message(rec)
+        if parsed is not None:
+            kind, text = parsed
+            if kind == "me":
+                text = _strip_remote_prefix(text)
+            antigravity.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind})
+            continue
+
         for message in _gemini_record_messages(rec):
             mid = str(message.get("id", "")).strip()
             if not mid:
@@ -738,6 +882,11 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
             if mid not in messages_by_id:
                 ordered_ids.append(mid)
             messages_by_id[mid] = message
+
+    if antigravity:
+        # A transcript is written by ONE agy version, so a file that yielded
+        # new-store records has no legacy ones to merge in.
+        return antigravity[-limit:]
 
     out: list[dict] = []
     for mid in ordered_ids:
@@ -756,8 +905,53 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
     return out[-limit:]
 
 
+def _antigravity_first_user_line(path: Path) -> str:
+    """Raw first human line of an agy transcript (role classification only)."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = _antigravity_record_message(json.loads(line))
+                except ValueError:
+                    continue
+                if parsed is not None and parsed[0] == "me":
+                    return _strip_remote_prefix(parsed[1]).strip()
+    except OSError:
+        pass
+    return ""
+
+
 def _first_gemini_user_preview(path: Path) -> tuple[str, str]:
-    """Returns (session_uuid, preview)."""
+    """Returns (session_uuid, preview).
+
+    agy's new store keeps the session id in the transcript's directory name,
+    not in a header record, so that shape is handled first.
+    """
+    if path.name == "transcript.jsonl":
+        session_uuid = path.parent.parent.parent.name
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = _antigravity_record_message(json.loads(line))
+                    except ValueError:
+                        continue
+                    if parsed is None or parsed[0] != "me":
+                        continue
+                    text = _strip_remote_prefix(parsed[1]).strip()
+                    if _is_generated_opener(text):
+                        continue
+                    if text:
+                        return session_uuid, text[:_SESSION_PREVIEW_CHARS]
+        except OSError:
+            pass
+        return session_uuid, ""
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             first_line = fh.readline().strip()
@@ -797,6 +991,21 @@ def _list_recent_gemini_sessions(
     if not cwd:
         return []
 
+    antigravity = gemini_helper.find_antigravity_sessions(cwd, limit=_SESSION_LIST_MAX_LIMIT)
+    if antigravity:
+        capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
+        out: list[dict] = []
+        for session_uuid, transcript in antigravity[:capped]:
+            try:
+                mtime = transcript.stat().st_mtime
+            except OSError:
+                continue
+            _, preview = _first_gemini_user_preview(transcript)
+            if _is_teammate_session_line(_antigravity_first_user_line(transcript)):
+                continue
+            out.append({"uuid": session_uuid, "mtime": mtime, "preview": preview})
+        return out
+
     base = _find_gemini_chats_dir(cwd)
     if base is None:
         return []
@@ -829,7 +1038,8 @@ def _list_recent_gemini_sessions(
 
 # ── Codex structured rollout adapter ──────────────────────────────────────
 # Codex writes one JSON object per line below ~/.codex/sessions/YYYY/MM/DD.
-# `event_msg.user_message` and `event_msg.agent_message` are the clean,
+# `event_msg.item_completed` (>= 0.147) and the legacy flat
+# `event_msg.user_message` / `.agent_message` pair are the clean,
 # provider-owned conversation stream; response_item/tool records are skipped
 # so the phone never receives tool arguments, terminal paint bytes, or hidden
 # reasoning.  Unlike Claude, Codex chooses its own session id after launch, so
@@ -997,6 +1207,39 @@ def _resolve_codex_jsonl_path(
     return None
 
 
+# Codex 0.147 replaced the flat `event_msg.agent_message` / `.user_message`
+# events with `event_msg.item_completed`, whose `item` carries the typed
+# message (`AgentMessage` / `UserMessage`) plus a content-block list. Both
+# forms are parsed, because the old one is not dead: `codex exec` (headless,
+# originator `codex_exec`) still writes it in 0.147 while `codex-tui` — the
+# mode every cockpit pane actually runs — writes only the new one. That split
+# is exactly why the schema flip went unnoticed: every exec-based probe kept
+# passing while Mobile went silent for `Lead = codex`.
+_CODEX_ITEM_KINDS = {"AgentMessage": "lead", "UserMessage": "me"}
+
+
+def _codex_item_text(item: dict) -> str:
+    """Join the text blocks of a Codex >= 0.147 message item.
+
+    Non-text blocks (`local_image`, …) are dropped — the phone mirrors prose
+    only. Block-type casing differs per item (`Text` on agent messages,
+    `text` on user ones), so the comparison is case-insensitive.
+    """
+    blocks = item.get("content")
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip().lower() != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
 def _codex_record_message(rec: object) -> tuple[str, str] | None:
     if not isinstance(rec, dict) or rec.get("type") != "event_msg":
         return None
@@ -1004,7 +1247,18 @@ def _codex_record_message(rec: object) -> tuple[str, str] | None:
     if not isinstance(payload, dict):
         return None
     ptype = payload.get("type")
-    if ptype == "agent_message":
+    if ptype == "item_completed":  # codex >= 0.147 (TUI)
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            return None
+        # Reasoning/CommandExecution/tool items land here too and are dropped
+        # by the kind map, so the text-only contract still holds.
+        kind = _CODEX_ITEM_KINDS.get(str(item.get("type") or "").strip())
+        if kind is None:
+            return None
+        text = _codex_item_text(item)
+        return (kind, text) if text else None
+    if ptype == "agent_message":  # codex <= 0.146, and `codex exec` on 0.147
         kind = "lead"
     elif ptype == "user_message":
         kind = "me"
@@ -1031,7 +1285,11 @@ def _first_codex_user_preview(path: Path) -> str:
                 except (ValueError, TypeError):
                     continue
                 if parsed is not None and parsed[0] == "me":
-                    return _strip_remote_prefix(parsed[1]).strip()[:_SESSION_PREVIEW_CHARS]
+                    text = _strip_remote_prefix(parsed[1]).strip()
+                    if _is_generated_opener(text):
+                        continue  # cockpit-written opener, not a preview
+                    if text:
+                        return text[:_SESSION_PREVIEW_CHARS]
     except OSError:
         pass
     return ""
@@ -1119,6 +1377,9 @@ def _list_recent_codex_sessions(
 
 
 def _gemini_live_text_blocks(rec: dict) -> list[str]:
+    parsed = _antigravity_record_message(rec)
+    if parsed is not None:
+        return [parsed[1]] if parsed[0] == "lead" else []
     out: list[str] = []
     for message in _gemini_record_messages(rec):
         if message.get("type") != "gemini":
@@ -1133,6 +1394,9 @@ def _gemini_live_text_blocks(rec: dict) -> list[str]:
 
 
 def _gemini_live_users(rec: dict) -> list[dict]:
+    parsed = _antigravity_record_message(rec)
+    if parsed is not None:
+        return _live_user_payload(parsed[1]) if parsed[0] == "me" else []
     messages = _gemini_record_messages(rec)
     # Snapshot records repeat the full conversation. Only a snapshot whose
     # newest message is a user turn represents a new desktop submission.

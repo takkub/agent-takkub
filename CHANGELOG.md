@@ -4,6 +4,75 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.74] - 2026-08-19
+
+### Fixed (แก้)
+
+**Remote บนมือถือไม่เห็นคำตอบของ Lead — พังทุก provider ยกเว้น claude**
+
+อาการ: พิมพ์จากมือถือ → ข้อความถึง Lead จริง Lead ตอบจริงบนเดสก์ท็อป แต่มือถือ
+ขึ้น "ยังไม่เห็นคำตอบใน 30 วิ" แล้วเงียบ ทั้ง history และ resume picker ว่างเปล่า
+สองสาเหตุ คนละตัวกัน แต่ตายเงียบเหมือนกัน (ไม่มี error สักบรรทัด CI เขียวตลอด)
+
+- **codex 0.147 เปลี่ยน schema ของ rollout log** — จาก `event_msg.agent_message` /
+  `.user_message` เป็น `event_msg.item_completed` ที่ห่อข้อความไว้ใน `item`
+  (`AgentMessage`/`UserMessage` + `content[]`) parser เดิมอ่านได้ 0 ข้อความ
+  ที่ไม่มีใครจับได้เพราะ `codex exec` (ตัวที่ doctor/probe/test ใช้) **ยังเขียน
+  schema เก่าอยู่** บน 0.147 — เทสต์เลยเขียวหมดขณะที่ pane จริง (`codex-tui`)
+  เงียบสนิท ตอนนี้อ่านได้ทั้งสอง schema
+- **agy (Antigravity CLI) ย้ายที่เก็บ transcript** — จาก
+  `~/.gemini/tmp/<x>/chats/session-*.jsonl` ไปเป็น
+  `~/.gemini/antigravity-cli/conversations/<id>.db` + `brain/<id>/…/transcript.jsonl`
+  พร้อม schema ใหม่ (`USER_INPUT` / `PLANNER_RESPONSE`) resolver เดิมไม่ error
+  แต่ไป resolve ไฟล์เก่าอายุ 2 เดือนแทน → มือถือเห็นแชทว่างตลอด รองรับทั้ง
+  store ใหม่และเก่าแล้ว · `thinking` ของโมเดลไม่ถูกส่งขึ้นมือถือ (text-only เหมือนเดิม)
+
+**Resume picker บนมือถือโชว์ preview ซ้ำกันทั้งลิสต์**
+
+ทุกใบขึ้นว่า "Start the current task from the one-shot system-prompt block now."
+เพราะ preview ใช้บรรทัดแรกของ user ซึ่งเป็นประโยคที่ cockpit เขียนเองตอน spawn
+ตอนนี้ใช้ `ai-title` ของ claude (ชื่อเดียวกับที่ picker บนเดสก์ท็อปโชว์ เช่น "โหลๆ")
+ถ้าไม่มีจึงค่อยไล่หาบรรทัดที่คนพิมพ์จริง · ตัวกรอง session ของ teammate ถูกแยก
+ออกมาอ่านบรรทัดแรกจริงๆ แทนการดูข้อความที่แสดง (ไม่งั้น session ของลูกทีมจะหลุด
+กลับเข้า picker ของ Lead)
+
+### Added (เพิ่ม)
+
+**prod เก็บ state ของทุก provider ไว้ใน `~/.agent-takkub` (user directive)**
+
+เดิมมีแค่ claude ที่ถูก isolate (`CLAUDE_CONFIG_DIR`) — codex/opencode ยังเขียนลง
+`~/.codex` / `~/.local/share/opencode` แปลว่า cockpit prod ใช้ session, config และ
+login ร่วมกับ dev checkout และกับ CLI ที่ user รันเอง
+
+- `CODEX_HOME` → `~/.agent-takkub/codex-home` · opencode → `XDG_DATA_HOME` /
+  `XDG_CONFIG_HOME` ชี้เข้า `~/.agent-takkub/opencode-home/{data,config}`
+  (สโคปเฉพาะ pane ของ provider นั้น ไม่ได้ export ทั้ง cockpit ไม่งั้นเครื่องมืออื่น
+  ที่อ่าน XDG เช่น gh/uv จะย้ายตามไปด้วย)
+- **ฝั่งอ่านกับฝั่ง spawn ใช้ที่เดียวกันเสมอ** (`config.provider_home_env`) — ถ้าสองฝั่ง
+  ไม่ตรงกัน mirror จะไปอ่านโฟลเดอร์ที่ไม่มีใครเขียน = จอมือถือว่างแบบไม่มี error
+  ซึ่งคือคลาสบั๊กที่รีลีสนี้แก้อยู่พอดี
+- **ย้ายของเดิมตามไปให้ครั้งแรกที่ spawn** (`provider_bootstrap.py`): auth + config +
+  session ของ **Lead** ล่าสุด (กรอง `[ROLE:` ของลูกทีมออก) แบบมีเพดาน atomic และ
+  **คัดลอก ไม่ย้าย** — ของเดิมใน `~/.codex` อยู่ครบ ไม่ต้อง login ใหม่
+- gemini/kimi/cursor **ยังย้ายไม่ได้** — ไม่มี env knob (gemini-cli ต่อ `.gemini` เข้ากับ
+  `os.homedir()` ตรงๆ) ประกาศไว้ใน `config.PROVIDER_ISOLATION_GAPS` และ
+  `takkub doctor` พิมพ์ออกมาเป็น gap #103 แทนที่จะเงียบ
+
+**เตือนดังๆ เมื่อ `~/.agent-takkub` เขียนไม่ได้**
+
+field report จาก mac: โฟลเดอร์เขียนไม่ได้ แล้ว**ไม่มีอะไรบอกเลย** — cockpit เปิดติด
+pane spawn ได้ ข้อความถึง Lead ได้ ขณะที่ prod profile ของ claude, port file,
+events.log และ provider home ทุกตัวเขียนไม่ลง (boot.log เองก็อยู่ในนั้น เลยกลืน error
+ตัวเอง) เจอได้ทาง `takkub doctor` ทางเดียว ตอนนี้เด้ง dialog ตอน boot พร้อมคำสั่งแก้
+
+### Changed (เปลี่ยน)
+
+- `takkub doctor` เพิ่มหมวด `[provider-isolation]` — บอกว่าแต่ละ provider เก็บ state
+  ไว้ที่ไหนจริงๆ และตัวไหนยัง isolate ไม่ได้เพราะอะไร
+- skill ใหม่ `provider-integration` (bundle กลางที่ ship ไปกับ package) — เช็กลิสต์ 6 ข้อ
+  ที่ provider ใหม่ต้องผ่าน + กฎกัน schema drift ของ CLI ต้นทาง ซึ่งเป็นต้นเหตุของ
+  ทั้ง 2 บั๊กในรีลีสนี้
+
 ## [1.0.73] - 2026-08-18
 
 ### Added (เพิ่ม)

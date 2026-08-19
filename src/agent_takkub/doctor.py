@@ -1441,9 +1441,13 @@ def _codex_auth_finding() -> Finding:
     reads OK here. Best-effort, not a guarantee; WARN (never FAIL) either
     way so a wrong guess can't block `takkub doctor` on a healthy machine.
     """
-    codex_home = os.environ.get("CODEX_HOME", "").strip()
-    base = Path(codex_home) if codex_home else Path.home() / ".codex"
-    auth_file = base / "auth.json"
+    # Must go through the shared resolver, not `os.environ` directly: an
+    # installed cockpit runs codex panes under an isolated CODEX_HOME inside
+    # DATA_HOME, so reading the inherited env var here would report on a
+    # login file the panes never use.
+    from .codex_helper import codex_home as _codex_home
+
+    auth_file = _codex_home() / "auth.json"
     if not auth_file.is_file():
         return Finding(
             "providers",
@@ -2156,6 +2160,59 @@ def check_remote_mirror_live(resp: dict | None) -> list[Finding]:
     return findings
 
 
+def check_provider_isolation() -> list[Finding]:
+    """[provider-isolation] — where each provider keeps its prod state.
+
+    An installed cockpit is supposed to keep everything it runs inside
+    DATA_HOME (user directive 2026-08-19), so a prod cockpit never shares
+    sessions, config or logins with a dev checkout or with the user's own
+    hand-run CLI. claude has done this since the C5 audit
+    (``CLAUDE_CONFIG_DIR``); codex and opencode joined via
+    ``config.provider_home_env``.
+
+    gemini/kimi/cursor expose no directory env var at all, so they still
+    write to their OS-wide homes. That is reported as INFO, not FAIL: it is
+    an upstream gap (#103), not a broken install, and hiding it is how the
+    isolation story silently looked complete while two thirds of the
+    providers were outside it.
+    """
+    from .config import (
+        DATA_HOME,
+        PROVIDER_ISOLATION_GAPS,
+        REPO_ROOT,
+        provider_home_env,
+    )
+
+    if DATA_HOME == REPO_ROOT:
+        return [
+            Finding(
+                "provider-isolation",
+                "mode",
+                Status.OK,
+                "dev checkout — providers use their normal OS-wide homes by design",
+            )
+        ]
+
+    findings: list[Finding] = []
+    for provider in ("codex", "opencode"):
+        env = provider_home_env(provider)
+        if not env:
+            continue
+        detail = ", ".join(f"{var}={value}" for var, value in sorted(env.items()))
+        findings.append(Finding("provider-isolation", provider, Status.OK, detail))
+    for provider, reason in sorted(PROVIDER_ISOLATION_GAPS.items()):
+        findings.append(
+            Finding(
+                "provider-isolation",
+                provider,
+                Status.INFO,
+                f"not isolated — {reason}",
+                "no action available yet; tracked as a multi-provider gap (#103)",
+            )
+        )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
@@ -2173,6 +2230,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mcps", check_mcps),
         ("check_projects", check_projects),
         ("check_providers", check_providers),
+        ("check_provider_isolation", check_provider_isolation),
         ("check_provider_auth", check_provider_auth),
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),

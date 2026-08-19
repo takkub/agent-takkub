@@ -634,6 +634,61 @@ def _bootstrap_prod_claude_profile() -> None:
         pass
 
 
+def _data_home_write_error() -> str | None:
+    """Probe DATA_HOME for writability, returning a message when it fails.
+
+    Field report (2026-08-19, macOS): ``~/.agent-takkub`` was not writable,
+    and NOTHING said so. The boot log itself lives under RUNTIME_DIR, so its
+    own write failure is swallowed (see `_BOOT_LOG` above); the cockpit came
+    up, panes spawned, messages reached Lead — while claude's prod profile,
+    the port file, events.log and every provider home under DATA_HOME failed
+    to write. Only `takkub doctor` reported it, and only if the user thought
+    to run it. This makes the same condition loud at boot instead.
+    """
+    from .config import DATA_HOME
+
+    probe = DATA_HOME / ".takkub-write-probe"
+    try:
+        DATA_HOME.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return None
+    except OSError as e:
+        return f"{DATA_HOME}\n\n{type(e).__name__}: {e}"
+
+
+def _warn_if_data_home_unwritable() -> None:
+    detail = _data_home_write_error()
+    if detail is None:
+        return
+    try:
+        from .orchestrator import _log_event
+
+        _log_event("data_home_unwritable")
+    except Exception:
+        pass
+    fix = (
+        'sudo chown -R "$(id -un)" ~/.agent-takkub && chmod -R u+rwX ~/.agent-takkub'
+        if sys.platform != "win32"
+        else "check the folder's permissions (Properties -> Security)"
+    )
+    try:
+        from PyQt6.QtWidgets import QMessageBox
+
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("agent-takkub — storage not writable")
+        box.setText(
+            "Takkub cannot write to its data directory. Sessions, provider "
+            "logins and the Remote mirror will all fail silently until this "
+            "is fixed."
+        )
+        box.setInformativeText(f"{detail}\n\nFix:\n{fix}")
+        box.exec()
+    except Exception:
+        _boot_log(f"DATA_HOME not writable: {detail}")
+
+
 def main(argv: list[str] | None = None) -> int:
     from .config import ensure_gui_path
 
@@ -649,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
+    _warn_if_data_home_unwritable()
 
     # Window/Dock/App-Switcher icon is set once MainWindow is constructed
     # (main_window.py sets both self.setWindowIcon and the QApplication

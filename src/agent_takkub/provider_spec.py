@@ -561,7 +561,9 @@ codex_spec = ProviderSpec(
     # tier effort can be wired without mutating the user's config.toml.
     effort_levels=("low", "medium", "high"),  # what `model_reasoning_effort` accepts
     # Codex writes structured rollout JSONL under ~/.codex/sessions. Remote
-    # consumes only event_msg user/agent messages; tool/reasoning records stay
+    # consumes only the user/agent messages — `event_msg.item_completed` items
+    # on 0.147+, the legacy flat `event_msg.agent_message`/`.user_message` pair
+    # below it; tool/reasoning records stay
     # local. The session id in the rollout metadata is also the stable id used
     # by ``codex resume <SESSION_ID>`` and the Remote picker.
     produces_jsonl_transcript=True,

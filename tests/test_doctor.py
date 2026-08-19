@@ -1047,6 +1047,7 @@ class TestRunAllChecks:
             patch("agent_takkub.doctor.check_mcps", return_value=[]),
             patch("agent_takkub.doctor.check_projects", return_value=[]),
             patch("agent_takkub.doctor.check_providers", return_value=[]),
+            patch("agent_takkub.doctor.check_provider_isolation", return_value=[]),
             patch("agent_takkub.doctor.check_provider_auth", return_value=[]),
             patch("agent_takkub.doctor.check_hooks", return_value=[]),
             patch("agent_takkub.doctor.check_hook_wiring", return_value=[]),

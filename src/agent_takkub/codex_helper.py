@@ -32,6 +32,31 @@ from pathlib import Path
 from ._win_console import SUBPROCESS_NO_WINDOW
 
 
+def codex_home() -> Path:
+    """Return the CODEX_HOME an installed cockpit's codex panes actually use.
+
+    Precedence — deliberately isolation-first:
+
+    1. ``config.provider_home_env("codex")`` (installed build) — the same
+       value ``pane_env.inject_provider_home_env`` exports into the pane, so
+       this reader can never point somewhere no pane writes to.
+    2. an inherited ``CODEX_HOME`` (dev checkout, or a user who set it).
+    3. Codex's own default, ``~/.codex``.
+
+    Order 1-before-2 matters: the cockpit process may itself have inherited a
+    ``CODEX_HOME`` from the user's shell, but the pane's value is assigned,
+    not defaulted — reading the inherited one here would send the Remote
+    mirror hunting in a directory the pane never writes to.
+    """
+    from . import config
+
+    isolated = config.provider_home_dir("codex", "CODEX_HOME")
+    if isolated is not None:
+        return isolated
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    return Path(configured) if configured else Path.home() / ".codex"
+
+
 def codex_sessions_root() -> Path:
     """Return Codex's provider-owned interactive session store.
 
@@ -40,8 +65,7 @@ def codex_sessions_root() -> Path:
     lets both the optional Remote package and the spawn engine validate the
     same store without making core orchestration import ``agent_takkub.remote``.
     """
-    configured = os.environ.get("CODEX_HOME", "").strip()
-    return Path(configured) / "sessions" if configured else Path.home() / ".codex" / "sessions"
+    return codex_home() / "sessions"
 
 
 def normalize_codex_cwd(value: object) -> str:

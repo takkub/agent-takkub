@@ -379,6 +379,31 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
         pass
 
 
+def inject_provider_home_env(env: dict[str, str], provider: str) -> None:
+    """Point a non-claude provider's state at DATA_HOME (user directive
+    2026-08-19) — the codex/opencode counterpart of
+    ``inject_user_profile_env``'s ``CLAUDE_CONFIG_DIR``.
+
+    Scoped to the pane being spawned, never to the cockpit process: the
+    OpenCode entry overrides the XDG pair, and exporting those cockpit-wide
+    would move every *other* XDG-aware tool a pane runs (gh, uv, …) off the
+    user's real config. A provider with no isolation knob
+    (``config.PROVIDER_ISOLATION_GAPS``) yields nothing and keeps its OS-wide
+    home, which `takkub doctor` reports rather than hiding.
+
+    Assignment (not ``setdefault``): the cockpit's own inherited CODEX_HOME /
+    XDG_* would otherwise win and quietly de-isolate the pane. A user who
+    really wants a custom location sets ``AGENT_TAKKUB_HOME``, which moves
+    DATA_HOME and therefore these with it.
+    """
+    from . import config
+
+    try:
+        env.update(config.provider_home_env(provider))
+    except Exception:
+        pass
+
+
 def _apply_win32_path_sanitization(env: dict[str, str]) -> None:
     """Sanitize Windows PATH: clean extensionless mb shims and reorder %APPDATA%\\npm."""
     import sys

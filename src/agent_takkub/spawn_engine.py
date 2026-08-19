@@ -66,6 +66,7 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
+    inject_provider_home_env,
     inject_user_profile_env,
 )
 from .pipeline_executor import _split_shard
@@ -1821,6 +1822,21 @@ class SpawnEngineMixin:
             env["TAKKUB_PROJECT"] = project_ns
             apply_chrome_bin(env, base_role)
             inject_user_profile_env(env, project_ns)
+            # Prod isolation for this provider's own state (sessions/auth/
+            # config) — the non-claude counterpart of CLAUDE_CONFIG_DIR above.
+            # Must run for every non-claude spawn, including a Lead pane.
+            # Seed first: the pane must find its credentials and recent Lead
+            # sessions already in place, or isolation reads as data loss.
+            # One-time and bounded (see provider_bootstrap); a no-op on every
+            # later spawn, so this stays off the hot path.
+            try:
+                from .provider_bootstrap import ensure_provider_home
+
+                if ensure_provider_home(spec.name):
+                    _log_event("provider_home_seeded", provider=spec.name)
+            except Exception:
+                _log.exception("provider home seeding failed for %s", spec.name)
+            inject_provider_home_env(env, spec.name)
             bin_dir = str(CLI_BIN_DIR)
             if spec.prepend_bin_dir_to_path:
                 provider_dir = os.path.dirname(provider_bin)

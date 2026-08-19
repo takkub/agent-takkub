@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -255,6 +257,122 @@ def _folder_uri_to_path(uri: str) -> str | None:
     if len(rest) >= 3 and rest[0] == "/" and rest[2] == ":":
         rest = rest[1:]
     return rest
+
+
+# ── Antigravity CLI conversation store (agy, 2026-08 layout) ────────────────
+#
+# agy moved its conversation store. The `~/.gemini/tmp/<name>/chats/session-*.jsonl`
+# files the resolver above reads stopped being written (last one on this
+# machine: 2026-06-19); a live agy Lead now writes:
+#
+#   ~/.gemini/antigravity-cli/conversations/<id>.db          — sqlite metadata
+#   ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl
+#
+# with an entirely different record schema (see `remote/notify.py`'s
+# Antigravity branch). Nothing errored when this changed — the old resolver
+# simply kept resolving a two-month-old file, so Remote showed an empty chat
+# for every gemini Lead. Both layouts are supported: new store first, legacy
+# as fallback for machines still on the old agy.
+def antigravity_root() -> Path:
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def antigravity_transcript_path(session_id: str) -> Path:
+    """Where agy keeps *session_id*'s transcript (may not exist yet)."""
+    return (
+        antigravity_root()
+        / "brain"
+        / session_id
+        / ".system_generated"
+        / "logs"
+        / "transcript.jsonl"
+    )
+
+
+def _antigravity_workspace(db_path: Path) -> str | None:
+    """The workspace folder recorded in one conversation db, or None.
+
+    The row is a protobuf blob; rather than depend on agy's schema we pull
+    the first ``file://`` URI out of it, which is the trajectory's workspace
+    (verified against a live session: the blob's leading field pair is the
+    workspace URI twice). Read-only and best-effort — agy holds this db open
+    while a pane runs, so a lock or a schema change must degrade to "unknown
+    workspace", never raise into the caller's scan.
+    """
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not row or not isinstance(row[0], (bytes, bytearray)):
+        return None
+    match = re.search(rb"file://[^\x00-\x1f\"']+", bytes(row[0]))
+    if match is None:
+        return None
+    try:
+        uri = match.group(0).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    return _folder_uri_to_path(uri)
+
+
+def _antigravity_conversation_dbs() -> list[Path]:
+    """Conversation dbs, newest first. `-wal`/`-shm` siblings are ignored."""
+    conv = antigravity_root() / "conversations"
+    if not conv.is_dir():
+        return []
+    try:
+        files = [p for p in conv.glob("*.db") if p.is_file()]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    return files
+
+
+def find_antigravity_sessions(cwd: str, limit: int = 0) -> list[tuple[str, Path]]:
+    """`(session_id, transcript_path)` for agy sessions owned by *cwd*.
+
+    Newest first, and only sessions whose transcript actually exists — a db
+    row with no transcript yet is a session agy has not written to, which
+    would resolve to a file the tail could never read.
+    """
+    wanted = _normalize_chat_store_cwd(cwd) if cwd else ""
+    if not wanted:
+        return []
+    out: list[tuple[str, Path]] = []
+    for db_path in _antigravity_conversation_dbs():
+        workspace = _antigravity_workspace(db_path)
+        if not workspace or _normalize_chat_store_cwd(workspace) != wanted:
+            continue
+        session_id = db_path.stem
+        transcript = antigravity_transcript_path(session_id)
+        if not transcript.is_file():
+            continue
+        out.append((session_id, transcript))
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def resolve_antigravity_transcript(cwd: str, session_uuid: str | None) -> Path | None:
+    """Newest agy transcript for *cwd*, or the one matching *session_uuid*."""
+    if session_uuid:
+        transcript = antigravity_transcript_path(session_uuid)
+        if not transcript.is_file():
+            return None
+        db_path = antigravity_root() / "conversations" / f"{session_uuid}.db"
+        workspace = _antigravity_workspace(db_path) if db_path.is_file() else None
+        if workspace and cwd:
+            if _normalize_chat_store_cwd(workspace) != _normalize_chat_store_cwd(cwd):
+                return None  # never mirror another project's conversation
+        return transcript
+    found = find_antigravity_sessions(cwd, limit=1)
+    return found[0][1] if found else None
 
 
 # ── concurrent-mint guard (#132 followup) ────────────────────────────────────

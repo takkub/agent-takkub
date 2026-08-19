@@ -90,7 +90,17 @@ def find_opencode_executable() -> str | None:
 
 
 def opencode_db_path() -> Path | None:
-    """Locate OpenCode's SQLite database (`opencode.db`)."""
+    """Locate OpenCode's SQLite database (`opencode.db`).
+
+    An installed cockpit spawns OpenCode with ``XDG_DATA_HOME`` pointed into
+    DATA_HOME (``config.provider_home_env("opencode")``), so that location is
+    checked FIRST — before the inherited XDG value or the OS default — for
+    the same reason ``codex_helper.codex_home`` is isolation-first: the
+    reader must land where the pane writes, or the Remote mirror reads a
+    database nothing updates. The legacy locations stay in the candidate
+    list below, so a pre-isolation install's existing history is still found
+    until OpenCode has written to the new home.
+    """
     override = os.environ.get("OPENCODE_DB_PATH", "").strip()
     if override:
         p = Path(override)
@@ -99,6 +109,11 @@ def opencode_db_path() -> Path | None:
 
     home = Path.home()
     candidates: list[Path] = []
+    from . import config
+
+    isolated = config.provider_home_dir("opencode", "XDG_DATA_HOME")
+    if isolated is not None:
+        candidates.append(isolated / "opencode" / "opencode.db")
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
         if local:
