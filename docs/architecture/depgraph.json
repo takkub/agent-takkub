@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 234,
+  "module_count": 247,
   "modules": [
     {
       "module": "agent_takkub",
@@ -208,9 +208,11 @@
         "agent_takkub.role_memory"
       ],
       "imported_by": [
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval"
       ],
-      "fan_in": 1,
+      "fan_in": 3,
       "fan_out": 2
     },
     {
@@ -549,6 +551,171 @@
       ],
       "fan_in": 2,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.brain",
+      "imports": [
+        "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.flag",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.brain.store"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 6
+    },
+    {
+      "module": "agent_takkub.core.brain.adapter",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.core.brain.candidate",
+      "imports": [
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain",
+        "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.sources.decision_note_source",
+        "agent_takkub.core.brain.sources.digest_facts_source",
+        "agent_takkub.core.brain.sources.knowledge_source",
+        "agent_takkub.core.brain.sources.role_memory_source"
+      ],
+      "fan_in": 8,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.brain.facade",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.flag",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.brain.store",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 6
+    },
+    {
+      "module": "agent_takkub.core.brain.flag",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.brain",
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.brain.pipeline",
+      "imports": [
+        "agent_takkub.bm25_search",
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.store",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain",
+        "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 3,
+      "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.core.brain.retrieval",
+      "imports": [
+        "agent_takkub.bm25_search",
+        "agent_takkub.core.brain.store",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain",
+        "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 3,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.brain.sources",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.brain.sources.decision_note_source",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.brain.sources.digest_facts_source",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.models.memory",
+        "agent_takkub.digest_facts"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.brain.sources.knowledge_source",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.brain.sources.role_memory_source",
+      "imports": [
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.models.memory"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.brain.store",
+      "imports": [
+        "agent_takkub.core.models.memory",
+        "agent_takkub.core.storage.jsonl_store",
+        "agent_takkub.core.storage.paths"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain",
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval"
+      ],
+      "fan_in": 4,
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.core.capabilities",
@@ -1016,9 +1183,19 @@
       "module": "agent_takkub.core.models.memory",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.brain.adapter",
+        "agent_takkub.core.brain.candidate",
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.brain.pipeline",
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.brain.sources.decision_note_source",
+        "agent_takkub.core.brain.sources.digest_facts_source",
+        "agent_takkub.core.brain.sources.knowledge_source",
+        "agent_takkub.core.brain.sources.role_memory_source",
+        "agent_takkub.core.brain.store",
         "agent_takkub.core.contracts.brain_adapter"
       ],
-      "fan_in": 1,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -1265,10 +1442,11 @@
       "imported_by": [
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.switch_log",
+        "agent_takkub.core.brain.store",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.journal"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -1291,13 +1469,14 @@
       "imported_by": [
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.switch_log",
+        "agent_takkub.core.brain.store",
         "agent_takkub.core.conversation.ingest.cursor_store",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.journal",
         "agent_takkub.core.versioning.store"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 1
     },
     {
@@ -1389,10 +1568,11 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.core.brain.sources.digest_facts_source",
         "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {

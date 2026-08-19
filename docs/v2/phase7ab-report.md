@@ -36,7 +36,7 @@
   เดียวที่เขียนเข้า brain ได้ (ไม่มี `id`/`version`/`status` เพราะ pipeline
   เป็นผู้กำหนดตอน persist)
 - **`src/agent_takkub/core/brain/store.py`**: `BrainStore` — event-sourced
-  บน `JsonlStore` เดิม (`core/storage/jsonl_store.py` ไม่มี update-in-place
+  บน `JsonlStore` เดิม (`src/agent_takkub/core/storage/jsonl_store.py` ไม่มี update-in-place
   primitive) หนึ่งไฟล์ต่อ project ใต้ `core_home()/brain/<project>.jsonl`
   (+ bucket `_global.jsonl` สำหรับ `project=None`) — "update" คือ append
   event ใหม่ id เดิม, `load_latest()` fold by id (last-write-wins จาก
@@ -98,7 +98,7 @@
 
 ## Multi-provider / cross-platform
 
-- ไม่มี path/command เฉพาะ platform ใดๆ ใน `core/brain/*` — ใช้
+- ไม่มี path/command เฉพาะ platform ใดๆ ใน `src/agent_takkub/core/brain/*` — ใช้
   `pathlib.Path` ผ่าน `core.storage.paths.core_home()` เดิมทั้งหมด, ไม่มี
   `sys.platform` branch
 - ไม่มีจุดใดผูก provider เฉพาะ (claude/codex/gemini/...) — candidate/record
