@@ -102,3 +102,12 @@ def test_skip_env_nonzero_still_suppresses(monkeypatch):
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
 
     assert aic._auto_issue_suppressed() is True
+
+
+def test_set_macos_app_name_runs_safely(monkeypatch):
+    # Safe on current platform (macOS executes ctypes, other platforms no-op)
+    app_mod._set_macos_app_name("agent-takkub")
+
+    # Non-darwin early exit
+    monkeypatch.setattr(sys, "platform", "win32")
+    app_mod._set_macos_app_name("agent-takkub")

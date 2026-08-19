@@ -141,6 +141,8 @@ def normalize_opencode_cwd(value: object) -> str:
         return ""
     normalized = os.path.normcase(os.path.abspath(os.path.expanduser(value.strip())))
     normalized = normalized.replace("\\", "/").rstrip("/")
+    if sys.platform in ("win32", "darwin"):
+        normalized = normalized.lower()
     return normalized
 
 

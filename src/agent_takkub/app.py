@@ -689,6 +689,68 @@ def _warn_if_data_home_unwritable() -> None:
         _boot_log(f"DATA_HOME not writable: {detail}")
 
 
+def _set_macos_app_name(name: str = "agent-takkub") -> None:
+    """Set native macOS application/process name so the top menu bar (next to
+    the Apple logo) displays 'agent-takkub' instead of generic 'Python' / 'python3.x'."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc_lib = ctypes.util.find_library("objc")
+        if not objc_lib:
+            return
+        objc = ctypes.cdll.LoadLibrary(objc_lib)
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        NSString = objc.objc_getClass(b"NSString")
+        sel_stringWithUTF8String = objc.sel_registerName(b"stringWithUTF8String:")
+        objc_msgSend_str = ctypes.cast(
+            objc.objc_msgSend,
+            ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p),
+        )
+        app_name = objc_msgSend_str(NSString, sel_stringWithUTF8String, name.encode("utf-8"))
+
+        NSProcessInfo = objc.objc_getClass(b"NSProcessInfo")
+        sel_processInfo = objc.sel_registerName(b"processInfo")
+        objc_msgSend_p = ctypes.cast(
+            objc.objc_msgSend,
+            ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p),
+        )
+        process_info = objc_msgSend_p(NSProcessInfo, sel_processInfo)
+
+        sel_setProcessName = objc.sel_registerName(b"setProcessName:")
+        objc_msgSend_set = ctypes.cast(
+            objc.objc_msgSend,
+            ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p),
+        )
+        objc_msgSend_set(process_info, sel_setProcessName, app_name)
+
+        NSBundle = objc.objc_getClass(b"NSBundle")
+        sel_mainBundle = objc.sel_registerName(b"mainBundle")
+        main_bundle = objc_msgSend_p(NSBundle, sel_mainBundle)
+        sel_infoDictionary = objc.sel_registerName(b"infoDictionary")
+        info_dict = objc_msgSend_p(main_bundle, sel_infoDictionary)
+        if info_dict:
+            sel_setObjectForKey = objc.sel_registerName(b"setObject:forKey:")
+            key_name = objc_msgSend_str(NSString, sel_stringWithUTF8String, b"CFBundleName")
+            key_disp = objc_msgSend_str(NSString, sel_stringWithUTF8String, b"CFBundleDisplayName")
+            objc_msgSend_set_dict = ctypes.cast(
+                objc.objc_msgSend,
+                ctypes.CFUNCTYPE(
+                    None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+                ),
+            )
+            objc_msgSend_set_dict(info_dict, sel_setObjectForKey, app_name, key_name)
+            objc_msgSend_set_dict(info_dict, sel_setObjectForKey, app_name, key_disp)
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     from .config import ensure_gui_path
 
@@ -701,10 +763,13 @@ def main(argv: list[str] | None = None) -> int:
     _log_instance_boot()
     _bootstrap_prod_claude_profile()
     _load_custom_roles()
+    _set_macos_app_name("agent-takkub")
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
     _warn_if_data_home_unwritable()
+    app.setApplicationDisplayName("agent-takkub")
+    app.setDesktopFileName("agent-takkub")
 
     # Window/Dock/App-Switcher icon is set once MainWindow is constructed
     # (main_window.py sets both self.setWindowIcon and the QApplication

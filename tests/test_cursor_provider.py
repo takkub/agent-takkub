@@ -59,6 +59,13 @@ class TestCursorSpec:
         assert cursor_spec.ready_rules == ()
         assert cursor_spec.supports_resume is False
 
+    def test_supports_remote_history_and_jsonl_transcript(self) -> None:
+        from agent_takkub.remote import notify as notify_mod
+
+        assert cursor_spec.produces_jsonl_transcript is True
+        assert cursor_spec.supports_remote_history is True
+        assert notify_mod.supports_remote_history("cursor") is True
+
     def test_forced_role(self) -> None:
         from agent_takkub import provider_config
 
