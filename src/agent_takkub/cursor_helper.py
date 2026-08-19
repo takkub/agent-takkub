@@ -145,7 +145,13 @@ def find_cursor_project_dir(cwd: str, *, root: Path | None = None) -> Path | Non
             _cursor_proj_dir_cache.pop(norm_cwd, None)
 
     try:
-        p = Path(cwd).resolve()
+        # Only resolve() a path that exists: resolving a non-existent POSIX
+        # path on Windows prepends the current drive ("/Volumes/x" ->
+        # "C:/Volumes/x") and the encoded name no longer matches what Cursor
+        # wrote on the machine that owns the transcript.
+        p = Path(cwd)
+        if p.exists():
+            p = p.resolve()
         posix_path = p.as_posix()
         encoded = re.sub(r"[^a-zA-Z0-9]+", "-", posix_path).strip("-")
 
