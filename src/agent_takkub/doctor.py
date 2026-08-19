@@ -1149,7 +1149,7 @@ def check_installed_integrity() -> list[Finding]:
                 "assets-skill-files",
                 Status.WARN,
                 f"no SKILL.md files under {SKILLS_DIR}",
-                "reinstall — the wheel shipped with no default .claude/skills bundle "
+                "reinstall — the wheel shipped with no default skill bundle "
                 "(New Role / Skill Catalog pickers will show no built-in skills)",
             )
         )
@@ -1186,6 +1186,60 @@ def check_installed_integrity() -> list[Finding]:
             )
         )
 
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [capability-hub] — Phase 5a skill store migration (epic #309)
+# ---------------------------------------------------------------------------
+
+
+def check_capability_skill_store() -> list[Finding]:
+    """[capability-hub] — Phase 5a: the shipped skill store's new location
+    (`capabilities/skills/`) plus the `.claude/skills` discovery surface
+    every reader (claude's Skill tool, `skill_scan.scan_skills`) still
+    depends on. Unlike `check_installed_integrity`, this runs on BOTH dev
+    checkouts and installed builds — the surface-link mechanism applies to
+    both (`config.ASSETS_ROOT == REPO_ROOT` for a dev checkout doesn't
+    change that `.claude/skills/<name>` must still resolve)."""
+    from .config import SKILLS_DIR
+    from .core.capabilities.skill_store import ensure_shipped_skill_surface, shipped_skills_root
+
+    findings: list[Finding] = []
+    real_root = shipped_skills_root()
+    if real_root.is_dir():
+        findings.append(
+            Finding("capability-hub", "skill-store-location", Status.OK, str(real_root))
+        )
+        errors = ensure_shipped_skill_surface()
+        if errors:
+            findings.append(
+                Finding(
+                    "capability-hub",
+                    "skill-store-surface",
+                    Status.WARN,
+                    f"{len(errors)} skill link issue(s): {errors[0]}",
+                    "check filesystem permissions for the .claude/skills surface dir",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "capability-hub",
+                    "skill-store-surface",
+                    Status.OK,
+                    f".claude/skills surface linked to {real_root}",
+                )
+            )
+    else:
+        findings.append(
+            Finding(
+                "capability-hub",
+                "skill-store-location",
+                Status.INFO,
+                f"legacy layout — no {real_root}, reading {SKILLS_DIR} directly",
+            )
+        )
     return findings
 
 
@@ -2351,6 +2405,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mini_browser", check_mini_browser),
         ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
+        ("check_capability_skill_store", check_capability_skill_store),
         ("check_editable_install", check_editable_install),
         ("check_arch", check_arch),
         ("check_qt", check_qt),

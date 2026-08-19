@@ -56,6 +56,13 @@ GEMINI.md
 # Scheduled-tasks lock — runtime, per-machine (created by /schedule).
 .claude/scheduled_tasks.lock
 
+# Shipped-skill discovery surface (Phase 5a, epic #309 Capability Hub) —
+# real storage moved to capabilities/skills/; core.capabilities.skill_store
+# .ensure_shipped_skill_surface() (re)creates a per-skill junction/symlink
+# here at spawn time so claude's Skill tool still finds them from cwd.
+# Runtime-generated, never source — same reasoning as .takkub/ above.
+.claude/skills/*/
+
 # Local scratch scripts / experiments — not repo source.
 scratch/
 

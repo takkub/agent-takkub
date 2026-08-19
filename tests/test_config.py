@@ -393,6 +393,36 @@ class TestAssetsRootAndCliBinDir:
         assert config._resolve_cli_bin_dir() == scripts_dir
 
 
+class TestResolveSkillsDir:
+    """Phase 5a (epic #309 Capability Hub): shipped skill store moved out
+    from under `.claude/` — `capabilities/skills` when present, legacy
+    `.claude/skills` fallback otherwise (never a hard break)."""
+
+    def test_new_layout_wins_when_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path)
+        (tmp_path / "capabilities" / "skills").mkdir(parents=True)
+
+        assert config._resolve_skills_dir() == tmp_path / "capabilities" / "skills"
+
+    def test_falls_back_to_legacy_when_new_layout_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path)
+
+        assert config._resolve_skills_dir() == tmp_path / ".claude" / "skills"
+
+    def test_new_layout_wins_even_when_legacy_also_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path)
+        (tmp_path / "capabilities" / "skills").mkdir(parents=True)
+        (tmp_path / ".claude" / "skills").mkdir(parents=True)
+
+        assert config._resolve_skills_dir() == tmp_path / "capabilities" / "skills"
+
+
 class TestDefaultClaudeConfigDir:
     """Per-instance default Claude profile home (isolation plan, finding C5)."""
 
