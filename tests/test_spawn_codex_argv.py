@@ -226,3 +226,53 @@ class TestCodexArgvMcpInjection:
             "features.plugins=false",
         ]
         assert not any(str(arg).startswith("mcp_servers.") for arg in argv)
+
+
+class TestMcpHandshakeLogging:
+    """#304 point 2: spawn_engine logs an `mcp_handshake_argv` event with
+    what actually made it into a pane's argv at spawn time — evidence for
+    `takkub doctor --pane`, not a live connection probe (unobservable from
+    here, see mcp_bridge.describe_mcp_handshake's docstring)."""
+
+    def test_codex_spawn_logs_handshake_event(self, qapp, monkeypatch, tmp_path):
+        import json
+
+        events: list[tuple[str, dict]] = []
+        # spawn() resolves `_log_event` via `_from_orch("_log_event")`
+        # (respects mock.patch on the orchestrator module's re-export) —
+        # patching spawn_engine's own binding directly would miss it.
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._log_event",
+            lambda event, **kw: events.append((event, kw)),
+        )
+        cfg = {"mcpServers": {"demo": {"type": "stdio", "command": "node", "args": []}}}
+        (tmp_path / "shared-mcp.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", allowed_mcps=["demo"])
+
+        handshakes = [kw for name, kw in events if name == "mcp_handshake_argv"]
+        assert len(handshakes) == 1
+        info = handshakes[0]
+        assert info["provider"] == "codex"
+        assert info["role"] == "codex"
+        assert info["base_role"] == "codex"
+        assert info["shard"] is None
+        assert info["has_mcp_config"] is True
+        assert info["server_names"] == ["demo"]
+
+    def test_codex_spawn_with_no_policy_logs_no_mcp_config(self, qapp, monkeypatch, tmp_path):
+        events: list[tuple[str, dict]] = []
+        # spawn() resolves `_log_event` via `_from_orch("_log_event")`
+        # (respects mock.patch on the orchestrator module's re-export) —
+        # patching spawn_engine's own binding directly would miss it.
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._log_event",
+            lambda event, **kw: events.append((event, kw)),
+        )
+
+        _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
+
+        handshakes = [kw for name, kw in events if name == "mcp_handshake_argv"]
+        assert len(handshakes) == 1
+        assert handshakes[0]["has_mcp_config"] is False
+        assert handshakes[0]["server_names"] == []

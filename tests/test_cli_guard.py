@@ -148,6 +148,37 @@ class TestFailOpen:
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
 
+class TestMbFallbackWiring:
+    """#304 point 3: `cmd_guard` wires `mcp_fallback.is_granted()` into
+    pane_guard's mb-shard-deny branch through a lazy callback."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_runtime(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
+        from agent_takkub import config
+
+        monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path)
+
+    def test_mb_denied_for_shard_without_a_grant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(monkeypatch, _payload("mb go http://localhost:3000"), TAKKUB_ROLE="qa#1")
+        resp = cli.cmd_guard(None)
+        assert resp.get("exit_code") == 2
+
+    def test_mb_allowed_for_shard_holding_the_grant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub import mcp_fallback
+
+        mcp_fallback.request("qa#1", "proj")
+        _run(monkeypatch, _payload("mb go http://localhost:3000"), TAKKUB_ROLE="qa#1")
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+
+    def test_mb_still_denied_for_a_different_shard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub import mcp_fallback
+
+        mcp_fallback.request("qa#1", "proj")
+        _run(monkeypatch, _payload("mb go http://localhost:3000"), TAKKUB_ROLE="qa#2")
+        resp = cli.cmd_guard(None)
+        assert resp.get("exit_code") == 2
+
+
 class TestCliDispatch:
     def test_guard_is_registered_and_not_lead_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Every teammate pane has to be able to run it — a lead-only gate

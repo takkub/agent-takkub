@@ -396,3 +396,59 @@ class TestGeminiMcpArgv:
 class TestUnknownProvider:
     def test_unknown_provider_name_returns_empty(self, isolated_mcp_file):
         assert mcp_bridge.mcp_argv_for_provider("nope", "qa", None, "proj") == []
+
+
+class TestDescribeMcpHandshake:
+    """`describe_mcp_handshake` (#304 point 2) — spawn-time argv evidence
+    for the `mcp_handshake_argv` event, not a live connection probe."""
+
+    def test_claude_no_mcp_config_in_argv(self):
+        result = mcp_bridge.describe_mcp_handshake("claude", [])
+        assert result == {"has_mcp_config": False, "mcp_config_path": None, "server_names": []}
+
+    def test_claude_reads_server_names_from_config_file(self, tmp_path):
+        cfg = tmp_path / "shared-mcp-proj-qa.json"
+        cfg.write_text(
+            json.dumps({"mcpServers": {"playwright": {}, "chrome-devtools": {}}}),
+            encoding="utf-8",
+        )
+        argv = ["--mcp-config", str(cfg), "--strict-mcp-config"]
+        result = mcp_bridge.describe_mcp_handshake("claude", argv)
+        assert result["has_mcp_config"] is True
+        assert result["mcp_config_path"] == str(cfg)
+        assert result["server_names"] == ["chrome-devtools", "playwright"]
+
+    def test_claude_missing_config_file_degrades_to_empty_names(self, tmp_path):
+        missing = tmp_path / "does-not-exist.json"
+        argv = ["--mcp-config", str(missing), "--strict-mcp-config"]
+        result = mcp_bridge.describe_mcp_handshake("claude", argv)
+        assert result["has_mcp_config"] is True
+        assert result["server_names"] == []
+
+    def test_codex_extracts_server_names_from_dashc_tokens(self):
+        argv = [
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+            "-c",
+            'mcp_servers.playwright.command="npx"',
+            "-c",
+            "mcp_servers.playwright.args=[]",
+            "-c",
+            'mcp_servers.graft.command="graft"',
+        ]
+        result = mcp_bridge.describe_mcp_handshake("codex", argv)
+        assert result["has_mcp_config"] is True
+        assert result["server_names"] == ["graft", "playwright"]
+        assert result["mcp_config_path"] is None
+
+    def test_codex_no_named_servers_after_disable_all(self):
+        argv = ["-c", "mcp_servers={}", "-c", "features.plugins=false"]
+        result = mcp_bridge.describe_mcp_handshake("codex", argv)
+        assert result["has_mcp_config"] is False
+        assert result["server_names"] == []
+
+    def test_unknown_provider_falls_back_to_bool_argv(self):
+        assert mcp_bridge.describe_mcp_handshake("gemini", [])["has_mcp_config"] is False
+        assert mcp_bridge.describe_mcp_handshake("gemini", ["--foo"])["has_mcp_config"] is True

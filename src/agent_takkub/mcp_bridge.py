@@ -410,3 +410,50 @@ def mcp_argv_for_provider(
     # "plugin_import" (gemini/agy) and "none" — documented no-op, see
     # module docstring for why plugin_import isn't auto-driven per spawn.
     return []
+
+
+def describe_mcp_handshake(provider_name: str, mcp_argv: list[str]) -> dict:
+    """Summarize *mcp_argv* for the `mcp_handshake_argv` spawn-time log event
+    (#304 point 2): whether an MCP config actually made it into this pane's
+    argv, the config path (claude), and the server names it grants — read
+    straight back off the argv/config file the pane is ABOUT to be launched
+    with, not a live connection probe (the cockpit has no visibility into
+    whether the provider binary actually connects — see docs/audit/2026-08-
+    04-issue-146-playwright-shards.md). Never raises: a malformed/missing
+    config degrades to an empty/False summary rather than failing the spawn
+    the caller is mid-way through.
+
+    ``"strict"`` (claude) argv is ``["--mcp-config", <path>,
+    "--strict-mcp-config"]`` — the path is right there. ``"session_override"``
+    (codex) has no on-disk config to point at; server names are recovered
+    from the ``-c mcp_servers.<name>.*`` tokens themselves.
+    """
+    if provider_name == "claude":
+        if "--mcp-config" not in mcp_argv:
+            return {"has_mcp_config": False, "mcp_config_path": None, "server_names": []}
+        cfg_path = mcp_argv[mcp_argv.index("--mcp-config") + 1]
+        server_names: list[str] = []
+        try:
+            data = json.loads(pathlib.Path(cfg_path).read_text(encoding="utf-8"))
+            servers = data.get("mcpServers")
+            if isinstance(servers, dict):
+                server_names = sorted(servers)
+        except (OSError, json.JSONDecodeError, IndexError):
+            pass
+        return {
+            "has_mcp_config": True,
+            "mcp_config_path": cfg_path,
+            "server_names": server_names,
+        }
+    if provider_name == "codex":
+        names: set[str] = set()
+        for tok in mcp_argv:
+            match = re.match(r"mcp_servers\.([A-Za-z0-9_-]+)\.", tok)
+            if match:
+                names.add(match.group(1))
+        return {
+            "has_mcp_config": bool(names),
+            "mcp_config_path": None,
+            "server_names": sorted(names),
+        }
+    return {"has_mcp_config": bool(mcp_argv), "mcp_config_path": None, "server_names": []}

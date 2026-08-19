@@ -374,6 +374,32 @@ def _clear_stale_singleton_locks(profile_dir: pathlib.Path) -> None:
             pass  # a leftover lock is recoverable; crashing here is not
 
 
+def _templated_config_filename(base_role: str, shard_idx: int | None, project: str) -> str:
+    """Filename `browser_profile_mcp_config_path` writes its templated config
+    to — pulled out so `browser_profile_mcp_config_path_readonly` (#304) can
+    compute the same path without the write/mkdir/singleton-lock side effects
+    the writing function has."""
+    safe_project = re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+    shard_suffix = f"-shard{shard_idx}" if shard_idx is not None else ""
+    return f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"
+
+
+def browser_profile_mcp_config_path_readonly(
+    base_role: str, shard_idx: int | None, project: str
+) -> pathlib.Path:
+    """Where `browser_profile_mcp_config_path` would write this pane's
+    templated config, without generating or mutating anything on disk.
+
+    `browser_profile_mcp_config_path` itself `mkdir`s profile dirs and clears
+    Chromium singleton-lock files as a side effect (`_clear_stale_singleton_
+    locks`) — safe when called from `spawn()` right before a pane starts, but
+    never safe to call from a read-only diagnostic (`takkub doctor --pane`,
+    #304) that might run while that same pane's browser is still live. This
+    never touches disk itself — only string/path math, same as the writing
+    function's own filename formula."""
+    return SHARED_MCP_FILE.parent / _templated_config_filename(base_role, shard_idx, project)
+
+
 def browser_profile_mcp_config_path(
     base_role: str, shard_idx: int | None, project: str, cwd: str | None = None
 ) -> str | None:
@@ -534,7 +560,7 @@ def browser_profile_mcp_config_path(
     # carries the flag is returned untouched.
     data["mcpServers"] = {name: _prefer_offline_npx(cfg) for name, cfg in servers.items()}
 
-    out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"
+    out = SHARED_MCP_FILE.parent / _templated_config_filename(base_role, shard_idx, project)
     try:
         _write_private_mcp_json(out, data)
     except OSError:

@@ -23,6 +23,7 @@ from agent_takkub.doctor import (
     check_mcps,
     check_mini_browser,
     check_npm_registry,
+    check_pane_mcp_handshake,
     check_plugins,
     check_projects,
     check_providers,
@@ -719,6 +720,103 @@ class TestCheckMcps:
         assert ok
         assert "browser" in called
         assert "user" in called
+
+
+# ---------------------------------------------------------------------------
+# check_pane_mcp_handshake (#304 point 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPaneMcpHandshake:
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from agent_takkub import config
+        from agent_takkub import shared_dev_tools as sdt
+
+        monkeypatch.setattr(config, "EVENTS_LOG", tmp_path / "events.log")
+        monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+
+    def _write_event(self, **fields) -> None:
+        from agent_takkub import config
+
+        config.EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"event": "mcp_handshake_argv", **fields})
+        with open(config.EVENTS_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def test_no_event_yet_warns(self) -> None:
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        f = next(x for x in findings if x.name == "qa#1")
+        assert f.status == Status.WARN
+        assert "no mcp_handshake_argv event" in f.detail
+
+    def test_event_with_mcp_config_is_ok(self) -> None:
+        self._write_event(
+            role="qa#1",
+            project="proj",
+            provider="claude",
+            has_mcp_config=True,
+            server_names=["playwright"],
+            ts="2026-08-19T00:00:00",
+        )
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        f = next(x for x in findings if x.name == "qa#1")
+        assert f.status == Status.OK
+        assert "playwright" in f.detail
+
+    def test_event_without_mcp_config_fails(self) -> None:
+        self._write_event(
+            role="qa#1",
+            project="proj",
+            provider="claude",
+            has_mcp_config=False,
+            server_names=[],
+            ts="2026-08-19T00:00:00",
+        )
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        f = next(x for x in findings if x.name == "qa#1")
+        assert f.status == Status.FAIL
+
+    def test_picks_most_recent_matching_event(self) -> None:
+        self._write_event(
+            role="qa#1", project="proj", provider="claude", has_mcp_config=False, server_names=[]
+        )
+        self._write_event(
+            role="qa#1",
+            project="proj",
+            provider="claude",
+            has_mcp_config=True,
+            server_names=["playwright"],
+        )
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        f = next(x for x in findings if x.name == "qa#1")
+        assert f.status == Status.OK
+
+    def test_ignores_events_for_a_different_role(self) -> None:
+        self._write_event(
+            role="qa#2", project="proj", provider="claude", has_mcp_config=True, server_names=["x"]
+        )
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        f = next(x for x in findings if x.name == "qa#1")
+        assert f.status == Status.WARN
+
+    def test_missing_config_file_on_disk_warns(self) -> None:
+        self._write_event(
+            role="qa#1", project="proj", provider="claude", has_mcp_config=True, server_names=["x"]
+        )
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        cfg_finding = next(x for x in findings if x.name == "qa#1:config-file")
+        assert cfg_finding.status == Status.WARN
+
+    def test_config_file_present_on_disk_is_ok(self) -> None:
+        from agent_takkub import shared_dev_tools as sdt
+
+        expected = sdt.browser_profile_mcp_config_path_readonly("qa", 1, "proj")
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        expected.write_text("{}", encoding="utf-8")
+        findings = check_pane_mcp_handshake("qa#1", "proj")
+        cfg_finding = next(x for x in findings if x.name == "qa#1:config-file")
+        assert cfg_finding.status == Status.OK
 
 
 # ---------------------------------------------------------------------------

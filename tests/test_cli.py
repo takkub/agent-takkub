@@ -369,6 +369,42 @@ class TestArgparse:
         assert len(fake_request) == n_before  # nothing dispatched
 
 
+class TestBrowserShardAssignWarning:
+    """#304 point 5: warn Lead in the `assign` response itself when fanning
+    out a browser-role (qa/critic/designer) shard — Playwright MCP has been
+    observed failing to connect under concurrent shard spawn (#146/#304)
+    with the `mb` fallback blocked by design (#92)."""
+
+    def test_qa_shard_fanout_warns(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "qa", "--shards", "2", "smoke test"])
+        out = capsys.readouterr().out
+        assert "#146" in out or "#304" in out
+        assert "เบราว์เซอร์" in out
+
+    def test_qa_plan_fanout_warns(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "qa", "--plan", "--shards", "2", "smoke test"])
+        out = capsys.readouterr().out
+        assert "เบราว์เซอร์" in out
+
+    def test_non_browser_role_shard_fanout_does_not_warn(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "frontend", "--shards", "2", "build X"])
+        out = capsys.readouterr().out
+        assert "เบราว์เซอร์" not in out
+
+    def test_single_qa_assign_does_not_warn(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "qa", "smoke test"])
+        out = capsys.readouterr().out
+        assert "เบราว์เซอร์" not in out
+
+
 class TestHarvestPayload:
     """Regression for the harvest dead-on-arrival bug (review 2026-06-16). The
     client built the harvest / harvest-done payloads WITHOUT a `from` stamp, so
