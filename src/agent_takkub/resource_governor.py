@@ -14,6 +14,9 @@ from enum import StrEnum
 import psutil
 
 from . import performance_settings
+from .core.scheduling import facade as scheduling_facade
+from .core.scheduling.backpressure import BackpressureSignal
+from .core.scheduling.models import ActiveCounts, Priority, SlotPolicy, SlotRequest
 
 
 class ResourceClass(StrEnum):
@@ -83,6 +86,11 @@ class ResourceToken:
     task_id: str
     resource_class: ResourceClass
     acquired_at: float
+    # provider_id/account_id (epic #309 Phase 8a): optional, additive — only
+    # populated when a caller opts into `core.scheduling`'s provider/account
+    # dimensions; every existing caller leaves these None.
+    provider_id: str | None = None
+    account_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +133,12 @@ class QueuedTask:
     # unconditionally the moment the initial denial happens, before the item
     # is even enqueued, so the heartbeat window starts counting from there.
     last_gate_block_log_at: float = 0.0
+    # provider_id/account_id/priority (epic #309 Phase 8a): additive —
+    # default None/NORMAL leaves every existing caller's FIFO-within-project
+    # ordering untouched; only used when TAKKUB_V2_SCHEDULER is on.
+    provider_id: str | None = None
+    account_id: str | None = None
+    priority: Priority = Priority.NORMAL
 
 
 # Issue #195: backoff schedule (seconds) for the queued-task retry loop in
@@ -209,8 +223,18 @@ class ResourceGovernor:
         sampler: Callable[[], tuple] | None = None,
         clock: Callable[[], float] = time.time,
         event_sink: Callable[[str, dict], None] | None = None,
+        slot_policy: SlotPolicy | None = None,
     ) -> None:
         self.limits = limits or GovernorLimits.from_environment()
+        # slot_policy (epic #309 Phase 8a): all-defaults `SlotPolicy()` caps
+        # nothing (see core.scheduling.models), and `_denial_reason` only
+        # ever consults it via the flag-gated `scheduling_facade` — so a
+        # governor built without one is byte-identical to pre-Phase-8a.
+        # A caller-supplied policy always wins; otherwise fall back to the
+        # Settings UI's persisted Scheduler Policy (flag-gated, fail-open to
+        # the same `SlotPolicy()` default — see `effective_slot_policy`'s
+        # own docstring).
+        self.slot_policy = slot_policy or scheduling_facade.effective_slot_policy()
         self._sampler = sampler or self._sample_psutil
         self._clock = clock
         self._event_sink = event_sink
@@ -319,6 +343,29 @@ class ResourceGovernor:
                 by_project[token.project_id] = by_project.get(token.project_id, 0) + 1
         return heavy, by_project, by_class, holders_by_class
 
+    def _active_counts(self) -> ActiveCounts:
+        """Snapshot for `core.scheduling.policy.evaluate` (epic #309 Phase
+        8a) — one active token is treated as both one agent and one pane
+        (see `ActiveCounts`'s `ponytail:` note)."""
+        total = len(self._tokens)
+        by_provider: dict[str, int] = {}
+        by_account: dict[str, int] = {}
+        by_project: dict[str, int] = {}
+        for token in self._tokens.values():
+            if token.provider_id is not None:
+                by_provider[token.provider_id] = by_provider.get(token.provider_id, 0) + 1
+            if token.account_id is not None:
+                by_account[token.account_id] = by_account.get(token.account_id, 0) + 1
+            by_project[token.project_id] = by_project.get(token.project_id, 0) + 1
+        return ActiveCounts(
+            agents_global=total,
+            panes_global=total,
+            by_provider=by_provider,
+            by_account=by_account,
+            by_project_agents=by_project,
+            by_project_panes=by_project,
+        )
+
     def holders_for_class(self, resource_class: ResourceClass) -> list[str]:
         """Pane ids currently holding a token of `resource_class` (#240 point
         3) — lets a denied caller be told *who* it's waiting behind instead
@@ -346,25 +393,67 @@ class ResourceGovernor:
             return "memory_low"
         return "waiting_resume"
 
-    def _denial_reason(self, project_id: str, resource_class: ResourceClass) -> str:
-        if resource_class in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
-            return ""
+    def _denial_reason(
+        self,
+        project_id: str,
+        resource_class: ResourceClass,
+        *,
+        pane_id: str = "",
+        task_id: str = "",
+        provider_id: str | None = None,
+        account_id: str | None = None,
+        priority: Priority = Priority.NORMAL,
+    ) -> str:
         if self._overloaded:
-            return self._overload_state_reason()
-        heavy, by_project, by_class, _holders = self._counts()
-        if heavy >= self.limits.max_heavy_global:
-            return "heavy_global_limit"
-        if by_project.get(project_id, 0) >= self.limits.max_heavy_per_project:
-            return "heavy_project_limit"
-        class_limits = {
-            ResourceClass.BROWSER: self.limits.max_browser_global,
-            ResourceClass.BUILD: self.limits.max_build_global,
-            ResourceClass.TEST: self.limits.max_test_global,
-            ResourceClass.PACKAGE_INSTALL: self.limits.max_package_install_global,
-        }
-        limit = class_limits.get(resource_class)
-        if limit is not None and by_class.get(resource_class, 0) >= limit:
-            return f"{resource_class.value}_global_limit"
+            # Overload latch still gates HEAVY-class work unconditionally
+            # (unchanged legacy behavior); Phase 8a's backpressure ladder
+            # additionally lets LIGHT/NORMAL-class low-priority work be
+            # throttled once overloaded, via the facade check below.
+            if resource_class not in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
+                return self._overload_state_reason()
+        elif resource_class not in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
+            heavy, by_project, by_class, _holders = self._counts()
+            if heavy >= self.limits.max_heavy_global:
+                return "heavy_global_limit"
+            if by_project.get(project_id, 0) >= self.limits.max_heavy_per_project:
+                return "heavy_project_limit"
+            class_limits = {
+                ResourceClass.BROWSER: self.limits.max_browser_global,
+                ResourceClass.BUILD: self.limits.max_build_global,
+                ResourceClass.TEST: self.limits.max_test_global,
+                ResourceClass.PACKAGE_INSTALL: self.limits.max_package_install_global,
+            }
+            limit = class_limits.get(resource_class)
+            if limit is not None and by_class.get(resource_class, 0) >= limit:
+                return f"{resource_class.value}_global_limit"
+
+        signal = BackpressureSignal(
+            cpu_percent=self._cpu_percent,
+            available_ram_percent=self._available_ram_percent,
+            overloaded=self._overloaded,
+            cpu_pause_percent=self.limits.cpu_pause_percent,
+            cpu_resume_percent=self.limits.cpu_resume_percent,
+            min_available_ram_percent=self.limits.min_available_ram_percent,
+            queued_count=sum(len(queue) for queue in self._waiting.values()),
+        )
+        level = scheduling_facade.backpressure_level(signal)
+        if not scheduling_facade.backpressure_admits(level, priority):
+            return f"backpressure_{level.value}"
+
+        extended = scheduling_facade.extended_denial_reason(
+            SlotRequest(
+                project_id=project_id,
+                pane_id=pane_id,
+                task_id=task_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                priority=priority,
+            ),
+            self._active_counts(),
+            self.slot_policy,
+        )
+        if extended:
+            return extended
         return ""
 
     def request_slot(
@@ -375,9 +464,20 @@ class ResourceGovernor:
         resource_class: ResourceClass,
         task_id: str,
         emit_on_deny: bool = True,
+        provider_id: str | None = None,
+        account_id: str | None = None,
+        priority: Priority = Priority.NORMAL,
     ) -> AdmissionDecision:
         with self._lock:
-            reason = self._denial_reason(project_id, resource_class)
+            reason = self._denial_reason(
+                project_id,
+                resource_class,
+                pane_id=pane_id,
+                task_id=task_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                priority=priority,
+            )
             if reason:
                 if emit_on_deny:
                     self._emit(
@@ -396,6 +496,8 @@ class ResourceGovernor:
                 task_id,
                 resource_class,
                 self._clock(),
+                provider_id=provider_id,
+                account_id=account_id,
             )
             self._tokens[token.token_id] = token
         self._emit(
@@ -433,6 +535,9 @@ class ResourceGovernor:
         resource_class: ResourceClass,
         reason: str = "",
         on_admitted: Callable[[ResourceToken], None] | None = None,
+        provider_id: str | None = None,
+        account_id: str | None = None,
+        priority: Priority = Priority.NORMAL,
     ) -> str:
         queued_at = self._clock()
         item = QueuedTask(
@@ -443,6 +548,9 @@ class ResourceGovernor:
             resource_class,
             queued_at,
             on_admitted,
+            provider_id=provider_id,
+            account_id=account_id,
+            priority=priority,
         )
         item.reason = reason
         item.last_gate_block_log_at = queued_at
@@ -525,6 +633,13 @@ class ResourceGovernor:
             if projects:
                 start = self._project_cursor % len(projects)
                 projects = projects[start:] + projects[:start]
+                # Phase 8a priority ordering (§8): a no-op stable re-sort
+                # while TAKKUB_V2_SCHEDULER is off (facade returns the list
+                # unchanged) — see core.scheduling.priority_queue.
+                projects = scheduling_facade.order_projects(
+                    projects,
+                    lambda pid: self._waiting[pid][0].priority,
+                )
             progress = True
             while projects and progress and (max_dispatch is None or len(admitted) < max_dispatch):
                 progress = False
@@ -553,6 +668,9 @@ class ResourceGovernor:
                         task_id=item.task_id,
                         resource_class=item.resource_class,
                         emit_on_deny=should_log,
+                        provider_id=item.provider_id,
+                        account_id=item.account_id,
+                        priority=item.priority,
                     )
                     if decision.allowed and decision.token is not None:
                         queue.popleft()

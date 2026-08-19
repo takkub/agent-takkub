@@ -6,6 +6,9 @@
 > และ **edge ที่ซ่อนอยู่** (ที่ import graph มองไม่เห็น) อยู่ตรงไหน — เพื่อไม่ให้ grep มั่วแล้วเดา.
 >
 > คู่กับ: `depgraph.json` (import map ระดับ module — ground truth, auto-refresh ทุก commit).
+>
+> **Core V2** (`agent_takkub.core.*`, epic #309): ไม่ใช่ god-file, เป็น package ใหม่ที่ยังไม่มีใครเรียก —
+> ดู `docs/v2/` (`V2_IMPLEMENTATION_PLAN.md` §1 module tree + §3 Phase 1) ไม่ใช่แผนที่นี้.
 
 ## สถานะ (refreshed 2026-07-11 — verified against source, not the old 2026-06-21 claim)
 

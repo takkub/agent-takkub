@@ -346,6 +346,33 @@ class TestCodexAdapter:
         assert result.error == "app-server RPC failed"
 
 
+class TestCodexAdapterConfigDir:
+    """epic #309 Phase 3b: `config_dir` scopes the app-server probe to one
+    account's isolated CODEX_HOME instead of whatever this process inherited."""
+
+    def _capture_popen_env(self, monkeypatch):
+        captured: dict = {}
+
+        def fake_popen(argv, **kwargs):
+            captured["env"] = kwargs.get("env")
+            raise OSError("stop before actually spawning — env capture only")
+
+        monkeypatch.setattr(pu, "_codex_executable", lambda: "/fake/codex")
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        return captured
+
+    def test_config_dir_sets_codex_home_in_subprocess_env(self, monkeypatch, tmp_path):
+        captured = self._capture_popen_env(monkeypatch)
+        result = pu.fetch_codex_usage(config_dir=tmp_path)
+        assert result.status == "error"
+        assert captured["env"]["CODEX_HOME"] == str(tmp_path)
+
+    def test_no_config_dir_inherits_process_env(self, monkeypatch):
+        captured = self._capture_popen_env(monkeypatch)
+        pu.fetch_codex_usage()
+        assert captured["env"] is None
+
+
 # ── gemini/agy adapter ────────────────────────────────────────────────────
 
 
@@ -625,6 +652,74 @@ class TestProviderUsageStore:
         store.refresh_now("claude")
         assert done.wait(timeout=2.0), "refresh_now() never triggered a fetch"
         assert seen_thread == ["usage-fetch-claude"]
+
+    # ── per-account (config_dir-scoped) cache — epic #309 Phase 3b ────────
+
+    def test_get_with_no_config_dir_reads_provider_level_cache_unchanged(self, monkeypatch):
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(provider=name, status="active"),
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude")
+        assert store.get("claude") is not None
+        assert store.get("claude", config_dir="/some/dir") is None
+
+    def test_fetch_one_with_config_dir_populates_account_scoped_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name, status="active", utilization=33.0
+            ),
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude", tmp_path)
+        cached = store.get("claude", config_dir=tmp_path)
+        assert cached is not None
+        assert cached.utilization == 33.0
+        # provider-level (no config_dir) cache stays untouched.
+        assert store.get("claude") is None
+
+    def test_refresh_now_with_config_dir_passes_it_through(self, tmp_path, monkeypatch):
+        seen: list[tuple] = []
+        done = threading.Event()
+
+        def fake_fetch_one(provider, config_dir=None):
+            seen.append((provider, config_dir))
+            done.set()
+
+        store = pu.ProviderUsageStore()
+        monkeypatch.setattr(store, "_fetch_one", fake_fetch_one)
+        store.refresh_now("codex", config_dir=tmp_path)
+        assert done.wait(timeout=2.0), "refresh_now() never triggered a fetch"
+        assert seen == [("codex", tmp_path)]
+
+
+class TestFetchProviderUsageConfigDir:
+    """`fetch_provider_usage(provider, config_dir=...)` dispatch — epic #309
+    Phase 3b."""
+
+    def test_claude_config_dir_forwarded_to_fetch_claude_usage(self, monkeypatch, tmp_path):
+        seen = {}
+
+        def fake_fetch_claude(config_dir=None):
+            seen["config_dir"] = config_dir
+            return pu.ProviderUsage(provider="claude", status="active")
+
+        monkeypatch.setitem(pu._CONFIG_DIR_AWARE_FETCHERS, "claude", fake_fetch_claude)
+        result = pu.fetch_provider_usage("claude", config_dir=tmp_path)
+        assert result.status == "active"
+        assert seen["config_dir"] == tmp_path
+
+    def test_provider_with_no_isolation_knob_ignores_config_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            pu, "fetch_gemini_usage", lambda: pu.ProviderUsage(provider="gemini", status="active")
+        )
+        monkeypatch.setitem(pu._FETCHERS, "gemini", pu.fetch_gemini_usage)
+        result = pu.fetch_provider_usage("gemini", config_dir=tmp_path)
+        assert result.status == "active"
 
 
 # ── ProviderUsageStore._loop ──────────────────────────────────────────────

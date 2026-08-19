@@ -797,6 +797,53 @@ def _restart_reason_suffix(restart_info: dict) -> str:
     return ""
 
 
+def _inject_v2_context(
+    task: str, project_ns: str | None, role_name: str, base_role_a: str, effective_provider: str
+) -> str:
+    """Core V2 Context Builder hook (#309 Phase 7c) —
+    `_assign_dispatch`'s call site. Flag OFF (default, `TAKKUB_V2_CONTEXT`)
+    short-circuits before any import, so `_assign_dispatch` stays byte-
+    identical; `task` is returned unchanged either way on any failure
+    (fail-open), including a `core.brain.facade.build_context_for_assign`
+    call that doesn't return within 300ms — a stuck/slow recall must never
+    delay a spawn, so it runs in a background thread with a hard timeout
+    rather than inline on this (the caller's) thread."""
+    try:
+        from .core.brain.flag import v2_context_enabled
+
+        if not v2_context_enabled():
+            return task
+
+        import concurrent.futures
+
+        from .core.brain.facade import build_context_for_assign
+        from .provider_spec import PROVIDER_REGISTRY
+
+        supports_file_read = PROVIDER_REGISTRY[effective_provider].supports_agent_file_read
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(
+                build_context_for_assign,
+                project_ns,
+                base_role_a,
+                task,
+                file_read_supported=supports_file_read,
+            )
+            try:
+                context_block = future.result(timeout=0.3)
+            except concurrent.futures.TimeoutError:
+                context_block = ""
+                _log_event("context_builder_timeout", role=role_name, project=project_ns)
+        finally:
+            # wait=False: a still-running worker must never block this
+            # (already-timed-out) call — see the docstring above.
+            executor.shutdown(wait=False)
+        return f"{task}\n\n{context_block}" if context_block else task
+    except Exception:
+        _log_event("context_builder_hook_error", role=role_name, project=project_ns)
+        return task
+
+
 class Orchestrator(
     PipelineMixin, LeadInboxMixin, LeadWaitMixin, SpawnEngineMixin, AutoResumeMixin, QObject
 ):
@@ -1461,6 +1508,56 @@ class Orchestrator(
             )
 
         session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+
+        # Core V2 Conversation hook (#309 Phase 6) — see done()'s identical
+        # comment. Subagents have no pane/PTY, so there is no cwd/session_id
+        # to pass through for transcript ingest; the note itself still gets
+        # recorded as a conversation message + rolling-summary update.
+        try:
+            from .core.conversation.flag import v2_conversation_enabled
+
+            if v2_conversation_enabled():
+                import threading
+
+                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
+
+                threading.Thread(
+                    target=_cv_on_pane_done,
+                    args=(project_ns, role_name),
+                    kwargs={"note": note, "failed": failed},
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "conversation_v2_hook_error",
+                role=role_name,
+                project=project_ns,
+                stage="subagent-done",
+            )
+
+        # Core V2 Second Brain Reflection hook (#309 Phase 7c) — see done()'s
+        # identical comment. Subagents never compute DigestFacts (no pane/PTY,
+        # no worktree git-state digest), so only the note-based heuristic
+        # candidate applies here.
+        try:
+            from .core.brain.flag import v2_brain_enabled
+
+            if v2_brain_enabled():
+                import threading
+
+                from .core.brain.facade import on_pane_done as _brain_on_pane_done
+
+                threading.Thread(
+                    target=_brain_on_pane_done,
+                    args=(project_ns, role_name),
+                    kwargs={"note": note, "failed": failed},
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "brain_v2_hook_error", role=role_name, project=project_ns, stage="subagent-done"
+            )
+
         body = note if failed else self._condense_done_note(note, note, "", session_path)
         notice = (
             self._build_verify_fail_handoff(role_name, note)
@@ -1817,6 +1914,7 @@ class Orchestrator(
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
+        task = _inject_v2_context(task, project_ns, role_name, base_role_a, effective_provider)
 
         plan_file = None
         delivery_task = task
@@ -3832,6 +3930,39 @@ class Orchestrator(
             project_ns, from_role, note, now=now, transcript_path=transcript_path
         )
 
+        # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
+        # circuits before any import, so done() stays byte-identical; flag ON
+        # runs in a background thread (I/O must never land on the Qt main
+        # thread) and is fail-open around both the flag check and the thread
+        # body itself (core.conversation.facade.on_pane_done already wraps
+        # its own body in try/except, this is belt-and-suspenders).
+        try:
+            from .core.conversation.flag import v2_conversation_enabled
+
+            if v2_conversation_enabled():
+                import threading
+
+                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
+                from .provider_config import effective_provider_for as _cv_provider_for
+
+                threading.Thread(
+                    target=_cv_on_pane_done,
+                    args=(project_ns, from_role),
+                    kwargs={
+                        "note": raw_note,
+                        "failed": failed,
+                        "task_id": had_task_id,
+                        "provider_id": _cv_provider_for(from_role, project_ns),
+                        "cwd": getattr(pane, "_session_cwd", None),
+                        "session_id": _ps_done.session_uuid,
+                    },
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "conversation_v2_hook_error", role=from_role, project=project_ns, stage="done"
+            )
+
         # notify Lead in the same project (a teammate in project-a mustn't
         # nudge the Lead in project-b by mistake). `done --fail` swaps the plain
         # done notice for a fix-loop proposal prompt (feedback routing MVP) —
@@ -3940,6 +4071,38 @@ class Orchestrator(
                     files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
                 )
                 _worktree_digest_precomputed = None
+
+        # Core V2 Second Brain Reflection hook (#309 Phase 7c) — flag OFF
+        # (default, `TAKKUB_V2_BRAIN`) short-circuits before any import, so
+        # done() stays byte-identical; flag ON runs in a background thread
+        # (fail-open around both the flag check and the thread body itself —
+        # `core.brain.facade.on_pane_done` already wraps its own body in
+        # try/except, belt-and-suspenders). Placed after `digest_facts` is
+        # finalized (both the happy path and its except-fallback above) so
+        # the cockpit-measured facts are available to fold in alongside the
+        # agent's own note.
+        try:
+            from .core.brain.flag import v2_brain_enabled
+
+            if v2_brain_enabled():
+                import threading
+
+                from .core.brain.facade import on_pane_done as _brain_on_pane_done
+
+                threading.Thread(
+                    target=_brain_on_pane_done,
+                    args=(project_ns, from_role),
+                    kwargs={
+                        "note": raw_note,
+                        "digest_facts": digest_facts,
+                        "failed": failed,
+                        "task_id": had_task_id,
+                    },
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event("brain_v2_hook_error", role=from_role, project=project_ns, stage="done")
+
         # #280: fold everything the watchdogs observed about this pane into
         # its own report instead of having interrupted Lead with each
         # observation as it happened (slow boot, unconfirmed paste, degrade +

@@ -51,27 +51,15 @@ class Finding:
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
-    """Run *argv* with timeout=5. Returns (returncode, combined output)."""
-    from ._win_console import SUBPROCESS_NO_WINDOW
+    """Run *argv* with timeout=5. Returns (returncode, combined output).
 
-    try:
-        r = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        out = (r.stdout or "").strip() or (r.stderr or "").strip()
-        return r.returncode, out
-    except FileNotFoundError:
-        return 1, f"not found: {argv[0]}"
-    except subprocess.TimeoutExpired:
-        return 1, "timed out"
-    except Exception as e:
-        return 1, str(e)
+    Moved to `agent_takkub.provider_probe.run_probe` (#309 Phase 4) so
+    `core.versioning.detector` shares the exact same subprocess-probe
+    behavior; kept as a thin re-export here so this module's ~40 existing
+    call sites are untouched."""
+    from .provider_probe import run_probe
+
+    return run_probe(argv, timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -1161,7 +1149,7 @@ def check_installed_integrity() -> list[Finding]:
                 "assets-skill-files",
                 Status.WARN,
                 f"no SKILL.md files under {SKILLS_DIR}",
-                "reinstall — the wheel shipped with no default .claude/skills bundle "
+                "reinstall — the wheel shipped with no default skill bundle "
                 "(New Role / Skill Catalog pickers will show no built-in skills)",
             )
         )
@@ -1198,6 +1186,60 @@ def check_installed_integrity() -> list[Finding]:
             )
         )
 
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [capability-hub] — Phase 5a skill store migration (epic #309)
+# ---------------------------------------------------------------------------
+
+
+def check_capability_skill_store() -> list[Finding]:
+    """[capability-hub] — Phase 5a: the shipped skill store's new location
+    (`capabilities/skills/`) plus the `.claude/skills` discovery surface
+    every reader (claude's Skill tool, `skill_scan.scan_skills`) still
+    depends on. Unlike `check_installed_integrity`, this runs on BOTH dev
+    checkouts and installed builds — the surface-link mechanism applies to
+    both (`config.ASSETS_ROOT == REPO_ROOT` for a dev checkout doesn't
+    change that `.claude/skills/<name>` must still resolve)."""
+    from .config import SKILLS_DIR
+    from .core.capabilities.skill_store import ensure_shipped_skill_surface, shipped_skills_root
+
+    findings: list[Finding] = []
+    real_root = shipped_skills_root()
+    if real_root.is_dir():
+        findings.append(
+            Finding("capability-hub", "skill-store-location", Status.OK, str(real_root))
+        )
+        errors = ensure_shipped_skill_surface()
+        if errors:
+            findings.append(
+                Finding(
+                    "capability-hub",
+                    "skill-store-surface",
+                    Status.WARN,
+                    f"{len(errors)} skill link issue(s): {errors[0]}",
+                    "check filesystem permissions for the .claude/skills surface dir",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "capability-hub",
+                    "skill-store-surface",
+                    Status.OK,
+                    f".claude/skills surface linked to {real_root}",
+                )
+            )
+    else:
+        findings.append(
+            Finding(
+                "capability-hub",
+                "skill-store-location",
+                Status.INFO,
+                f"legacy layout — no {real_root}, reading {SKILLS_DIR} directly",
+            )
+        )
     return findings
 
 
@@ -1335,23 +1377,17 @@ def check_editable_install() -> list[Finding]:
 
 
 def _resolve_provider_bin(spec) -> str | None:
-    """Resolve `spec`'s binary via the SAME custom_discovery_fn the cockpit
-    uses at spawn time — e.g. gemini's `find_agy_executable()` falls back to
-    %LOCALAPPDATA%\\agy\\bin when the installer didn't register PATH, so
-    doctor doesn't falsely report "not installed" for a role that actually
-    works. Shared by check_providers() (version/install-state) and
-    check_provider_auth() (#248/#247 round 2) so both agree on whether a
-    provider is installed at all."""
-    try:
-        if spec.custom_discovery_fn is not None:
-            return spec.custom_discovery_fn()
-    except Exception:
-        pass
-    for name in spec.binary_names or (spec.name,):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
+    """Resolve `spec`'s binary — shared by check_providers()
+    (version/install-state) and check_provider_auth() (#248/#247 round 2) so
+    both agree on whether a provider is installed at all.
+
+    Moved to `agent_takkub.provider_probe.resolve_provider_bin` (#309 Phase
+    4) so `core.versioning.detector` uses the identical resolution logic
+    instead of a second, independently-drifting copy; kept as a thin
+    re-export here for the existing call sites."""
+    from .provider_probe import resolve_provider_bin
+
+    return resolve_provider_bin(spec)
 
 
 def check_providers() -> list[Finding]:
@@ -1510,6 +1546,76 @@ def check_provider_auth() -> list[Finding]:
                 spec.post_install_note or f"run the {provider} CLI once to verify sign-in manually",
             )
         )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [secrets]
+# ---------------------------------------------------------------------------
+
+
+def check_secret_backend() -> list[Finding]:
+    """[secrets/*-backend] — added alongside `check_provider_auth()` (never
+    replacing it), Phase 3 (epic #309): reports which `core.secrets`
+    backend each installed provider resolves to, and whether that backend
+    actually finds a credential. Same installed-provider filtering as
+    `check_provider_auth()` via `_resolve_provider_bin`, so an uninstalled
+    provider is skipped exactly like it is there (check_providers() already
+    reports install state)."""
+    from .core.secrets.backends import BackendStatus
+    from .core.secrets.manager import default_backends
+    from .provider_spec import PROVIDER_REGISTRY
+
+    findings: list[Finding] = []
+    backends = default_backends()
+    for provider, spec in PROVIDER_REGISTRY.items():
+        if _resolve_provider_bin(spec) is None:
+            continue  # not installed — check_providers() already reports this
+        backend = backends.get(provider)
+        if backend is None:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.INFO,
+                    "no secret backend registered yet — credential location unconfirmed (#309)",
+                )
+            )
+            continue
+        try:
+            status = backend.status("default")
+        except Exception as e:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.WARN,
+                    f"check errored: {type(e).__name__}: {e}",
+                )
+            )
+            continue
+        detail = f"backend={backend.name}"
+        if status is BackendStatus.FOUND:
+            findings.append(Finding("secrets", f"{provider}-backend", Status.OK, detail))
+        elif status is BackendStatus.MISSING:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.WARN,
+                    f"{detail} — credential not found",
+                    f"run the {provider} CLI once to sign in",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "secrets",
+                    f"{provider}-backend",
+                    Status.INFO,
+                    f"{detail} — unavailable on this platform",
+                )
+            )
     return findings
 
 
@@ -2213,6 +2319,133 @@ def check_provider_isolation() -> list[Finding]:
     return findings
 
 
+def check_core_version_compat() -> list[Finding]:
+    """[version/*] — Core V2 Schema/Adapter/Compat verdict per provider
+    (#309 Phase 4): detected CLI version vs `core.versioning.compatibility`,
+    plus a live-store schema fingerprint from `core.versioning.probe`.
+
+    Deliberately NOT part of `run_all_checks()`'s default tuple — opt-in
+    only via `takkub doctor --core-version` (cli.cmd_doctor), the same
+    pattern `check_spawn_queue_live`/`check_remote_mirror_live` already use
+    for "--live" — so a plain `takkub doctor` stays byte-identical to
+    before this landed (project rule: every new connection point to
+    existing behavior sits behind a flag that leaves the old path
+    untouched when off). Never FAILs: an unregistered/unparseable provider
+    is INFO, not a broken machine.
+    """
+    try:
+        from .core.versioning.compatibility import DEFAULT_MATRIX, CompatVerdict
+        from .core.versioning.detector import ProviderVersionDetector
+        from .core.versioning.probe import probe_store
+        from .provider_spec import PROVIDER_REGISTRY
+    except Exception as e:
+        return [Finding("version", "core-v2", Status.INFO, f"core.versioning unavailable: {e}")]
+
+    findings: list[Finding] = []
+    detector = ProviderVersionDetector()
+    for provider in PROVIDER_REGISTRY:
+        detected = detector.detect(provider)
+        ev = DEFAULT_MATRIX.evaluate(provider, detected.version_text)
+        shown = detected.version_text or "(not detected)"
+        if ev.verdict == CompatVerdict.OK:
+            findings.append(Finding("version", f"{provider}-compat", Status.OK, shown))
+        elif ev.verdict == CompatVerdict.BELOW_MIN:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-compat",
+                    Status.WARN,
+                    f"{shown} (below calibrated minimum)",
+                )
+            )
+        elif ev.verdict == CompatVerdict.ABOVE_MAX:
+            findings.append(
+                Finding(
+                    "version", f"{provider}-compat", Status.WARN, f"{shown} (above calibrated max)"
+                )
+            )
+        elif ev.verdict == CompatVerdict.UNKNOWN:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-compat",
+                    Status.INFO,
+                    f"{shown} (version string unparseable)",
+                )
+            )
+        else:
+            findings.append(
+                Finding("version", f"{provider}-compat", Status.INFO, f"{shown} (not calibrated)")
+            )
+
+        probe = probe_store(provider)
+        if probe.found:
+            findings.append(
+                Finding(
+                    "version",
+                    f"{provider}-store",
+                    Status.INFO,
+                    f"live store found — schema fingerprint: {len(probe.fingerprint)} keys/tables",
+                )
+            )
+        else:
+            findings.append(
+                Finding("version", f"{provider}-store", Status.SKIP, probe.note or "no store found")
+            )
+    return findings
+
+
+def check_storage_layout_state() -> list[Finding]:
+    """[storage-layout/*] — V1/V2/mixed layout state (#309 Phase 8b) +
+    which legacy files are still sitting unmigrated.
+
+    Deliberately NOT part of `run_all_checks()`'s default tuple — opt-in
+    only via `takkub doctor --storage-layout`, same "--live"/"--core-
+    version" pattern this module already uses, so a plain `takkub doctor`
+    stays byte-identical to before this landed. Never FAILs — a V1-only
+    machine (every install today) is OK, not broken.
+    """
+    try:
+        from .core.storage.layout import LEGACY_MAPPING, layout_state, storage_layout_v2
+    except Exception as e:
+        return [
+            Finding(
+                "storage-layout", "core-v2", Status.INFO, f"core.storage.layout unavailable: {e}"
+            )
+        ]
+
+    state = layout_state()
+    findings = [
+        Finding(
+            "storage-layout",
+            "state",
+            Status.OK,
+            f"{state} — {storage_layout_v2().root}",
+        )
+    ]
+    if state == "v1":
+        findings.append(
+            Finding(
+                "storage-layout",
+                "ladder",
+                Status.INFO,
+                f"{len({e.ladder_step for e in LEGACY_MAPPING if e.ladder_step > 0})} ladder step(s) "
+                "not yet applied — `takkub migrate inspect` for detail",
+            )
+        )
+    elif state == "mixed":
+        findings.append(
+            Finding(
+                "storage-layout",
+                "legacy-leftover",
+                Status.INFO,
+                "V2 layout exists alongside V1 files — expected until the deprecation ladder "
+                "(plan §2, Phase 10) removes V1; not itself a problem",
+            )
+        )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
@@ -2223,6 +2456,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mini_browser", check_mini_browser),
         ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
+        ("check_capability_skill_store", check_capability_skill_store),
         ("check_editable_install", check_editable_install),
         ("check_arch", check_arch),
         ("check_qt", check_qt),
@@ -2232,6 +2466,7 @@ def run_all_checks() -> list[Finding]:
         ("check_providers", check_providers),
         ("check_provider_isolation", check_provider_isolation),
         ("check_provider_auth", check_provider_auth),
+        ("check_secret_backend", check_secret_backend),
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),

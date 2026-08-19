@@ -1462,6 +1462,16 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         findings += check_remote_mirror_live(mirror_resp)
         findings += check_performance_live(performance_resp)
 
+    if getattr(args, "core_version", False):
+        from .doctor import check_core_version_compat
+
+        findings += check_core_version_compat()
+
+    if getattr(args, "storage_layout", False):
+        from .doctor import check_storage_layout_state
+
+        findings += check_storage_layout_state()
+
     if args.json:
         import json as _json
 
@@ -1486,6 +1496,51 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     n_fail = sum(1 for f in findings if f.status == Status.FAIL)
     ok = n_fail == 0
     return {"ok": ok, "msg": f"{n_fail} fail(s)" if not ok else "all checks passed"}
+
+
+def cmd_migrate(args: argparse.Namespace) -> dict:
+    """`takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` — Core
+    V2 storage migration (#309 Phase 4, docs/v2/V2_IMPLEMENTATION_PLAN.md
+    §5). Pure-local, same rationale as `takkub worktree`/`takkub doctor`: no
+    orchestrator socket needed, works with the cockpit closed."""
+    from .core.migration.engine import MigrationEngine
+
+    engine = MigrationEngine()
+    dispatch = {
+        "inspect": engine.inspect,
+        "plan": engine.plan,
+        "dry-run": engine.dry_run,
+        "apply": engine.apply,
+        "validate": engine.validate,
+        "rollback": engine.rollback,
+    }
+    reports = dispatch[args.migrate_cmd]()
+
+    if args.json:
+        import json as _json
+
+        _utf8_print(
+            _json.dumps(
+                [
+                    {
+                        "step_id": r.step_id,
+                        "stage": r.stage,
+                        "ok": r.ok,
+                        "summary": r.summary,
+                        "detail": r.detail,
+                    }
+                    for r in reports
+                ],
+                indent=2,
+            )
+        )
+    else:
+        for r in reports:
+            icon = "✓" if r.ok else "✗"
+            _utf8_print(f"  {icon} [{r.step_id}] {r.summary}")
+
+    ok = all(r.ok for r in reports)
+    return {"ok": ok, "msg": "ok" if ok else "one or more steps failed"}
 
 
 def cmd_provider(args: argparse.Namespace) -> dict:
@@ -2806,7 +2861,37 @@ def main(argv: list[str] | None = None) -> int:
         help="also query the running cockpit for spawn-queue wedge state (#141); "
         "skipped (not failed) when the cockpit isn't running",
     )
+    sdoc.add_argument(
+        "--core-version",
+        action="store_true",
+        help="also run Core V2 Schema/Adapter/Compat checks per provider (#309 Phase 4); "
+        "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
+    sdoc.add_argument(
+        "--storage-layout",
+        action="store_true",
+        help="also report V1/V2/mixed storage layout state (#309 Phase 8b); "
+        "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
     sdoc.set_defaults(func=cmd_doctor)
+
+    smig = sub.add_parser(
+        "migrate",
+        help="Core V2 storage migration: inspect/plan/dry-run/apply/validate/rollback (#309 Phase 4)",
+    )
+    smig_sub = smig.add_subparsers(dest="migrate_cmd", required=True)
+    smig_help = {
+        "inspect": "V1 อะไรอยู่ตรงไหน, schema version เท่าไหร่ (read-only)",
+        "plan": "จะย้ายอะไรไปไหน (ไม่แตะดิสก์)",
+        "dry-run": "จำลอง apply แบบเต็ม ไม่เขียนดิสก์จริง",
+        "apply": "ทำจริง + journal (copy-never-move)",
+        "validate": "cross-check V2 กับ V1 ที่ยังอยู่",
+        "rollback": "ย้อนจาก journal + backup",
+    }
+    for _name, _help in smig_help.items():
+        _p = smig_sub.add_parser(_name, help=_help)
+        _p.add_argument("--json", action="store_true", help="emit JSON instead of text report")
+        _p.set_defaults(func=cmd_migrate)
 
     sprv = sub.add_parser(
         "provider",

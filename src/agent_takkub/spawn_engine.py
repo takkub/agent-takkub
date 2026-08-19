@@ -185,6 +185,37 @@ def _resolve_teammate_effort(base_role: str, spec: ProviderSpec, model: str) -> 
     return _teammate_tier(base_role)[1]
 
 
+def _apply_v2_account_env_override(
+    env: dict, provider_id: str, project_ns: str, role_name: str
+) -> None:
+    """epic #309 Phase 3b: when `TAKKUB_V2_ROUTER` is on, resolve which
+    `ProviderAccount` should back this spawn (`core.accounts.resolve_account_for`
+    — a real V2 pool if one is registered, else the same legacy profile
+    `inject_user_profile_env`/`inject_provider_home_env` already used) and
+    let it override `CLAUDE_CONFIG_DIR`/`CODEX_HOME` in *env*.
+
+    Flag off: this function isn't called at all (both call sites gate on
+    `v2_router_enabled()` first) — zero behavior change, same as
+    `core.routing.facade`'s pattern. Flag on with no V2 pool configured:
+    resolves to the SAME account the legacy injectors already picked, so
+    `env` ends up unchanged in practice until a pool actually exists.
+    Fail-open: any exception leaves *env* exactly as the legacy injectors
+    left it — this must never block a spawn.
+    """
+    try:
+        from .core.accounts import resolve_account_for
+        from .core.providers import account_env_overrides
+
+        account = resolve_account_for(provider_id, project_ns, role_name)
+        env.update(account_env_overrides(provider_id, account))
+    except Exception:
+        _log.exception(
+            "core.accounts env override failed for provider=%r role=%r (fail-open)",
+            provider_id,
+            role_name,
+        )
+
+
 _CURRENT_TASK_BEGIN = "\n\n<!-- takkub-current-spawn-task:start -->"
 _CURRENT_TASK_END = "<!-- takkub-current-spawn-task:end -->"
 _CURRENT_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
@@ -335,7 +366,21 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
     name collision), plus the cockpit's own checkout as a fallback (same
     roots `settings_window._new_role_skill_roots` scans, so the Skill
     Matrix and the actual spawn-time injection agree on what "exists").
+
+    Best-effort (re)creates the shipped-skill surface first (Phase 5a,
+    epic #309): the cockpit's own checkout's real skill files now live
+    under `capabilities/skills/`, and `scan_skills` — called against
+    `REPO_ROOT` below, unchanged — still only ever looks under
+    `.claude/skills/`, so every spawn must repair that junction/symlink
+    surface before scanning or a moved/renamed skill would silently stop
+    being discovered. Never blocks a spawn on a link failure.
     """
+    try:
+        from .core.capabilities.skill_store import ensure_shipped_skill_surface
+
+        ensure_shipped_skill_surface()
+    except Exception:
+        _log.exception("could not repair shipped-skill surface; spawning without it")
     roots = list(_allowed_project_roots(project_ns)) if project_ns else []
     roots.append(REPO_ROOT)
     return roots
@@ -1453,14 +1498,19 @@ class SpawnEngineMixin:
         # append-system-prompt flag. Marking it pending above the gate/FIFO
         # returns lets deferred spawns retain the task without adding it to a
         # long PTY paste or command-line argument.
-        from .provider_config import CLAUDE, effective_provider_for
+        from .core.routing import effective_provider_for_v2
+        from .provider_config import CLAUDE
         from .provider_spec import PROVIDER_REGISTRY
 
         _ps_initial = self._ps(_exit_key(project_ns, role_name))
         # #248/#247 round 2: a pane-scoped degrade (no-content watchdog gave
         # up on this role's real provider after a retry) wins over the
         # normal config/availability resolution — see PaneState.provider_override.
-        effective_provider = _ps_initial.provider_override or effective_provider_for(
+        # epic #309 Phase 3: routed through core.routing's façade instead of
+        # calling provider_config.effective_provider_for directly — this is
+        # THE single connection point TAKKUB_V2_ROUTER gates (off by default,
+        # byte-identical to the direct call; see core/routing/facade.py).
+        effective_provider = _ps_initial.provider_override or effective_provider_for_v2(
             base_role, project=project_ns
         )
         if (
@@ -1837,6 +1887,10 @@ class SpawnEngineMixin:
             except Exception:
                 _log.exception("provider home seeding failed for %s", spec.name)
             inject_provider_home_env(env, spec.name)
+            from .core.routing.flag import v2_router_enabled
+
+            if v2_router_enabled():
+                _apply_v2_account_env_override(env, spec.name, project_ns, role_name)
             bin_dir = str(CLI_BIN_DIR)
             if spec.prepend_bin_dir_to_path:
                 provider_dir = os.path.dirname(provider_bin)
@@ -2332,6 +2386,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
+        from .core.routing.flag import v2_router_enabled
+
+        if v2_router_enabled():
+            _apply_v2_account_env_override(env, CLAUDE, project_ns, role_name)
         # Shard env: let the agent know its instance identity vs behaviour identity.
         # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)
         # TAKKUB_SHARD     = this shard's 1-based index (None-string when not a shard)

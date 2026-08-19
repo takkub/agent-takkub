@@ -15,6 +15,7 @@ from agent_takkub.doctor import (
     Finding,
     Status,
     check_arch,
+    check_capability_skill_store,
     check_claude,
     check_editable_install,
     check_graft,
@@ -907,6 +908,76 @@ class TestCheckInstalledIntegrity:
 
 
 # ---------------------------------------------------------------------------
+# check_capability_skill_store — Phase 5a skill store migration (#309)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCapabilitySkillStore:
+    def test_legacy_layout_reports_info(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No `capabilities/skills` dir at all — legacy layout, no surface
+        to repair; INFO not FAIL/WARN (never a hard break)."""
+        import agent_takkub.config as config_mod
+
+        assets_root = tmp_path / "assets"
+        legacy_skills = assets_root / ".claude" / "skills" / "some-skill"
+        legacy_skills.mkdir(parents=True)
+        (legacy_skills / "SKILL.md").write_text("# some-skill", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / ".claude" / "skills")
+
+        findings = check_capability_skill_store()
+
+        assert len(findings) == 1
+        assert findings[0].name == "skill-store-location"
+        assert findings[0].status == Status.INFO
+
+    def test_new_layout_links_surface_and_reports_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        assets_root = tmp_path / "assets"
+        real_skill = assets_root / "capabilities" / "skills" / "debug-mantra"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / "capabilities" / "skills")
+
+        findings = check_capability_skill_store()
+
+        names = {f.name: f for f in findings}
+        assert names["skill-store-location"].status == Status.OK
+        assert names["skill-store-surface"].status == Status.OK
+        surface = assets_root / ".claude" / "skills" / "debug-mantra"
+        assert surface.is_dir()
+        assert (surface / "SKILL.md").is_file()
+
+    def test_surface_link_failure_reports_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+        from agent_takkub.core.capabilities import skill_store as skill_store_mod
+
+        assets_root = tmp_path / "assets"
+        real_skill = assets_root / "capabilities" / "skills" / "debug-mantra"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", assets_root / "capabilities" / "skills")
+        monkeypatch.setattr(
+            skill_store_mod, "ensure_shipped_skill_surface", lambda: ["debug-mantra: boom"]
+        )
+
+        findings = check_capability_skill_store()
+
+        names = {f.name: f for f in findings}
+        assert names["skill-store-surface"].status == Status.WARN
+        assert "boom" in names["skill-store-surface"].detail
+
+
+# ---------------------------------------------------------------------------
 # check_editable_install — dev-checkout shared editable install (#202)
 # ---------------------------------------------------------------------------
 
@@ -1026,36 +1097,45 @@ class TestCheckEditableInstall:
 
 
 class TestRunAllChecks:
-    def test_returns_list_of_findings(self) -> None:
-        with (
-            patch(
-                "agent_takkub.doctor.check_claude",
-                return_value=[Finding("claude", "binary", Status.OK)],
-            ),
-            patch(
-                "agent_takkub.doctor.check_runtime",
-                return_value=[Finding("runtime", "node", Status.OK)],
-            ),
-            patch("agent_takkub.doctor.check_installed_integrity", return_value=[]),
-            patch("agent_takkub.doctor.check_env_path", return_value=[]),
-            patch("agent_takkub.doctor.check_npm_registry", return_value=[]),
-            patch("agent_takkub.doctor.check_mini_browser", return_value=[]),
-            patch("agent_takkub.doctor.check_graft", return_value=[]),
-            patch("agent_takkub.doctor.check_arch", return_value=[]),
-            patch("agent_takkub.doctor.check_qt", return_value=[]),
-            patch("agent_takkub.doctor.check_plugins", return_value=[]),
-            patch("agent_takkub.doctor.check_mcps", return_value=[]),
-            patch("agent_takkub.doctor.check_projects", return_value=[]),
-            patch("agent_takkub.doctor.check_providers", return_value=[]),
-            patch("agent_takkub.doctor.check_provider_isolation", return_value=[]),
-            patch("agent_takkub.doctor.check_provider_auth", return_value=[]),
-            patch("agent_takkub.doctor.check_hooks", return_value=[]),
-            patch("agent_takkub.doctor.check_hook_wiring", return_value=[]),
-            patch("agent_takkub.doctor.check_ready_markers", return_value=[]),
-            patch("agent_takkub.doctor.check_version", return_value=[]),
-            patch("agent_takkub.doctor.check_editable_install", return_value=[]),
-        ):
-            findings = run_all_checks()
+    def test_returns_list_of_findings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `unittest.mock.patch` as one big `with (...)` hit CPython's 20-block
+        # nesting limit once check_secret_backend joined the roster
+        # (SyntaxError: too many statically nested blocks) — monkeypatch.setattr
+        # sets each attribute procedurally instead of opening a context-manager
+        # block per check, so the count here has no such ceiling.
+        no_findings = (
+            "check_installed_integrity",
+            "check_capability_skill_store",
+            "check_env_path",
+            "check_npm_registry",
+            "check_mini_browser",
+            "check_graft",
+            "check_arch",
+            "check_qt",
+            "check_plugins",
+            "check_mcps",
+            "check_projects",
+            "check_providers",
+            "check_provider_isolation",
+            "check_provider_auth",
+            "check_secret_backend",
+            "check_hooks",
+            "check_hook_wiring",
+            "check_ready_markers",
+            "check_version",
+            "check_editable_install",
+        )
+        for name in no_findings:
+            monkeypatch.setattr(f"agent_takkub.doctor.{name}", lambda: [])
+        monkeypatch.setattr(
+            "agent_takkub.doctor.check_claude",
+            lambda: [Finding("claude", "binary", Status.OK)],
+        )
+        monkeypatch.setattr(
+            "agent_takkub.doctor.check_runtime",
+            lambda: [Finding("runtime", "node", Status.OK)],
+        )
+        findings = run_all_checks()
 
         assert isinstance(findings, list)
         assert all(isinstance(f, Finding) for f in findings)

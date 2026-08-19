@@ -134,16 +134,23 @@ def _stage_assets() -> None:
             f"under {docs_lead_src}: {', '.join(missing_docs)}"
         )
 
-    # Default skill bundle (.claude/skills/<name>/SKILL.md) — supplementary
-    # reference material for the New Role / Skill Catalog pickers, unlike
-    # CLAUDE.md/agents it's not required for a pane to spawn, so a
-    # missing/empty .claude/skills degrades to "no bundled skills shipped"
-    # instead of failing the build.
-    skills_src = _ROOT / ".claude" / "skills"
+    # Default skill bundle — supplementary reference material for the New
+    # Role / Skill Catalog pickers, unlike CLAUDE.md/agents it's not
+    # required for a pane to spawn, so a missing/empty store degrades to
+    # "no bundled skills shipped" instead of failing the build. Phase 5a
+    # (epic #309 Capability Hub): real storage moved from
+    # `.claude/skills/` to `capabilities/skills/` (provider-neutral, see
+    # `config._resolve_skills_dir`) — `.claude/skills` at repo root is
+    # kept only as a runtime junction/symlink surface, so staging must
+    # read the NEW path; a legacy repo checkout that hasn't migrated yet
+    # falls back to the old path so the build never silently ships empty.
+    skills_src = _ROOT / "capabilities" / "skills"
+    if not skills_src.is_dir():
+        skills_src = _ROOT / ".claude" / "skills"
     if skills_src.is_dir():
         skill_files = sorted(skills_src.glob("*/SKILL.md"))
         if skill_files:
-            skills_dst = _ASSETS / ".claude" / "skills"
+            skills_dst = _ASSETS / "capabilities" / "skills"
             for f in skill_files:
                 dst = skills_dst / f.parent.name / f.name
                 dst.parent.mkdir(parents=True, exist_ok=True)

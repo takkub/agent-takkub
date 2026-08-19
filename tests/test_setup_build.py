@@ -100,14 +100,14 @@ class TestStageAssets:
 
         setup_mod._stage_assets()
 
-        staged = setup_mod._ASSETS / ".claude" / "skills" / "debug-mantra" / "SKILL.md"
+        staged = setup_mod._ASSETS / "capabilities" / "skills" / "debug-mantra" / "SKILL.md"
         assert staged.read_text(encoding="utf-8") == "# debug-mantra"
 
     def test_missing_skills_dir_does_not_raise(self, fake_root: Path) -> None:
         # Unlike CLAUDE.md/agents, the skill bundle is optional — a repo/sdist
         # tree with no .claude/skills still builds a valid wheel.
         setup_mod._stage_assets()
-        assert not (setup_mod._ASSETS / ".claude" / "skills").exists()
+        assert not (setup_mod._ASSETS / "capabilities" / "skills").exists()
 
     def test_ignores_flat_md_files_in_skills_dir(self, fake_root: Path) -> None:
         # Staging only follows the real Claude Code skill layout
@@ -119,7 +119,7 @@ class TestStageAssets:
 
         setup_mod._stage_assets()
 
-        assert not (setup_mod._ASSETS / ".claude" / "skills" / "README.md").exists()
+        assert not (setup_mod._ASSETS / "capabilities" / "skills" / "README.md").exists()
 
     def test_stages_docs_lead_files(self, fake_root: Path) -> None:
         docs_lead = fake_root / "docs" / "lead"
