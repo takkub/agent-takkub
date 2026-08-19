@@ -449,7 +449,14 @@ def fetch_gemini_usage() -> ProviderUsage:
     fast enough it would rarely matter.
     """
     primary_dir = _antigravity_authorized_cache_dir()
-    if not str(primary_dir).startswith(str(Path.home())):
+    # Only widen discovery when the primary is the real default location.
+    # A redirected primary (tests, or a future per-account config_dir) must
+    # stay scoped — a "startswith(home)" guard is not enough on Windows
+    # where pytest's tmp_path itself lives under the user's home.
+    if (
+        primary_dir
+        != Path.home() / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized"
+    ):
         dirs_to_check = [primary_dir]
     else:
         dirs_to_check = [primary_dir] + [

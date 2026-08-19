@@ -687,6 +687,8 @@ def _warn_if_data_home_unwritable() -> None:
         box.exec()
     except Exception:
         _boot_log(f"DATA_HOME not writable: {detail}")
+
+
 def _set_macos_app_name(name: str = "agent-takkub") -> None:
     """Set native macOS application/process name so the top menu bar (next to
     the Apple logo) displays 'agent-takkub' instead of generic 'Python' / 'python3.x'."""
