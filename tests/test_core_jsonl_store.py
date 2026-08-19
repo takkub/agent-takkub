@@ -178,6 +178,21 @@ import agent_takkub.core.conversation.ingest.claude_adapter
 import agent_takkub.core.conversation.ingest.codex_adapter
 import agent_takkub.core.conversation.ingest.gemini_adapter
 import agent_takkub.core.conversation.ingest.opencode_adapter
+import agent_takkub.core.brain
+import agent_takkub.core.brain.flag
+import agent_takkub.core.brain.candidate
+import agent_takkub.core.brain.store
+import agent_takkub.core.brain.pipeline
+import agent_takkub.core.brain.retrieval
+import agent_takkub.core.brain.adapter
+import agent_takkub.core.brain.facade
+import agent_takkub.core.brain.context_builder
+import agent_takkub.core.brain.sources
+import agent_takkub.core.brain.sources.role_memory_source
+import agent_takkub.core.brain.sources.knowledge_source
+import agent_takkub.core.brain.sources.decision_note_source
+import agent_takkub.core.brain.sources.digest_facts_source
+import agent_takkub.core.brain.sources.reflection_source
 
 qt_modules = [m for m in sys.modules if m.startswith("PyQt6")]
 print(",".join(qt_modules))
