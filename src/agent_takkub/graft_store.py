@@ -58,6 +58,7 @@ import json
 import shutil
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from .config import DATA_HOME, REPO_ROOT
@@ -72,6 +73,12 @@ from .config import DATA_HOME, REPO_ROOT
 # the un-truncated 64-char digests, and a default Windows 11 install has
 # LongPathsEnabled=0, unlike this dev machine).
 _KEY_HEX_LEN = 16
+
+
+@lru_cache(maxsize=2048)
+def _resolved_path_for_key(absolute_path: str) -> str:
+    """Resolve one lexical absolute path once for repeated key lookups."""
+    return str(Path(absolute_path).resolve())
 
 
 def _normalize_for_key(target: Path) -> str:
@@ -98,8 +105,11 @@ def _normalize_for_key(target: Path) -> str:
     accepted here the same way `_instance_key` already accepts a comparable
     one.
     """
-    resolved = target.expanduser().resolve()
-    s = str(resolved)
+    # ``absolute()`` is lexical (no stat/realpath syscall) and makes a
+    # relative path's cwd part of the cache key, so a later call from another
+    # cwd cannot reuse the wrong resolved path.
+    absolute = target.expanduser().absolute()
+    s = _resolved_path_for_key(str(absolute))
     if sys.platform in ("win32", "darwin"):
         s = s.lower()
     return s

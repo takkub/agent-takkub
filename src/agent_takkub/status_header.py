@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -32,16 +32,39 @@ from . import cockpit_theme
 # every 2s timer tick AND every `orch.statusChanged` emission (reviewer
 # measured 14.4ms/call at 46 project dirs; worse, `is_dir()` on a
 # disconnected mapped drive blocks for the SMB timeout, on the GUI thread).
-# Two module-level caches fix the shape without touching the GUI-thread
-# constraint: the CLI path never changes mid-session (resolved once), and
-# the rest of the snapshot is cheap enough to redo only every 10s — chip
-# granularity doesn't need 2s resolution. `_reset_graft_caches()` is the
-# test-only escape hatch so each test's fresh monkeypatching still lands.
+# A thread-pool worker now owns the full snapshot scan; the Qt-thread slot
+# only paints its returned cache. The CLI path never changes mid-session
+# (resolved once), and the filesystem-backed portion has a 10s TTL because
+# chip granularity doesn't need 2s resolution. `_reset_graft_caches()` is
+# the test-only escape hatch so each test's fresh monkeypatching still lands.
 _UNSET = object()
 _graft_cli_cache: str | object | None = _UNSET
 _graft_snapshot_cache: dict | None = None
 _graft_snapshot_cache_at: float = 0.0
 _GRAFT_SNAPSHOT_TTL_S = 10.0
+
+
+class _GraftSnapshotSignals(QObject):
+    finished = pyqtSignal(object)
+
+
+class _GraftSnapshotWorker(QRunnable):
+    """Compute the filesystem-backed graft snapshot off the Qt thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = _GraftSnapshotSignals()
+
+    def run(self) -> None:
+        try:
+            snapshot = StatusHeaderMixin._graft_progress_snapshot()
+        except Exception:
+            snapshot = None
+        try:
+            self.signals.finished.emit(snapshot)
+        except RuntimeError:
+            # The window may have been deleted while the pool job was running.
+            pass
 
 
 def _reset_graft_caches() -> None:
@@ -331,7 +354,9 @@ class StatusHeaderMixin:
         self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
         self._chip_graft.clicked.connect(self._on_graft_chip_clicked)
         self._graft_status_cache: dict | None = None
+        self._graft_snapshot_worker_busy = False
         self._refresh_graft_chip()
+        self._schedule_graft_snapshot()
 
         # Live host/resource health. The compact chip keeps the four numbers
         # needed during fan-out visible; click opens class/queue detail.
@@ -668,6 +693,7 @@ class StatusHeaderMixin:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
         self._refresh_graft_chip()
+        self._schedule_graft_snapshot()
         self._refresh_remote_chip()
         self._refresh_overage_chip()
         self._update_provider_chip()
@@ -894,12 +920,13 @@ class StatusHeaderMixin:
         so a non-git-repo path never inflates the "N built" fraction or
         makes the chip look stuck below 100%.
 
-        MED-6 (2026-08-06 final review, R-2 follow-up): this runs on the Qt
-        main thread (2s status timer + every `statusChanged`), and per-call
-        cost scales with configured project count — a `shutil.which()` PATH
+        MED-6 (2026-08-06 final review, R-2 follow-up): per-call cost scales
+        with configured project count — a `shutil.which()` PATH
         scan plus a `resolve()`/`is_dir()`/sha256 per path (measured
         14.4ms/call at 46 dirs; an offline mapped drive's `is_dir()` blocks
-        for the SMB timeout on the GUI thread). The resolved CLI path and
+        for the SMB timeout). `_schedule_graft_snapshot` therefore runs this
+        method on a thread-pool worker; the Qt refresh slot only reads its
+        cache. The resolved CLI path and
         the `total`/`completed` project scan are the expensive, slow-moving
         part — cached under `_GRAFT_SNAPSHOT_TTL_S` (10s), since the chip
         doesn't need 2s resolution for those.
@@ -1069,8 +1096,30 @@ class StatusHeaderMixin:
             return f"No eligible projects to build — {len(skipped)} configured path(s) aren't git repos."
         return "No project paths configured yet — nothing to build."
 
+    def _schedule_graft_snapshot(self) -> None:
+        """Start one background snapshot, never stacking overlapping scans."""
+        if "_chip_graft" not in self.__dict__:
+            return
+        if self.__dict__.get("_graft_snapshot_worker_busy", False):
+            return
+        self._graft_snapshot_worker_busy = True
+        worker = _GraftSnapshotWorker()
+        worker.signals.finished.connect(self._on_graft_snapshot_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_graft_snapshot_ready(self, snapshot: object) -> None:
+        """Qt-thread completion slot: cache worker data and repaint only."""
+        self._graft_snapshot_worker_busy = False
+        if not isinstance(snapshot, dict):
+            return
+        self._graft_status_cache = snapshot
+        self._refresh_graft_chip()
+
     def _refresh_graft_chip(self) -> None:
-        """Repaint the 🧠 Graft chip from a fresh snapshot. Uses the same
+        """Repaint the 🧠 Graft chip from the worker-populated cache.
+
+        This Qt-main-thread slot deliberately performs no snapshot, path, or
+        marker-file work. Uses the same
         `__dict__`-membership guard as `_refresh_remote_chip` so tests that
         exercise a `MainWindow.__new__()` stub (Qt C++ side never
         constructed) don't hit the sip `hasattr`/`getattr` quirk documented
@@ -1090,8 +1139,16 @@ class StatusHeaderMixin:
         rendered as "N failed" and scared the user for nothing)."""
         if "_chip_graft" not in self.__dict__:
             return
-        snap = self._graft_progress_snapshot()
-        self._graft_status_cache = snap
+        snap = self.__dict__.get("_graft_status_cache")
+        # Lightweight unit stubs historically inject a per-instance snapshot
+        # callable. Keep that dependency-injection seam without ever invoking
+        # the real class method from the Qt thread; production instances never
+        # shadow this method in ``__dict__``.
+        injected_snapshot = self.__dict__.get("_graft_progress_snapshot")
+        if not isinstance(snap, dict) and callable(injected_snapshot):
+            snap = injected_snapshot()
+        if not isinstance(snap, dict):
+            return
         completed = snap["completed"]
         eligible_total = snap.get("eligible_total", snap["total"])
         building = snap.get("building")
@@ -1295,7 +1352,14 @@ class StatusHeaderMixin:
         when `failed` is genuinely non-empty. A skip-only dialog stays
         informational (2026-08-06 bug report: the old dialog said "Failed:"
         for dirs that were never supposed to build at all)."""
-        snap = self._graft_status_cache or self._graft_progress_snapshot()
+        snap = self._graft_status_cache
+        if snap is None:
+            QMessageBox.information(
+                self,
+                "Code-intelligence graph (graft)",
+                "Graft status is still being checked in the background.",
+            )
+            return
         if not snap["available"]:
             QMessageBox.warning(
                 self,
