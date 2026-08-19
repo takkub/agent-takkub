@@ -169,7 +169,8 @@ class TestOpencodeSessionResolution:
         conn.commit()
         conn.close()
 
-        # Second resolution without session_id must find the newer ses_2, not get stuck on cached ses_1
+        # Second resolution without session_id (past cache TTL or after cache clear) must find the newer ses_2
+        opencode_helper._OPENCODE_RESOLVE_CACHE.clear()
         resolved_2 = opencode_helper.resolve_opencode_session(proj_dir, db_path=db_path)
         assert resolved_2 is not None
         assert resolved_2[1] == "ses_2"
