@@ -218,12 +218,19 @@ class TestProviderEffortSpecs:
         assert codex_spec.effort_config_key == "model_reasoning_effort"
 
     def test_unsupported_providers_remain_explicit(self) -> None:
-        from agent_takkub.provider_spec import cursor_spec, gemini_spec, kimi_spec, opencode_spec
+        from agent_takkub.provider_spec import cursor_spec, kimi_spec, opencode_spec
 
-        assert gemini_spec.effort_flag is None
         assert opencode_spec.effort_flag is None
         assert kimi_spec.effort_flag is None
         assert cursor_spec.effort_flag is None
+
+    def test_gemini_gains_effort_flag(self) -> None:
+        # #323 follow-up: agy's #125 silent-model-swap regression is fixed
+        # upstream (agy 1.1.10+) — see gemini_spec's own comment.
+        from agent_takkub.provider_spec import gemini_spec
+
+        assert gemini_spec.effort_flag == "--effort"
+        assert gemini_spec.effort_levels == ("low", "medium", "high")
 
 
 _GEMINI_SCOPE_CASES = pytest.mark.parametrize(
@@ -240,8 +247,19 @@ _GEMINI_SCOPE_CASES = pytest.mark.parametrize(
 
 
 class TestGenericProviderSpawnEffort:
+    # #323 follow-up: agy's #125 silent-model-swap regression (mismatched
+    # --model/--effort silently discarding the explicit --model) is fixed
+    # upstream in agy 1.1.10+ — re-verified live against the installed 1.1.15
+    # binary (docs/reviews/2026-08-20-323-agy-effort-restored.md). gemini now
+    # goes through the same generic effort path claude/codex already use, so
+    # these two tests assert --effort IS present instead of absent. The model
+    # override below (gemini-3.1-pro-high) intentionally MATCHES the "high"
+    # tier effort — Takkub does not itself cross-validate an explicit --model
+    # against the resolved effort before spawn (see gemini_spec's comment on
+    # the residual conflict case), so a mismatched pair would still reach
+    # argv here and fail only when agy itself parses it.
     @_GEMINI_SCOPE_CASES
-    def test_gemini_model_override_is_never_changed_by_effort(
+    def test_gemini_model_override_now_gets_matching_effort(
         self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
@@ -251,25 +269,26 @@ class TestGenericProviderSpawnEffort:
             monkeypatch,
             tmp_path,
             "gemini",
-            model_override="Gemini 3.1 Pro (Low)",
+            model_override="gemini-3.1-pro-high",
             role="backend",
             gemini_project_id=gemini_project_id,
         )
 
         # #132: project scoping always appends --project/--new-project after
-        # the model flag — pin the resolver (via gemini_project_id) so this
+        # the effort flag — pin the resolver (via gemini_project_id) so this
         # stays deterministic instead of reading the real ~/.gemini registry.
         assert argv == [
             "agy",
             "--dangerously-skip-permissions",
             "--model",
-            "Gemini 3.1 Pro (Low)",
+            "gemini-3.1-pro-high",
+            "--effort",
+            "high",
             *expected_scope_tail,
         ]
-        assert "--effort" not in argv
 
     @_GEMINI_SCOPE_CASES
-    def test_gemini_without_model_override_never_guesses_effort(
+    def test_gemini_without_model_override_now_gets_tier_effort(
         self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
@@ -283,8 +302,13 @@ class TestGenericProviderSpawnEffort:
             gemini_project_id=gemini_project_id,
         )
 
-        assert argv == ["agy", "--dangerously-skip-permissions", *expected_scope_tail]
-        assert "--effort" not in argv
+        assert argv == [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--effort",
+            "high",
+            *expected_scope_tail,
+        ]
 
     def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "low")
@@ -337,14 +361,33 @@ class TestGenericProviderSpawnEffort:
     def test_assign_effort_override_ignored_for_unsupported_provider(
         self, qapp, monkeypatch, tmp_path
     ) -> None:
-        # gemini/agy has no effort_flag at all (#103/#125 gap) — a per-assign
+        # opencode has no effort_flag at all (#103 gap) — a per-assign
         # override must degrade silently, same as every other precedence
         # layer, not invent a CLI flag the provider doesn't accept.
         argv = _capture_generic_argv(
-            qapp, monkeypatch, tmp_path, "gemini", role="backend", effort_override="high"
+            qapp, monkeypatch, tmp_path, "opencode", role="backend", effort_override="high"
         )
 
         assert "--effort" not in argv
+
+    def test_assign_effort_override_reaches_gemini_argv(self, qapp, monkeypatch, tmp_path) -> None:
+        # #323 follow-up: gemini/agy now has a real effort_flag (#125's
+        # silent-model-swap regression is fixed upstream, agy 1.1.10+) — a
+        # per-assign override must win over env/tier same as codex/claude.
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "medium")
+
+        argv = _capture_generic_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "gemini",
+            role="backend",
+            effort_override="low",
+            gemini_project_id="17fdc03a-8cb3-446e-a833-4aaffc55f6bb",
+        )
+
+        effort_idx = argv.index("--effort")
+        assert argv[effort_idx : effort_idx + 2] == ["--effort", "low"]
 
 
 def _capture_claude_argv(

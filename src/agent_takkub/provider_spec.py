@@ -771,12 +771,36 @@ gemini_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # agy 1.0.5 changelog + confirmed `agy models` subcommand
-    # agy 1.1.6 exposes --effort, but its advertised model slugs already encode
-    # effort (for example gemini-3.1-pro-low/high). A mismatched pair makes agy
-    # discard the explicit --model and silently use its default (#125). With no
-    # explicit model there is also no deterministic way to prove the default
-    # supports the requested effort before launch, so model preservation wins.
-    effort_flag=None,
+    # #125 (agy 1.1.6, 2026-07-25): a mismatched --model/--effort pair (e.g.
+    # --model gemini-3.1-pro-low --effort high) made agy silently DISCARD the
+    # explicit --model and fall back to a different one — full trace in
+    # docs/reviews/2026-07-25-125-agy-effort-fallback.md. That regression was
+    # why this field was set to None.
+    #
+    # Fixed upstream, agy 1.1.10 changelog: "Fixed --model and --effort being
+    # ignored in interactive sessions and in headless -p runs... Fixed a bare
+    # --effort resolving against the default model instead of the model you
+    # actually have selected, which could silently move you to a different
+    # model." Re-verified live against the installed 1.1.15 binary (review
+    # #323 follow-up, 2026-08-20):
+    #   agy --model gemini-3.1-pro-low --effort high -p "..."
+    #     => exit 1: Error: invalid model selection (--model
+    #        "gemini-3.1-pro-low" --effort "high"): --model
+    #        gemini-3.1-pro-low conflicts with --effort=high
+    #   agy --model gemini-3.1-pro-low --effort low -p "..."   => succeeds
+    #   agy --effort high -p "..." (no --model)                 => succeeds
+    # A conflicting pair now hard-fails the spawn with an explicit CLI error
+    # instead of silently swapping models. Takkub does not itself cross-
+    # validate an explicit --model against the resolved tier/assign effort
+    # before spawn, so a role pinned to an effort-suffixed gemini model (e.g.
+    # "gemini-3.1-pro-low") whose effort resolves to a different level will
+    # now fail to boot with agy's own error instead of a silent misroute —
+    # narrow, self-explaining failure mode, not the silent one #125 fixed.
+    # See docs/reviews/2026-08-20-323-agy-effort-restored.md.
+    effort_flag="--effort",  # agy --help: "Reasoning effort for the current
+    # CLI session (low|medium|high)" — same tokens `agy models` advertises
+    # baked into gemini's own model slugs (gemini-3.1-pro-high, etc.).
+    effort_levels=("low", "medium", "high"),
     produces_jsonl_transcript=True,
     supports_token_meter=False,
     supports_remote_history=True,

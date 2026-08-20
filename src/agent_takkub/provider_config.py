@@ -469,13 +469,16 @@ def assign_effort_override_error(
     ``--provider`` override on the same assign — same "what actually spawns"
     reasoning as :func:`assign_model_override_error`, issue #270).
 
-    A provider with no ``ProviderSpec.effort_flag`` at all (agy/gemini today —
-    #103/#125 gap, no CLI knob to inject one) is NOT an error here: issue
-    #323's own acceptance criteria requires it degrade silently, exactly like
-    :func:`spawn_engine._append_provider_effort` already no-ops for such a
-    provider. Only a level string the provider's CLI does NOT accept is
-    blocked, mirroring the model id family mismatch that
-    :func:`assign_model_override_error` blocks.
+    A provider with no ``ProviderSpec.effort_flag`` at all (opencode/kimi/
+    cursor today — #103 gap, no CLI knob to inject one) is NOT an error here:
+    issue #323's own acceptance criteria requires it degrade silently,
+    exactly like :func:`spawn_engine._append_provider_effort` already no-ops
+    for such a provider. Only a level string the provider's CLI does NOT
+    accept is blocked, mirroring the model id family mismatch that
+    :func:`assign_model_override_error` blocks. gemini/agy gained a real
+    ``--effort`` knob (#125 fixed upstream in agy 1.1.10 — see
+    ``provider_spec.gemini_spec``'s own comment) and is validated the same
+    way claude/codex are.
     """
     normalized = str(effort or "").strip().lower()
     if not normalized:

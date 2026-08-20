@@ -402,10 +402,31 @@ class TestAssignEffortOverrideValidation:
     def test_provider_without_effort_flag_degrades_silently(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # agy/gemini has no CLI knob at all (#103/#125 gap) — issue #323's
-        # acceptance criteria requires this NOT be a hard error.
+        # opencode/kimi/cursor have no CLI knob at all (#103 gap) — issue
+        # #323's acceptance criteria requires this NOT be a hard error.
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda *_a, **_kw: "opencode"
+        )
+        assert provider_config.assign_effort_override_error("backend", "low") is None
+
+    def test_gemini_accepts_its_documented_effort_levels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #323 follow-up: agy's #125 silent-model-swap regression is fixed
+        # upstream (agy 1.1.10+) — gemini is validated like claude/codex now.
         monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "gemini")
         assert provider_config.assign_effort_override_error("backend", "low") is None
+        assert provider_config.assign_effort_override_error("backend", "high") is None
+
+    def test_gemini_rejects_a_level_it_does_not_accept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # gemini_spec.effort_levels is exactly ("low", "medium", "high") — no xhigh.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "gemini")
+        error = provider_config.assign_effort_override_error("backend", "xhigh")
+        assert error is not None
+        assert "gemini" in error
+        assert "xhigh" in error
 
     def test_provider_override_wins_over_effective_provider(
         self, monkeypatch: pytest.MonkeyPatch

@@ -1,5 +1,18 @@
 # Issue #125 — agy effort fallback trace and fix
 
+> **Update 2026-08-20 (review #323 follow-up):** the upstream bug this doc
+> traces is fixed. agy 1.1.10's changelog: "Fixed `--model` and `--effort`
+> being ignored in interactive sessions and in headless `-p` runs... Fixed a
+> bare `--effort` resolving against the default model instead of the model
+> you actually have selected, which could silently move you to a different
+> model." A mismatched pair now hard-fails with an explicit CLI error instead
+> of silently swapping models (re-verified live against the installed 1.1.15
+> binary). `gemini_spec.effort_flag` is `"--effort"` again as of this update
+> — see `docs/reviews/2026-08-20-323-agy-effort-restored.md` for the new
+> evidence and `provider_spec.gemini_spec`'s own comment for the exact repro.
+> The rest of this document is kept as the historical trace of the original
+> regression.
+
 ## Scope
 
 Regression introduced by `54baec5` and released in 1.0.29/1.0.30. The invariant for

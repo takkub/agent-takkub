@@ -2338,12 +2338,12 @@ def main(argv: list[str] | None = None) -> int:
         "Default: don't send anything, keep the role/provider's existing effort. "
         "Route mechanical work (rename, doc sync, running an existing test suite) "
         "at low for speed/cost; save high for design-sensitive or correctness-"
-        "critical work. Only 3 providers accept an effort knob today (claude "
-        "--effort, codex -c model_reasoning_effort=, both low/medium/high; agy/"
-        "gemini has no CLI knob yet — GAP tracked in #103) — every other "
-        "provider silently ignores this flag rather than erroring. Only takes "
-        "effect when spawning a new pane; an already-running pane keeps its "
-        "current effort",
+        "critical work. 4 providers accept an effort knob today (claude --effort, "
+        "codex -c model_reasoning_effort=, gemini/agy --effort, all low/medium/"
+        "high; claude alone also takes xhigh/max) — opencode/kimi/cursor have "
+        "no CLI knob yet (GAP tracked in #103) and silently ignore this flag "
+        "rather than erroring. Only takes effect when spawning a new pane; an "
+        "already-running pane keeps its current effort",
     )
     sa.add_argument("task", help="task content (positional)")
     sa.add_argument(

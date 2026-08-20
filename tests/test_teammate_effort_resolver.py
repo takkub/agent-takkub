@@ -21,6 +21,7 @@ from agent_takkub.spawn_engine import _append_provider_effort, _resolve_teammate
 CLAUDE = PROVIDER_REGISTRY["claude"]
 CODEX = PROVIDER_REGISTRY["codex"]
 GEMINI = PROVIDER_REGISTRY["gemini"]
+OPENCODE = PROVIDER_REGISTRY["opencode"]
 
 
 @pytest.fixture(autouse=True)
@@ -70,8 +71,16 @@ def test_role_setting_for_a_different_provider_does_not_apply() -> None:
 
 
 def test_unsupported_provider_resolves_empty_regardless_of_setting() -> None:
+    role_models.set_effort("backend", "opencode", "high")
+    assert _resolve_teammate_effort("backend", OPENCODE, "some-model") == ""
+
+
+def test_gemini_resolves_role_setting_now_that_it_is_supported() -> None:
+    # #323 follow-up: #125's silent-model-swap regression is fixed upstream
+    # (agy 1.1.10+) — gemini goes through the same generic resolver claude/
+    # codex already use.
     role_models.set_effort("backend", "gemini", "high")
-    assert _resolve_teammate_effort("backend", GEMINI, "gemini-3.1-pro-high") == ""
+    assert _resolve_teammate_effort("backend", GEMINI, "gemini-3.1-pro-high") == "high"
 
 
 def test_haiku_model_resolves_empty_even_with_role_setting() -> None:
@@ -111,11 +120,19 @@ def test_no_override_falls_through_to_existing_precedence() -> None:
 
 
 def test_override_still_gated_by_unsupported_provider() -> None:
-    # A per-assign --effort on a provider with no effort_flag at all (agy/
-    # gemini) must resolve empty just like every other precedence layer —
-    # cli_server/orchestrator already reject this before spawn via
-    # assign_effort_override_error, but the resolver stays defense-in-depth.
-    assert _resolve_teammate_effort("backend", GEMINI, "gemini-3.1-pro-high", override="high") == ""
+    # A per-assign --effort on a provider with no effort_flag at all
+    # (opencode/kimi/cursor) must resolve empty just like every other
+    # precedence layer — cli_server/orchestrator already reject this before
+    # spawn via assign_effort_override_error, but the resolver stays
+    # defense-in-depth.
+    assert _resolve_teammate_effort("backend", OPENCODE, "some-model", override="high") == ""
+
+
+def test_gemini_override_wins_now_that_it_is_supported() -> None:
+    assert (
+        _resolve_teammate_effort("backend", GEMINI, "gemini-3.1-pro-high", override="high")
+        == "high"
+    )
 
 
 def test_override_still_gated_by_haiku_model() -> None:
@@ -136,8 +153,14 @@ def test_append_provider_effort_codex_uses_config_key() -> None:
 
 def test_append_provider_effort_no_flag_for_unsupported_provider() -> None:
     argv: list[str] = []
-    _append_provider_effort(argv, GEMINI, "high")
+    _append_provider_effort(argv, OPENCODE, "high")
     assert argv == []
+
+
+def test_append_provider_effort_gemini_uses_plain_flag() -> None:
+    argv: list[str] = []
+    _append_provider_effort(argv, GEMINI, "high")
+    assert argv == ["--effort", "high"]
 
 
 def test_append_provider_effort_empty_value_appends_nothing() -> None:

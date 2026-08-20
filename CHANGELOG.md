@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed (แก้)
+
+- **`takkub assign --effort` ใช้ได้กับ gemini/agy จริงแล้ว** (#323 follow-up) — เดิม #125 ปิด `--effort`
+  ไว้เพราะ agy 1.1.6 เจอ `--model`/`--effort` ชนกันแล้ว swap model เงียบ ตอนนี้ agy 1.1.10+ fix ต้นทาง
+  แล้ว (ค่าคู่ที่ชนกัน hard-error ชัดแทนที่จะ swap เงียบ, verify สดกับ 1.1.15) → `gemini_spec.effort_flag`
+  กลับมาเป็น `--effort` (low/medium/high, ตรง `agy --help`) ผ่าน path เดิมที่ claude/codex ใช้อยู่แล้ว
+  ดู `docs/reviews/2026-08-20-323-agy-effort-restored.md`
+
 ## [1.0.77] - 2026-08-19
 
 ### Added (เพิ่ม)
