@@ -1452,12 +1452,23 @@ class PtySession(QObject):
                     pass
             # Join the reader/writer so they don't accumulate across many
             # close/respawn cycles. Bounded so a wedged thread can't hang exit.
+            # Both are QThread children of this session, so app shutdown can
+            # delete their C++ side out from under this background thread
+            # between the parent-chain teardown and this call (#316) — quit()
+            # / wait() on an already-deleted wrapper raises RuntimeError, and
+            # since the C++ thread object is gone there's nothing left to stop.
             if _writer is not None:
-                _writer.quit()
-                _writer.wait(2000)
+                try:
+                    _writer.quit()
+                    _writer.wait(2000)
+                except RuntimeError:
+                    pass
             if _reader is not None:
-                _reader.quit()
-                _reader.wait(2000)
+                try:
+                    _reader.quit()
+                    _reader.wait(2000)
+                except RuntimeError:
+                    pass
             # Thread QObjects are children of the session.  Once their loops
             # stop, release their last references to the native PTY object.
             for thread_obj in (_writer, _reader):
