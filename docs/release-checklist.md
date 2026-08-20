@@ -1,18 +1,29 @@
 # Release checklist (agent-takkub)
 
-วิธี release จริงของ 1.0.10+ (manual, ไม่มี git tag, ไม่มี GitHub Release สำหรับเวอร์ชันเหล่านี้)
-— ไม่ใช่ `takkub release` (ตัวนั้น parse heading `## [vNEXT]` ซึ่ง CHANGELOG.md ปัจจุบันไม่มีแล้ว)
+วิธี release จริงของ 1.0.10+ (manual, ไม่มี GitHub Release) — ไม่ใช่ `takkub release`
+(ตัวนั้น parse heading `## [vNEXT]` ซึ่ง CHANGELOG.md ไม่ได้ใช้รูปแบบนั้น)
+
+> **เอกสารนี้เคยเพี้ยนจากของจริงมาก่อน** (ตรวจ 2026-08-20 ตอน release 1.0.79) — ข้อ 2 เคยสั่ง
+> "ห้ามสร้าง heading เวอร์ชัน" ทั้งที่ CHANGELOG.md มี heading อยู่ 77 อัน และหลายที่เคยเขียนว่า
+> "ไม่มี git tag ตั้งแต่ 1.0.10" ทั้งที่ v1.0.76/77/78 มีอยู่จริง **ถ้าเจอเอกสารขัดกับ repo อีก
+> ให้เชื่อ repo แล้วแก้เอกสารทันที** — วิธีตรวจของจริง: `grep -c '^## \[' CHANGELOG.md`,
+> `git tag --list --sort=-creatordate | head`, `git show <release-commit> -- CHANGELOG.md`
 
 ## 0. Pre-flight — ต้องเขียวก่อนแตะเวอร์ชัน
 
 ```bash
-python -m pytest -v            # full suite รวม installed-mode gate (tests/test_installed_mode_gate.py,
-                                # tests/test_installed_cli_bin_integration.py) — ต้องรันจาก venv ที่มี
-                                # `build` package (dev extra `.[dev]`) ไม่งั้น wheel-build fixture fail
-python -m ruff check .
-python -m ruff format --check .
-lint-imports                    # import-linter contracts (pyproject.toml [tool.importlinter])
+takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fail-fast + report
 ```
+
+**ห้ามพิมพ์ `pytest` / `ruff check` / `lint-imports` ดิบเอง** — ตั้งแต่ #325 entrypoint เดียวคือ
+`takkub qa-gate` (root CLAUDE.md บังคับ) มันรัน 4 step เดียวกับที่ CI รัน แล้วเขียน report ลง
+`docs/qa/` ให้ commit ไปกับ release ได้เลย · full suite รวม installed-mode gate
+(`tests/test_installed_mode_gate.py`, `tests/test_installed_cli_bin_integration.py`) ซึ่งต้องรัน
+จาก venv ที่มี `build` package (dev extra `.[dev]`) ไม่งั้น wheel-build fixture fail
+
+> **อย่าแตะเวอร์ชันระหว่าง gate กำลังรัน** — `test_version_sync` อ่าน `__version__` ตอน import
+> แต่อ่าน pyproject ตอนรันเทส bump คร่อมกันเมื่อไหร่จะตกแบบหลอกๆ (เจอจริงตอน 1.0.79,
+> `docs/qa/2026-08-20-165059-qa-gate.md`) — รอ gate จบก่อนค่อย bump
 
 - **CI ต้องเขียวทั้ง 2 OS** (`windows-latest` + `macos-latest`, `.github/workflows/ci.yml`) — ถ้าเพิ่งพุช
   commit สุดท้าย รอ `gh run list` เขียวก่อนตัดเวอร์ชัน อย่า release ทับ CI ที่ยังไม่จบ
@@ -27,20 +38,40 @@ lint-imports                    # import-linter contracts (pyproject.toml [tool.
 
 ## 1. ตัดสินเวอร์ชันใหม่ (SemVer)
 
-ดู diff ตั้งแต่ release ก่อนหน้า (`git log <last-release-commit>..HEAD`) แล้วเลือก patch/minor/major
-ตามหลัก SemVer ปกติ ปัจจุบัน (2026-07-05) อยู่ที่ **1.0.12** — เวอร์ชันถัดไปที่เป็น bugfix = **1.0.13**
+ดู diff ตั้งแต่ release ก่อนหน้า แล้วเลือก patch/minor/major ตามหลัก SemVer ปกติ
+
+**อย่า hardcode เลขไว้ในเอกสารนี้** (เคยเขียน "ปัจจุบันอยู่ที่ 1.0.12" แล้วเน่าค้าง 66 เวอร์ชัน) —
+อ่านของจริงทุกครั้ง:
+
+```bash
+grep '^version' pyproject.toml                          # เวอร์ชันปัจจุบัน
+git log --oneline --grep='release):\? 1\.' -1          # release commit ล่าสุด
+git log --oneline <last-release-commit>..HEAD           # อะไรเข้ามาบ้างตั้งแต่นั้น
+```
 
 ## 2. เขียน CHANGELOG.md (ภาษาไทย)
 
-**อย่าสร้าง heading เวอร์ชันใหม่** — CHANGELOG.md ใช้ `## [Unreleased]` เป็น heading เดียวถาวร
-(ไม่มี `## [1.0.13]` ตั้งแต่ 1.0.10) เพิ่ม bullet ใหม่ใต้ section ที่ตรงกับประเภทงาน
-(`### Fixed (แก้)`, `### Added (เพิ่ม)`, ฯลฯ) — commit message ต่างหากที่เป็นตัวบอกขอบเขต release
+**สร้าง heading เวอร์ชันใหม่ทุก release** — แทรก `## [X.Y.Z] - YYYY-MM-DD` ไว้**ใต้**
+`## [Unreleased]` (ซึ่งเป็น placeholder ว่างถาวร ไม่ต้องลบ ไม่ต้องเติมอะไรใต้มัน) แล้วเขียน
+bullet ใต้ `### Fixed (แก้)` / `### Added (เพิ่ม)` / ฯลฯ ของ heading ใหม่นั้น
 
-รูปแบบ bullet (ดูตัวอย่างจริงที่ commit c55c3e0):
+โครงที่ได้:
+
 ```markdown
-- **<หัวข้อสั้นเป็นภาษาไทย>** — <อาการที่ user เจอ> → root cause: <สาเหตุจริง> → แก้: <วิธีแก้ + ไฟล์/ฟังก์ชันหลัก>
+## [Unreleased]
+
+## [1.0.79] - 2026-08-20
+
+### Fixed (แก้)
+
+- **<หัวข้อสั้นเป็นภาษาไทย>** — <อาการที่ user เจอ> → root cause: <สาเหตุจริง> → แก้: <วิธีแก้ +
+  ไฟล์/ฟังก์ชันหลัก>
   + N tests (`test_xxx.py`)
+
+## [1.0.78] - 2026-08-20
 ```
+
+ตัวอย่างจริงล่าสุด: `git show cf54eee -- CHANGELOG.md` (1.0.79) หรือ `git show 3129b74 -- CHANGELOG.md` (1.0.78)
 
 ## 3. Bump เวอร์ชัน — 3 ไฟล์ ต้องตรงกันเป๊ะ
 
@@ -55,8 +86,8 @@ version = "1.0.13"
 __version__ = "1.0.13"
 ```
 
-`tests/test_version_sync.py` บังคับให้ทั้ง 3 ค่าเท่ากัน — ไม่มี git tag, ไม่มี GitHub Release
-สำหรับเวอร์ชันเหล่านี้ (ยกเว้น v1.0.0)
+`tests/test_version_sync.py` บังคับให้ทั้ง 3 ค่าเท่ากัน — รันเช็คเร็วๆ ด้วย
+`takkub qa-gate --targeted tests/test_version_sync.py` ก่อนไปต่อ
 
 ## 4. Build wheel
 
@@ -90,7 +121,18 @@ git add CHANGELOG.md pyproject.toml package.json src/agent_takkub/__init__.py
 git commit -m "chore(release): 1.0.13 — <หัวข้อสั้น>"
 ```
 
-ไม่ต้อง `git tag` — เลิกทำตั้งแต่ 1.0.10
+### 5b. Tag
+
+**ต้อง tag** — กลับมาทำตั้งแต่ 1.0.76 (`v1.0.76` / `v1.0.77` / `v1.0.78` เป็น lightweight tag
+ทั้งหมด ไม่ใช่ annotated) ยิงที่ release commit:
+
+```bash
+git tag v1.0.79 && git push origin v1.0.79
+```
+
+> หมายเหตุ: v1.0.76–78 ถูก tag ทีหลังที่ HEAD ตอนนั้น จึงไม่ได้ชี้ที่ release commit เป๊ะ
+> (`v1.0.78` → `685efc5` ไม่ใช่ `3129b74`) — ตั้งแต่ 1.0.79 เป็นต้นไป tag ที่ release commit เลย
+> ยังไม่มี GitHub Release object สำหรับเวอร์ชันเหล่านี้ (ยกเว้น v1.0.0)
 
 ## 6. Push + รอ CI เขียว 2 OS
 
@@ -140,5 +182,7 @@ npm view agent-takkub version   # ต้องตรงกับเวอร์�
 - **build/ module shadow**: `python -m build` สร้าง staging dir `build/` ใน srcdir — ปัญหาจริงคือ
   shell เดิมที่ import/run pytest ต่อทันทีหลัง build อาจ resolve ผิดโมดูล ไม่ใช่ตัว build เอง (ดูข้อ 4)
 - **ไม่มี CI publish workflow** — publish มือจากเครื่อง dev เท่านั้น ไม่มี auto-publish-on-tag
-- **ไม่มี git tag ตั้งแต่ 1.0.10** — commit message `chore(release): X.Y.Z — ...` คือ source of truth
-  ของ "เวอร์ชันนี้ออกตอนไหน" (`git log --oneline | grep 'chore(release)'`)
+- **git tag กลับมาใช้ตั้งแต่ 1.0.76** (ก่อนหน้านั้นเว้นช่วง 1.0.36–1.0.75) — แต่ commit message
+  ยังเป็น source of truth ของ "เวอร์ชันนี้ออกตอนไหน" เพราะ tag เก่าไม่ได้ชี้ release commit เป๊ะ
+  รูปแบบ commit ที่ใช้จริงมี 3 แบบปนกัน: `chore(release):` (ส่วนใหญ่), `release:` (1.0.78),
+  `fix(release):` (1.0.69/1.0.70) — grep ให้ครอบทั้งหมด: `git log --oneline | grep -iE 'release[):]'`
