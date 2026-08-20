@@ -152,6 +152,41 @@ class TestInboxReportOriginProvenance:
 
         assert items[0]["origin_confirmed"] is None
 
+    def test_ordinary_next_task_respawn_not_flagged_stale(self, orch: Orchestrator) -> None:
+        """#315 false positive: the role finished, its report was queued,
+        and only THEN was it respawned for its next assignment (mint time
+        strictly after queued_ts) — the ordinary steady-state hand-off that
+        fired the banner on ~every digest pre-#315. Must not warn."""
+        queued_ts = 1_000.0
+        orch._pane_tokens = {"tok-new": (PROJECT, "backend")}
+        orch._pane_token_minted_at = {"tok-new": queued_ts + 5}
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque([("[backend done] x", "tok-old", queued_ts)])
+        }
+
+        items = orch.inbox_report(project=PROJECT)
+
+        assert items[0]["origin_confirmed"] is True
+
+    def test_phantom_report_predating_current_pane_still_flagged_stale(
+        self, orch: Orchestrator
+    ) -> None:
+        """#228 true positive, still caught post-#315: the CURRENT pane was
+        already live BEFORE this report claims to have been queued. A live
+        done() call always stamps whatever token is current at call time, so
+        this ordering can only happen for a replayed/phantom report — must
+        still warn."""
+        queued_ts = 1_000.0
+        orch._pane_tokens = {"tok-new": (PROJECT, "backend")}
+        orch._pane_token_minted_at = {"tok-new": queued_ts - 5}
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque([("[backend done] x", "tok-old", queued_ts)])
+        }
+
+        items = orch.inbox_report(project=PROJECT)
+
+        assert items[0]["origin_confirmed"] is False
+
 
 class TestCliInboxCommand:
     def test_sends_inbox_cmd(self, monkeypatch: pytest.MonkeyPatch) -> None:
