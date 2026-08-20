@@ -16,6 +16,7 @@ takkub assign --role reviewer --mode subagent "<scan>" # native child ของ 
 takkub subagent-done --role reviewer "<summary>"        # child ปิดงานเข้า ledger/inbox/wait (คำสั่งอยู่ใน task capsule)
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
 takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default
+takkub assign --role backend --effort low "<task>"     # (#323) override reasoning-effort เฉพาะ pane ที่ spawn ใหม่ (low/medium/high); precedence: assign > role > TAKKUB_TEAMMATE_EFFORT env > tier default; provider ไม่มี effort knob (agy/gemini วันนี้ — gap #103) = ignore เงียบ ไม่ error; provider มี knob แต่ไม่รับ level นี้ (เช่น xhigh บน codex) = error ชัดก่อน spawn
 takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)
 takkub assign --role backend --auto-chain "<task>"     # impl done → auto verify sequence (devops→qa) ไม่ต้อง propose
 takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)

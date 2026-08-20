@@ -178,6 +178,92 @@ class TestArgparse:
         )
         assert captured["provider_override"] == "claude"
 
+    def test_assign_with_effort_override(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error",
+            lambda *_a, **_kw: None,
+        )
+        cli.main(["assign", "--role", "backend", "--effort", "low", "scan"])
+        assert fake_request[-1]["effort"] == "low"
+
+    def test_no_effort_flag_sends_none(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "backend", "scan"])
+        assert fake_request[-1]["effort"] is None
+
+    def test_effort_override_is_forwarded_to_every_shard(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error",
+            lambda *_a, **_kw: None,
+        )
+        cli.main(["assign", "--role", "backend", "--shards", "2", "--effort", "high", "scan"])
+        assert [payload["effort"] for payload in fake_request[-2:]] == ["high", "high"]
+
+    def test_subagent_mode_rejects_effort_override(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        rc = cli.main(
+            ["assign", "--role", "reviewer", "--mode", "subagent", "--effort", "low", "scan"]
+        )
+        assert rc == 1
+        assert fake_request == []
+
+    def test_assign_effort_validation_error_sends_nothing(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error",
+            lambda *_args, **_kwargs: "--effort not accepted",
+        )
+        rc = cli.main(["assign", "--role", "backend", "--effort", "low", "scan"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_effort_choices_rejects_unknown_value(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # argparse itself only knows about the common low/medium/high
+        # baseline (issue #323) — a provider-specific tier like claude's
+        # xhigh/max is not a valid --effort value on this CLI knob.
+        with pytest.raises(SystemExit):
+            cli.main(["assign", "--role", "backend", "--effort", "xhigh", "scan"])
+        assert fake_request == []
+
+    def test_effort_override_validated_against_provider_override(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+
+        def _fake_effort_error(role, effort, project, provider_override=None):
+            captured["provider_override"] = provider_override
+            return None
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error", _fake_effort_error
+        )
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "backend",
+                "--provider",
+                "codex",
+                "--effort",
+                "low",
+                "scan",
+            ]
+        )
+        assert captured["provider_override"] == "codex"
+
     def test_assign_model_warning_prints_but_does_not_block(
         self,
         fake_request: list[dict[str, Any]],

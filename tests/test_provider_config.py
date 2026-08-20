@@ -362,6 +362,65 @@ class TestAssignModelOverrideValidation:
         assert "model_flag" in error
 
 
+class TestAssignEffortOverrideValidation:
+    """Issue #323 — `--effort` validated against the provider that will
+    actually spawn, mirroring `TestAssignModelOverrideValidation`."""
+
+    def test_empty_effort_never_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "claude")
+        assert provider_config.assign_effort_override_error("qa", "") is None
+        assert provider_config.assign_effort_override_error("qa", None) is None
+
+    @pytest.mark.parametrize("effort", ["low", "medium", "high"])
+    def test_supported_provider_accepts_valid_level(
+        self, monkeypatch: pytest.MonkeyPatch, effort: str
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        assert provider_config.assign_effort_override_error("backend", effort) is None
+
+    def test_claude_accepts_xhigh_and_max_beyond_the_cli_common_baseline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # claude_spec.effort_levels includes xhigh/max even though the
+        # `takkub assign --effort` CLI flag only exposes low/medium/high —
+        # a level string reaching this validator from another caller must
+        # still be checked against the real provider list, not a narrower
+        # CLI-only vocabulary.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "claude")
+        assert provider_config.assign_effort_override_error("backend", "xhigh") is None
+
+    def test_level_not_accepted_by_provider_is_blocked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # codex's effort_levels is exactly ("low", "medium", "high") — no xhigh.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        error = provider_config.assign_effort_override_error("backend", "xhigh")
+        assert error is not None
+        assert "codex" in error
+        assert "xhigh" in error
+
+    def test_provider_without_effort_flag_degrades_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # agy/gemini has no CLI knob at all (#103/#125 gap) — issue #323's
+        # acceptance criteria requires this NOT be a hard error.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "gemini")
+        assert provider_config.assign_effort_override_error("backend", "low") is None
+
+    def test_provider_override_wins_over_effective_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same "what will actually spawn" rule as assign_model_override_error
+        # (issue #270) — a validated --provider on the same assign is what
+        # gets checked, not the role's static config.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "gemini")
+        error = provider_config.assign_effort_override_error(
+            "backend", "xhigh", provider_override="codex"
+        )
+        assert error is not None
+        assert "codex" in error
+
+
 class TestAssignModelOverrideProviderMismatch:
     """Issue #127: a --model id that unambiguously belongs to a DIFFERENT
     provider's naming scheme (e.g. claude-* sent to a role that maps to

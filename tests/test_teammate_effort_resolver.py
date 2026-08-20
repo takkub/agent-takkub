@@ -86,6 +86,42 @@ def test_no_model_override_does_not_suppress_effort() -> None:
     assert _resolve_teammate_effort("backend", CLAUDE, "") == "high"
 
 
+def test_override_wins_over_role_setting_env_and_tier() -> None:
+    # Issue #323: per-assign --effort is the narrowest, highest-precedence
+    # layer — above the role setting, the env escape hatch, AND the tier
+    # default all at once.
+    import os
+
+    role_models.set_effort("backend", "claude", "xhigh")
+    os.environ["TAKKUB_TEAMMATE_EFFORT"] = "medium"
+    try:
+        assert (
+            _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5", override="low") == "low"
+        )
+    finally:
+        del os.environ["TAKKUB_TEAMMATE_EFFORT"]
+
+
+def test_no_override_falls_through_to_existing_precedence() -> None:
+    # override="" (the default) must behave exactly like the pre-#323
+    # signature — proves the new parameter is additive, not a behavior change
+    # for every existing caller that doesn't pass it.
+    assert _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5", override="") == "high"
+    assert _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5") == "high"
+
+
+def test_override_still_gated_by_unsupported_provider() -> None:
+    # A per-assign --effort on a provider with no effort_flag at all (agy/
+    # gemini) must resolve empty just like every other precedence layer —
+    # cli_server/orchestrator already reject this before spawn via
+    # assign_effort_override_error, but the resolver stays defense-in-depth.
+    assert _resolve_teammate_effort("backend", GEMINI, "gemini-3.1-pro-high", override="high") == ""
+
+
+def test_override_still_gated_by_haiku_model() -> None:
+    assert _resolve_teammate_effort("frontend", CLAUDE, "claude-haiku-4-5", override="high") == ""
+
+
 def test_append_provider_effort_claude_uses_plain_flag() -> None:
     argv: list[str] = []
     _append_provider_effort(argv, CLAUDE, "high")

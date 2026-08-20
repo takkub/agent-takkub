@@ -58,11 +58,13 @@ class _FakeOrch:
         feature="",
         model=None,
         provider=None,
+        effort=None,
         mode="pane",
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
         self.last_assign_provider = provider
+        self.last_assign_effort = effort
         self.last_assign_mode = mode
         return True, "ok"
 
@@ -267,6 +269,84 @@ class TestAsyncSpawnDispatch:
         )
 
         assert captured["provider_override"] == "claude"
+
+    def test_assign_passes_effort_override(self, qapp: QCoreApplication) -> None:
+        # Issue #323.
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "task": "t",
+                    "effort": "low",
+                }
+            ),
+        )
+        qapp.processEvents()
+        assert _replies(sock)[0]["ok"] is True
+        assert orch.last_assign_effort == "low"
+
+    def test_assign_rejects_unsupported_effort_before_scheduling(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error",
+            lambda *_args, **_kwargs: "--effort 'xhigh' is not accepted by provider 'codex'",
+        )
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "effort": "xhigh", "task": "scan"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is False
+        qapp.processEvents()
+        assert orch.assign_calls == []
+
+    def test_effort_error_receives_validated_provider_override(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same "checks against what will actually spawn" rule as
+        # test_model_error_receives_validated_provider_override (issue #270),
+        # applied to --effort (#323).
+        captured: dict = {}
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+
+        def _fake_effort_error(role, effort, project, provider_override=None):
+            captured["provider_override"] = provider_override
+            return None
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_effort_override_error", _fake_effort_error
+        )
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "task": "t",
+                    "provider": "codex",
+                    "effort": "low",
+                }
+            ),
+        )
+
+        assert captured["provider_override"] == "codex"
 
 
 class _FakeClock:

@@ -479,6 +479,7 @@ class CliServer(QObject):
                         self._reply(sock, ok=False, msg="--mode must be pane or subagent")
                         return
                     from .provider_config import (
+                        assign_effort_override_error,
                         assign_model_override_error,
                         assign_provider_override_error,
                     )
@@ -497,6 +498,15 @@ class CliServer(QObject):
                     )
                     if model_error:
                         self._reply(sock, ok=False, msg=model_error)
+                        return
+                    effort_error = assign_effort_override_error(
+                        role,
+                        req.get("effort"),
+                        from_project,
+                        provider_override=provider_req,
+                    )
+                    if effort_error:
+                        self._reply(sock, ok=False, msg=effort_error)
                         return
                     # #162: assign() itself already rejects this, but it runs
                     # deferred (QTimer below) and its return value is never
@@ -577,6 +587,7 @@ class CliServer(QObject):
                             feature=str(req.get("feature", "") or ""),
                             model=(str(req.get("model", "") or "").strip() or None),
                             provider=(str(req.get("provider", "") or "").strip().lower() or None),
+                            effort=(str(req.get("effort", "") or "").strip().lower() or None),
                         ),
                     )
                     self._reply(
