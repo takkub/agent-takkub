@@ -309,3 +309,68 @@ def test_item_not_pulled_via_inbox_renders_full_body(
     written = _written(lead.session)
     assert "never pulled via inbox" in written
     assert "อ่านแล้วผ่าน takkub inbox" not in written
+
+
+def test_ordinary_next_task_respawn_does_not_render_stale_banner(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#315: the role finishing its task and being handed the next one
+    before the digest flushes — the ordinary steady-state case that fired
+    the banner on ~every digest — must render with no warning at all."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+    queued_ts = 1_000.0
+    orch._pane_tokens = {"tok-new": (PROJECT, "backend")}
+    orch._pane_token_minted_at = {"tok-new": queued_ts + 5}  # respawned AFTER queuing
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(
+            PROJECT,
+            "[backend done] shipped the thing",
+            from_role="backend",
+            pane_token="tok-old",
+            queued_ts=queued_ts,
+        )
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "shipped the thing" in written
+    assert "unverified origin" not in written
+
+
+def test_phantom_report_still_renders_stale_banner_one_line(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#228 true positive, still caught post-#315: the current pane was
+    already live before this report claims to have been queued — a genuine
+    phantom, still must warn. Banner itself is now a single short line."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+    queued_ts = 1_000.0
+    orch._pane_tokens = {"tok-new": (PROJECT, "backend")}
+    orch._pane_token_minted_at = {"tok-new": queued_ts - 5}  # already live BEFORE queuing
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(
+            PROJECT,
+            "[backend done] phantom detail",
+            from_role="backend",
+            pane_token="tok-old",
+            queued_ts=queued_ts,
+        )
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "phantom detail" in written
+    banner_idx = written.index("unverified origin")
+    banner_line_end = written.index("\n", banner_idx)
+    banner_line = written[max(0, banner_idx - 3) : banner_line_end]
+    assert "\n" not in banner_line.strip("\n")

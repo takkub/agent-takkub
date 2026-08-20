@@ -1243,13 +1243,24 @@ class SpawnEngineMixin:
         stamps it into ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers
         keep it to revoke explicitly if the spawn then fails. M5#24: this minting
         boilerplate was copy-pasted across all four provider branches of spawn().
+
+        Also stamps ``_pane_token_minted_at[tok]`` (#315) — a plain, unpersisted
+        dict, deliberately NOT routed through the same ``_registry``-backed
+        property as ``_pane_tokens``: it's soft heuristic metadata for
+        `_provenance_stale`'s respawn-vs-queued-time comparison, not auth
+        state, so it doesn't need to survive a restart or be revoked in lock
+        step with the token itself — a few stray floats for long-revoked
+        tokens are harmless and get GC'd with the whole orchestrator anyway.
         """
         if not hasattr(self, "_pane_tokens"):
             self._pane_tokens: dict[str, tuple[str, str]] = {}
+        if not hasattr(self, "_pane_token_minted_at"):
+            self._pane_token_minted_at: dict[str, float] = {}
         tok = secrets.token_urlsafe(32)
         for _t in [t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)]:
             self._pane_tokens.pop(_t, None)
         self._pane_tokens[tok] = (project_ns, role_name)
+        self._pane_token_minted_at[tok] = time.time()
         env["TAKKUB_PANE_TOKEN"] = tok
         return tok
 
@@ -1269,6 +1280,16 @@ class SpawnEngineMixin:
             if p == project_ns and r == role_name:
                 return tok
         return None
+
+    def _current_pane_mint_ts(self, project_ns: str, role_name: str) -> float | None:
+        """When the CURRENT live token for ``(project_ns, role_name)`` was
+        minted, or None if there is no live pane or no record of its mint
+        time (#315 — legacy/test-constructed ``_pane_tokens`` entries that
+        never went through `_mint_pane_token`)."""
+        tok = self._current_pane_identity(project_ns, role_name)
+        if tok is None:
+            return None
+        return getattr(self, "_pane_token_minted_at", {}).get(tok)
 
     def _finish_spawn_initial_task(
         self,

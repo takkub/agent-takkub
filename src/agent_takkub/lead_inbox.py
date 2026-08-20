@@ -436,10 +436,11 @@ def _unwrap_notice_facts(item) -> DigestFacts | None:
     return None
 
 
-_STALE_ORIGIN_BANNER = (
-    "⚠️ [unverified origin — {role} pane was respawned since this report was "
-    "queued; confirm current status with the live pane before acting on it]"
-)
+# #315: was a 2-line, full-sentence paragraph — recalibrated to fire only
+# on genuinely informative mismatches (see _provenance_stale), so it can
+# afford to stay terse instead of front-loading a justification Lead had to
+# skim past on nearly every digest item.
+_STALE_ORIGIN_BANNER = "⚠️ [unverified origin — {role} respawned since queued, verify live pane]"
 
 
 def _format_notice_age(now_ts: float, queued_ts: float | None) -> str:
@@ -2692,7 +2693,7 @@ class LeadInboxMixin:
                 lines.append(f"• [{role or 'system'}] (อ่านแล้วผ่าน takkub inbox{age})")
                 continue
             line = _format_digest_item(item_body, item_ts, now_ts, facts=item_facts)
-            if self._provenance_stale(project_ns, role, item_pane_token):
+            if self._provenance_stale(project_ns, role, item_pane_token, queued_ts=item_ts):
                 line = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{line}"
             lines.append(line)
         digest = "\n".join(
@@ -2712,9 +2713,16 @@ class LeadInboxMixin:
             self._arm_lead_notify_pump(project_ns)
         return True
 
-    def _provenance_stale(self, project_ns: str, role: str | None, pane_token: str | None) -> bool:
+    def _provenance_stale(
+        self,
+        project_ns: str,
+        role: str | None,
+        pane_token: str | None,
+        queued_ts: float | None = None,
+    ) -> bool:
         """True when a role-attributed notice's origin pane can no longer be
-        confirmed live under that role slot (#228).
+        confirmed live under that role slot AND that mismatch is actually
+        informative (#228, recalibrated by #315).
 
         *role* is None for bodies that carry no per-pane origin claim (system
         notices, CC relays, combined digests) — never stale, there is nothing
@@ -2723,11 +2731,43 @@ class LeadInboxMixin:
         also treated as nothing-to-verify rather than flagged, so this only
         ever fires for a genuine `[role done]`/`[role FAILED]` body whose
         producing `done()` call recorded its own pane token.
+
+        A raw token mismatch alone (the pre-#315 check) fires on ~every
+        digest in ordinary steady-state operation: `done()` always captures
+        `pane_token` as whatever `_current_pane_identity` returns AT THAT
+        EXACT MOMENT (orchestrator.py `done()`), so it can only ever go stale
+        via a LATER respawn — and a respawn straight after almost every
+        `done()` (the role picks up its next assignment) is the normal case,
+        not an anomaly. See docs/audit/2026-08-20-issue-315-provenance-noise.md
+        for the traced proof.
+
+        The genuinely informative case (a report that was already phantom —
+        #228: content nobody live actually sent) can only arise when the
+        CURRENT occupant's own token was minted AT OR BEFORE this report's
+        `queued_ts` — i.e. the current pane was already live when this report
+        claims to have been queued, yet the report names a DIFFERENT token.
+        A live `done()` call can never produce that shape (it always stamps
+        whatever is current at call time), so this ordering can only happen
+        via a replayed/duplicate/mis-tagged report — worth the warning. A
+        respawn that happens strictly AFTER `queued_ts` is ordinary
+        sequential hand-off and is not flagged.
+
+        *queued_ts* absent, or no live pane at all under the role, or no
+        recorded mint time for the current token — fails safe to stale=True
+        (the pre-#315, conservative behaviour) since there's no timing
+        evidence to prove the mismatch is benign.
         """
         if role is None or pane_token is None:
             return False
         current = self._current_pane_identity(project_ns, role)
-        return current != pane_token
+        if current == pane_token:
+            return False
+        if current is None or queued_ts is None:
+            return True
+        current_mint_ts = self._current_pane_mint_ts(project_ns, role)
+        if current_mint_ts is None:
+            return True
+        return current_mint_ts <= queued_ts
 
     def _other_roles_still_active(self, project_ns: str, exclude_role: str) -> bool:
         """(#264) True if some role OTHER than Lead and *exclude_role* (the
@@ -3177,7 +3217,7 @@ class LeadInboxMixin:
         # No-op for every other notice shape (plain done/CC/FAILED bodies).
         raw_body = self._revalidate_system_notice(project_ns, raw_body)
         item_role = _notice_role_tag(raw_body)
-        if self._provenance_stale(project_ns, item_role, item_pane_token):
+        if self._provenance_stale(project_ns, item_role, item_pane_token, queued_ts=item_ts):
             raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
         # #266: stamp every notice with when it actually occurred, not just
         # when it happened to be flushed — this queue previously carried no
@@ -3448,7 +3488,9 @@ class LeadInboxMixin:
             # Lead, so it's at LEAST as likely to be carrying stale claims.
             item_body = self._revalidate_system_notice(project_ns, item.get("body", ""))
             role = _notice_role_tag(item_body)
-            if self._provenance_stale(project_ns, role, item.get("pane_token")):
+            if self._provenance_stale(
+                project_ns, role, item.get("pane_token"), queued_ts=item.get("queued_ts")
+            ):
                 item_body = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{item_body}"
             item_body = f"{_occurred_stamp(item.get('queued_ts'))}{item_body}"
             return _sanitize_pane_text(item_body)

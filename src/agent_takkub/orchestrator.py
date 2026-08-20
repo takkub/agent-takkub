@@ -5120,10 +5120,14 @@ class Orchestrator(
             self._inbox_seen = {}
         seen = self._inbox_seen.setdefault(project_ns, set())
 
-        def _origin_confirmed(item_role: str | None, pane_token: str | None) -> bool | None:
+        def _origin_confirmed(
+            item_role: str | None, pane_token: str | None, queued_ts: float | None = None
+        ) -> bool | None:
             if item_role is None or pane_token is None:
                 return None
-            return not self._provenance_stale(project_ns, item_role, pane_token)
+            return not self._provenance_stale(
+                project_ns, item_role, pane_token, queued_ts=queued_ts
+            )
 
         items: list[dict] = []
 
@@ -5139,14 +5143,14 @@ class Orchestrator(
                     "queue": "digest",
                     "body": body,
                     "origin_confirmed": _origin_confirmed(
-                        item_role if item_role != "system" else None, pane_token
+                        item_role if item_role != "system" else None, pane_token, queued_ts
                     ),
                     "queued_ts": queued_ts,
                 }
             )
 
         for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
-            body, pane_token, _live_ts = _unwrap_notice_item(entry)
+            body, pane_token, live_ts = _unwrap_notice_item(entry)
             item_role = _notice_role_tag(body) or "system"
             if role is not None and item_role != role:
                 continue
@@ -5156,7 +5160,7 @@ class Orchestrator(
                     "queue": "live",
                     "body": body,
                     "origin_confirmed": _origin_confirmed(
-                        item_role if item_role != "system" else None, pane_token
+                        item_role if item_role != "system" else None, pane_token, live_ts
                     ),
                 }
             )
@@ -5176,7 +5180,9 @@ class Orchestrator(
                     "role": item_role,
                     "queue": "durable",
                     "body": item_body,
-                    "origin_confirmed": _origin_confirmed(tagged_role, item.get("pane_token")),
+                    "origin_confirmed": _origin_confirmed(
+                        tagged_role, item.get("pane_token"), item.get("queued_ts")
+                    ),
                 }
             )
 
