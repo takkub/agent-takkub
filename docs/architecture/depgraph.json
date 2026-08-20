@@ -36,9 +36,10 @@
       "module": "agent_takkub._pty_backend",
       "imports": [],
       "imported_by": [
-        "agent_takkub.pty_session"
+        "agent_takkub.pty_session",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -3707,6 +3708,7 @@
     {
       "module": "agent_takkub.spawn_engine",
       "imports": [
+        "agent_takkub._pty_backend",
         "agent_takkub.agent_pane",
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_auth_config",
@@ -3749,7 +3751,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 35
+      "fan_out": 36
     },
     {
       "module": "agent_takkub.spawn_gate",

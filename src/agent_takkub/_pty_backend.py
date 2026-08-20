@@ -25,6 +25,7 @@ import os
 import sys
 import threading
 from collections.abc import Sequence
+from shutil import which
 
 
 class _BackendBase:
@@ -125,6 +126,89 @@ class _PosixBackend(_BackendBase):
         return self._proc.write(data)
 
 
+class SpawnTargetCorrupt(OSError):
+    """Raised when argv[0] resolves to a file whose header fails the
+    pre-flight sanity check in :func:`_validate_spawn_target` — see that
+    function's docstring for exactly what this does and doesn't catch.
+    """
+
+
+_POSIX_MAGIC_PREFIXES = (
+    b"\x7fELF",  # ELF (Linux)
+    b"#!",  # shebang script — exec'd via its interpreter, not loaded directly
+    b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit LE
+    b"\xce\xfa\xed\xfe",  # Mach-O 32-bit LE
+    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit BE
+    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit BE
+    b"\xca\xfe\xba\xbe",  # Mach-O universal/fat binary
+    b"\xbe\xba\xfe\xca",
+)
+
+
+def _looks_like_valid_executable(path: str) -> bool:
+    """Best-effort magic-header sanity check on a *resolved* spawn target.
+
+    Returns False ONLY when the file is a recognisable native-binary format
+    for this platform (a Windows ``.exe``, or a POSIX file the OS would try
+    to exec directly) whose header is missing/truncated/corrupt — the exact
+    condition proven (issue #313, reproduced directly against this repo's
+    pywinpty dependency: `docs/audit/2026-08-20-issue-313-spawn-deadlock.md`)
+    to send the native pty constructor into a call that can hold the whole
+    interpreter's GIL hostage for hours on Windows (a modal "Unsupported
+    16-Bit Application" hard-error dialog for a mid-write PE, e.g. an npm
+    self-update racing a spawn). Any other outcome (file missing/unreadable,
+    a shim/script the OS hands off to an interpreter, or a header that
+    parses fine) returns True — this exists to catch one narrow, *proven*
+    failure mode, not to become a general launchability oracle that could
+    false-positive on a binary format it doesn't recognise.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return True  # can't read it — not the failure mode this guards against
+
+    if sys.platform == "win32":
+        if not path.lower().endswith(".exe"):
+            return True  # .cmd/.bat/.ps1 shims aren't PE — nothing to check
+        if len(head) < 64 or head[:2] != b"MZ":
+            return False
+        e_lfanew = int.from_bytes(head[60:64], "little")
+        try:
+            with open(path, "rb") as f:
+                f.seek(e_lfanew)
+                pe_sig = f.read(4)
+        except OSError:
+            return True
+        return pe_sig == b"PE\x00\x00"
+
+    # POSIX: only distrust a file the loader would actually exec directly —
+    # an executable-bit-set regular file whose header matches none of the
+    # recognised formats is the POSIX analogue of a truncated Windows PE.
+    if not head or head.startswith(_POSIX_MAGIC_PREFIXES):
+        return True
+    try:
+        executable_bit = bool(os.stat(path).st_mode & 0o111)
+    except OSError:
+        return True
+    return not executable_bit
+
+
+def _validate_spawn_target(argv0: str, env: dict | None) -> None:
+    """Resolve argv[0] via PATH (same lookup pywinpty/ptyprocess do
+    internally) and raise :class:`SpawnTargetCorrupt` if it fails the header
+    check above. A no-op (never raises) when the target can't be resolved at
+    all — the backend's own FileNotFoundError already covers that case with
+    a proper error path, so this stays purely additive.
+    """
+    resolved = which(argv0, path=(env or os.environ).get("PATH"))
+    if resolved is not None and not _looks_like_valid_executable(resolved):
+        raise SpawnTargetCorrupt(
+            f"spawn target failed pre-flight header check, refusing the "
+            f"native constructor call (#313): {resolved!r}"
+        )
+
+
 def spawn_pty(
     argv: Sequence[str],
     cwd: str | None = None,
@@ -146,6 +230,8 @@ def spawn_pty(
     # a clean "spawn failed: working directory does not exist" message.
     if cwd is not None and not os.path.isdir(cwd):
         raise NotADirectoryError(f"working directory does not exist: {cwd!r}")
+    if argv:
+        _validate_spawn_target(argv[0], env)
     if sys.platform == "win32":
         return _WinptyBackend.spawn(argv, cwd, env, rows, cols)
     return _PosixBackend.spawn(argv, cwd, env, rows, cols)

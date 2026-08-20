@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer
 
+from ._pty_backend import SpawnTargetCorrupt
 from .agent_pane import AgentPane
 from .browser_chrome import (
     NativeChromeManager,
@@ -487,6 +488,13 @@ _TOCTOU_RESAMPLE_N = 3
 # every SPAWN_BLOCK_WARN_AFTER_S seconds while the block persists (#64).
 SPAWN_BLOCK_WARN_AFTER_S = 5.0
 
+# #313: SpawnTargetCorrupt retry/backoff. An npm self-update finishes
+# rewriting a provider binary in low single-digit seconds; linear backoff
+# (300ms, 600ms, ... ) across 5 attempts covers ~4.5s of retries before
+# giving up and surfacing the failure like any other spawn error.
+_CORRUPT_SPAWN_MAX_RETRIES = 5
+_CORRUPT_SPAWN_BACKOFF_MS = 300
+
 
 @dataclass
 class PaneState:
@@ -528,6 +536,11 @@ class PaneState:
     quota_provider: str = ""
     # _auto_respawn_attempts: consecutive crash-respawn count (capped at AUTO_RESPAWN_MAX)
     auto_respawn_attempts: int = 0
+    # #313: consecutive SpawnTargetCorrupt count (capped at
+    # _CORRUPT_SPAWN_MAX_RETRIES) — a self-update racing this pane's binary
+    # mid-write finishes in seconds, so a few retries clear it; reset to 0
+    # on the next successful spawn.
+    corrupt_spawn_retries: int = 0
     # _last_assigned_task: FULL composed task text (never a pointer); replayed
     # after crash-respawn regardless of whether the pane was only pasted a
     # pointer at assign time (issue #1 — file-based task handoff).
@@ -1425,6 +1438,7 @@ class SpawnEngineMixin:
             )
             pane.attach_session(session, cwd=spawn_cwd, provider_name=label)
             _ekey = _exit_key(project_ns, role_name)
+            self._ps(_ekey).corrupt_spawn_retries = 0
             # Record if this spawn used resume (important for auto-respawn logic).
             self._ps(_ekey).last_spawn_resumed = bool(resume_uuid)
             if resume_uuid:
@@ -1459,6 +1473,56 @@ class SpawnEngineMixin:
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=bool(resume_uuid))
             return True, f"{label} spawned in {spawn_cwd}"
+        except SpawnTargetCorrupt as e:
+            # #313: the resolved spawn target failed its pre-flight header
+            # check — most commonly an npm self-update rewriting the binary
+            # mid-spawn. That write finishes in seconds, so retry with a
+            # short capped backoff through the existing deferred-spawn queue
+            # instead of failing the pane outright; only fall through to the
+            # normal failure path once retries are exhausted.
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
+            _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
+            _ps_corrupt.corrupt_spawn_retries += 1
+            if _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES:
+                delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
+                _log_event(
+                    "spawn_target_corrupt_retry",
+                    role=role_name,
+                    project=project_ns,
+                    attempt=_ps_corrupt.corrupt_spawn_retries,
+                    delay_ms=delay_ms,
+                )
+                self._pane_tokens.pop(pane_tok, None)
+                _deferred = getattr(self, "_spawn_deferred", None)
+                if _deferred is None:
+                    self._spawn_deferred = _deferred = set()
+                _deferred.add(f"{project_ns}::{role_name}")
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                        self._retry_deferred_spawn(r, c, p, a, s, u)
+                    ),
+                )
+                return (
+                    True,
+                    f"{role_name} spawn deferred (target failed pre-flight check, retrying)",
+                )
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
+            self._pane_tokens.pop(pane_tok, None)
+            return (
+                False,
+                f"failed to spawn {label}: {e} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
+            )
         except Exception as e:
             # #139: make a native-spawn failure's actual elapsed time visible
             # even though it never reached the success log line above — this
@@ -2848,6 +2912,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 provider_name="claude",
                 session_uuid=_spawned_session_uuid,
             )
+            self._ps(_ekey_spawn).corrupt_spawn_retries = 0
             self._finish_spawn_initial_task(
                 role_name,
                 project_ns,
@@ -2929,6 +2994,58 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if role_name in FORCED_ROLES:
                 suffix += " — claude substitute (provider unavailable)"
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
+        except SpawnTargetCorrupt as e:
+            # #313: the resolved spawn target failed its pre-flight header
+            # check — most commonly an npm self-update rewriting the binary
+            # mid-spawn. That write finishes in seconds, so retry with a
+            # short capped backoff through the existing deferred-spawn queue
+            # instead of failing the pane outright; only fall through to the
+            # normal failure path once retries are exhausted.
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
+            _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
+            _ps_corrupt.corrupt_spawn_retries += 1
+            if _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES:
+                delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
+                _log_event(
+                    "spawn_target_corrupt_retry",
+                    role=role_name,
+                    project=project_ns,
+                    attempt=_ps_corrupt.corrupt_spawn_retries,
+                    delay_ms=delay_ms,
+                )
+                if role_name != LEAD.name:
+                    getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+                _deferred = getattr(self, "_spawn_deferred", None)
+                if _deferred is None:
+                    self._spawn_deferred = _deferred = set()
+                _deferred.add(f"{project_ns}::{role_name}")
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                        self._retry_deferred_spawn(r, c, p, a, s, u)
+                    ),
+                )
+                return (
+                    True,
+                    f"{role_name} spawn deferred (target failed pre-flight check, retrying)",
+                )
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
+            if role_name != LEAD.name:
+                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+            return (
+                False,
+                f"failed to spawn claude: {e} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
+            )
         except Exception as e:
             # #139: make a native-spawn failure's actual elapsed time visible
             # even though it never reached the success log line above — this
