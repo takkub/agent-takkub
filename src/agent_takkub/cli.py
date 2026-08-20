@@ -1543,6 +1543,19 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     return {"ok": ok, "msg": f"{n_fail} fail(s)" if not ok else "all checks passed"}
 
 
+def cmd_qa_gate(args: argparse.Namespace) -> dict:
+    """`takkub qa-gate` (#325) — pure-local like `doctor`/`migrate`: no
+    orchestrator socket needed, works with the cockpit closed. Heavy lifting
+    lives in `.qa_gate` so it stays testable without going through argparse."""
+    from .qa_gate import render_table, run_gate
+
+    report = run_gate(targeted=args.targeted, v2_flags=args.v2_flags)
+    _utf8_print(render_table(report))
+    if report.ok:
+        return {"ok": True, "msg": "qa-gate: all steps passed", "exit_code": 0}
+    return {"ok": False, "msg": "qa-gate: failed — see table above", "exit_code": report.exit_code}
+
+
 def cmd_migrate(args: argparse.Namespace) -> dict:
     """`takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` — Core
     V2 storage migration (#309 Phase 4, docs/v2/V2_IMPLEMENTATION_PLAN.md
@@ -3016,6 +3029,27 @@ def main(argv: list[str] | None = None) -> int:
         help="project namespace for --pane (default: current pane's project, or the active project)",
     )
     sdoc.set_defaults(func=cmd_doctor)
+
+    sqag = sub.add_parser(
+        "qa-gate",
+        help="canonical gate: venv-check -> pytest -> ruff check -> lint-imports, "
+        "one entrypoint shared by qa pane / CI / a user's terminal (#325)",
+    )
+    sqag.add_argument(
+        "--targeted",
+        nargs="+",
+        metavar="PATH",
+        default=None,
+        help="mid-flight tier: run pytest on only these paths (skips ruff/lint-imports, "
+        "no report file written) — team policy: targeted mid-flight, full gate once at the batch gate",
+    )
+    sqag.add_argument(
+        "--v2-flags",
+        action="store_true",
+        help="force every TAKKUB_V2_* flag on for this run, to check the Core V2 ladder "
+        "before flipping any flag on by default (#309)",
+    )
+    sqag.set_defaults(func=cmd_qa_gate)
 
     smig = sub.add_parser(
         "migrate",
