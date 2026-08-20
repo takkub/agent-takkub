@@ -202,6 +202,21 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
         log_path.write_text(output, encoding="utf-8")
     tail_lines = [ln for ln in output.strip().splitlines() if ln.strip()][-6:]
     detail = " / ".join(tail_lines) if tail_lines else "(no output)"
+    if proc.returncode != 0:
+        # A failed step must be diagnosable from THIS process's stdout alone —
+        # on CI the on-runner log file is unreachable after the job dies
+        # (proven on run 32335988102: three OSes said only "FAILED tests/..."
+        # with the traceback stranded in the runner's runtime/exports/). Print
+        # the pytest FAILURES section when present (assertions live there),
+        # else the last chunk of output, capped so a pathological log can't
+        # flood the console.
+        lines = output.splitlines()
+        start = next((i for i, ln in enumerate(lines) if "= FAILURES =" in ln), None)
+        excerpt = lines[start:] if start is not None else lines
+        print(f"\n----- {name} failure output (excerpt) -----")
+        for ln in excerpt[-200:]:
+            print(ln)
+        print(f"----- end {name} failure output -----\n")
     # proc.returncode is read straight off the completed subprocess — never
     # inferred from a shell pipe's own $? (the #234-adjacent footgun this
     # gate exists to structurally rule out).
