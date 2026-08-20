@@ -182,9 +182,20 @@ class TestNonClaudeBranchCorruptRetry:
         pane = _make_pane("gemini")
         orch._panes_by_project[TEST_PROJECT] = {"gemini": pane}
 
-        with patch(
-            "agent_takkub.provider_config.effective_provider_for",
-            return_value=GEMINI,
+        with (
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                return_value=GEMINI,
+            ),
+            # ProviderSpec is frozen — can't patch custom_discovery_fn on the
+            # instance; pin shutil.which instead (same technique as
+            # test_provider_project_scope.py). CI runners have no agy anywhere,
+            # so without this the spawn dies at spec discovery before ever
+            # reaching the mocked PtySession (CI run 32338427010, all 3 OSes).
+            patch(
+                "shutil.which",
+                side_effect=lambda n, *a, **kw: "agy" if str(n).startswith("agy") else None,
+            ),
         ):
             ok, msg, mock_pty = _spawn_with_scripted_pty(
                 orch,
