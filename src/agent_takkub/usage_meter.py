@@ -21,6 +21,7 @@ from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from . import cockpit_theme
+from .auto_resume import CONFIRM_UTILIZATION_PCT as _AUTO_CONTINUE_HINT_PCT
 from .provider_usage import ProviderUsage
 
 _BAR_HEIGHT = 6
@@ -153,6 +154,16 @@ def _provider_body_entries(
             text = "—" if pct is None else f"{round(pct)}%"
             eta = w.get("eta") or ""
             line = f"{wlabel}: {text}" + (f" · reset ใน {eta}" if eta else "")
+            # #322: at/near the 5h window's limit, cockpit's own park→wake
+            # (limit_autoresume.py) is a safety net, not the primary
+            # mechanism — Claude Code 2.1.234+ auto-continues the pane's
+            # own session the instant this window resets, no cockpit nudge
+            # needed. Surfaced only for five_hour (the window that actually
+            # blocks a pane mid-task) and only near/at the confirm threshold
+            # auto-resume itself uses, so this never claims "will
+            # auto-continue" for an ordinary, still-working utilization %.
+            if key == "five_hour" and pct is not None and pct >= _AUTO_CONTINUE_HINT_PCT:
+                line += " · pane จะทำงานต่อเอง (auto-continue)"
             color = severity_color(pct)
             if pct is not None:
                 entries.append(("bar", wlabel, pct, color, stale))

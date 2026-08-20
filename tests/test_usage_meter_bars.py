@@ -38,6 +38,44 @@ def test_claude_windows_render_two_labelled_bars():
     assert all(b[4] is False for b in bars)  # not stale
 
 
+def test_five_hour_near_limit_shows_auto_continue_hint():
+    # #322: near/at the 5h window's limit, the text line should tell the
+    # user cockpit's park→wake nudge is a safety net, not the primary
+    # mechanism — Claude Code 2.1.234+ resumes the pane's own session on
+    # its own once this window resets.
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="claude",
+        status="active",
+        fetched_at=now,
+        raw_data={
+            "windows": {
+                "five_hour": {"utilization": 96.0, "eta": "20น."},
+                "seven_day": {"utilization": 96.0, "eta": "3วัน"},
+            }
+        },
+    )
+    entries = _provider_body_entries(usage, now)
+    texts = [e[1] for e in entries if e[0] == "text"]
+    assert any("5h" in t and "auto-continue" in t for t in texts)
+    # seven_day never blocks a pane mid-task the way five_hour does — must
+    # not get the hint even at the same utilization.
+    assert not any(t.startswith("7d") and "auto-continue" in t for t in texts)
+
+
+def test_five_hour_below_threshold_no_auto_continue_hint():
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="claude",
+        status="active",
+        fetched_at=now,
+        raw_data={"windows": {"five_hour": {"utilization": 50.0, "eta": "20น."}}},
+    )
+    entries = _provider_body_entries(usage, now)
+    texts = [e[1] for e in entries if e[0] == "text"]
+    assert not any("auto-continue" in t for t in texts)
+
+
 def test_claude_window_missing_utilization_gets_no_bar():
     now = datetime.now(tz=UTC)
     usage = ProviderUsage(
