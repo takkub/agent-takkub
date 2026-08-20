@@ -16,7 +16,13 @@ reset epoch in ``PaneState.rate_limited_until``. This module adds:
   handles the "stop nagging" half).
 * **wake** — a one-shot ``QTimer`` fires at the reported reset time (+
   buffer) and injects a "continue the pending task" nudge directly into the
-  TEAMMATE pane — not just a Lead notice — so work actually resumes.
+  TEAMMATE pane — not just a Lead notice — so work actually resumes. #322:
+  right before injecting, re-checks the limit banner is still showing — a
+  Claude Code 2.1.234+ pane may have already auto-continued the interrupted
+  turn on its own by wake time, and pasting a nudge on top of live
+  generation would race it (same class as the A3 draft-hold incident). If
+  the banner already cleared, the wake is a no-op beyond clearing state and
+  notifying Lead that the CLI resumed itself.
 * **caps** — at most ``auto_resume.MAX_PARK_ROUNDS`` park→wake cycles per
   pane per assigned task, and an immediate permanent stop if the pane
   re-hits the limit within ``auto_resume.RELIMIT_GRACE_S`` of waking (the
@@ -361,10 +367,44 @@ class AutoResumeMixin:
             _log_event("pane_limit_wake_skipped", role=role, project=project, reason="task_done")
             return
 
+        # #322: Claude Code 2.1.234+ auto-continues the session on its own
+        # once the usage window resets — if the limit banner is already gone
+        # by the time our WAKE_BUFFER_S-delayed timer fires, the CLI beat us
+        # to it and the pane may already be mid-turn again. Blindly writing
+        # our own nudge + Enter on top of that risks landing inside live
+        # generation (same class of race as the A3 draft-hold incident).
+        # Re-check signal (a) right before injecting instead of trusting the
+        # stale rate_limited_until snapshot. Fails safe (still_limited=True,
+        # legacy nudge path) if the re-check itself errors.
+        try:
+            still_limited = (
+                pane.session.rate_limit_reset_at(ps.quota_provider or "claude") is not None
+            )
+        except Exception:
+            still_limited = True
         ps.limit_parked = False
         ps.limit_park_wake_ts = time.time()
         ps.rate_limited_until = 0.0  # let the rate-limit watchdog run normally again
         ps.last_content_change_ts = time.time()  # #53: don't false-trigger the stuck detector
+        if not still_limited:
+            # #158: mark the on-disk snapshot resumed rather than deleting it —
+            # cheap audit trail of the park→wake cycle, harmless if it's
+            # overwritten again by the next park.
+            _write_progress_marker(
+                project, role, ps, pane, status="resumed", reason="cli_auto_continued"
+            )
+            _log_event(
+                "pane_limit_resumed_by_cli",
+                role=role,
+                project=project,
+                round=ps.limit_park_rounds,
+            )
+            lead_msg = (
+                f"🌙 [auto-resume] {role} ({project}) — Claude ทำงานต่อเองแล้วก่อน cockpit ปลุก "
+                "(auto-continue, claude 2.1.234+) — ไม่ต้อง nudge ซ้ำ"
+            )
+            self._notify_lead(project, lead_msg, from_role=role, note="limit_resumed_self")
+            return
         # #158: mark the on-disk snapshot resumed rather than deleting it —
         # cheap audit trail of the park→wake cycle, harmless if it's
         # overwritten again by the next park.

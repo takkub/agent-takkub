@@ -373,6 +373,76 @@ class TestParkAndWake:
         o._notify_lead.assert_called_once()
         assert o._notify_lead.call_args.kwargs["note"] == "limit_resumed"
 
+    def test_wake_skips_nudge_when_cli_already_auto_continued(self) -> None:
+        # #322: Claude Code 2.1.234+ auto-continues the interrupted turn on
+        # its own once the window resets. If our WAKE_BUFFER_S-delayed timer
+        # fires and the banner is already gone, the pane resumed itself —
+        # writing our own nudge + Enter on top of that would race live
+        # generation (A3 draft-hold-style race). Simulated via
+        # rate_limit_reset_at() returning None (banner cleared).
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.limit_parked = True
+        ps.limit_park_rounds = 1
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 100
+        ps.quota_provider = "claude"
+        pane = _pane_alive()
+        pane.session.rate_limit_reset_at.return_value = None  # banner already cleared
+        o._panes_by_project["proj"] = {"backend": pane}
+
+        with patch("agent_takkub.limit_autoresume._delayed_enter") as inject:
+            o._wake_parked_pane("proj", "backend")
+
+        assert ps.limit_parked is False
+        assert ps.rate_limited_until == 0.0
+        pane.session.write.assert_not_called()
+        inject.assert_not_called()
+        pane.session.rate_limit_reset_at.assert_called_once_with("claude")
+        o._notify_lead.assert_called_once()
+        assert o._notify_lead.call_args.kwargs["note"] == "limit_resumed_self"
+
+    def test_wake_still_limited_falls_back_to_legacy_nudge(self) -> None:
+        # Counterpart of the above: banner still showing at wake time (the
+        # pre-2.1.234 "press enter to continue" CLI, or a still-blocked
+        # session) must keep sending the manual nudge exactly as before.
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.limit_parked = True
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 100
+        ps.quota_provider = "claude"
+        pane = _pane_alive()
+        pane.session.rate_limit_reset_at.return_value = time.time() + 10  # still showing
+        o._panes_by_project["proj"] = {"backend": pane}
+
+        with patch("agent_takkub.limit_autoresume._delayed_enter") as inject:
+            o._wake_parked_pane("proj", "backend")
+
+        pane.session.write.assert_called_once()
+        inject.assert_called_once()
+        assert o._notify_lead.call_args.kwargs["note"] == "limit_resumed"
+
+    def test_wake_recheck_error_fails_safe_to_legacy_nudge(self) -> None:
+        # A broken re-check (torn-down session, unexpected exception) must
+        # never silently strand a parked pane — fail open to the legacy
+        # nudge path rather than swallowing the wake.
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.limit_parked = True
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 100
+        pane = _pane_alive()
+        pane.session.rate_limit_reset_at.side_effect = RuntimeError("boom")
+        o._panes_by_project["proj"] = {"backend": pane}
+
+        with patch("agent_takkub.limit_autoresume._delayed_enter") as inject:
+            o._wake_parked_pane("proj", "backend")
+
+        pane.session.write.assert_called_once()
+        inject.assert_called_once()
+        assert o._notify_lead.call_args.kwargs["note"] == "limit_resumed"
+
 
 # ── layer 5: toggle ──────────────────────────────────────────────────────────
 

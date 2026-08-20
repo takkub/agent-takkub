@@ -6,6 +6,8 @@ and the fail-open `.facade` `resource_governor.py` calls into.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agent_takkub.core.scheduling import backpressure, policy
@@ -265,6 +267,63 @@ def test_runtime_control_pause_resume_cancel():
     control.cancel()
     assert control.state == RunState.CANCELLED
     control.resume()  # cancel is terminal
+    assert control.state == RunState.CANCELLED
+
+
+def test_runtime_control_limit_wait_park_and_resume():
+    # #322: usage-limit wait modeled as a first-class RunState, distinct
+    # from an operator pause() — resume() must never clear it, and
+    # resume_from_limit() must never clear a plain operator pause().
+    control = AgentRuntimeControl()
+    reset_at = time.time() + 3600
+
+    control.park_for_limit(reset_at)
+    assert control.state == RunState.LIMIT_WAIT
+    assert control.limit_reset_at == reset_at
+    assert control.may_dispatch_new() is False
+
+    control.resume()  # plain resume must not touch LIMIT_WAIT
+    assert control.state == RunState.LIMIT_WAIT
+
+    control.resume_from_limit()
+    assert control.state == RunState.RUNNING
+    assert control.limit_reset_at is None
+    assert control.may_dispatch_new() is True
+
+
+def test_runtime_control_limit_wait_from_paused():
+    control = AgentRuntimeControl()
+    control.pause()
+    control.park_for_limit(time.time() + 60)
+    assert control.state == RunState.LIMIT_WAIT
+
+    control.resume_from_limit()
+    assert control.state == RunState.RUNNING  # not back to PAUSED — reset wins
+
+
+def test_runtime_control_resume_from_limit_is_noop_on_plain_pause():
+    control = AgentRuntimeControl()
+    control.pause()
+    control.resume_from_limit()  # never parked — must not clear the pause
+    assert control.state == RunState.PAUSED
+
+
+def test_runtime_control_limit_wait_terminal_states_ignore_park():
+    control = AgentRuntimeControl()
+    control.cancel()
+    control.park_for_limit(time.time() + 60)
+    assert control.state == RunState.CANCELLED  # terminal — park is a no-op
+
+    control2 = AgentRuntimeControl()
+    control2.mark_done()
+    control2.park_for_limit(time.time() + 60)
+    assert control2.state == RunState.DONE
+
+
+def test_runtime_control_cancel_from_limit_wait():
+    control = AgentRuntimeControl()
+    control.park_for_limit(time.time() + 60)
+    control.cancel()
     assert control.state == RunState.CANCELLED
 
 

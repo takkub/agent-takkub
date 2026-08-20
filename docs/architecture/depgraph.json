@@ -191,9 +191,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
-        "agent_takkub.limit_autoresume"
+        "agent_takkub.limit_autoresume",
+        "agent_takkub.usage_meter"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -3989,6 +3990,7 @@
     {
       "module": "agent_takkub.usage_meter",
       "imports": [
+        "agent_takkub.auto_resume",
         "agent_takkub.cockpit_theme",
         "agent_takkub.provider_usage"
       ],
@@ -3997,7 +3999,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.user_actions",

@@ -90,6 +90,25 @@ class TestParseRateLimitReset:
         assert time.localtime(epoch).tm_hour == 13
         assert time.localtime(epoch).tm_min == 10
 
+    def test_real_incident_banner_2026_08_19(self) -> None:
+        # #322: exact byte-for-byte text scraped from the real Lead pane that
+        # hit its limit at the 2026-08-19 20:20 checkpoint (whole wave
+        # stalled overnight until manually woken —
+        # runtime/sessions/2026-08-19/agent-takkub/lead-205813.transcript.log,
+        # ANSI stripped). Differs from test_session_limit_banner_v2_1_198's
+        # wording in the tail ("progress saved" + "Press ⏎ to continue after
+        # reset" instead of "/upgrade to increase your usage limit.") — pin
+        # the actual field wording, not just the general shape.
+        epoch = _parse_rate_limit_reset(
+            "you've hit your session limit · resets 9:10pm (asia/bangkok) · progress saved\n"
+            "press ⏎ to continue after reset\n"
+            "/upgrade or /usage-credits to finish what you're working on.",
+            self.NOW,
+        )
+        assert epoch is not None
+        assert time.localtime(epoch).tm_hour == 21
+        assert time.localtime(epoch).tm_min == 10
+
     def test_12am_maps_to_midnight(self) -> None:
         epoch = _parse_rate_limit_reset("usage limit reached, resets 12am", self.NOW)
         assert epoch is not None
