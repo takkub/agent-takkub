@@ -748,6 +748,24 @@ def _warn_if_data_home_unwritable() -> None:
         _boot_log(f"DATA_HOME not writable: {detail}")
 
 
+def _boot_main_window() -> MainWindow:
+    """Construct MainWindow, gated by the boot-time provider-update splash
+    (#313) unless the user opted out with ``TAKKUB_BOOT_UPDATE=0``.
+
+    The splash (if shown) runs every installed+enabled provider's update
+    once, before any pane can exist to race it — see
+    ``boot_update_window.py`` / ``provider_update.py`` /
+    ``docs/audit/2026-08-20-boot-update-policy.md``. A failed/timed-out
+    provider never blocks the cockpit itself from opening; only that
+    provider's row reports the failure.
+    """
+    from .boot_update_window import boot_update_enabled, run_boot_update_gate
+
+    if not boot_update_enabled():
+        return MainWindow()
+    return run_boot_update_gate(MainWindow)
+
+
 def _set_macos_app_name(name: str = "agent-takkub") -> None:
     """Set native macOS application/process name so the top menu bar (next to
     the Apple logo) displays 'agent-takkub' instead of generic 'Python' / 'python3.x'."""
@@ -864,7 +882,7 @@ def main(argv: list[str] | None = None) -> int:
             _instance_lock
         ):
             _boot_log("[single-instance] restart successor — predecessor exited, lock acquired")
-            w = MainWindow()
+            w = _boot_main_window()
             _install_signal_handlers(w)
             _start_deadman_watchdog(w)
             w.show()
@@ -929,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    w = MainWindow()
+    w = _boot_main_window()
     _install_signal_handlers(w)
     _start_deadman_watchdog(w)
     # #297: report cockpit defects that never raise. The crash hook above only

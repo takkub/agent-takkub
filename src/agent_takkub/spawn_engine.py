@@ -68,6 +68,7 @@ from .orchestrator_text import (
 )
 from .pane_env import (
     inject_provider_home_env,
+    inject_provider_no_autoupdate_env,
     inject_user_profile_env,
 )
 from .pipeline_executor import _split_shard
@@ -1998,6 +1999,7 @@ class SpawnEngineMixin:
             except Exception:
                 _log.exception("provider home seeding failed for %s", spec.name)
             inject_provider_home_env(env, spec.name)
+            inject_provider_no_autoupdate_env(env, spec.name)
             from .core.routing.flag import v2_router_enabled
 
             if v2_router_enabled():
@@ -2514,6 +2516,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
+        inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled
 
         if v2_router_enabled():
