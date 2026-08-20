@@ -381,6 +381,9 @@ def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str | None) -> Pat
         return None
     try:
         base = config_dir_for(project_ns) / "projects"
+        named = base / f"takkub-project-{project_ns}" / f"{session_uuid}.jsonl"
+        if named.is_file():
+            return named
         matches = list(base.glob(f"*/{session_uuid}.jsonl"))
     except OSError:
         return None
@@ -663,32 +666,39 @@ def _list_recent_claude_sessions(
     line can't be read (or has none yet) is kept as a Lead-candidate
     rather than silently dropped."""
     from .. import config as _config
-    from ..token_meter import session_project_dir_for_cwd
+    from ..token_meter import session_project_dirs_for_cwd
 
     cwd = _config.lead_cwd(project_ns)
     if not cwd:
         return []
     try:
-        proj_dir = session_project_dir_for_cwd(config_dir_for(project_ns), cwd)
+        project_dirs = session_project_dirs_for_cwd(
+            config_dir_for(project_ns), cwd, project_ns=project_ns
+        )
     except OSError:
-        return []
-    if not proj_dir.is_dir():
         return []
     found: list[tuple[float, Path]] = []
-    try:
-        for jsonl in proj_dir.glob("*.jsonl"):
-            try:
-                found.append((jsonl.stat().st_mtime, jsonl))
-            except OSError:
-                continue
-    except OSError:
-        return []
+    for proj_dir in project_dirs:
+        if not proj_dir.is_dir():
+            continue
+        try:
+            for jsonl in proj_dir.glob("*.jsonl"):
+                try:
+                    found.append((jsonl.stat().st_mtime, jsonl))
+                except OSError:
+                    continue
+        except OSError:
+            continue
     found.sort(key=lambda t: t[0], reverse=True)
     capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
     out: list[dict] = []
+    seen_uuids: set[str] = set()
     for mtime, jsonl in found:
+        if jsonl.stem in seen_uuids:
+            continue
         if _is_teammate_session_line(_first_user_line(jsonl)):
             continue
+        seen_uuids.add(jsonl.stem)
         out.append({"uuid": jsonl.stem, "mtime": mtime, "preview": _first_user_preview(jsonl)})
         if len(out) >= capped:
             break

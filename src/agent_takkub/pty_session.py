@@ -1081,6 +1081,7 @@ class PtySession(QObject):
         # it so a pane on a non-default user profile finds its session JSONL
         # under <config_dir>/projects/ instead of ~/.claude/projects/.
         self._claude_config_dir: str | None = None
+        self._claude_project_dir_name: str | None = None
         # Monotonic timestamp of the last *content-changing* PTY output chunk
         # (#248/#247) — a structural idle/busy signal (independent of TUI text
         # markers, #20): a generating CLI streams visibly-changing output
@@ -1132,6 +1133,7 @@ class PtySession(QObject):
         # Remember which Claude config home this pane uses so the token meter
         # can locate its session JSONL (non-default profiles redirect it).
         self._claude_config_dir = (env or {}).get("CLAUDE_CONFIG_DIR")
+        self._claude_project_dir_name = (env or {}).get("CLAUDE_CODE_PROJECT_DIR_NAME")
 
         # Snapshot console windows before spawn so we can hide whatever new
         # console window (cmd.exe / conhost) pywinpty surfaces (Windows only).

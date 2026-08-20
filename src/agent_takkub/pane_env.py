@@ -46,7 +46,12 @@ with existing test imports.
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 from datetime import datetime
+
+_CLAUDE_PROJECT_DIR_NAME_MIN_VERSION = "2.1.234"
+_CLAUDE_PROJECT_DIR_NAME_PREFIX = "takkub-project-"
 
 # Env vars that MUST pass through to claude/codex/gemini panes for them to
 # function. Anything not in this list is dropped to avoid leaking secrets
@@ -377,6 +382,60 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
             env["CLAUDE_CONFIG_DIR"] = str(config_dir_for(project))
     except Exception:
         pass
+
+
+def claude_project_dir_name(project_ns: str) -> str:
+    """Return the cockpit-owned Claude transcript directory for a project.
+
+    The project namespace is the cockpit's stable identifier, unlike Claude's
+    legacy cwd encoding which collapses ``-``, ``_`` and ``.`` to the same
+    character.  Keep the prefix fixed so a new directory can never be
+    mistaken for a legacy encoded absolute path.
+    """
+    return f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}"
+
+
+def supports_claude_project_dir_name(version: str | None) -> bool:
+    """Whether *version* supports ``CLAUDE_CODE_PROJECT_DIR_NAME``.
+
+    Unknown/unparseable versions deliberately keep Claude's historical
+    encoded-cwd behaviour; that is safe for older CLIs and the read side still
+    checks both layouts.
+    """
+    if not version:
+        return False
+    match = re.search(r"\b(\d+(?:\.\d+){1,3})\b", version)
+    if match is None:
+        return False
+    installed = tuple(int(part) for part in match.group(1).split("."))
+    minimum = tuple(int(part) for part in _CLAUDE_PROJECT_DIR_NAME_MIN_VERSION.split("."))
+    width = max(len(installed), len(minimum))
+    return installed + (0,) * (width - len(installed)) >= minimum + (0,) * (width - len(minimum))
+
+
+def inject_claude_project_dir_name_env(
+    env: dict[str, str], project_ns: str, claude_executable: str
+) -> None:
+    """Opt into the reversible per-project transcript name on supported Claude.
+
+    Claude Code introduced this per-session environment variable in 2.1.234.
+    Probe the exact executable about to be spawned; older/unknown versions
+    retain the default encoded-cwd layout rather than receiving an environment
+    variable they do not understand.
+    """
+    try:
+        completed = subprocess.run(
+            [claude_executable, "--version"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3,
+        )
+        version = completed.stdout if completed.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        version = None
+    if supports_claude_project_dir_name(version):
+        env["CLAUDE_CODE_PROJECT_DIR_NAME"] = claude_project_dir_name(project_ns)
 
 
 def inject_provider_home_env(env: dict[str, str], provider: str) -> None:

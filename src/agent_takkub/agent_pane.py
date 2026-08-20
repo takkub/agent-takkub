@@ -772,13 +772,19 @@ class AgentPane(QFrame):
         # under <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/).
         cwd = self._session_cwd
         cfg_dir = getattr(self.session, "_claude_config_dir", None)
+        project_dir_name = getattr(self.session, "_claude_project_dir_name", None)
         self._token_refreshing = True
 
         def _worker() -> None:
             cand = None
             usage = None
             try:
-                cand = find_session_by_uuid(cwd, session_uuid, config_dir=cfg_dir)
+                cand = find_session_by_uuid(
+                    cwd,
+                    session_uuid,
+                    config_dir=cfg_dir,
+                    project_dir_name=project_dir_name,
+                )
                 if cand is not None:
                     try:
                         usage = read_last_usage(cand)
