@@ -199,6 +199,59 @@ class TestGuardInjection:
         assert entry["matcher"] == "Bash"
 
 
+class TestConciseOutputStyle:
+    """#318: the Concise output style rides `--settings` (a per-invocation
+    session override, docs/en/settings precedence tier 2) instead of any
+    shared settings file, and is opt-in per role via TAKKUB_CONCISE_ROLES —
+    default pilot is `qa` only, Lead is always excluded."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_CONCISE_ROLES", raising=False)
+
+    def test_default_pilot_is_qa_only(self) -> None:
+        assert hook_wiring.role_wants_concise("qa", is_lead=False) is True
+        assert hook_wiring.role_wants_concise("backend", is_lead=False) is False
+
+    def test_lead_never_concise_even_if_named_in_allowlist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_CONCISE_ROLES", "*")
+        assert hook_wiring.role_wants_concise("lead", is_lead=True) is False
+
+    def test_wildcard_env_enables_every_teammate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_CONCISE_ROLES", "*")
+        assert hook_wiring.role_wants_concise("backend", is_lead=False) is True
+        assert hook_wiring.role_wants_concise("devops", is_lead=False) is True
+
+    def test_empty_env_disables_the_default_pilot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_CONCISE_ROLES", "")
+        assert hook_wiring.role_wants_concise("qa", is_lead=False) is False
+
+    def test_custom_roster_replaces_default_pilot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_CONCISE_ROLES", "backend,devops")
+        assert hook_wiring.role_wants_concise("backend", is_lead=False) is True
+        assert hook_wiring.role_wants_concise("qa", is_lead=False) is False
+
+    def test_concise_file_carries_output_style_key(self, tmp_env: pathlib.Path) -> None:
+        path = hook_wiring.ensure_hook_settings_file(concise=True)
+        assert path.endswith("hook-settings-concise.json")
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert data["outputStyle"] == "Concise"
+
+    def test_non_concise_file_has_no_output_style_key(self, tmp_env: pathlib.Path) -> None:
+        path = hook_wiring.ensure_hook_settings_file(concise=False)
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "outputStyle" not in data
+
+    def test_concise_and_plain_files_are_separate_paths(self, tmp_env: pathlib.Path) -> None:
+        plain = hook_wiring.ensure_hook_settings_file(concise=False)
+        concise = hook_wiring.ensure_hook_settings_file(concise=True)
+        assert plain != concise
+        assert pathlib.Path(plain).exists()
+        assert pathlib.Path(concise).exists()
+
+
 class TestClaudeSpawnArgvIncludesSettings:
     def test_teammate_spawn_gets_settings_flag(self, orch: Orchestrator) -> None:
         argv = _spawn_capture(orch, "backend")
@@ -216,3 +269,20 @@ class TestClaudeSpawnArgvIncludesSettings:
         # get claude-only flags at all.
         argv = _spawn_capture(orch, "shell")
         assert "--settings" not in argv
+
+    def test_default_pilot_role_spawn_gets_concise_settings_file(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TAKKUB_CONCISE_ROLES", raising=False)
+        argv = _spawn_capture(orch, "qa")
+        settings_path = argv[argv.index("--settings") + 1]
+        assert settings_path.endswith("hook-settings-concise.json")
+
+    def test_lead_spawn_never_gets_concise_settings_file(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_CONCISE_ROLES", "*")
+        argv = _spawn_capture(orch, "lead")
+        settings_path = argv[argv.index("--settings") + 1]
+        assert settings_path.endswith("hook-settings.json")
+        assert not settings_path.endswith("hook-settings-concise.json")

@@ -360,6 +360,40 @@ def _apply_color_term(env: dict[str, str]) -> None:
     env.setdefault("COLORTERM", "truecolor")
 
 
+def apply_default_model(env: dict[str, str], model: str) -> None:
+    """Set ``ANTHROPIC_DEFAULT_MODEL`` so a claude pane *starts* on *model*
+    without permanently overriding a model the user already picked (#318).
+
+    Confirmed against code.claude.com/docs/en/model-config (CC 2.1.236+,
+    "Set a default model for new sessions"): ``ANTHROPIC_DEFAULT_MODEL`` is
+    the lowest-precedence of the five ways to pick a session's model —
+    behind an explicit ``--model`` flag, ``ANTHROPIC_MODEL``, and a ``model``
+    value in any settings file. Critically, ``/model`` writes that settings
+    ``model`` field on save (since 2.1.153), so once a user picks a model
+    with ``/model`` this var is silently ignored on every later launch —
+    *including* a crash-respawn's ``--resume``, where the docs draw the same
+    distinction explicitly: "Claude Code doesn't restore the model saved in
+    that session's transcript [only] when a new session would start on the
+    variable's model" — i.e. only when nothing else (a settings ``model``
+    field included) already claimed the slot.
+
+    This is why a *persistent* role/provider model pin belongs here and not
+    on ``--model``: ``--model`` always wins over a saved ``/model`` choice,
+    on every spawn AND every resume, so a teammate could never actually keep
+    a model its own session picked. Reserve ``--model`` for a genuinely
+    one-off, deliberate override (a single ``takkub assign --model`` call) —
+    stacking both mechanisms for the same "persistent default" duty is
+    exactly the double-mechanism issue #318 asks not to reintroduce.
+
+    Claude-only (``ANTHROPIC_DEFAULT_MODEL`` has no codex/gemini/opencode/
+    kimi/cursor counterpart — flagged to #103): callers must only invoke
+    this on the claude spawn path, never the generic provider branch.
+    """
+    model = (model or "").strip()
+    if model:
+        env["ANTHROPIC_DEFAULT_MODEL"] = model
+
+
 def inject_user_profile_env(env: dict[str, str], project: str) -> None:
     """Set ``CLAUDE_CONFIG_DIR`` in *env* when it should differ from a plain
     ``claude`` default invocation.

@@ -67,6 +67,7 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
+    apply_default_model,
     inject_claude_project_dir_name_env,
     inject_provider_home_env,
     inject_provider_no_autoupdate_env,
@@ -2612,9 +2613,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # backed pane (Lead + teammates); codex/gemini/shell panes returned
         # earlier and never reach this branch.
         try:
-            from .hook_wiring import ensure_hook_settings_file
+            from .hook_wiring import ensure_hook_settings_file, role_wants_concise
 
-            argv.extend(["--settings", ensure_hook_settings_file()])
+            _concise = role_wants_concise(role_name, is_lead=role_name == LEAD.name)
+            argv.extend(["--settings", ensure_hook_settings_file(concise=_concise)])
         except Exception:
             pass  # hook wiring must never block a spawn
 
@@ -2642,12 +2644,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             tier_model, _tier_effort, tier_fallback = _teammate_tier(base_role)
             if _ps_initial.model_override:
                 # --model on this assign is narrower than every persistent or
-                # process-wide setting, including TAKKUB_TEAMMATE_MODEL.
+                # process-wide setting, including TAKKUB_TEAMMATE_MODEL — a
+                # deliberate one-off override, so it goes on the argv flag
+                # (highest precedence, beats even a saved /model choice) and
+                # not through the ANTHROPIC_DEFAULT_MODEL pin below (#318).
                 teammate_model = _ps_initial.model_override
+                teammate_model = _remap_pinned_model(teammate_model, env)
+                if teammate_model:
+                    argv.extend(["--model", teammate_model])
             elif "TAKKUB_TEAMMATE_MODEL" in os.environ:
                 # An explicitly empty value means "use the Claude CLI default"
-                # and must not be replaced by provider configuration.
+                # and must not be replaced by provider configuration. Same
+                # explicit-operator-force reasoning as model_override above.
                 teammate_model = os.environ["TAKKUB_TEAMMATE_MODEL"].strip()
+                teammate_model = _remap_pinned_model(teammate_model, env)
+                if teammate_model:
+                    argv.extend(["--model", teammate_model])
             else:
                 from .provider_config import CLAUDE
                 from .provider_models import model_for
@@ -2658,12 +2670,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # the effective provider (a non-claude role that degraded to a
                 # claude substitute lands here too), so the role model only
                 # applies when it was chosen FOR claude.
+                #
+                # #318: this persistent pin is injected as ANTHROPIC_DEFAULT_MODEL
+                # (see pane_env.apply_default_model), not --model — --model would
+                # win over a model the user saved with /model on every spawn AND
+                # every crash-respawn --resume, so a teammate could never actually
+                # keep a model its own session picked.
                 teammate_model = (
                     role_model_for(base_role, CLAUDE) or model_for(CLAUDE) or tier_model
                 ).strip()
-            teammate_model = _remap_pinned_model(teammate_model, env)
-            if teammate_model:
-                argv.extend(["--model", teammate_model])
+                teammate_model = _remap_pinned_model(teammate_model, env)
+                apply_default_model(env, teammate_model)
             # Precedence + provider/model gating: see _resolve_teammate_effort's
             # own docstring (same resolver the generic provider branch above
             # uses — role setting > TAKKUB_TEAMMATE_EFFORT > tier default,
@@ -2713,15 +2730,26 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             from .provider_models import model_for as _provider_model_for
             from .role_models import model_for as _role_model_for
 
-            lead_model = (
-                _ps_initial.model_override
-                or _role_model_for(role_name, _CLAUDE)
-                or _provider_model_for(_CLAUDE)
-                or _lead_model_override()
-            )
-            if lead_model:
-                lead_model = _remap_pinned_model(lead_model, env)
-                argv.extend(["--model", lead_model])
+            if _ps_initial.model_override:
+                # Deliberate one-off override — same argv-flag reasoning as
+                # the teammate branch above (#318).
+                lead_model = _remap_pinned_model(_ps_initial.model_override, env)
+                if lead_model:
+                    argv.extend(["--model", lead_model])
+            else:
+                # #318: a role/provider pin or the Pro [1m]-avoidance safety
+                # net (_lead_model_override) is a *default*, not a forced
+                # override, so it goes through ANTHROPIC_DEFAULT_MODEL — same
+                # reasoning as the teammate branch — instead of --model, which
+                # would clobber a model the Lead's operator saved with /model.
+                lead_model = (
+                    _role_model_for(role_name, _CLAUDE)
+                    or _provider_model_for(_CLAUDE)
+                    or _lead_model_override()
+                )
+                if lead_model:
+                    lead_model = _remap_pinned_model(lead_model, env)
+                    apply_default_model(env, lead_model)
             # Degrade to Sonnet on overload/not-found so orchestration keeps
             # moving during peak load instead of the Lead turn erroring out
             # — the Lead is the single pane the user is actually talking to,
