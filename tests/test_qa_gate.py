@@ -172,7 +172,13 @@ def test_targeted_mode_runs_pytest_only_and_writes_no_report(repo, monkeypatch):
     assert recorder[0][0][-1] == "tests/test_x.py"
 
 
-def test_pythonpath_prepends_worktree_src(repo, monkeypatch):
+def test_pythonpath_src_never_injected(repo, monkeypatch):
+    """The gate must NOT add <root>/src to PYTHONPATH — that's the exact
+    system-python footgun it exists to rule out: it leaks into
+    test_installed_mode_gate's fresh wheel venvs and makes an installed
+    build resolve agent_takkub from the checkout instead (fake packaging
+    bug, gate run 2026-08-20-112822). A caller's own PYTHONPATH passes
+    through untouched; resolution relies on the venv's editable install."""
     _make_complete_venv(repo)
     monkeypatch.setenv("PYTHONPATH", "/existing")
     recorder: list = []
@@ -181,9 +187,8 @@ def test_pythonpath_prepends_worktree_src(repo, monkeypatch):
     qa_gate.run_gate(cwd=repo, write_report=False)
 
     _, env = recorder[0]
-    parts = env["PYTHONPATH"].split(os.pathsep)
-    assert parts[0] == str(repo / "src")
-    assert "/existing" in parts
+    assert str(repo / "src") not in env.get("PYTHONPATH", "").split(os.pathsep)
+    assert env["PYTHONPATH"] == "/existing"
 
 
 def test_v2_flags_forces_all_five_env_vars(repo, monkeypatch):
