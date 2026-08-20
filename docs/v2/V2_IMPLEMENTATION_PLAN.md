@@ -228,6 +228,29 @@ takkub migrate rollback    # ย้อนจาก journal + backup
 - ดิสก์ย้ายจริงที่ Phase 8 เท่านั้น
 - เครื่องที่ยังไม่ migrate ต้องเปิด cockpit ได้ปกติเสมอ (ทั้ง Windows และ macOS — ทดสอบทั้งคู่)
 
+#### Claude Code project-transcript directory mapping (#321)
+
+`CLAUDE_CODE_PROJECT_DIR_NAME` (Claude Code >= 2.1.234) is a V1 provider-store
+layout choice, not a new Takkub storage root.  For a cockpit project namespace
+`<project_ns>`, the spawn side writes Claude transcripts to:
+
+```text
+CLAUDE_CONFIG_DIR/projects/takkub-project-<project_ns>/
+```
+
+The namespace is cockpit-owned and reversible, so `-`, `_`, and `.` retain
+their identity; this replaces no data and does not require reverse-decoding a
+cwd.  Readers must prefer that directory and then fall back to Claude's legacy
+`CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/` directory.  This keeps pre-2.1.234
+sessions resumable and also covers an older CLI, for which the environment
+variable is intentionally not injected.
+
+This belongs to ladder step 6's existing `claude default_claude_config_dir()`
+reference-only mapping (`providers/claude/` + `accounts/claude/`): the future
+2.0.0 migration records the one Claude config root and its two recognized
+transcript naming schemes, copies neither credentials nor transcripts, and
+therefore cannot migrate the same transcript twice.
+
 ---
 
 ## 6. สิ่งที่ต้องตัดสินใจก่อนเริ่ม Phase 1

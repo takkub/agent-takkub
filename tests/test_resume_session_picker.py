@@ -183,6 +183,69 @@ class TestSurvivesLossyPathChars:
         assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd)) is True
 
 
+class TestClaudeProjectDirectoryName:
+    """#321: deterministic Claude directory names replace lossy cwd decoding."""
+
+    def test_name_preserves_mixed_lossy_characters_and_version_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.pane_env import (
+            claude_project_dir_name,
+            inject_claude_project_dir_name_env,
+            supports_claude_project_dir_name,
+        )
+
+        project_ns = "project-name_with.dot"
+        assert claude_project_dir_name(project_ns) == "takkub-project-project-name_with.dot"
+        assert supports_claude_project_dir_name("2.1.233") is False
+        assert supports_claude_project_dir_name("2.1.234") is True
+        completed = MagicMock(returncode=0, stdout="2.1.234 (Claude Code)")
+        monkeypatch.setattr(
+            "agent_takkub.pane_env.subprocess.run", lambda *_args, **_kwargs: completed
+        )
+        env: dict[str, str] = {}
+        inject_claude_project_dir_name_env(env, project_ns, "claude")
+        assert env["CLAUDE_CODE_PROJECT_DIR_NAME"] == "takkub-project-project-name_with.dot"
+
+    def test_new_directory_wins_and_legacy_directory_stays_resolvable(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.pane_env import claude_project_dir_name
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+        from agent_takkub.token_meter import find_session_by_uuid
+
+        project_ns = "project-name_with.dot"
+        config_dir = tmp_path / "claude_config"
+        cwd = tmp_path / project_ns
+        cwd.mkdir()
+        monkeypatch.setattr(notify_mod, "config_dir_for", lambda _project: config_dir)
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        monkeypatch.setattr(_config, "lead_cwd", lambda _project=None: str(cwd))
+
+        legacy = config_dir / "projects" / _encode_cwd(cwd)
+        named = config_dir / "projects" / claude_project_dir_name(project_ns)
+        legacy.mkdir(parents=True)
+        named.mkdir(parents=True)
+        record = (
+            json.dumps({"type": "user", "message": {"role": "user", "content": "resume me"}}) + "\n"
+        )
+        (legacy / "legacy.jsonl").write_text(record, encoding="utf-8")
+        (legacy / "same.jsonl").write_text(record, encoding="utf-8")
+        preferred = named / "same.jsonl"
+        preferred.write_text(record, encoding="utf-8")
+        (named / "new.jsonl").write_text(record, encoding="utf-8")
+
+        assert find_session_by_uuid(cwd, "same", config_dir, project_ns=project_ns) == preferred
+        assert _resume_uuid_matches_cwd(project_ns, "new", str(cwd)) is True
+        assert _resume_uuid_matches_cwd(project_ns, "legacy", str(cwd)) is True
+        assert notify_mod._resolve_claude_jsonl_path(project_ns, "new") == named / "new.jsonl"
+        assert {entry["uuid"] for entry in notify_mod.list_recent_lead_sessions(project_ns)} == {
+            "legacy",
+            "same",
+            "new",
+        }
+
+
 class TestResumeUuidMatchesCwd:
     def test_matches_when_encoded_dir_decodes_to_cwd(
         self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch

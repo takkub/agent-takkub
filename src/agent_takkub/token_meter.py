@@ -90,6 +90,7 @@ def effective_context_limit(model: str | None, prompt: int, base: int | None = N
 # and '.'. Matching that exactly is what lets the token meter find the session
 # JSONL.
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+_CLAUDE_PROJECT_DIR_NAME_PREFIX = "takkub-project-"
 
 
 def encode_path_for_claude(cwd: str | Path) -> str:
@@ -108,6 +109,30 @@ def encode_path_for_claude(cwd: str | Path) -> str:
     that doesn't exist — its token badge silently never appeared.
     """
     return _NON_ALNUM_RE.sub("-", str(Path(cwd).resolve()))
+
+
+def session_project_dirs_for_cwd(
+    config_dir: str | Path | None,
+    cwd: str | Path,
+    *,
+    project_ns: str | None = None,
+    project_dir_name: str | None = None,
+) -> tuple[Path, ...]:
+    """Return transcript directories in preferred new-to-legacy order.
+
+    A Claude >=2.1.234 pane writes to its cockpit-controlled directory name;
+    sessions created by earlier Claude versions remain under the legacy
+    encoded-cwd directory.  Keep both candidates so an upgrade never hides a
+    resumable session. ``project_dir_name`` lets a live pane carry the exact
+    spawn-side choice without re-deriving it from state.
+    """
+    root = _claude_projects_dir(config_dir)
+    new_name = project_dir_name or (
+        f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}" if project_ns else None
+    )
+    names = [new_name, encode_path_for_claude(cwd)] if new_name else [encode_path_for_claude(cwd)]
+    seen: set[str] = set()
+    return tuple(root / name for name in names if name and not (name in seen or seen.add(name)))
 
 
 def session_project_dir_for_cwd(config_dir: str | Path | None, cwd: str | Path) -> Path:
@@ -141,7 +166,12 @@ def _claude_projects_dir(config_dir: str | Path | None = None) -> Path:
 
 
 def find_session_by_uuid(
-    cwd: str | Path, session_uuid: str, config_dir: str | Path | None = None
+    cwd: str | Path,
+    session_uuid: str,
+    config_dir: str | Path | None = None,
+    *,
+    project_ns: str | None = None,
+    project_dir_name: str | None = None,
 ) -> Path | None:
     """Return this pane's *exact* session JSONL —
     ``<cwd's encoded project dir>/<session_uuid>.jsonl`` — never a guess.
@@ -163,13 +193,22 @@ def find_session_by_uuid(
     """
     if not session_uuid:
         return None
-    enc = encode_path_for_claude(cwd)
-    candidate = _claude_projects_dir(config_dir) / enc / f"{session_uuid}.jsonl"
-    return candidate if candidate.is_file() else None
+    for project_dir in session_project_dirs_for_cwd(
+        config_dir, cwd, project_ns=project_ns, project_dir_name=project_dir_name
+    ):
+        candidate = project_dir / f"{session_uuid}.jsonl"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def find_latest_session(
-    cwd: str | Path, since_ts: float = 0.0, config_dir: str | Path | None = None
+    cwd: str | Path,
+    since_ts: float = 0.0,
+    config_dir: str | Path | None = None,
+    *,
+    project_ns: str | None = None,
+    project_dir_name: str | None = None,
 ) -> Path | None:
     """Return the most-recently-modified JSONL file matching `cwd`'s encoded
     project dir, optionally requiring mtime >= since_ts.
@@ -189,25 +228,26 @@ def find_latest_session(
     uuid is available and "some session in this cwd, not necessarily this
     pane's" is an acceptable answer.
     """
-    enc = encode_path_for_claude(cwd)
-    proj_dir = _claude_projects_dir(config_dir) / enc
-    if not proj_dir.is_dir():
-        return None
     best: tuple[float, Path] | None = None
-    try:
-        for f in proj_dir.iterdir():
-            if f.suffix != ".jsonl" or not f.is_file():
-                continue
-            try:
-                mtime = f.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < since_ts:
-                continue
-            if best is None or mtime > best[0]:
-                best = (mtime, f)
-    except OSError:
-        return None
+    for proj_dir in session_project_dirs_for_cwd(
+        config_dir, cwd, project_ns=project_ns, project_dir_name=project_dir_name
+    ):
+        if not proj_dir.is_dir():
+            continue
+        try:
+            for f in proj_dir.iterdir():
+                if f.suffix != ".jsonl" or not f.is_file():
+                    continue
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime < since_ts:
+                    continue
+                if best is None or mtime > best[0]:
+                    best = (mtime, f)
+        except OSError:
+            continue
     return best[1] if best else None
 
 

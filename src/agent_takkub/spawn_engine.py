@@ -67,6 +67,7 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
+    inject_claude_project_dir_name_env,
     inject_provider_home_env,
     inject_provider_no_autoupdate_env,
     inject_user_profile_env,
@@ -415,14 +416,16 @@ def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bo
     if not _SAFE_SESSION_UUID_RE.match(session_uuid):
         return False
 
-    from .token_meter import session_project_dir_for_cwd
+    from .token_meter import session_project_dirs_for_cwd
     from .user_profile import config_dir_for
 
     try:
-        proj_dir = session_project_dir_for_cwd(config_dir_for(project_ns), cwd)
+        project_dirs = session_project_dirs_for_cwd(
+            config_dir_for(project_ns), cwd, project_ns=project_ns
+        )
     except OSError:
         return False
-    return (proj_dir / f"{session_uuid}.jsonl").is_file()
+    return any((proj_dir / f"{session_uuid}.jsonl").is_file() for proj_dir in project_dirs)
 
 
 def _resume_uuid_matches_provider_cwd(
@@ -2516,6 +2519,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
+        inject_claude_project_dir_name_env(env, project_ns, claude)
         inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled
 
