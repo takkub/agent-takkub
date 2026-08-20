@@ -81,12 +81,15 @@ class _Bridge(QObject):
     the Qt main thread; `request` is emitted from arbitrary handler
     threads and Qt auto-queues delivery of `_handle` onto the main thread.
 
-    M-5: `pulse`/`lead_say` do real loopback-socket I/O to `cli_server`
-    (up to several seconds under load) — that must never block the Qt
-    event loop. They never touch Orchestrator/pane state directly (only
-    the already-thread-safe `orch._lead_token` attribute), so the actual
-    socket call is kicked off on a throwaway worker thread instead of
-    running inline here. Their client-supplied `project` param is still
+    M-5: `pulse`/`lead_say`/`answer_picker` do real loopback-socket I/O to
+    `cli_server` (up to several seconds under load) — that must never block
+    the Qt event loop. They never touch Orchestrator/pane state directly
+    (only the already-thread-safe `orch._lead_token` attribute), so the
+    actual socket call is kicked off on a throwaway worker thread instead of
+    running inline here. `answer_picker` additionally does a synchronous
+    JSONL re-read (`notify.current_ask_state`) before that socket call — off
+    the Qt thread for the same reason. Their client-supplied `project` param
+    is still
     resolved inline first (`_resolve_scoped_project`, a cheap in-process
     read) so the open-tabs check happens on the Qt thread before the
     worker thread ever starts. `projects`/`sse_ticket`/`open`/`lead_history`/
@@ -101,7 +104,7 @@ class _Bridge(QObject):
 
     request = pyqtSignal(object)
 
-    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say", "lead_upload"})
+    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say", "lead_upload", "answer_picker"})
 
     def __init__(self, orch) -> None:
         super().__init__()
@@ -200,6 +203,11 @@ class _Bridge(QObject):
                     pending.params.get("name"),
                     pending.params.get("caption"),
                     pending.params.get("project"),
+                )
+                pending.reply.put((200, result))
+            elif pending.action == "answer_picker":
+                result = api.answer_picker(
+                    self._orch, pending.params.get("project"), pending.params.get("answers")
                 )
                 pending.reply.put((200, result))
         except api.RemoteApiError as exc:
@@ -520,6 +528,21 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._respond_marshaled(
                 "lead_say", {"text": payload.get("text", ""), "project": payload.get("project")}
+            )
+        elif rest == "/api/lead/answer-picker":
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled(
+                "answer_picker",
+                {"answers": payload.get("answers"), "project": payload.get("project")},
             )
         elif rest == "/api/open":
             if not self._check_bearer() or not self._check_password_gate():

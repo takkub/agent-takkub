@@ -61,8 +61,20 @@ class TestAppJsWiring:
         # what still matters is that the client renders option labels safely
         # (textContent, never innerHTML) rather than trusting the shape blindly.
         js = _read("app.js")
-        assert "Array.isArray(payload.options)" in js  # guards a malformed payload
+        assert "Array.isArray(payload.questions)" in js  # guards a malformed payload
         assert "btn.textContent = label" in js  # chip labels never go through innerHTML
+
+    def test_multi_question_picker_answers_via_dedicated_endpoint(self):
+        # remote AskUserQuestion fix: typed label text + Enter is silently discarded by the real
+        # terminal picker and Enter submits whatever option was already
+        # highlighted, not what the user tapped (proven live, see
+        # docs/audit/2026-08-20-remote-askuserquestion.md) — chips must
+        # submit through the key-injection endpoint, never sendLeadMessage.
+        js = _read("app.js")
+        assert "function submitPickerAnswers" in js
+        assert "api/lead/answer-picker" in js
+        # every question in the payload must be answered before submit
+        assert "selections.indexOf(null)" in js
 
     def test_hide_picker_banner_wired_into_new_lead_text_paths(self):
         js = _read("app.js")

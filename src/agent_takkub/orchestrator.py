@@ -2886,6 +2886,33 @@ class Orchestrator(
             f"ยืนยันว่าถึงมือจริงไหมด้วย `takkub messages --role {to_role}`"
         )
 
+    def answer_picker(self, key_sequence: str, project: str | None = None) -> tuple[bool, str]:
+        """Remote mobile AskUserQuestion fix: write a raw key
+        sequence straight into the Lead pane's PTY, bypassing `send()`'s
+        chat-message pipeline entirely — `_sanitize_pane_text`/
+        `_paste_payload` are built for prose a human typed, not control
+        keystrokes, and `send()`'s delayed-Enter self-heal would double-fire
+        Enter into a picker that already advanced on its own.
+
+        `key_sequence` is caller-built (`remote/api.py::_build_picker_key_
+        sequence`) from a *fresh* re-read of the pane's actual current
+        AskUserQuestion state — every character in it is a plain ASCII
+        digit ('1'-'9', selecting an option) or '\\r' (confirming the
+        multi-question "Review your answers" screen), never an escape
+        sequence, so no sanitization is needed or wanted here. Lead-pane
+        only, same as every other write this orchestrator makes into a
+        picker: there is no such thing as a teammate-pane picker (#103,
+        `spawn_engine.py` denies teammates the `AskUserQuestion` tool
+        outright)."""
+        if not key_sequence:
+            return False, "empty key sequence"
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(LEAD.name)
+        if pane is None or pane.session is None or not pane.session.is_alive:
+            return False, "lead is not running"
+        pane.session.write(key_sequence)
+        return True, "ok"
+
     # ------------------------------------------------------------------
     # Pane health (#280) — watchdog observations are accumulated per pane
     # lifecycle and reported at its terminal event instead of interrupting

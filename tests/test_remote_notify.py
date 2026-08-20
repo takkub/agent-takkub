@@ -833,16 +833,21 @@ class TestAskQuestionPrompt:
 
 
 class TestAskQuestionOptions:
-    """`_ask_question_options` (B2): forwards the full picker payload
-    (prompt + option labels + multiSelect) so the remote can render
-    tappable chips."""
+    """`_ask_question_options` (B2, remote AskUserQuestion fix): forwards the full picker payload
+    for EVERY question in the tool call (prompt + option labels +
+    multiSelect), not just the first, so the remote can render tappable
+    chips and answer a multi-question call."""
 
     def test_extracts_prompt_options_and_multi_select(self):
         rec = json.loads(_ask_user_question_line("เลือกแนวทางไหนดี?"))
         assert notify_mod._ask_question_options(rec) == {
-            "prompt": "เลือกแนวทางไหนดี?",
-            "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
-            "multiSelect": False,
+            "questions": [
+                {
+                    "prompt": "เลือกแนวทางไหนดี?",
+                    "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                    "multiSelect": False,
+                }
+            ]
         }
 
     def test_caps_option_count(self):
@@ -850,7 +855,7 @@ class TestAskQuestionOptions:
         opts = [{"label": f"opt{i}"} for i in range(10)]
         rec["message"]["content"][0]["input"]["questions"][0]["options"] = opts
         result = notify_mod._ask_question_options(rec)
-        assert len(result["options"]) == notify_mod._MAX_ASK_OPTIONS
+        assert len(result["questions"][0]["options"]) == notify_mod._MAX_ASK_OPTIONS
 
     def test_non_ask_tool_use_is_none(self):
         rec = json.loads(_tool_use_line())
@@ -859,6 +864,93 @@ class TestAskQuestionOptions:
     def test_non_assistant_record_is_none(self):
         rec = json.loads(_user_line("hi"))
         assert notify_mod._ask_question_options(rec) is None
+
+    def test_forwards_every_question_not_just_the_first(self):
+        # remote AskUserQuestion fix: the pre-fix behavior read only questions[0] -- a Lead turn
+        # firing 2+ questions in one call silently lost every question after
+        # the first, so the phone couldn't even show it, let alone answer.
+        rec = json.loads(_ask_user_question_line("Q1?"))
+        rec["message"]["content"][0]["input"]["questions"].append(
+            {
+                "question": "Q2?",
+                "header": "second",
+                "options": [{"label": "C"}, {"label": "D"}],
+                "multiSelect": True,
+            }
+        )
+        result = notify_mod._ask_question_options(rec)
+        assert [q["prompt"] for q in result["questions"]] == ["Q1?", "Q2?"]
+        assert result["questions"][1]["multiSelect"] is True
+        assert result["questions"][1]["options"] == [
+            {"index": 0, "label": "C"},
+            {"index": 1, "label": "D"},
+        ]
+
+    def test_caps_question_count(self):
+        rec = json.loads(_ask_user_question_line("Q0?"))
+        base = rec["message"]["content"][0]["input"]["questions"][0]
+        rec["message"]["content"][0]["input"]["questions"] = [
+            {**base, "question": f"Q{i}?"} for i in range(10)
+        ]
+        result = notify_mod._ask_question_options(rec)
+        assert len(result["questions"]) == notify_mod._MAX_ASK_QUESTIONS
+
+
+class TestCurrentAskState:
+    """`current_ask_state` (remote AskUserQuestion fix): the answer-picker endpoint's guard — a
+    FRESH, uncached re-read of the pane's actual current state, independent
+    of whatever `LeadNotifier`'s poll tail last pushed over SSE. Must return
+    None the moment anything supersedes the picker (a real reply, or a
+    different tool_use), so a stale mobile banner can never type digits
+    into a live chat turn."""
+
+    def test_active_picker_returns_all_questions(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1")
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [_ask_user_question_line("ไปทางไหนดี?")])
+        state = notify_mod.current_ask_state(orch, "proj")
+        assert state == {
+            "questions": [
+                {
+                    "prompt": "ไปทางไหนดี?",
+                    "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+    def test_a_real_reply_after_the_picker_supersedes_it(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1")
+        _write_jsonl(
+            tmp_path,
+            "C--proj",
+            "uuid-1",
+            [_ask_user_question_line("q"), _assistant_line("answered on desktop already")],
+        )
+        assert notify_mod.current_ask_state(orch, "proj") is None
+
+    def test_a_different_tool_use_after_the_picker_supersedes_it(self, qapp, tmp_path, config_dir):
+        # Lead moved on to something else -- the picker (if it ever showed)
+        # is no longer the pane's current state.
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1")
+        _write_jsonl(
+            tmp_path, "C--proj", "uuid-1", [_ask_user_question_line("q"), _tool_use_line()]
+        )
+        assert notify_mod.current_ask_state(orch, "proj") is None
+
+    def test_no_jsonl_yet_is_none(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1")
+        assert notify_mod.current_ask_state(orch, "proj") is None
+
+    def test_non_claude_provider_is_none(self, qapp, tmp_path, config_dir):
+        # Only Claude has a live_ask scanner -- same #103 gap the fallback
+        # banner already documents.
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1", provider="gemini")
+        assert notify_mod.current_ask_state(orch, "proj") is None
 
 
 class TestLeadOutputTailAskQuestion:
@@ -877,9 +969,13 @@ class TestLeadOutputTailAskQuestion:
                 fh.write(_ask_user_question_line("ไปทางไหนดี?") + "\n")
             notifier._poll_all()
             expected = {
-                "prompt": "ไปทางไหนดี?",
-                "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
-                "multiSelect": False,
+                "questions": [
+                    {
+                        "prompt": "ไปทางไหนดี?",
+                        "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                        "multiSelect": False,
+                    }
+                ]
             }
             assert broadcaster.events == [("blocked_on_picker", expected, "proj")]
         finally:
@@ -928,9 +1024,13 @@ class TestLeadOutputTailAskQuestion:
                 fh.write(_ask_user_question_line("q") + "\n")
             notifier._poll_all()
             expected = {
-                "prompt": "q",
-                "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
-                "multiSelect": False,
+                "questions": [
+                    {
+                        "prompt": "q",
+                        "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                        "multiSelect": False,
+                    }
+                ]
             }
             assert broadcaster.events == [("blocked_on_picker", expected, "proj")]
 

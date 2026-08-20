@@ -796,6 +796,121 @@ class TestLeadSay:
         assert excinfo.value.status == 502
 
 
+def _one_question_state(multi_select: bool = False) -> dict:
+    return {
+        "questions": [
+            {
+                "prompt": "Pick one?",
+                "options": [
+                    {"index": 0, "label": "Apple"},
+                    {"index": 1, "label": "Banana"},
+                    {"index": 2, "label": "Cherry"},
+                ],
+                "multiSelect": multi_select,
+            }
+        ]
+    }
+
+
+def _two_question_state() -> dict:
+    return {
+        "questions": [
+            {
+                "prompt": "Pet?",
+                "options": [{"index": 0, "label": "Cat"}, {"index": 1, "label": "Dog"}],
+                "multiSelect": False,
+            },
+            {
+                "prompt": "Drink?",
+                "options": [{"index": 0, "label": "Tea"}, {"index": 1, "label": "Coffee"}],
+                "multiSelect": False,
+            },
+        ]
+    }
+
+
+class TestBuildPickerKeySequence:
+    """Remote AskUserQuestion fix: proven live (docs/audit/2026-08-20-remote-askuserquestion.md) —
+    a bare 1-based digit selects AND submits a single-select question
+    immediately (no Enter needed); a multi-question call auto-advances
+    tabs on its own and only needs one trailing Enter to confirm the
+    "Review your answers" screen that appears after the LAST question."""
+
+    def test_single_question_is_a_bare_digit_no_trailing_enter(self):
+        state = _one_question_state()
+        seq = api._build_picker_key_sequence(state["questions"], [[1]])
+        assert seq == "2"  # 0-based index 1 -> 1-based digit key "2"
+
+    def test_multi_question_appends_trailing_enter_to_confirm_review_screen(self):
+        state = _two_question_state()
+        seq = api._build_picker_key_sequence(state["questions"], [[0], [1]])
+        assert seq == "1" + "2" + "\r"
+
+    def test_multi_select_question_is_rejected(self):
+        state = _one_question_state(multi_select=True)
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api._build_picker_key_sequence(state["questions"], [[0]])
+        assert excinfo.value.status == 400
+
+    def test_answer_count_mismatch_is_rejected(self):
+        state = _two_question_state()
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api._build_picker_key_sequence(state["questions"], [[0]])
+        assert excinfo.value.status == 400
+
+    def test_out_of_range_index_is_rejected(self):
+        state = _one_question_state()
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api._build_picker_key_sequence(state["questions"], [[99]])
+        assert excinfo.value.status == 400
+
+    def test_more_than_one_selection_for_single_select_is_rejected(self):
+        state = _one_question_state()
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api._build_picker_key_sequence(state["questions"], [[0, 1]])
+        assert excinfo.value.status == 400
+
+
+class TestAnswerPicker:
+    def test_no_active_picker_returns_409(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api.notify, "current_ask_state", lambda orch, ns: None)
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.answer_picker(fake_orch, "proj", [[0]])
+        assert excinfo.value.status == 409
+
+    def test_empty_answers_rejected_before_any_state_lookup(self, fake_orch):
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.answer_picker(fake_orch, "proj", [])
+        assert excinfo.value.status == 400
+
+    def test_success_writes_key_sequence_via_answer_picker_cmd(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api.notify, "current_ask_state", lambda orch, ns: _one_question_state())
+        srv = _FakeCliServer({"ok": True})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.answer_picker(fake_orch, "proj", [[1]])
+        finally:
+            srv.close()
+        assert result == {"ok": True}
+        assert len(srv.received) == 1
+        sent = srv.received[0]
+        assert sent["cmd"] == "answer-picker"
+        assert sent["key_sequence"] == "2"
+        assert sent["from"] == "remote"
+        assert sent["from_project"] == "proj"
+
+    def test_cli_server_failure_propagates(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api.notify, "current_ask_state", lambda orch, ns: _one_question_state())
+        srv = _FakeCliServer({"ok": False, "msg": "lead is not running"})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            with pytest.raises(api.RemoteApiError) as excinfo:
+                api.answer_picker(fake_orch, "proj", [[0]])
+        finally:
+            srv.close()
+        assert excinfo.value.status == 502
+
+
 class TestLeadUploadImage:
     _PNG = b"\x89PNG\r\n\x1a\n" + b"test-pixels"
 

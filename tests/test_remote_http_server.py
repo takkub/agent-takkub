@@ -961,12 +961,16 @@ class TestSSEBroadcaster:
         assert json.loads(payload) == {"text": "ไปทางไหนดี?"}
 
     def test_dict_payload_is_sent_unwrapped(self):
-        """B2: a dict `data` (the picker's structured prompt/options/
+        """B2: a dict `data` (the picker's structured questions/options/
         multiSelect shape) must reach the wire as-is, not double-wrapped
         under a `text` key like the plain-string case."""
         broadcaster = http_server.SSEBroadcaster()
         q = broadcaster.register("proj")
-        structured = {"prompt": "q", "options": [{"index": 0, "label": "A"}], "multiSelect": False}
+        structured = {
+            "questions": [
+                {"prompt": "q", "options": [{"index": 0, "label": "A"}], "multiSelect": False}
+            ]
+        }
         broadcaster.push("blocked_on_picker", structured, "proj")
         event, payload = q.get_nowait()
         assert event == "blocked_on_picker"
