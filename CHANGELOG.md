@@ -4,6 +4,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.79] - 2026-08-20
+
+### Fixed (แก้)
+
+- **boot-update ยิง `npm install -g` ขนานกันจน install ชนกันเอง** (#326) — อาการบน macOS ของ user
+  จริง: claude ขึ้น "updated to v2.1.237" แต่ binary เป็น placeholder, codex กับ opencode ตาย
+  พร้อมกันด้วย npm EEXIST (npm debug log ห่างกัน 1 ms) → root cause: `boot_update_window.start()`
+  ยิง 1 QThreadPool worker ต่อ 1 provider ขนานกันหมด แต่ npm **ไม่มี cross-process lock** สำหรับ
+  global prefix — สาม `npm install -g` ชน bin-linking กันเอง (EEXIST ที่ `<prefix>/bin/<name>`)
+  และตัด postinstall กลางทางจน native binary ของ claude ไม่ถูก copy ออกจาก optional dep ทั้งที่
+  npm ยัง exit 0 (= อาการ #313 ซ้ำ) → แก้: `provider_update._NPM_LOCK` mutex ระดับ process ครอบ
+  ทุก npm run ทั้ง `_update_generic` และ `_update_claude` (`npm view` ที่ read-only ไม่ถือ lock ·
+  uv ยังขนานได้เหมือนเดิม) รอเกิน 180s รายงานตรงๆ แทนค้าง
+  + 3 tests (`test_provider_update.py::TestNpmSerialisation` — ปิด mutex แล้วเทสแดงจริง)
+- **hint ซ่อม claude บอก platform ผิดบนทุก OS ที่ไม่ใช่ Windows** (#326) — ข้อความตอน binary ไม่ผ่าน
+  header check hardcode `@anthropic-ai/claude-code-win32-x64` ส่งคนใช้ mac/linux ไปลง binary ของ
+  Windows → แก้: `provider_update._node_optional_dep_tag()` map `sys.platform` + `platform.machine()`
+  ตาม naming ของ npm optional dep (`darwin-arm64` / `darwin-x64` / `linux-*` / `win32-x64`)
+  + 5 tests
+- **ข้อความ error ของ npm บน splash อ่านไม่รู้เรื่อง** (#326) — `splitlines()[-2:]` ได้แต่ boilerplate
+  ท้าย log ของ npm ("A complete log of this run can be found in: …") สาเหตุจริงถูกตัดทิ้งทุกครั้ง →
+  แก้: `_error_excerpt()` anchor ที่ `npm error code <CODE>` ซึ่ง npm พิมพ์**ก่อน** (updater อื่นที่
+  สาเหตุอยู่บรรทัดท้ายจริงๆ ยังใช้ tail เหมือนเดิม)
+  + 4 tests
+
 ## [1.0.78] - 2026-08-20
 
 ### Added (เพิ่ม)
