@@ -357,6 +357,53 @@ def _capture_claude_argv(
     return spawn_calls[0]["argv"]
 
 
+def _capture_claude_spawn(
+    qapp,
+    monkeypatch,
+    tmp_path,
+    *,
+    model_override: str | None = None,
+) -> dict:
+    """Like `_capture_claude_argv` but returns the full spawn() kwargs (argv
+    AND env) — #318 needs both since a persistent model pin now rides
+    ANTHROPIC_DEFAULT_MODEL in env instead of the --model argv flag."""
+    from agent_takkub.provider_config import CLAUDE
+
+    orchestrator = _make_orchestrator(qapp, monkeypatch)
+    pane = _make_pane("backend")
+    orchestrator._panes_by_project[TEST_PROJECT] = {"backend": pane}
+    orchestrator._ps(f"{TEST_PROJECT}::backend").model_override = model_override
+    spawn_calls: list[dict] = []
+
+    with (
+        patch.object(orchestrator, "_is_spawn_blocked", return_value=False),
+        patch.object(orchestrator, "_final_gate_clear", return_value=True),
+        patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+        patch("agent_takkub.orchestrator.PtySession") as mock_pty_cls,
+        patch("agent_takkub.orchestrator.QTimer.singleShot"),
+        patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
+        patch("agent_takkub.orchestrator._build_lead_env", return_value={}),
+        patch("agent_takkub.orchestrator.agent_role_dir", return_value=tmp_path),
+        patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude"),
+        patch("agent_takkub.provider_config.effective_provider_for", return_value=CLAUDE),
+        patch("agent_takkub.orchestrator.inject_user_profile_env"),
+        patch("agent_takkub.orchestrator.apply_claude_auth_overrides"),
+        patch("agent_takkub.orchestrator._default_plugin_dirs", return_value=[]),
+        patch("agent_takkub.hook_wiring.ensure_hook_settings_file", return_value="hooks.json"),
+        patch("agent_takkub.mcp_bridge.mcp_argv_for_provider", return_value=[]),
+    ):
+        mock_pty = MagicMock()
+        mock_pty.spawn.side_effect = lambda **kwargs: spawn_calls.append(kwargs)
+        mock_pty_cls.return_value = mock_pty
+        pane.attach_session = MagicMock()
+
+        ok, message = orchestrator.spawn("backend", cwd=str(tmp_path), project=TEST_PROJECT)
+
+    assert ok is True, message
+    assert spawn_calls
+    return spawn_calls[0]
+
+
 def _model_arg(argv: list[str]) -> str | None:
     if "--model" not in argv:
         return None
@@ -379,32 +426,50 @@ class TestClaudeTeammateModelPrecedence:
         provider_models.set_model("claude", "claude-provider")
         monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "claude-env")
 
-        argv = _capture_claude_argv(
+        spawn_kwargs = _capture_claude_spawn(
             qapp,
             monkeypatch,
             tmp_path,
             model_override="claude-assign",
         )
 
-        assert _model_arg(argv) == "claude-assign"
+        assert _model_arg(spawn_kwargs["argv"]) == "claude-assign"
+        # Single mechanism per spawn (#318): an explicit override never also
+        # sets the ANTHROPIC_DEFAULT_MODEL pin.
+        assert "ANTHROPIC_DEFAULT_MODEL" not in spawn_kwargs["env"]
 
     def test_config_wins_over_tier_when_env_unset(self, qapp, monkeypatch, tmp_path) -> None:
+        # #318: a persistent pin (no explicit override, no TAKKUB_TEAMMATE_MODEL
+        # force) rides ANTHROPIC_DEFAULT_MODEL, not --model — see
+        # docs/audit/2026-08-20-issue-318-*.md for why.
         monkeypatch.delenv("TAKKUB_TEAMMATE_MODEL", raising=False)
         provider_models.set_model("claude", "claude-custom")
 
-        assert _model_arg(_capture_claude_argv(qapp, monkeypatch, tmp_path)) == "claude-custom"
+        spawn_kwargs = _capture_claude_spawn(qapp, monkeypatch, tmp_path)
+        assert _model_arg(spawn_kwargs["argv"]) is None
+        assert spawn_kwargs["env"].get("ANTHROPIC_DEFAULT_MODEL") == "claude-custom"
 
     def test_explicit_empty_env_keeps_no_model_behavior(self, qapp, monkeypatch, tmp_path) -> None:
         provider_models.set_model("claude", "claude-custom")
         monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "")
 
-        assert _model_arg(_capture_claude_argv(qapp, monkeypatch, tmp_path)) is None
+        # An explicitly empty TAKKUB_TEAMMATE_MODEL means "use the Claude CLI
+        # default" — it must short-circuit the whole precedence chain, so
+        # neither --model nor ANTHROPIC_DEFAULT_MODEL should be set.
+        spawn_kwargs = _capture_claude_spawn(qapp, monkeypatch, tmp_path)
+        assert _model_arg(spawn_kwargs["argv"]) is None
+        assert "ANTHROPIC_DEFAULT_MODEL" not in spawn_kwargs["env"]
 
     def test_nonempty_env_wins_over_config(self, qapp, monkeypatch, tmp_path) -> None:
+        # TAKKUB_TEAMMATE_MODEL is an explicit operator force, same argv-flag
+        # tier as an assign-level model_override (#318) — not the persistent
+        # ANTHROPIC_DEFAULT_MODEL pin.
         provider_models.set_model("claude", "claude-config")
         monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "claude-env")
 
-        assert _model_arg(_capture_claude_argv(qapp, monkeypatch, tmp_path)) == "claude-env"
+        spawn_kwargs = _capture_claude_spawn(qapp, monkeypatch, tmp_path)
+        assert _model_arg(spawn_kwargs["argv"]) == "claude-env"
+        assert "ANTHROPIC_DEFAULT_MODEL" not in spawn_kwargs["env"]
 
 
 class TestRunningPaneModelOverride:
