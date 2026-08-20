@@ -68,6 +68,12 @@ def _spawn_with_scripted_pty(orch, role, monkeypatch, tmp_path, spawn_side_effec
     with (
         patch.object(orch, "_is_spawn_blocked", return_value=False),
         patch.object(orch, "_final_gate_clear", return_value=True),
+        # CI runners have no claude installed anywhere — without this stub the
+        # claude branch dies at find_claude_executable() before ever reaching
+        # the mocked PtySession (run 32337550027, all 3 OSes; dev machines
+        # always pass because the locator falls back to absolute install
+        # paths, not just PATH). Same stub pattern as test_hook_wiring.py.
+        patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude"),
         patch("agent_takkub.orchestrator.PtySession") as mock_pty_cls,
         patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=_immediate_single_shot),
         patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
