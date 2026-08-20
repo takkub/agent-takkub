@@ -50,6 +50,8 @@ import re
 import subprocess
 from datetime import datetime
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 _CLAUDE_PROJECT_DIR_NAME_MIN_VERSION = "2.1.234"
 _CLAUDE_PROJECT_DIR_NAME_PREFIX = "takkub-project-"
 
@@ -463,7 +465,10 @@ def inject_claude_project_dir_name_env(
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         version = completed.stdout if completed.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):

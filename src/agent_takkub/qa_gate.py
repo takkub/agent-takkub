@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 # Mirrors core/*/flag.py's os.environ.get(...) == "1" contract exactly —
 # #309 Phase 9's 5 named flags (context has no module yet, see
 # core_v2_settings.py's own comment, but the env var is still forced for the
@@ -82,8 +84,11 @@ def worktree_root(cwd: Path | None = None) -> Path:
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
             cwd=cwd,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         return Path(out.stdout.strip())
     except Exception:
@@ -100,8 +105,11 @@ def shared_venv_bin(cwd: Path | None = None) -> Path | None:
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
             cwd=cwd,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         root = Path(out.stdout.strip()).parent
     except Exception:
@@ -169,7 +177,16 @@ def _lint_imports_cmd(bin_dir: Path | None) -> list[str]:
 def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | None) -> StepResult:
     t0 = time.monotonic()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=cwd,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
     except OSError as e:
         # e.g. FileNotFoundError from a resolved-but-deleted-mid-run exe —
         # never let this masquerade as a generic Python traceback.
@@ -201,8 +218,11 @@ def _head_sha(cwd: Path) -> str:
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
             cwd=cwd,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         return out.stdout.strip()
     except Exception:
@@ -228,9 +248,6 @@ def run_gate(
         write_report = targeted is None
 
     env = dict(os.environ)
-    src_dir = str(wroot / "src")
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = src_dir if not existing else src_dir + os.pathsep + existing
     if v2_flags:
         for name in V2_FLAG_ENV_VARS:
             env[name] = "1"

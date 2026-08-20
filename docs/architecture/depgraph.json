@@ -81,6 +81,7 @@
         "agent_takkub.provider_update",
         "agent_takkub.provider_usage",
         "agent_takkub.pty_session",
+        "agent_takkub.qa_gate",
         "agent_takkub.remote.settings_dialog",
         "agent_takkub.services",
         "agent_takkub.settings_management.pages.skills_page",
@@ -93,7 +94,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 35,
+      "fan_in": 36,
       "fan_out": 0
     },
     {
@@ -2899,12 +2900,14 @@
     },
     {
       "module": "agent_takkub.qa_gate",
-      "imports": [],
+      "imports": [
+        "agent_takkub._win_console"
+      ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.release",

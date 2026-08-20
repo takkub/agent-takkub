@@ -538,9 +538,26 @@ class TestRoleEffortCombo:
         provider_combo = dlg._role_provider_combos["backend"]
         effort_combo = dlg._role_effort_combos["backend"]
 
-        provider_combo.setCurrentIndex(provider_combo.findData("gemini"))
+        # opencode has effort_flag=None (#103 documented gap) — gemini/agy
+        # regained --effort in #323, so it no longer belongs in this case.
+        provider_combo.setCurrentIndex(provider_combo.findData("opencode"))
 
         assert effort_combo.isEnabled() is False
+        dlg.deleteLater()
+
+    def test_gemini_offers_effort_levels(self) -> None:
+        """#323: gemini/agy regained --effort (upstream #125 fix, agy 1.1.10+)
+        after #103 had marked it unsupported — the combo must re-enable with
+        agy's own low/medium/high levels, not claude's five-level scale."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        provider_combo = dlg._role_provider_combos["backend"]
+        effort_combo = dlg._role_effort_combos["backend"]
+
+        provider_combo.setCurrentIndex(provider_combo.findData("gemini"))
+
+        assert effort_combo.isEnabled() is True
+        levels = [effort_combo.itemData(i) for i in range(effort_combo.count())]
+        assert levels == ["", "low", "medium", "high"]
         dlg.deleteLater()
 
     def test_switching_model_to_haiku_disables_and_keeps_prior_selection(self) -> None:
@@ -562,7 +579,7 @@ class TestRoleEffortCombo:
         provider_combo = dlg._role_provider_combos["backend"]
         effort_combo = dlg._role_effort_combos["backend"]
 
-        provider_combo.setCurrentIndex(provider_combo.findData("gemini"))
+        provider_combo.setCurrentIndex(provider_combo.findData("opencode"))
         assert effort_combo.isEnabled() is False
         provider_combo.setCurrentIndex(provider_combo.findData("claude"))
 
