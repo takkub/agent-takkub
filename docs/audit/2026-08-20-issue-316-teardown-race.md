@@ -85,5 +85,6 @@ event loop):
   both threads must still be joined exactly as before (behavior-neutral on
   the non-racing path).
 
-Run: `PYTHONPATH=src <venv>/Scripts/python.exe -m pytest
-tests/test_pty_teardown_deleted_qthread.py -q`
+Run: `.venv/Scripts/python.exe -m pytest
+tests/test_pty_teardown_deleted_qthread.py -q` (editable install — never
+`PYTHONPATH=src`, see run-tests-with-venv convention)
