@@ -4,13 +4,67 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.78] - 2026-08-20
+
+### Added (เพิ่ม)
+
+- **Boot-update + splash** — ปิด self-update ของทุก provider ระหว่าง pane ทำงาน (claude
+  `DISABLE_AUTOUPDATER` · gemini/kimi env ตามเอกสาร · opencode `autoupdate:false` ใน config ·
+  codex/cursor ไม่มี knob → gap #103) แล้วย้ายการ update ไปรัน**ครั้งเดียวตอนเปิด cockpit** ผ่าน
+  splash window (painted vector icons, layout-driven height, fade, aggregate progress) — เปิด
+  MainWindow หลังทุก provider done/fail/timeout ครบเท่านั้น · verify binary ด้วย pre-flight check
+  ก่อน mark ✓ (กัน placeholder 500B จาก postinstall ล้ม) · `TAKKUB_BOOT_UPDATE=0` ข้ามได้,
+  `TAKKUB_BOOT_UPDATE_TIMEOUT_S` ปรับ timeout · model catalog refresh ในเฟสเดียวกัน: gemini
+  bump เป็นรุ่นล่าสุดจริงผ่าน `agy --output-format json models` + text fallback (#317), provider
+  อื่น gap พร้อมเหตุผล (#103)
+- **`takkub qa-gate`** (#325) — entrypoint เทสเดียวทั้งทีม: venv-check → full pytest → `ruff check
+  src/ tests/` → lint-imports, exit code จับตรงไม่ผ่าน pipe, ตารางสรุป + report ลง `docs/qa/`,
+  `--targeted` (tier กลางทาง) + `--v2-flags` (ตรวจ V2 ladder) — CI/qa pane/มือ user เรียกตัวเดียวกัน
+  พร้อม regression guard ห้าม inject `PYTHONPATH=src` ตลอดไป
+- **`takkub assign --effort low|medium|high`** (#323) — per-assign effort override ครบ 3 provider
+  ที่มี knob จริง (claude `--effort` · codex `model_reasoning_effort` · gemini `--effort`) +
+  routing guidance ใน role-and-workflow
+- **Claude pane pin model ผ่าน `ANTHROPIC_DEFAULT_MODEL`** (#318) — role/provider pin ไม่ทับ
+  `/model` ที่ user เลือกอีกต่อไป (`--model` เหลือเฉพาะ override ที่เจตนา) + **Concise output
+  style pilot** กับ role qa (`TAKKUB_CONCISE_ROLES` ขยาย/ปิดได้, Lead ไม่โดนเสมอ) — token diet wave 4
+- **`CLAUDE_CODE_PROJECT_DIR_NAME`** (#321) — transcript dir ต่อ project เป็นชื่อ deterministic
+  (`takkub-project-<ns>`) แก้ปัญหา encode/decode path lossy ที่ต้นตอ · resolver ทุกชั้น fallback
+  อ่าน layout เก่า session เดิมไม่หาย · gate ที่ claude ≥2.1.234
+- **Pane รอ limit reset เป็น state จริง** (#322) — `LIMIT_WAIT` first-class ใน core scheduler ·
+  wake path re-check banner ก่อน inject (claude 2.1.234+ auto-continue เองได้ — ไม่ paste ทับ
+  live generation) · usage meter บอก "pane จะทำงานต่อเอง"
+- **`pane_guard` กติกา `git_lead_only`** (#314) — commit/push/rebase/merge/checkout เป็น hard-block
+  ระดับ PreToolUse สำหรับ specialist (ยกเว้นเดียว: `git commit` ใน worktree isolation ตาม #81) +
+  custom-role template มี version-control ban แล้ว
+- **Remote/มือถือตอบ AskUserQuestion ได้จริง** — answer-picker endpoint เขียน digit key ตรงเข้า
+  PTY + fresh-state guard (409 เมื่อ desktop ตอบไปแล้ว) + notify ส่งครบทุกคำถาม (เดิมส่งแค่ข้อแรก)
+  · multiSelect/non-claude fallback ตอบบน desktop เหมือนเดิม (#103)
+
 ### Fixed (แก้)
 
+- **Spawn ชน binary เสียแล้ว freeze ทั้ง cockpit เป็นชั่วโมง** (#313) — พิสูจน์แล้วว่า
+  `winpty.PtyProcess.spawn()` ไม่ปล่อย GIL ระหว่าง block: `spawn_pty()` ตรวจ header PE/ELF/Mach-O
+  ก่อนเรียก native เสมอ → `SpawnTargetCorrupt` retry ผ่าน deferred queue (backoff ~4.5s) ·
+  HARD-stall dead-man switch ด้วย `faulthandler.dump_traceback_later` (C-thread, ยิงได้แม้ GIL
+  ถูกยึด — boot.log ไม่เงียบอีก)
+- **ป้าย "unverified origin" เด้งแทบทุก done** (#315) — เทียบ mint timestamp ของ token แทนการเทียบ
+  token ดิบ: respawn หลัง queue = ปกติ, warn เฉพาะ phantom/replay จริง
+- **`pty-teardown` thread ตายเงียบตอนปิดโปรแกรม** (#316) — guard `RuntimeError` รอบ
+  `quit()/wait()` เมื่อ Qt ลบ `_WriterThread/_ReaderThread` ไปก่อน
+- **codex 0.148 `archive` ทำ session หายจาก mirror/resume** (#319) — resolver ทุกชั้น fallback ไป
+  `archived_sessions/` เฉพาะ exact-id lookup + fixture 0.148 กัน drift · `/export` ไม่มี headless
+  surface → ไม่ adopt (gap #103)
 - **`takkub assign --effort` ใช้ได้กับ gemini/agy จริงแล้ว** (#323 follow-up) — เดิม #125 ปิด `--effort`
   ไว้เพราะ agy 1.1.6 เจอ `--model`/`--effort` ชนกันแล้ว swap model เงียบ ตอนนี้ agy 1.1.10+ fix ต้นทาง
   แล้ว (ค่าคู่ที่ชนกัน hard-error ชัดแทนที่จะ swap เงียบ, verify สดกับ 1.1.15) → `gemini_spec.effort_flag`
   กลับมาเป็น `--effort` (low/medium/high, ตรง `agy --help`) ผ่าน path เดิมที่ claude/codex ใช้อยู่แล้ว
   ดู `docs/reviews/2026-08-20-323-agy-effort-restored.md`
+
+### Docs
+
+- **Spike SendMessage/ListAgents** (#320) — สรุป no-go สำหรับ topology ปัจจุบัน (SendMessage address
+  ได้เฉพาะ agent ที่ session ตัวเอง dispatch) + design sketch เก็บเป็น input ของ conversation V2
+- Audit docs ครบทุกงานวันนี้ใน `docs/audit/2026-08-20-*` + issue #146 ปิดหลัง repro ไม่ติด 3 shards
 
 ## [1.0.77] - 2026-08-19
 
