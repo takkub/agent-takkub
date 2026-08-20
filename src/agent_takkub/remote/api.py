@@ -320,6 +320,76 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     }
 
 
+# #313: AskUserQuestion's single-select options answer with a bare 1-based
+# digit keypress — no Enter needed, it selects AND submits immediately
+# (proven live, docs/audit/2026-08-20-remote-askuserquestion.md). A
+# multi-question tool call auto-advances to the next question's tab on its
+# own after each digit; only once every question has an answer does the CLI
+# show an extra "Review your answers" screen that needs one more Enter to
+# actually finalize — single-question calls never show that screen, so the
+# trailing Enter is added only when there's more than one question.
+def _build_picker_key_sequence(questions: list[dict], answers: list) -> str:
+    if any(bool(q.get("multiSelect")) for q in questions):
+        raise RemoteApiError(
+            400, "multi-select picker not supported on mobile yet — answer on desktop"
+        )
+    if len(answers) != len(questions):
+        raise RemoteApiError(400, "answers count does not match questions")
+    keys: list[str] = []
+    for q, chosen in zip(questions, answers, strict=True):
+        options = q.get("options") or []
+        if not isinstance(chosen, list) or len(chosen) != 1:
+            raise RemoteApiError(400, "each question needs exactly one selected option")
+        idx = chosen[0]
+        if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(options)):
+            raise RemoteApiError(400, "invalid option index")
+        if idx >= 9:
+            # the picker's own numbered list never shows a 2-digit index
+            # (_MAX_ASK_OPTIONS caps at 6) -- defensive, unreachable via the
+            # normal payload shape.
+            raise RemoteApiError(400, "option index out of digit-key range")
+        keys.append(str(idx + 1))
+    if len(questions) > 1:
+        keys.append("\r")  # "Review your answers" -> "1. Submit answers" (default)
+    return "".join(keys)
+
+
+def answer_picker(orch, from_project: str | None, answers: object) -> dict:
+    """control-mode only (enforced by the HTTP handler's mode gate before
+    this runs, same as `lead_say`). Answers a live `AskUserQuestion` picker
+    by injecting the exact key presses a human would type at the terminal —
+    `lead_say`'s plain-text pipeline cannot do this (see the audit doc:
+    typed text is silently discarded by the picker, and Enter alone submits
+    whatever option was already highlighted, not what the user tapped).
+
+    `answers` is a list of one-selection-per-question lists of 0-based
+    option indices (`state["questions"][i]["options"][j]["index"]`), in the
+    same order the picker payload listed the questions. Re-derives the
+    *current* question/option shape from `notify.current_ask_state` rather
+    than trusting whatever the phone cached from the SSE push — the picker
+    may have moved on since that push arrived, and this is the guard that
+    catches it (409) instead of typing digits into a live chat turn."""
+    if not isinstance(answers, list) or not answers:
+        raise RemoteApiError(400, "answers must be a non-empty list")
+    state = notify.current_ask_state(orch, from_project)
+    if state is None:
+        raise RemoteApiError(409, "no active picker — it may already be answered on desktop")
+    key_sequence = _build_picker_key_sequence(state["questions"], answers)
+    resp = _lead_frame(
+        orch,
+        {
+            "cmd": "answer-picker",
+            "key_sequence": key_sequence,
+            "from": "remote",
+            "from_project": from_project,
+        },
+    )
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        msg = resp.get("msg") if isinstance(resp, dict) else None
+        raise RemoteApiError(502, msg or "answer failed")
+    return {"ok": True}
+
+
 def lead_upload_image(
     orch,
     data_url: object,

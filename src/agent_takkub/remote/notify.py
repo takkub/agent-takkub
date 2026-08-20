@@ -157,12 +157,22 @@ _MAX_ASK_QUESTION_CHARS = 200
 _MAX_ASK_OPTIONS = 6
 _MAX_OPTION_LABEL_CHARS = 80
 
+# #313: a defensive cap, not a discovered protocol limit — AskUserQuestion
+# can carry more than one question per tool call (verified live: the CLI
+# renders one tab per question + a trailing "Submit" tab, see
+# docs/audit/2026-08-20-remote-askuserquestion.md). Forwarding only
+# `questions[0]` (the pre-#313 behavior) silently dropped every question
+# after the first — the phone could not even see them, let alone answer.
+_MAX_ASK_QUESTIONS = 4
+
 
 def _ask_question_options(rec: dict) -> dict | None:
-    """Return `{"prompt": str, "options": [{"index": int, "label": str}],
-    "multiSelect": bool}` for `rec`'s first `AskUserQuestion` question, else
-    None. Mirrors `_ask_question_prompt`'s record-shape checks but forwards
-    option labels (B2 tappable picker) instead of dropping them."""
+    """Return `{"questions": [{"prompt": str, "options": [{"index",
+    "label"}], "multiSelect": bool}, ...]}` for every question in `rec`'s
+    `AskUserQuestion` tool_use, else None. Mirrors `_ask_question_prompt`'s
+    record-shape checks but forwards option labels (B2 tappable picker)
+    instead of dropping them. Always a list (a single question is a
+    1-element list) so callers never special-case question count."""
     if rec.get("type") != "assistant":
         return None
     msg = rec.get("message")
@@ -180,21 +190,29 @@ def _ask_question_options(rec: dict) -> dict | None:
         if not isinstance(inp, dict):
             return None
         questions = inp.get("questions")
-        if not isinstance(questions, list) or not questions or not isinstance(questions[0], dict):
+        if not isinstance(questions, list) or not questions:
             return None
-        q = questions[0]
-        prompt = str(q.get("question") or "").strip()[:_MAX_ASK_QUESTION_CHARS]
-        options: list[dict] = []
-        raw_options = q.get("options")
-        if isinstance(raw_options, list):
-            for idx, opt in enumerate(raw_options[:_MAX_ASK_OPTIONS]):
-                if not isinstance(opt, dict):
-                    continue
-                label = str(opt.get("label") or "").strip()[:_MAX_OPTION_LABEL_CHARS]
-                if not label:
-                    continue
-                options.append({"index": idx, "label": label})
-        return {"prompt": prompt, "options": options, "multiSelect": bool(q.get("multiSelect"))}
+        out_questions: list[dict] = []
+        for q in questions[:_MAX_ASK_QUESTIONS]:
+            if not isinstance(q, dict):
+                continue
+            prompt = str(q.get("question") or "").strip()[:_MAX_ASK_QUESTION_CHARS]
+            options: list[dict] = []
+            raw_options = q.get("options")
+            if isinstance(raw_options, list):
+                for idx, opt in enumerate(raw_options[:_MAX_ASK_OPTIONS]):
+                    if not isinstance(opt, dict):
+                        continue
+                    label = str(opt.get("label") or "").strip()[:_MAX_OPTION_LABEL_CHARS]
+                    if not label:
+                        continue
+                    options.append({"index": idx, "label": label})
+            out_questions.append(
+                {"prompt": prompt, "options": options, "multiSelect": bool(q.get("multiSelect"))}
+            )
+        if not out_questions:
+            return None
+        return {"questions": out_questions}
     return None
 
 
@@ -1708,6 +1726,64 @@ def lead_sessions_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list
     """Return `(provider, sessions)` with a clean unsupported-provider fallback."""
     provider = lead_provider_name(orch, project_ns)
     return provider, list_recent_lead_sessions(project_ns, limit, provider=provider)
+
+
+# #313 answer-picker guard: only the tail needs scanning — a live picker's
+# tool_use record is always near EOF, never buried deep in a long session.
+_ASK_STATE_SCAN_BYTES = 200_000
+
+
+def current_ask_state(orch, project_ns: str) -> dict | None:
+    """Fresh (uncached) read of whether the Lead pane is CURRENTLY sitting at
+    an unanswered `AskUserQuestion` picker, and if so, its full question
+    list (same shape `_ask_question_options` returns).
+
+    Deliberately independent of `LeadNotifier`'s poll-tail state: the
+    answer-picker endpoint calls this right before injecting key presses,
+    so it must reflect the true *current* state of the pane, not whatever a
+    poll tick last pushed over SSE. Walks the JSONL from the end backward to
+    the single most recent meaningful record — a real reply (`live_texts`)
+    or a non-ask tool_use (`live_activity`) both mean the picker, if there
+    ever was one, is no longer the pane's current state, so this returns
+    None rather than let a stale picker answer get typed into a live turn.
+
+    Only providers with a `live_ask` scanner (currently just Claude) can
+    ever return non-None here — every other provider's scanner defaults
+    `live_ask` to a no-op lambda, so this naturally returns None for them
+    (same gap `_ask_question_options`'s docstring already flags, #103)."""
+    provider = lead_provider_name(orch, project_ns)
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return None
+    path = resolve_lead_jsonl(orch, project_ns, provider)
+    if path is None:
+        return None
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - _ASK_STATE_SCAN_BYTES))
+            chunk = fh.read()
+    except OSError:
+        return None
+    lines = chunk.split(b"\n")
+    if size > _ASK_STATE_SCAN_BYTES:
+        lines = lines[1:]  # first line may be a mid-record fragment
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if scanner.live_texts(rec):
+            return None  # a real reply already superseded any picker
+        ask = scanner.live_ask(rec)
+        if ask is not None:
+            return ask
+        if scanner.live_activity(rec) is not None:
+            return None  # mid-turn on a DIFFERENT tool, not a picker
+    return None
 
 
 def read_resume_session_messages(

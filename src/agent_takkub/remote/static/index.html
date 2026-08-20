@@ -793,6 +793,14 @@
     gap: 8px;
     margin-top: 8px;
   }
+  /* #313: a multi-question picker renders several .q + .picker-chips
+     groups in sequence -- extra top margin on a .q that follows a prior
+     question's chips row keeps each question visually separate. */
+  .picker-chips + .q {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line2);
+  }
   .picker-chips .qr-chip.picked {
     background: var(--accent-dim);
     color: #dff8f3;

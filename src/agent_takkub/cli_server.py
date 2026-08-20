@@ -386,7 +386,8 @@ class CliServer(QObject):
             self._reply(sock, ok=False, msg=f"lead cannot call {cmd}")
             return
 
-        # Layer 4 — per-pane capability token for `done`, `progress`, and `send`.
+        # Layer 4 — per-pane capability token for `done`, `progress`, `send`,
+        # and `answer-picker`.
         #
         # Each non-Lead pane receives TAKKUB_PANE_TOKEN in its env at spawn time.
         # The token is bound to (project, role) server-side. For these commands,
@@ -396,14 +397,19 @@ class CliServer(QObject):
         #
         # Raw clients that haven't been spawned by the orchestrator have no token
         # and are rejected for these commands.
-        if cmd in ("done", "progress", "send", "hook", "session-report"):
+        if cmd in ("done", "progress", "send", "answer-picker", "hook", "session-report"):
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
             # Lead token is valid for `send` (Lead sends task specs to teammates),
             # `hook` and `session-report` (Lead's own claude session also fires
             # Stop/Notification/SessionStart hooks — the done-gate itself is a
             # no-op for Lead) but not `done`/`progress` (Lead cannot report on
-            # itself).
+            # itself). `answer-picker` is remote-mobile-only (#313: Remote's
+            # `api.lead_say` never sends `from: lead`, always `from: remote`,
+            # same as `send` already does for chat messages) — it reuses this
+            # same lead-token branch rather than `_LEAD_ONLY_CMDS` because it
+            # isn't Lead calling itself, it's the mobile client relaying key
+            # presses into the Lead pane's own PTY.
             lead_token = getattr(self._orch, "_lead_token", None)
             if (
                 lead_token
@@ -583,6 +589,10 @@ class CliServer(QObject):
                     msg=req.get("msg", ""),
                     from_role=req.get("from"),
                     project=from_project,
+                )
+            elif cmd == "answer-picker":
+                ok, msg = self._orch.answer_picker(
+                    req.get("key_sequence", ""), project=from_project
                 )
             elif cmd == "close":
                 ok, msg = self._orch.close(req["role"], project=from_project)

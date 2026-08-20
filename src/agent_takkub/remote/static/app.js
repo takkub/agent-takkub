@@ -1285,14 +1285,132 @@
     });
   }
 
-  // B2: renders tappable option chips from the provider-neutral picker
-  // payload emitted by notify.py instead of forcing the phone user to answer
-  // on the desktop. Providers without structured options use the same plain
-  // "answer on desktop" fallback below.
+  // B2/#313: renders tappable option chips from the provider-neutral picker
+  // payload emitted by notify.py (`{questions: [{prompt, options,
+  // multiSelect}, ...]}`, always a list even for a single question) instead
+  // of forcing the phone user to answer on the desktop. Tapping a chip only
+  // *stages* a selection locally — nothing is sent to Lead until every
+  // question has one, at which point "ส่งคำตอบ" submits all of them in one
+  // /api/lead/answer-picker call (submitPickerAnswers), which replays the
+  // real key presses the terminal picker needs (a bare digit, proven live —
+  // see docs/audit/2026-08-20-remote-askuserquestion.md). Providers without
+  // structured options, and any multiSelect question (key sequence not
+  // proven safe yet, same doc), fall back to the plain "answer on desktop"
+  // banner instead of rendering chips that can't be submitted correctly.
   function showPickerBanner(payload) {
     var el = $("lead-picker-banner");
     if (!el) return;
     el.innerHTML = "";
+    // The `{questions: [...]}` list shape is claude-only (notify.py's
+    // `_ask_question_options`, #313) and is the only shape the key-
+    // injection answer path (`current_ask_state` server-side) understands.
+    // Other providers with their own structured picker (e.g. opencode's
+    // "question" tool, `opencode_helper.poll_opencode_delta`) still push
+    // the older flat `{prompt, options, multiSelect}` shape — keep that
+    // path byte-for-byte on the pre-#313 `sendLeadMessage` flow instead of
+    // routing it through an endpoint that can only answer claude's picker
+    // (must-not-regress, per the task spec: non-claude keeps its existing
+    // behavior untouched).
+    if (payload && typeof payload === "object" && Array.isArray(payload.questions)) {
+      showMultiQuestionPickerBanner(el, payload.questions);
+    } else {
+      showLegacyPickerBanner(el, payload);
+    }
+  }
+
+  // #313: claude-shaped multi-question picker. Tapping a chip only *stages*
+  // a selection locally — nothing is sent to Lead until every question has
+  // one, at which point "ส่งคำตอบ" submits all of them in one
+  // /api/lead/answer-picker call (submitPickerAnswers), which replays the
+  // real key presses the terminal picker needs (a bare digit, proven live —
+  // see docs/audit/2026-08-20-remote-askuserquestion.md). Any multiSelect
+  // question in the payload falls back to the plain "answer on desktop"
+  // banner instead of rendering chips that can't be submitted correctly
+  // (key sequence not proven safe yet, same doc).
+  function showMultiQuestionPickerBanner(el, questions) {
+    var isControl = state.mode === "control";
+    var hasOptions = questions.some(function (q) {
+      return q && Array.isArray(q.options) && q.options.length;
+    });
+    var hasMultiSelect = questions.some(function (q) { return !!(q && q.multiSelect); });
+    var interactive = hasOptions && !hasMultiSelect;
+
+    var main = document.createElement("span");
+    main.textContent = interactive
+      ? (isControl ? "⏸️ Lead ถามคำถาม — แตะเพื่อตอบ" : "⏸️ Lead รอคำตอบ — เปิด control mode เพื่อตอบ")
+      : "⏸️ Lead รอคำตอบจาก picker บน desktop — ตอบบนจอคอมก่อน";
+    el.appendChild(main);
+
+    if (!interactive) {
+      questions.forEach(function (q) {
+        var prompt = q && typeof q.prompt === "string" ? q.prompt.trim() : "";
+        if (!prompt) return;
+        var qEl = document.createElement("span");
+        qEl.className = "q";
+        qEl.textContent = prompt;
+        el.appendChild(qEl);
+      });
+      el.classList.add("show");
+      return;
+    }
+
+    // selections[i] = 0-based option index chosen for questions[i], or null
+    // until tapped. Kept as one flat array so submitPickerAnswers can wrap
+    // it straight into the API's `answers` shape with no extra bookkeeping.
+    var selections = questions.map(function () { return null; });
+    var submitBtn = null;
+    function refreshSubmit() {
+      if (!submitBtn) return;
+      submitBtn.disabled = !isControl || selections.indexOf(null) !== -1;
+    }
+
+    questions.forEach(function (q, qi) {
+      var prompt = (q.prompt || "").trim();
+      if (prompt) {
+        var qEl = document.createElement("span");
+        qEl.className = "q";
+        qEl.textContent = prompt;
+        el.appendChild(qEl);
+      }
+      var chipsWrap = document.createElement("div");
+      chipsWrap.className = "picker-chips";
+      var chipEls = [];
+      q.options.forEach(function (opt, i) {
+        var label = String((opt && opt.label) || "");
+        if (!label) return;
+        var idx = opt && typeof opt.index === "number" ? opt.index : i;
+        var chip = makeQuickChip((idx + 1) + ". " + label, false, function () {
+          if (state.mode !== "control") return;
+          selections[qi] = idx;
+          chipEls.forEach(function (c) { c.classList.remove("picked"); });
+          chip.classList.add("picked");
+          refreshSubmit();
+        });
+        if (!isControl) chip.disabled = true;
+        chipEls.push(chip);
+        chipsWrap.appendChild(chip);
+      });
+      el.appendChild(chipsWrap);
+    });
+
+    submitBtn = makeQuickChip("ส่งคำตอบ", false, function () {
+      if (state.mode !== "control" || selections.indexOf(null) !== -1) return;
+      submitPickerAnswers(selections);
+    });
+    submitBtn.className += " picker-confirm";
+    refreshSubmit();
+    el.appendChild(submitBtn);
+
+    el.classList.add("show");
+  }
+
+  // Pre-#313 behavior, unchanged: a flat `{prompt, options, multiSelect}`
+  // (or bare string) payload, answered by typing the tapped label as a
+  // chat message (`sendLeadMessage`). Never reached for claude (which only
+  // ever emits the `{questions: [...]}` list shape) — this exists purely so
+  // non-claude structured pickers (opencode's "question" tool today) keep
+  // behaving exactly as they did before this change.
+  function showLegacyPickerBanner(el, payload) {
     var prompt = "";
     var options = [];
     var multiSelect = false;
@@ -1348,6 +1466,43 @@
       }
     }
     el.classList.add("show");
+  }
+
+  // Submits every question's staged selection in one call — the endpoint
+  // re-derives the picker's actual current state server-side and rejects
+  // (409) if it's already been answered/dismissed on desktop, so a stale
+  // banner can't type stray keys into a live chat turn.
+  function submitPickerAnswers(selections) {
+    if (state.mode !== "control") return;
+    var project = visibleProject();
+    var targetLead = projectLeadState(project);
+    if (targetLead) {
+      targetLead.picker = null;
+      beginOptimisticWorking(project);
+    }
+    hidePickerBanner();
+    showThinking();
+    var answers = selections.map(function (idx) { return [idx]; });
+    apiFetch("api/lead/answer-picker", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers: answers, project: project }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data || data.ok !== true) {
+          if (targetLead) setProjectWorking(project, false, null, false);
+          appendProjectMessage(
+            project,
+            "sys",
+            "ตอบคำถามไม่สำเร็จ" + ((data && data.msg) ? " — " + data.msg : "") + " — ลองตอบจากเดสก์ท็อป"
+          );
+        }
+      })
+      .catch(function (err) {
+        if (targetLead) setProjectWorking(project, false, null, false);
+        toast(errMsg(err, "ส่งคำตอบไม่สำเร็จ"));
+      });
   }
 
   function hidePickerBanner() {
