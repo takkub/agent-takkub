@@ -278,6 +278,136 @@ class TestWatchdogThreadBehaviour:
 
 
 # ─────────────────────────────────────────────────────────────
+# 3c. HARD-stall dead-man's switch (#313) — faulthandler.dump_traceback_later
+# ─────────────────────────────────────────────────────────────
+
+
+class TestArmHardStallDeadman:
+    """_arm_hard_stall_deadman arms faulthandler's own C-level watcher thread
+    — proven (docs/audit/2026-08-20-issue-313-spawn-deadlock.md) to still
+    fire and dump every thread's stack even while the interpreter is wedged
+    in a way that starves every plain threading.Thread, including the
+    SOFT-stall dumper tested above. These tests only check the wiring —
+    the GIL-independence claim itself was verified by live reproduction,
+    not something a unit test can exercise."""
+
+    def test_arms_with_configured_timeout_and_boot_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fh = MagicMock()
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", fh)
+        monkeypatch.setattr(app_mod, "_HARD_STALL_TIMEOUT_S", 123.0)
+        cancel_calls: list[tuple] = []
+        arm_calls: list[tuple] = []
+        monkeypatch.setattr(
+            app_mod.faulthandler, "cancel_dump_traceback_later", lambda: cancel_calls.append(())
+        )
+        monkeypatch.setattr(
+            app_mod.faulthandler,
+            "dump_traceback_later",
+            lambda timeout, **kw: arm_calls.append((timeout, kw)),
+        )
+
+        app_mod._arm_hard_stall_deadman()
+
+        assert len(cancel_calls) == 1, "must cancel any previously-armed deadline first"
+        assert len(arm_calls) == 1
+        timeout, kw = arm_calls[0]
+        assert timeout == 123.0
+        assert kw["repeat"] is False
+        assert kw["file"] is fh
+        assert kw["exit"] is False
+
+    def test_noop_without_a_boot_log_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
+        arm_calls: list[tuple] = []
+        monkeypatch.setattr(
+            app_mod.faulthandler,
+            "dump_traceback_later",
+            lambda *a, **kw: arm_calls.append((a, kw)),
+        )
+
+        app_mod._arm_hard_stall_deadman()
+
+        assert arm_calls == []
+
+    def test_swallows_faulthandler_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", MagicMock())
+
+        def _boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(app_mod.faulthandler, "dump_traceback_later", _boom)
+
+        app_mod._arm_hard_stall_deadman()  # must not raise
+
+
+class TestDeadmanWatchdogRearmsHardStall:
+    """The watchdog daemon loop re-arms the HARD-stall switch on a coarse
+    cadence while the heartbeat is healthy, and stops re-arming once the
+    heartbeat itself goes stale — exactly mirroring the real incident where
+    the re-arming code (a plain Python thread) is the first thing GIL
+    starvation would silence, leaving the last-armed deadline to fire on its
+    own instead."""
+
+    def test_rearms_periodically_while_heartbeat_healthy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 999.0)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 999.0)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
+        monkeypatch.setattr(app_mod, "_HARD_STALL_REARM_INTERVAL_S", 0.03)
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
+
+        rearm_calls: list[None] = []
+        monkeypatch.setattr(app_mod, "_arm_hard_stall_deadman", lambda: rearm_calls.append(None))
+
+        stop = threading.Event()
+        window = MagicMock()
+        window._heartbeat_ts = time.monotonic()
+
+        keepalive_stop = threading.Event()
+
+        def _keep_alive() -> None:
+            while not keepalive_stop.is_set():
+                window._heartbeat_ts = time.monotonic()
+                time.sleep(0.005)
+
+        keeper = threading.Thread(target=_keep_alive, daemon=True)
+        keeper.start()
+
+        app_mod._start_deadman_watchdog(window, _stop=stop)
+        _wait_until(lambda: len(rearm_calls) >= 2, timeout=2.0)
+        stop.set()
+        keepalive_stop.set()
+
+        assert len(rearm_calls) >= 2, "must re-arm more than once across several intervals"
+
+    def test_stops_rearming_once_heartbeat_goes_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 999.0)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 0.05)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
+        monkeypatch.setattr(app_mod, "_HARD_STALL_REARM_INTERVAL_S", 0.02)
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
+
+        rearm_calls: list[None] = []
+        monkeypatch.setattr(app_mod, "_arm_hard_stall_deadman", lambda: rearm_calls.append(None))
+        monkeypatch.setattr(app_mod, "_dump_main_stack", lambda header: None)
+
+        stop = threading.Event()
+        window = MagicMock()
+        window._heartbeat_ts = time.monotonic() - 1.0  # already stale before the loop starts
+
+        app_mod._start_deadman_watchdog(window, _stop=stop)
+        time.sleep(0.15)  # several poll + rearm intervals, heartbeat never advances
+        stop.set()
+
+        assert rearm_calls == [], "a stale heartbeat must not keep pushing the deadline out"
+
+
+# ─────────────────────────────────────────────────────────────
 # 5. Per-DATA_HOME instance lock key (isolation plan, finding C1)
 # ─────────────────────────────────────────────────────────────
 

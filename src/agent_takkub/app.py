@@ -290,6 +290,30 @@ _WATCHDOG_SOFT_STALL_S = float(os.environ.get("TAKKUB_WATCHDOG_SOFT_STALL_S", "1
 # hypothesis without guessing.
 _WATCHDOG_STALL_LOG_S = float(os.environ.get("TAKKUB_STALL_LOG_S", "0.75"))
 
+# HARD-stall dead-man's switch (#313, distinct class from the SOFT/wedge
+# dumps above). Both of those are driven by this module's own
+# `threading.Thread` daemon calling `faulthandler.dump_traceback()`
+# directly — plain Python code that itself needs the GIL to run. Issue #313
+# proved that class of watchdog is not sufficient: a native pty spawn call
+# that hangs *without releasing the GIL* (reproduced directly against this
+# repo's pywinpty dependency — see
+# docs/audit/2026-08-20-issue-313-spawn-deadlock.md) freezes every Python
+# thread in the process, this daemon included, which is exactly why
+# boot.log went silent for the whole ~3 h incident instead of showing a
+# wedge dump.
+#
+# faulthandler.dump_traceback_later() sidesteps that: it arms a dedicated
+# C-level thread (PyThread_start_new_thread, not threading.Thread) whose
+# deadline fires and dumps every thread's stack WITHOUT reacquiring the
+# GIL first — empirically confirmed (same audit doc) to still fire and
+# write a usable dump while the interpreter was wedged exactly like the
+# real incident. _arm_hard_stall_deadman() below re-arms it on a coarse
+# cadence while the main thread proves it's alive; if the process that
+# re-arms it ever stops running, the last-armed deadline is simply left in
+# place and fires on its own.
+_HARD_STALL_TIMEOUT_S = float(os.environ.get("TAKKUB_HARD_STALL_TIMEOUT_S", "300"))
+_HARD_STALL_REARM_INTERVAL_S = 60.0
+
 
 def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> bool:
     """Pure helper: True when the main-thread heartbeat has been stale too long.
@@ -333,6 +357,28 @@ class _StallTracker:
             self._saw_spawn = False
             return rec
         return None
+
+
+def _arm_hard_stall_deadman() -> None:
+    """(Re-)arm the GIL-independent HARD-stall dead-man's switch (#313).
+
+    Cancels any previously-armed deadline and starts a fresh one
+    `_HARD_STALL_TIMEOUT_S` out. Cheap enough to call on a coarse interval
+    (see `_HARD_STALL_REARM_INTERVAL_S`) but not so cheap it should be
+    called every heartbeat tick — each call starts a new native thread.
+    """
+    if _BOOT_LOG_FH is None:
+        return
+    try:
+        faulthandler.cancel_dump_traceback_later()
+        faulthandler.dump_traceback_later(
+            _HARD_STALL_TIMEOUT_S, repeat=False, file=_BOOT_LOG_FH, exit=False
+        )
+    except Exception:
+        pass
+
+
+_arm_hard_stall_deadman()
 
 
 def _dump_main_stack(header: str) -> None:
@@ -386,12 +432,25 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
         soft_dumped = False
         hard_dumped = False
         stall_tracker = _StallTracker(_WATCHDOG_STALL_LOG_S)
+        last_hard_stall_rearm = time.monotonic()
         while not (_stop is not None and _stop.is_set()):
             time.sleep(_WATCHDOG_POLL_S)
             if _stop is not None and _stop.is_set():
                 return
             now = time.monotonic()
             age = now - window._heartbeat_ts
+            # Kick the HARD-stall dead-man's switch (#313) on a coarse
+            # cadence while the heartbeat is healthy, pushing its deadline
+            # back out. Deliberately gated on THIS loop's own liveness: if
+            # this thread itself ever stops running (the same GIL-hostage
+            # scenario the switch exists to catch), the re-arm simply stops
+            # happening and the last-armed deadline fires on its own.
+            if (
+                age < _WATCHDOG_SOFT_STALL_S
+                and now - last_hard_stall_rearm >= _HARD_STALL_REARM_INTERVAL_S
+            ):
+                _arm_hard_stall_deadman()
+                last_hard_stall_rearm = now
             # Soft stall: UI hung a few seconds but not yet at the hard kill.
             # Capture the main-thread stack once per episode (re-arm on recovery)
             # so transient spawn freezes — which recover before 30 s — still
