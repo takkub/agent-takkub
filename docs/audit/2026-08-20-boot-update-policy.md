@@ -338,6 +338,58 @@ stale") — per explicit user instruction (2026-08-20), every stale pin is
 bumped unconditionally when this ambiguity can't be resolved. Distinguishing
 intentional pins is a real, separate follow-up, not attempted here.
 
+#### Addendum (2026-08-20, issue #317): JSON path added, text kept as fallback
+
+The text parse above was always one display-string change away from a
+silent break (same lesson as the codex 0.147 store-drift incident). agy
+1.1.12+ supports a GLOBAL `--output-format json|stream-json` flag that also
+covers the `models` subcommand (agy 1.1.8 added the flag to print mode;
+1.1.12 extended it to `models`/`agents`). Real output captured against agy
+1.1.15 installed on the dev machine, 2026-08-20 (`agy --output-format json
+models` — the flag MUST precede the subcommand; placed after it, e.g. `agy
+models --output-format json`, agy rejects it with "flags provided but not
+defined"):
+
+```json
+{"conversation_id":"","status":"SUCCESS","response":"gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n...",
+ "duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0},
+ "command":{"name":"models","data":{"models":[
+   {"id":"gemini-3.7-flash-high","label":"Gemini 3.7 Flash (High)"},
+   {"id":"gemini-3.7-flash-medium","label":"Gemini 3.7 Flash (Medium)"},
+   ...
+   {"id":"gpt-oss-120b-medium","label":"GPT-OSS 120B (Medium)"}]}}}
+```
+
+`command.data.models[]` is in the identical newest-first-per-family order as
+the text listing (directly compared id-for-id against the same run) — the
+ordering property `_pick_latest_per_family` relies on holds for both paths.
+
+`_discover_gemini_models` now tries `_discover_gemini_models_json` first
+(structured, immune to display-text drift) and falls back to
+`_discover_gemini_models_text` (the original tab-parser above, unchanged)
+only when the JSON path fails for any reason: an agy older than 1.1.12
+rejecting the unrecognized global flag (confirmed non-zero exit via a
+synthetic bad-flag probe, `--totally-bogus-flag` → exit 2, empty stdout,
+2026-08-20), non-JSON stdout, or a `command.data.models` shape mismatch.
+Both paths are logged so which one actually ran is visible in boot logs.
+
+**`remote/notify.py` gemini scanner — evaluated, no scrape-to-replace
+found.** The `_HistoryScanner` registered for `"gemini"` in `notify.py`
+(`resolve_session`/`read_messages`/`list_sessions`/`live_texts`/
+`live_users`) reads agy's own already-structured JSONL transcript files
+from disk (`gemini_helper.py`'s store resolution) — it never shells out to
+`agy` itself, so there is no CLI text-output scrape to swap for
+`--output-format stream-json` there. The one place in this codebase that
+*does* invoke `agy` as a subprocess and consume raw text
+(`gemini_helper.gemini_exec`, backing `takkub gemini` / orchestrator IPC via
+`agy -p "<prompt>" --print-timeout ...`) is a single non-interactive
+print-mode call whose return value is one free-text answer, not a scan
+target — `--output-format stream-json` is built for incremental multi-turn
+scanning, not a fitting improvement for a single blocking prompt/response
+pair, so it was left as-is. The interactive pane's own PTY session is
+unaffected either way — it stays a normal TUI, per the issue's explicit
+scope.
+
 ### claude — gap, with a stated alternative
 
 `claude --help` has no models-list subcommand. It DOES document tier

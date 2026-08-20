@@ -30,10 +30,14 @@ other gap in this module defers to.
 
 from __future__ import annotations
 
+import json
+import logging
 import subprocess
 from dataclasses import dataclass
 
 from ._win_console import SUBPROCESS_NO_WINDOW
+
+logger = logging.getLogger(__name__)
 
 STATUS_NO_PIN = "no_pin"  # nothing configured — CLI default is always fresh
 STATUS_UP_TO_DATE = "up_to_date"
@@ -91,8 +95,58 @@ def _run(argv: list[str], timeout: float = 30.0) -> subprocess.CompletedProcess[
     )
 
 
-def _discover_gemini_models(binary: str) -> list[str] | None:
-    """Run `agy models` and return model ids in the CLI's own listing order.
+def _discover_gemini_models_json(binary: str) -> list[str] | None:
+    """Run `agy --output-format json models` and return model ids in the
+    CLI's own listing order.
+
+    Real captured shape (agy 1.1.15, confirmed installed on dev machine,
+    2026-08-20)::
+
+        {"conversation_id": "", "status": "SUCCESS",
+         "response": "gemini-3.7-flash-high\\tGemini 3.7 Flash (High)\\n...",
+         "duration_seconds": 0, "num_turns": 0,
+         "usage": {"input_tokens": 0, ...},
+         "command": {"name": "models",
+                      "data": {"models": [
+                          {"id": "gemini-3.7-flash-high",
+                           "label": "Gemini 3.7 Flash (High)"},
+                          ...]}}}
+
+    `command.data.models` is in the same newest-first-per-family order as
+    the text listing (directly observed: identical id sequence in both
+    outputs) — the ordering property `_pick_latest_per_family` relies on.
+
+    `--output-format` is a GLOBAL flag, not subcommand-local: it must come
+    BEFORE the subcommand (`agy --output-format json models`), not after
+    (`agy models --output-format json` fails with "flags provided but not
+    defined", confirmed 2026-08-20). An agy older than 1.1.12 (before the
+    `models` subcommand supported this flag) also fails the global-flag
+    parse the same way agy does for any unrecognized flag: non-zero exit,
+    empty stdout (confirmed via `--totally-bogus-flag`, 2026-08-20) — that
+    lands here as a clean None, same as a network/auth failure.
+
+    Returns None on ANY shape mismatch — non-zero exit, non-JSON stdout, or
+    a missing/malformed `command.data.models` list — never guesses at a
+    partial parse. Caller falls back to the text parser.
+    """
+    try:
+        result = _run([binary, "--output-format", "json", "models"])
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "")
+        models = payload["command"]["data"]["models"]
+        ids = [m["id"] for m in models if isinstance(m, dict) and m.get("id")]
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+        return None
+    return ids or None
+
+
+def _discover_gemini_models_text(binary: str) -> list[str] | None:
+    """Run `agy models` (no output-format flag) and return model ids in the
+    CLI's own listing order.
 
     Real captured output (agy, 2026-08-20)::
 
@@ -109,6 +163,9 @@ def _discover_gemini_models(binary: str) -> list[str] | None:
     Lines without a tab (the "Fetching..." status line, blank lines) are
     skipped. Returns None on any subprocess failure — caller reports
     `discovery_failed`, never treats an empty/failed run as "no models".
+
+    Fallback path for agy builds older than 1.1.12 (no `--output-format`
+    support on the `models` subcommand) — see `_discover_gemini_models_json`.
     """
     try:
         result = _run([binary, "models"])
@@ -124,6 +181,23 @@ def _discover_gemini_models(binary: str) -> list[str] | None:
         if model_id:
             ids.append(model_id)
     return ids or None
+
+
+def _discover_gemini_models(binary: str) -> list[str] | None:
+    """JSON path first (structured, immune to display-text drift); falls
+    back to the text parser when the JSON path fails — old agy without
+    `--output-format` support on `models`, or any other shape mismatch.
+    Logs which path actually produced the result."""
+    ids = _discover_gemini_models_json(binary)
+    if ids is not None:
+        logger.info("gemini model discovery: used json path (%d models)", len(ids))
+        return ids
+    ids = _discover_gemini_models_text(binary)
+    if ids is not None:
+        logger.info("gemini model discovery: used text fallback (%d models)", len(ids))
+        return ids
+    logger.warning("gemini model discovery: both json and text paths failed")
+    return None
 
 
 def _family_key_gemini(model_id: str) -> tuple[str, ...] | None:
