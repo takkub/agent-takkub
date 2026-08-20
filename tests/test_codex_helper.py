@@ -6,6 +6,7 @@ construction + the error-surfacing contract.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -21,8 +22,6 @@ def _proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
 
 
 def _write_rollout(root: Path, uuid: str, cwd: Path) -> Path:
-    import json
-
     path = root / "2026" / "08" / "11" / f"rollout-{uuid}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -64,6 +63,78 @@ class TestCodexSessionStore:
     ) -> None:
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
         assert codex_helper.codex_sessions_root() == tmp_path / "custom-codex" / "sessions"
+
+    def test_codex_home_selects_archived_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+        assert (
+            codex_helper.codex_archived_sessions_root()
+            == tmp_path / "custom-codex" / "archived_sessions"
+        )
+
+
+class TestCodexArchivedSessionFallback:
+    """`codex archive` (0.148+) MOVES the rollout file out of the day-sharded
+    `sessions/YYYY/MM/DD/` tree into a flat `archived_sessions/` dir (verified
+    against a real 0.148.0 store — see issue #319). An exact id+cwd lookup
+    must still find it there when the default (no explicit `root`) store is
+    used, or a session archived mid-conversation goes silently blank."""
+
+    def test_resolves_from_default_stores_via_codex_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        archived_root = tmp_path / "custom-codex" / "archived_sessions"
+        archived_root.mkdir(parents=True)
+        path = archived_root / "rollout-archived-uuid.jsonl"
+        path.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": "uuid-1", "cwd": str(cwd)}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-1") == path
+
+    def test_prefers_live_sessions_root_over_archived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        live_path = _write_rollout(tmp_path / "custom-codex" / "sessions", "uuid-1", cwd)
+        archived_root = tmp_path / "custom-codex" / "archived_sessions"
+        archived_root.mkdir(parents=True)
+        (archived_root / "rollout-stale-uuid.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": "uuid-1", "cwd": str(cwd)}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-1") == live_path
+
+    def test_explicit_root_never_falls_back_to_archived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit `root=` (as tests use) means "search only here" — no
+        implicit archived-store magic, matching the pre-existing contract."""
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        archived_root = tmp_path / "custom-codex" / "archived_sessions"
+        archived_root.mkdir(parents=True)
+        (archived_root / "rollout-archived-uuid.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": "uuid-1", "cwd": str(cwd)}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert (
+            codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-1", root=tmp_path / "sessions")
+            is None
+        )
 
 
 class TestFindCodexExecutable:

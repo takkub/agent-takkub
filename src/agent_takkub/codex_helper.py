@@ -68,6 +68,24 @@ def codex_sessions_root() -> Path:
     return codex_home() / "sessions"
 
 
+def codex_archived_sessions_root() -> Path:
+    """Return Codex's archived-session store (``codex archive``, 0.148+).
+
+    Verified on-disk (0.148.0): ``codex archive <id>`` MOVES the rollout file
+    out of the day-sharded ``sessions/YYYY/MM/DD/`` tree into a flat
+    ``archived_sessions/`` directory — no date subfolders, and `unarchive`
+    moves it straight back. `codex_sessions_root()`'s day-sharded resolvers
+    never look here, so an exact by-ID lookup for a session that got archived
+    mid-flight would otherwise resolve to nothing (not an error — a silent
+    "session vanished", the exact failure mode `provider-integration`'s row 4
+    warns about). Callers doing an exact id+cwd match should fall back here
+    when the primary root misses; the broader "newest session for this cwd"
+    scan never needs to, because a session actively being spawned/resumed
+    can't already be archived.
+    """
+    return codex_home() / "archived_sessions"
+
+
 def normalize_codex_cwd(value: object) -> str:
     """Normalize a session-metadata cwd for exact, platform-aware matching."""
     if not isinstance(value, str) or not value.strip():
@@ -102,20 +120,27 @@ def resolve_codex_jsonl_for_cwd(
     """
     wanted_cwd = normalize_codex_cwd(cwd)
     wanted_id = str(session_id or "").strip()
-    base = root if root is not None else codex_sessions_root()
-    if not wanted_cwd or not wanted_id or not base.is_dir():
+    if not wanted_cwd or not wanted_id:
         return None
-    try:
-        candidates = base.rglob("rollout-*.jsonl")
-        for path in candidates:
-            meta = read_codex_session_meta(path)
-            meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
-            if meta_id != wanted_id:
-                continue
-            if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
-                return path
-    except OSError:
-        return None
+    # An explicit `root` (tests) searches only that root, no archived
+    # fallback — callers relying on the real store also check `archived_sessions/`
+    # (see `codex_archived_sessions_root`) since `codex archive` moves the file
+    # there and this is an exact id+cwd lookup, not the newest-for-cwd scan.
+    bases = [root] if root is not None else [codex_sessions_root(), codex_archived_sessions_root()]
+    for base in bases:
+        if not base.is_dir():
+            continue
+        try:
+            candidates = base.rglob("rollout-*.jsonl")
+            for path in candidates:
+                meta = read_codex_session_meta(path)
+                meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
+                if meta_id != wanted_id:
+                    continue
+                if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
+                    return path
+        except OSError:
+            continue
     return None
 
 

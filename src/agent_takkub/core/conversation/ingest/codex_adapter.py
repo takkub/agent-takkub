@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from agent_takkub.codex_helper import (
+    codex_archived_sessions_root,
     codex_sessions_root,
     normalize_codex_cwd,
     read_codex_session_meta,
@@ -76,14 +77,9 @@ def _parse_record(rec: dict) -> IngestedMessage | None:
     return IngestedMessage(role=role, text=text.strip())
 
 
-def resolve_source(cwd: str, session_id: str | None) -> str | None:
-    root = codex_sessions_root()
+def _scan_root_for_cwd(root: Path, wanted_cwd: str, wanted_id: str) -> str | None:
     if not root.is_dir():
         return None
-    wanted_cwd = normalize_codex_cwd(cwd)
-    if not wanted_cwd:
-        return None
-    wanted_id = str(session_id or "").strip()
     try:
         candidates = sorted(
             root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
@@ -100,6 +96,23 @@ def resolve_source(cwd: str, session_id: str | None) -> str | None:
                 continue
         return str(path)
     return None
+
+
+def resolve_source(cwd: str, session_id: str | None) -> str | None:
+    wanted_cwd = normalize_codex_cwd(cwd)
+    if not wanted_cwd:
+        return None
+    wanted_id = str(session_id or "").strip()
+    found = _scan_root_for_cwd(codex_sessions_root(), wanted_cwd, wanted_id)
+    if found is not None:
+        return found
+    if wanted_id:
+        # `codex archive` (0.148+) moves the rollout file out of `sessions/`
+        # into a flat `archived_sessions/` dir — only worth checking for an
+        # exact id match; a fresh/live session (no id yet) can't already be
+        # archived, so the no-id "newest for cwd" path never needs this.
+        found = _scan_root_for_cwd(codex_archived_sessions_root(), wanted_cwd, wanted_id)
+    return found
 
 
 def read_new(source_id: str, cursor: str | None) -> IngestBatch:

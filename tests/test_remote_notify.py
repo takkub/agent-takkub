@@ -1491,11 +1491,23 @@ class TestCodexRemoteHistory:
         self.cwd.mkdir()
         self.root = tmp_path / "codex-sessions"
         self.root.mkdir()
+        self.archived_root = tmp_path / "codex-archived-sessions"
         monkeypatch.setattr(notify_mod, "_codex_sessions_root", lambda: self.root)
+        monkeypatch.setattr(notify_mod, "_codex_archived_sessions_root", lambda: self.archived_root)
         monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda project=None: str(self.cwd))
         notify_mod._CODEX_RESOLVE_CACHE.clear()
         yield
         notify_mod._CODEX_RESOLVE_CACHE.clear()
+
+    def _write_archived(self, uuid: str) -> Path:
+        self.archived_root.mkdir(parents=True, exist_ok=True)
+        path = self.archived_root / f"rollout-2026-08-11T10-00-00-{uuid}.jsonl"
+        meta = {
+            "type": "session_meta",
+            "payload": {"id": uuid, "session_id": uuid, "cwd": str(self.cwd)},
+        }
+        path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+        return path
 
     def _write(self, uuid: str, records: list[dict]) -> Path:
         path = self.root / f"rollout-2026-08-11T10-00-00-{uuid}.jsonl"
@@ -1585,6 +1597,45 @@ class TestCodexRemoteHistory:
             {"text": "final answer", "kind": "lead"},
         ]
 
+    def test_reads_item_completed_messages_from_codex_0_148_paginated(self):
+        """Regression guard for #319: codex 0.148.0's `migrate-rollouts`/
+        background pagination adds `ordinal` to every record and a duplicate
+        `session_id` key to `session_meta` (verified by migrating a real
+        on-disk rollout with `codex migrate-rollouts --apply` and diffing the
+        result) — the `item_completed` shape itself is unchanged, so the
+        extra fields must be harmlessly ignored, not break the parse."""
+        path = self._write(
+            "codex-0148",
+            [
+                {"ordinal": 1, "type": "turn_context", "payload": {"turn_id": "t1"}},
+                {
+                    "ordinal": 2,
+                    **self._item_event(
+                        {
+                            "type": "UserMessage",
+                            "id": "item-1",
+                            "content": [{"type": "text", "text": "[remote → lead] hello"}],
+                        }
+                    ),
+                },
+                {
+                    "ordinal": 3,
+                    **self._item_event(
+                        {
+                            "type": "AgentMessage",
+                            "id": "item-2",
+                            "content": [{"type": "Text", "text": "final answer"}],
+                        }
+                    ),
+                },
+            ],
+        )
+
+        assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
+            {"text": "hello", "kind": "me"},
+            {"text": "final answer", "kind": "lead"},
+        ]
+
     def test_live_codex_0_147_reply_is_pushed(self, qapp):
         path = self._write("codex-live-0147", [])
         os.utime(path, (time.time(), time.time()))
@@ -1653,6 +1704,29 @@ class TestCodexRemoteHistory:
         first = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
         first["payload"]["cwd"] = str(self.cwd.parent / "other")
         path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", None) is None
+
+    def test_archived_session_still_resolves_by_id(self):
+        """`codex archive` (0.148+) moves the rollout OUT of `sessions/` into
+        a flat `archived_sessions/` dir (verified against a real store, #319)
+        — an id-based lookup must still find it there rather than going
+        silently blank for a session archived mid-conversation."""
+        path = self._write_archived("codex-archived")
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", "codex-archived") == path
+
+    def test_live_session_wins_over_a_stale_archived_duplicate(self):
+        live = self._write("codex-dup", [])
+        self._write_archived("codex-dup")
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", "codex-dup") == live
+
+    def test_archived_lookup_never_used_for_the_no_id_spawn_time_scan(self):
+        """Only the exact id+cwd lookup falls back to `archived_sessions/` —
+        a fresh session with no provider id yet can't already be archived, so
+        the newest-for-cwd scan must stay scoped to the live store."""
+        self._write_archived("codex-archived-only")
 
         assert notify_mod._resolve_codex_jsonl_path("proj", None) is None
 

@@ -1075,6 +1075,12 @@ def _codex_sessions_root() -> Path:
     return codex_sessions_root()
 
 
+def _codex_archived_sessions_root() -> Path:
+    from ..codex_helper import codex_archived_sessions_root
+
+    return codex_archived_sessions_root()
+
+
 def _safe_mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -1195,22 +1201,31 @@ def _resolve_codex_jsonl_path(
         return cached
 
     root = _codex_sessions_root()
-    if not root.is_dir():
-        return None
     # A picker/desktop resume supplies Codex's authoritative thread id. Its
     # rollout can be days old and may not receive a new write until the user
     # submits another prompt, so spawn-time filtering must not hide it from
     # Mobile history immediately after resume — this lookup is deliberately
     # unbounded by date, unlike the spawn-time one below.
     if wanted_uuid:
-        for path in _codex_rollout_candidates(root):
-            meta = _codex_session_meta(path)
-            meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
-            if meta_id != wanted_uuid or _norm_cwd(meta.get("cwd")) != wanted_cwd:
+        # `codex archive` (0.148+) moves the rollout out of the day-sharded
+        # `sessions/` tree into a flat `archived_sessions/` dir; check both so
+        # an id-based resume/mirror lookup for an archived-mid-conversation
+        # session doesn't go silently blank. `_codex_rollout_candidates`
+        # already falls back to a flat whole-tree walk for a non-date layout,
+        # so no extra branching is needed for the archived root's shape.
+        for search_root in (root, _codex_archived_sessions_root()):
+            if not search_root.is_dir():
                 continue
-            _CODEX_RESOLVE_CACHE[cache_key] = path
-            return path
+            for path in _codex_rollout_candidates(search_root):
+                meta = _codex_session_meta(path)
+                meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
+                if meta_id != wanted_uuid or _norm_cwd(meta.get("cwd")) != wanted_cwd:
+                    continue
+                _CODEX_RESOLVE_CACHE[cache_key] = path
+                return path
 
+    if not root.is_dir():
+        return None
     # Fresh Codex launches have no provider session id in pane state yet. The
     # file may be created just before AgentPane stamps spawn_ts after attach,
     # so allow a small clock/order tolerance without admitting old sessions.

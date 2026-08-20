@@ -114,6 +114,39 @@ docs/v2/phase6-report.md   # this file
    `apply_done_note`. Extracting decisions/files would need something like
    `chatlog_scanner._first_h2_heading`'s heuristic; left for whoever builds the Memory Candidate
    Pipeline (plan §15) since it's the same "pull structured claims out of prose" problem.
+9. **#319 (2026-08-20): codex 0.148 verified against a real store — one real drift found and
+   fixed, one risk documented, `/export` confirmed non-adoptable.** Full writeup:
+   `docs/audit/2026-08-20-issue-319-codex-0148-verify.md`. Summary for whoever builds V2's
+   Conversation ingest adapter (this is the layer that must absorb it, not the Phase 3
+   spawn-side `ProviderAdapter`):
+   - `codex archive` (0.148+) **moves** the rollout file out of the day-sharded `sessions/`
+     tree into a flat `archived_sessions/` dir — an id-based lookup that only scans `sessions/`
+     silently returns nothing for a session archived mid-conversation (the exact "None is a
+     diagnosis, not a state" failure the `provider-integration` skill warns about). **Fixed**
+     in all three V1 call sites (`codex_helper.resolve_codex_jsonl_for_cwd`,
+     `core/conversation/ingest/codex_adapter.resolve_source`,
+     `remote/notify._resolve_codex_jsonl_path`) with an archived-root fallback, id-match only
+     — V2's adapter must carry the same dual-root lookup forward, not just `sessions/`.
+   - The `item_completed`/`AgentMessage`/`UserMessage` message schema itself is **unchanged**
+     between 0.147 and 0.148, including after running `codex migrate-rollouts --apply`
+     (verified: migrated a real rollout, diffed before/after). The migration only adds an
+     `ordinal` index per record and a duplicate `session_id` key + `history_mode` field to
+     `session_meta` — harmless today, pinned by a regression test in both
+     `tests/test_core_conversation_ingest.py` and `tests/test_remote_notify.py`.
+   - **Risk, not yet a drift**: `codex features list` shows `background_paginated_rollout_migration`
+     and `local_thread_store_compression` both `under development`/disabled. If either ships
+     enabled, Codex may stop keeping full message text inline in the rollout `.jsonl` (today it
+     is a projection *cache* in `thread_history_1.sqlite`, source-of-truth stays the `.jsonl`) —
+     that would break every raw-jsonl-scrape adapter (V1 and this V2 layer alike) silently. No
+     action possible now beyond flagging it; re-verify against a real store on the next codex
+     minor bump per the `provider-cli-schema-drift` lesson.
+   - **`/export` (TUI slash command, Markdown transcript to clipboard/file) has no CLI/headless
+     equivalent** — `codex --help`'s subcommand list has no `export`, and `codex exec`/`resume`/
+     `fork` all hard-require a real TTY (`stdin is not a terminal` when piped). Not adopted into
+     done-handoff evidence. The only theoretically viable path is typing `/export` into a LIVE
+     codex-tui pane's PTY the same way `takkub send` already injects text — untested here (would
+     require spawning and driving a real pane, out of scope for this backend-role
+     investigation); flagged as a #103 follow-up for whoever owns done-handoff.
 
 ## 4. Design decisions made without asking
 

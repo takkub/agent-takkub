@@ -133,6 +133,77 @@ def test_codex_read_new_parses_0147_item_completed_schema(tmp_path):
     ]
 
 
+def test_codex_read_new_parses_0148_paginated_schema(tmp_path):
+    """Regression guard for #319: codex 0.148.0's `migrate-rollouts`/background
+    pagination rewrites `session_meta` to add a duplicate `session_id` key
+    (alongside `id`) plus a new `history_mode` field, and stamps every record
+    with an `ordinal` index — verified by migrating a real on-disk 0.147
+    rollout to the paginated form with `codex migrate-rollouts --apply` and
+    diffing the result. The `item_completed`/`AgentMessage`/`UserMessage`
+    shape itself is UNCHANGED; this pins that the new/extra fields are
+    harmlessly ignored rather than silently breaking the parse."""
+    path = tmp_path / "rollout-1.jsonl"
+    lines = [
+        json.dumps(
+            {
+                "timestamp": "2026-08-20T08:00:00.000Z",
+                "ordinal": 0,
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "01a01402-984c-7452-aa94-ae022605e438",
+                    "id": "01a01402-984c-7452-aa94-ae022605e438",
+                    "cwd": "/fake/project",
+                    "originator": "codex-tui",
+                    "cli_version": "0.148.0",
+                    "history_mode": "paginated",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "timestamp": "2026-08-20T08:00:01.000Z",
+                "ordinal": 1,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "01a01402-984c-7452-aa94-ae022605e438",
+                    "turn_id": "turn-1",
+                    "completed_at_ms": 1787000000000,
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "item-1",
+                        "content": [{"type": "text", "text": "hi"}],
+                    },
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "timestamp": "2026-08-20T08:00:02.000Z",
+                "ordinal": 2,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "01a01402-984c-7452-aa94-ae022605e438",
+                    "turn_id": "turn-1",
+                    "completed_at_ms": 1787000001000,
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "item-2",
+                        "content": [{"type": "Text", "text": "hello back"}],
+                    },
+                },
+            }
+        ),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    batch = codex_adapter.read_new(str(path), None)
+    assert [(m.role, m.text) for m in batch.messages] == [
+        (MessageRole.USER, "hi"),
+        (MessageRole.ASSISTANT, "hello back"),
+    ]
+
+
 def test_codex_read_new_mixed_schema_file_never_double_counts(tmp_path):
     """A file containing BOTH generations (codex exec still writes the old
     shape post-0.147 while codex-tui writes the new one) must parse each
@@ -172,6 +243,42 @@ def test_codex_read_new_ignores_reasoning_and_command_items(tmp_path):
     path.write_text(line + "\n")
     batch = codex_adapter.read_new(str(path), None)
     assert batch.messages == []
+
+
+def test_codex_resolve_source_falls_back_to_archived_sessions(tmp_path, monkeypatch):
+    """`codex archive` (0.148+) moves a rollout out of `sessions/` into a flat
+    `archived_sessions/` dir (verified against a real store, #319) — an
+    exact id+cwd lookup must still find it there."""
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setattr(codex_adapter, "codex_sessions_root", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(
+        codex_adapter, "codex_archived_sessions_root", lambda: tmp_path / "archived_sessions"
+    )
+    archived = tmp_path / "archived_sessions"
+    archived.mkdir()
+    path = archived / "rollout-archived.jsonl"
+    path.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "uuid-1", "cwd": str(cwd)}}) + "\n"
+    )
+
+    assert codex_adapter.resolve_source(str(cwd), "uuid-1") == str(path)
+
+
+def test_codex_resolve_source_no_id_never_checks_archived_sessions(tmp_path, monkeypatch):
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setattr(codex_adapter, "codex_sessions_root", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(
+        codex_adapter, "codex_archived_sessions_root", lambda: tmp_path / "archived_sessions"
+    )
+    archived = tmp_path / "archived_sessions"
+    archived.mkdir()
+    (archived / "rollout-archived.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "uuid-1", "cwd": str(cwd)}}) + "\n"
+    )
+
+    assert codex_adapter.resolve_source(str(cwd), None) is None
 
 
 def test_codex_read_new_cursor_prevents_double_count(tmp_path):
