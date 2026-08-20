@@ -133,6 +133,17 @@ class TestCreateRole:
         assert "data-eng" in text
         assert "takkub done" in text
 
+    def test_default_template_bans_self_commit(self, registry_files: Path) -> None:
+        """#314: a fresh custom role must start with the same "only Lead
+        commits" policy every built-in role file carries — the report's own
+        trigger was a custom `admin` role self-committing because its
+        default template carried no version-control prose at all."""
+        ok, _err = custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, None)
+        assert ok is True
+        text = custom_roles.role_file_path("data-eng").read_text(encoding="utf-8")
+        assert "git commit" in text
+        assert "only Lead" in text
+
     def test_rejects_collision_with_builtin(self, registry_files: Path) -> None:
         ok, err = custom_roles.create_role("qa", "Fake QA", "#112233", 1, 5, None)
         assert ok is False

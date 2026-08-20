@@ -327,6 +327,119 @@ class TestPipEditableDenied:
         assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
 
 
+class TestGitLeadOnlyDenied:
+    """#314: a `backend`/custom `admin` pane self-committed on a task
+    instruction of "commit เอง" while a `frontend` pane in the same session
+    refused the identical instruction — both role files carried the same
+    prohibition in prose, but prose alone is only as strong as how
+    convincingly the task text argues past it. This pins the real
+    `PreToolUse` deny."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'git commit -m "fix bug"',
+            "git commit --amend",
+            "git add -A && git commit -m x",
+            "git push",
+            "git push origin main",
+            "git reset --hard",
+            "git reset --hard HEAD~1",
+            "git branch -D feature-x",
+            "git tag -d v1.0.0",
+            "git rebase main",
+            "git rebase -i HEAD~3",
+            "git merge feature-x",
+            "git checkout main",
+            "git checkout -b new-branch",
+        ],
+    )
+    def test_denied_for_backend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("git_lead_only:")
+        assert "Lead" in verdict.reason
+
+    @pytest.mark.parametrize("role", ["frontend", "mobile", "devops", "reviewer", "qa", "critic"])
+    def test_denied_for_every_role_no_allowlist(self, role: str) -> None:
+        """No teammate role legitimately commits on the shared tree —
+        qa/critic are browser roles but still denied."""
+        assert not pane_guard.classify('git commit -m "x"', role).allowed
+        assert not pane_guard.classify("git push", role).allowed
+
+    def test_denied_for_shard(self) -> None:
+        assert not pane_guard.classify('git commit -m "x"', "backend#2").allowed
+
+    def test_admin_style_custom_role_denied(self) -> None:
+        """The #314 report's own trigger: a custom role (no `.claude/agents`
+        file of its own) must be denied exactly like a built-in one — the
+        guard has no allowlist to fall through."""
+        assert not pane_guard.classify('git commit -m "x"', "admin").allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git status",
+            "git diff",
+            "git diff --staged",
+            "git log --oneline -5",
+            "git log --oneline --all --grep=commit",
+            "git show HEAD",
+            "git stash",
+            "git stash pop",
+            "git branch -d merged-branch",  # lowercase -d: safe delete, not -D
+            "git tag -l",
+            # reading/mentioning must never trip the guard
+            "grep -rn 'git commit' docs/",
+            "echo 'only Lead runs git commit'",
+            "cat docs/lead/role-and-workflow.md",
+        ],
+    )
+    def test_unrelated_git_commands_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+    def test_lead_and_shell_exempt(self) -> None:
+        assert pane_guard.classify('git commit -m "x"', "lead").allowed
+        assert pane_guard.classify("git push", "shell").allowed
+
+
+class TestGitLeadOnlyWorktreeCarveOut:
+    """#81: an `--isolation worktree` pane owns a private branch and is
+    explicitly told (by `orchestrator_text._append_worktree_hint`) to commit
+    there itself — "the 'wait for Lead' policy is for the shared tree only".
+    Only `commit` is carved out; push/rebase/merge/checkout stay blocked
+    even there, matching that same hint's "ห้าม push · ห้าม switch/merge"."""
+
+    _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+    _WT_CWD_POSIX = "/home/dev/.agent-takkub/worktrees/myproj/backend-3-1700000000"
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
+    def test_commit_allowed_from_worktree_cwd(self, cwd: str) -> None:
+        assert pane_guard.classify('git commit -m "x"', "backend", cwd=cwd).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        ["git push", "git rebase main", "git merge main", "git checkout main"],
+    )
+    def test_push_rebase_merge_checkout_still_denied_from_worktree_cwd(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend", cwd=self._WT_CWD)
+        assert not verdict.allowed, f"should still block from a worktree cwd: {command}"
+
+    def test_commit_denied_when_cwd_missing(self) -> None:
+        """No cwd (e.g. an older Claude Code build, or a malformed hook
+        payload) must fail toward "not a worktree" — the safe default is
+        Lead-only, never an accidental grant."""
+        assert not pane_guard.classify('git commit -m "x"', "backend").allowed
+        assert not pane_guard.classify('git commit -m "x"', "backend", cwd=None).allowed
+        assert not pane_guard.classify('git commit -m "x"', "backend", cwd="").allowed
+
+    def test_commit_denied_from_shared_tree_cwd(self) -> None:
+        """A normal (non-worktree) checkout path must not accidentally match
+        the "worktrees" substring check."""
+        shared = r"C:\Users\dev\my-project"
+        assert not pane_guard.classify('git commit -m "x"', "backend", cwd=shared).allowed
+
+
 class TestFailOpen:
     """The guard must never be able to wedge a pane or police a human."""
 
@@ -336,6 +449,7 @@ class TestFailOpen:
         assert pane_guard.classify("find / -name x", role).allowed
         assert pane_guard.classify("taskkill /F /IM node.exe", role).allowed
         assert pane_guard.classify("pip install -e .", role).allowed
+        assert pane_guard.classify('git commit -m "x"', role).allowed
 
     @pytest.mark.parametrize("role", [None, "", "   "])
     def test_unknown_role_allows(self, role: str | None) -> None:
@@ -368,3 +482,13 @@ class TestRuleTextSyncedWithRoleFiles:
         assert "pytest" in pane_guard.PIP_EDITABLE_RULE_TEXT
         assert "pip install -e" in pane_guard.PIP_EDITABLE_RULE_TEXT
         assert "202" in pane_guard.PIP_EDITABLE_RULE_TEXT
+
+    def test_git_lead_only_rule_text_is_actionable(self) -> None:
+        """Same contract as GUARD_RULE_TEXT: name the safe alternative
+        (takkub done, Lead review), not just the prohibition — and name the
+        worktree carve-out so a blocked pane isn't left guessing why the
+        exact same command worked for a teammate in isolation mode."""
+        assert "takkub done" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
+        assert "git commit" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
+        assert "314" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
+        assert "worktree" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT

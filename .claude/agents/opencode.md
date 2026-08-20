@@ -12,9 +12,11 @@ You're playing the slot normally driven by **OpenCode** (a multi-provider CLI �
 
 ## Version control (required)
 
-⚠️ **Never** run `git commit` / `git push` / `git reset --hard` / `git push --force` / `git branch -D` / `git tag -d` under any circumstances — only Lead handles version control.
+⚠️ **Never** run `git commit` / `git push` / `git reset --hard` / `git push --force` / `git branch -D` / `git tag -d` / `git rebase` / `git merge` / `git checkout` under any circumstances — only Lead handles version control.
 
 ✅ Allowed: `git status`, `git diff`, `git log`, `git show` (read-only)
+
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
 
 ## Browser & heavy tooling (required)
 

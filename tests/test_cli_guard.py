@@ -30,12 +30,15 @@ def _run(monkeypatch: pytest.MonkeyPatch, payload: dict | str, **env) -> None:
         monkeypatch.setenv(key, val)
 
 
-def _payload(command: str) -> dict:
-    return {
+def _payload(command: str, cwd: str | None = None) -> dict:
+    payload: dict = {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": command},
     }
+    if cwd is not None:
+        payload["cwd"] = cwd
+    return payload
 
 
 class TestDeny:
@@ -84,6 +87,21 @@ class TestDeny:
         assert "host_destructive" in err
         assert "PID" in err, "the reason must name the safe alternative, not just say no"
 
+    def test_blocks_git_commit_for_backend(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#314: the exact incident — a `backend` pane self-committing on a
+        task instruction of "commit เอง", with no `cwd` in the payload (a
+        shared-tree spawn, not `--isolation worktree`)."""
+        _run(monkeypatch, _payload('git commit -m "x"'), TAKKUB_ROLE="backend")
+
+        resp = cli.cmd_guard(None)
+
+        assert resp["exit_code"] == 2
+        err = capsys.readouterr().err
+        assert "git_lead_only" in err
+        assert "Lead" in err
+
 
 class TestAllow:
     def test_allows_ordinary_command(
@@ -110,6 +128,39 @@ class TestAllow:
         _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="lead")
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
+    def test_lead_may_commit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(monkeypatch, _payload('git commit -m "x"'), TAKKUB_ROLE="lead")
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+
+
+class TestGitLeadOnlyWorktreeCarveOut:
+    """#81/#314: the hook payload's `cwd` field is what lets `cmd_guard`
+    tell a `--isolation worktree` pane's own branch apart from the shared
+    tree — end-to-end through the actual stdin-JSON path, not just
+    `pane_guard.classify()` directly."""
+
+    _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+
+    def test_commit_allowed_from_worktree_cwd(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(
+            monkeypatch,
+            _payload('git commit -m "x"', cwd=self._WT_CWD),
+            TAKKUB_ROLE="backend",
+        )
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+
+    def test_push_still_blocked_from_worktree_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        _run(monkeypatch, _payload("git push", cwd=self._WT_CWD), TAKKUB_ROLE="backend")
+        resp = cli.cmd_guard(None)
+        assert resp["exit_code"] == 2
+        assert "git_lead_only:push" in capsys.readouterr().err
+
+    def test_commit_blocked_when_payload_has_no_cwd(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(monkeypatch, _payload('git commit -m "x"'), TAKKUB_ROLE="backend")
+        assert cli.cmd_guard(None)["exit_code"] == 2
+
 
 class TestFailOpen:
     def test_no_role_env_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,6 +178,8 @@ class TestFailOpen:
             {"tool_input": "a string, not a dict"},
             {"tool_input": {}},  # no command key
             {"tool_input": {"command": None}},
+            {"tool_input": {"command": "npm test"}, "cwd": None},
+            {"tool_input": {"command": "npm test"}, "cwd": 12345},
         ],
     )
     def test_malformed_payload_allows(
