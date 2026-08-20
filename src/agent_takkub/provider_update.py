@@ -22,8 +22,12 @@ via `provider_state` is never probed or downloaded — it just reports
 
 from __future__ import annotations
 
+import platform
+import re
 import shutil
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -32,6 +36,20 @@ from ._win_console import SUBPROCESS_NO_WINDOW
 # the outer gate's own timeout (see boot_update_window.py) — this is a
 # per-provider ceiling, the gate timeout is the overall one.
 _UPDATE_TIMEOUT_S = 180.0
+
+# npm has NO cross-process lock for the global prefix: two `npm install -g`
+# runs against the same prefix corrupt each other's bin-linking (EEXIST on
+# `<prefix>/bin/<name>`) and can abort a package's postinstall midway, which
+# for claude-code means its native binary is never copied out of the
+# optional dep — npm still exits 0 and leaves the placeholder behind.
+# boot_update_window starts one worker PER provider in parallel, so on a
+# machine with claude + codex + opencode installed that is three concurrent
+# global installs (real report, macOS 2026-08-20: claude "updated" to a
+# placeholder while codex and opencode both died with EEXIST, npm debug logs
+# 1 ms apart). Serialise every npm run behind this process-wide mutex; uv
+# and any future manager stay parallel.
+_NPM_LOCK = threading.Lock()
+_NPM_LOCK_WAIT_S = _UPDATE_TIMEOUT_S
 
 STATUS_UP_TO_DATE = "up_to_date"
 STATUS_UPDATED = "updated"
@@ -144,6 +162,69 @@ def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _node_optional_dep_tag() -> str:
+    """`<platform>-<arch>` for THIS machine, in npm's optional-dependency
+    naming (Node's `process.platform` + `process.arch`).
+
+    claude-code publishes its native binary as a per-platform optional dep
+    named `@anthropic-ai/claude-code-<tag>`, so a remediation hint naming
+    that package MUST name the one belonging to the machine showing the
+    error. This used to be hardcoded `win32-x64`, which told every macOS
+    user to install a Windows binary (real report, 2026-08-20).
+    """
+    machine = platform.machine().lower()
+    arch_map = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}
+    return f"{sys.platform}-{arch_map.get(machine, machine or 'x64')}"
+
+
+# npm pads the tail of every failure with the same two boilerplate lines, so
+# a naive `splitlines()[-2:]` excerpt shows the log path and nothing else —
+# exactly what the macOS report surfaced ("...with --force to overwrite files
+# recklessly. | npm error A complete log of this run can be found in: ...",
+# which never mentions EEXIST or which file collided). npm prints the
+# machine-readable cause FIRST (`npm error code <CODE>`, `npm error path
+# <path>`), so anchor on that when it's there and fall back to the tail for
+# every other updater, whose cause genuinely is the last thing printed.
+_NPM_CODE_RE = re.compile(r"^npm (?:error|ERR!)\s+code\s+\S+", re.IGNORECASE)
+_NOISE_MARKERS = ("a complete log of this run can be found in",)
+
+
+def _error_excerpt(output: str, *, max_lines: int = 2) -> str:
+    lines = [ln.strip() for ln in (output or "").strip().splitlines() if ln.strip()]
+    lines = [ln for ln in lines if not any(m in ln.lower() for m in _NOISE_MARKERS)]
+    if not lines:
+        return ""
+    for i, line in enumerate(lines):
+        if _NPM_CODE_RE.match(line):
+            return " | ".join(lines[i : i + max_lines])
+    return " | ".join(lines[-max_lines:])
+
+
+def _run_update_command(
+    name: str, program: str, argv: list[str]
+) -> subprocess.CompletedProcess[str] | UpdateOutcome:
+    """Run one provider's update command — the completed process on launch,
+    or a terminal failure outcome. npm runs are serialised (`_NPM_LOCK`)."""
+    needs_npm_lock = argv[0] == "npm"
+    if needs_npm_lock and not _NPM_LOCK.acquire(timeout=_NPM_LOCK_WAIT_S):
+        return UpdateOutcome(
+            name,
+            STATUS_FAILED,
+            f"another provider's npm install held the global npm lock for {_NPM_LOCK_WAIT_S:.0f}s",
+        )
+    try:
+        return _run([program, *argv[1:]], timeout=_UPDATE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return UpdateOutcome(
+            name, STATUS_FAILED, f"update timed out after {_UPDATE_TIMEOUT_S:.0f}s"
+        )
+    except OSError as e:
+        return UpdateOutcome(name, STATUS_FAILED, f"failed to launch: {e}")
+    finally:
+        if needs_npm_lock:
+            _NPM_LOCK.release()
+
+
 def _generic_update_argv(spec) -> list[str] | None:
     """Derive an update command from `spec.install_command` — the SAME
     command already used to install this provider, re-run to fetch latest.
@@ -192,13 +273,27 @@ def _update_claude() -> UpdateOutcome:
     if compare_versions(current, latest) >= 0:
         return UpdateOutcome("claude", STATUS_UP_TO_DATE, f"v{current}")
 
-    ok, msg = apply_update()
+    # Same process-wide npm mutex as `_run_update_command` — claude's update
+    # IS an `npm install -g`, and it is the provider whose postinstall a
+    # concurrent npm run corrupts most visibly (placeholder binary below).
+    # `latest_version()` above is a read-only `npm view` and stays unlocked.
+    if not _NPM_LOCK.acquire(timeout=_NPM_LOCK_WAIT_S):
+        return UpdateOutcome(
+            "claude",
+            STATUS_FAILED,
+            f"another provider's npm install held the global npm lock for {_NPM_LOCK_WAIT_S:.0f}s",
+        )
+    try:
+        ok, msg = apply_update()
+    finally:
+        _NPM_LOCK.release()
     if not ok:
         return UpdateOutcome("claude", STATUS_FAILED, msg)
 
-    # Real incident (2026-08-20): claude ships bin/claude.exe as a ~500B
-    # placeholder; postinstall (install.cjs) copies the real binary from the
-    # optional dependency @anthropic-ai/claude-code-win32-x64. If that
+    # Real incident (2026-08-20, seen on BOTH Windows and macOS): claude
+    # ships its bin entry as a ~500B placeholder and the postinstall
+    # (install.cjs) copies the real binary in from the optional dependency
+    # @anthropic-ai/claude-code-<platform>-<arch>. If that
     # optional-dep fetch fails mid-update, npm still exits 0 and the
     # placeholder is left in place — every future spawn dies. Re-run the
     # SAME pre-flight header check spawn_pty already uses (#313) before
@@ -215,7 +310,7 @@ def _update_claude() -> UpdateOutcome:
             STATUS_FAILED,
             f"updated to v{latest} but the binary failed the header check (placeholder left "
             "by a failed optional-dep fetch) — run `npm i -g "
-            "@anthropic-ai/claude-code-win32-x64` then `node install.cjs`",
+            f"@anthropic-ai/claude-code-{_node_optional_dep_tag()}` then `node install.cjs`",
         )
     # → (U+2192), not ASCII "->" — real arrow glyph, confirmed present in the
     # bundled IBM Plex Sans (critic review 2026-08-20, finding #11).
@@ -238,18 +333,14 @@ def _update_generic(name: str) -> UpdateOutcome:
     if program is None:
         return UpdateOutcome(name, STATUS_FAILED, f"`{argv[0]}` not found on PATH")
 
-    try:
-        result = _run([program, *argv[1:]], timeout=_UPDATE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return UpdateOutcome(
-            name, STATUS_FAILED, f"update timed out after {_UPDATE_TIMEOUT_S:.0f}s"
-        )
-    except OSError as e:
-        return UpdateOutcome(name, STATUS_FAILED, f"failed to launch: {e}")
+    result = _run_update_command(name, program, argv)
+    if isinstance(result, UpdateOutcome):
+        return result
 
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip().splitlines()[-2:]
-        return UpdateOutcome(name, STATUS_FAILED, f"exit {result.returncode}: {' | '.join(tail)}")
+        excerpt = _error_excerpt(result.stderr or result.stdout or "")
+        detail = f"exit {result.returncode}: {excerpt}" if excerpt else f"exit {result.returncode}"
+        return UpdateOutcome(name, STATUS_FAILED, detail)
 
     resolved = _discover(spec)
     if resolved is None:

@@ -49,9 +49,15 @@ from . import cockpit_theme as theme
 from . import provider_model_refresh, provider_update
 from .provider_spec import PROVIDER_REGISTRY
 
-# Overall bounded ceiling for the whole boot-update phase (all providers run
-# in parallel via QThreadPool, so this is ~one provider's worst case, not a
-# sum). Default sized for a slow-network cold install of claude's ~330 MB
+# Overall bounded ceiling for the whole boot-update phase. Providers run in
+# parallel via QThreadPool, EXCEPT that every `npm install -g` is serialised
+# behind one mutex (`provider_update._NPM_LOCK`) because npm has no lock of
+# its own for the global prefix — so with several npm providers installed
+# this ceiling can cut off a run still queued for that mutex, which lands as
+# a "timeout" row and lets the cockpit open (the corrupt binary a truncated
+# install could leave behind is still caught at spawn by
+# `_pty_backend._validate_spawn_target`). Default sized for a slow-network
+# cold install of claude's ~330 MB
 # optional-dep binary (the exact payload that made the #313 incident's
 # window so wide) with real margin, while still bounding boot — a stuck
 # updater must never block the cockpit from opening at all.
