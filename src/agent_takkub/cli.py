@@ -319,6 +319,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
     provider = (getattr(args, "provider", None) or "").strip().lower() or None
+    effort = (getattr(args, "effort", None) or "").strip().lower() or None
     if mode == "subagent" and model:
         return {
             "ok": False,
@@ -328,6 +329,11 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         return {
             "ok": False,
             "msg": "--provider cannot be used with --mode subagent: native subagents always use the parent provider/model context",
+        }
+    if mode == "subagent" and effort:
+        return {
+            "ok": False,
+            "msg": "--effort cannot be used with --mode subagent: native subagents always use the parent provider/model context",
         }
     if mode == "subagent" and getattr(args, "plan", False):
         return {
@@ -353,6 +359,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         )
         if model_warning:
             print(f"warn: {model_warning}", file=sys.stderr)
+    if effort:
+        from .provider_config import assign_effort_override_error
+
+        effort_error = assign_effort_override_error(
+            args.role, effort, _from_project(), provider_override=provider
+        )
+        if effort_error:
+            return {"ok": False, "msg": effort_error}
     if shards > 1 and getattr(args, "auto_chain", False):
         return {
             "ok": False,
@@ -399,6 +413,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "shard_total": shards,
                     "model": model,
                     "provider": provider,
+                    "effort": effort,
                     "feature": getattr(args, "feature", "") or "",
                     "mode": mode,
                 }
@@ -426,6 +441,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "isolation": isolation,
                         "model": model,
                         "provider": provider,
+                        "effort": effort,
                         "feature": getattr(args, "feature", "") or "",
                         "mode": mode,
                     }
@@ -454,6 +470,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "isolation": isolation,
                 "model": model,
                 "provider": provider,
+                "effort": effort,
                 "feature": getattr(args, "feature", "") or "",
                 "mode": mode,
             }
@@ -2324,6 +2341,22 @@ def main(argv: list[str] | None = None) -> int:
         "needs a cockpit restart to take effect). Only takes effect when "
         "spawning a new pane; an already-running pane keeps its current "
         "provider",
+    )
+    sa.add_argument(
+        "--effort",
+        choices=("low", "medium", "high"),
+        default=None,
+        help="override the reasoning-effort knob for this assign's fresh spawn "
+        "(issue #323) — one-assign escape hatch, same shape as --model/--provider. "
+        "Default: don't send anything, keep the role/provider's existing effort. "
+        "Route mechanical work (rename, doc sync, running an existing test suite) "
+        "at low for speed/cost; save high for design-sensitive or correctness-"
+        "critical work. 4 providers accept an effort knob today (claude --effort, "
+        "codex -c model_reasoning_effort=, gemini/agy --effort, all low/medium/"
+        "high; claude alone also takes xhigh/max) — opencode/kimi/cursor have "
+        "no CLI knob yet (GAP tracked in #103) and silently ignore this flag "
+        "rather than erroring. Only takes effect when spawning a new pane; an "
+        "already-running pane keeps its current effort",
     )
     sa.add_argument("task", help="task content (positional)")
     sa.add_argument(

@@ -19,9 +19,16 @@ def test_codex_effort_levels() -> None:
     assert provider_spec.codex_spec.effort_levels == ("low", "medium", "high")
 
 
+def test_gemini_effort_levels() -> None:
+    # #323 follow-up: agy's #125 silent-model-swap regression is fixed
+    # upstream (agy 1.1.10+) — see gemini_spec's own comment for the live
+    # re-verification. Levels come straight from `agy --help`.
+    assert provider_spec.gemini_spec.effort_flag == "--effort"
+    assert provider_spec.gemini_spec.effort_levels == ("low", "medium", "high")
+
+
 def test_providers_without_effort_flag_have_no_levels() -> None:
     for spec in (
-        provider_spec.gemini_spec,
         provider_spec.opencode_spec,
         provider_spec.kimi_spec,
         provider_spec.cursor_spec,
@@ -53,7 +60,15 @@ def test_effort_levels_for_haiku_model_is_empty() -> None:
 
 
 def test_effort_levels_for_unsupported_provider_is_empty() -> None:
-    assert provider_spec.effort_levels_for("gemini", "gemini-3.1-pro-high") == ()
+    assert provider_spec.effort_levels_for("opencode", "some-model") == ()
+
+
+def test_effort_levels_for_gemini_model_is_supported() -> None:
+    assert provider_spec.effort_levels_for("gemini", "gemini-3.1-pro-high") == (
+        "low",
+        "medium",
+        "high",
+    )
 
 
 def test_effort_levels_for_unknown_provider_is_empty() -> None:

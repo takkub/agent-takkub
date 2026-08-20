@@ -113,6 +113,7 @@ def _capture_generic_argv(
     provider: str,
     *,
     model_override: str | None = None,
+    effort_override: str | None = None,
     role: str | None = None,
     gemini_project_id: str | None = None,
 ) -> list[str]:
@@ -123,7 +124,9 @@ def _capture_generic_argv(
     spawn_role = role or provider
     pane = _make_pane(spawn_role)
     orchestrator._panes_by_project[TEST_PROJECT] = {spawn_role: pane}
-    orchestrator._ps(f"{TEST_PROJECT}::{spawn_role}").model_override = model_override
+    ps = orchestrator._ps(f"{TEST_PROJECT}::{spawn_role}")
+    ps.model_override = model_override
+    ps.effort_override = effort_override
     # Canonical names: cursor ships `cursor-agent` (the bare `agent` alias is
     # only the fallback in discovery, since it collides too easily).
     binary = {
@@ -215,12 +218,19 @@ class TestProviderEffortSpecs:
         assert codex_spec.effort_config_key == "model_reasoning_effort"
 
     def test_unsupported_providers_remain_explicit(self) -> None:
-        from agent_takkub.provider_spec import cursor_spec, gemini_spec, kimi_spec, opencode_spec
+        from agent_takkub.provider_spec import cursor_spec, kimi_spec, opencode_spec
 
-        assert gemini_spec.effort_flag is None
         assert opencode_spec.effort_flag is None
         assert kimi_spec.effort_flag is None
         assert cursor_spec.effort_flag is None
+
+    def test_gemini_gains_effort_flag(self) -> None:
+        # #323 follow-up: agy's #125 silent-model-swap regression is fixed
+        # upstream (agy 1.1.10+) — see gemini_spec's own comment.
+        from agent_takkub.provider_spec import gemini_spec
+
+        assert gemini_spec.effort_flag == "--effort"
+        assert gemini_spec.effort_levels == ("low", "medium", "high")
 
 
 _GEMINI_SCOPE_CASES = pytest.mark.parametrize(
@@ -237,8 +247,19 @@ _GEMINI_SCOPE_CASES = pytest.mark.parametrize(
 
 
 class TestGenericProviderSpawnEffort:
+    # #323 follow-up: agy's #125 silent-model-swap regression (mismatched
+    # --model/--effort silently discarding the explicit --model) is fixed
+    # upstream in agy 1.1.10+ — re-verified live against the installed 1.1.15
+    # binary (docs/reviews/2026-08-20-323-agy-effort-restored.md). gemini now
+    # goes through the same generic effort path claude/codex already use, so
+    # these two tests assert --effort IS present instead of absent. The model
+    # override below (gemini-3.1-pro-high) intentionally MATCHES the "high"
+    # tier effort — Takkub does not itself cross-validate an explicit --model
+    # against the resolved effort before spawn (see gemini_spec's comment on
+    # the residual conflict case), so a mismatched pair would still reach
+    # argv here and fail only when agy itself parses it.
     @_GEMINI_SCOPE_CASES
-    def test_gemini_model_override_is_never_changed_by_effort(
+    def test_gemini_model_override_now_gets_matching_effort(
         self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
@@ -248,25 +269,26 @@ class TestGenericProviderSpawnEffort:
             monkeypatch,
             tmp_path,
             "gemini",
-            model_override="Gemini 3.1 Pro (Low)",
+            model_override="gemini-3.1-pro-high",
             role="backend",
             gemini_project_id=gemini_project_id,
         )
 
         # #132: project scoping always appends --project/--new-project after
-        # the model flag — pin the resolver (via gemini_project_id) so this
+        # the effort flag — pin the resolver (via gemini_project_id) so this
         # stays deterministic instead of reading the real ~/.gemini registry.
         assert argv == [
             "agy",
             "--dangerously-skip-permissions",
             "--model",
-            "Gemini 3.1 Pro (Low)",
+            "gemini-3.1-pro-high",
+            "--effort",
+            "high",
             *expected_scope_tail,
         ]
-        assert "--effort" not in argv
 
     @_GEMINI_SCOPE_CASES
-    def test_gemini_without_model_override_never_guesses_effort(
+    def test_gemini_without_model_override_now_gets_tier_effort(
         self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
@@ -280,8 +302,13 @@ class TestGenericProviderSpawnEffort:
             gemini_project_id=gemini_project_id,
         )
 
-        assert argv == ["agy", "--dangerously-skip-permissions", *expected_scope_tail]
-        assert "--effort" not in argv
+        assert argv == [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--effort",
+            "high",
+            *expected_scope_tail,
+        ]
 
     def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "low")
@@ -312,6 +339,56 @@ class TestGenericProviderSpawnEffort:
 
         assert argv == ["opencode", "--auto"]
 
+    def test_assign_effort_override_wins_over_env_and_tier(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        # Issue #323: `takkub assign --effort low` on a role whose tier
+        # default and TAKKUB_TEAMMATE_EFFORT both say "high" — the per-assign
+        # value must reach codex's actual spawn argv.
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
+
+        with patch(
+            "agent_takkub.mcp_bridge.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
+        ):
+            argv = _capture_generic_argv(
+                qapp, monkeypatch, tmp_path, "codex", effort_override="low"
+            )
+
+        effort_idx = argv.index("model_reasoning_effort=low")
+        assert argv[effort_idx - 1 : effort_idx + 1] == ["-c", "model_reasoning_effort=low"]
+
+    def test_assign_effort_override_ignored_for_unsupported_provider(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        # opencode has no effort_flag at all (#103 gap) — a per-assign
+        # override must degrade silently, same as every other precedence
+        # layer, not invent a CLI flag the provider doesn't accept.
+        argv = _capture_generic_argv(
+            qapp, monkeypatch, tmp_path, "opencode", role="backend", effort_override="high"
+        )
+
+        assert "--effort" not in argv
+
+    def test_assign_effort_override_reaches_gemini_argv(self, qapp, monkeypatch, tmp_path) -> None:
+        # #323 follow-up: gemini/agy now has a real effort_flag (#125's
+        # silent-model-swap regression is fixed upstream, agy 1.1.10+) — a
+        # per-assign override must win over env/tier same as codex/claude.
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "medium")
+
+        argv = _capture_generic_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "gemini",
+            role="backend",
+            effort_override="low",
+            gemini_project_id="17fdc03a-8cb3-446e-a833-4aaffc55f6bb",
+        )
+
+        effort_idx = argv.index("--effort")
+        assert argv[effort_idx : effort_idx + 2] == ["--effort", "low"]
+
 
 def _capture_claude_argv(
     qapp,
@@ -319,13 +396,16 @@ def _capture_claude_argv(
     tmp_path,
     *,
     model_override: str | None = None,
+    effort_override: str | None = None,
 ) -> list[str]:
     from agent_takkub.provider_config import CLAUDE
 
     orchestrator = _make_orchestrator(qapp, monkeypatch)
     pane = _make_pane("backend")
     orchestrator._panes_by_project[TEST_PROJECT] = {"backend": pane}
-    orchestrator._ps(f"{TEST_PROJECT}::backend").model_override = model_override
+    ps = orchestrator._ps(f"{TEST_PROJECT}::backend")
+    ps.model_override = model_override
+    ps.effort_override = effort_override
     spawn_calls: list[dict] = []
 
     with (
@@ -471,6 +551,18 @@ class TestClaudeTeammateModelPrecedence:
         assert _model_arg(spawn_kwargs["argv"]) == "claude-env"
         assert "ANTHROPIC_DEFAULT_MODEL" not in spawn_kwargs["env"]
 
+    def test_assign_effort_override_wins_over_role_tier_default(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        # backend's tier default effort is "high" (test_claude_keeps_role_tier_effort
+        # above) — a per-assign --effort must win over it (issue #323).
+        monkeypatch.delenv("TAKKUB_TEAMMATE_EFFORT", raising=False)
+
+        argv = _capture_claude_argv(qapp, monkeypatch, tmp_path, effort_override="low")
+
+        effort_idx = argv.index("--effort")
+        assert argv[effort_idx : effort_idx + 2] == ["--effort", "low"]
+
 
 class TestRunningPaneModelOverride:
     def test_override_warns_lead_and_does_not_change_live_pane(self, qapp, monkeypatch) -> None:
@@ -504,6 +596,46 @@ class TestRunningPaneModelOverride:
 
         assert ok is True, message
         assert state.model_override == "model-used-at-spawn"
+        warning = notify.call_args.args[1]
+        assert "ไม่มีผล" in warning
+        assert "close" in warning
+
+
+class TestRunningPaneEffortOverride:
+    def test_override_warns_lead_and_does_not_change_live_pane(self, qapp, monkeypatch) -> None:
+        # Issue #323 — mirrors TestRunningPaneModelOverride: CLI argv can't
+        # change after process start, so --effort on an already-running pane
+        # must warn and leave the pane's spawned effort untouched.
+        from agent_takkub.provider_config import CLAUDE
+
+        orchestrator = _make_orchestrator(qapp, monkeypatch)
+        pane = _make_pane("backend")
+        pane.session = MagicMock()
+        pane.session.is_alive = True
+        orchestrator._panes_by_project[TEST_PROJECT] = {"backend": pane}
+        state = orchestrator._ps(f"{TEST_PROJECT}::backend")
+        state.effort_override = "effort-used-at-spawn"
+
+        with (
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                return_value=CLAUDE,
+            ),
+            patch("agent_takkub.orchestrator._task_handoff_pointer", return_value=("task", None)),
+            patch("agent_takkub.task_ledger.create_assignment", return_value=None),
+            patch.object(orchestrator, "_notify_lead") as notify,
+            patch.object(orchestrator, "_send_when_ready"),
+        ):
+            ok, message = orchestrator.assign(
+                "backend",
+                cwd=None,
+                task="scan",
+                project=TEST_PROJECT,
+                effort="low",
+            )
+
+        assert ok is True, message
+        assert state.effort_override == "effort-used-at-spawn"
         warning = notify.call_args.args[1]
         assert "ไม่มีผล" in warning
         assert "close" in warning

@@ -1731,6 +1731,7 @@ class Orchestrator(
         feature: str = "",
         model: str | None = None,
         provider: str | None = None,
+        effort: str | None = None,
         mode: str = "pane",
         _resource_token: ResourceToken | None = None,
     ) -> tuple[bool, str]:
@@ -1741,6 +1742,8 @@ class Orchestrator(
                 return False, "model override is not supported in subagent mode"
             if provider:
                 return False, "provider override is not supported in subagent mode"
+            if effort:
+                return False, "effort override is not supported in subagent mode"
             if plan:
                 return False, "plan mode is not supported in subagent mode"
             return self._register_subagent(
@@ -1770,6 +1773,15 @@ class Orchestrator(
             )
             if model_error:
                 return False, model_error
+        effort = (effort or "").strip().lower() or None
+        if effort:
+            from .provider_config import assign_effort_override_error
+
+            effort_error = assign_effort_override_error(
+                role_name, effort, project, provider_override=provider
+            )
+            if effort_error:
+                return False, effort_error
         # #162: a repeated `--isolation worktree` assign at the same BARE role
         # name (no `#N`) doesn't get its own isolated pane — it silently
         # collides with the pane the earlier call already owns (see
@@ -1840,7 +1852,7 @@ class Orchestrator(
                     task_id=task_id,
                     resource_class=resource_class,
                     reason=decision.reason,
-                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider, dp=detail_path: (
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider, ef=effort, dp=detail_path: (
                         self.assign(
                             r,
                             c,
@@ -1854,6 +1866,7 @@ class Orchestrator(
                             feature=f,
                             model=m,
                             provider=pr,
+                            effort=ef,
                             _resource_token=token,
                         )
                     ),
@@ -1912,6 +1925,7 @@ class Orchestrator(
                 feature,
                 model,
                 provider,
+                effort,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -1930,6 +1944,7 @@ class Orchestrator(
                 feature,
                 model,
                 provider,
+                effort,
             )
         else:
             result = self._assign_dispatch(
@@ -1945,6 +1960,7 @@ class Orchestrator(
                 feature=feature,
                 model=model,
                 provider=provider,
+                effort=effort,
             )
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
@@ -2031,6 +2047,7 @@ class Orchestrator(
         feature: str = "",
         model: str | None = None,
         provider: str | None = None,
+        effort: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -2141,6 +2158,26 @@ class Orchestrator(
             # --model must clear the prior one-shot choice; a new assign with
             # --model survives spawn gate/FIFO retries and crash auto-respawn.
             ps_assign.model_override = model
+        if effort and pane_is_running:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --effort {effort!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "effort เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+            )
+            _log_event(
+                "assign_effort_override_ignored",
+                role=role_name,
+                project=project_ns,
+                effort=effort,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # Same one-shot-choice contract as model_override immediately
+            # above — narrowest override, cleared on every fresh assign that
+            # doesn't repeat it.
+            ps_assign.effort_override = effort
         ps_assign.spawn_initial_task = None
         ps_assign.spawn_initial_task_fallback = None
         ps_assign.spawn_initial_prompt_file = None
@@ -2333,6 +2370,7 @@ class Orchestrator(
             effective_provider=effective_provider,
             model_override=model,
             provider_override=provider,
+            effort_override=effort,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -2349,6 +2387,7 @@ class Orchestrator(
         feature: str = "",
         model: str | None = None,
         provider: str | None = None,
+        effort: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -2385,6 +2424,7 @@ class Orchestrator(
                 feature=feature,
                 model=model,
                 provider=provider,
+                effort=effort,
             )
 
         if not base_cwd:
@@ -2448,6 +2488,7 @@ class Orchestrator(
             feature=feature,
             model=model,
             provider=provider,
+            effort=effort,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -7840,11 +7881,12 @@ class Orchestrator(
         feature: str = "",
         model: str | None = None,
         provider: str | None = None,
+        effort: str | None = None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
         flag (commit gate, auto-chain, shards, plan, isolation, feature,
-        per-assign model/provider) survives unchanged."""
+        per-assign model/provider/effort) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -7863,6 +7905,7 @@ class Orchestrator(
                 "feature": feature,
                 "model": model,
                 "provider": provider,
+                "effort": effort,
             }
         )
         depth = len(q[project_ns])
@@ -7925,6 +7968,7 @@ class Orchestrator(
                 feature=item.get("feature", ""),
                 model=item.get("model"),
                 provider=item.get("provider"),
+                effort=item.get("effort"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a

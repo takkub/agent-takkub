@@ -153,12 +153,18 @@ def _append_provider_effort(
     argv.extend([spec.effort_flag, value])
 
 
-def _resolve_teammate_effort(base_role: str, spec: ProviderSpec, model: str) -> str:
+def _resolve_teammate_effort(
+    base_role: str, spec: ProviderSpec, model: str, override: str = ""
+) -> str:
     """Resolve the effort value a teammate pane should spawn with for
     *base_role* on *spec*, spawning *model* (empty string when no explicit
     model override applies — see the two call sites).
 
     Precedence (highest wins):
+      0. *override* — the per-assign ``takkub assign --effort`` value
+         (issue #323), threaded in via ``PaneState.effort_override``. The
+         narrowest, most explicit choice, same as ``model_override``'s
+         precedence over the role/env/tier layers below it.
       1. the role's own Settings -> Providers & Roles effort override
          (:func:`role_models.effort_for`, already resolved against the
          provider ACTUALLY spawning so a re-pointed/substituted role never
@@ -174,13 +180,19 @@ def _resolve_teammate_effort(base_role: str, spec: ProviderSpec, model: str) -> 
     ``effort_flag`` at all, or a *model* in that provider's
     ``_MODELS_WITHOUT_EFFORT`` (e.g. claude-haiku-4-5), always resolves to
     ``""`` regardless of which tier picked a value — callers never need to
-    re-check provider/model support themselves.
+    re-check provider/model support themselves. (`cli_server`/`orchestrator`
+    already reject a per-assign ``--effort`` the effective provider's CLI
+    doesn't accept before spawn ever reaches this resolver, via
+    `provider_config.assign_effort_override_error` — this gate is the
+    second, unconditional line of defense.)
     """
     from .provider_spec import effort_levels_for
     from .role_models import effort_for as role_effort_for
 
     if not effort_levels_for(spec.name, model):
         return ""
+    if override:
+        return override
     role_effort = role_effort_for(base_role, spec.name)
     if role_effort:
         return role_effort
@@ -577,6 +589,15 @@ class PaneState:
     # instead of staying degraded forever. Mirrors model_override's
     # shape/precedent immediately above.
     provider_override: str | None = None
+    # #323: per-assign reasoning-effort override, set the same way as
+    # model_override immediately above (`_assign_dispatch`, cleared on a
+    # fresh assign that doesn't repeat it, ignored on an already-running
+    # pane since CLI argv can't change after process start). Read by
+    # `_resolve_teammate_effort` as the highest-precedence layer, ABOVE the
+    # role's own Settings -> Providers & Roles effort and the
+    # TAKKUB_TEAMMATE_EFFORT env escape hatch — narrowest choice wins, same
+    # rule model_override already follows.
+    effort_override: str | None = None
     # #248/#247 round 2 (extended #269): how many times
     # lead_inbox._recover_broken_pane has already closed+respawned this pane
     # for EITHER reason — no-content OR auth-failure (0 = never). For the
@@ -2059,7 +2080,9 @@ class SpawnEngineMixin:
                 # gates the result against what this provider/model actually
                 # accepts — _append_provider_effort is then a no-op whenever
                 # that resolves to "".
-                provider_effort = _resolve_teammate_effort(base_role, spec, provider_model)
+                provider_effort = _resolve_teammate_effort(
+                    base_role, spec, provider_model, override=_ps_initial.effort_override or ""
+                )
                 _append_provider_effort(provider_argv, spec, provider_effort)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
             # codex gets native `-c mcp_servers.<name>.<key>=…` session
@@ -2686,7 +2709,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # uses — role setting > TAKKUB_TEAMMATE_EFFORT > tier default,
             # then gated so e.g. claude-haiku-4-5 never gets --effort).
             teammate_effort = _resolve_teammate_effort(
-                base_role, PROVIDER_REGISTRY[CLAUDE], teammate_model
+                base_role,
+                PROVIDER_REGISTRY[CLAUDE],
+                teammate_model,
+                override=_ps_initial.effort_override or "",
             )
             _append_provider_effort(
                 argv,
