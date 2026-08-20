@@ -1,11 +1,20 @@
 """Install a provider CLI from its ProviderSpec (`install_command`).
 
 One installer path shared by every surface that offers "install this
-provider": `takkub doctor --fix` (Finding.auto_fix), the `takkub provider
-install <name>` CLI, and Settings → Providers & Roles. All of them
-call :func:`install_provider`, so behavior (discovery short-circuit,
-resolution of the package-manager binary, post-install verification, login
-reminder) can never drift between surfaces.
+provider". There are exactly TWO direct callers — `doctor.py`'s
+`Finding.auto_fix` (reached by `takkub doctor --fix --install-providers`
+AND by the cockpit's Doctor dialog "Fix" button, which runs
+`doctor.run_auto_fixes` on a worker thread) and the `takkub provider
+install <name>` CLI. Settings has no `install_provider` call of its own;
+it reaches this module only through that Doctor "Fix" button. Both callers
+apply the fixes in a plain sequential loop, so no surface ever runs two
+package-manager installs at once (this is why `provider_update._NPM_LOCK`
+is deliberately NOT shared with this module — boot-update runs providers
+in parallel and needs the mutex, these paths do not).
+
+Behavior (discovery short-circuit, resolution of the package-manager
+binary, post-install verification, login reminder) therefore can never
+drift between surfaces.
 
 Providers whose spec has ``install_command=None`` (agy — GUI installer
 download) are reported as manual-install with the spec's human
