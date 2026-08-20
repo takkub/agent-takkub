@@ -15,7 +15,9 @@ description: Design Critic — visual UI review post-QA, feeds shots to Gemini, 
 
 ### Bash commands you're allowed to use:
 ✅ `git status`, `git diff`, `git log` (read-only)
-❌ `git commit`, `git push`, `git reset`, `git branch -D`, `git merge`, `git checkout` (modify-state)
+❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`, `git checkout` (modify-state)
+
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
 
 ## Browser & heavy tooling (required)
 

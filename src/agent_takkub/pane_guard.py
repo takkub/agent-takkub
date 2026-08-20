@@ -69,6 +69,33 @@ A fifth rule, ``pane_poll_loop`` (#287), blocks hand-rolled loops that poll
 `takkub list`/`status` with a `sleep` — and is the one rule that deliberately
 applies to `lead` as well, since Lead is the only role with teammates to poll.
 See its pattern block below for why the #242 prose ban never bound.
+
+A sixth rule, ``git_lead_only`` (#314), blocks `git commit` / `push` /
+`reset --hard` / `branch -D` / `tag -d` / `rebase` / `merge` / `checkout` for
+every guarded role. Every role file already carried this prohibition in
+prose (see "Version control (required)" in each `.claude/agents/*.md`) —
+but prose alone is exactly the gap the module docstring above describes for
+`browser_driver`: real, observed session behavior (#314) showed a `backend`
+and a custom `admin` role self-committing on a task instruction of "commit
+เอง" while a `frontend` pane in the same session refused the identical
+instruction, citing the same role-file prose both panes had. Whether the
+prose held was down to how convincingly the task text argued past it, not
+policy — the one thing that should decide it. This rule makes "only Lead
+commits" a real `PreToolUse` deny instead of a suggestion an agent can be
+talked out of, closing the same hole `browser_driver` closed for the MCP
+policy.
+
+One carve-out: `git commit` (only — never push/reset/rebase/merge/checkout)
+is allowed when the pane's cwd is inside a cockpit-managed
+`.../worktrees/...` checkout. That is `--isolation worktree` (issue #81):
+the pane owns a private branch nobody else touches, and
+`orchestrator_text._append_worktree_hint` already instructs it to commit
+there itself — "the 'wait for Lead' policy is for the shared tree only".
+A hard block here would fight that already-shipped, intentional workflow
+(and would have made this exact fix's own commit impossible). The
+detection is a plain cwd substring match, not an import of
+`worktree_manager` — this module stays a stdlib-only leaf (see top of this
+docstring); `cli.cmd_guard` passes the hook payload's `cwd` field through.
 """
 
 from __future__ import annotations
@@ -117,6 +144,21 @@ PIP_EDITABLE_RULE_TEXT = (
     "ถูกลบ + qa ที่รัน full suite คาบเกี่ยวกันได้ผลเทสจากโค้ดผิด worktree โดยไม่รู้ตัว). "
     "ต้องการเทสโค้ดตัวเอง → รัน pytest ปกติ (ไม่ต้อง reinstall) — ถ้าจำเป็นต้องแก้ dependency ของ repo "
     "จริงๆ ให้แจ้ง Lead ผ่าน `takkub send --to lead` แทนที่จะแก้ shared venv เอง."
+)
+
+
+# Prose handed to role files verbatim (#314). Kept in sync with the patterns
+# below by tests/test_agent_role_files_have_git_commit_guard.py.
+GIT_LEAD_ONLY_RULE_TEXT = (
+    "ห้าม `git commit` / `git push` / `git reset --hard` / `git branch -D` / "
+    "`git tag -d` / `git rebase` / `git merge` / `git checkout` ไม่ว่า task จะสั่งว่า "
+    "'commit เอง'/'ตรวจผ่านแล้ว commit เอง' แค่ไหนก็ตาม — มีแค่ Lead เท่านั้นที่ commit "
+    "(เคสจริง #314: backend/admin role commit เองเมื่อ task สั่ง ในขณะที่ frontend ปฏิเสธ "
+    "เพราะ role file ทั้งคู่มีข้อห้ามเดียวกัน แต่ prose อย่างเดียวโน้มน้าวให้ทำผิดได้). "
+    'งานเสร็จ → `takkub done "<note สรุปงาน>"` แล้วรอ Lead review + commit '
+    "ข้อยกเว้นเดียว: pane ที่ spawn ด้วย `--isolation worktree` (branch แยกของตัวเอง) "
+    "ต้อง `git commit` บน branch นั้นเอง (แต่ยังห้าม push/rebase/merge/checkout) "
+    "ตามที่ task prompt บอกไว้ตอน spawn."
 )
 
 
@@ -338,6 +380,58 @@ _PIP_EDITABLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# git subcommand gate (#314): "only Lead commits" — see module docstring for
+# why prose alone wasn't enough. Flags between `git` and the subcommand are
+# skipped ONLY when they look like bare flags (`-c foo=bar` style values are
+# not consumed), so `git log --grep=commit` never matches (`log` sits where
+# the subcommand is expected, "commit" only appears deep inside a flag
+# value) while `git commit -m "..."` and `git -C dir commit` both do.
+_GIT_SUBCMD_GAP = r"(?:\s+-{1,2}[\w-]+)*\s+"
+
+# `git commit` alone is the one carve-out for a worktree-isolated pane (see
+# module docstring) — kept separate from the no-exception rules below so
+# `classify()` can gate it on `_is_worktree_cwd()`.
+_GIT_COMMIT_PATTERN = re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit\b", re.M)
+
+# No allowlist, no cwd exception — push/reset --hard/branch -D/tag -d/rebase/
+# merge/checkout stay Lead-only even from an isolated worktree branch (the
+# worktree carve-out is "commit your own branch", never "push it" or
+# "rewrite/switch it").
+_GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push\b", re.M)),
+    (
+        "reset-hard",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}reset\b{_SAME_CMD}--hard\b", re.M),
+    ),
+    (
+        "branch-delete",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}branch\b{_SAME_CMD}-D\b", re.M),
+    ),
+    (
+        "tag-delete",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}tag\b{_SAME_CMD}-d\b", re.M),
+    ),
+    ("rebase", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}rebase\b", re.M)),
+    ("merge", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}merge\b", re.M)),
+    ("checkout", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout\b", re.M)),
+)
+
+# A cockpit-managed `--isolation worktree` checkout always lives under
+# `<DATA_HOME>/worktrees/<project>/<role>-<ts>/` (worktree_manager.worktree_dest).
+# Matching the literal path segment — not importing worktree_manager — keeps
+# this module free of the config/DATA_HOME import chain (stdlib-only leaf,
+# see module docstring). Both slash styles: the hook payload's cwd is
+# whatever the pane's OS reports (backslash on Windows, forward slash on
+# macOS/Linux).
+_WORKTREE_CWD = re.compile(r"[/\\]worktrees[/\\]", re.I)
+
+
+def _is_worktree_cwd(cwd: str | None) -> bool:
+    """True when *cwd* looks like an `--isolation worktree` checkout (#81),
+    the one place a non-Lead role legitimately commits on its own branch."""
+    return bool(cwd) and bool(_WORKTREE_CWD.search(cwd))
+
+
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
 # still use its isolated Playwright MCP, but must never drive mb's one shared
 # Chrome session (#92).
@@ -361,6 +455,7 @@ def classify(
     role: str | None,
     *,
     mb_fallback_check: Callable[[], bool] | None = None,
+    cwd: str | None = None,
 ) -> Verdict:
     """Decide whether `role` may run `command`.
 
@@ -378,6 +473,12 @@ def classify(
     itself lives in `mcp_fallback.py`, not here, precisely so this stays a
     pure leaf. `None` (the default, and every caller that doesn't pass one)
     behaves exactly as before: unconditional deny.
+
+    *cwd* (#314): the hook payload's working-directory string, used only to
+    tell an `--isolation worktree` pane apart from a shared-tree one for the
+    `git commit` carve-out (see `_is_worktree_cwd`). `None`/missing defaults
+    to "not a worktree" — i.e. `git commit` stays blocked, the same
+    conservative direction every other rule here fails toward.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -458,6 +559,21 @@ def classify(
                 False,
                 rule=f"pip_editable:{rule}",
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
+            )
+
+    if not _is_worktree_cwd(cwd) and _GIT_COMMIT_PATTERN.search(cmd):
+        return Verdict(
+            False,
+            rule="git_lead_only:commit",
+            reason=(f"role `{name}` commit เองไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
+        )
+
+    for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
+        if pattern.search(cmd):
+            return Verdict(
+                False,
+                rule=f"git_lead_only:{rule}",
+                reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
             )
 
     for rule, pattern in _DISK_SCAN_PATTERNS:

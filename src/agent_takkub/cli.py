@@ -1930,7 +1930,8 @@ def cmd_guard(_: argparse.Namespace) -> dict:
                 _log_event("mcp_fallback_used", role=role, project=_from_project())
             return granted
 
-        verdict = pane_guard.classify(command, role, mb_fallback_check=_mb_fallback_check)
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        verdict = pane_guard.classify(command, role, mb_fallback_check=_mb_fallback_check, cwd=cwd)
         if verdict.allowed:
             return {"ok": True, "msg": ""}
         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
