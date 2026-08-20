@@ -65,7 +65,7 @@ class TestAppJsWiring:
         assert "btn.textContent = label" in js  # chip labels never go through innerHTML
 
     def test_multi_question_picker_answers_via_dedicated_endpoint(self):
-        # #313: typed label text + Enter is silently discarded by the real
+        # remote AskUserQuestion fix: typed label text + Enter is silently discarded by the real
         # terminal picker and Enter submits whatever option was already
         # highlighted, not what the user tapped (proven live, see
         # docs/audit/2026-08-20-remote-askuserquestion.md) — chips must

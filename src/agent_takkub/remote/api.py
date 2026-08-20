@@ -320,7 +320,8 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     }
 
 
-# #313: AskUserQuestion's single-select options answer with a bare 1-based
+# remote AskUserQuestion fix (docs/audit/2026-08-20-remote-askuserquestion.md):
+# AskUserQuestion's single-select options answer with a bare 1-based
 # digit keypress — no Enter needed, it selects AND submits immediately
 # (proven live, docs/audit/2026-08-20-remote-askuserquestion.md). A
 # multi-question tool call auto-advances to the next question's tab on its

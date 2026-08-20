@@ -833,7 +833,7 @@ class TestAskQuestionPrompt:
 
 
 class TestAskQuestionOptions:
-    """`_ask_question_options` (B2/#313): forwards the full picker payload
+    """`_ask_question_options` (B2, remote AskUserQuestion fix): forwards the full picker payload
     for EVERY question in the tool call (prompt + option labels +
     multiSelect), not just the first, so the remote can render tappable
     chips and answer a multi-question call."""
@@ -866,7 +866,7 @@ class TestAskQuestionOptions:
         assert notify_mod._ask_question_options(rec) is None
 
     def test_forwards_every_question_not_just_the_first(self):
-        # #313: the pre-fix behavior read only questions[0] -- a Lead turn
+        # remote AskUserQuestion fix: the pre-fix behavior read only questions[0] -- a Lead turn
         # firing 2+ questions in one call silently lost every question after
         # the first, so the phone couldn't even show it, let alone answer.
         rec = json.loads(_ask_user_question_line("Q1?"))
@@ -897,7 +897,7 @@ class TestAskQuestionOptions:
 
 
 class TestCurrentAskState:
-    """`current_ask_state` (#313): the answer-picker endpoint's guard — a
+    """`current_ask_state` (remote AskUserQuestion fix): the answer-picker endpoint's guard — a
     FRESH, uncached re-read of the pane's actual current state, independent
     of whatever `LeadNotifier`'s poll tail last pushed over SSE. Must return
     None the moment anything supersedes the picker (a real reply, or a

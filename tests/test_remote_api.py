@@ -830,7 +830,7 @@ def _two_question_state() -> dict:
 
 
 class TestBuildPickerKeySequence:
-    """#313: proven live (docs/audit/2026-08-20-remote-askuserquestion.md) —
+    """Remote AskUserQuestion fix: proven live (docs/audit/2026-08-20-remote-askuserquestion.md) —
     a bare 1-based digit selects AND submits a single-select question
     immediately (no Enter needed); a multi-question call auto-advances
     tabs on its own and only needs one trailing Enter to confirm the

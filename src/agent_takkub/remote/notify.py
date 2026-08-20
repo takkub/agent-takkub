@@ -157,11 +157,11 @@ _MAX_ASK_QUESTION_CHARS = 200
 _MAX_ASK_OPTIONS = 6
 _MAX_OPTION_LABEL_CHARS = 80
 
-# #313: a defensive cap, not a discovered protocol limit — AskUserQuestion
-# can carry more than one question per tool call (verified live: the CLI
-# renders one tab per question + a trailing "Submit" tab, see
-# docs/audit/2026-08-20-remote-askuserquestion.md). Forwarding only
-# `questions[0]` (the pre-#313 behavior) silently dropped every question
+# remote AskUserQuestion fix: a defensive cap, not a discovered protocol
+# limit — AskUserQuestion can carry more than one question per tool call
+# (verified live: the CLI renders one tab per question + a trailing
+# "Submit" tab, see docs/audit/2026-08-20-remote-askuserquestion.md).
+# Forwarding only `questions[0]` (the pre-fix behavior) silently dropped every question
 # after the first — the phone could not even see them, let alone answer.
 _MAX_ASK_QUESTIONS = 4
 
@@ -1728,7 +1728,7 @@ def lead_sessions_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list
     return provider, list_recent_lead_sessions(project_ns, limit, provider=provider)
 
 
-# #313 answer-picker guard: only the tail needs scanning — a live picker's
+# remote AskUserQuestion fix answer-picker guard: only the tail needs scanning — a live picker's
 # tool_use record is always near EOF, never buried deep in a long session.
 _ASK_STATE_SCAN_BYTES = 200_000
 

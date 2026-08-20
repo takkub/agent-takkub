@@ -2887,7 +2887,7 @@ class Orchestrator(
         )
 
     def answer_picker(self, key_sequence: str, project: str | None = None) -> tuple[bool, str]:
-        """#313 (Remote mobile AskUserQuestion fix): write a raw key
+        """Remote mobile AskUserQuestion fix: write a raw key
         sequence straight into the Lead pane's PTY, bypassing `send()`'s
         chat-message pipeline entirely — `_sanitize_pane_text`/
         `_paste_payload` are built for prose a human typed, not control

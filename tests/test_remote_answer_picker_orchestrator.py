@@ -1,4 +1,4 @@
-"""Tests for `Orchestrator.answer_picker` (#313 — Remote mobile
+"""Tests for `Orchestrator.answer_picker` (Remote mobile
 AskUserQuestion fix). Writes a raw key sequence straight into the Lead
 pane's PTY, bypassing `send()`'s chat-message pipeline entirely — see
 docs/audit/2026-08-20-remote-askuserquestion.md for why that pipeline

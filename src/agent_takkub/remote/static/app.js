@@ -1285,7 +1285,7 @@
     });
   }
 
-  // B2/#313: renders tappable option chips from the provider-neutral picker
+  // B2 (remote AskUserQuestion fix): renders tappable option chips from the provider-neutral picker
   // payload emitted by notify.py (`{questions: [{prompt, options,
   // multiSelect}, ...]}`, always a list even for a single question) instead
   // of forcing the phone user to answer on the desktop. Tapping a chip only
@@ -1302,12 +1302,12 @@
     if (!el) return;
     el.innerHTML = "";
     // The `{questions: [...]}` list shape is claude-only (notify.py's
-    // `_ask_question_options`, #313) and is the only shape the key-
+    // `_ask_question_options`, remote AskUserQuestion fix) and is the only shape the key-
     // injection answer path (`current_ask_state` server-side) understands.
     // Other providers with their own structured picker (e.g. opencode's
     // "question" tool, `opencode_helper.poll_opencode_delta`) still push
     // the older flat `{prompt, options, multiSelect}` shape — keep that
-    // path byte-for-byte on the pre-#313 `sendLeadMessage` flow instead of
+    // path byte-for-byte on the pre-fix `sendLeadMessage` flow instead of
     // routing it through an endpoint that can only answer claude's picker
     // (must-not-regress, per the task spec: non-claude keeps its existing
     // behavior untouched).
@@ -1318,7 +1318,7 @@
     }
   }
 
-  // #313: claude-shaped multi-question picker. Tapping a chip only *stages*
+  // remote AskUserQuestion fix: claude-shaped multi-question picker. Tapping a chip only *stages*
   // a selection locally — nothing is sent to Lead until every question has
   // one, at which point "ส่งคำตอบ" submits all of them in one
   // /api/lead/answer-picker call (submitPickerAnswers), which replays the
@@ -1404,7 +1404,7 @@
     el.classList.add("show");
   }
 
-  // Pre-#313 behavior, unchanged: a flat `{prompt, options, multiSelect}`
+  // Pre-fix behavior, unchanged: a flat `{prompt, options, multiSelect}`
   // (or bare string) payload, answered by typing the tapped label as a
   // chat message (`sendLeadMessage`). Never reached for claude (which only
   // ever emits the `{questions: [...]}` list shape) — this exists purely so

@@ -404,7 +404,7 @@ class CliServer(QObject):
             # `hook` and `session-report` (Lead's own claude session also fires
             # Stop/Notification/SessionStart hooks — the done-gate itself is a
             # no-op for Lead) but not `done`/`progress` (Lead cannot report on
-            # itself). `answer-picker` is remote-mobile-only (#313: Remote's
+            # itself). `answer-picker` is remote-mobile-only (remote AskUserQuestion fix: Remote's
             # `api.lead_say` never sends `from: lead`, always `from: remote`,
             # same as `send` already does for chat messages) — it reuses this
             # same lead-token branch rather than `_LEAD_ONLY_CMDS` because it
