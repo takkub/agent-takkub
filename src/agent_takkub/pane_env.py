@@ -404,6 +404,114 @@ def inject_provider_home_env(env: dict[str, str], provider: str) -> None:
         pass
 
 
+# ── Provider self-update suppression while a pane is alive (#313) ──────────
+#
+# Root cause: an npm/uv self-update racing a live pane's spawn can leave the
+# CLI binary mid-write, which _pty_backend._validate_spawn_target now catches
+# defensively (docs/audit/2026-08-20-issue-313-spawn-deadlock.md) — but the
+# better fix is simply never letting a provider update itself while cockpit
+# panes might spawn it. Real update runs happen once at cockpit boot instead
+# (boot_update.py), before any pane exists.
+#
+# Each entry is a CONFIRMED, documented knob (never a guess — a wrong env var
+# either does nothing or, worse, silently misfires): claude's is stated by
+# user directive; the rest were verified against each CLI's own docs on
+# 2026-08-20 (see docs/audit/2026-08-20-boot-update-policy.md for the exact
+# citations). A provider absent from this dict has no known knob — tracked in
+# `NO_AUTOUPDATE_KNOB_GAPS` below instead of silently doing nothing.
+_PROVIDER_NO_AUTOUPDATE_ENV: dict[str, dict[str, str]] = {
+    "claude": {"DISABLE_AUTOUPDATER": "1"},
+    # Antigravity CLI docs, "Resolve self-updater locks and failures":
+    # https://antigravity.google/docs/cli/troubleshooting
+    "gemini": {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+    # kimi-cli FAQ: https://moonshotai.github.io/kimi-cli/en/faq.html
+    # ("export KIMI_CLI_NO_AUTO_UPDATE=1"). KIMI_CODE_NO_AUTO_UPDATE is set
+    # alongside it — same FAQ entry names it as the current kimi-code rebrand
+    # of the identical variable; setting both costs nothing and covers either
+    # binary generation without guessing which one is actually installed.
+    "kimi": {"KIMI_CLI_NO_AUTO_UPDATE": "1", "KIMI_CODE_NO_AUTO_UPDATE": "1"},
+}
+
+# Providers with NO documented env-var knob to disable self-update, kept
+# explicit (mirrors config.PROVIDER_ISOLATION_GAPS) so the gap is visible
+# instead of looking like an oversight. Flagged to issue #103 (2026-08-20).
+NO_AUTOUPDATE_KNOB_GAPS: dict[str, str] = {
+    # openai/codex GitHub issues #3855 / #4375 both ask for exactly this and
+    # are still open/unimplemented as of 2026-08-20 — no config/env surface
+    # exists in the shipped CLI to disable its own update check.
+    "codex": "no documented env/config knob to disable codex's self-update check",
+    # OpenCode disables auto-update via a config FILE key (`"autoupdate":
+    # false` in opencode.json), not an env var — see
+    # `_ensure_opencode_no_autoupdate_config` below, which handles it through
+    # that file instead of this env-var table.
+    # cursor-agent: only an unofficial community workaround exists (removing
+    # exec permission on its versions dir) — no vendor-documented knob.
+    "cursor": "no vendor-documented knob; only an unofficial filesystem workaround exists",
+}
+
+
+def _ensure_opencode_no_autoupdate_config(config_home: str) -> None:
+    """Merge ``"autoupdate": false`` into OpenCode's isolated
+    ``<config_home>/opencode/opencode.json`` (#313).
+
+    OpenCode has no env-var override for this (confirmed against
+    https://opencode.ai/docs/config/ — the only documented mechanism is the
+    ``autoupdate`` key in its JSON config), so suppressing it means writing to
+    that file instead of the env dict above.
+
+    Only runs against the cockpit's OWN isolated config home
+    (``config.provider_home_env("opencode")["XDG_CONFIG_HOME"]``, populated
+    only for an installed build) — never the user's real
+    ``~/.config/opencode/opencode.json``. A dev checkout has no isolated home
+    (`config.provider_home_env` returns ``{}`` by design), so this is a no-op
+    there rather than reaching for the user's real global config; that gap is
+    intentional, not silent (see docs/audit/2026-08-20-boot-update-policy.md).
+    Idempotent (skips the write once the key already reads False) and never
+    raises — a config-merge failure must not block a pane from spawning.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    cfg_path = _Path(config_home) / "opencode" / "opencode.json"
+    try:
+        data = {}
+        if cfg_path.is_file():
+            try:
+                parsed = _json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    data = parsed
+            except (OSError, ValueError):
+                pass  # corrupt/unreadable — rebuild from an empty config rather than give up
+        if data.get("autoupdate") is False:
+            return  # already suppressed — avoid an unnecessary write every spawn
+        data["autoupdate"] = False
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(_json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def inject_provider_no_autoupdate_env(env: dict[str, str], provider: str) -> None:
+    """Suppress *provider*'s own self-update while this pane is alive (#313).
+
+    Called for every pane spawn (claude branch and the generic non-claude
+    branch alike, see spawn_engine.py) — the real update run happens once at
+    cockpit boot instead (boot_update.py), so no pane should ever race a
+    provider's own updater against its own spawn. ``setdefault`` on every
+    var, same contract as the other ``_apply_*`` helpers in this module: a
+    cockpit-level override in the host env still wins.
+    """
+    name = str(provider or "").strip().lower()
+    for key, value in _PROVIDER_NO_AUTOUPDATE_ENV.get(name, {}).items():
+        env.setdefault(key, value)
+    if name == "opencode":
+        from . import config
+
+        config_home = config.provider_home_env("opencode").get("XDG_CONFIG_HOME")
+        if config_home:
+            _ensure_opencode_no_autoupdate_config(config_home)
+
+
 def _apply_win32_path_sanitization(env: dict[str, str]) -> None:
     """Sanitize Windows PATH: clean extensionless mb shims and reorder %APPDATA%\\npm."""
     import sys
