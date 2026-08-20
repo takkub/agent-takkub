@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 272,
+  "module_count": 273,
   "modules": [
     {
       "module": "agent_takkub",
@@ -316,6 +316,7 @@
         "agent_takkub.provider_install",
         "agent_takkub.provider_models",
         "agent_takkub.provider_spec",
+        "agent_takkub.qa_gate",
         "agent_takkub.release",
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
@@ -326,7 +327,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 28
+      "fan_out": 29
     },
     {
       "module": "agent_takkub.cli_server",
@@ -2894,6 +2895,15 @@
       ],
       "fan_in": 8,
       "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.qa_gate",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.release",

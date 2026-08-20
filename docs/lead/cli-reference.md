@@ -32,6 +32,9 @@ takkub harvest --role <role>                           # กู้งานข�
 takkub close --role qa                                 # ปิด pane เดียว
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
 takkub end-session --note "<สรุป>"                     # เขียน session summary ลง runtime/sessions + vault mirror
+takkub qa-gate                                         # canonical gate (#325): venv-check → full pytest → ruff check src/tests/ → lint-imports, 1 table + exit code, report → docs/qa/ · pure-local (cockpit ปิดก็รันได้) · ทุก role/CI/มือ user เรียกตัวเดียวกัน — ห้ามพิมพ์ pytest/ruff/lint-imports ดิบ
+takkub qa-gate --targeted <path...>                    # tier กลางทาง: pytest เฉพาะ path ที่ให้ (ข้าม ruff/lint-imports, ไม่เขียน report) — full gate ไม่ใส่ flag รันครั้งเดียวที่ batch gate
+takkub qa-gate --v2-flags                              # รัน gate ซ้ำพร้อมบังคับ TAKKUB_V2_ROUTER/_CONVERSATION/_CONTEXT/_BRAIN/_SCHEDULER=1 ก่อน default-on (#309)
 takkub doctor                                          # diagnose cockpit env (claude/node/plugins/mcps/projects) · --fix auto-fix (ไม่ลง provider ให้ ต้องใส่ --install-providers)
 takkub doctor --live                                   # + เช็ค spawn-queue wedge จาก orchestrator ที่รันอยู่ (#141) · cockpit ปิด = SKIP
 takkub provider list                                   # provider ทั้งหมด + สถานะติดตั้ง + model ที่ตั้งไว้

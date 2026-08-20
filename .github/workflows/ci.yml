@@ -51,22 +51,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
-      - name: Ruff lint
-        run: python -m ruff check .
-
       - name: Ruff format check
         run: python -m ruff format --check .
 
       - name: Import smoke test (skip Qt modules — no display in CI)
         run: |
           python -c "import agent_takkub.config, agent_takkub.roles, agent_takkub.cli"
-
-      # import-linter: architecture contracts (pyproject.toml [[tool.importlinter.contracts]]).
-      # `lint-imports` is the console script pip installs from `.[dev]` above — no
-      # OS-specific venv path needed here (unlike the local pre-commit hooks, which
-      # resolve a shared .venv's Scripts/bin directly).
-      - name: Import-linter architecture contracts
-        run: lint-imports
 
       # depgraph freshness: regenerate in memory and compare to the committed
       # docs/architecture/depgraph.json, ignoring provenance-only fields
@@ -77,8 +67,14 @@ jobs:
       - name: Depgraph freshness check
         run: python tools/gen_import_graph.py --check
 
-      - name: Run tests
-        run: python -m pytest -v
+      # #325 canonical gate: pytest (full suite, exit code captured directly,
+      # never via a pipe) -> ruff check src/ tests/ -> import-linter (25+
+      # architecture contracts) -> one summary table + exit code. `takkub` is
+      # the console script `pip install -e .[dev]` above just installed —
+      # the SAME entrypoint a qa pane and a developer's own terminal run, so
+      # CI can never drift onto a different command than everyone else uses.
+      - name: QA gate (pytest + ruff check + import-linter)
+        run: takkub qa-gate
 
   installed-gate:
     # Separate from lint-and-test so a packaging regression (wheel missing

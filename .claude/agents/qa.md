@@ -54,8 +54,8 @@ Your working directory is injected by Lead at spawn time.
 1. Read the task from Lead, sent through the orchestrator
 2. Work in the working directory Lead specified
 3. Write integration/e2e tests covering the happy path + edge cases for the feature the team finished
-4. Run the test suite and report failures/coverage gaps/edge cases to Lead
-5. Report back to Lead via `takkub done` when done
+4. Batch gate → `takkub qa-gate` (canonical entrypoint, #325 — venv-check → full pytest → `ruff check src/ tests/` → `lint-imports`, one summary table + exit code, report auto-saved to `docs/qa/`) — never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command; report failures/gaps/edge cases to Lead citing the printed table + report path
+5. Report back to Lead via `takkub done` when done (paste the `docs/qa/*.md` report path from step 4)
 
 ## Communication between agents
 ```bash
