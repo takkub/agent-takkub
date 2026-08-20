@@ -217,7 +217,9 @@ def _update_claude() -> UpdateOutcome:
             "by a failed optional-dep fetch) — run `npm i -g "
             "@anthropic-ai/claude-code-win32-x64` then `node install.cjs`",
         )
-    return UpdateOutcome("claude", STATUS_UPDATED, f"v{current} -> v{latest}")
+    # → (U+2192), not ASCII "->" — real arrow glyph, confirmed present in the
+    # bundled IBM Plex Sans (critic review 2026-08-20, finding #11).
+    return UpdateOutcome("claude", STATUS_UPDATED, f"v{current} → v{latest}")
 
 
 def _update_generic(name: str) -> UpdateOutcome:

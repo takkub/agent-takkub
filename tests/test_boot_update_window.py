@@ -142,8 +142,10 @@ class TestBootUpdateWindowStateMachine:
         win._on_timeout()
         assert finished_calls == [1]
         assert not win._pending
-        assert "✗" in win._rows["claude"]._status_label.text()
-        assert "✗" in win._rows["codex"]._status_label.text()
+        # Status is now a painted icon, not a text glyph (critic review
+        # 2026-08-20, finding #1) — assert the icon's kind, not label text.
+        assert win._rows["claude"]._icon._kind == bw._StatusIcon._KIND_ERROR
+        assert win._rows["codex"]._icon._kind == bw._StatusIcon._KIND_ERROR
 
     def test_finished_emitted_at_most_once(self, qapp) -> None:
         win = bw.BootUpdateWindow()
@@ -153,6 +155,33 @@ class TestBootUpdateWindowStateMachine:
         win._finish()
         win._on_timeout()
         assert finished_calls == [1]
+
+    def test_every_row_growing_a_wrapped_model_note_does_not_overlap(self, qapp) -> None:
+        """Stress case the critic reproduced (review 2026-08-20, finding
+        #2): every provider getting a status detail + a 2-line model-catalog
+        bump note in the same boot used to overlap the row below it under
+        the old row-count `setFixedSize` formula. Height must now be
+        layout-driven and grow to fit every row without any collision."""
+        win = bw.BootUpdateWindow()
+        long_note = (
+            "model: some-provider-a-genuinely-long-model-family-name-v3.7-flash-medium ↑ updated"
+        )
+        for name, row in win._rows.items():
+            row.set_status(pu.STATUS_UPDATED, f"v1.0.0 → v9.9.{len(name)}", long_note)
+        win._resize_to_content()
+
+        rows = list(win._rows.values())
+        for i in range(len(rows) - 1):
+            this_bottom = rows[i].geometry().y() + rows[i].height()
+            next_top = rows[i + 1].geometry().y()
+            assert this_bottom <= next_top, (
+                f"{rows[i].name} row (bottom={this_bottom}) overlaps "
+                f"{rows[i + 1].name} row (top={next_top})"
+            )
+        # The window itself must actually be tall enough to contain the last
+        # row, not just avoid inter-row overlap within a still-too-short window.
+        last = rows[-1]
+        assert last.geometry().y() + last.height() <= win.height()
 
     def test_no_eligible_providers_finishes_immediately(
         self, qapp, monkeypatch: pytest.MonkeyPatch
@@ -187,6 +216,9 @@ class TestRunBootUpdateGate:
                 self.finished.emit()
 
             def close(self) -> None:
+                pass
+
+            def close_animated(self) -> None:
                 pass
 
         monkeypatch.setattr(bw, "BootUpdateWindow", _FakeSplash)
