@@ -1,13 +1,21 @@
 # Release checklist (agent-takkub)
 
-วิธี release จริงของ 1.0.10+ (manual, ไม่มี GitHub Release) — ไม่ใช่ `takkub release`
-(ตัวนั้น parse heading `## [vNEXT]` ซึ่ง CHANGELOG.md ไม่ได้ใช้รูปแบบนั้น)
+วิธี release จริงของ 1.0.10+ (manual ทุกขั้น) — **ไม่ใช่** `takkub release` (คำสั่งนั้นมีอยู่จริง
+ใน CLI: "bump version + roll CHANGELOG [vNEXT] + git commit" แต่มัน parse heading `## [vNEXT]`
+ซึ่ง CHANGELOG.md ไม่ได้ใช้รูปแบบนั้น — อย่าเรียก)
 
 > **เอกสารนี้เคยเพี้ยนจากของจริงมาก่อน** (ตรวจ 2026-08-20 ตอน release 1.0.79) — ข้อ 2 เคยสั่ง
 > "ห้ามสร้าง heading เวอร์ชัน" ทั้งที่ CHANGELOG.md มี heading อยู่ 77 อัน และหลายที่เคยเขียนว่า
-> "ไม่มี git tag ตั้งแต่ 1.0.10" ทั้งที่ v1.0.76/77/78 มีอยู่จริง **ถ้าเจอเอกสารขัดกับ repo อีก
-> ให้เชื่อ repo แล้วแก้เอกสารทันที** — วิธีตรวจของจริง: `grep -c '^## \[' CHANGELOG.md`,
-> `git tag --list --sort=-creatordate | head`, `git show <release-commit> -- CHANGELOG.md`
+> "ไม่มี git tag / ไม่มี GitHub Release ตั้งแต่ 1.0.10" ทั้งที่ v1.0.76/77/78 มีทั้ง tag และ
+> Release object ครบ และ CI ถูกเขียนว่ารัน 2 OS ทั้งที่จริง 3 **ถ้าเจอเอกสารขัดกับ repo อีก
+> ให้เชื่อ repo แล้วแก้เอกสารทันที** — คำสั่งตรวจของจริง:
+>
+> ```bash
+> grep -c '^## \[' CHANGELOG.md            # heading เวอร์ชันใน CHANGELOG
+> git tag --list --sort=-creatordate | head # tag ล่าสุด
+> gh release list --limit 5                 # GitHub Release ล่าสุด
+> grep -n 'os:' .github/workflows/ci.yml    # matrix ของ CI
+> ```
 
 ## 0. Pre-flight — ต้องเขียวก่อนแตะเวอร์ชัน
 
@@ -25,8 +33,10 @@ takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fa
 > แต่อ่าน pyproject ตอนรันเทส bump คร่อมกันเมื่อไหร่จะตกแบบหลอกๆ (เจอจริงตอน 1.0.79,
 > `docs/qa/2026-08-20-165059-qa-gate.md`) — รอ gate จบก่อนค่อย bump
 
-- **CI ต้องเขียวทั้ง 2 OS** (`windows-latest` + `macos-latest`, `.github/workflows/ci.yml`) — ถ้าเพิ่งพุช
-  commit สุดท้าย รอ `gh run list` เขียวก่อนตัดเวอร์ชัน อย่า release ทับ CI ที่ยังไม่จบ
+- **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **5 job ไม่ใช่ 4**:
+  `lint-and-test` รัน 3 OS (`windows-latest` · `macos-latest` · `ubuntu-latest`) และ
+  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`) — ถ้าเพิ่งพุช commit สุดท้าย
+  รอ `gh run watch <id> --exit-status` เขียวก่อนตัดเวอร์ชัน อย่า release ทับ CI ที่ยังไม่จบ
 - **installed-mode gate** (`tests/test_installed_mode_gate.py`) proves the ACTUAL packaged behavior
   (DATA_HOME/ASSETS_ROOT/CLI_BIN_DIR/pane-env/CLI wiring) works when running from a real installed
   wheel — not just a dev checkout where `DATA_HOME == REPO_ROOT` masks installed-only bugs
@@ -77,13 +87,13 @@ bullet ใต้ `### Fixed (แก้)` / `### Added (เพิ่ม)` / ฯ�
 
 ```bash
 # pyproject.toml
-version = "1.0.13"
+version = "X.Y.Z"
 
 # package.json
-"version": "1.0.13",
+"version": "X.Y.Z",
 
 # src/agent_takkub/__init__.py
-__version__ = "1.0.13"
+__version__ = "X.Y.Z"
 ```
 
 `tests/test_version_sync.py` บังคับให้ทั้ง 3 ค่าเท่ากัน — รันเช็คเร็วๆ ด้วย
@@ -113,12 +123,14 @@ ls dist/*.whl   # ต้องมีไฟล์เดียว ชื่อม�
 > เพราะเป็น subprocess ใหม่ทั้งกระบวนการ ไม่มี shell state ให้ contaminate คำเตือนข้างบนใช้กับ
 > **manual release flow ในเทอร์มินัลเดียวกัน** เท่านั้น
 
-## 5. Commit (ไฟล์ที่แตะ: CHANGELOG.md, pyproject.toml, package.json,
-src/agent_takkub/__init__.py — ไม่มี dist/, gitignored)
+## 5. Commit
+
+ไฟล์ที่แตะ: `CHANGELOG.md`, `pyproject.toml`, `package.json`,
+`src/agent_takkub/__init__.py` — ไม่มี `dist/` (gitignored)
 
 ```bash
 git add CHANGELOG.md pyproject.toml package.json src/agent_takkub/__init__.py
-git commit -m "chore(release): 1.0.13 — <หัวข้อสั้น>"
+git commit -m "chore(release): X.Y.Z — <หัวข้อสั้น>"
 ```
 
 ### 5b. Tag
@@ -127,25 +139,37 @@ git commit -m "chore(release): 1.0.13 — <หัวข้อสั้น>"
 ทั้งหมด ไม่ใช่ annotated) ยิงที่ release commit:
 
 ```bash
-git tag v1.0.79 && git push origin v1.0.79
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 > หมายเหตุ: v1.0.76–78 ถูก tag ทีหลังที่ HEAD ตอนนั้น จึงไม่ได้ชี้ที่ release commit เป๊ะ
 > (`v1.0.78` → `685efc5` ไม่ใช่ `3129b74`) — ตั้งแต่ 1.0.79 เป็นต้นไป tag ที่ release commit เลย
-> ยังไม่มี GitHub Release object สำหรับเวอร์ชันเหล่านี้ (ยกเว้น v1.0.0)
 
-## 6. Push + รอ CI เขียว 2 OS
+## 6. Push + รอ CI เขียวครบ 5 job
 
 ```bash
 git push origin main
-gh run list --branch main --limit 3   # รอ 4 job เขียวหมด:
-                                       #   lint-and-test (windows-latest, macos-latest)
-                                       #   installed-gate (windows-latest, macos-latest)
+gh run list --branch main --limit 5    # หา run id ของ workflow ชื่อ `ci`
+gh run watch <id> --exit-status        # รอ 5 job เขียวหมด:
+                                       #   lint-and-test  (windows / macos / ubuntu)
+                                       #   installed-gate (windows / macos)
 ```
 
 **ห้าม publish ก่อน CI เขียว** — ถ้า `installed-gate` แดงโดยเฉพาะ (แม้ `lint-and-test` เขียว) แปลว่า
 wheel ที่กำลังจะ ship พังตอนติดตั้งจริงบน OS นั้น ต่อให้ pre-flight ในเครื่องตัวเองเขียวไปแล้วก็ตาม
 (env drift ระหว่างเครื่อง — `installed-gate` proves the packaged artifact, not just the dev checkout)
+
+## 6b. GitHub Release
+
+**ต้องสร้าง** — กลับมาทำพร้อม tag ตั้งแต่ 1.0.76 (`gh release list` ยืนยัน: 1.0.76 / 1.0.77 /
+1.0.78 มีครบ) รูปแบบที่ใช้จริง: title = `X.Y.Z — <หัวข้อสั้นไทย>` (ไม่มี `v` นำ), body =
+`## ไฮไลต์` เป็น bullet + วิธีอัพเดต
+
+```bash
+gh release create vX.Y.Z --title "X.Y.Z — <หัวข้อสั้น>" --notes "<ไฮไลต์>"
+```
+
+ตัวอย่างจริง: `gh release view v1.0.79 --json name,body` หรือ `v1.0.78`
 
 ## 7. npm publish
 
@@ -182,6 +206,9 @@ npm view agent-takkub version   # ต้องตรงกับเวอร์�
 - **build/ module shadow**: `python -m build` สร้าง staging dir `build/` ใน srcdir — ปัญหาจริงคือ
   shell เดิมที่ import/run pytest ต่อทันทีหลัง build อาจ resolve ผิดโมดูล ไม่ใช่ตัว build เอง (ดูข้อ 4)
 - **ไม่มี CI publish workflow** — publish มือจากเครื่อง dev เท่านั้น ไม่มี auto-publish-on-tag
+  (workflow มีแค่ 3 ตัว: `ci.yml`, `codeql.yml`, `security.yml` — ยืนยันด้วย `ls .github/workflows/`)
+- **GitHub Release กลับมาสร้างตั้งแต่ 1.0.76** พร้อมกับ tag — เอกสารนี้เคยเขียนว่าไม่มี ทำให้
+  1.0.79 ตกทั้ง tag และ Release ตอนแรก (ตามไปเติมทีหลังทั้งคู่)
 - **git tag กลับมาใช้ตั้งแต่ 1.0.76** (ก่อนหน้านั้นเว้นช่วง 1.0.36–1.0.75) — แต่ commit message
   ยังเป็น source of truth ของ "เวอร์ชันนี้ออกตอนไหน" เพราะ tag เก่าไม่ได้ชี้ release commit เป๊ะ
   รูปแบบ commit ที่ใช้จริงมี 3 แบบปนกัน: `chore(release):` (ส่วนใหญ่), `release:` (1.0.78),
