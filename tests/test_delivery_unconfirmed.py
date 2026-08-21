@@ -352,7 +352,17 @@ class TestGateDeferredSpawnDeliversEventually:
         # No unconfirmed-delivery warning: this was a clean, confirmed
         # ready-prompt delivery, not a blind/timeout paste.
         lead = orch._panes_by_project["P"]["lead"]
-        assert not any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+        # Only the str writes carry Lead notice text — `_notify_lead` also
+        # writes a bare CR as bytes, and a delivery that settles UNCERTAIN
+        # (which this mocked session does: its `is_at_ready_prompt` keeps
+        # answering True after the paste, where a real pane would be busy
+        # generating) adds a notice of its own. Neither is a #26 warning, and
+        # substring-testing bytes against a str raises rather than failing.
+        assert not any(
+            "#26" in c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
+        )
 
     def test_gives_up_and_warns_once_truly_not_gate_deferred(
         self, orch: Orchestrator, monkeypatch

@@ -1179,6 +1179,7 @@ class LeadInboxMixin:
                     manager.mark_accepted(delivery.delivery_id)
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
+                    self._warn_lead_delivery_uncertain(role_name, project)
 
             # Self-healing submit: the task pastes as a `[Pasted text]` placeholder
             # and an Enter landing mid-render is swallowed, leaving the teammate
@@ -1705,6 +1706,41 @@ class LeadInboxMixin:
             project=project_ns,
             reason=reason,
         )
+
+    def _warn_lead_delivery_uncertain(self, role_name: str, project: str | None) -> None:
+        """Tell the Lead that a delivery ended in UNCERTAIN — the pane was
+        back at its ready prompt after every Enter resend was spent, so the
+        task may never have been submitted at all.
+
+        Before this, UNCERTAIN was a dead end: `mark_uncertain` set the state
+        and nothing else happened — no escalation, no reaper, no notice. The
+        Lead went on believing the pane was working while the task sat unsent
+        in the composer or vanished, and `takkub status` showed a pane that
+        looked busy (reported 2026-08-21 on a gemini pane, twice in one
+        session). Whether it landed is genuinely unknown here, hence a
+        warning rather than a FAILED: `_delayed_enter_verified`'s
+        "ready + empty box" signal cannot tell "already submitted" from
+        "still holding the unsent text" apart, which is the same ambiguity
+        that keeps automated repaste off for task bodies (#134) — so the
+        cockpit says what it saw and leaves the call to a human instead of
+        writing a second copy into the composer.
+
+        Fires once per delivery, from `_on_settled`'s single terminal branch.
+        No-op when warning the Lead about itself.
+        """
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [delivery-uncertain] {role_name} pane กลับไปอยู่ที่ ready prompt หลัง resend "
+            f"Enter จนครบ — ใบงานอาจไม่ได้ถูก submit จริง (ค้างอยู่ในช่องพิมพ์ หรือหายไปเลย) "
+            f"cockpit ไม่ paste ซ้ำให้เอง (#134) — เปิด pane ดูตรงๆ แล้ว assign ใหม่ถ้าไม่ถึงมือ"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event("delivery_uncertain_warned", role=role_name, project=project_ns)
 
     def _warn_lead_delivery_busy_wait(
         self, role_name: str, project: str | None, seconds_since_output: float

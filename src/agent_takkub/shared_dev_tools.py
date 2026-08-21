@@ -169,6 +169,51 @@ GRAFT_MCP: dict = {
 }
 
 
+# How long a warm-up subprocess may run before it is killed. The point of the
+# warm is the npx CACHE, and populating that means a cold first run downloads
+# and extracts a tarball before the server even starts — on a slow link that
+# alone can outlast the old 30 s cap, which killed the warm mid-download and
+# left the pane paying the full cost anyway (reported from a teammate's mac,
+# 2026-08-21: codex sitting on "Starting MCP servers: graft" run after run).
+# These run in daemon threads with no one waiting on them, so a longer cap
+# costs nothing but a lingering child in the pathological case where a server
+# ignores EOF on stdin — which none of the pinned servers do (they exit within
+# a second or two, see `_warm_one`).
+_MCP_WARM_TIMEOUT_S = 180
+
+
+def _warm_mcp_process(name: str, argv: list[str]) -> None:
+    """Run one warm-up to completion, logging how it ended.
+
+    Every outcome used to be swallowed by a bare `except Exception: pass`, so
+    a warm that timed out mid-download looked exactly like one that succeeded
+    — there was no way to tell from the cockpit whether the cache was hot.
+    Still never raises: a failed warm is a slow first call, not a broken
+    cockpit.
+    """
+    try:
+        subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_MCP_WARM_TIMEOUT_S,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning(
+            "MCP warm %s: killed after %ss — npx cache may still be cold, "
+            "so the first pane to use it pays the download",
+            name,
+            _MCP_WARM_TIMEOUT_S,
+        )
+    except Exception as exc:
+        _log.warning("MCP warm %s: failed (%r) — first use will be slow", name, exc)
+    else:
+        _log.debug("MCP warm %s: done", name)
+
+
 def warm_browser_mcps() -> None:
     """Pre-warm the npx cache for the browser MCPs at cockpit boot.
 
@@ -207,25 +252,11 @@ def warm_browser_mcps() -> None:
         _log.debug("warm_browser_mcps: npx launcher not found on PATH")
         return
 
-    def _warm_one(argv: list[str]) -> None:
-        try:
-            subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                check=False,
-                creationflags=SUBPROCESS_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
     for name, cfg in BROWSER_MCPS.items():
         argv = [npx if cfg["command"] == "npx" else cfg["command"], *cfg["args"]]
         threading.Thread(
-            target=_warm_one,
-            args=(argv,),
+            target=_warm_mcp_process,
+            args=(name, argv),
             name=f"warm-{name}",
             daemon=True,
         ).start()
@@ -247,21 +278,12 @@ def warm_graft_mcp() -> None:
         _log.debug("warm_graft_mcp: npx launcher not found on PATH")
         return
 
-    def _warm() -> None:
-        try:
-            subprocess.run(
-                [npx, *GRAFT_MCP["graft"]["args"]],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                check=False,
-                creationflags=SUBPROCESS_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
-    threading.Thread(target=_warm, name="warm-graft", daemon=True).start()
+    threading.Thread(
+        target=_warm_mcp_process,
+        args=("graft", [npx, *GRAFT_MCP["graft"]["args"]]),
+        name="warm-graft",
+        daemon=True,
+    ).start()
 
 
 def shared_mcp_config_path() -> str | None:
