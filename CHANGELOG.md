@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.81] - 2026-08-21
+
 ### Fixed (แก้)
 
 - **`takkub release` bump version ไม่ครบ — v1.0.80 ออกไปพร้อม `__version__` ค้างที่ 1.0.79** —
