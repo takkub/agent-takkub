@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.84] - 2026-08-21
+
 ### Changed (เปลี่ยน)
 
 - **Core V2 เปิดเป็นค่าเริ่มต้นแล้วทั้ง 5 ตัว** (#309 — ขั้นสุดท้ายก่อน 2.0.0) —
