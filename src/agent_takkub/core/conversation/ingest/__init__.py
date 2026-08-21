@@ -1,9 +1,15 @@
 """Provider-transcript ingest registry (plan §5.3, epic #309 Phase 6).
 
-Registered: claude / codex / gemini / opencode — the same 4 providers
-`remote/notify.py::_HISTORY_SCANNERS` covers (`ProviderSpec.supports_remote_history`).
-kimi/cursor have no resolver here for the same reason they have none there —
-documented gap, issue #103.
+Registered: claude / codex / gemini / opencode. kimi and cursor are the
+documented gap (issue #103), for two DIFFERENT reasons — not the one this
+docstring used to give:
+
+* cursor DOES have a `remote/notify.py::_HISTORY_SCANNERS` entry (that
+  registry covers claude/codex/cursor/gemini/opencode), so the remote/mobile
+  history path works for it; only this ingest adapter is missing.
+* kimi has neither, and says so honestly — its `ProviderSpec.
+  supports_remote_history` is False, so the phone reports "not supported"
+  rather than showing a blank history.
 """
 
 from __future__ import annotations

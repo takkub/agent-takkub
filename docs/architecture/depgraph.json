@@ -2705,7 +2705,8 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.provider_spec",
-        "agent_takkub.provider_state"
+        "agent_takkub.provider_state",
+        "agent_takkub.role_models"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -2735,7 +2736,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 25,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_install",
@@ -3115,11 +3116,12 @@
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
+        "agent_takkub.provider_config",
         "agent_takkub.provider_model_refresh",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {

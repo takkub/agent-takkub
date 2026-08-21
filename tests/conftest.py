@@ -214,6 +214,17 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if hasattr(cvs, "_reset_cache"):
             cvs._reset_cache()  # (mtime,size) cache must not leak across tests
 
+    # #338: `provider_config.provider_for` now falls back to the provider
+    # recorded in role-models.json when role-providers.json says nothing about
+    # a role — which makes the user's REAL ~/.takkub/role-models.json able to
+    # decide what a test's "default provider" resolves to. Same isolation
+    # reasoning (and same 2026-08-19 lesson) as core-v2-settings above.
+    rm = _maybe_module("agent_takkub.role_models", force=True)
+    if rm is not None:
+        monkeypatch.setattr(
+            rm, "_PATH", tmp_path / "_isolated_takkub" / "role-models.json", raising=False
+        )
+
     # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
     # password-session store unconditionally (not opt-in like the P0 remote
     # scaffold — any test that builds a real RemoteHttpServer/AuthGate, not

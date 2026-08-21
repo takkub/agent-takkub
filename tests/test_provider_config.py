@@ -42,6 +42,54 @@ class TestProviderFor:
         redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
         assert provider_config.provider_for("lead") == "codex"
 
+    def test_role_models_provider_fills_in_when_role_providers_is_silent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """#338: a team that set up model diversity through the model picker
+        alone leaves role-providers.json empty — its shipped state — and every
+        role used to resolve to claude in silence. Measured on a real cockpit:
+        six roles configured across codex/gemini/claude, all six spawning
+        claude, with no event saying so."""
+        from agent_takkub import role_models
+
+        models = tmp_path / "role-models.json"
+        models.write_text(
+            '{"frontend": {"provider": "codex", "model": "gpt-5.6-terra"},'
+            ' "critic": {"provider": "gemini", "model": "gemini-3.7-flash-high"}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(role_models, "_PATH", models)
+
+        assert provider_config.provider_for("frontend") == "codex"
+        assert provider_config.provider_for("critic") == "gemini"
+        # A role with no entry anywhere still lands on the baseline.
+        assert provider_config.provider_for("reviewer") == "claude"
+
+    def test_role_providers_entry_still_wins_over_role_models(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, redirect_config_path: Path
+    ) -> None:
+        """The fallback only fills a gap — it must never override the provider
+        the user picked in Providers & Roles."""
+        from agent_takkub import role_models
+
+        models = tmp_path / "role-models.json"
+        models.write_text('{"frontend": {"provider": "codex"}}', encoding="utf-8")
+        monkeypatch.setattr(role_models, "_PATH", models)
+        redirect_config_path.write_text('{"frontend": "opencode"}', encoding="utf-8")
+
+        assert provider_config.provider_for("frontend") == "opencode"
+
+    def test_unknown_provider_in_role_models_falls_back_to_claude(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from agent_takkub import role_models
+
+        models = tmp_path / "role-models.json"
+        models.write_text('{"frontend": {"provider": "not-a-cli"}}', encoding="utf-8")
+        monkeypatch.setattr(role_models, "_PATH", models)
+
+        assert provider_config.provider_for("frontend") == "claude"
+
     def test_codex_role_is_always_codex(self, redirect_config_path: Path) -> None:
         # User mapping a "codex" key to "claude" would be nonsensical;
         # the role's whole point is codex.

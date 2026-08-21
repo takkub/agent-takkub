@@ -1127,6 +1127,7 @@ class LeadInboxMixin:
                     role=role_name,
                     delivery_id=delivery.delivery_id,
                 )
+                self._warn_lead_delivery_blocked(role_name, project)
                 return
             wrote = _safe_session_write(
                 _task_sess,
@@ -1741,6 +1742,34 @@ class LeadInboxMixin:
         )
         self._notify_lead(project_ns, msg)
         _log_event("delivery_uncertain_warned", role=role_name, project=project_ns)
+
+    def _warn_lead_delivery_blocked(self, role_name: str, project: str | None) -> None:
+        """Tell the Lead that an assign was dropped by the single-flight gate
+        instead of letting it look like it worked (#339).
+
+        `takkub assign` answers `ok: task queued` the moment the task is
+        accepted for delivery, and this branch returns BEFORE anything is
+        written — so a blocked assign was indistinguishable from a delivered
+        one from the CLI, from `takkub status` (still `working`), and from
+        the Lead's side. The only trace was one line in events.log.
+
+        Now that UNCERTAIN releases the slot, reaching here means a write is
+        genuinely still in flight, so "wait for it, then retry" is real
+        advice rather than a two-minute dead end.
+        """
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"🚨 [delivery-blocked] ใบงานที่เพิ่ง assign ให้ {role_name} **ไม่ได้ถูกส่ง** — "
+            f"pane นี้ยังมีใบก่อนหน้าเขียนค้างอยู่ (single-flight) ใบใหม่เลยถูกทิ้ง "
+            f"ทั้งที่ `takkub assign` ตอบ ok ไปแล้ว · รอให้ใบเดิมจบแล้ว assign ซ้ำอีกครั้ง"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event("delivery_blocked_warned", role=role_name, project=project_ns)
 
     def _warn_lead_delivery_busy_wait(
         self, role_name: str, project: str | None, seconds_since_output: float

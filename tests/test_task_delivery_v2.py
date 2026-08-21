@@ -32,6 +32,28 @@ def test_single_flight_per_pane_session() -> None:
     assert manager.begin_write(second.delivery_id, 1)
 
 
+def test_uncertain_releases_the_single_flight_slot() -> None:
+    """#339: UNCERTAIN means the write finished and only the confirmation is
+    ambiguous — nothing is in flight, so it must not keep the slot.
+
+    It used to, and the cost was that the recovery the cockpit itself
+    recommends ("assign ใหม่ถ้าไม่ถึงมือ") was exactly what the lock forbade:
+    the retry was dropped with `task_delivery_single_flight_block` and only
+    got through once the stale reaper freed the slot ~2 minutes later.
+    """
+    manager = DeliveryManager(default_ttl_sec=30)
+    first = _delivery(manager)
+    second = _delivery(manager)
+
+    assert manager.begin_write(first.delivery_id, 1)
+    assert manager.begin_submit(first.delivery_id, 1)
+    assert manager.mark_uncertain(first.delivery_id)
+    assert first.state is DeliveryState.UNCERTAIN
+
+    # The human's explicit retry gets through immediately.
+    assert manager.begin_write(second.delivery_id, 1)
+
+
 def test_old_generation_and_expired_delivery_never_write() -> None:
     now = [100.0]
     manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
@@ -56,15 +78,23 @@ def test_retry_enter_never_changes_payload_or_creates_delivery() -> None:
     assert len(manager.snapshot()) == 1
 
 
-def test_expired_uncertain_owner_does_not_block_next_delivery() -> None:
+def test_uncertain_owner_does_not_block_next_delivery_even_before_its_ttl() -> None:
+    """Kept from the version that needed the TTL to elapse first: since #339
+    an UNCERTAIN delivery holds no slot at all, so the next delivery goes
+    through immediately and the uncertain one is left for `expire_stale` —
+    not force-expired as a side effect of someone else needing the slot."""
     now = [100.0]
     manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
     first = _delivery(manager)
     assert manager.begin_write(first.delivery_id, 1)
     assert manager.mark_uncertain(first.delivery_id)
-    now[0] = 106.0
+
     second = _delivery(manager)
-    assert manager.begin_write(second.delivery_id, 1)
+    assert manager.begin_write(second.delivery_id, 1)  # same clock, no TTL wait
+    assert first.state is DeliveryState.UNCERTAIN
+
+    now[0] = 106.0
+    assert first.delivery_id in {d.delivery_id for d in manager.expire_stale()}
     assert first.state is DeliveryState.EXPIRED
 
 

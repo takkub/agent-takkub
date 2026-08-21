@@ -36,10 +36,26 @@ class DeliveryState(StrEnum):
     CANCELLED = "cancelled"
 
 
+# States that hold the pane/session single-flight slot — a delivery here has
+# a write genuinely in progress, so a second one would interleave with it.
+#
+# UNCERTAIN is deliberately NOT here (#339). It used to be, and the cost was
+# that the recovery the cockpit itself recommends ("assign ใหม่ถ้าไม่ถึงมือ")
+# was the one thing the lock forbade: the dead delivery kept the slot until
+# the stale reaper freed it ~2 minutes later, and the new assign was dropped
+# with `task_delivery_single_flight_block` while `takkub assign` still
+# answered `ok: task queued`. Measured: assign at 17:23:36 blocked, slot
+# freed 17:24:43, task finally landed 17:25:19 — three minutes during which
+# `takkub status` said `working` and the pane sat at an empty prompt.
+#
+# Nothing is in flight once a delivery is UNCERTAIN: the write finished, only
+# the confirmation is ambiguous. Holding a lock on "we are not sure" blocks
+# the human's explicit retry to prevent a duplicate paste that a human just
+# asked for — the wrong trade. `has_reached_pane` still treats UNCERTAIN as
+# unconfirmed (#336), so a `send` supersede cannot silently drop it either.
 _SINGLE_FLIGHT_STATES = {
     DeliveryState.WRITING,
     DeliveryState.SUBMITTING,
-    DeliveryState.UNCERTAIN,
 }
 _TERMINAL_STATES = {
     DeliveryState.DONE,

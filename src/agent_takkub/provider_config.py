@@ -203,7 +203,40 @@ def provider_for(role: str, project: str | None = None) -> str:
     if key in _FORCED_PROVIDER:
         return _FORCED_PROVIDER[key]
     mapping = load_providers(project)
-    return mapping.get(key, CLAUDE)
+    if key in mapping:
+        return mapping[key]
+    return _provider_from_role_models(key)
+
+
+def _provider_from_role_models(key: str) -> str:
+    """Fallback for a role that `role-providers.json` says nothing about:
+    honour the provider recorded alongside its model in `role-models.json`
+    before defaulting to claude (#338).
+
+    Both files are written by the same Settings page, and `role-models.json`
+    stores `{"frontend": {"provider": "codex", "model": ..., "effort": ...}}`
+    — a shape that reads as "run frontend on codex". It was never consulted
+    here, so a team that set up model diversity entirely through the model
+    picker (leaving `role-providers.json` empty, which is its shipped state)
+    silently ran EVERY role on claude. Measured on a real cockpit: six roles
+    configured across codex/gemini/claude, all six resolving to claude, with
+    no event saying so.
+
+    Only a role with no explicit mapping reaches here, so this never
+    overrides a provider the user chose in Providers & Roles — it fills in
+    the case that used to be a silent claude default. Imported lazily to keep
+    this module's import graph flat (same reason `_provider_available` does).
+    """
+    try:
+        from . import role_models
+
+        entry = role_models.raw_model_for(key)
+    except Exception:
+        return CLAUDE
+    if not entry:
+        return CLAUDE
+    provider = (entry[0] or "").strip().lower()
+    return provider if provider in PROVIDER_REGISTRY else CLAUDE
 
 
 def _provider_available(provider: str) -> bool:
