@@ -121,24 +121,35 @@ class TestNonWindows:
 
 
 class TestSweeperWiring:
-    def test_sweeper_is_a_single_process_wide_timer(self, monkeypatch) -> None:
-        """A timer per pane would multiply an EnumWindows sweep by the pane
-        count for no benefit."""
+    @staticmethod
+    def _fake_app(platform_name: str):
+        return type("App", (), {"platformName": staticmethod(lambda: platform_name)})()
+
+    def _install(self, monkeypatch, platform_name="windows", plat="win32"):
+        """Stand in for the Qt side so these run on any OS."""
         from agent_takkub import pty_session
 
-        monkeypatch.setattr(pty_session, "_console_sweeper", None)
-        monkeypatch.setattr(pty_session.sys, "platform", "win32")
         made: list = []
 
         class _FakeTimer:
-            def __init__(self) -> None:
-                made.append(self)
+            def __init__(self, parent=None) -> None:
+                made.append(parent)
                 self.timeout = type("S", (), {"connect": lambda _s, _f: None})()
 
             def setInterval(self, ms) -> None: ...
             def start(self) -> None: ...
 
+        app = self._fake_app(platform_name)
+        monkeypatch.setattr(pty_session, "_console_sweeper", None)
+        monkeypatch.setattr(pty_session.sys, "platform", plat)
         monkeypatch.setattr(pty_session, "QTimer", _FakeTimer)
+        monkeypatch.setattr(pty_session.QCoreApplication, "instance", staticmethod(lambda: app))
+        return pty_session, made, app
+
+    def test_sweeper_is_a_single_process_wide_timer(self, monkeypatch) -> None:
+        """A timer per pane would multiply an EnumWindows sweep by the pane
+        count for no benefit."""
+        pty_session, made, _app = self._install(monkeypatch)
 
         pty_session._ensure_console_sweeper()
         pty_session._ensure_console_sweeper()
@@ -146,16 +157,39 @@ class TestSweeperWiring:
 
         assert len(made) == 1
 
-    def test_never_starts_off_windows(self, monkeypatch) -> None:
-        from agent_takkub import pty_session
-
-        monkeypatch.setattr(pty_session, "_console_sweeper", None)
-        monkeypatch.setattr(pty_session.sys, "platform", "linux")
-        monkeypatch.setattr(
-            pty_session, "QTimer", lambda *a, **k: pytest.fail("no timer off Windows")
-        )
+    def test_timer_is_owned_by_the_application(self, monkeypatch) -> None:
+        """An ownerless QObject outlives QApplication teardown and takes the
+        process down with it — the abort that killed CI's Windows job."""
+        pty_session, made, app = self._install(monkeypatch)
 
         pty_session._ensure_console_sweeper()
+
+        assert made == [app]
+
+    def test_never_starts_under_the_offscreen_platform(self, monkeypatch) -> None:
+        """Test/headless runs have no OS windows to hide, and a process-wide
+        timer started inside one test keeps firing through every later one."""
+        pty_session, made, _app = self._install(monkeypatch, platform_name="offscreen")
+
+        pty_session._ensure_console_sweeper()
+
+        assert made == []
+        assert pty_session._console_sweeper is None
+
+    def test_never_starts_without_an_application(self, monkeypatch) -> None:
+        pty_session, made, _app = self._install(monkeypatch)
+        monkeypatch.setattr(pty_session.QCoreApplication, "instance", staticmethod(lambda: None))
+
+        pty_session._ensure_console_sweeper()
+
+        assert made == []
+
+    def test_never_starts_off_windows(self, monkeypatch) -> None:
+        pty_session, made, _app = self._install(monkeypatch, plat="linux")
+
+        pty_session._ensure_console_sweeper()
+
+        assert made == []
         assert pty_session._console_sweeper is None
 
 

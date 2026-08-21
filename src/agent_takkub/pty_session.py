@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 import pyte
-from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 from wcwidth import wcwidth
 
 from ._pty_backend import spawn_pty_bounded
@@ -793,10 +793,29 @@ _console_hwnds_seen: set[int] = set()
 
 
 def _ensure_console_sweeper() -> None:
-    """Start the process-wide console sweeper once (Windows only)."""
+    """Start the process-wide console sweeper once (real Windows GUI only).
+
+    Two guards, both learned the hard way when the first version of this took
+    CI's Windows job down with a silent Qt abort at 78% of the suite:
+
+    * `offscreen` platform → don't start at all. Under the test QPA there are
+      no OS windows to hide, so the timer is pure cost — and a process-wide
+      timer created inside one test keeps firing through every later test,
+      across QApplication teardown, which is exactly how a Qt process dies
+      with no traceback to point at the cause.
+    * parent it to the application object, so it is destroyed with the app
+      instead of outliving it as an ownerless QObject.
+    """
     global _console_sweeper
     if sys.platform != "win32" or _console_sweeper is not None:
         return
+    app = QCoreApplication.instance()
+    if app is None:
+        return
+    platform = getattr(app, "platformName", None)
+    if callable(platform) and platform() == "offscreen":
+        return
+
     import os
 
     root_pid = os.getpid()
@@ -808,7 +827,7 @@ def _ensure_console_sweeper() -> None:
             # A sweep is cosmetic; never let it reach the Qt event loop.
             pass
 
-    timer = QTimer()
+    timer = QTimer(app)
     timer.setInterval(_CONSOLE_SWEEP_MS)
     timer.timeout.connect(_sweep_owned)
     timer.start()

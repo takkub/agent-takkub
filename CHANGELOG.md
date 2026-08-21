@@ -4,6 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **CI windows ตายเงียบเพราะ console sweeper ที่เพิ่งเพิ่มใน 1.0.81** — timer กวาดหน้าต่าง console
+  ถูกสร้างเป็น QTimer ระดับ module **ไม่มี parent** แล้วสตาร์ตตอน spawn PTY พอเทสตัวหนึ่ง spawn
+  PTY จริง timer ก็ยิงทุก 2 วิ ข้ามไปทุกเทสที่เหลือ ข้าม QApplication ที่ teardown ไปแล้ว →
+  pytest abort ที่ 78% ไม่มี traceback ไม่มี summary (ตายที่
+  `tests/test_settings_management_ui_phase4.py` ซึ่งเป็นเหยื่อ ไม่ใช่ต้นเหตุ) · หลักฐานที่ชี้ตัว:
+  macOS + ubuntu เขียว มีแต่ windows ที่ตาย และของใหม่ที่รันเฉพาะ `win32` รอบนั้นมีตัวเดียวคือ
+  sweeper นี้ → ไม่สตาร์ตเลยเมื่อ QPA เป็น `offscreen` (conftest ตั้งไว้ทุกเทส — headless ไม่มี
+  หน้าต่าง OS ให้ซ่อนอยู่แล้ว timer จึงมีแต่โทษ) + `QTimer(app)` ผูกเจ้าของกับ application ให้ตายไป
+  พร้อมแอป ไม่เป็น QObject ลอยข้าม teardown + 3 tests
+
 ## [v1.0.81] - 2026-08-21
 
 ### Fixed (แก้)
