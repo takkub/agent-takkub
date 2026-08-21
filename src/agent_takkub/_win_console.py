@@ -4,6 +4,22 @@ pywinpty (ConPTY or WinPTY backend) often surfaces a `ConsoleWindowClass`
 window owned by `conhost.exe` / `cmd.exe` when launching a console app from a
 GUI process. Functionally harmless but visually disruptive.
 
+`ConsoleWindowClass` is only the conhost-era half of it. On Windows 11 the
+default terminal application is Windows Terminal, and Windows COM-activates
+it to host a newly allocated console — which surfaces as
+`CASCADIA_HOSTING_WINDOW_CLASS` (WindowsTerminal.exe) plus
+`PseudoConsoleWindow` (OpenConsole.exe), neither of which this module could
+see while it matched one class name. Captured live on a 26200 box: a
+"Terminal" window appearing seconds after a pane closed, parented to
+`svchost.exe` -> `services.exe` (the COM launch service), i.e. NOT in the
+cockpit's process tree at all.
+
+That COM parentage matters for `hide_own_console_windows`: its descendancy
+proof walks the window owner's parents looking for the cockpit, and a
+COM-activated terminal never leads back there. Such a window can therefore
+only be attributed by the SPAWN-TIME path, whose "new since the snapshot we
+took a moment before spawning" test does not depend on parentage.
+
 Strategy: snapshot all ConsoleWindowClass HWNDs before spawn, then after
 spawn diff against a fresh snapshot and `ShowWindow(hwnd, SW_HIDE)` any new
 HWNDs.
@@ -22,8 +38,28 @@ import sys
 SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+# Every window class that can host a console on Windows. `ConsoleWindowClass`
+# is conhost; the other two are what Windows 11 raises when the default
+# terminal application is Windows Terminal (see the module docstring).
+CONSOLE_WINDOW_CLASSES: frozenset[str] = frozenset(
+    {"ConsoleWindowClass", "PseudoConsoleWindow", "CASCADIA_HOSTING_WINDOW_CLASS"}
+)
+
+# Classes the PERIODIC sweeper refuses to touch. `CASCADIA_HOSTING_WINDOW_CLASS`
+# IS the user's Windows Terminal UI, and a COM-activated one cannot be proven
+# ours by the parent walk (see the module docstring) — so on that path there is
+# no way to tell "the terminal Windows raised to host OUR console" from "the
+# terminal the user just opened", and hiding the wrong one makes a window the
+# user is typing in vanish. The spawn-time path may still hide it: there
+# ownership comes from "new since the snapshot taken moments before we
+# spawned", which needs no parentage. `PseudoConsoleWindow` is not in here —
+# a healthy terminal keeps its ConPTY host window hidden, so a VISIBLE one is
+# already the anomaly.
+_UNOWNABLE_WINDOW_CLASSES: frozenset[str] = frozenset({"CASCADIA_HOSTING_WINDOW_CLASS"})
+
+
 def snapshot_console_hwnds() -> set[int]:
-    """Return set of HWNDs (int) for top-level ConsoleWindowClass windows."""
+    """Return set of HWNDs (int) for top-level console-hosting windows."""
     if sys.platform != "win32":
         return set()
 
@@ -38,12 +74,24 @@ def snapshot_console_hwnds() -> set[int]:
     def _cb(hwnd: int, _lp: int) -> bool:
         buf = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, buf, 64)
-        if buf.value == "ConsoleWindowClass":
+        if buf.value in CONSOLE_WINDOW_CLASSES:
             out.add(int(hwnd))
         return True
 
     user32.EnumWindows(EnumWindowsProc(_cb), 0)
     return out
+
+
+def window_class(hwnd: int) -> str:
+    if sys.platform != "win32":
+        return ""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    buf = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(wt.HWND(hwnd), buf, 64)
+    return buf.value
 
 
 def _window_pid(hwnd: int) -> int | None:
@@ -104,6 +152,8 @@ def hide_own_console_windows(root_pid: int, already_seen: set[int]) -> set[int]:
     mine: set[int] = set()
     for hwnd in fresh:
         already_seen.add(hwnd)
+        if window_class(hwnd) in _UNOWNABLE_WINDOW_CLASSES:
+            continue
         pid = _window_pid(hwnd)
         if pid is not None and _is_descendant_of(pid, root_pid):
             mine.add(hwnd)

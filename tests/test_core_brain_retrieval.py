@@ -55,13 +55,60 @@ def test_bm25_relevant_record_outranks_irrelevant_one(store):
 
 
 def test_scope_match_breaks_a_bm25_tie(store):
-    # Neither record's content matches the query at all (bm25 == 0 for
-    # both), so scope match is the only signal that can separate them.
-    store.append_event(_rec(id="a", content="unrelated text one", scope=Scope.AGENT))
-    store.append_event(_rec(id="b", content="unrelated text two", scope=Scope.PROJECT))
+    # Both records match the query identically, so scope match is the only
+    # signal left that can separate them.
+    store.append_event(_rec(id="a", content="same wording here", scope=Scope.AGENT))
+    store.append_event(_rec(id="b", content="same wording here", scope=Scope.PROJECT))
     engine = RetrievalEngine(store)
-    ranked = engine.recall("zzz-no-match", scope=Scope.PROJECT, now=_NOW)
+    ranked = engine.recall("same wording here", scope=Scope.PROJECT, now=_NOW)
     assert [r.id for r in ranked] == ["b", "a"]
+
+
+def test_record_with_no_query_overlap_is_not_returned(store):
+    """#333: the non-query signals (scope+recency+confidence+trust) sum to
+    1.4, above `_W_BM25` at full scale, so a record that matches nothing used
+    to be returned anyway — recent+trusted beat relevant."""
+    store.append_event(
+        _rec(
+            id="fresh",
+            content="unrelated text one",
+            scope=Scope.PROJECT,
+            trust=Trust.COCKPIT_MEASURED,
+            confidence=Confidence.HIGH,
+        )
+    )
+    engine = RetrievalEngine(store)
+    assert engine.recall("zzz-no-match", scope=Scope.PROJECT, now=_NOW) == []
+
+
+def test_match_on_a_single_query_token_is_below_the_coverage_floor(store):
+    """The measured failure mode: on a small store one rare token carries a
+    high idf, so a record whose ONLY overlap with an 8-token query was the
+    word "the" scored higher than a genuine multi-term match."""
+    store.append_event(_rec(id="stopword", content="resolved the merge conflict"))
+    store.append_event(_rec(id="real", content="add pagination to the users table endpoint"))
+    engine = RetrievalEngine(store)
+    ranked = engine.recall(
+        "add pagination to the users table api endpoint", scope=Scope.PROJECT, now=_NOW
+    )
+    assert [r.id for r in ranked] == ["real"]
+
+
+def test_blank_query_ranks_nothing(store):
+    store.append_event(_rec(id="a", content="some content here"))
+    engine = RetrievalEngine(store)
+    assert engine.recall("   ", scope=Scope.PROJECT, now=_NOW) == []
+
+
+def test_broader_query_coverage_outranks_a_higher_raw_bm25_score(store):
+    """Ranking is coverage-weighted: matching more of what was asked beats
+    matching one term very strongly (the old `bm25 / max(bm25)` rescaled the
+    best raw hit to 1.0 however narrow it was)."""
+    store.append_event(_rec(id="narrow", content="alembic alembic alembic alembic"))
+    store.append_event(_rec(id="broad", content="alembic database migrations for the backend"))
+    engine = RetrievalEngine(store)
+    ranked = engine.recall("alembic database migrations backend", scope=Scope.PROJECT, now=_NOW)
+    assert next(r.id for r in ranked) == "broad"
 
 
 def test_recency_prefers_the_newer_record_on_a_bm25_tie(store):

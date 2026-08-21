@@ -4,6 +4,62 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`takkub send` ตามหลัง `assign` ทิ้งใบงานที่ยังไม่ยืนยันว่าถึงมือ แล้วรายงานว่า "ปลอดภัย"** (#336) —
+  `#295` แยก "ยกเลิกได้/ไม่ได้" ไว้ถูกแล้ว แต่ตารางสถานะไม่ครบ: `_UNDELIVERED_STATES` มีแค่
+  `QUEUED`/`WAITING_RESOURCE` ทำให้ `UNCERTAIN` ถูกนับเป็น "ถึงมือแล้ว" ทั้งที่มันแปลตรงตัวว่า
+  **ไม่รู้ว่าถึงหรือไม่ถึง** (สัญญาณ "ready + ช่องพิมพ์ว่าง" แยกไม่ออกว่า submit ไปแล้วหรือค้างอยู่
+  ในช่อง — ความกำกวมตัวเดียวกับที่ทำให้ auto-repaste ถูกปิดไว้ตั้งแต่ #134/#328) · ของจริง: gemini
+  UNCERTAIN 15:48:33 → โดน supersede 15:49:14 → transcript ไม่มีใบงานเลย ขณะที่ `takkub status`
+  ยังบอก `working` ต่ออีก 4 นาที → เพิ่ม `_UNCONFIRMED_STATES` (สถานะกำกวมต้องตอบ "ไม่" เมื่อคำถามคือ
+  "ทิ้งได้ไหม") + แยกข้อความเป็น `⚠️ [delivery-pending]` (ยังไม่ถึงมือ เดี๋ยวส่งให้เอง) กับ
+  `🚨 [delivery-unconfirmed]` (ไม่ยืนยัน จะไม่ paste ซ้ำให้ ต้องเช็ค transcript แล้ว assign ใหม่)
+
+- **Context Builder ตัด record project-scoped ของ role อื่นทิ้งทั้งหมด** (#335) — filter เขียนว่า
+  `agent_id in (None, role)` พร้อม comment ว่า "PROJECT-scoped มี agent_id=None" ซึ่งไม่จริง:
+  `digest_facts_source.from_digest_facts` stamp role ลงไปด้วย ผลคือ record `COCKPIT_MEASURED`
+  (trust สูงสุดใน store) ของทุก role อื่นหายหมด — วัดจริงบน store 34 records: `recall 7 → filter 2`
+  frontend ไม่มีทางเห็นสิ่งที่ qa เพิ่ง verify ให้ · แก้เป็นกรองด้วย **scope** (จำกัดเฉพาะ
+  `Scope.AGENT` ซึ่งเป็นเจตนาเดิม) + เทียบ base role เพื่อให้ shard pane (`frontend#3`) อ่าน memory
+  ของ role ตัวเองได้
+
+- **`backpressure` rung QUEUE ทริกที่ backlog=2 ทุกเครื่อง** (#334) — `resource_governor` ไม่เคยส่ง
+  `active_capacity_hint` ให้ `BackpressureSignal` เลย จึงตกไปใช้ default `1` ทำให้
+  `backlog_threshold = 1 x 2.0 = 2` คือพอ overload latch ติด + มีงานรอ 2 ชิ้น ก็กระโดดข้าม
+  `PAUSE_BACKGROUND` ไป rung แรงสุด (หยุดรับงาน NORMAL ทั้งหมด) ไม่ว่าเครื่องจะรัน 1 หรือ 10 pane ·
+  ส่ง `max(1, len(self._tokens))` = งานที่ถือ token อยู่จริง (ตัวเดียวกับที่ `_active_counts()`
+  รายงานเป็น `agents_global`)
+
+- **`recall()` ไม่มี relevance floor — assign ที่ไม่เกี่ยวก็โดน inject memory ทุกครั้ง** (#333) —
+  BM25 บน corpus ระดับไม่กี่สิบ document ใช้เป็นสัญญาณเดี่ยวไม่ได้: idf ทำให้ token ที่บังเอิญหายาก
+  ดูมีความหมาย (วัดจริง "add pagination to the users table API endpoint" ได้ 4.53 จาก record เรื่อง
+  git conflict ที่ overlap กับ query แค่คำว่า "the") ซ้ำร้าย normalisation เดิม `bm25 / max(bm25)`
+  ดัน hit ที่ดีที่สุดเป็น 1.0 เสมอไม่ว่าจะอ่อนแค่ไหน และ signal ที่ไม่เกี่ยวกับ query
+  (`scope+recency+confidence+trust` = 1.4) สูงกว่า `_W_BM25` เต็มสเกล = ของใหม่+trust สูงชนะของที่ตรง
+  query เสมอ → เปลี่ยนเป็น `coverage x saturating(bm25)` + floor ที่ coverage 0.2 · ข้อจำกัดที่ยัง
+  เหลือเขียนไว้ใน docstring: query ไทยสั้นที่มีแต่คำเชื่อมยังผ่าน floor ได้จาก trigram (ต้องใช้ word
+  segmentation ถึงจะแก้)
+
+- **1 `done()` เขียน memory 2 record เนื้อเดียวกัน → inject ซ้ำ กิน budget ครึ่งหนึ่ง** (#332) —
+  `facade.on_pane_done` submit ทั้ง headline ของ agent (`scope=AGENT`) และ digest ที่ฝัง headline
+  เดียวกันไว้ท้าย git facts (`scope=PROJECT`) และ dedup ของ `pipeline` จับไม่ได้ **โดยดีไซน์** เพราะ
+  เทียบเฉพาะใน bucket `(kind, scope, project_id, agent_id)` เดียวกัน · แก้ที่ฝั่งอ่าน (ได้ผลกับ
+  record ที่อยู่บนดิสก์แล้วด้วย) ด้วย token containment ≥ 0.7 เก็บตัวที่ข้อมูลมากกว่า — เกณฑ์มาจาก
+  การวัด: คู่ note/digest ของ done เดียวกัน = 0.73–1.00, คู่ที่เป็นคนละ event จริง = 0.61
+
+- **console เด้งเป็นพักๆ บน Windows 11 ทั้งที่ sweeper ทำงานอยู่** (#337) — sweeper พังสองชั้น:
+  (1) `snapshot_console_hwnds()` แมตช์ชื่อคลาสเดียว `ConsoleWindowClass` ซึ่งเป็นของยุค conhost —
+  บน Win11 default terminal คือ Windows Terminal ที่ Windows **COM-activate** ขึ้นมา host console
+  ใหม่ โผล่เป็น `CASCADIA_HOSTING_WINDOW_CLASS` + `PseudoConsoleWindow` จึงไม่เคยเข้า snapshot เลย
+  (2) `hide_own_console_windows()` พิสูจน์เจ้าของด้วยการเดิน parent chain หา cockpit แต่ COM
+  activation ทำให้ parent เป็น `svchost.exe` → `services.exe` ไม่มีทางย้อนกลับมา · แก้: ขยายเป็น 3
+  คลาส (spawn-time path พิสูจน์เจ้าของด้วย "ใหม่กว่า snapshot ก่อน spawn" ไม่พึ่ง parentage),
+  กัน periodic sweeper ไม่ให้แตะ `CASCADIA_*` เด็ดขาด (นั่นคือ UI ของ Terminal ที่ user เปิดเอง) และ
+  ลด `_CONSOLE_SWEEP_MS` 2000 → 250 เพราะ sweeper ซ่อน**ทีหลัง** ค่า interval จึง**คือ**ระยะแวบที่
+  ผู้ใช้เห็น (วัดต้นทุนจริง 0.53 ms/sweep = 0.2% ของ 1 core)
+
+
 ## [v1.0.82] - 2026-08-21
 
 ### Fixed (แก้)

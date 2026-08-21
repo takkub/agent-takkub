@@ -217,10 +217,11 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -660,6 +661,7 @@
     {
       "module": "agent_takkub.core.brain.context_builder",
       "imports": [
+        "agent_takkub.bm25_search",
         "agent_takkub.core.brain.retrieval",
         "agent_takkub.core.brain.store",
         "agent_takkub.core.conversation.flag",
@@ -671,7 +673,7 @@
         "agent_takkub.core.brain.facade"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.brain.facade",

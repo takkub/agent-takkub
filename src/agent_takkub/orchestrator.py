@@ -160,7 +160,7 @@ from .spawn_engine import (  # re-exported for backward compat; mixin provides m
     PaneState,
     SpawnEngineMixin,
 )
-from .task_delivery import NoticeDeduper, make_notice_id
+from .task_delivery import DeliveryState, NoticeDeduper, make_notice_id
 from .vault_mirror import (  # re-exported for test + script imports
     _DEFAULT_VAULT,
     _JUNK_NOTE_EXACT,
@@ -2798,16 +2798,42 @@ class Orchestrator(
                         cancelled=superseded,
                     )
                 if kept_undelivered:
-                    task_ids = ", ".join(sorted({d.task_id[:8] for d in kept_undelivered}))
-                    self._notify_lead(
-                        project_ns,
-                        f"⚠️ [delivery-pending] {to_role} มีใบงาน {len(kept_undelivered)} ใบที่ "
-                        f"**ยังไม่ถึงมือ** (task {task_ids}) — ไม่ถูกยกเลิก จะส่งให้เมื่อ pane ready "
-                        f"แต่ข้อความที่เพิ่ง `takkub send` อาจถึงก่อนใบงาน ถ้าข้อความนั้นอ้างถึงใบงาน "
-                        f"ให้ส่งซ้ำหลัง pane รับงานแล้ว",
-                        from_role="system",
-                        note="delivery_pending_not_cancelled",
-                    )
+                    # #336: "not yet delivered" and "we cannot tell" need
+                    # different advice. The first still lands on its own; an
+                    # UNCERTAIN one will not be re-pasted (auto-repaste stays
+                    # off, #134/#328), so Lead has to look and decide.
+                    unconfirmed = [
+                        d
+                        for d in kept_undelivered
+                        if DeliveryState(d.state) is DeliveryState.UNCERTAIN
+                    ]
+                    pending = [
+                        d
+                        for d in kept_undelivered
+                        if DeliveryState(d.state) is not DeliveryState.UNCERTAIN
+                    ]
+                    if pending:
+                        task_ids = ", ".join(sorted({d.task_id[:8] for d in pending}))
+                        self._notify_lead(
+                            project_ns,
+                            f"⚠️ [delivery-pending] {to_role} มีใบงาน {len(pending)} ใบที่ "
+                            f"**ยังไม่ถึงมือ** (task {task_ids}) — ไม่ถูกยกเลิก จะส่งให้เมื่อ pane ready "
+                            f"แต่ข้อความที่เพิ่ง `takkub send` อาจถึงก่อนใบงาน ถ้าข้อความนั้นอ้างถึงใบงาน "
+                            f"ให้ส่งซ้ำหลัง pane รับงานแล้ว",
+                            from_role="system",
+                            note="delivery_pending_not_cancelled",
+                        )
+                    if unconfirmed:
+                        task_ids = ", ".join(sorted({d.task_id[:8] for d in unconfirmed}))
+                        self._notify_lead(
+                            project_ns,
+                            f"🚨 [delivery-unconfirmed] {to_role} มีใบงาน {len(unconfirmed)} ใบที่ "
+                            f"**ไม่ยืนยันว่าถึงมือหรือไม่** (task {task_ids}) — ไม่ถูกยกเลิก และ "
+                            f"**จะไม่ paste ซ้ำให้เอง** · เช็ค transcript ของ {to_role} ว่าเห็นใบงานจริงไหม "
+                            f"ถ้าไม่เห็น ให้ `takkub assign` ใหม่ทั้งใบ อย่าส่งข้อความแก้ทีละจุด",
+                            from_role="system",
+                            note="delivery_unconfirmed_on_send",
+                        )
                     _log_event(
                         "delivery_kept_undelivered_on_send",
                         role=to_role,

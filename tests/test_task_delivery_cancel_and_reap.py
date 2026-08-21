@@ -168,6 +168,48 @@ class TestSendAutoCancelsStaleDelivery:
         # "safe, nothing to do".
         assert not any("[delivery-superseded]" in m for m in notices)
 
+    def test_lead_send_keeps_a_delivery_whose_arrival_is_uncertain(
+        self, orch: Orchestrator
+    ) -> None:
+        """#336: UNCERTAIN means the paste went out but the confirmation came
+        back ambiguous — it is NOT proof the pane got the task.
+
+        Field case: gemini went UNCERTAIN at 15:48:33, a `send` superseded it
+        at 15:49:14, and its transcript never contained the task at all —
+        while Lead was told the cancellation was "ปลอดภัย ไม่ต้องทำอะไร" and
+        `takkub status` reported `working` for four more minutes.
+        """
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t9def111",
+            project_id="P",
+            pane_id="backend",
+            session_generation=1,
+            payload="do X",
+        )
+        manager.begin_write(delivery.delivery_id, 1)
+        manager.mark_written(delivery.delivery_id)
+        manager.mark_uncertain(delivery.delivery_id)
+        orch._delivery_manager = manager
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            ok, _msg = orch.send("backend", "แก้ข้อ 3 ด้วย", from_role="lead", project="P")
+
+        assert ok is True
+        assert delivery.state.value == "uncertain"
+        notices = _written_strings(lead.session)
+        assert any("[delivery-unconfirmed]" in m for m in notices)
+        # Never the "safe, nothing to do" wording — that was the whole bug.
+        assert not any("[delivery-superseded]" in m for m in notices)
+        # Nor the plain pending wording, which promises it will land on its
+        # own; an uncertain delivery is not re-pasted (#134/#328).
+        assert not any("[delivery-pending]" in m for m in notices)
+
     def test_explicit_cancel_verb_still_cancels_an_undelivered_delivery(
         self, orch: Orchestrator
     ) -> None:

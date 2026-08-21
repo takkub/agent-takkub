@@ -74,6 +74,19 @@ _UNDELIVERED_STATES = {
     DeliveryState.WAITING_RESOURCE,
 }
 
+# States in which we cannot PROVE the task reached the pane (#336). The two
+# above never wrote anything; `UNCERTAIN` is the one that bites, because it
+# means the paste went out but the confirmation signal came back ambiguous —
+# "ready prompt + empty input box" reads the same whether the submit landed or
+# is still sitting in the box (the same ambiguity that keeps auto-repaste
+# switched off, #134/#328). Treating it as delivered let a `takkub send`
+# supersede destroy the pane's only copy of its task and report the result as
+# "ปลอดภัย ไม่ต้องทำอะไร": measured on a real session, gemini was superseded at
+# 15:49:14 after going UNCERTAIN at 15:48:33 and its transcript never contained
+# the task at all, while `takkub status` still said `working` for 4 more
+# minutes.
+_UNCONFIRMED_STATES = _UNDELIVERED_STATES | {DeliveryState.UNCERTAIN}
+
 
 @dataclass(slots=True)
 class TaskDelivery:
@@ -98,12 +111,15 @@ class TaskDelivery:
 
 
 def has_reached_pane(delivery: TaskDelivery) -> bool:
-    """True once *delivery*'s task text has been written toward its pane.
+    """True once *delivery*'s task text is CONFIRMED in front of its pane.
 
     `WRITING` counts: the write is already in progress, so a second delivery
-    of the same task would duplicate rather than deliver.
+    of the same task would duplicate rather than deliver. `UNCERTAIN` does
+    not (#336) — see `_UNCONFIRMED_STATES`. The asymmetry is deliberate: this
+    predicate gates "is it safe to throw this delivery away", so an ambiguous
+    signal has to answer no.
     """
-    return DeliveryState(delivery.state) not in _UNDELIVERED_STATES
+    return DeliveryState(delivery.state) not in _UNCONFIRMED_STATES
 
 
 class DeliveryManager:
@@ -342,9 +358,10 @@ class DeliveryManager:
         reasoning only holds for a delivery that has already pasted once —
         there is nothing to duplicate otherwise.
 
-        #295: a delivery still in QUEUED/WAITING_RESOURCE has never put the
-        task in front of the pane, so cancelling it doesn't suppress a
-        duplicate, it destroys the only copy — the pane ends up with no work
+        #295/#336: a delivery still in QUEUED/WAITING_RESOURCE has never put
+        the task in front of the pane, and an UNCERTAIN one cannot be shown
+        to have done so, so cancelling it doesn't suppress a
+        duplicate, it may destroy the only copy — the pane ends up with no work
         at all, and from Lead's side the "superseded" notice looked identical
         to the harmless case. Those are left armed so the task still lands;
         the caller is handed them so it can say so instead of staying quiet.

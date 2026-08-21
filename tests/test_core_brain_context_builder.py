@@ -117,6 +117,74 @@ def test_other_roles_agent_scoped_record_is_excluded(runtime):
     assert "frontend private note" not in out
 
 
+def test_other_roles_project_scoped_record_is_kept(runtime):
+    """The role filter must key on SCOPE, not on `agent_id`: a PROJECT-scoped
+    digest carries the reporting role in `agent_id` too, so filtering on
+    `agent_id in (None, role)` threw away every other role's cockpit-measured
+    findings — the highest-trust records in the store."""
+    store = BrainStore("proj")
+    store.append_event(
+        _rec(
+            id="qa",
+            content="qa done — verify the retry policy holds under load",
+            scope=Scope.PROJECT,
+            agent_id="qa",
+        )
+    )
+    out = context_builder.build_context("proj", "backend", "verify retry policy load", 2000)
+    assert "qa done" in out
+
+
+def test_shard_instance_reads_its_base_roles_agent_memory(runtime):
+    store = BrainStore("proj")
+    store.append_event(
+        _rec(
+            id="mine",
+            content="backend private note about the retry policy",
+            scope=Scope.AGENT,
+            agent_id="backend",
+        )
+    )
+    out = context_builder.build_context("proj", "backend#2", "retry policy", 2000)
+    assert "backend private note" in out
+
+
+def test_the_two_records_one_done_writes_are_collapsed(runtime):
+    """`facade.on_pane_done` submits the agent's headline AND the digest that
+    embeds that same headline; they differ in scope so `pipeline`'s dedup can
+    never see them as one (#332)."""
+    headline = "pruned 21 redundant theme layouts down to 10 verified keepers"
+    store = BrainStore("proj")
+    store.append_event(_rec(id="note", content=headline, scope=Scope.AGENT, agent_id="frontend"))
+    store.append_event(
+        _rec(
+            id="digest",
+            content=f"frontend done branch=master files_touched=101 — {headline}",
+            scope=Scope.PROJECT,
+            agent_id="frontend",
+        )
+    )
+    out = context_builder.build_context("proj", "frontend", "theme layouts pruned", 2000)
+    assert out.count("pruned 21 redundant theme layouts") == 1
+    # The survivor is the one carrying MORE information, not just the first.
+    assert "files_touched=101" in out
+
+
+def test_distinct_events_sharing_vocabulary_are_both_kept(runtime):
+    """The collapse threshold sits above `pipeline._SEMANTIC_MATCH_THRESHOLD`
+    precisely so two separate runs of the same job stay two records."""
+    store = BrainStore("proj")
+    store.append_event(
+        _rec(id="one", content="rebuild and restart admin and frontend, both healthy again")
+    )
+    store.append_event(
+        _rec(id="two", content="rebuild and restart the api container, health check green")
+    )
+    out = context_builder.build_context("proj", "devops", "rebuild restart", 2000)
+    assert "both healthy again" in out
+    assert "health check green" in out
+
+
 def test_bounded_by_record_count_cap(runtime):
     store = BrainStore("proj")
     for i in range(20):

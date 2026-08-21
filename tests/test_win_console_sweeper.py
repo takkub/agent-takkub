@@ -31,6 +31,11 @@ def fake_windows(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_win_console, "snapshot_console_hwnds", lambda: set(state["hwnds"]))
     monkeypatch.setattr(_win_console, "_window_pid", lambda hwnd: state["pids"].get(hwnd))
     monkeypatch.setattr(
+        _win_console,
+        "window_class",
+        lambda hwnd: state.get("classes", {}).get(hwnd, "ConsoleWindowClass"),
+    )
+    monkeypatch.setattr(
         _win_console, "_is_descendant_of", lambda pid, root, **kw: pid in state["tree"]
     )
     monkeypatch.setattr(
@@ -39,7 +44,46 @@ def fake_windows(monkeypatch: pytest.MonkeyPatch):
     return state
 
 
+class TestConsoleWindowClasses:
+    def test_covers_windows_terminal_console_hosting(self) -> None:
+        """Matching only `ConsoleWindowClass` made the sweeper blind on
+        Windows 11, where the default terminal application is Windows
+        Terminal and Windows COM-activates it to host a new console.
+        Captured live: a "Terminal" window (CASCADIA_HOSTING_WINDOW_CLASS,
+        WindowsTerminal.exe) plus PseudoConsoleWindow (OpenConsole.exe)."""
+        assert _win_console.CONSOLE_WINDOW_CLASSES == {
+            "ConsoleWindowClass",
+            "PseudoConsoleWindow",
+            "CASCADIA_HOSTING_WINDOW_CLASS",
+        }
+
+
 class TestOwnershipScoping:
+    def test_periodic_sweep_never_hides_a_windows_terminal_window(self, fake_windows) -> None:
+        """A COM-activated Windows Terminal is not in our process tree, so on
+        this path it is indistinguishable from the terminal the user opened —
+        even when the parent walk happens to say yes."""
+        fake_windows["hwnds"] = {303}
+        fake_windows["pids"] = {303: 5555}
+        fake_windows["tree"] = {5555}
+        fake_windows["classes"] = {303: "CASCADIA_HOSTING_WINDOW_CLASS"}
+
+        _win_console.hide_own_console_windows(1, set())
+
+        assert fake_windows["hidden"] == []
+
+    def test_periodic_sweep_hides_a_visible_pseudoconsole_host(self, fake_windows) -> None:
+        """A healthy terminal keeps its ConPTY host window hidden, so a
+        visible one in our own tree is the anomaly this sweeper exists for."""
+        fake_windows["hwnds"] = {404}
+        fake_windows["pids"] = {404: 5555}
+        fake_windows["tree"] = {5555}
+        fake_windows["classes"] = {404: "PseudoConsoleWindow"}
+
+        _win_console.hide_own_console_windows(1, set())
+
+        assert fake_windows["hidden"] == [{404}]
+
     def test_hides_a_console_opened_by_our_own_process_tree(self, fake_windows) -> None:
         fake_windows["hwnds"] = {101}
         fake_windows["pids"] = {101: 5555}

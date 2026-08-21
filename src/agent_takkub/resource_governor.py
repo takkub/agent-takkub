@@ -515,6 +515,13 @@ class ResourceGovernor:
             cpu_resume_percent=self.limits.cpu_resume_percent,
             min_available_ram_percent=self.limits.min_available_ram_percent,
             queued_count=sum(len(queue) for queue in self._waiting.values()),
+            # How much work is actually in flight right now — the same
+            # quantity `_active_counts()` reports as `agents_global`. Without
+            # it `BackpressureSignal` falls back to its own `1` default, which
+            # made `classify()`'s QUEUE rung (backlog >= 2x capacity) fire at
+            # a backlog of TWO on every machine, no matter how many panes were
+            # running, i.e. the harshest rung with no ramp.
+            active_capacity_hint=max(1, len(self._tokens)),
         )
         level = scheduling_facade.backpressure_level(signal)
         if not scheduling_facade.backpressure_admits(level, priority):

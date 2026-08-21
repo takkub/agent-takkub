@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from agent_takkub.core.scheduling import facade as scheduling_facade
-from agent_takkub.core.scheduling.models import Priority, SlotPolicy
+from agent_takkub.core.scheduling.models import BackpressureLevel, Priority, SlotPolicy
 from agent_takkub.resource_governor import GovernorLimits, ResourceClass, ResourceGovernor
 
 
@@ -239,6 +239,39 @@ def test_flag_off_dispatch_waiting_keeps_fifo_project_order(monkeypatch):
     # Priority is ignored while the flag is off -- plain round-robin/FIFO
     # order applies, same as before Phase 8a existed.
     assert admitted_order == ["low"]
+
+
+def test_backpressure_signal_reports_real_active_capacity(monkeypatch):
+    """`BackpressureSignal.active_capacity_hint` was never passed, so it fell
+    back to its own default of 1 and `classify()`'s QUEUE rung (backlog >=
+    2x capacity) fired at a backlog of TWO on every machine — the harshest
+    rung, with no ramp, regardless of how many panes were actually running.
+    """
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    governor = ResourceGovernor(_limits(), sampler=lambda: (10.0, 90.0, 0))
+    governor.sample()
+    held = [
+        governor.request_slot(
+            project_id="p",
+            pane_id=f"pane{i}",
+            task_id=f"t{i}",
+            resource_class=ResourceClass.LIGHT,
+        )
+        for i in range(4)
+    ]
+    assert all(decision.allowed for decision in held)
+
+    seen: dict[str, int] = {}
+
+    def _capture(signal):
+        seen["hint"] = signal.active_capacity_hint
+        return BackpressureLevel.NORMAL
+
+    monkeypatch.setattr(scheduling_facade, "backpressure_level", _capture)
+    governor.request_slot(
+        project_id="p", pane_id="pane9", task_id="t9", resource_class=ResourceClass.LIGHT
+    )
+    assert seen["hint"] == 4
 
 
 def test_flag_on_backpressure_throttles_low_priority_new_work(monkeypatch):

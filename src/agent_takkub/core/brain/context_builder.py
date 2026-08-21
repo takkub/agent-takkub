@@ -19,6 +19,7 @@ read is a single `summary.json`, never the raw message log.
 
 from __future__ import annotations
 
+from agent_takkub.bm25_search import tokenize
 from agent_takkub.core.models.memory import MemoryRecord, Scope
 
 from .retrieval import RetrievalEngine
@@ -82,27 +83,100 @@ def _fit_to_budget(records: list[MemoryRecord], budget_tokens: int) -> list[Memo
     return out
 
 
+def _base_role(name: str | None) -> str | None:
+    """`"qa#2"` -> `"qa"`; `None` stays `None`. Same `#`-suffix convention
+    `config._safe_name`/`pipeline_executor` already parse for shard panes."""
+    return name.partition("#")[0] if name else None
+
+
 def _recall_records(
     project: str | None, role: str, task_text: str, budget_tokens: int
 ) -> list[MemoryRecord]:
     scoped = RetrievalEngine(BrainStore(project)).recall(
         task_text, scope=Scope.PROJECT, budget_tokens=budget_tokens
     )[:_RECALL_LIMIT_SCOPED]
-    # Role-scoping: drop another role's own AGENT-scoped working memory —
-    # PROJECT/TASK/SESSION/GLOBAL-scoped records (agent_id=None) stay
-    # shared. When project is None, the "scoped" bucket IS the global
-    # bucket (`BrainStore(None)`'s `_global` file) — the global query below
-    # can then reintroduce an other-role AGENT record this filter just
-    # dropped; accepted as-is, the global bucket is shared-by-design and
-    # this only matters for the rare pane with no active project.
-    scoped = [r for r in scoped if r.agent_id in (None, role)]
+    # Role-scoping: drop another role's own AGENT-scoped working memory, and
+    # ONLY that. Keyed on the scope, not on `agent_id`: a PROJECT-scoped
+    # record carries an `agent_id` too (`digest_facts_source.from_digest_facts`
+    # stamps the reporting role on the cockpit-measured digest), so the older
+    # `agent_id in (None, role)` test silently threw away every other role's
+    # project-level findings — the highest-trust records in the store — and a
+    # frontend pane could never see what qa or devops had measured.
+    #
+    # Shard instances share their base role's memory (`qa#2` reads `qa`'s):
+    # they are the same teammate, just parallel panes.
+    #
+    # When project is None, the "scoped" bucket IS the global bucket
+    # (`BrainStore(None)`'s `_global` file) — the global query below can then
+    # reintroduce an other-role AGENT record this filter just dropped;
+    # accepted as-is, the global bucket is shared-by-design and this only
+    # matters for the rare pane with no active project.
+    base_role = _base_role(role)
+    scoped = [
+        r
+        for r in scoped
+        if r.scope is not Scope.AGENT or _base_role(r.agent_id) in (None, base_role)
+    ]
 
     global_recs = RetrievalEngine(BrainStore(None)).recall(
         task_text, scope=Scope.GLOBAL, budget_tokens=budget_tokens
     )[:_RECALL_LIMIT_GLOBAL]
 
     seen = {r.id for r in scoped}
-    return scoped + [r for r in global_recs if r.id not in seen]
+    merged = scoped + [r for r in global_recs if r.id not in seen]
+    return _drop_near_duplicates(merged)
+
+
+# Token-set containment (|A n B| / min(|A|,|B|)) above which two records are
+# the SAME event written twice, not two related facts. Measured over a real
+# 34-record store: every agent-note/digest pair from one `done()` scored
+# 0.73-1.00, while the closest genuinely-distinct pair (two separate rebuilds
+# of the same service) scored 0.61 — so the boundary sits in a real gap, and
+# deliberately above `pipeline._SEMANTIC_MATCH_THRESHOLD` (0.6), which would
+# have collapsed those distinct events.
+_NEAR_DUP_CONTAINMENT = 0.7
+
+
+def _drop_near_duplicates(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    """Collapse the two records one `done()` writes for the same event (#332),
+    keeping whichever carries more distinct tokens.
+
+    By design `facade.on_pane_done` submits the agent's own headline
+    (`reflection_source`, scope=AGENT, trust=AGENT_REPORTED) AND the cockpit-
+    measured digest (`digest_facts_source`, scope=PROJECT), whose
+    `_summarize` appends that same headline after the git facts.
+    `pipeline`'s dedup can never collapse them: it only compares inside one
+    `(kind, scope, project_id, agent_id)` bucket and these two differ in
+    scope. So the read side does it, where it also cleans up every pair
+    already on disk.
+
+    Containment on TOKEN SETS rather than plain substring, because the digest
+    truncates a long headline with an ellipsis — the note is then not a
+    substring of the digest, but its tokens still overlap almost completely.
+
+    O(n^2) over at most `_RECALL_LIMIT_SCOPED + _RECALL_LIMIT_GLOBAL` = 12
+    records; ranked order is preserved, the survivor of a pair inheriting the
+    earlier of the two ranks.
+    """
+    kept: list[MemoryRecord] = []
+    kept_tokens: list[set[str]] = []
+    for record in records:
+        tokens = set(tokenize(record.content))
+        if not tokens:
+            continue
+        merged_into_kept = False
+        for i, other in enumerate(kept_tokens):
+            containment = len(tokens & other) / min(len(tokens), len(other))
+            if containment < _NEAR_DUP_CONTAINMENT:
+                continue
+            if len(tokens) > len(other):
+                kept[i], kept_tokens[i] = record, tokens
+            merged_into_kept = True
+            break
+        if not merged_into_kept:
+            kept.append(record)
+            kept_tokens.append(tokens)
+    return kept
 
 
 def _memory_lines(records: list[MemoryRecord]) -> list[str]:

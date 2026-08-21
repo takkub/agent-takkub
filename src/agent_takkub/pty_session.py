@@ -787,7 +787,22 @@ _GEMINI_MODEL_RE = re.compile(
 # per pane would multiply an EnumWindows sweep by the pane count for no gain),
 # and `hide_own_console_windows` restricts hiding to this process's own tree
 # so a terminal the USER opened is never touched.
-_CONSOLE_SWEEP_MS = 2_000
+# 250ms, not the original 2s: this sweeper HIDES a console window after it has
+# already been shown, so its interval IS the worst-case flash the user sees.
+# The cost that made 2s look prudent isn't there — measured on this box,
+# `hide_own_console_windows` in steady state (nothing new to rule on; the
+# parent walk only runs for genuinely new hwnds) is **0.53 ms**, i.e. 0.2% of
+# one core at 250ms. A window that appears right after a sweep is now visible
+# for ~0.25s instead of ~2s.
+#
+# This does NOT make the flash impossible — only short. Eliminating it needs
+# the window to never be shown in the first place, which we cannot do for a
+# console created by a process we did not spawn (codex -> pwsh, npm -> cmd);
+# a `SetWinEventHook(EVENT_OBJECT_SHOW)` hook would hide it on the event
+# instead of on a poll. Not done here: unlike this timer it is a global hook
+# with no CI mileage, and the first version of this sweeper already took the
+# Windows CI job down with a silent Qt abort (#330 follow-up).
+_CONSOLE_SWEEP_MS = 250
 _console_sweeper: QTimer | None = None
 _console_hwnds_seen: set[int] = set()
 
