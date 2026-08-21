@@ -199,7 +199,7 @@ def _provider_body_entries(
             entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
     else:
         if stale and u.fetched_at:
-            entries.append(("text", "ข้อมูลโควต้าหมดอายุ (ยังไม่อัปเดต)", cockpit_theme.TEXT_FAINT))
+            entries.append(("text", "ข้อมูลโควต้าหมดอายุ", cockpit_theme.TEXT_FAINT))
         else:
             entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
 
@@ -207,6 +207,15 @@ def _provider_body_entries(
     stale_enough = u.fetched_at is not None and (now - _aware(u.fetched_at)).total_seconds() > 900
     if age and (stale or stale_enough):
         entries.append(("text", f"ข้อมูลเมื่อ {age}", cockpit_theme.TEXT_FAINT))
+    # Some channels cannot refresh themselves at all — gemini reads a cache
+    # only the Antigravity desktop app writes, so "stale" there is permanent
+    # until the user opens that app, not a poll that hasn't landed yet. Every
+    # line above reads as "an update is on its way", which is the opposite of
+    # the truth, so a stale snapshot carrying its adapter's own hint gets to
+    # say why. `status == "error"` returned earlier, so this only ever renders
+    # a hint attached to a stale (still-usable) snapshot.
+    if stale and u.error:
+        entries.append(("text", u.error, cockpit_theme.TEXT_FAINT))
     return entries
 
 

@@ -424,6 +424,15 @@ def fetch_codex_usage(
 
 _GEMINI_STALE_THRESHOLD_S = 24 * 3600.0
 
+# The Antigravity DESKTOP APP is the only writer of this quota cache — `agy`,
+# the CLI this cockpit actually spawns, never refreshes it (observed on the
+# dev box: a cache file 5 months old while agy itself ran daily). So a stale
+# gemini snapshot does NOT mean "the next poll will catch up", it means
+# "nothing will ever update this until the app is opened". The generic stale
+# wording in `usage_meter` implies a refresh is on its way, which is exactly
+# backwards here, so the adapter ships its own hint alongside the snapshot.
+GEMINI_STALE_HINT = "ต้องเปิดแอป Antigravity ถึงจะอัปเดต (agy CLI ไม่เขียน cache นี้)"
+
 
 def _antigravity_authorized_cache_dirs() -> list[Path]:
     """Candidate cache directories where Antigravity / Gemini quota files may be written."""
@@ -576,6 +585,7 @@ def fetch_gemini_usage() -> ProviderUsage:
         fetched_at=fetched_at,
         raw_data={"email": raw.get("email"), "model_count": len(models)},
         windows=windows_out,
+        error=GEMINI_STALE_HINT if status == STATUS_STALE else None,
     )
 
 

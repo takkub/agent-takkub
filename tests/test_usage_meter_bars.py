@@ -117,3 +117,35 @@ def test_unsupported_loading_error_never_render_a_bar():
         usage = ProviderUsage(provider="kimi", status=status)
         entries = _provider_body_entries(usage, now)
         assert _bars(entries) == []
+
+
+def test_stale_snapshot_renders_its_adapter_hint_instead_of_implying_a_refresh():
+    # gemini's channel is a cache only the Antigravity desktop app writes, so
+    # "stale" there never clears on its own. The old wording
+    # ("ยังไม่อัปเดต") promised an update that will never arrive.
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="gemini",
+        status="stale",
+        fetched_at=now - timedelta(days=150),
+        error="ต้องเปิดแอป Antigravity ถึงจะอัปเดต (agy CLI ไม่เขียน cache นี้)",
+    )
+    texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
+    assert any("Antigravity" in t for t in texts)
+    assert not any("ยังไม่อัปเดต" in t for t in texts)
+
+
+def test_stale_snapshot_without_a_hint_keeps_the_plain_expiry_line():
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(provider="claude", status="stale", fetched_at=now - timedelta(days=2))
+    texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
+    assert any("ข้อมูลโควต้าหมดอายุ" in t for t in texts)
+
+
+def test_error_status_never_reaches_the_hint_line():
+    # `status == "error"` short-circuits well before the hint block — an
+    # error must render as a failure, never as a stale-but-usable snapshot.
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(provider="gemini", status="error", error="boom")
+    texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
+    assert texts == ["ดึงข้อมูลไม่สำเร็จ"]

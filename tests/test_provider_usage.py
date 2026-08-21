@@ -432,6 +432,8 @@ class TestGeminiAdapter:
         assert result.raw_data["model_count"] == 2
         assert result.windows is not None
         assert len(result.windows) == 2
+        # Fresh data must not carry the "go open the app" hint.
+        assert result.error is None
 
     def test_stale_data_is_flagged_stale_not_active(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
@@ -451,6 +453,11 @@ class TestGeminiAdapter:
         result = pu.fetch_gemini_usage()
         assert result.status == "stale"
         assert result.utilization is None
+        # A stale gemini snapshot is permanent until the Antigravity desktop
+        # app is opened — `agy` never writes this cache — so the adapter must
+        # ship the hint that says so, not leave the UI implying a poll is
+        # still on its way (usage_meter renders `error` for stale snapshots).
+        assert result.error == pu.GEMINI_STALE_HINT
 
     def test_picks_newest_file_when_multiple_accounts_cached(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
