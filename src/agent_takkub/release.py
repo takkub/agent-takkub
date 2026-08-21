@@ -9,7 +9,9 @@ heading. This automates the whole ceremony:
   3. rewrite pyproject's `version = "..."`
   4. roll CHANGELOG: rename `## [vNEXT]` → `## [vX.Y.Z] - <date>` and drop a
      fresh empty `## [vNEXT]` back on top
-  5. git commit (pyproject.toml + CHANGELOG.md only) + annotated tag vX.Y.Z
+  5. git commit (pyproject.toml + CHANGELOG.md + src/agent_takkub/__init__.py
+     + package.json — every place the version is written; they must agree,
+     see tests/test_version_sync.py) + annotated tag vX.Y.Z
   6. (default) push + create the GitHub Release with the rolled changelog
      section as its notes, so the release shows up on the Releases page
 
@@ -57,6 +59,33 @@ def bump_version(current: str, part: str) -> str:
     if part == "patch":
         return f"{major}.{minor}.{patch + 1}"
     raise ValueError(f"unknown bump part: {part!r} (want major/minor/patch)")
+
+
+# `pyproject.toml` is not the only place the version is written: the package
+# exports `__version__`, and the npm wrapper that actually installs the cockpit
+# carries its own. `tests/test_version_sync.py` asserts all three agree — and
+# for four releases they only did because whoever cut them edited the other two
+# by hand first. `takkub release` bumping just pyproject shipped v1.0.80 with
+# `__version__` still reading 1.0.79 and a red CI on main.
+_INIT_VERSION_RE = re.compile(r'^(__version__\s*=\s*")([^"]+)(")', re.MULTILINE)
+_NPM_VERSION_RE = re.compile(r'^(\s*"version"\s*:\s*")([^"]+)(")', re.MULTILINE)
+
+
+def set_init_version(text: str, version: str) -> str:
+    new, n = _INIT_VERSION_RE.subn(lambda m: m.group(1) + version + m.group(3), text, count=1)
+    if not n:
+        raise ValueError('no `__version__ = "..."` line to update in __init__.py')
+    return new
+
+
+def set_npm_version(text: str, version: str) -> str:
+    """Rewrite only the FIRST top-level `"version":` — a regex, not a
+    json round-trip, so the file keeps its exact formatting and key order
+    (npm tooling and reviewers both read this diff)."""
+    new, n = _NPM_VERSION_RE.subn(lambda m: m.group(1) + version + m.group(3), text, count=1)
+    if not n:
+        raise ValueError('no `"version": "..."` line to update in package.json')
+    return new
 
 
 def read_pyproject_version(text: str) -> str:
@@ -235,8 +264,12 @@ def release(
     repo_root = pathlib.Path(repo_root)
     pyproject = repo_root / "pyproject.toml"
     changelog = repo_root / "CHANGELOG.md"
+    init_py = repo_root / "src" / "agent_takkub" / "__init__.py"
+    package_json = repo_root / "package.json"
 
     pp_text = pyproject.read_text(encoding="utf-8")
+    init_text = init_py.read_text(encoding="utf-8")
+    npm_text = package_json.read_text(encoding="utf-8")
     current = read_pyproject_version(pp_text)
 
     if explicit_version is not None:
@@ -265,6 +298,8 @@ def release(
     # write a half-done pyproject
     new_pp = set_pyproject_version(pp_text, new_version)
     new_cl = roll_changelog(cl_text, new_version, date)
+    new_init = set_init_version(init_text, new_version)
+    new_npm = set_npm_version(npm_text, new_version)
 
     summary = {
         "current": current,
@@ -291,9 +326,18 @@ def release(
         writes_started = True
         pyproject.write_text(new_pp, encoding="utf-8")
         changelog.write_text(new_cl, encoding="utf-8")
+        init_py.write_text(new_init, encoding="utf-8")
+        package_json.write_text(new_npm, encoding="utf-8")
 
         if do_commit:
-            _git(repo_root, "add", "pyproject.toml", "CHANGELOG.md")
+            _git(
+                repo_root,
+                "add",
+                "pyproject.toml",
+                "CHANGELOG.md",
+                "src/agent_takkub/__init__.py",
+                "package.json",
+            )
             _git(repo_root, "commit", "-m", f"chore(release): {tag}")
             commit_created = True
             summary["committed"] = True
@@ -309,9 +353,19 @@ def release(
                     if commit_created and original_head:
                         _git(repo_root, "reset", "--mixed", original_head)
                     else:
-                        _git(repo_root, "reset", "--", "pyproject.toml", "CHANGELOG.md")
+                        _git(
+                            repo_root,
+                            "reset",
+                            "--",
+                            "pyproject.toml",
+                            "CHANGELOG.md",
+                            "src/agent_takkub/__init__.py",
+                            "package.json",
+                        )
                 pyproject.write_text(pp_text, encoding="utf-8")
                 changelog.write_text(cl_text, encoding="utf-8")
+                init_py.write_text(init_text, encoding="utf-8")
+                package_json.write_text(npm_text, encoding="utf-8")
         except Exception as rollback_exc:
             raise RuntimeError(
                 f"release failed ({exc}); rollback also failed: {rollback_exc}"

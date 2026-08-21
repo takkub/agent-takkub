@@ -17,11 +17,30 @@ from agent_takkub.release import (
     read_pyproject_version,
     release,
     roll_changelog,
+    set_init_version,
+    set_npm_version,
     set_pyproject_version,
 )
 
 _PYPROJECT = '[project]\nname = "agent-takkub"\nversion = "0.3.9"\nrequires-python = ">=3.11"\n'
 _CHANGELOG = "# Changelog\n\n## [vNEXT]\n\n### Changed\n- did a thing\n\n(end)\n"
+
+_INIT_PY = '"""doc."""\n\n__version__ = "0.3.9"\n'
+_PACKAGE_JSON = '{\n  "name": "agent-takkub",\n  "version": "0.3.9",\n  "bin": {}\n}\n'
+
+
+def _make_repo(tmp_path, changelog: str = _CHANGELOG):
+    """Every file `release()` rewrites. The version lives in FOUR places and
+    `tests/test_version_sync.py` asserts they agree — a fixture carrying only
+    two of them is how release() shipped v1.0.80 with `__version__` left
+    behind at 1.0.79."""
+    (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    pkg = tmp_path / "src" / "agent_takkub"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(_INIT_PY, encoding="utf-8")
+    (tmp_path / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
+    return tmp_path
 
 
 class TestBump:
@@ -76,8 +95,7 @@ class TestRollChangelog:
 
 class TestRelease:
     def _repo(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
-        (tmp_path / "CHANGELOG.md").write_text(_CHANGELOG, encoding="utf-8")
+        _make_repo(tmp_path, _CHANGELOG)
         return tmp_path
 
     def test_dry_run_touches_nothing(self, tmp_path):
@@ -135,8 +153,7 @@ class TestExtractReleaseNotes:
 
 class TestReleaseGithubStep:
     def _repo(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
-        (tmp_path / "CHANGELOG.md").write_text(_CHANGELOG, encoding="utf-8")
+        _make_repo(tmp_path, _CHANGELOG)
         return tmp_path
 
     def test_github_release_invoked_when_committed_and_tagged(self, tmp_path):
@@ -205,8 +222,7 @@ class TestChangelogHasEntries:
 
 class TestGuards:
     def _repo(self, tmp_path, changelog=_CHANGELOG):
-        (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
-        (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+        _make_repo(tmp_path, changelog)
         return tmp_path
 
     def test_empty_vnext_blocks(self, tmp_path):
@@ -239,3 +255,59 @@ class TestGuards:
         repo = self._repo(tmp_path, _EMPTY_CL)
         with pytest.raises(ValueError, match="no changelog entries"):
             release(repo, part="patch", dry_run=True)
+
+
+class TestEveryVersionFileMovesTogether:
+    """v1.0.80 shipped with pyproject at 1.0.80 and `__version__` still at
+    1.0.79 because `release()` only ever rewrote two of the four files. CI's
+    own `test_version_sync` caught it — after the tag was already pushed."""
+
+    def test_release_bumps_all_four_files(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+        ):
+            release(repo, part="minor", today="2026-05-31")
+
+        assert 'version = "0.4.0"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+        assert '__version__ = "0.4.0"' in (repo / "src" / "agent_takkub" / "__init__.py").read_text(
+            encoding="utf-8"
+        )
+        assert '"version": "0.4.0"' in (repo / "package.json").read_text(encoding="utf-8")
+        assert "## [v0.4.0] - 2026-05-31" in (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    def test_all_four_are_staged_for_the_release_commit(self, tmp_path):
+        """Writing them is not enough — a file left unstaged still ships a
+        mismatched tag."""
+        repo = _make_repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git") as git,
+            patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+        ):
+            release(repo, part="minor", today="2026-05-31")
+
+        add = next(c for c in git.call_args_list if len(c.args) > 1 and c.args[1] == "add")
+        assert set(add.args[2:]) == {
+            "pyproject.toml",
+            "CHANGELOG.md",
+            "src/agent_takkub/__init__.py",
+            "package.json",
+        }
+
+    def test_set_init_version_rewrites_only_the_version(self):
+        out = set_init_version(_INIT_PY, "9.9.9")
+        assert '__version__ = "9.9.9"' in out
+        assert out.startswith('"""doc."""')
+
+    def test_set_npm_version_keeps_formatting_and_other_keys(self):
+        out = set_npm_version(_PACKAGE_JSON, "9.9.9")
+        assert '"version": "9.9.9"' in out
+        assert '"name": "agent-takkub"' in out
+        assert '"bin": {}' in out
+
+    def test_missing_version_line_raises(self):
+        with pytest.raises(ValueError):
+            set_init_version('"""doc."""\n', "9.9.9")
+        with pytest.raises(ValueError):
+            set_npm_version('{"name": "x"}', "9.9.9")

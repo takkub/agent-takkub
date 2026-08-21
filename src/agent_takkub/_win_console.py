@@ -46,6 +46,72 @@ def snapshot_console_hwnds() -> set[int]:
     return out
 
 
+def _window_pid(hwnd: int) -> int | None:
+    import ctypes
+    import ctypes.wintypes as wt
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid))
+    return int(pid.value) or None
+
+
+def _is_descendant_of(pid: int, root_pid: int, max_depth: int = 16) -> bool:
+    """Walk *pid*'s parents looking for *root_pid*.
+
+    Walking UP is deliberate: the alternative — enumerating every descendant
+    of the cockpit — is a full process-table scan (this box routinely has 400+
+    processes), and this runs on a timer. A parent chain is a handful of hops.
+    `max_depth` guards against a cycle in a lying/racy parent table.
+    """
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        for _ in range(max_depth):
+            proc = proc.parent()
+            if proc is None:
+                return False
+            if proc.pid == root_pid:
+                return True
+    except Exception:
+        # Process exited mid-walk, or access denied — not ours as far as we
+        # can prove, and proving it is the whole point of this check.
+        return False
+    return False
+
+
+def hide_own_console_windows(root_pid: int, already_seen: set[int]) -> set[int]:
+    """Hide console windows belonging to *root_pid*'s process tree.
+
+    Why the ownership check, when spawn-time hiding never needed one: that
+    pass only had to cover the few hundred milliseconds around a PTY spawn, so
+    "any console window that is new since a snapshot taken a moment ago" was
+    safe. Console windows that appear LATER cannot be swept the same way —
+    codex opens `pwsh.exe` for every shell tool call it makes, minutes into a
+    session (#286 already records pwsh as codex scaffolding), and a blind
+    periodic sweep would just as happily hide a terminal the USER opened.
+
+    *already_seen* is a caller-owned set of HWNDs this has already ruled on;
+    it is mutated in place and returned. It keeps each sweep to an
+    `EnumWindows` plus a parent walk for genuinely new windows only.
+    """
+    if sys.platform != "win32":
+        return already_seen
+    fresh = snapshot_console_hwnds() - already_seen
+    if not fresh:
+        return already_seen
+    mine: set[int] = set()
+    for hwnd in fresh:
+        already_seen.add(hwnd)
+        pid = _window_pid(hwnd)
+        if pid is not None and _is_descendant_of(pid, root_pid):
+            mine.add(hwnd)
+    if mine:
+        hide_hwnds(mine)
+    return already_seen
+
+
 def hide_hwnds(hwnds: set[int]) -> int:
     """Hide each HWND. Returns number actually hidden."""
     if sys.platform != "win32" or not hwnds:

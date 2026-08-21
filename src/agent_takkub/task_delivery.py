@@ -284,10 +284,23 @@ class DeliveryManager:
     def mark_done(self, delivery_id: str) -> bool:
         return self._set_state(delivery_id, DeliveryState.DONE, release=True)
 
-    def mark_failed(self, delivery_id: str) -> bool:
-        return self._set_state(delivery_id, DeliveryState.FAILED, release=True)
+    def mark_failed(self, delivery_id: str, reason: str = "") -> bool:
+        """*reason* rides along on the emitted event, and callers must give
+        one (#331).
 
-    def _set_state(self, delivery_id: str, state: DeliveryState, *, release: bool = False) -> bool:
+        FAILED is reached from outcomes that are nothing alike: the task text
+        never reached the pane (a real delivery failure), the pane was closed
+        with a delivery still registered (routine), or the teammate ran the
+        task and reported `takkub done --failed` (also routine — the delivery
+        worked perfectly). Without a reason on the event they are one
+        undifferentiated count, which is how the auto-issue reporter opened a
+        bug over four ordinary FAILED task reports.
+        """
+        return self._set_state(delivery_id, DeliveryState.FAILED, release=True, reason=reason)
+
+    def _set_state(
+        self, delivery_id: str, state: DeliveryState, *, release: bool = False, **extra: object
+    ) -> bool:
         with self._lock:
             delivery = self._deliveries.get(delivery_id)
             if delivery is None:
@@ -295,7 +308,11 @@ class DeliveryManager:
             delivery.state = state
             if release or state not in _SINGLE_FLIGHT_STATES:
                 self._release_active(delivery)
-        self._emit(f"task_delivery_{state.value}", delivery)
+        # Drop empty extras so a caller that passes nothing produces exactly
+        # the event payload it always did.
+        self._emit(
+            f"task_delivery_{state.value}", delivery, **{k: v for k, v in extra.items() if v}
+        )
         return True
 
     def cancel_for_session(self, project_id: str, pane_id: str, session_generation: int) -> int:

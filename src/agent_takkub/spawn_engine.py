@@ -513,6 +513,20 @@ _CORRUPT_SPAWN_MAX_RETRIES = 5
 _CORRUPT_SPAWN_BACKOFF_MS = 300
 
 
+# `_auto_trust` used to press Enter ONCE and then stop polling entirely
+# (#330). If that keypress landed mid-render and was swallowed — the same
+# swallow that makes task paste unreliable — nobody was left watching and the
+# pane sat on the modal forever (observed: 2 of 3 fan-out panes cleared, the
+# third never did). It now keeps watching until the modal is confirmed GONE,
+# re-pressing at most `_AUTO_TRUST_MAX_PRESSES` times and no more often than
+# `_AUTO_TRUST_RETRY_EVERY_MS` apart, so the modal has time to process one
+# keypress before the next arrives. The cap matters: `is_at_trust_prompt()` is
+# a screen-scrape, and a future TUI whose ordinary screen happened to match it
+# would otherwise take an Enter every 500 ms forever.
+_AUTO_TRUST_MAX_PRESSES = 5
+_AUTO_TRUST_RETRY_EVERY_MS = 1_500
+
+
 @dataclass
 class PaneState:
     """Per-pane transient state, keyed ``"{project}::{role}"`` in
@@ -3378,17 +3392,65 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         if pane is None:
             return
         elapsed = [0]
+        presses = [0]
+        last_press_ms = [-_AUTO_TRUST_RETRY_EVERY_MS]
 
         def _check() -> None:
             if pane.session is None or not pane.session.is_alive:
                 return
-            if pane.session.is_at_trust_prompt():
-                # option 1 (Yes) is preselected; just hit Enter
-                pane.session.write("\r")
+            at_prompt = pane.session.is_at_trust_prompt()
+            if at_prompt:
+                due = elapsed[0] - last_press_ms[0] >= _AUTO_TRUST_RETRY_EVERY_MS
+                if due and presses[0] < _AUTO_TRUST_MAX_PRESSES:
+                    # option 1 (Yes) is preselected; just hit Enter
+                    pane.session.write("\r")
+                    presses[0] += 1
+                    last_press_ms[0] = elapsed[0]
+            elif presses[0]:
+                # Confirmed gone. Seeing the modal disappear is the ONLY
+                # success signal there is — "we pressed Enter" is not one.
+                _log_event(
+                    "auto_trust_cleared",
+                    role=role_name,
+                    project=self._resolve_project(project),
+                    presses=presses[0],
+                    after_ms=elapsed[0],
+                )
                 return
             elapsed[0] += 500
             if elapsed[0] >= max_ms:
+                if at_prompt:
+                    self._warn_lead_trust_prompt_stuck(role_name, project, elapsed[0] / 1000.0)
                 return
             QTimer.singleShot(500, _check)
 
         QTimer.singleShot(1_000, _check)
+
+    def _warn_lead_trust_prompt_stuck(
+        self, role_name: str, project: str | None, seconds: float
+    ) -> None:
+        """(#330) `_auto_trust` spent its whole budget and the modal is STILL
+        up — say so, instead of leaving a pane that looks busy but never got a
+        task.
+
+        The Lead's last word on this pane was `[delivery-blocked-prompt] …
+        cockpit is auto-answering` (#186), which reads as "handled". When
+        auto-answer then gives up, nothing retracts that: the pane shows
+        `working`, has never received a task, and the Lead only finds out by
+        reading events.log by hand. This is the retraction."""
+        project_ns = self._resolve_project(project)
+        _log_event(
+            "auto_trust_gave_up", role=role_name, project=project_ns, after_s=round(seconds, 1)
+        )
+        if role_name == LEAD.name:
+            return
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        self._notify_lead(
+            project_ns,
+            f"⛔ [trust-prompt-stuck] {role_name} pane ยังติด trust/onboarding modal หลัง "
+            f"auto-answer พยายามมา {seconds:.0f}s แล้วเลิก — pane นี้ "
+            f"**ยังไม่เคยได้รับใบงาน** (ไม่ใช่กำลังทำงานอยู่) กดตอบใน pane เอง หรือ close "
+            f"แล้ว assign ใหม่ (เปลี่ยน provider ก็ได้) — issue #330",
+        )

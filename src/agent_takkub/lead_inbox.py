@@ -1141,7 +1141,7 @@ class LeadInboxMixin:
                 ),
             )
             if not wrote:
-                manager.mark_failed(delivery.delivery_id)
+                manager.mark_failed(delivery.delivery_id, "writer_queue_full")
                 _log_event(
                     "writer_queue_full",
                     project=self._resolve_project(project),
@@ -1169,7 +1169,7 @@ class LeadInboxMixin:
 
             def _on_settled() -> None:
                 if pane.session is not _task_sess:
-                    manager.mark_failed(delivery.delivery_id)
+                    manager.mark_failed(delivery.delivery_id, "session_replaced")
                     return
                 try:
                     accepted = not _task_sess.is_at_ready_prompt()

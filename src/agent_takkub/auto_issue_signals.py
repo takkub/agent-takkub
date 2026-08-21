@@ -95,6 +95,13 @@ class SignalRule:
     # so a high count of trivial occurrences doesn't fire on its own.
     field: str | None = None
     field_min: float | None = None
+    # Values of `ignore_field` that mean "this occurrence is routine" — the
+    # event fired, but not for a reason worth a bug report. Needed because one
+    # event name can cover outcomes that are nothing alike (#331:
+    # `task_delivery_failed` is emitted both when the task never reached the
+    # pane AND when a teammate simply reported the task failed).
+    ignore_field: str | None = None
+    ignore_values: frozenset[str] = frozenset()
 
 
 # Each `min_count` is stated against what the reference box actually produced,
@@ -112,7 +119,13 @@ RULES: tuple[SignalRule, ...] = (
         event="task_delivery_failed",
         min_count=3,
         title="ส่งใบงานไม่สำเร็จซ้ำ",
-        why="วัดจริง 18 ครั้งใน 2 วัน กระจายทั้งช่วง — กระจุก 3 ครั้งใน 6 ชม. คือมีอะไรพัง",
+        why=(
+            "วัดจริง 18 ครั้งใน 2 วัน กระจายทั้งช่วง — กระจุก 3 ครั้งใน 6 ชม. คือมีอะไรพัง · "
+            "นับเฉพาะที่ใบงานไปไม่ถึง pane จริงๆ: #331 เปิดเป็น false positive จาก "
+            "`takkub done --failed` ธรรมดา 4 ใบ ซึ่ง delivery สำเร็จทุกใบ"
+        ),
+        ignore_field="reason",
+        ignore_values=frozenset({"agent_reported_failed", "pane_closed"}),
     ),
     SignalRule(
         key="delivery_boot_timeout_failed",
@@ -190,6 +203,10 @@ def scan_for_signals(
                 for rule in rules:
                     if rule.event != name:
                         continue
+                    if rule.ignore_field is not None and (
+                        str(rec.get(rule.ignore_field) or "") in rule.ignore_values
+                    ):
+                        continue
                     if rule.field is not None:
                         try:
                             value = float(rec.get(rule.field) or 0)
@@ -200,8 +217,13 @@ def scan_for_signals(
                         worst[rule.key] = max(worst.get(rule.key, 0.0), value)
                     counts[rule.key] += 1
                     if len(samples.setdefault(rule.key, [])) < 5:
+                        # Include the reason when the event carries one —
+                        # an auto-filed issue that only says "×4" gives the
+                        # reader nothing to act on (#331).
+                        reason = str(rec.get("reason") or "")
                         samples[rule.key].append(
                             f"{stamp:%m-%d %H:%M} {name} {rec.get('role', '')}"
+                            + (f" [{reason}]" if reason else "")
                         )
     except OSError:
         return []

@@ -49,6 +49,9 @@ def repo(tmp_path):
     subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
     (root / "README.md").write_text("x", encoding="utf-8")
+    # Marks the tree as a Python project so the gate takes the pytest/ruff/
+    # lint-imports path rather than #329's non-Python branch.
+    (root / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
     return root
@@ -226,3 +229,117 @@ def test_render_table_smoke(repo, monkeypatch):
     table = qa_gate.render_table(report)
     assert "GATE: PASS" in table
     assert "pytest" in table and "ruff" in table and "lint-imports" in table
+
+
+# ── #329: a tree with no Python in it ─────────────────────────────────────
+
+
+@pytest.fixture
+def node_repo(tmp_path):
+    """A git repo that is a Node project and nothing else — no pyproject.toml,
+    no tests/, exactly the saas_admin shape that used to die on
+    `No module named pytest`."""
+    root = tmp_path / "node-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+    (root / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
+    (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (root / "README.md").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    return root
+
+
+class TestDetectProjectKind:
+    def test_python_marker_wins_over_a_package_json(self, tmp_path) -> None:
+        """A Python project that also carries package.json for tooling must
+        still take the Python gate."""
+        (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+        (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+        assert qa_gate.detect_project_kind(tmp_path) == "python"
+
+    def test_a_bare_tests_dir_is_enough_to_count_as_python(self, tmp_path) -> None:
+        """Refusing a Python project that merely packages itself unusually
+        would be a worse failure than the one this replaces."""
+        (tmp_path / "tests").mkdir()
+        assert qa_gate.detect_project_kind(tmp_path) == "python"
+
+    def test_node_markers(self, tmp_path) -> None:
+        (tmp_path / "pnpm-workspace.yaml").write_text("", encoding="utf-8")
+        assert qa_gate.detect_project_kind(tmp_path) == "node"
+
+    def test_neither(self, tmp_path) -> None:
+        assert qa_gate.detect_project_kind(tmp_path) == "unknown"
+
+
+class TestNodeProjectGate:
+    def test_runs_the_projects_own_checks_instead_of_pytest(self, node_repo, monkeypatch) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        ran = [cmd for cmd, _env in recorder]
+        assert not any("pytest" in " ".join(map(str, cmd)) for cmd in ran), (
+            "a Node project must never be handed pytest — that IS #329"
+        )
+        assert any("tsc" in " ".join(map(str, cmd)) for cmd in ran)
+        assert report.ok
+
+    def test_a_failing_check_fails_the_gate_and_skips_the_rest(
+        self, node_repo, monkeypatch
+    ) -> None:
+        # detect step is free; the first real check fails.
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], [1]))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not report.ok
+        assert report.exit_code != 0
+        assert any(s.skipped for s in report.steps), "fail-fast must skip the later checks"
+
+    def test_targeted_paths_are_reported_as_ignored_not_swallowed(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """The original complaint: `--targeted apps/frontend ...` vanished with
+        no word that it had done nothing."""
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(
+            cwd=node_repo, targeted=["apps/frontend", "packages/ui"], write_report=False
+        )
+
+        note = next(s for s in report.steps if s.name == "targeted")
+        assert note.skipped
+        assert "apps/frontend" in note.detail
+
+    def test_a_node_project_with_nothing_runnable_refuses_clearly(
+        self, node_repo, monkeypatch
+    ) -> None:
+        (node_repo / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not report.ok
+        assert "refuse" in report.steps[0].detail
+
+
+class TestUnknownProjectGate:
+    def test_refuses_with_a_readable_message_not_no_module_named_pytest(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        root = tmp_path / "plain"
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=root, write_report=False)
+
+        assert not report.ok
+        detail = report.steps[0].detail
+        assert "refuse" in detail
+        assert "pyproject.toml" in detail and "package.json" in detail

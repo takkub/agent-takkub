@@ -2904,13 +2904,14 @@
     {
       "module": "agent_takkub.qa_gate",
       "imports": [
-        "agent_takkub._win_console"
+        "agent_takkub._win_console",
+        "agent_takkub.verify"
       ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.release",
@@ -4097,9 +4098,10 @@
         "agent_takkub._win_console"
       ],
       "imported_by": [
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.qa_gate"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {

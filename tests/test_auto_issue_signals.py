@@ -214,3 +214,68 @@ class TestSharedRateCap:
         )
         sig.file_signal_issue(sig.SignalHit(sig.RULES[0], 3, 0.0, []))
         assert called == []
+
+
+def _delivery_failures(now: datetime, count: int, reason: str | None) -> list[dict]:
+    return [
+        {
+            "ts": (now - timedelta(minutes=i * 5)).isoformat(),
+            "event": "task_delivery_failed",
+            "role": "backend",
+            **({"reason": reason} if reason else {}),
+        }
+        for i in range(count)
+    ]
+
+
+class TestDeliveryFailureReasons:
+    """#331 was filed over four ordinary `takkub done --failed` reports.
+    `task_delivery_failed` is emitted for outcomes that are nothing alike —
+    the task never reaching the pane (a real defect), a pane being closed with
+    a delivery on the books (routine), and a teammate reporting the task
+    failed (routine, and the delivery worked). Only the first is a bug."""
+
+    def test_agent_reported_failures_never_file_an_issue(self, tmp_path: Path) -> None:
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 8, "agent_reported_failed"))
+        assert sig.scan_for_signals(log, now=now) == []
+
+    def test_pane_close_failures_never_file_an_issue(self, tmp_path: Path) -> None:
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 8, "pane_closed"))
+        assert sig.scan_for_signals(log, now=now) == []
+
+    def test_real_delivery_failures_still_fire(self, tmp_path: Path) -> None:
+        """The rule must not be neutered — a task that genuinely never reached
+        the pane is exactly what this signal is for."""
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 4, "writer_queue_full"))
+        hits = sig.scan_for_signals(log, now=now)
+        assert [h.rule.key for h in hits] == ["task_delivery_failed"]
+        assert hits[0].count == 4
+
+    def test_routine_reasons_do_not_pad_the_count_of_real_ones(self, tmp_path: Path) -> None:
+        """Mixed window: two real failures (below the bar of 3) alongside a
+        pile of routine ones must stay silent, not be pushed over by them."""
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        records = _delivery_failures(now, 2, "writer_queue_full") + _delivery_failures(
+            now, 20, "agent_reported_failed"
+        )
+        log = _log(tmp_path / "events.log", records)
+        assert sig.scan_for_signals(log, now=now) == []
+
+    def test_an_event_with_no_reason_still_counts(self, tmp_path: Path) -> None:
+        """Logs written by an older build carry no `reason`. Treating those as
+        routine would silently blind the rule against the very history it was
+        calibrated on."""
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 4, None))
+        assert [h.rule.key for h in sig.scan_for_signals(log, now=now)] == ["task_delivery_failed"]
+
+    def test_the_reason_reaches_the_issue_body(self, tmp_path: Path) -> None:
+        """An auto-filed issue that only says "×4" gives its reader nothing to
+        act on — which is precisely what #331 looked like."""
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 3, "writer_queue_full"))
+        hits = sig.scan_for_signals(log, now=now)
+        assert all("writer_queue_full" in s for s in hits[0].samples)

@@ -3279,7 +3279,9 @@ class Orchestrator(
         delivery_id = getattr(self, "_last_delivery_ids", {}).pop((project_ns, role_name), None)
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_id and delivery_manager is not None:
-            delivery_manager.mark_failed(delivery_id)
+            # Routine: closing a pane that still has a delivery on the books
+            # is not a delivery malfunction (#331).
+            delivery_manager.mark_failed(delivery_id, "pane_closed")
         if delivery_manager is not None:
             delivery_manager.cancel_for_session(
                 project_ns,
@@ -4169,7 +4171,10 @@ class Orchestrator(
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_id and delivery_manager is not None:
             if failed:
-                delivery_manager.mark_failed(delivery_id)
+                # The teammate ran the task and reported it failed — the
+                # DELIVERY succeeded (#331). Same terminal state, entirely
+                # different meaning, hence the reason.
+                delivery_manager.mark_failed(delivery_id, "agent_reported_failed")
             else:
                 delivery_manager.mark_done(delivery_id)
 

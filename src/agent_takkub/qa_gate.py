@@ -244,6 +244,113 @@ def _head_sha(cwd: Path) -> str:
         return "unknown"
 
 
+# Markers that decide which gate a tree can actually run (#329). Python wins
+# when both are present: a Python project that also carries a package.json for
+# tooling is still a Python project, while a Node repo with a stray
+# pyproject.toml is far rarer.
+_PYTHON_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini")
+_NODE_MARKERS = ("package.json", "pnpm-workspace.yaml")
+
+
+def detect_project_kind(root: Path) -> str:
+    """``"python"`` | ``"node"`` | ``"unknown"`` for the tree at *root*.
+
+    A bare `tests/` directory counts as Python too: the marker list exists to
+    avoid misrouting a real Python project, and refusing one that merely
+    packages itself unusually would be a worse failure than the one this
+    replaces.
+    """
+    if any((root / m).exists() for m in _PYTHON_MARKERS) or (root / "tests").is_dir():
+        return "python"
+    if any((root / m).exists() for m in _NODE_MARKERS):
+        return "node"
+    return "unknown"
+
+
+def _non_python_gate(
+    kind: str,
+    root: Path,
+    targeted: list[str] | None,
+    report: GateReport,
+    env: dict,
+    log_dir: Path | None,
+) -> GateReport:
+    """Gate a tree that has no Python in it (#329).
+
+    The team rule is "`takkub qa-gate` is the ONE entrypoint, never run pytest/
+    ruff/lint-imports by hand" — but the gate only knew how to run those three,
+    so calling it inside a Node repo died on `No module named pytest` and left
+    the specialist to run the project's real commands by hand, with nothing in
+    their report to prove they had. Either the rule or the tool had to give;
+    the tool gives. `verify.detect_stack` already knows how to read a Node
+    project's own scripts, so this delegates there rather than inventing a
+    second detector that would drift from it.
+    """
+    if kind != "node":
+        report.steps.append(
+            StepResult(
+                "detect",
+                False,
+                False,
+                0.0,
+                f"refuse: no Python ({'/'.join(_PYTHON_MARKERS)}) and no Node "
+                f"({'/'.join(_NODE_MARKERS)}) markers in {root} — qa-gate has no gate "
+                "to run for this project. Run this project's own test command.",
+            )
+        )
+        return report
+
+    from .verify import detect_stack
+
+    checks = detect_stack(root)
+    if not checks:
+        report.steps.append(
+            StepResult(
+                "detect",
+                False,
+                False,
+                0.0,
+                f"refuse: Node project at {root} but nothing to run — no `test` script, "
+                "no tsconfig.json, no eslint config. Add one, or run the project's own "
+                "command directly.",
+            )
+        )
+        return report
+
+    report.steps.append(
+        StepResult(
+            "detect",
+            True,
+            False,
+            0.0,
+            f"node project — delegating to: {', '.join(c.name for c in checks)}",
+        )
+    )
+    if targeted:
+        # Never silently swallow them: a Node gate has no generic way to map
+        # source paths onto a test selection, and pretending otherwise is how
+        # a "targeted" run quietly became a full one with no one told.
+        report.steps.append(
+            StepResult(
+                "targeted",
+                True,
+                True,
+                0.0,
+                "--targeted is Python-only — these paths did NOT narrow anything: "
+                + " ".join(targeted),
+            )
+        )
+
+    for index, check in enumerate(checks):
+        step = _run_step(check.name, check.cmd, env, root, log_dir)
+        report.steps.append(step)
+        if not step.ok:
+            for rest in checks[index + 1 :]:
+                report.steps.append(_skip(rest.name, f"{check.name} failed — fail-fast"))
+            break
+    return report
+
+
 def run_gate(
     *,
     targeted: list[str] | None = None,
@@ -274,6 +381,15 @@ def run_gate(
             report.report_path = _maybe_write_report(wroot, report)
         return report
 
+    log_dir = None
+    if write_report:
+        log_dir = wroot / "runtime" / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
+
+    kind = detect_project_kind(wroot)
+    if kind != "python":
+        _non_python_gate(kind, wroot, targeted, report, env, log_dir)
+        return finish()
+
     vc = _venv_check(bin_dir)
     report.steps.append(vc)
     if not vc.ok:
@@ -281,10 +397,6 @@ def run_gate(
         report.steps.append(_skip("ruff", "venv-check failed"))
         report.steps.append(_skip("lint-imports", "venv-check failed"))
         return finish()
-
-    log_dir = None
-    if write_report:
-        log_dir = wroot / "runtime" / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
 
     py = _resolve_tool(bin_dir, "python") or sys.executable
 

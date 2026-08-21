@@ -27,7 +27,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from wcwidth import wcwidth
 
 from ._pty_backend import spawn_pty_bounded
-from ._win_console import hide_hwnds, snapshot_console_hwnds
+from ._win_console import hide_hwnds, hide_own_console_windows, snapshot_console_hwnds
 from .job_object_manager import JobObjectManager
 from .provider_spec import (
     AUTH_TRANSIENT_GRACE_SEC,
@@ -779,6 +779,42 @@ _GEMINI_MODEL_RE = re.compile(
 )
 
 
+# Console windows opened AFTER a pane spawns (#330 follow-up). The spawn-time
+# sweep above only watches the 3.5 s around the PTY starting, which was enough
+# for the conhost pywinpty surfaces — but codex opens a `pwsh.exe` shell-tool
+# host on every shell command it runs, minutes into a session, and nothing was
+# left watching for those. One process-wide timer handles every pane (a timer
+# per pane would multiply an EnumWindows sweep by the pane count for no gain),
+# and `hide_own_console_windows` restricts hiding to this process's own tree
+# so a terminal the USER opened is never touched.
+_CONSOLE_SWEEP_MS = 2_000
+_console_sweeper: QTimer | None = None
+_console_hwnds_seen: set[int] = set()
+
+
+def _ensure_console_sweeper() -> None:
+    """Start the process-wide console sweeper once (Windows only)."""
+    global _console_sweeper
+    if sys.platform != "win32" or _console_sweeper is not None:
+        return
+    import os
+
+    root_pid = os.getpid()
+
+    def _sweep_owned() -> None:
+        try:
+            hide_own_console_windows(root_pid, _console_hwnds_seen)
+        except Exception:
+            # A sweep is cosmetic; never let it reach the Qt event loop.
+            pass
+
+    timer = QTimer()
+    timer.setInterval(_CONSOLE_SWEEP_MS)
+    timer.timeout.connect(_sweep_owned)
+    timer.start()
+    _console_sweeper = timer
+
+
 class WritePriority(IntEnum):
     CONTROL = 0
     USER = 10
@@ -1177,6 +1213,7 @@ class PtySession(QObject):
 
             for delay in (150, 400, 900, 1800, 3500):
                 QTimer.singleShot(delay, _sweep)
+            _ensure_console_sweeper()
 
         if transcript_path is not None:
             try:

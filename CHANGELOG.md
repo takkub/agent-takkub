@@ -4,6 +4,52 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`takkub release` bump version ไม่ครบ — v1.0.80 ออกไปพร้อม `__version__` ค้างที่ 1.0.79** —
+  เลข version อยู่ 4 ที่ (pyproject.toml · package.json · `agent_takkub.__version__` · CHANGELOG)
+  และ `tests/test_version_sync.py` บังคับให้ตรงกันทั้งหมด แต่ `release()` เขียนแค่ 2 ที่ ที่ผ่านมา
+  รอดมาได้เพราะคนที่ cut release แก้อีก 2 ไฟล์ด้วยมือก่อนรันคำสั่ง พอปล่อยด้วยคำสั่งล้วนๆ ก็ได้ tag
+  ที่ version ไม่ตรงกันและ CI แดง → `release()` เขียน+stage ครบทั้ง 4 ไฟล์ และ rollback ครบทั้ง 4
+  เมื่อล้มกลางทาง (v1.0.80 ที่ตกค้างถูกซิงก์ให้ตรงในคอมมิตนี้ — tag ที่ push ไปแล้วไม่แตะ) + 5 tests
+
+- **RuntimeError จาก token-meter เมื่อปิด pane ระหว่างอ่าน** (#327) — worker thread ชื่อ
+  `token-meter` emit `_tokenMeterReady` ใส่ `AgentPane` ที่ C++ object ถูกลบไปแล้ว ("wrapped C/C++
+  object of type AgentPane has been deleted") — เป็น thread ธรรมดา ไม่ใช่ Qt thread exception เลย
+  หลุดเป็น unhandled จนถึงตัว auto-capture → ครอบ emit ด้วย `try/except RuntimeError` ใน
+  `_emit_token_meter()` (เช็ค "ถูกลบยัง" ก่อน emit ชนะ race ไม่ได้ — pane ตายได้ทุกจังหวะรวมถึง
+  ระหว่างเช็คกับ emit) exception ชนิดอื่นยัง propagate ตามเดิม + 4 tests
+- **auto-issue เปิดบั๊กจากเรื่องปกติ — `task_delivery_failed` เหมารวมของที่ไม่ใช่ความผิดพลาด** (#331) —
+  state FAILED มาจาก 3 ทางที่ไม่เหมือนกันเลย: ใบงานไปไม่ถึง pane (พังจริง), ปิด pane ทั้งที่ยังมี
+  delivery ค้าง (ปกติ), และ teammate รายงาน `takkub done --failed` (ปกติ — delivery สำเร็จด้วยซ้ำ)
+  ทั้งสามนับรวมเป็นตัวเลขเดียว #331 จึงถูกเปิดจาก done --failed ธรรมดา 4 ใบ → `mark_failed(reason=…)`
+  ทุก call site, auto-issue นับเฉพาะ reason ที่พังจริง, และ reason โผล่ในตัวอย่างใน issue body
+  (เดิมบอกแค่ "×4" อ่านแล้วทำอะไรต่อไม่ได้) + 6 tests
+- **`takkub qa-gate` ใช้กับโปรเจคที่ไม่ใช่ Python ไม่ได้** (#329) — root CLAUDE.md บังคับว่า qa-gate
+  คือ entrypoint เดียวและห้ามพิมพ์ pytest ดิบ แต่ gate รู้จักแค่ pytest/ruff/lint-imports พอเรียกใน
+  monorepo Node มันตายที่ `No module named pytest` แล้ว `--targeted` ที่ชี้ไป path ของโปรเจคนั้นก็
+  หายเงียบ → กฎกลางบังคับเครื่องมือที่ใช้ไม่ได้ แล้วความผิดไปตกที่ specialist → `detect_project_kind()`
+  แยกชนิดโปรเจคก่อน: Node → delegate ไป `verify.detect_stack` (test script / `tsc --noEmit` /
+  eslint) พร้อม fail-fast เหมือนเดิม · ไม่รู้จัก → refuse พร้อมบอกว่าหา marker อะไรไม่เจอ ·
+  `--targeted` บน Node ขึ้นเป็น step ที่บอกตรงๆ ว่า path เหล่านั้นไม่ได้ narrow อะไร ·
+  แก้ถ้อยคำใน CLAUDE.md ให้กฎ "ห้ามพิมพ์ pytest ดิบ" ผูกกับ repo นี้เท่านั้น + 10 tests
+- **gemini pane ค้าง folder-trust ไม่หลุด — auto-answer กด Enter ครั้งเดียวแล้วเลิกเฝ้า** (#330,
+  regression ของ #186) — `_auto_trust` เจอ modal → `write("\r")` → `return` จบการ poll ทันที ถ้า
+  Enter นั้นตกกลาง render แล้วถูกกลืน (การกลืนแบบเดียวกับที่ทำให้ paste ใบงานไม่น่าเชื่อถือ) ก็ไม่มีใคร
+  เฝ้าต่ออีกเลย pane ค้างยาว — ตรงกับที่รายงาน: fan-out 3 pane ผ่าน 2 ค้าง 1 → เฝ้าจนเห็น modal
+  **หายจริง** เท่านั้นถึงจะถือว่าสำเร็จ, กดซ้ำได้สูงสุด 5 ครั้งห่างกัน 1.5s (cap เพราะ
+  `is_at_trust_prompt()` เป็น screen-scrape — TUI อนาคตที่หน้าจอปกติดันแมตช์จะโดนยิง Enter ทุก 500ms
+  ไม่รู้จบ) · หมดเวลาแล้วยังติด → แจ้ง Lead ว่า pane นี้ **ยังไม่เคยได้รับใบงาน** (ถอนคำว่า "cockpit
+  กำลัง auto-answer อยู่" จาก #186 ที่อ่านแล้วนึกว่าจัดการอยู่) + 7 tests
+- **หน้าต่าง PowerShell เปล่าเด้งขึ้นมาเรื่อยๆ ระหว่างใช้งาน** — `pwsh.exe` คือ shell-tool host ของ
+  codex บน Windows (#286 จดไว้แล้วว่าเป็น scaffolding) แต่ตัวซ่อนหน้าต่าง console ทำงานเฉพาะ 3.5
+  วินาทีรอบ spawn PTY เท่านั้น ส่วน pwsh เกิดทุกครั้งที่ agent สั่ง shell ซึ่งเป็นนาทีที่ 5/10/20 →
+  ไม่มีใครกวาด → `hide_own_console_windows()` + timer ระดับ process ตัวเดียว (ไม่ใช่ต่อ pane —
+  จะได้ไม่คูณ EnumWindows ตามจำนวน pane) กวาดทุก 2 วิ · **ซ่อนเฉพาะหน้าต่างที่เจ้าของ process เป็น
+  ลูกหลานของ cockpit** — กวาดแบบไม่ดูเจ้าของจะไปซ่อน terminal ที่ user เปิดเองด้วย · เดินขึ้นหา
+  parent (ไม่ enumerate ลูกทั้งหมด — เครื่องนี้มี 400+ process และนี่รันบน timer) และจำผลต่อ HWND
+  ไว้ ไม่ตัดสินซ้ำ + 10 tests
+
 ## [v1.0.80] - 2026-08-21
 
 ### Fixed (แก้)

@@ -3065,8 +3065,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sqag = sub.add_parser(
         "qa-gate",
-        help="canonical gate: venv-check -> pytest -> ruff check -> lint-imports, "
-        "one entrypoint shared by qa pane / CI / a user's terminal (#325)",
+        help="canonical gate: venv-check -> pytest -> ruff check -> lint-imports on a "
+        "Python project, or that project's own checks on a Node one (#329) — one "
+        "entrypoint shared by qa pane / CI / a user's terminal (#325)",
     )
     sqag.add_argument(
         "--targeted",
@@ -3074,7 +3075,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         default=None,
         help="mid-flight tier: run pytest on only these paths (skips ruff/lint-imports, "
-        "no report file written) — team policy: targeted mid-flight, full gate once at the batch gate",
+        "no report file written) — team policy: targeted mid-flight, full gate once at the "
+        "batch gate. Python only: on a Node project the gate says so and runs unnarrowed",
     )
     sqag.add_argument(
         "--v2-flags",

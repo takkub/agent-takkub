@@ -792,9 +792,33 @@ class AgentPane(QFrame):
                         usage = None
             finally:
                 # Hand back to the GUI thread (queued — emitter != receiver thread).
-                self._tokenMeterReady.emit(cand, usage)
+                self._emit_token_meter(cand, usage)
 
         threading.Thread(target=_worker, daemon=True, name="token-meter").start()
+
+    def _emit_token_meter(self, cand, usage) -> None:
+        """Emit `_tokenMeterReady` from the worker thread, tolerating a pane
+        that was closed while the read was in flight (#327).
+
+        Closing a pane deletes the underlying C++ QWidget, and emitting any
+        signal on a deleted QObject raises ``RuntimeError: wrapped C/C++
+        object of type AgentPane has been deleted``. The worker runs on a
+        plain `threading.Thread`, so that lands as an unhandled exception in
+        a non-Qt thread — which is exactly how it reached the auto-capture
+        reporter instead of being ignored.
+
+        Checking "is it deleted?" first cannot fix this: the pane can be torn
+        down at any instant, including between the check and the emit, so the
+        guard has to be the emit itself. `_apply_token_meter` still keeps its
+        own teardown check for the case where the pane survives the emit but
+        is gone (or respawned) by the time the queued slot runs.
+        """
+        try:
+            self._tokenMeterReady.emit(cand, usage)
+        except RuntimeError:
+            # Pane closed mid-read — the result has nowhere to go, which is
+            # the correct outcome, not an error worth surfacing.
+            pass
 
     def _apply_token_meter(self, cand, usage) -> None:
         """GUI-thread slot: apply an off-thread token-meter read to the badge."""
