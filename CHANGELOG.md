@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.82] - 2026-08-21
+
 ### Fixed (แก้)
 
 - **CI windows ตายเงียบเพราะ console sweeper ที่เพิ่งเพิ่มใน 1.0.81** — timer กวาดหน้าต่าง console
