@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.83] - 2026-08-21
+
 ### Fixed (แก้)
 
 - **`takkub send` ตามหลัง `assign` ทิ้งใบงานที่ยังไม่ยืนยันว่าถึงมือ แล้วรายงานว่า "ปลอดภัย"** (#336) —
