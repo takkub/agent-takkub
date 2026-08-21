@@ -199,8 +199,13 @@ class TestCoreV2Views:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_OVERVIEW)
         assert dlg._cv2_flag_toggles["brain"].isChecked() is True
         assert dlg._cv2_flag_toggles["router"].isChecked() is False
-        # "context" has no wired core module yet — toggle exists but disabled.
-        assert dlg._cv2_flag_toggles["context"].isEnabled() is False
+        # Every flag in _FLAG_ROWS now has a wired core module — "context"
+        # included (Phase 7c: core/brain/context_builder.py, called from
+        # orchestrator._assign_dispatch's Context-Injection hook), so no row
+        # may ship disabled. Guards the stale `wired=False` this row carried
+        # after 7c landed, which left the toggle greyed out in Settings.
+        for key in core_v2_settings.FLAG_NAMES:
+            assert dlg._cv2_flag_toggles[key].isEnabled() is True, key
         dlg.deleteLater()
 
     def test_overview_save_flags_persists(self) -> None:

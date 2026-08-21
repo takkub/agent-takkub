@@ -84,8 +84,8 @@ _FLAG_ROWS: tuple[tuple[str, str, str, bool], ...] = (
     (
         "context",
         "TAKKUB_V2_CONTEXT",
-        "Context Builder — ยังไม่มี core.context module (phase ถัดไป)",
-        False,
+        "Context Builder — inject memory เข้า task ตอน assign (ต้องเปิด BRAIN คู่กัน)",
+        True,
     ),
     ("brain", "TAKKUB_V2_BRAIN", "Second Brain — memory candidate pipeline + retrieval", True),
     (
