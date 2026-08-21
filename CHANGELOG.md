@@ -2,7 +2,62 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [vNEXT]
+
+## [v1.0.80] - 2026-08-21
+
+### Fixed (แก้)
+
+- **ปุ่ม `TAKKUB_V2_CONTEXT` ใน Settings กดไม่ได้ ทั้งที่ Context Builder มีจริงมาตั้งแต่ Phase 7c** (#309) —
+  แถว context ใน `settings_core_v2._FLAG_ROWS` ยังค้าง `wired=False` จากตอนที่ยังไม่มี core module
+  ค่านั้นวิ่งไปเข้า `toggle.setEnabled(wired)` → ปุ่มเทา เปิดจาก UI ไม่ได้เลย ต้องไปแก้
+  `core-v2-settings.json` หรือตั้ง env เอง ทั้งที่ `core/brain/context_builder.py` + hook ใน
+  `orchestrator._assign_dispatch` merge เข้ามานานแล้ว (คำอธิบายในแถวก็ยังบอกว่า "ยังไม่มี core.context
+  module") → แก้เป็น `wired=True` + เขียนคำอธิบายใหม่ · test เดิมที่ assert ว่าปุ่มต้อง disabled
+  เปลี่ยนเป็น guard วนทุกตัวใน `FLAG_NAMES` ว่าต้องกดได้หมด กันแถวใหม่หลุดซ้ำ
+- **โควต้า gemini โชว์ "ยังไม่อัปเดต" ทั้งที่ช่องทางนั้นไม่มีวันอัปเดตเอง** — `fetch_gemini_usage` อ่าน
+  cache ของ**แอป Antigravity** (`~/.antigravity_cockpit/cache/quota_api_v1_plugin/authorized/*.json`)
+  ซึ่ง `agy` (CLI ที่ cockpit spawn จริง) ไม่ใช่คนเขียน — บนเครื่อง dev ไฟล์เก่า 5 เดือนทั้งที่ agy
+  รันทุกวัน stale ตรงนี้จึงไม่ใช่ "poll ยังไม่ทัน" แต่คือ "ไม่มีอะไรมาอัปเดตจนกว่าจะเปิดแอป" →
+  adapter แนบ hint ของตัวเองมากับ snapshot ที่ stale แล้ว `usage_meter` render ให้ (`status == "error"`
+  return ก่อนแล้ว hint จึงติดได้เฉพาะกับ stale ที่ยังใช้ข้อมูลได้) + 3 tests
+- **boot model-refresh มองไม่เห็น `role-models.json` — บั๊มโมเดลไม่เคยทำงานเลยบนคอนฟิกจริง** (#317) —
+  `provider_model_refresh` อ่านแค่ `provider_models` (provider-models.json) ทั้งที่โมเดลที่ทีมวิ่งจริง
+  พินอยู่ใน `role_models` (provider store เป็นแค่ fallback ของ role ที่ไม่ได้ override) → รายงาน
+  `NO_PIN` ทุกบูต ไม่บั๊มอะไรเลย ขณะที่ role แช่แข็งอยู่กับ pin เดิม → `_pins_for()` รวมทั้งสอง store,
+  bump กลับผ่าน setter ตัวเดียวกับที่ Settings ใช้ (effort ของ role ไม่หาย) + 13 tests
+- **codex ไม่มี model discovery ทั้งที่ CLI มี cache ของตัวเอง** (#103) — เดิมอยู่ใน
+  `NO_MODEL_DISCOVERY_GAPS` เพราะไม่มี models subcommand (จริง) แต่ codex maintain
+  `~/.codex/models_cache.json` เอง และ `settings_window` ก็จดไว้อยู่แล้วว่าให้อ่าน `slug` จากไฟล์นี้
+  มือๆ → wire เข้าเป็น channel จริง (จับ shape จาก codex 0.149.0, 2026-08-21): honour
+  `visibility: "hide"` ไม่ให้ `gpt-reserve`/`codex-auto-review` กลายเป็นเป้า bump · เรียงตาม version
+  token ใน slug **ไม่ใช่ `priority`** เพราะ priority = ความเด่นไม่ใช่ความใหม่ (sol/terra/luna = 1/2/3
+  ในรุ่นเดียวกัน) เชื่อมันแล้ว pin จะถูกดันถอยหลังได้ · codex คือ provider เดียวที่ทีมนี้พิน id ตายตัวไว้
+- **รายชื่อโมเดล gemini ใน Settings ตกรุ่น** — ยืนยันสดด้วย `agy --output-format json models`
+  (2026-08-21) ว่า 3.7 ออกแล้ว แต่ `_MODELS_BY_PROVIDER` จบที่ 3.6 → เติม 3.7 ทั้งสาม tier ·
+  picker ตัวนี้ไม่มีใคร refresh ให้ (ต่างจาก pin ที่ boot-refresh ดูแล) ต้องรันมือเอง — จดไว้ในคอมเมนต์แล้ว
+- **หน้าต่าง Settings ใหญ่เกินจอจนกด "Save & Apply" ไม่ถึง** — dialog เปิดที่ขนาดตายตัว 1320x848
+  พร้อมพื้นขั้นต่ำ 900x600 บนจอเล็ก/จอที่ scale ไว้ footer สูง 60px (ที่เดียวที่ปุ่ม Save อยู่) เลยไปอยู่
+  ใต้ taskbar และย่อให้ถึงก็ไม่ได้เพราะติดพื้น → clamp ทั้งขนาดเปิดและขนาดต่ำสุดตาม
+  `availableGeometry` ของจอที่ dialog จะโผล่จริง (จอใหญ่ได้เท่าเดิมเป๊ะ · ไม่มี QScreen บน
+  offscreen/headless → คืนค่าเดิม) · ทุก view ห่อ `QScrollArea` อยู่แล้ว หน้าต่างเล็กลงจึงเสียแค่
+  "เห็นได้ทีละเท่าไหร่" · label คำอธิบายในแถว provider/role เปิด `wordWrap` — เดิมความกว้างขั้นต่ำ
+  ของมันเท่ากับความยาวข้อความทั้งบรรทัด ทั้ง view เลยย่อไม่ลงและงอก horizontal scrollbar แทนที่จะ
+  reflow (เห็นได้แม้บนจอ 1920) + 5 tests
+- **`task_delivery` state `UNCERTAIN` เป็นทางตัน — ใบงานหายเงียบ** — `_on_settled` เรียก
+  `mark_uncertain()` แล้วจบ ไม่มี escalate ไม่มี reaper ไม่มีแจ้งใคร Lead จึงเชื่อว่า pane ทำงานอยู่
+  (`takkub status` ก็โชว์ busy) ทั้งที่ใบงานอาจค้างในช่องพิมพ์หรือหายไปแล้ว — เจอกับ gemini pane
+  2 ครั้งในรอบเดียว (gemini เจอบ่อยกว่า claude เพราะ preload งานเข้า spawn ไม่ได้
+  `system_prompt_flag is None` เลยวิ่ง paste path ทุกครั้ง ไม่ใช่เพราะ claude มี recovery ดีกว่า) →
+  `_warn_lead_delivery_uncertain()` แจ้ง Lead ทันทีที่ settle · เป็น warning ไม่ใช่ FAILED เพราะ
+  สัญญาณ "ready + ช่องว่าง" แยกไม่ออกจริงๆ ว่า submit แล้วหรือยังค้าง — ความกำกวมตัวเดียวกับที่
+  ทำให้ #134 ปิด repaste อัตโนมัติ cockpit จึงรายงานสิ่งที่เห็นแล้วให้คนตัดสิน + 5 tests
+- **MCP warm กลืน error หมด — warm ที่โดนฆ่ากลางคันหน้าตาเหมือนสำเร็จ** — `warm_browser_mcps`/
+  `warm_graft_mcp` รันด้วย timeout 30s + `except Exception: pass` ล้วน มองจาก cockpit ไม่มีทางรู้ว่า
+  npx cache ร้อนหรือยัง (mac ของ user ค้างที่ "Starting MCP servers: graft" ซ้ำๆ) → รวมเป็น
+  `_warm_mcp_process()` ตัวเดียว: cap 180s (ต้องพอให้โหลด+แตก tarball รอบแรกจบ ไม่ใช่แค่ให้ server
+  บูต) + log แยก timeout/error/สำเร็จ · ยังไม่ raise เหมือนเดิม — warm พังคือ "ครั้งแรกช้า"
+  ไม่ใช่ "cockpit พัง" + 5 tests
 
 ## [1.0.79] - 2026-08-20
 
