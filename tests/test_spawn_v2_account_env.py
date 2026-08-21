@@ -179,7 +179,7 @@ def _registered_codex_pool_registries(tmp_path, high_dir, low_dir):
 
 class TestV2AccountEnvFlagOff:
     def test_flag_off_no_codex_home_override(self, qapp, monkeypatch, tmp_path):
-        monkeypatch.delenv("TAKKUB_V2_ROUTER", raising=False)
+        monkeypatch.setenv("TAKKUB_V2_ROUTER", "0")
         pools, accounts = _registered_codex_pool_registries(
             tmp_path, tmp_path / "hi", tmp_path / "lo"
         )
@@ -247,7 +247,7 @@ class TestV2AccountEnvClaudeBranch:
         return pools, accounts
 
     def test_flag_off_no_claude_config_dir_override(self, qapp, monkeypatch, tmp_path):
-        monkeypatch.delenv("TAKKUB_V2_ROUTER", raising=False)
+        monkeypatch.setenv("TAKKUB_V2_ROUTER", "0")
         pools, accounts = self._claude_pool_registries(tmp_path, tmp_path / "hi", tmp_path / "lo")
         monkeypatch.setattr("agent_takkub.core.accounts.facade.AccountPoolRegistry", lambda: pools)
         monkeypatch.setattr("agent_takkub.core.accounts.facade.AccountRegistry", lambda: accounts)

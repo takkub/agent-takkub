@@ -19,9 +19,10 @@ from agent_takkub.core.routing.flag import v2_router_enabled
 # ── flag ──────────────────────────────────────────────────────────────────
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_flag_on_by_default(monkeypatch):
+    """Default flipped ON in 1.0.84 (epic #309)."""
     monkeypatch.delenv("TAKKUB_V2_ROUTER", raising=False)
-    assert v2_router_enabled() is False
+    assert v2_router_enabled() is True
 
 
 def test_flag_on_when_set_to_1(monkeypatch):

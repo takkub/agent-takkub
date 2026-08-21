@@ -41,9 +41,10 @@ def _isolate_core_v2_settings(tmp_path, monkeypatch):
 # ── flag ──────────────────────────────────────────────────────────────────
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_flag_on_by_default(monkeypatch):
+    """Default flipped ON in 1.0.84 (epic #309)."""
     monkeypatch.delenv("TAKKUB_V2_SCHEDULER", raising=False)
-    assert v2_scheduler_enabled() is False
+    assert v2_scheduler_enabled() is True
 
 
 def test_flag_on_when_set_to_1(monkeypatch):
@@ -328,7 +329,7 @@ def test_runtime_control_cancel_from_limit_wait():
 
 
 def test_runtime_control_checkpoint_is_noop_when_flag_off(monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_SCHEDULER", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
     calls = []
     control = AgentRuntimeControl(checkpoint_fn=lambda: calls.append(1))
     assert control.checkpoint() is False
@@ -357,7 +358,7 @@ def test_runtime_control_checkpoint_fail_open(monkeypatch):
 
 
 def test_facade_flag_off_is_all_noop(monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_SCHEDULER", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
     request = SlotRequest(project_id="p", pane_id="pane", task_id="t")
     tight_policy = SlotPolicy(max_agents_global=0)
     assert scheduling_facade.extended_denial_reason(request, ActiveCounts(), tight_policy) == ""

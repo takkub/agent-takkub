@@ -1,6 +1,6 @@
 """The ONE façade `resource_governor.py` calls into for the Phase 8a
 dimensions (docs/v2/REUSE_VS_REWRITE_MATRIX.md §5: "V2 แทรกผ่าน façade เดียว
-ต่อ boundary"). Flag OFF (default): every function is a no-op that returns
+ต่อ boundary"). Flag OFF (`TAKKUB_V2_SCHEDULER=0`): every function is a no-op that returns
 whatever leaves the caller's existing behavior untouched — `resource_governor`
 stays byte-identical (`tests/test_resource_governor*.py`'s flag-off parity
 tests). Flag ON: best-effort, fail-open — an exception here never turns into

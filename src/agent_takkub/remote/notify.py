@@ -1660,7 +1660,7 @@ def supports_remote_history(provider: str) -> bool:
 
 def _read_from_conversation_store_v2(project_ns: str, limit: int) -> list[dict] | None:
     """Core V2 Conversation read-through (#309 Phase 6). Flag
-    `TAKKUB_V2_CONVERSATION` is off by default; this is the ONE touch point
+    `TAKKUB_V2_CONVERSATION` is on by default since 1.0.84; this is the ONE touch point
     `remote/` makes into `core.*` (plan §6d "แก้ remote/ น้อยที่สุด 1 จุด
     fail-open") — the dependency direction is remote -> core only, which
     `core-is-bottom-layer`/`remote-bolt-on-isolation` both allow (neither

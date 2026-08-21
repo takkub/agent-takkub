@@ -33,7 +33,17 @@ SCHEMA_VERSION = 1
 # rather than needing a schema migration later.
 FLAG_NAMES: tuple[str, ...] = ("router", "conversation", "context", "brain", "scheduler")
 
-_DEFAULT_FLAGS: dict[str, bool] = {name: False for name in FLAG_NAMES}
+# Default-ON since 1.0.84 (epic #309's last rung before 2.0.0). Every flag
+# shipped off through the Phase 1-9 build-out and then ran with all five on
+# for a full working day on a real cockpit, which is what surfaced #332-#337;
+# those are fixed, so "V2 on" is now the product and `TAKKUB_V2_*=0` is the
+# escape hatch rather than the other way round.
+#
+# A cockpit that already has a core-v2-settings.json keeps whatever it says:
+# `load()` starts from these defaults and then applies the persisted values
+# over them, so an explicit `false` on disk is still an explicit `false`. Only
+# a missing file — or a key that never existed — picks up the new default.
+_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES}
 
 
 @dataclass(frozen=True, slots=True)

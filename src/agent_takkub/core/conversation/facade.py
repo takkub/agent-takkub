@@ -2,7 +2,7 @@
 `core.accounts.selector.CooldownFailoverSelector`'s account-switch path —
 call into (plan §0 rule 4: "จุดเชื่อมเดียว ... fail-open").
 
-Flag OFF (default): every function here returns immediately, touching
+Flag OFF (`TAKKUB_V2_CONVERSATION=0`): every function here returns immediately, touching
 nothing on disk — `orchestrator.done()` stays byte-identical (proof:
 `tests/test_core_conversation.py`'s flag-off no-op tests).
 Flag ON: best-effort — any exception anywhere in the chain is caught and

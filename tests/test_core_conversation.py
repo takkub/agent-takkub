@@ -18,9 +18,11 @@ from agent_takkub.core.models.conversation import MessageRole
 # ── flag ──────────────────────────────────────────────────────────────────
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_flag_on_by_default(monkeypatch):
+    """Default flipped ON in 1.0.84 (epic #309) — env unset now means the
+    shipped default, which is enabled."""
     monkeypatch.delenv("TAKKUB_V2_CONVERSATION", raising=False)
-    assert v2_conversation_enabled() is False
+    assert v2_conversation_enabled() is True
 
 
 def test_flag_on_when_set_to_1(monkeypatch):
@@ -340,7 +342,7 @@ def test_render_resume_prompt_includes_key_sections():
 
 
 def test_facade_on_pane_done_flag_off_writes_nothing(tmp_path, monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_CONVERSATION", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "0")
     from agent_takkub.core.conversation.facade import on_pane_done
 
     conv_root = tmp_path / "conversations"

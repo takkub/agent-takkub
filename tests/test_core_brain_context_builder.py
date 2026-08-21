@@ -16,7 +16,9 @@ def runtime(tmp_path, monkeypatch):
     import agent_takkub.config as config
 
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path)
-    monkeypatch.delenv("TAKKUB_V2_CONVERSATION", raising=False)
+    # Explicitly OFF, not merely unset: the shipped default is ON since
+    # 1.0.84, so "no env var" no longer means "feature disabled".
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "0")
     return tmp_path
 
 
@@ -224,7 +226,7 @@ def test_recent_summary_omitted_when_conversation_flag_off(runtime, monkeypatch)
     from agent_takkub.core.conversation.store import ConversationStore, conversation_id_for
     from agent_takkub.core.conversation.summary import RollingSummary, save_summary
 
-    monkeypatch.delenv("TAKKUB_V2_CONVERSATION", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "0")
     conv_store = ConversationStore()
     conv_id = conversation_id_for("proj", "backend")
     conv_dir = conv_store.conversation_dir("proj", conv_id)

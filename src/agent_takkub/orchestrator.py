@@ -913,7 +913,7 @@ def _inject_v2_context(
     task: str, project_ns: str | None, role_name: str, base_role_a: str, effective_provider: str
 ) -> str:
     """Core V2 Context Builder hook (#309 Phase 7c) —
-    `_assign_dispatch`'s call site. Flag OFF (default, `TAKKUB_V2_CONTEXT`)
+    `_assign_dispatch`'s call site. Flag OFF (`TAKKUB_V2_CONTEXT=0`)
     short-circuits before any import, so `_assign_dispatch` stays byte-
     identical; `task` is returned unchanged either way on any failure
     (fail-open), including a `core.brain.facade.build_context_for_assign`

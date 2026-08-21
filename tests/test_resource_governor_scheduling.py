@@ -46,7 +46,7 @@ def _limits(**overrides) -> GovernorLimits:
 
 
 def test_flag_off_slot_policy_is_ignored(monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_SCHEDULER", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
     governor = ResourceGovernor(_limits(), slot_policy=SlotPolicy(max_agents_global=0))
     decision = governor.request_slot(
         project_id="p", pane_id="pane", task_id="t", resource_class=ResourceClass.NORMAL
@@ -212,7 +212,7 @@ def test_flag_on_dispatch_waiting_orders_by_priority(monkeypatch):
 
 
 def test_flag_off_dispatch_waiting_keeps_fifo_project_order(monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_SCHEDULER", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
     governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
     holder = governor.request_slot(
         project_id="busy", pane_id="holder", task_id="h", resource_class=ResourceClass.HEAVY

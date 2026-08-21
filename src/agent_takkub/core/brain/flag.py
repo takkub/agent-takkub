@@ -1,5 +1,5 @@
-"""TAKKUB_V2_BRAIN / TAKKUB_V2_CONTEXT — both off by default (plan §0 rule
-3: "feature flag ทุกจุดเชื่อม — ปิด flag = พฤติกรรมเดิมเป๊ะ").
+"""TAKKUB_V2_BRAIN / TAKKUB_V2_CONTEXT — both ON by default since 1.0.84 (epic #309) — `=0` is now the escape hatch,
+and plan §0 rule 3 ("ปิด flag = พฤติกรรมเดิมเป๊ะ") still holds for it.
 
 `TAKKUB_V2_BRAIN` gates every *write/read* path into the Second Brain
 itself: `core.brain.facade.recall`/`submit`/`on_pane_done`.

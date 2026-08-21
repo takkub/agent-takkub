@@ -1,5 +1,5 @@
-"""The Second Brain façade — `TAKKUB_V2_BRAIN` off by default, fail-open
-(plan §0 rules 3+4). The stable entry point `orchestrator.py`'s hooks call
+"""The Second Brain façade — `TAKKUB_V2_BRAIN` on by default since 1.0.84,
+fail-open (plan §0 rules 3+4). The stable entry point `orchestrator.py`'s hooks call
 into instead of reaching into `pipeline`/`retrieval`/`context_builder`
 directly: `on_pane_done` (Reflection hook, Phase 7c) and
 `build_context_for_assign` (Context-Injection hook, Phase 7c) join

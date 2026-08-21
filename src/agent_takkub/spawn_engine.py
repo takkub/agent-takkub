@@ -1659,8 +1659,9 @@ class SpawnEngineMixin:
         # normal config/availability resolution — see PaneState.provider_override.
         # epic #309 Phase 3: routed through core.routing's façade instead of
         # calling provider_config.effective_provider_for directly — this is
-        # THE single connection point TAKKUB_V2_ROUTER gates (off by default,
-        # byte-identical to the direct call; see core/routing/facade.py).
+        # THE single connection point TAKKUB_V2_ROUTER gates (on by default
+        # since 1.0.84; `=0` is byte-identical to the direct call, see
+        # core/routing/facade.py).
         effective_provider = _ps_initial.provider_override or effective_provider_for_v2(
             base_role, project=project_ns
         )

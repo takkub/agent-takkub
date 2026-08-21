@@ -2,7 +2,7 @@
 call site (`spawn()`, line ~1463) is patched to go through (plan §2 Phase 2:
 "จุดเชื่อมเดียว ... 1 façade call, fail-open").
 
-Flag OFF (default): calls `provider_config.effective_provider_for` directly
+Flag OFF (`TAKKUB_V2_ROUTER=0`): calls `provider_config.effective_provider_for` directly
 — zero `Router` involvement, byte-identical to pre-#309 behavior (proof:
 `tests/test_core_routing.py`'s flag-off parity test).
 Flag ON: goes through `Router(StaticRoutingPolicy())`, which for this phase

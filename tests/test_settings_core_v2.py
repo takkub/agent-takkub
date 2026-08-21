@@ -37,14 +37,35 @@ def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 class TestCoreV2SettingsStore:
     def test_load_on_missing_file_is_all_defaults(self) -> None:
         payload = core_v2_settings.load()
-        assert payload["flags"] == {name: False for name in core_v2_settings.FLAG_NAMES}
+        # Default-ON since 1.0.84 (epic #309's last rung before 2.0.0).
+        assert payload["flags"] == {name: True for name in core_v2_settings.FLAG_NAMES}
 
     def test_set_flag_round_trips(self) -> None:
+        assert core_v2_settings.flag_enabled("router") is True  # shipped default
+        assert core_v2_settings.set_flag("router", False) is True
         assert core_v2_settings.flag_enabled("router") is False
-        assert core_v2_settings.set_flag("router", True) is True
-        assert core_v2_settings.flag_enabled("router") is True
-        # Untouched flags stay False — a single set_flag must not clobber siblings.
-        assert core_v2_settings.flag_enabled("brain") is False
+        # Untouched flags keep the default — a single set_flag must not clobber
+        # siblings (the direction that matters now the default is ON).
+        assert core_v2_settings.flag_enabled("brain") is True
+
+    def test_every_flag_ships_enabled(self) -> None:
+        """The 1.0.84 flip itself (epic #309's last rung before 2.0.0): a
+        cockpit with no settings file gets all five Core V2 subsystems on.
+
+        Pinned as its own test because every OTHER flag test now sets the
+        value it wants explicitly, so nothing else would notice if the
+        shipped default silently regressed to off.
+        """
+        for name in core_v2_settings.FLAG_NAMES:
+            assert core_v2_settings.flag_enabled(name) is True, name
+
+    def test_explicit_false_on_disk_survives_the_new_default(self) -> None:
+        """An operator who turned a flag OFF must keep it off across the
+        upgrade — `load()` layers the persisted file over the defaults, so a
+        stored `false` is a decision, not an absence."""
+        core_v2_settings.set_flag("scheduler", False)
+        assert core_v2_settings.load()["flags"]["scheduler"] is False
+        assert core_v2_settings.flag_enabled("scheduler") is False
 
     def test_set_unknown_flag_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -65,7 +86,7 @@ class TestCoreV2SettingsStore:
     def test_corrupt_file_falls_back_to_defaults(self) -> None:
         core_v2_settings.path().parent.mkdir(parents=True, exist_ok=True)
         core_v2_settings.path().write_text("not json", encoding="utf-8")
-        assert core_v2_settings.flag_enabled("router") is False
+        assert core_v2_settings.flag_enabled("router") is True  # falls back to defaults
 
 
 class TestCoreV2SettingsCache:
@@ -106,18 +127,18 @@ class TestCoreV2SettingsCache:
         assert core_v2_settings.load()["flags"]["router"] is False
 
     def test_set_flag_invalidates_cache_immediately(self) -> None:
+        assert core_v2_settings.flag_enabled("brain") is True  # shipped default
+        core_v2_settings.set_flag("brain", False)
         assert core_v2_settings.flag_enabled("brain") is False
-        core_v2_settings.set_flag("brain", True)
-        assert core_v2_settings.flag_enabled("brain") is True
 
     def test_missing_file_caches_default_and_still_detects_creation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        assert core_v2_settings.load()["flags"]["router"] is False  # cache = (None, defaults)
-        assert core_v2_settings.load()["flags"]["router"] is False  # cache hit, no crash
+        assert core_v2_settings.load()["flags"]["router"] is True  # cache = (None, defaults)
+        assert core_v2_settings.load()["flags"]["router"] is True  # cache hit, no crash
 
-        core_v2_settings.set_flag("router", True)  # file now exists
-        assert core_v2_settings.load()["flags"]["router"] is True
+        core_v2_settings.set_flag("router", False)  # file now exists
+        assert core_v2_settings.load()["flags"]["router"] is False
 
     def test_load_returns_independent_copies(self) -> None:
         core_v2_settings.set_flag("router", True)
@@ -144,9 +165,9 @@ class TestFlagConfigFallback:
         from agent_takkub.core.routing.flag import v2_router_enabled
 
         monkeypatch.delenv("TAKKUB_V2_ROUTER", raising=False)
-        assert v2_router_enabled() is False
-        core_v2_settings.set_flag("router", True)
-        assert v2_router_enabled() is True
+        assert v2_router_enabled() is True  # no file yet -> shipped default
+        core_v2_settings.set_flag("router", False)
+        assert v2_router_enabled() is False  # config is what env-unset reads
 
     def test_brain_falls_back_to_config_when_env_unset(
         self, monkeypatch: pytest.MonkeyPatch
@@ -195,10 +216,10 @@ class TestCoreV2Views:
         dlg.deleteLater()
 
     def test_overview_flag_toggles_seeded_from_disk(self) -> None:
-        core_v2_settings.set_flag("brain", True)
+        core_v2_settings.set_flag("brain", False)
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_OVERVIEW)
-        assert dlg._cv2_flag_toggles["brain"].isChecked() is True
-        assert dlg._cv2_flag_toggles["router"].isChecked() is False
+        assert dlg._cv2_flag_toggles["brain"].isChecked() is False
+        assert dlg._cv2_flag_toggles["router"].isChecked() is True  # shipped default
         # Every flag in _FLAG_ROWS now has a wired core module — "context"
         # included (Phase 7c: core/brain/context_builder.py, called from
         # orchestrator._assign_dispatch's Context-Injection hook), so no row

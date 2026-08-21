@@ -76,11 +76,12 @@ def test_recall_respects_limit(adapter):
 # ── facade: flag off / on / fail-open ────────────────────────────────────
 
 
-def test_facade_flag_off_by_default(monkeypatch):
+def test_facade_flag_on_by_default(monkeypatch):
+    """Default flipped ON in 1.0.84 (epic #309)."""
     monkeypatch.delenv("TAKKUB_V2_BRAIN", raising=False)
     from agent_takkub.core.brain.flag import v2_brain_enabled
 
-    assert v2_brain_enabled() is False
+    assert v2_brain_enabled() is True
 
 
 def test_facade_recall_flag_off_returns_empty_without_touching_store(monkeypatch):
