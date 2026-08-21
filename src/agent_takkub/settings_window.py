@@ -77,7 +77,7 @@ import re
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPalette
+from PyQt6.QtGui import QColor, QFontMetrics, QGuiApplication, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -721,8 +721,16 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
 
         self.setObjectName("settingsWindow")
         self.setWindowTitle("Takkub Cockpit — Settings")
-        self.setMinimumSize(900, 600)
-        self.resize(1320, 848)
+        # Never open — or refuse to shrink — larger than the screen actually
+        # showing this dialog. The old unconditional 1320x848 with a hard
+        # 900x600 floor put the footer, and with it "Save & Apply", under the
+        # taskbar on a smaller/scaled display, with no way to resize far
+        # enough to reach it (reported from a teammate's laptop, 2026-08-21).
+        # Every view already scrolls (`_wrap_scroll`), so a smaller window
+        # costs only how much is visible at once, never reachability.
+        avail = self._available_screen_size()
+        self.setMinimumSize(min(900, avail.width()), min(600, avail.height()))
+        self.resize(min(1320, avail.width()), min(848, avail.height()))
         self.setSizeGripEnabled(True)
 
         fonts = cockpit_theme.ensure_fonts_loaded()
@@ -944,6 +952,20 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         outer.addWidget(header_body, 1)
         outer.addWidget(self._build_footer())
         return content
+
+    def _available_screen_size(self) -> QSize:
+        """How big this dialog is allowed to get, in pixels.
+
+        `availableGeometry` already excludes the taskbar/dock; the extra
+        margin covers the window frame and title bar, which it does not.
+        Falls back to the historical fixed size when Qt can't name a screen
+        (offscreen/headless platforms) so nothing here needs a real display.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return QSize(1320, 848)
+        geo = screen.availableGeometry()
+        return QSize(max(640, geo.width() - 48), max(420, geo.height() - 80))
 
     def _wrap_scroll(self, inner: QWidget) -> QScrollArea:
         scroll = QScrollArea(self)
@@ -1407,6 +1429,13 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
             row_lay.addWidget(cockpit_theme.role_chip(provider.capitalize(), color, row))
             desc = QLabel(_PROVIDER_DESC.get(provider, ""), row)
             desc.setObjectName("panelHint")
+            # Without wrapping, the label's minimum width is its ENTIRE text,
+            # so the row — and through it the whole view — refuses to become
+            # narrower than the longest description, and the pane grows a
+            # horizontal scrollbar instead of reflowing. The combo/toggle to
+            # its right keep their own fixed minimums; only this filler text
+            # is allowed to give.
+            desc.setWordWrap(True)
             row_lay.addWidget(desc, 1)
 
             # Per-provider default model (provider_models.json). Editable —
@@ -1577,6 +1606,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         row_lay.addWidget(cockpit_theme.role_chip(label, color, row))
         desc_lbl = QLabel(desc, row)
         desc_lbl.setObjectName("panelHint")
+        desc_lbl.setWordWrap(True)  # see the provider row's own comment
         row_lay.addWidget(desc_lbl, 1)
 
         if locked:
