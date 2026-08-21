@@ -11,6 +11,7 @@ The JSON-path fixtures below are the ACTUAL stdout captured from a real
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -46,15 +47,13 @@ class TestFamilyKey:
         ],
     )
     def test_strips_version_token(self, model_id: str, expected: tuple[str, ...]) -> None:
-        assert pmr._family_key_gemini(model_id) == expected
+        assert pmr._family_key(model_id) == expected
 
     def test_no_version_token_returns_none(self) -> None:
-        assert pmr._family_key_gemini("gpt-oss-120b-medium") is None
+        assert pmr._family_key("gpt-oss-120b-medium") is None
 
     def test_different_tiers_are_different_families(self) -> None:
-        assert pmr._family_key_gemini("gemini-3.7-flash-high") != pmr._family_key_gemini(
-            "gemini-3.7-flash-low"
-        )
+        assert pmr._family_key("gemini-3.7-flash-high") != pmr._family_key("gemini-3.7-flash-low")
 
 
 class TestPickLatestPerFamily:
@@ -277,7 +276,7 @@ class TestRefreshGemini:
 
 
 class TestOtherProvidersAreGaps:
-    @pytest.mark.parametrize("name", ["claude", "codex", "kimi", "cursor", "opencode"])
+    @pytest.mark.parametrize("name", ["claude", "kimi", "cursor", "opencode"])
     def test_reports_gap_without_touching_subprocess(
         self, name: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -289,5 +288,207 @@ class TestOtherProvidersAreGaps:
         assert not called
 
     def test_every_gap_provider_has_a_documented_reason(self) -> None:
-        for name in ("claude", "codex", "kimi", "cursor", "opencode"):
+        for name in ("claude", "kimi", "cursor", "opencode"):
             assert name in pmr.NO_MODEL_DISCOVERY_GAPS
+
+    def test_a_provider_is_never_both_supported_and_a_documented_gap(self) -> None:
+        """The two tables answer opposite questions — a name in both would
+        make `refresh_provider_model` silently ignore a documented gap (or
+        keep claiming a gap for a channel that now exists, the exact drift
+        that left codex listed as unsupported after its cache was wired up).
+        """
+        assert not (set(pmr._DISCOVERY) & set(pmr.NO_MODEL_DISCOVERY_GAPS))
+
+    def test_every_registered_provider_lands_in_exactly_one_table(self) -> None:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        covered = set(pmr._DISCOVERY) | set(pmr.NO_MODEL_DISCOVERY_GAPS)
+        assert set(PROVIDER_REGISTRY) <= covered
+
+
+class TestRolePinsAreRefreshedToo:
+    """The regression this class exists for: role-models.json is where a
+    team's real per-role models live, and the first wave of this feature only
+    ever read the provider-level store — so a config with every pin at role
+    level reported NO_PIN forever and never bumped anything."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_stores(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        from agent_takkub import provider_models, role_models
+
+        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        monkeypatch.setattr(provider_models, "model_for", lambda name: None)
+
+    def test_role_pin_is_bumped_even_with_no_provider_level_pin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import role_models
+
+        role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium")
+        monkeypatch.setattr(
+            pmr,
+            "_discover_gemini_models",
+            lambda binary: ["gemini-3.7-flash-medium", "gemini-3.5-flash-medium"],
+        )
+        outcome = pmr.refresh_provider_model("gemini", "/bin/agy")
+        assert outcome.status == pmr.STATUS_BUMPED
+        assert outcome.detail == "backend: gemini-3.5-flash-medium -> gemini-3.7-flash-medium"
+        assert role_models.model_for("backend", "gemini") == "gemini-3.7-flash-medium"
+
+    def test_bump_preserves_the_roles_effort_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bump goes through the same `role_models.set_model` Settings uses,
+        which keeps the sibling effort field — writing the entry any other way
+        would silently drop the role's configured effort."""
+        from agent_takkub import role_models
+
+        role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium")
+        role_models.set_effort("backend", "gemini", "high")
+        monkeypatch.setattr(
+            pmr, "_discover_gemini_models", lambda binary: ["gemini-3.7-flash-medium"]
+        )
+        assert pmr.refresh_provider_model("gemini", "/bin/agy").status == pmr.STATUS_BUMPED
+        assert role_models.effort_for("backend", "gemini") == "high"
+
+    def test_only_pins_bound_to_this_provider_are_touched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import role_models
+
+        role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium")
+        role_models.set_model("qa", "kimi", "gemini-3.5-flash-medium")  # same id, other CLI
+        monkeypatch.setattr(
+            pmr, "_discover_gemini_models", lambda binary: ["gemini-3.7-flash-medium"]
+        )
+        pmr.refresh_provider_model("gemini", "/bin/agy")
+        assert role_models.model_for("qa", "kimi") == "gemini-3.5-flash-medium"
+
+    def test_several_stale_pins_all_bump_and_all_appear_in_the_detail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import role_models
+
+        role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium")
+        role_models.set_model("critic", "gemini", "gemini-3.1-pro-low")
+        monkeypatch.setattr(
+            pmr,
+            "_discover_gemini_models",
+            lambda binary: ["gemini-3.7-flash-medium", "gemini-3.6-pro-low"],
+        )
+        outcome = pmr.refresh_provider_model("gemini", "/bin/agy")
+        assert outcome.status == pmr.STATUS_BUMPED
+        assert "backend: gemini-3.5-flash-medium -> gemini-3.7-flash-medium" in outcome.detail
+        assert "critic: gemini-3.1-pro-low -> gemini-3.6-pro-low" in outcome.detail
+        assert role_models.model_for("critic", "gemini") == "gemini-3.6-pro-low"
+
+    def test_no_pin_anywhere_still_skips_discovery_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(pmr, "_discover_gemini_models", lambda binary: calls.append(binary))
+        assert pmr.refresh_provider_model("gemini", "/bin/agy").status == pmr.STATUS_NO_PIN
+        assert not calls
+
+
+class TestCodexDiscovery:
+    """codex ships no models-list subcommand, but its CLI keeps its own
+    `models_cache.json` — the source `settings_window._MODELS_BY_PROVIDER`
+    already documents reading by hand. The shape below is the real one
+    captured from codex 0.149.0 on 2026-08-21."""
+
+    def _write_cache(self, tmp_path, models):
+        home = tmp_path / ".codex"
+        home.mkdir()
+        (home / "models_cache.json").write_text(
+            json.dumps({"fetched_at": "2026-08-21T04:29:59Z", "models": models}),
+            encoding="utf-8",
+        )
+        return home
+
+    def _patch_home(self, monkeypatch: pytest.MonkeyPatch, home) -> None:
+        import agent_takkub.codex_helper as codex_helper
+
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: home)
+
+    def test_parses_real_cache_shape_newest_version_first(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        home = self._write_cache(
+            tmp_path,
+            [
+                {"slug": "gpt-5.6-sol", "visibility": "list", "priority": 1},
+                {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 2},
+                {"slug": "gpt-5.5", "visibility": "list", "priority": 7},
+            ],
+        )
+        self._patch_home(monkeypatch, home)
+        assert pmr._discover_codex_models("/bin/codex") == [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.5",
+        ]
+
+    def test_hidden_models_never_become_bump_targets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        home = self._write_cache(
+            tmp_path,
+            [
+                {"slug": "gpt-reserve", "visibility": "hide", "priority": 3},
+                {"slug": "codex-auto-review", "visibility": "hide", "priority": 43},
+                {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 2},
+            ],
+        )
+        self._patch_home(monkeypatch, home)
+        assert pmr._discover_codex_models("/bin/codex") == ["gpt-5.6-terra"]
+
+    def test_version_beats_priority_when_the_two_disagree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """`priority` ranks prominence, not recency — a newer release listed
+        below an older one must still win, or a bump would move a pin
+        BACKWARDS."""
+        home = self._write_cache(
+            tmp_path,
+            [
+                {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 1},
+                {"slug": "gpt-5.7-terra", "visibility": "list", "priority": 9},
+            ],
+        )
+        self._patch_home(monkeypatch, home)
+        assert pmr._discover_codex_models("/bin/codex")[0] == "gpt-5.7-terra"
+
+    def test_missing_cache_reports_discovery_failed_not_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        import agent_takkub.codex_helper as codex_helper
+        from agent_takkub import provider_models, role_models
+
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: tmp_path / "nope")
+        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        monkeypatch.setattr(provider_models, "model_for", lambda name: "gpt-5.6-terra")
+        assert pmr._discover_codex_models("/bin/codex") is None
+        assert (
+            pmr.refresh_provider_model("codex", "/bin/codex").status == pmr.STATUS_DISCOVERY_FAILED
+        )
+
+    def test_role_pin_on_codex_bumps_through_the_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        from agent_takkub import provider_models, role_models
+
+        home = self._write_cache(
+            tmp_path,
+            [
+                {"slug": "gpt-5.7-terra", "visibility": "list", "priority": 1},
+                {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 2},
+            ],
+        )
+        self._patch_home(monkeypatch, home)
+        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        monkeypatch.setattr(provider_models, "model_for", lambda name: None)
+        role_models.set_model("backend", "codex", "gpt-5.6-terra")
+        outcome = pmr.refresh_provider_model("codex", "/bin/codex")
+        assert outcome.status == pmr.STATUS_BUMPED
+        assert role_models.model_for("backend", "codex") == "gpt-5.7-terra"

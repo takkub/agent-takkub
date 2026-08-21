@@ -408,12 +408,13 @@
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.versioning.probe",
         "agent_takkub.doctor",
+        "agent_takkub.provider_model_refresh",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 2
     },
     {
@@ -2751,13 +2752,15 @@
       "module": "agent_takkub.provider_model_refresh",
       "imports": [
         "agent_takkub._win_console",
-        "agent_takkub.provider_models"
+        "agent_takkub.codex_helper",
+        "agent_takkub.provider_models",
+        "agent_takkub.role_models"
       ],
       "imported_by": [
         "agent_takkub.boot_update_window"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_models",
@@ -3109,10 +3112,11 @@
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
+        "agent_takkub.provider_model_refresh",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {

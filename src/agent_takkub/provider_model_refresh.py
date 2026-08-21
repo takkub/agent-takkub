@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -58,7 +59,6 @@ NO_MODEL_DISCOVERY_GAPS: dict[str, str] = {
         "latest release) but resolving an alias to a concrete id requires a real, "
         "billed generation — not run automatically just to check freshness"
     ),
-    "codex": "no models-list subcommand (confirmed via `codex --help`, 2026-08-20)",
     "kimi": "no models-list subcommand (confirmed via `kimi --help`, 2026-08-20)",
     "cursor": (
         "`agent models` is documented to exist (cursor.com CLI reference) but cursor "
@@ -200,13 +200,78 @@ def _discover_gemini_models(binary: str) -> list[str] | None:
     return None
 
 
-def _family_key_gemini(model_id: str) -> tuple[str, ...] | None:
-    """Strip the version-number token from a gemini model id, e.g.
+def _discover_codex_models(binary: str) -> list[str] | None:
+    """Read codex's own `models_cache.json` and return the listable slugs,
+    newest version first.
+
+    codex still ships no models-list subcommand (`codex --help`, re-confirmed
+    2026-08-21) — but the CLI maintains this cache itself, and
+    `settings_window._MODELS_BY_PROVIDER` already documents reading exactly
+    these `slug` fields by hand. This wires that same source up so the one
+    provider carrying real, concrete pins on this team stops being the one
+    provider nothing can refresh.
+
+    Real captured shape (codex 0.149.0, dev box, 2026-08-21)::
+
+        {"fetched_at": "2026-08-21T04:29:59Z", "etag": "...",
+         "client_version": "0.149.0",
+         "models": [{"slug": "gpt-5.6-sol", "visibility": "list",
+                     "priority": 1, ...}, ...]}
+
+    `visibility` is honoured rather than inferred: `gpt-reserve` and
+    `codex-auto-review` both ship as `"hide"` and must never become a bump
+    target. `priority` is NOT used for ordering — it ranks prominence, not
+    recency (sol/terra/luna are 1/2/3 within the same release), so a future
+    cache could list a newer version below an older one. The version token
+    in the slug is the actual recency signal, so that is what orders this
+    list; `sorted` is stable, so same-version variants keep cache order.
+
+    `binary` is unused (the cache is a plain file) but kept in the signature
+    so every discovery function has the one shape `refresh_provider_model`
+    dispatches to.
+    """
+    from .codex_helper import codex_home
+
+    try:
+        raw = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
+        entries = raw["models"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    ids = [
+        m["slug"]
+        for m in entries
+        if isinstance(m, dict) and m.get("slug") and m.get("visibility") != "hide"
+    ]
+    if not ids:
+        return None
+    return sorted(ids, key=_version_tuple, reverse=True)
+
+
+def _version_tuple(model_id: str) -> tuple[int, ...]:
+    """The slug's version token as a comparable tuple, e.g.
+    ``gpt-5.6-terra`` -> ``(5, 6)``. No version token (``gpt-reserve``)
+    sorts last as ``()`` — those are dropped by `_pick_latest_per_family`
+    anyway, which needs the same token to build a family key."""
+    for part in model_id.split("-"):
+        if _looks_like_version(part):
+            return tuple(int(seg) for seg in part.split(".") if seg != "")
+    return ()
+
+
+def _family_key(model_id: str) -> tuple[str, ...] | None:
+    """Strip the version-number token from a model id, e.g.
     ``gemini-3.7-flash-medium`` -> ``("gemini", "flash", "medium")`` — the
     same family as ``gemini-3.5-flash-medium``, distinct from the
     ``-high``/``-low`` tier (a real, separate variant, not a version) and
     from ``-pro`` (a different product line). Returns None when no token
-    looks like a version number (id doesn't match the confirmed shape)."""
+    looks like a version number (id doesn't match the confirmed shape).
+
+    Provider-agnostic despite being written for gemini first: codex's slugs
+    have the identical shape, where it separates ``gpt-5.6-terra`` from
+    ``gpt-5.6-sol`` (sibling variants of one release, not versions of each
+    other) exactly the way it separates gemini's ``-high``/``-low``."""
     parts = model_id.split("-")
     family = [p for p in parts if not _looks_like_version(p)]
     if len(family) == len(parts):
@@ -227,52 +292,117 @@ def _pick_latest_per_family(ids: list[str]) -> dict[tuple[str, ...], str]:
     within a family (see `_discover_gemini_models`'s docstring)."""
     latest: dict[tuple[str, ...], str] = {}
     for model_id in ids:
-        fam = _family_key_gemini(model_id)
+        fam = _family_key(model_id)
         if fam is not None and fam not in latest:
             latest[fam] = model_id
     return latest
 
 
-def _refresh_gemini(binary: str) -> ModelRefreshOutcome:
-    from . import provider_models
+# provider -> the name of its discovery function in this module. Every one of
+# them returns model ids newest-first within a family, or None when its
+# channel failed / returned a shape it does not recognise. Held by NAME, not
+# by reference: a dict of function objects binds at import time, so a
+# reference captured here would shadow the module attribute the rest of the
+# codebase (and every test) patches.
+_DISCOVERY: dict[str, str] = {
+    "gemini": "_discover_gemini_models",
+    "codex": "_discover_codex_models",
+}
 
-    pinned = provider_models.model_for("gemini")
-    if not pinned:
-        return ModelRefreshOutcome("gemini", STATUS_NO_PIN)
 
-    ids = _discover_gemini_models(binary)
+def _discovery_for(provider: str) -> Callable[[str], list[str] | None]:
+    return globals()[_DISCOVERY[provider]]
+
+
+def _pins_for(provider: str) -> list[tuple[str | None, str]]:
+    """Every pin this provider carries as ``(role, model)``, role ``None``
+    for the provider-level default.
+
+    BOTH stores matter, and the role store matters more: `provider_models`
+    only holds the fallback for a role that never overrode it, while
+    `role_models` (role-models.json) is where a team's actual per-role models
+    live. The first wave of this feature read only the provider store, so on
+    a real config — every pin in role-models.json, none at provider level —
+    the boot refresh reported NO_PIN and did nothing, every single boot,
+    while the roles stayed frozen on whatever they were pinned to.
+    """
+    from . import provider_models, role_models
+
+    pins: list[tuple[str | None, str]] = []
+    provider_pin = provider_models.model_for(provider)
+    if provider_pin:
+        pins.append((None, provider_pin))
+    pins.extend(
+        (role, entry["model"])
+        for role, entry in sorted(role_models.all_models().items())
+        if entry.get("provider") == provider and entry.get("model")
+    )
+    return pins
+
+
+def _apply_pin(provider: str, role: str | None, model: str) -> None:
+    """Persist a bumped pin back to whichever store it came from — the same
+    calls Settings makes, so a bump is indistinguishable from the user
+    picking the newer model themselves and Settings can still override it
+    afterward (user directive 2026-08-20: "Settings ยัง override ได้"). No
+    pin-intent tracking exists, so every stale pin is bumped unconditionally,
+    per that same directive's answer for a deliberately-pinned model."""
+    from . import provider_models, role_models
+
+    if role is None:
+        provider_models.set_model(provider, model)
+    else:
+        role_models.set_model(role, provider, model)
+
+
+def _refresh_pins(provider: str, binary: str) -> ModelRefreshOutcome:
+    discover = _discovery_for(provider)
+    pins = _pins_for(provider)
+    if not pins:
+        # Nothing pinned anywhere: the CLI rides its own default, which is
+        # inherently fresh — no reason to spend a discovery call.
+        return ModelRefreshOutcome(provider, STATUS_NO_PIN)
+
+    ids = discover(binary)
     if ids is None:
-        return ModelRefreshOutcome("gemini", STATUS_DISCOVERY_FAILED, "agy models failed")
+        return ModelRefreshOutcome(provider, STATUS_DISCOVERY_FAILED, "model discovery failed")
+    latest_by_family = _pick_latest_per_family(ids)
 
-    fam = _family_key_gemini(pinned)
-    if fam is None:
-        return ModelRefreshOutcome("gemini", STATUS_UNMATCHED, pinned)
+    bumped: list[str] = []
+    unmatched: list[str] = []
+    for role, pinned in pins:
+        label = pinned if role is None else f"{role}: {pinned}"
+        fam = _family_key(pinned)
+        latest = latest_by_family.get(fam) if fam is not None else None
+        if latest is None:
+            # Pin doesn't parse as a versioned id, or its family is gone from
+            # the catalog — left exactly as configured, never guessed at.
+            unmatched.append(label)
+        elif latest != pinned:
+            _apply_pin(provider, role, latest)
+            bumped.append(f"{label} -> {latest}")
 
-    latest = _pick_latest_per_family(ids).get(fam)
-    if latest is None:
-        return ModelRefreshOutcome("gemini", STATUS_UNMATCHED, pinned)
-    if latest == pinned:
-        return ModelRefreshOutcome("gemini", STATUS_UP_TO_DATE, pinned)
-
-    # Same persistence Settings uses — a bump here is indistinguishable from
-    # the user picking the newer model themselves, and Settings can still
-    # override it afterward (user directive: "Settings ยัง override ได้").
-    # No pin-intent tracking exists this wave, so every stale pin is bumped
-    # unconditionally, per explicit user instruction (2026-08-20) when asked
-    # how to handle a deliberately-pinned-and-not-meant-to-move model.
-    provider_models.set_model("gemini", latest)
-    return ModelRefreshOutcome("gemini", STATUS_BUMPED, f"{pinned} -> {latest}")
+    # One outcome covers every pin: a bump anywhere is the headline, since
+    # that is the only status the boot window surfaces to the user at all.
+    if bumped:
+        return ModelRefreshOutcome(provider, STATUS_BUMPED, " · ".join(bumped))
+    if unmatched:
+        return ModelRefreshOutcome(provider, STATUS_UNMATCHED, " · ".join(unmatched))
+    return ModelRefreshOutcome(provider, STATUS_UP_TO_DATE, " · ".join(p for _, p in pins))
 
 
 def refresh_provider_model(name: str, binary: str) -> ModelRefreshOutcome:
-    """Refresh *name*'s pinned model if it's stale within its own line.
+    """Refresh *name*'s pinned models if they're stale within their own line.
+
+    Covers BOTH the provider-level pin and every role pinned to this
+    provider (see `_pins_for`).
 
     Caller MUST have already confirmed eligibility (installed + enabled) —
     mirrors `provider_update.update_provider`'s contract; this function does
     not re-check `provider_state` itself, since it is only ever called from
     the same worker that already ran the binary-update eligibility check.
     """
-    if name == "gemini":
-        return _refresh_gemini(binary)
+    if name in _DISCOVERY:
+        return _refresh_pins(name, binary)
     gap = NO_MODEL_DISCOVERY_GAPS.get(name, "no discovery mechanism wired for this provider")
     return ModelRefreshOutcome(name, STATUS_GAP, gap)

@@ -118,10 +118,20 @@ def _model_note(name: str, binary: str | None) -> str:
         return ""
     result = provider_model_refresh.refresh_provider_model(name, binary)
     if result.status == provider_model_refresh.STATUS_BUMPED:
+        # A refresh can now bump several pins at once (the provider default
+        # plus any role pinned to it), so the detail is " · "-joined — name
+        # the model when they all landed on the same one, otherwise just say
+        # how many moved rather than overflowing this one-line note.
+        targets = [
+            seg.split(" -> ")[-1].strip() for seg in result.detail.split(" · ") if " -> " in seg
+        ]
+        unique = list(dict.fromkeys(targets))
         # ↑ (U+2191), not ⬆ (U+2B06) — the heavy arrow isn't in the bundled
         # IBM Plex fonts (critic review 2026-08-20, finding #1); the thin
         # arrow is confirmed present by the same glyph-coverage check.
-        return f"model: {result.detail.split(' -> ')[-1]} ↑ updated"
+        if len(unique) == 1:
+            return f"model: {unique[0]} ↑ updated"
+        return f"model: {len(targets)} pins ↑ updated"
     return ""
 
 

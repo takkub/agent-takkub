@@ -360,10 +360,16 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "gpt-5.4",
         "gpt-5.4-mini",
     ),
-    # Confirmed via `agy models` (installed CLI's own lister) — these are the
-    # exact `--model` tokens, not agy's spaced display names like the prior
-    # snapshot had.
+    # Confirmed via `agy models` (installed CLI's own lister, re-run
+    # 2026-08-21) — these are the exact `--model` tokens, not agy's spaced
+    # display names like the prior snapshot had. The 3.7 line was already out
+    # when this list still topped out at 3.6: `provider_model_refresh` bumps a
+    # PINNED model automatically, but nothing refreshes this picker, so it
+    # goes stale on its own cadence and has to be re-run by hand.
     "gemini": (
+        "gemini-3.7-flash-high",
+        "gemini-3.7-flash-medium",
+        "gemini-3.7-flash-low",
         "gemini-3.6-flash-high",
         "gemini-3.6-flash-medium",
         "gemini-3.6-flash-low",
