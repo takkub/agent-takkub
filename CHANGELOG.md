@@ -15,6 +15,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   sweeper นี้ → ไม่สตาร์ตเลยเมื่อ QPA เป็น `offscreen` (conftest ตั้งไว้ทุกเทส — headless ไม่มี
   หน้าต่าง OS ให้ซ่อนอยู่แล้ว timer จึงมีแต่โทษ) + `QTimer(app)` ผูกเจ้าของกับ application ให้ตายไป
   พร้อมแอป ไม่เป็น QObject ลอยข้าม teardown + 3 tests
+- **release commit timeout 30 วิ สั้นกว่า pre-commit ของ repo นี้** — git commit ในขั้น release
+  รัน hook ทั้งชุด (ruff · docs-verify · import-linter 25 contracts · depgraph freshness) ซึ่งเกิน
+  30 วิได้ง่ายตอน cache เย็น แล้ว release ก็ abort + rollback พร้อมข้อความ "timed out" เปล่าๆ ที่อ่าน
+  เหมือน git ค้างรอ credential ทั้งที่ hook แค่ทำงานตามปกติ (เจอตอน cut 1.0.82 ติดกัน 2 ครั้ง) →
+  ขั้น commit ใช้ timeout 600 วิ + 1 test
 
 ## [v1.0.81] - 2026-08-21
 

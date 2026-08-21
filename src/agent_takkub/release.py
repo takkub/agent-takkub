@@ -338,7 +338,14 @@ def release(
                 "src/agent_takkub/__init__.py",
                 "package.json",
             )
-            _git(repo_root, "commit", "-m", f"chore(release): {tag}")
+            # Generous timeout: `git commit` here runs this repo's whole
+            # pre-commit chain (ruff, docs-verify, import-linter's 25
+            # contracts, the depgraph freshness check). That routinely
+            # outlasts `_git`'s 30 s default on a cold cache, and when it does
+            # the release aborts and rolls back with a bare "timed out" —
+            # which reads like git hanging on credentials rather than hooks
+            # simply doing their job.
+            _git(repo_root, "commit", "-m", f"chore(release): {tag}", timeout=600.0)
             commit_created = True
             summary["committed"] = True
         if do_tag:

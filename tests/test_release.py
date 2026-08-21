@@ -311,3 +311,20 @@ class TestEveryVersionFileMovesTogether:
             set_init_version('"""doc."""\n', "9.9.9")
         with pytest.raises(ValueError):
             set_npm_version('{"name": "x"}', "9.9.9")
+
+
+def test_release_commit_outlasts_the_pre_commit_chain(tmp_path):
+    """`git commit` runs this repo's full pre-commit chain (ruff,
+    docs-verify, import-linter, depgraph freshness). On a cold cache that
+    outlasts `_git`'s 30 s default, and the release then aborts and rolls
+    back reporting a bare "timed out" — observed twice in a row cutting
+    1.0.82."""
+    repo = _make_repo(tmp_path)
+    with (
+        patch("agent_takkub.release._git") as git,
+        patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+    ):
+        release(repo, part="patch", today="2026-05-31")
+
+    commit = next(c for c in git.call_args_list if len(c.args) > 1 and c.args[1] == "commit")
+    assert commit.kwargs.get("timeout", 30.0) >= 300.0
