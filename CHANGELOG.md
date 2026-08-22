@@ -91,6 +91,30 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   `src/agent_takkub/orchestrator.py::shutdown_timers()`,
   `tests/_qt_timer_leak_guard.py` (+ 68 ไฟล์เทสสลับมาเรียก `shutdown_timers()`)
 
+- **agy/Antigravity ค้างที่ banner "Verifying your account" แล้ว cockpit อ่านผิดว่า
+  ready → blind-paste ใบงานทิ้ง หายเงียบ** (#346) — ตอนเปิด issue เข้าใจผิดว่า root
+  cause เป็น `is_at_trust_prompt` (สืบแล้วคืน False ตลอด ไม่เกี่ยว) ตัวจริงคือ
+  `is_at_ready_prompt()` คืน True ผิด มาจาก `ReadyRule("please try again shortly",
+  True)` ใน `gemini_spec` ที่ใส่ไว้เมื่อ 2026-07-25 บนสมมติฐานว่าวลีนี้แปลว่า
+  account check ล้มแล้วตกกลับมาที่ composer ปกติ — หลักฐานสด 2026-08-22 พิสูจน์ว่า
+  ผิด: CLI แสดงวลีเดียวกันได้ทั้งที่ค้างสนิทไม่รับ input เลย ผลคือ delivery loop
+  เห็นว่า ready แล้ว blind-paste ใบงานลงไปในตัว banner ใบงานหายเงียบ แล้วรายงานเป็น
+  `delivery-uncertain` ให้ Lead ไปเดาเอง ผลกระทบจริง: พา user ไปไล่แก้ผิดคลาส (คิดว่า
+  เป็นบั๊ก paste timing แทนที่จะเป็น false-ready classification) → แก้: ลบ ReadyRule +
+  bypass ที่ผิดออกจาก `provider_spec.py` และ `pty_session.py::_classify_ready`
+  (พร้อม self-test case ที่เคย expect ผิดด้วย) เพิ่ม tier ใหม่
+  `account_pending_markers` แยกจาก `auth_transient_markers` เพราะ "sign in ใหม่"
+  กับ "รอ Google verify account" ต้องบอก user คนละแบบ (อันแรกแก้ได้เดี๋ยวนี้ อันหลัง
+  ทำได้แค่รอหรือสลับ provider) เพิ่ม state ใหม่ `blocked:provider-account` พร้อม
+  auto-recover (close + respawn + degrade เป็น claude) และไม่ยิง auto-answer Enter
+  ใส่ state นี้เลยเพราะเป็น banner ไม่ใช่ prompt + ตรวจ multi-provider ครบ:
+  claude/codex/opencode/cursor ไม่มี marker ทำนองนี้, kimi's "send /login to login"
+  เป็น login failure จริงคนละเคสจึงไม่ย้าย, ปล่อย tuple ว่างไว้จนกว่าจะเห็นจอจริงของ
+  provider นั้นไม่เดาจาก docs
+  + audit doc: `docs/audit/2026-08-22-346-agy-account-pending-misclassified-as-ready.md`
+  + tests: `tests/test_delivery_account_pending.py` (ใหม่),
+  `tests/test_pty_ready_prompt.py` (ใหม่) + แก้ของเดิม 4 ไฟล์
+
 ## [v1.0.84] - 2026-08-21
 
 ### Changed (เปลี่ยน)
