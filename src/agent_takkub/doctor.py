@@ -1287,6 +1287,68 @@ def check_installed_integrity() -> list[Finding]:
             )
         )
 
+    # #341 — a stray external tool once overwrote a LIVE venv's python.exe
+    # with a 29-byte text file. Every subsequent CLI invocation launched
+    # through it then failed to even start (empty stdout/stderr), so nothing
+    # in this module ever ran to report it — this check only helps because
+    # it reads the file on disk, not the already-loaded image: an
+    # already-running cockpit process (which keeps the OLD, healthy image
+    # mapped in memory) can still catch on-disk corruption that happened out
+    # from under it mid-session, even though a fresh `takkub doctor`
+    # invocation launched AFTER the corruption can't run at all (the npm/
+    # bin launchers guard that case before ever spawning the interpreter).
+    py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+    py_path = CLI_BIN_DIR / py_name
+    min_python_exe_bytes = 40 * 1024  # a real venv interpreter is comfortably >90KB
+    fix_hint = (
+        "close every running cockpit/takkub process for this install, then "
+        "`npm install -g agent-takkub --force` to reprovision the venv "
+        f"(or delete {py_path.parent} by hand if that still can't overwrite it)"
+    )
+    if not py_path.exists():
+        findings.append(
+            Finding("installed", "venv-python", Status.FAIL, f"missing: {py_path}", fix_hint)
+        )
+    else:
+        size = py_path.stat().st_size
+        looks_broken = size < min_python_exe_bytes
+        if not looks_broken and sys.platform == "win32":
+            try:
+                with open(py_path, "rb") as f:
+                    looks_broken = f.read(2) != b"MZ"
+            except OSError:
+                looks_broken = True
+        if looks_broken:
+            findings.append(
+                Finding(
+                    "installed",
+                    "venv-python",
+                    Status.FAIL,
+                    f"{py_path} is only {size} byte(s) and does not look like a real "
+                    "interpreter — something outside agent-takkub overwrote it",
+                    fix_hint,
+                )
+            )
+        else:
+            # Static shape checks passed — confirm it actually runs. Only
+            # attempted once the file looks plausible (never spawn something
+            # already known to be broken; see lib.js's pythonLooksExecutable
+            # for the same discipline on the npm launcher side).
+            rc, out = _run([str(py_path), "--version"])
+            if rc == 0 and out.strip().lower().startswith("python "):
+                findings.append(Finding("installed", "venv-python", Status.OK, out.strip()))
+            else:
+                findings.append(
+                    Finding(
+                        "installed",
+                        "venv-python",
+                        Status.WARN,
+                        f"{py_path} passed the static file check but `--version` "
+                        f"failed (rc={rc}): {out.strip()[:200]}",
+                        fix_hint,
+                    )
+                )
+
     try:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         probe = RUNTIME_DIR / ".doctor-write-probe"
