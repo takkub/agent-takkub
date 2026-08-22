@@ -352,3 +352,65 @@ class TestCursorLeadNotifierIntegration:
 
         finally:
             notifier.stop()
+
+
+class TestCursorMirrorDiagnosis:
+    """#348: Cursor is wired into the remote mirror in production
+    (`_read_recent_cursor_messages` via `remote/notify.py`'s `_HISTORY_SCANNERS`),
+    so a whole-file schema drift there must surface the same
+    `transcript_unreadable` signal codex gets, not a silent blank chat."""
+
+    def _write(self, tmp_path, monkeypatch, cwd: str, encoded: str, uuid: str, raw: str) -> None:
+        transcripts = tmp_path / "projects" / encoded / "agent-transcripts"
+        sdir = transcripts / uuid
+        sdir.mkdir(parents=True)
+        (sdir / f"{uuid}.jsonl").write_text(raw, encoding="utf-8")
+        monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+        monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda p: cwd)
+
+    def test_whole_file_schema_drift_is_flagged_unreadable(self, tmp_path, monkeypatch):
+        drifted = "\n".join(
+            json.dumps({"role": "future_role", "payload": "x" * 200}) for _ in range(30)
+        )
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "/Volumes/Data/project-drift",
+            "Volumes-Data-project-drift",
+            "sess-drift",
+            drifted + "\n",
+        )
+        orch = _FakeOrch()
+        orch.set_lead("project-drift", "sess-drift", provider="cursor")
+        assert (
+            notify_mod.read_recent_lead_messages(
+                tmp_path
+                / "projects"
+                / "Volumes-Data-project-drift"
+                / "agent-transcripts"
+                / "sess-drift"
+                / "sess-drift.jsonl",
+                provider="cursor",
+            )
+            == []
+        )
+        result = notify_mod.lead_mirror_diagnosis(orch, "project-drift")
+        assert result == {
+            "code": "transcript_unreadable",
+            "provider": "cursor",
+            "session_uuid_short": "sess-dri",
+        }
+
+    def test_freshly_created_empty_transcript_is_not_flagged_as_drift(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "/Volumes/Data/project-fresh",
+            "Volumes-Data-project-fresh",
+            "sess-fresh",
+            "",
+        )
+        orch = _FakeOrch()
+        orch.set_lead("project-fresh", "sess-fresh", provider="cursor")
+        result = notify_mod.lead_mirror_diagnosis(orch, "project-fresh")
+        assert result == {"code": None, "provider": "cursor"}

@@ -578,6 +578,71 @@ class TestLeadMirrorDiagnosis:
         result = notify_mod.lead_mirror_diagnosis(orch, "proj")
         assert result == {"code": "transcript_missing", "provider": "codex"}
 
+    def test_claude_file_resolves_with_content_but_zero_records_is_unreadable(
+        self, tmp_path, config_dir
+    ):
+        """#348: the file exists, is not empty, and resolution succeeded —
+        but every line failed to parse into a message. That is the sharpest
+        available signal of upstream schema drift, not "no messages yet"."""
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1", provider="claude")
+        drifted_lines = [
+            json.dumps({"type": "future_record_shape", "body": "x" * 200}) for _ in range(30)
+        ]
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", drifted_lines)
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {
+            "code": "transcript_unreadable",
+            "provider": "claude",
+            "session_uuid_short": "uuid-1",
+        }
+
+    def test_claude_small_unparseable_file_is_not_flagged_as_drift(self, tmp_path, config_dir):
+        """A handful of bytes that fail to parse into a message (well under
+        the drift threshold) reads as "no messages yet", not a fault — this
+        guards against crying wolf on a session that only just started."""
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1", provider="claude")
+        _write_jsonl(
+            tmp_path, "C--proj", "uuid-1", [json.dumps({"type": "session_meta", "id": "uuid-1"})]
+        )
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": None, "provider": "claude"}
+
+
+class TestTranscriptUnreadableGuard:
+    """#348 centralized guard exercised directly against every registered
+    scanner, without needing each provider's full spawn/resolver plumbing —
+    `_transcript_unreadable` only ever calls `scanner.read_messages`, so this
+    is the same code path `lead_mirror_diagnosis` drives in production."""
+
+    @pytest.mark.parametrize("provider", ["claude", "gemini", "codex", "cursor"])
+    def test_content_that_parses_to_nothing_is_flagged(self, tmp_path, provider):
+        scanner = notify_mod.history_scanner(provider)
+        path = tmp_path / f"{provider}.transcript"
+        drifted = "\n".join(
+            json.dumps({"totally": "new-shape", "pad": "x" * 200}) for _ in range(30)
+        )
+        path.write_text(drifted + "\n", encoding="utf-8")
+        assert notify_mod._transcript_unreadable(scanner, path, "proj") is True
+
+    @pytest.mark.parametrize("provider", ["claude", "gemini", "codex", "cursor"])
+    def test_empty_file_is_not_flagged(self, tmp_path, provider):
+        scanner = notify_mod.history_scanner(provider)
+        path = tmp_path / f"{provider}.transcript"
+        path.write_text("", encoding="utf-8")
+        assert notify_mod._transcript_unreadable(scanner, path, "proj") is False
+
+    def test_opencodes_shared_store_is_never_flagged(self, tmp_path):
+        """OpenCode keeps every project's sessions in ONE sqlite db — a
+        non-empty file with zero rows *for this session* is the normal shape
+        of a brand-new session there, not drift (unlike the per-session
+        files every other scanner resolves to)."""
+        scanner = notify_mod.history_scanner("opencode")
+        path = tmp_path / "opencode.db"
+        path.write_text("x" * 10_000, encoding="utf-8")
+        assert notify_mod._transcript_unreadable(scanner, path, "proj") is False
+
 
 class TestGeminiHistoryHelpers:
     @staticmethod
@@ -1785,6 +1850,38 @@ class TestCodexRemoteHistory:
         path.write_text("\n".join([json.dumps(meta), *records[1:]]) + "\n", encoding="utf-8")
 
         assert notify_mod.list_recent_lead_sessions("proj", provider="codex") == []
+
+    def test_freshly_spawned_pane_meta_only_file_is_not_flagged_as_drift(self):
+        """A Codex rollout file exists the moment the pane spawns (the
+        `session_meta` preamble `_write` always prepends) — well before the
+        user has typed anything. That legitimately parses to zero messages
+        and must stay "no reason to explain", never "transcript_unreadable"
+        (#348 false-positive guard)."""
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="codex")
+        self._write("codex-fresh", [])
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": None, "provider": "codex"}
+
+    def test_real_conversation_that_fails_to_parse_at_all_is_unreadable(self):
+        """#348: Codex wired into the remote mirror in production — a whole
+        rollout file that yields zero parsed messages despite real content
+        must surface as `transcript_unreadable`, not a silent blank chat."""
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="codex")
+        drifted = [
+            {"type": "turn_completed", "data": {"role": "assistant", "text": "x" * 200}}
+            for _ in range(30)
+        ]
+        self._write("codex-drifted", drifted)
+        assert (
+            notify_mod.read_recent_lead_messages(
+                self.root / "rollout-2026-08-11T10-00-00-codex-drifted.jsonl", provider="codex"
+            )
+            == []
+        )
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": "transcript_unreadable", "provider": "codex"}
 
 
 class TestProviderNeutralLiveFallback:

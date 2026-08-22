@@ -472,15 +472,57 @@ def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Pa
 # --live`, but computed directly against `orch` (already in-process here,
 # like `lead_history_snapshot` — no loopback round trip needed) so it can
 # never disagree with what `resolve_lead_jsonl` actually did.
+# #348: a resolved file that the scanner parses into zero records is the
+# sharpest signal available that the upstream CLI changed its transcript
+# schema/layout — a store nothing writes to still stops changing, but it
+# never starts non-empty-with-nothing-parseable on its own. Record-level
+# fail-silent (skip one malformed line, keep the rest) stays exactly as it
+# was; this only classifies the *whole-file* case the individual `except
+# ValueError` guards in `codex_helper.py`/`cursor_helper.py`/etc. can never
+# see themselves, since each only ever looks at one record at a time.
+#
+# A bare `size == 0` check is not enough: some providers (Codex) write a
+# small bookkeeping preamble (`session_meta`) the moment a pane spawns,
+# before the user has typed a single prompt — that record legitimately
+# parses to zero messages and must read as "no messages yet", not drift. A
+# lone preamble record is a few hundred bytes at most in every scanner this
+# repo has today, so a small threshold well above that (and far below what
+# even one real exchange accumulates) tells "just spawned" apart from "real
+# content came in but nothing parsed" without needing per-provider knowledge
+# of what a preamble record looks like.
+_TRANSCRIPT_DRIFT_MIN_BYTES = 4096
+
+
+def _transcript_unreadable(scanner: _HistoryScanner, path: Path, project_ns: str) -> bool:
+    if not scanner.exclusive_store:
+        # Shared store (OpenCode's one sqlite db): zero rows for THIS
+        # session is the normal shape of a brand-new session, not drift.
+        return False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False  # resolve_lead_jsonl already proved the path existed
+    if size < _TRANSCRIPT_DRIFT_MIN_BYTES:
+        return False
+    try:
+        messages = scanner.read_messages(path, 1, project_ns)
+    except (OSError, ValueError, TypeError):
+        return True
+    return not messages
+
+
 def lead_mirror_diagnosis(orch, project_ns: str) -> dict:
     """Classify why the Lead pane currently has nothing to mirror.
 
     Returns `{"code": ..., "provider": ..., "session_uuid_short"?: ...}`.
     `code` is one of `"provider_unsupported"`, `"no_session_uuid"`,
-    `"transcript_missing"`, or `None` when a transcript resolved (a blank
-    chat there is legitimately "no messages yet", not a fault to explain).
-    `session_uuid_short` (first 8 chars, never the full uuid — data-min) is
-    included only for `transcript_missing` when a uuid was recorded.
+    `"transcript_missing"`, `"transcript_unreadable"` (#348 — file resolved
+    and has content, but the parser extracted zero records: the upstream CLI
+    likely changed its schema), or `None` when a transcript resolved with at
+    least one parseable record, or resolved empty (legitimately "no messages
+    yet", not a fault to explain). `session_uuid_short` (first 8 chars, never
+    the full uuid — data-min) is included for `transcript_missing` and
+    `transcript_unreadable` when a uuid was recorded.
     """
     provider = lead_provider_name(orch, project_ns)
     scanner = history_scanner(provider)
@@ -490,12 +532,17 @@ def lead_mirror_diagnosis(orch, project_ns: str) -> dict:
     if scanner.requires_session_uuid and not session_uuid:
         return {"code": "no_session_uuid", "provider": provider}
     path = resolve_lead_jsonl(orch, project_ns, provider)
-    if path is not None:
-        return {"code": None, "provider": provider}
-    out = {"code": "transcript_missing", "provider": provider}
-    if session_uuid:
-        out["session_uuid_short"] = session_uuid[:8]
-    return out
+    if path is None:
+        out = {"code": "transcript_missing", "provider": provider}
+        if session_uuid:
+            out["session_uuid_short"] = session_uuid[:8]
+        return out
+    if _transcript_unreadable(scanner, path, project_ns):
+        out = {"code": "transcript_unreadable", "provider": provider}
+        if session_uuid:
+            out["session_uuid_short"] = session_uuid[:8]
+        return out
+    return {"code": None, "provider": provider}
 
 
 _SESSION_LIST_DEFAULT_LIMIT = 10
@@ -1587,6 +1634,12 @@ class _HistoryScanner:
     live_activity: Callable[[dict], str | None] = lambda _rec: None
     live_ask: Callable[[dict], dict | None] = lambda _rec: None
     requires_session_uuid: bool = True
+    # False only for a store shared across sessions/projects (OpenCode's one
+    # sqlite db): there, a non-empty file with zero rows *for this session*
+    # is the normal state of a brand-new session, not a drift signal — the
+    # #348 unreadable-file guard below only applies where the resolved path
+    # belongs exclusively to this session's transcript.
+    exclusive_store: bool = True
 
 
 _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
@@ -1622,6 +1675,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         live_texts=lambda _rec: [],
         live_users=lambda _rec: [],
         requires_session_uuid=False,
+        exclusive_store=False,
     ),
     "cursor": _HistoryScanner(
         resolve_session=_resolve_cursor_jsonl_path,
