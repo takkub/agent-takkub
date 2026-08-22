@@ -245,6 +245,29 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if ss is not None:
         monkeypatch.setattr(ss, "_PATH", runtime / "takkub-remote-sessions.json", raising=False)
 
+    # `orchestrator._main_thread_heartbeat_age` is a module-global probe
+    # (set via `set_main_thread_heartbeat_probe`) that lead_inbox's
+    # submit-verify loop reads on every decision (#133). Production wiring
+    # is app.py's `_start_deadman_watchdog`, which registers a REAL probe
+    # closed over a `window` object — `tests/test_single_instance_watchdog.py`
+    # calls that function directly with a local `MagicMock()` window and
+    # never restores the probe afterward, so it stays permanently "stale"
+    # (growing `time.monotonic() - <frozen ts>`) for every test that runs
+    # later in the same process. Combined with a `QTimer.singleShot`
+    # synchronous-mock (several test files patch it to call its callback
+    # immediately instead of via the Qt event loop), `_delayed_enter_verified`'s
+    # stall-deferral branch — normally bounded to a few nested calls — instead
+    # re-triggers on every iteration of its ~150-attempt busy-resend budget,
+    # multiplying the synchronous call depth enough to blow Python's
+    # recursion limit (reproduced: `test_single_instance_watchdog.py` then
+    # `test_no_content_watchdog_cap.py::TestAttemptTwoCapsOut` in one pytest
+    # run → RecursionError). Force it back to the neutral "never stale"
+    # probe before every test so no test — this one or a future one — can
+    # leak it into another via process/worker reuse under xdist.
+    orch_hb = _maybe_module("agent_takkub.orchestrator", force=True)
+    if orch_hb is not None and hasattr(orch_hb, "_main_thread_heartbeat_age"):
+        monkeypatch.setattr(orch_hb, "_main_thread_heartbeat_age", lambda: 0.0, raising=False)
+
     # Second layer for #91 (see the module-level os.environ.setdefault above):
     # force the env guard back on per-test (in case a prior test cleared it)
     # AND monkeypatch warm_browser_mcps to a no-op directly, so a stray import
