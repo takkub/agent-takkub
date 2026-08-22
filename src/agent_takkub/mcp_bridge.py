@@ -35,15 +35,17 @@ to that provider's own injection surface:
     inherited ones do not come back). That makes the disable-all prefix a
     complete deny-by-default on its own, on every version tested — not
     something that depends on also resolving and disabling each inherited
-    name one by one. Because untested older/unknown codex builds could
-    still behave like the original #121 finding, `_codex_mcp_argv` keeps
-    that per-name resolve-and-disable as defense-in-depth gated by
-    `_CODEX_RESOLVE_SAFE_MIN_VERSION`: codex-cli at or above that floor
+    name one by one. Because untested older/newer codex builds could
+    still behave like the original #121 finding — confirmed 2026-08-22 for
+    codex-cli 0.149.0, see #352 — `_codex_mcp_argv` keeps that per-name
+    resolve-and-disable as defense-in-depth gated by
+    `_CODEX_RESOLVE_SAFE_MIN_VERSION`/`_CODEX_RESOLVE_SAFE_MAX_VERSION`:
+    codex-cli strictly WITHIN that closed, empirically-verified window
     skips the resolve subprocess entirely (and can never hard-abort a spawn
-    over it); anything older, or whose version can't be parsed, keeps the
-    original conservative behaviour (resolve codex's live MCP name list via
-    `mcp list --json`, hard-abort the spawn if that fails — see
-    `McpResolutionError`). A role with NO cockpit MCP policy at all
+    over it); anything older, newer, or whose version can't be parsed,
+    keeps the original conservative behaviour (resolve codex's live MCP
+    name list via `mcp list --json`, hard-abort the spawn if that fails —
+    see `McpResolutionError`). A role with NO cockpit MCP policy at all
     (`role_mcp_allowlist` returns `None`) stays untouched passthrough, same
     as always.
   - ``"plugin_import"`` (gemini/agy): documented no-op. `agy` genuinely
@@ -80,7 +82,26 @@ _log = logging.getLogger(__name__)
 # (used to disambiguate stdio vs http for OUR own tooling) has no codex
 # equivalent — stdio is implied by `command` being present — so it's
 # dropped rather than forwarded as an override codex doesn't recognize.
-_CODEX_SERVER_KEYS = ("command", "args", "env")
+#
+# `startup_timeout_sec`/`tool_timeout_sec` (#351): every server the cockpit
+# injects lands here from `runtime/shared-mcp.json`, which never sets these
+# — so before this fix codex fell through to its own short built-in default
+# for EVERY cockpit-injected server, regardless of how slow that server's
+# cold start actually is (measured: a cold `npx` MCP server can take
+# 30-300s+ to answer `initialize`, see `_codex_resolved_mcp_names`'s
+# docstring and issue #351's `delivery_boot_timeout_failed` evidence).
+# `tool_timeout_sec` is forwarded when the server config sets it explicitly
+# but gets no synthesized default — unlike startup, there is no measured
+# case of codex's own tool-call default being too short, so inventing one
+# would just risk masking a genuinely hung tool call.
+_CODEX_SERVER_KEYS = ("command", "args", "env", "startup_timeout_sec", "tool_timeout_sec")
+
+# Applied only when a cockpit-injected server config omits
+# `startup_timeout_sec` entirely (see `_CODEX_SERVER_KEYS` comment above).
+# 120s matches the value the #351 workaround verified against the real
+# 0.149.0 binary (base `CODEX_HOME/config.toml` value, confirmed surviving
+# alongside a session-scoped `command`/`args` override).
+_CODEX_DEFAULT_STARTUP_TIMEOUT_SEC = 120
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CODEX_DISABLE_ALL_MCP_ARGV = [
     "-c",
@@ -89,17 +110,32 @@ _CODEX_DISABLE_ALL_MCP_ARGV = [
     "features.plugins=false",
 ]
 
-# Oldest codex-cli build empirically confirmed (2026-08-05, real binaries,
-# not guessed) to fully clear `mcp_servers` from `-c mcp_servers={}` alone —
-# see the module docstring's session_override bullet. codex-cli at or above
-# this floor skips `_codex_resolved_mcp_names` entirely: the disable-all
-# prefix is already sufficient, so there is nothing left to resolve and
-# nothing that can hard-abort the spawn. Anything older, or a version string
-# we can't parse, falls back to the pre-existing resolve-and-hard-abort path
-# — we have not tested every codex build that has ever shipped, only these
-# three (0.144.1, 0.145.0, 0.146.0), so this stays a conservative floor
-# rather than a blanket "codex never merges" assumption.
+# Oldest/newest codex-cli build empirically confirmed (2026-08-05, real
+# binaries, not guessed) to fully clear `mcp_servers` from
+# `-c mcp_servers={}` alone — see the module docstring's session_override
+# bullet. codex-cli WITHIN this closed window skips `_codex_resolved_mcp_names`
+# entirely: the disable-all prefix is already sufficient, so there is
+# nothing left to resolve and nothing that can hard-abort the spawn.
+# Anything older, newer, or a version string we can't parse, falls back to
+# the pre-existing resolve-and-hard-abort path — we have not tested every
+# codex build that has ever shipped, only these three (0.144.1, 0.145.0,
+# 0.146.0), so this stays a conservative closed range rather than an
+# open-ended "0.144.1 and up is safe forever" assumption.
+#
+# #352: that open-ended floor was exactly the bug — codex-cli 0.149.0
+# (untested, above the 0.146.0 ceiling) silently kept skipping the resolve
+# step, and on that real binary the disable-all prefix does NOT fully deny
+# inherited servers: confirmed 2026-08-22 not just via `mcp list --json`
+# (which reporter #352 already flagged as merely diagnostic) but via a live
+# `codex exec` session's own `codex.conversation_starts` OpenTelemetry event
+# — `mcp_servers="codex_apps, graft, graft2"` / `mcp_server_count=3` for a
+# session whose ONLY override was a graft-only allowlist on top of
+# `-c mcp_servers={}`. An inherited `graft2` (standing in for an
+# out-of-allowlist server) genuinely loaded into the live MCP manager, not
+# just into the `mcp list` diagnostic. A max ceiling stops a future unknown
+# version from getting the same silent pass.
 _CODEX_RESOLVE_SAFE_MIN_VERSION = (0, 144, 1)
+_CODEX_RESOLVE_SAFE_MAX_VERSION = (0, 146, 0)
 _CODEX_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
@@ -107,15 +143,16 @@ class McpResolutionError(RuntimeError):
     """Raised when the "session_override" (codex) adapter can't safely
     resolve which MCP servers to deny.
 
-    Only reachable for a codex-cli older than `_CODEX_RESOLVE_SAFE_MIN_VERSION`
-    (or one whose version we couldn't parse): the disable-all prefix already
-    covers every verified codex build on its own (module docstring), so
-    `_codex_mcp_argv` skips this resolve step — and this error — entirely
-    for those. For the older/unverified path, deny-by-default falls back to
-    depending on the full inherited name list being known — an incomplete
-    or failed resolution there would silently under-deny, handing the pane
-    whatever MCPs happen to be in `~/.codex/config.toml`. So this is not
-    a degrade-and-continue error: callers (`spawn_engine.py`) must treat
+    Only reachable for a codex-cli outside the closed
+    `_CODEX_RESOLVE_SAFE_MIN_VERSION`..`_CODEX_RESOLVE_SAFE_MAX_VERSION`
+    window (or one whose version we couldn't parse): the disable-all prefix
+    already covers every verified codex build on its own (module docstring),
+    so `_codex_mcp_argv` skips this resolve step — and this error — entirely
+    for those. For the older/newer/unverified path, deny-by-default falls
+    back to depending on the full inherited name list being known — an
+    incomplete or failed resolution there would silently under-deny, handing
+    the pane whatever MCPs happen to be in `~/.codex/config.toml`. So this is
+    not a degrade-and-continue error: callers (`spawn_engine.py`) must treat
     it as fatal to the spawn attempt, not log-and-proceed like the
     surrounding context-rendering `except Exception` blocks do.
     """
@@ -338,7 +375,11 @@ def _codex_mcp_argv(
         _cwd = cwd or os.getcwd()
         _env = env or os.environ.copy()
         version = _codex_cli_version_cached(_bin, _cwd, _env)
-        if version is None or version < _CODEX_RESOLVE_SAFE_MIN_VERSION:
+        if (
+            version is None
+            or version < _CODEX_RESOLVE_SAFE_MIN_VERSION
+            or version > _CODEX_RESOLVE_SAFE_MAX_VERSION
+        ):
             names = _codex_resolved_mcp_names(_bin, _cwd, _env)
             for name in names:
                 if name not in servers:
@@ -353,10 +394,14 @@ def _codex_mcp_argv(
         if not isinstance(cfg, dict):
             continue
         for key in _CODEX_SERVER_KEYS:
-            if key not in cfg:
+            if key in cfg:
+                value = cfg[key]
+            elif key == "startup_timeout_sec":
+                value = _CODEX_DEFAULT_STARTUP_TIMEOUT_SEC
+            else:
                 continue
             try:
-                literal = _toml_literal(cfg[key])
+                literal = _toml_literal(value)
             except TypeError:
                 _log.warning("mcp_bridge: skipping unencodable %s.%s for codex", name, key)
                 continue
