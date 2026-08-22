@@ -36,7 +36,7 @@ def _make_orchestrator(qapp, monkeypatch):
         staticmethod(lambda p: p or TEST_PROJECT),
     )
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

@@ -49,7 +49,7 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda project: project))
     monkeypatch.setattr(Orchestrator, "_save_pending_done_notices", lambda self, p: None)
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

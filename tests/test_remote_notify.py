@@ -19,6 +19,8 @@ from agent_takkub.remote import config as remote_config
 from agent_takkub.remote import notify as notify_mod
 from agent_takkub.remote.notify import LeadNotifier, _lead_text_blocks
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 
 class _PaneState:
     def __init__(self, session_uuid: str | None) -> None:
@@ -84,6 +86,16 @@ class _FakeMonotonicClock:
 @pytest.fixture
 def qapp() -> QCoreApplication:
     return QCoreApplication.instance() or QCoreApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _stop_lead_notifier_timers(monkeypatch):
+    # LeadNotifier.__init__ starts self._timer (poll) unconditionally (#344)
+    # — every `LeadNotifier(...)` in this file otherwise leaves one running
+    # for the rest of the pytest session.
+    finalize = stop_timers_after(monkeypatch, LeadNotifier, "_timer")
+    yield
+    finalize()
 
 
 def _assistant_line(*texts: str) -> str:

@@ -92,7 +92,7 @@ class TestProviderModelConfig:
 def _make_orchestrator(qapp, monkeypatch) -> Orchestrator:
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p or TEST_PROJECT))
     orchestrator = Orchestrator()
-    orchestrator._idle_watchdog.stop()
+    orchestrator.shutdown_timers()
     return orchestrator
 
 

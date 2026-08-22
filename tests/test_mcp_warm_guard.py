@@ -98,8 +98,7 @@ def test_orchestrator_construction_spawns_no_subprocess(
     monkeypatch.setattr(sdt.subprocess, "run", _fake_run)
 
     o = Orchestrator()
-    o._idle_watchdog.stop()
-    o._hot_md_timer.stop()
+    o.shutdown_timers()
 
     assert calls == [], f"Orchestrator() construction spawned subprocess.run calls: {calls}"
 

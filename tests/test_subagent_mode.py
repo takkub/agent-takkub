@@ -27,7 +27,7 @@ def orch(qapp: QCoreApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(orchestrator_text, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path)
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     o._notify_lead = MagicMock()
     o._write_hot_md = MagicMock()
     return o

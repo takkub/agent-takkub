@@ -16,6 +16,8 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.cli_server import CliServer
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 _PANE_TOKEN_BACKEND = "test-pane-token-backend-abc"
 _LEAD_TOKEN = "test-lead-token-abc123"
 
@@ -26,6 +28,16 @@ def qapp() -> QCoreApplication:
     if app is None:
         app = QCoreApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _stop_cli_server_reapers(monkeypatch):
+    # CliServer.__init__ starts self._reaper (1s repeating) unconditionally
+    # (#344) — every `CliServer(...)` in this file otherwise leaves one
+    # running for the rest of the pytest session.
+    finalize = stop_timers_after(monkeypatch, CliServer, "_reaper")
+    yield
+    finalize()
 
 
 class _FakeSock:

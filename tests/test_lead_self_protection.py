@@ -86,7 +86,7 @@ class TestOrchestratorDoneRejectsLead:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         ok, msg = orch.done("lead", note="I am lead trying to close myself")
         assert ok is False
@@ -105,7 +105,7 @@ class TestOrchestratorDoneRejectsLead:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         orch._panes_by_project.clear()
 
         ok, msg = orch.done("lead")
@@ -126,7 +126,7 @@ class TestOrchestratorDoneRejectsLead:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         # Suppress side-effects (QTimer, file I/O)
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda *_: None))
@@ -165,7 +165,7 @@ class TestOrchestratorCloseSkipsLeadTerminate:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         mock_session = MagicMock()
         lead_pane = MagicMock()
@@ -192,7 +192,7 @@ class TestOrchestratorCloseSkipsLeadTerminate:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         mock_session = MagicMock()
         lead_pane = MagicMock()
@@ -217,7 +217,7 @@ class TestOrchestratorCloseSkipsLeadTerminate:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         # Suppress paneClosed / statusChanged Qt signals
         monkeypatch.setattr(orch, "paneClosed", MagicMock())
@@ -299,7 +299,7 @@ class TestOrchestratorCloseForce:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         monkeypatch.setattr(orch, "paneClosed", MagicMock())
         monkeypatch.setattr(orch, "statusChanged", MagicMock())
         return orch
@@ -383,7 +383,7 @@ class TestOrchestratorUnregisterPane:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         monkeypatch.setattr(orch, "statusChanged", MagicMock())
         return orch
 
@@ -470,7 +470,7 @@ class TestCloseAllTeammatesSkipsLead:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         monkeypatch.setattr(orch, "paneClosed", MagicMock())
         monkeypatch.setattr(orch, "statusChanged", MagicMock())
 
@@ -525,7 +525,7 @@ class TestRestartLeadPath:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         monkeypatch.setattr(orch, "paneClosed", MagicMock())
         monkeypatch.setattr(orch, "statusChanged", MagicMock())
 
@@ -567,7 +567,7 @@ class TestCloseEmitsDistinctReasons:
             staticmethod(lambda project: project or "proj"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
         monkeypatch.setattr(orch, "paneClosed", MagicMock())
         monkeypatch.setattr(orch, "statusChanged", MagicMock())
         return orch

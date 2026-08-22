@@ -33,7 +33,7 @@ def qapp() -> QCoreApplication:
 def orch(qapp, monkeypatch):
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p or TEST_PROJECT))
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     # Neutralise collaborators the tail touches so we observe wiring, not effects.
     o._auto_trust = MagicMock()
     o._on_codex_exit = MagicMock()

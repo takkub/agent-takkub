@@ -16,6 +16,8 @@ from agent_takkub import project_nav as project_nav_module
 from agent_takkub.project_nav import ProjectNav
 from agent_takkub.project_tab import ProjectTab
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -29,6 +31,18 @@ def qapp():
 def _isolate_runtime_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(project_nav_module, "list_project_names", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def _stop_nav_tab_timers(monkeypatch):
+    # ProjectNav._pending_timer and ProjectTab._tab_status_timer both start
+    # unconditionally in __init__ (#344) — every construction in this file
+    # otherwise leaves one running for the rest of the pytest session.
+    finalize_nav = stop_timers_after(monkeypatch, ProjectNav, "_pending_timer")
+    finalize_tab = stop_timers_after(monkeypatch, ProjectTab, "_tab_status_timer")
+    yield
+    finalize_nav()
+    finalize_tab()
 
 
 def _page(text: str) -> QWidget:

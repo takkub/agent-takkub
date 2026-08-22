@@ -53,8 +53,7 @@ def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> path
 @pytest.fixture
 def window(qapp: QCoreApplication, project_env: pathlib.Path) -> HeadlessWindow:
     w = HeadlessWindow()
-    w.orch._idle_watchdog.stop()
-    w.orch._hot_md_timer.stop()
+    w.orch.shutdown_timers()
     yield w
 
 

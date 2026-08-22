@@ -92,7 +92,7 @@ def tmp_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.
 @pytest.fixture
 def orch(qapp: QCoreApplication, tmp_env: pathlib.Path) -> Orchestrator:
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

@@ -46,7 +46,7 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
         staticmethod(lambda project: project or TEST_PROJECT),
     )
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     # Run deferred (staggered) spawns inline so tests stay synchronous.
     monkeypatch.setattr(o, "_defer", lambda _delay, fn: fn())
     return o
