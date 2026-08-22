@@ -26,10 +26,13 @@
     "takkub": "npm/bin/takkub.js"
   },
   "scripts": {
-    "postinstall": "node npm/scripts/postinstall.js"
+    "postinstall": "node npm/scripts/postinstall.js",
+    "prepublishOnly": "node npm/scripts/preflight-publish.js",
+    "test": "node --test npm/scripts/*.test.js"
   },
   "files": [
     "npm/",
+    "!npm/scripts/*.test.js",
     "dist/*.whl",
     "assets/icon.ico",
     "assets/icon.png",

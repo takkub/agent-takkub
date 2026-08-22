@@ -101,10 +101,14 @@ __version__ = "X.Y.Z"
 
 ## 4. Build wheel
 
+**#340 (แก้แล้ว):** `postinstall.js` เลือก wheel จากเวอร์ชันใน `package.json` ตรงๆ แล้ว (ไม่ใช่
+string sort สุดท้าย) และ `npm publish`/`npm publish --dry-run` มี `prepublishOnly` guard
+(`npm/scripts/preflight-publish.js`) เทียบเวอร์ชันใน `package.json` กับชื่อไฟล์ wheel ใน `dist/` —
+ไม่ตรง/ไม่มี/มีมากกว่า 1 ไฟล์ → publish ตายทันที ไม่ warn เฉยๆ ยังต้อง build เองตามข้อนี้ (manual flow นี้
+ยังไม่เรียก `takkub release`) แต่ผิดเวอร์ชันแล้ว publish จะไม่หลุดเงียบๆ อีกต่อไป
+
 ```bash
-rm -f dist/*.whl   # ลบของเก่าก่อนเสมอ — npm files:"dist/*.whl" ship ทุกไฟล์ที่เจอ และ
-                    # npm/scripts/postinstall.js เลือกตัว sort ท้ายสุด (string sort ธรรมดา —
-                    # "1.0.9" > "1.0.10" ตาม lexicographic order! ของเก่าค้างไว้ = เสี่ยง ship ผิดตัว)
+rm -f dist/*.whl   # ลบของเก่าก่อนเสมอ — npm files:"dist/*.whl" ship ทุกไฟล์ที่เจอ
 
 # รันจาก cwd นอก repo เสมอ — python -m build สร้าง build/ staging dir ใน srcdir ระหว่างมันทำงาน;
 # ถ้า cwd == srcdir และมี build/ ค้างจากรอบก่อน สภาพแวดล้อม shell เดียวกันที่ import agent_takkub
@@ -200,9 +204,10 @@ npm view agent-takkub version   # ต้องตรงกับเวอร์�
 - **npm 2FA**: บัญชี user ไม่ได้เปิด 2FA เริ่มต้น → `npm publish` ปกติเคยโดน E403 เสมอ ก่อน 1.0.12
   แก้ด้วย granular token bypass-2FA แบบ one-shot; ตั้งแต่ที่ login session คงอยู่ (`npm whoami` ผ่าน)
   publish ตรงๆ ใช้ได้แล้ว — ลองแบบตรงก่อนเสมอ ค่อย fallback ไป token dance
-- **wheel version-sort bug**: `postinstall.js` เลือก wheel ด้วย string sort ธรรมดา ("1.0.9" >
-  "1.0.10" แบบ lexicographic) — ต้องมี wheel เดียวใน `dist/` ต่อ release เท่านั้น (ลบของเก่าก่อน build
-  ทุกครั้ง — ดูข้อ 4)
+- **wheel version-sort bug (#340, แก้แล้ว)**: `postinstall.js` เคยเลือก wheel ด้วย string sort
+  ธรรมดา ("1.0.9" > "1.0.10" แบบ lexicographic) — ตอนนี้เลือกจากเวอร์ชันใน `package.json` ตรงๆ
+  (`npm/scripts/lib.js`'s `findWheelForVersion`) และมี `prepublishOnly` preflight guard กัน publish
+  ผิดเวอร์ชันไว้อีกชั้น (ดูข้อ 4) — ลบของเก่าก่อน build ทุกครั้งไว้เป็นนิสัยดีเหมือนเดิม
 - **build/ module shadow**: `python -m build` สร้าง staging dir `build/` ใน srcdir — ปัญหาจริงคือ
   shell เดิมที่ import/run pytest ต่อทันทีหลัง build อาจ resolve ผิดโมดูล ไม่ใช่ตัว build เอง (ดูข้อ 4)
 - **ไม่มี CI publish workflow** — publish มือจากเครื่อง dev เท่านั้น ไม่มี auto-publish-on-tag
