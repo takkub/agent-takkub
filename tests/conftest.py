@@ -422,16 +422,17 @@ def pop_qt_slot_exceptions() -> list[str]:
 # against torn-down state later in the session (the actual abort risk),
 # and queues a one-line note for a session-end report.
 #
-# Deliberately NON-fatal, unlike the exception queue above: as of this
-# writing backend#2 is still auditing ~15 files with this exact leak, so
-# this fires across most of the suite right now — failing on it would turn
-# nearly the whole run red and bury the (rare, always-a-real-bug) exception-
-# escape failures the guard above exists to surface. It only stops the timer
-# and appends to `_leaked_timer_reports`, printed as a non-fatal section by
-# `pytest_terminal_summary` below. Once backend#2's per-file audit lands and
-# this report goes empty, promoting it to `pytest.fail` (same pattern as
-# `_qt_session_app`'s teardown) would be reasonable follow-up — not done
-# here since 15 files still legitimately trip it.
+# #345 follow-up: was deliberately non-fatal while backend#2's per-file audit
+# was still in progress (240 leaks at the low point) — failing on it then
+# would have turned nearly the whole run red and buried the (rare, always-
+# a-real-bug) exception-escape failures the guard above exists to surface.
+# That audit is done (240 -> 0, #345) — this now FAILS the session (see
+# `_qt_session_app`'s teardown below, same `pytest.fail` pattern already
+# used for the exception queue above) instead of only printing the
+# non-fatal `pytest_terminal_summary` section, so a QTimer newly leaked by
+# a future test/production change goes red immediately instead of quietly
+# regrowing this list unnoticed until it hits #344-style abort territory
+# again.
 _live_qtimers: weakref.WeakSet | None = None
 _leaked_timer_reports: list[str] = []
 
@@ -473,21 +474,54 @@ def _stop_leaked_qtimers() -> None:
         )
 
 
+def _format_leaked_timer_reports(reports: list[str], *, limit: int = 50) -> str:
+    """Render *reports* (one `_stop_leaked_qtimers` line per leaked timer,
+    already naming the leaking test + the timer's interval/objectName) as an
+    indented block, capped at *limit* lines. Shared by the non-fatal
+    terminal-summary section and the session-failure message below so the
+    two never drift out of sync (#345)."""
+    shown = reports[:limit]
+    more = len(reports) - len(shown)
+    detail = "\n".join(f"  {line}" for line in shown)
+    if more:
+        detail += f"\n  ... and {more} more"
+    return detail
+
+
+def _qtimer_leak_failure_message(reports: list[str]) -> str | None:
+    """Build the `pytest.fail` message for `_qt_session_app`'s teardown, or
+    None when *reports* is empty (nothing to fail on). Pulled out as a pure
+    function so it's unit-testable without actually failing a pytest
+    session — see test_conftest_qtimer_leak_tracker.py."""
+    if not reports:
+        return None
+    return (
+        f"#344/#345: {len(reports)} QTimer(s) were still active after their owning "
+        "test finished (each already stopped here so it couldn't fire against "
+        "torn-down state later in the session). A QTimer constructed with a parent "
+        "(e.g. `QTimer(self)`) must be stopped by the test that armed it, or by that "
+        "owner's `shutdown_timers()` in a fixture teardown — see #345's "
+        "CliServer._fire_staggered/shutdown_timers and Orchestrator.shutdown_timers "
+        "for the established pattern. Do not silence this check by widening the "
+        "non-fatal report again.\n" + _format_leaked_timer_reports(reports)
+    )
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not _leaked_timer_reports:
         return
-    terminalreporter.section("#344 leaked QTimer summary (non-fatal)")
+    terminalreporter.section("#344/#345 leaked QTimer summary (fails the session)")
     terminalreporter.write_line(
         f"{len(_leaked_timer_reports)} QTimer(s) were still active after their owning "
         "test finished; stopped here so they can't fire against torn-down state later "
-        "in the session. backend#2 is auditing these file-by-file — see "
-        "_install_qtimer_leak_tracker's docstring in conftest.py for #344 context. Not "
-        "failing the suite over this on purpose."
+        "in the session. Each line names the leaking test, the timer's interval, and "
+        "its objectName (if any) — find the QTimer(...) construction in that test's "
+        "code path and stop it (or park it in a per-test/fixture teardown) instead of "
+        "leaving it armed past teardown. See _install_qtimer_leak_tracker's docstring "
+        "in conftest.py for #344/#345 context. `_qt_session_app`'s teardown below turns "
+        "this into a session failure."
     )
-    for line in _leaked_timer_reports[:50]:
-        terminalreporter.write_line(f"  {line}")
-    if len(_leaked_timer_reports) > 50:
-        terminalreporter.write_line(f"  ... and {len(_leaked_timer_reports) - 50} more")
+    terminalreporter.write_line(_format_leaked_timer_reports(_leaked_timer_reports))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -547,3 +581,13 @@ def _qt_session_app():
             "stop the leaking timer; do not silence this check.\n" + "\n".join(leaked),
             pytrace=False,
         )
+
+    # #345: promoted from the non-fatal `pytest_terminal_summary` report to a
+    # real failure now that the per-file audit (#345) closed the count to 0 —
+    # see _install_qtimer_leak_tracker's docstring above for why this waited.
+    # Each entry already names the leaking test + the timer's interval/
+    # objectName (`_stop_leaked_qtimers`), so the failure message is
+    # self-contained: no need to re-run with extra flags to find the culprit.
+    timer_leak_msg = _qtimer_leak_failure_message(_leaked_timer_reports)
+    if timer_leak_msg is not None:
+        pytest.fail(timer_leak_msg, pytrace=False)

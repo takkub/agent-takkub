@@ -37,7 +37,13 @@ def qapp() -> QCoreApplication:
 def orch(qapp) -> Orchestrator:
     o = Orchestrator.__new__(Orchestrator)
     QObject.__init__(o)
-    return o
+    yield o
+    # #344/#345: test_provider_with_argv_and_binary_does_spawn reaches
+    # _run_boot_diagnostic_async's real path, which arms an 8s QTimer(self)
+    # watchdog (lead_inbox.py) — QProcess is mocked so it never fires, so
+    # stop it here rather than leaving it ticking against this torn-down
+    # Orchestrator for the rest of the session.
+    o.shutdown_timers()
 
 
 class TestBootDiagnosticNoticeText:

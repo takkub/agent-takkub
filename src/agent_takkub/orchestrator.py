@@ -1339,7 +1339,7 @@ class Orchestrator(
             manager.close()
 
     def shutdown_timers(self) -> None:
-        """Stop every QTimer this Orchestrator owns (#344).
+        """Stop every QTimer this Orchestrator (recursively) owns (#344).
 
         __init__ arms _resource_timer / _idle_watchdog / _hot_md_timer
         unconditionally, so any Orchestrator() left reachable past its
@@ -1357,11 +1357,19 @@ class Orchestrator(
         signals) always ends in process exit, which takes every timer with
         it regardless. Call this only where an Orchestrator is built and
         then dropped without the process ending — tests, mainly.
+
+        Deterministic `findChildren(QTimer)` sweep (#345 — mirrors
+        CliServer.shutdown_timers), not just the 3 named attrs above: also
+        catches transient per-call watchdogs parented to `self` but never
+        stored as an attribute — e.g. `_check_uncommitted_async`'s git-status
+        timeout and `_run_boot_diagnostic_async`'s boot-diagnostic timeout
+        (lead_inbox.py) — which a test exercising just that one call path
+        leaves armed with no attribute name to stop by hand. `self` has no
+        other QObject parented as a child (`_native_chrome` is constructed
+        parentless), so this never reaches into an unrelated owner's timers.
         """
-        for attr in ("_resource_timer", "_idle_watchdog", "_hot_md_timer"):
-            timer = getattr(self, attr, None)
-            if timer is not None:
-                timer.stop()
+        for timer in self.findChildren(QTimer):
+            timer.stop()
 
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry  (SpawnEngineMixin provides _ps + spawn methods)
