@@ -10,6 +10,11 @@ happens to run). `stop_timers_after` patches the class's __init__ to record
 every instance built while a test runs, then stops the named timers at
 teardown — so a leftover instance can never still be armed once the process
 moves on to a later test/module and pumps the event loop again.
+
+Each name in *timer_attrs* is either a QTimer attribute (stopped directly) or
+a zero-arg cleanup method like `CliServer.shutdown_timers` (#345 — called
+instead, for a class whose timers aren't all one fixed attribute — e.g. one
+spawn-stagger QTimer per staggered dispatch).
 """
 
 from __future__ import annotations
@@ -30,8 +35,9 @@ def stop_timers_after(monkeypatch, cls: type, *timer_attrs: str) -> Callable[[],
     def _finalize() -> None:
         for obj in instances:
             for attr in timer_attrs:
-                timer = getattr(obj, attr, None)
-                if timer is not None:
-                    timer.stop()
+                target = getattr(obj, attr, None)
+                if target is None:
+                    continue
+                target() if callable(target) else target.stop()
 
     return _finalize

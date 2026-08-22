@@ -34,9 +34,11 @@ def qapp() -> QCoreApplication:
 @pytest.fixture(autouse=True)
 def _stop_cli_server_reapers(monkeypatch):
     # CliServer.__init__ starts self._reaper (1s repeating) unconditionally
-    # (#344) — every `CliServer(...)` in this file otherwise leaves one
-    # running for the rest of the pytest session.
-    finalize = stop_timers_after(monkeypatch, CliServer, "_reaper")
+    # (#344), and _dispatch's spawn/assign/pipeline-run path can leave a
+    # pending spawn-stagger QTimer behind too (#345) — every `CliServer(...)`
+    # in this file otherwise leaves one or more running for the rest of the
+    # pytest session. shutdown_timers() stops both kinds.
+    finalize = stop_timers_after(monkeypatch, CliServer, "shutdown_timers")
     yield
     finalize()
 

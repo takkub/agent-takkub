@@ -102,7 +102,12 @@ def srv(qapp: QCoreApplication) -> CliServer:
     mock_orch.send.return_value = (True, "sent")
     mock_orch.end_session.return_value = (True, "ok")
     mock_orch.list_status.return_value = {}
-    return CliServer(mock_orch)
+    srv = CliServer(mock_orch)
+    yield srv
+    # #345: CliServer.__init__ starts _reaper/_spawn_health unconditionally —
+    # stop them (and any pending spawn-stagger timer) so they don't outlive
+    # this test as a leaked, still-active QTimer.
+    srv.shutdown_timers()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
