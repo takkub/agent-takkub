@@ -31,6 +31,19 @@ function venvPythonIfExists() {
   return fs.existsSync(p) ? p : null;
 }
 
+// Pick the wheel matching an exact version out of a dist/ dir — never the
+// lexically-last filename. A string sort puts "1.0.9" after "1.0.10" (#340),
+// and dist/ is gitignored so a stale wheel from a previous release can sit
+// there unnoticed. `version` is the SemVer string as read from package.json;
+// the filename convention (setuptools normalizes the project name's `-` to
+// `_`) is `agent_takkub-{version}-py3-none-any.whl`.
+function findWheelForVersion(distDir, version) {
+  if (!fs.existsSync(distDir)) return null;
+  const prefix = `agent_takkub-${version}-`;
+  const match = fs.readdirSync(distDir).find((f) => f.endsWith('.whl') && f.startsWith(prefix));
+  return match ? path.join(distDir, match) : null;
+}
+
 // A venv python that EXISTS but was overwritten/truncated by something
 // outside agent-takkub (#341 — a stray tool once clobbered a live
 // ~/.agent-takkub/venv/Scripts/python.exe with a 29-byte text file) must
@@ -98,6 +111,7 @@ module.exports = {
   venvPython,
   venvPythonIfExists,
   venvPythonw,
+  findWheelForVersion,
   pythonLooksExecutable,
   brokenInterpreterMessage,
 };

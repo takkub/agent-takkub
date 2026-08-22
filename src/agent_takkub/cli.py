@@ -1721,6 +1721,7 @@ def cmd_release(args: argparse.Namespace) -> dict:
         }
 
     do_github_release = getattr(args, "github_release", True)
+    do_build_wheel = getattr(args, "build_wheel", True)
     res = release(
         REPO_ROOT,
         part=args.part,
@@ -1730,6 +1731,7 @@ def cmd_release(args: argparse.Namespace) -> dict:
         dry_run=args.dry_run,
         allow_empty=args.allow_empty,
         do_github_release=do_github_release,
+        do_build_wheel=do_build_wheel,
     )
     if res["dry_run"]:
         _utf8_print(
@@ -1748,6 +1750,8 @@ def cmd_release(args: argparse.Namespace) -> dict:
         bits.append("committed")
     if res["tagged"]:
         bits.append(f"tagged {res['tag']}")
+    if res.get("wheel_built"):
+        bits.append(f"built {os.path.basename(res['wheel_path'])}")
     _utf8_print("  " + " · ".join(bits))
     if res.get("github_released"):
         _utf8_print(f"  GitHub Release:  {res['github_url']}")
@@ -3258,6 +3262,17 @@ def main(argv: list[str] | None = None) -> int:
             "after commit+tag, push and create the GitHub Release with the "
             "changelog section as notes (DEFAULT). Use --no-github-release to "
             "only commit+tag locally (push left to you)."
+        ),
+    )
+    srel.add_argument(
+        "--build-wheel",
+        dest="build_wheel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "after commit+tag, delete stale dist/*.whl and `python -m build "
+            "--wheel` (DEFAULT) — without it `npm publish` can silently bundle "
+            "a previous version's wheel (#340). Use --no-build-wheel to skip."
         ),
     )
     srel.add_argument(

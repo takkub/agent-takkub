@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -239,6 +240,23 @@ def _provider_from_role_models(key: str) -> str:
     return provider if provider in PROVIDER_REGISTRY else CLAUDE
 
 
+# `_provider_available`'s CLI-installed check (`custom_discovery_fn`) walks
+# PATH doing a real filesystem probe per call (`shutil.which` under the
+# hood) — cheap in isolation, but this is called every ~5s watchdog tick for
+# every "working" codex/gemini pane across every open project
+# (`Orchestrator._check_stuck_tool_panes`), fully uncached, directly on the
+# Qt main thread. Confirmed root cause of recurring `main_thread_stall`
+# events (0.7-2s+ each) via captured main-thread stack traces landing here
+# through `_check_idle_teammates` → `_check_stuck_tool_panes` →
+# `effective_provider_for` (2026-08-22 investigation). A short TTL cache is
+# enough — this only needs to be fresher than "the next watchdog tick",
+# not real-time; a disable-toggle or CLI (un)install takes effect within one
+# TTL window instead of instantly, which is an acceptable trade for cutting
+# a per-pane-per-tick disk probe down to once per TTL.
+_PROVIDER_AVAILABLE_TTL_S = 15.0
+_provider_available_cache: dict[str, tuple[float, bool]] = {}
+
+
 def _provider_available(provider: str) -> bool:
     """True iff `provider` can actually run right now.
 
@@ -257,10 +275,24 @@ def _provider_available(provider: str) -> bool:
     ``from .codex_helper import find_codex_executable`` lazily *inside* the
     call, so a test that monkeypatches ``codex_helper.find_codex_executable``
     keeps working exactly as before.
+
+    Result is cached per provider for `_PROVIDER_AVAILABLE_TTL_S` — see the
+    module comment above this function for why.
     """
     if provider == CLAUDE:
         return True
 
+    now = time.monotonic()
+    cached = _provider_available_cache.get(provider)
+    if cached is not None and now - cached[0] < _PROVIDER_AVAILABLE_TTL_S:
+        return cached[1]
+
+    result = _provider_available_uncached(provider)
+    _provider_available_cache[provider] = (now, result)
+    return result
+
+
+def _provider_available_uncached(provider: str) -> bool:
     # (1) user-intent toggle
     try:
         from .provider_state import is_disabled
