@@ -2058,15 +2058,15 @@ class SpawnEngineMixin:
                 _prov_tok = None
             else:
                 _prov_tok = self._mint_pane_token(env, project_ns, role_name)
-            provider_argv = [
-                provider_bin,
-                *spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", [])),
-            ]
+            autonomy_argv = list(
+                spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
+            )
             # Default for providers with no model_flag (none currently in the
             # registry, but ProviderSpec allows it) — _resolve_teammate_effort
             # below still needs a value to check against
             # provider_spec._MODELS_WITHOUT_EFFORT.
             provider_model = ""
+            model_argv: list[str] = []
             if spec.model_flag:
                 from .provider_models import model_for
                 from .role_models import model_for as role_model_for
@@ -2086,7 +2086,8 @@ class SpawnEngineMixin:
                     or model_for(spec.name)
                 )
                 if provider_model:
-                    provider_argv.extend([spec.model_flag, provider_model])
+                    model_argv.extend([spec.model_flag, provider_model])
+            effort_argv: list[str] = []
             if not _is_lead:
                 # Role tiers are provider-neutral for effort: a pane mapped to
                 # agy or Codex should retain the role's low/medium/high setting
@@ -2098,7 +2099,7 @@ class SpawnEngineMixin:
                 provider_effort = _resolve_teammate_effort(
                     base_role, spec, provider_model, override=_ps_initial.effort_override or ""
                 )
-                _append_provider_effort(provider_argv, spec, provider_effort)
+                _append_provider_effort(effort_argv, spec, provider_effort)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
             # codex gets native `-c mcp_servers.<name>.<key>=…` session
             # overrides; agy's "plugin_import" resolves to a documented no-op
@@ -2135,7 +2136,6 @@ class SpawnEngineMixin:
                     f"could not verify {spec.name}'s inherited MCP servers, so "
                     f"{role_name} was not spawned (refusing to guess a deny-list): {exc}"
                 )
-            provider_argv.extend(mcp_argv)
             # #304 point 2: log what actually made it into this pane's argv —
             # separate from whether the provider binary goes on to connect it
             # (unobservable from here, see mcp_bridge.describe_mcp_handshake's
@@ -2158,6 +2158,7 @@ class SpawnEngineMixin:
             # whose own conversation history isn't keyed by cwd otherwise.
             # Never hardcode a provider name here; a future provider plugs
             # in by setting the three project_scope_* fields on its own spec.
+            project_scope_argv: list[str] = []
             if spec.project_scope_flag and spec.project_scope_resolver:
                 try:
                     _scope_id = spec.project_scope_resolver(spawn_cwd)
@@ -2165,14 +2166,14 @@ class SpawnEngineMixin:
                     _log.exception("project scope resolver failed for %s", spec.name)
                     _scope_id = None
                 if _scope_id:
-                    provider_argv.extend([spec.project_scope_flag, _scope_id])
+                    project_scope_argv.extend([spec.project_scope_flag, _scope_id])
                     _log_event(
                         "provider_project_scope",
                         provider=spec.name,
                         resolved=_scope_id,
                     )
                 elif spec.project_scope_new_flag:
-                    provider_argv.append(spec.project_scope_new_flag)
+                    project_scope_argv.append(spec.project_scope_new_flag)
                     _log_event(
                         "provider_project_scope",
                         provider=spec.name,
@@ -2180,8 +2181,21 @@ class SpawnEngineMixin:
                         fallback=spec.project_scope_new_flag,
                     )
 
+            resume_argv: list[str] = []
             if resume_uuid:
-                provider_argv.extend([spec.session_resume_flag, resume_uuid])
+                resume_argv.extend([spec.session_resume_flag, resume_uuid])
+
+            from .core.providers.plan import assemble_generic_argv
+
+            provider_argv = assemble_generic_argv(
+                provider_bin,
+                autonomy_argv=autonomy_argv,
+                model_argv=model_argv,
+                effort_argv=effort_argv,
+                mcp_argv=mcp_argv,
+                project_scope_argv=project_scope_argv,
+                resume_argv=resume_argv,
+            )
 
             return self._launch_session(
                 pane=pane,
@@ -2636,13 +2650,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # soft policy in CLAUDE.md only — the previous deny-rule guard was
         # removed because the per-Bash / per-tool permission prompts it
         # exposed broke flow ("ต้องกด enter ตลอด ๆ งานไม่จบ").
-        argv: list[str] = [
-            claude,
-            "--dangerously-skip-permissions",
-            "--setting-sources",
-            sources,
-        ]
-
         # Wire Stop/Notification hooks → `takkub _hook` so the orchestrator gets
         # an authoritative turn-end/idle signal for THIS pane instead of relying
         # solely on PTY-scraping's next poll tick. `--settings` takes a file path
@@ -2650,11 +2657,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # JSON string (see hook_wiring.py docstring). Applies to every claude-
         # backed pane (Lead + teammates); codex/gemini/shell panes returned
         # earlier and never reach this branch.
+        settings_argv: list[str] = []
         try:
             from .hook_wiring import ensure_hook_settings_file, role_wants_concise
 
             _concise = role_wants_concise(role_name, is_lead=role_name == LEAD.name)
-            argv.extend(["--settings", ensure_hook_settings_file(concise=_concise)])
+            settings_argv.extend(["--settings", ensure_hook_settings_file(concise=_concise)])
         except Exception:
             pass  # hook wiring must never block a spawn
 
@@ -2676,6 +2684,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #   TAKKUB_TEAMMATE_MODEL="claude-opus-4-8"    → force Opus everywhere
         #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
         #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
+        model_argv: list[str] = []
+        effort_argv: list[str] = []
+        fallback_argv: list[str] = []
+        disallowed_tools_argv: list[str] = []
         if role_name != LEAD.name:
             # effort's own tier default is looked up inside
             # _resolve_teammate_effort below (needs the role, not this tuple).
@@ -2689,7 +2701,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 teammate_model = _ps_initial.model_override
                 teammate_model = _remap_pinned_model(teammate_model, env)
                 if teammate_model:
-                    argv.extend(["--model", teammate_model])
+                    model_argv.extend(["--model", teammate_model])
             elif "TAKKUB_TEAMMATE_MODEL" in os.environ:
                 # An explicitly empty value means "use the Claude CLI default"
                 # and must not be replaced by provider configuration. Same
@@ -2697,7 +2709,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 teammate_model = os.environ["TAKKUB_TEAMMATE_MODEL"].strip()
                 teammate_model = _remap_pinned_model(teammate_model, env)
                 if teammate_model:
-                    argv.extend(["--model", teammate_model])
+                    model_argv.extend(["--model", teammate_model])
             else:
                 from .provider_config import CLAUDE
                 from .provider_models import model_for
@@ -2730,7 +2742,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 override=_ps_initial.effort_override or "",
             )
             _append_provider_effort(
-                argv,
+                effort_argv,
                 PROVIDER_REGISTRY[CLAUDE],
                 teammate_effort,
             )
@@ -2747,14 +2759,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             teammate_fallback = os.environ.get("TAKKUB_TEAMMATE_FALLBACK", tier_fallback).strip()
             teammate_fallback = _remap_pinned_model(teammate_fallback, env)
             if teammate_fallback:
-                argv.extend(["--fallback-model", teammate_fallback])
+                fallback_argv.extend(["--fallback-model", teammate_fallback])
             # Hard-enforce the pane-mode side of #268 at the CLI level. Native
             # subagent mode runs under Lead and never reaches this spawn branch.
             # Teammate panes stay restricted; the Lead remains unrestricted. Override/clear via
             # TAKKUB_TEAMMATE_DISALLOWED_TOOLS (see _teammate_disallowed_tools).
             _disallowed_tools = _teammate_disallowed_tools()
             if _disallowed_tools:
-                argv.extend(["--disallowedTools", *_disallowed_tools])
+                disallowed_tools_argv.extend(["--disallowedTools", *_disallowed_tools])
         else:
             # Lead normally rides the user's default model (Opus on this
             # install) with no --model flag. Under a Pro plan that default may
@@ -2776,7 +2788,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # the teammate branch above (#318).
                 lead_model = _remap_pinned_model(_ps_initial.model_override, env)
                 if lead_model:
-                    argv.extend(["--model", lead_model])
+                    model_argv.extend(["--model", lead_model])
             else:
                 # #318: a role/provider pin or the Pro [1m]-avoidance safety
                 # net (_lead_model_override) is a *default*, not a forced
@@ -2799,7 +2811,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-5").strip()
             lead_fallback = _remap_pinned_model(lead_fallback, env)
             if lead_fallback:
-                argv.extend(["--fallback-model", lead_fallback])
+                fallback_argv.extend(["--fallback-model", lead_fallback])
 
         # Explicit plugin allowlist (skip the broken claude-obsidian hook).
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
@@ -2807,12 +2819,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # more, or set it to empty string to suppress the defaults.
         plugin_default = ";".join(_default_plugin_dirs(base_role, project=project_ns))
         plugin_dirs_raw = os.environ.get("TAKKUB_EXTRA_PLUGINS", plugin_default)
+        plugin_dir_argv: list[str] = []
         for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
             if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():
-                argv.extend(["--plugin-dir", pdir])
+                plugin_dir_argv.extend(["--plugin-dir", pdir])
         _claude_system_prompt_flag = PROVIDER_REGISTRY[CLAUDE].system_prompt_flag
+        system_prompt_argv: list[str] = []
         if role_md_file and _claude_system_prompt_flag:
-            argv.extend([_claude_system_prompt_flag, role_md_file])
+            system_prompt_argv.extend([_claude_system_prompt_flag, role_md_file])
 
         # (Lead write-boundary used to inject a per-project deny-rule
         # settings file here. Removed when Lead switched to
@@ -2844,7 +2858,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _claude_mcp_argv = mcp_argv_for_provider(
             "claude", base_role, shard_idx, project_ns, cwd=spawn_cwd
         )
-        argv.extend(_claude_mcp_argv)
         # #304 point 2 — see the matching call in the generic provider branch
         # above for why this is argv-time evidence, not a live connect probe.
         _log_event(
@@ -2884,6 +2897,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             denied.append("Task")
         if role_name != LEAD.name:
             denied.append("AskUserQuestion")
+        denied_tools_argv: list[str] = []
         if denied:
             # Comma-join, NOT space: a space inside this single argv element
             # makes subprocess.list2cmdline (pty_session.spawn) wrap the value
@@ -2893,7 +2907,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # known tool` on every spawn. The names themselves are valid; only
             # the leaked quotes break the match. Comma needs no quoting and
             # --disallowed-tools accepts comma- or space-separated lists.
-            argv.extend(["--disallowed-tools", ",".join(denied)])
+            denied_tools_argv.extend(["--disallowed-tools", ",".join(denied)])
 
         # Session resume: if this same role exited recently from the same
         # cwd and we have its session UUID, use --resume <uuid> so claude
@@ -2914,9 +2928,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # see the resume_uuid check above find_claude_executable(). By this
         # point resume_uuid is already known-valid or None.)
         resumed = False
+        resume_argv: list[str] = []
         _ekey_spawn = _exit_key(project_ns, role_name)
         if resume_uuid:
-            argv.extend(["--resume", resume_uuid])
+            resume_argv.extend(["--resume", resume_uuid])
             resumed = True
             _ps_new = self._ps(_ekey_spawn)
             _ps_new.session_uuid = resume_uuid
@@ -2938,11 +2953,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
             )
             if can_resume:
-                argv.extend(["--resume", prior_uuid])
+                resume_argv.extend(["--resume", prior_uuid])
                 resumed = True
             else:
                 new_uuid = str(_uuid.uuid4())
-                argv.extend(["--session-id", new_uuid])
+                resume_argv.extend(["--session-id", new_uuid])
                 _ps_new = self._ps(_ekey_spawn)
                 _ps_new.session_uuid = new_uuid
                 _ps_new.session_uuid_cwd = spawn_cwd
@@ -2952,6 +2967,23 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # pane so the token meter resolves this pane's own JSONL by uuid,
         # never by newest-mtime-in-cwd (issue #129: peer panes sharing a cwd).
         _spawned_session_uuid = self._ps(_ekey_spawn).session_uuid
+
+        from .core.providers.claude_plan import assemble_claude_argv
+
+        argv = assemble_claude_argv(
+            claude,
+            setting_sources=sources,
+            settings_argv=settings_argv,
+            model_argv=model_argv,
+            effort_argv=effort_argv,
+            fallback_argv=fallback_argv,
+            disallowed_tools_argv=disallowed_tools_argv,
+            plugin_dir_argv=plugin_dir_argv,
+            system_prompt_argv=system_prompt_argv,
+            mcp_argv=_claude_mcp_argv,
+            denied_tools_argv=denied_tools_argv,
+            resume_argv=resume_argv,
+        )
 
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
