@@ -1345,10 +1345,18 @@ class Orchestrator(
         unconditionally, so any Orchestrator() left reachable past its
         owner's lifetime keeps ticking under the process-wide QApplication —
         a leaked timer can fire against long-torn-down state and abort the
-        process with no traceback. The real app never calls this (the whole
-        process exits, taking every timer with it); it exists so tests and
-        any other short-lived Orchestrator owner have one call that can
-        never miss a timer this class adds in the future.
+        process with no traceback.
+
+        This is test/short-lived-owner tooling, not a hook production is
+        missing. `self.orch = Orchestrator(self)` happens exactly once, in
+        MainWindow.__init__ / HeadlessWindow.__init__ (each window's own
+        lifetime == the process's), and neither ever replaces it with a
+        fresh instance while running — so there is no live "old Orchestrator
+        discarded, still reachable" moment for this to guard against.
+        app.py's real teardown (`_kill_all`, wired to aboutToQuit/atexit/
+        signals) always ends in process exit, which takes every timer with
+        it regardless. Call this only where an Orchestrator is built and
+        then dropped without the process ending — tests, mainly.
         """
         for attr in ("_resource_timer", "_idle_watchdog", "_hot_md_timer"):
             timer = getattr(self, attr, None)
