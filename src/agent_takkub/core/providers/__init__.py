@@ -5,6 +5,7 @@ decision (why `spawn`/`send`/`is_ready`/`terminate` are documented stubs)."""
 from __future__ import annotations
 
 from .claude_adapter import ClaudeCliAdapter
+from .claude_plan import assemble_claude_argv
 from .cli_adapter import CliProviderAdapter
 from .errors import ProviderAdapterNotWired
 from .plan import account_env_overrides, assemble_generic_argv, build_generic_spawn_plan
@@ -16,6 +17,7 @@ __all__ = [
     "ProviderAdapterNotWired",
     "account_env_overrides",
     "adapter_for",
+    "assemble_claude_argv",
     "assemble_generic_argv",
     "build_generic_spawn_plan",
 ]
