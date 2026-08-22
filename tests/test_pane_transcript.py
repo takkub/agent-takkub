@@ -151,7 +151,7 @@ class TestTerminateClosesTranscript:
         session._transcript = log.open("wb")
         handle = session._transcript
 
-        session.terminate()
+        session.terminate(wait=True)
 
         assert handle.closed, "file handle must be closed after terminate()"
         assert session._transcript is None, "_transcript must be cleared after terminate()"

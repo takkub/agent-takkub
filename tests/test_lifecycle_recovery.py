@@ -682,7 +682,7 @@ class TestPtySessionTerminateJoinsThreads:
         session._alive = True
         session._transcript = None
 
-        session.terminate()
+        session.terminate(wait=True)
 
         writer.request_stop.assert_called_once()
         writer.quit.assert_called_once()
@@ -700,7 +700,7 @@ class TestPtySessionTerminateJoinsThreads:
         session._alive = True
         session._transcript = None
 
-        session.terminate()
+        session.terminate(wait=True)
 
         reader.request_stop.assert_called_once()
         reader.quit.assert_called_once()
@@ -724,7 +724,7 @@ class TestPtySessionTerminateJoinsThreads:
         session._alive = True
         session._transcript = None
 
-        session.terminate()
+        session.terminate(wait=True)
 
         assert call_order.index("proc_term") < call_order.index("writer_quit")
 
