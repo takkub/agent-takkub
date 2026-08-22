@@ -56,6 +56,7 @@ def window(qapp: QCoreApplication, project_env: pathlib.Path) -> HeadlessWindow:
     w.orch.shutdown_timers()
     w.cli.shutdown_timers()  # #345: stop CliServer's reaper/spawn_health/stagger timers too
     yield w
+    w.shutdown_timers()  # stop any pending _fire_delayed (pane-teardown/restart, #345)
 
 
 def _pump(app: QCoreApplication, n: int = 5) -> None:

@@ -18,7 +18,7 @@ docs/design/2026-07-11-105-phaseB-headless.md.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QCoreApplication, QObject, QTimer
+from PyQt6.QtCore import QCoreApplication, QObject, Qt, QTimer
 
 from . import cockpit_theme
 from .cli_server import CliServer
@@ -228,7 +228,7 @@ class HeadlessWindow(QObject):
                 return
             self.orch.unregister_pane(role_name, project=project)
 
-        QTimer.singleShot(0, _teardown)
+        self._fire_delayed(0, _teardown)
 
     # ──────────────────────────────────────────────────────────────
     def _on_restart_requested(self) -> None:
@@ -240,4 +240,27 @@ class HeadlessWindow(QObject):
         _log_event("headless_restart_requested")
         app = QCoreApplication.instance()
         if app is not None:
-            QTimer.singleShot(200, app.quit)
+            self._fire_delayed(200, app.quit)
+
+    # ──────────────────────────────────────────────────────────────
+    def _fire_delayed(self, delay_ms: int, callback) -> None:
+        """Run *callback* once after *delay_ms*, via a QTimer parented to
+        `self` instead of the anonymous, unparented `QTimer.singleShot()`
+        static call this replaces (mirrors CliServer._fire_staggered, #345)
+        — gives `shutdown_timers()`/tests a handle to stop a still-pending
+        one instead of leaving it to fire against torn-down state later."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(callback)
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(delay_ms)
+
+    def shutdown_timers(self) -> None:
+        """Stop every QTimer this HeadlessWindow directly owns — any pending
+        pane-teardown/restart delay from `_fire_delayed`. Test-only, mirrors
+        CliServer.shutdown_timers/Orchestrator.shutdown_timers (#344/#345).
+        Direct children only: `self.orch`/`self.cli` are child QObjects with
+        their own shutdown_timers(), called separately by callers of this
+        one — recursing into them here would just be redundant, not wrong."""
+        for timer in self.findChildren(QTimer, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            timer.stop()

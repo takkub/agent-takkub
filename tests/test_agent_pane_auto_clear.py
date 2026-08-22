@@ -18,6 +18,8 @@ import agent_takkub.agent_pane as agent_pane_mod
 from agent_takkub.agent_pane import AgentPane
 from agent_takkub.roles import LEAD, by_name
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -73,6 +75,20 @@ class _FakeTerminalWidget(QWidget):
 @pytest.fixture(autouse=True)
 def _fake_terminal(monkeypatch):
     monkeypatch.setattr(agent_pane_mod, "TerminalWidget", _FakeTerminalWidget)
+
+
+@pytest.fixture(autouse=True)
+def _stop_done_clear_timer(monkeypatch):
+    # set_state("done") arms a real 5s _done_clear_timer regardless of
+    # _keepalive_active (#344) — several tests here assert it got armed and
+    # simulate the fire by calling _on_done_clear_timeout() directly rather
+    # than waiting out the real delay, which never stops the underlying
+    # QTimer. Every AgentPane built in this file is a parentless top-level
+    # widget nothing ever closes, so without this the timer is still active
+    # at session end.
+    finalize = stop_timers_after(monkeypatch, AgentPane, "_done_clear_timer")
+    yield
+    finalize()
 
 
 def _make_pane(role_name: str) -> AgentPane:
