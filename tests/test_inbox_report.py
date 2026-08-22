@@ -310,7 +310,11 @@ class TestCliServerInboxDispatch:
             def flush(self) -> None:
                 pass
 
-        return srv, _FakeSock(), mock_orch
+        yield srv, _FakeSock(), mock_orch
+        # #345: CliServer.__init__ starts _reaper/_spawn_health unconditionally
+        # — stop them (and any pending spawn-stagger timer) so they don't
+        # outlive this test as a leaked, still-active QTimer.
+        srv.shutdown_timers()
 
     def test_lead_token_required(self, srv_sock) -> None:
         import json

@@ -54,6 +54,7 @@ def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> path
 def window(qapp: QCoreApplication, project_env: pathlib.Path) -> HeadlessWindow:
     w = HeadlessWindow()
     w.orch.shutdown_timers()
+    w.cli.shutdown_timers()  # #345: stop CliServer's reaper/spawn_health/stagger timers too
     yield w
 
 

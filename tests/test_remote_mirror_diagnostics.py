@@ -15,10 +15,23 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub.cli_server import CliServer
 from agent_takkub.doctor import Status, check_remote_mirror_live
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 
 @pytest.fixture(scope="module")
 def qapp() -> QCoreApplication:
     return QCoreApplication.instance() or QCoreApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _stop_cli_server_timers(monkeypatch):
+    # #345: CliServer.__init__ starts _reaper/_spawn_health unconditionally,
+    # and a spawn-stagger dispatch can leave a pending QTimer too — every
+    # `CliServer(...)` in this file otherwise leaves one or more running for
+    # the rest of the pytest session.
+    finalize = stop_timers_after(monkeypatch, CliServer, "shutdown_timers")
+    yield
+    finalize()
 
 
 class _FakeSock:

@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -115,12 +116,13 @@ class CliServer(QObject):
         self._reaper.timeout.connect(self._reap_idle_connections)
         self._reaper.start()
         # Spawn staggering (#44/#38). Concurrent `takkub assign` (parallel
-        # fan-out / shard fan-out) would otherwise schedule N QTimer.singleShot(0)
+        # fan-out / shard fan-out) would otherwise schedule N deferred (0ms)
         # spawns that fire back-to-back on one tick; the 2nd+ ConPTY COM call
         # lands during the 1st spawn's input-synchronous WebEngine dispatch and
         # Windows rejects it (RPC_E_CANTCALLOUT) → spawn_failed_warned. We reserve
         # a time slot per spawn so the actual spawns are spaced apart (non-blocking
-        # — QTimer, never a main-thread sleep, which would re-introduce the freeze).
+        # — QTimer via _fire_staggered, never a main-thread sleep, which would
+        # re-introduce the freeze).
         self._spawn_gap_ms = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
         # codex needs a bigger gap: each codex child runs `npm i -g @openai/codex`
         # on boot (codex v0.137 has no off-switch), and two overlapping global-npm
@@ -210,6 +212,40 @@ class CliServer(QObject):
         if is_browser_shard:
             self._browser_shard_slot_until = start + self._browser_shard_gap_ms
         return max(0, int(start - now))
+
+    def _fire_staggered(self, delay_ms: int, callback: Callable[[], None]) -> None:
+        """Run *callback* once after *delay_ms*, via a QTimer parented to
+        `self` instead of the `QTimer.singleShot()` static call this replaces
+        (#345). `QTimer.singleShot()` builds its own anonymous, unparented
+        timer with no handle to stop — harmless once the app is running (it
+        self-cleans after firing), but a full test run schedules ~230 of
+        these (one per staggered spawn/assign/pipeline-run dispatch) and ends
+        most of those tests well before the delay elapses, so #344's leak
+        tracker finds them still active at teardown with nothing anyone can
+        stop. Parenting to `self` gives tests a handle again — `shutdown_timers()`
+        below finds and stops every pending one via `findChildren`, same as it
+        already does for `_reaper` — and `timeout.connect(timer.deleteLater)`
+        makes a timer that DOES fire clean itself up immediately after, so a
+        long-running production server doesn't grow an ever-larger pile of
+        spent child timers either."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(callback)
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(delay_ms)
+
+    def shutdown_timers(self) -> None:
+        """Stop every QTimer this CliServer (recursively) owns — the
+        repeating idle-connection reaper, `_spawn_health`'s poll timer, and
+        any spawn-stagger single-shot from `_fire_staggered` still pending.
+        Test-only entrypoint mirroring `Orchestrator.shutdown_timers` (#344):
+        production never calls this, the process just exits. Deterministic
+        by design — tests call it explicitly at teardown rather than relying
+        on this CliServer getting garbage-collected (a signal connection
+        closing over `self` keeps it reachable via a reference cycle, so GC
+        timing is not guaranteed, same reason `_reaper` needed this before)."""
+        for timer in self.findChildren(QTimer):
+            timer.stop()
 
     def listen(self, port: int = 0) -> int:
         # bind to loopback only — other machines on the LAN must not reach us
@@ -566,13 +602,13 @@ class CliServer(QObject):
                     return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
-                    QTimer.singleShot(
+                    self._fire_staggered(
                         delay,
                         lambda: self._orch.spawn(role, cwd=req.get("cwd"), project=from_project),
                     )
                     self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
                 else:
-                    QTimer.singleShot(
+                    self._fire_staggered(
                         delay,
                         lambda: self._orch.assign(
                             role,
@@ -911,7 +947,7 @@ class CliServer(QObject):
                     self._reply(sock, ok=False, msg=pre_msg)
                     return
                 pl_delay = self._next_spawn_delay_ms(None, from_project)
-                QTimer.singleShot(
+                self._fire_staggered(
                     pl_delay,
                     lambda tid=template_id: self._orch.run_pipeline(
                         template_id=tid,

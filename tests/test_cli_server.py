@@ -9,7 +9,7 @@ import json
 import re
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QTimer
 
 from agent_takkub.cli_server import CliServer
 
@@ -19,9 +19,11 @@ from ._qt_timer_leak_guard import stop_timers_after
 @pytest.fixture(autouse=True)
 def _stop_cli_server_reapers(monkeypatch):
     # CliServer.__init__ starts self._reaper (1s repeating) unconditionally
-    # (#344) — every `CliServer(...)` in this file otherwise leaves one
-    # running for the rest of the pytest session.
-    finalize = stop_timers_after(monkeypatch, CliServer, "_reaper")
+    # (#344), and _dispatch's spawn/assign/pipeline-run path can leave a
+    # pending spawn-stagger QTimer behind too (#345) — every `CliServer(...)`
+    # in this file otherwise leaves one or more running for the rest of the
+    # pytest session. shutdown_timers() stops both kinds.
+    finalize = stop_timers_after(monkeypatch, CliServer, "shutdown_timers")
     yield
     finalize()
 
@@ -785,6 +787,69 @@ class TestSpawnStagger:
         backend_delay = _delay_ms(_replies(s2)[0]["msg"])
         # backend is spaced by the general gap, NOT held back the full codex gap.
         assert 0 < backend_delay <= 400
+
+
+class TestSpawnStaggerTimerOwnership:
+    """#345: the spawn-stagger delay used to fire via the `QTimer.singleShot()`
+    static call — an anonymous, unparented C++ timer with no handle to stop,
+    so a test that ends before its delay elapses leaves it reported as a
+    leaked QTimer with nothing anyone can do about it. `_fire_staggered` now
+    schedules it as a QTimer parented to the CliServer instead, and
+    `shutdown_timers()` can find and stop it."""
+
+    def _pending_timers(self, srv: CliServer) -> list[QTimer]:
+        # Single-shot + still active isolates a not-yet-fired _fire_staggered
+        # timer from CliServer's other, repeating children (_reaper,
+        # _spawn_health's poll timer) and from one that already fired.
+        return [t for t in srv.findChildren(QTimer) if t.isSingleShot() and t.isActive()]
+
+    def test_dispatch_schedules_an_instance_owned_timer(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 60_000  # stay pending long enough to inspect it
+        sock = _FakeSock()
+
+        srv._dispatch(sock, _auth({"cmd": "spawn", "role": "backend"}))
+        # First spawn in an idle period gets delay 0 — let its timer fire on
+        # the next tick before queuing a second, concurrent one so only the
+        # staggered (delay > 0) one is left pending to inspect.
+        qapp.processEvents()
+        sock2 = _FakeSock()
+        srv._dispatch(sock2, _auth({"cmd": "spawn", "role": "backend"}))
+
+        pending = self._pending_timers(srv)
+        assert len(pending) == 1, "the staggered dispatch must own exactly one QTimer"
+        timer = pending[0]
+        assert timer.parent() is srv, "must be parented to the CliServer, not anonymous"
+        assert timer.isSingleShot()
+        assert timer.isActive()
+
+    def test_shutdown_timers_stops_pending_spawn_stagger(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 60_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "spawn", "role": "backend"}))
+        srv._dispatch(s2, _auth({"cmd": "spawn", "role": "backend"}))
+        pending = self._pending_timers(srv)
+        assert pending and pending[0].isActive()
+
+        srv.shutdown_timers()
+
+        assert not pending[0].isActive(), "shutdown_timers() must stop pending stagger timers"
+        assert not srv._reaper.isActive(), "shutdown_timers() must also stop the reaper"
+
+    def test_fired_timer_self_deletes(self, qapp: QCoreApplication) -> None:
+        """A timer that DOES fire (delay 0, the common case — a lone assign)
+        must not pile up as a spent child forever in a long-running server —
+        it must be gone entirely, not merely inactive."""
+        srv = CliServer(_FakeOrch())
+        sock = _FakeSock()
+        srv._dispatch(sock, _auth({"cmd": "spawn", "role": "backend"}))  # delay 0
+
+        qapp.processEvents()  # let the singleShot fire
+        qapp.sendPostedEvents(None, 0)  # flush the deleteLater it queued
+
+        remaining_singleshots = [t for t in srv.findChildren(QTimer) if t.isSingleShot()]
+        assert remaining_singleshots == []
 
 
 class TestBrowserShardSpawnStagger:

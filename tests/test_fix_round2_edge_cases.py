@@ -38,7 +38,12 @@ def srv(qapp: QCoreApplication) -> CliServer:
     mock_orch._pane_tokens = {"tok-backend": ("proj", "backend")}
     mock_orch.close.return_value = (True, "closed")
     mock_orch.list_status.return_value = {}
-    return CliServer(mock_orch)
+    s = CliServer(mock_orch)
+    yield s
+    # #345: CliServer.__init__ starts _reaper/_spawn_health unconditionally —
+    # stop them (and any pending spawn-stagger timer) so they don't outlive
+    # this test as a leaked, still-active QTimer.
+    s.shutdown_timers()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
