@@ -226,10 +226,36 @@ def _venv_check(bin_dir: Path | None) -> StepResult:
     return StepResult("venv-check", True, False, time.monotonic() - t0, f"using {bin_dir}")
 
 
+def _xdist_worker_count() -> str:
+    """Worker count for the full tier's `-n` flag — a number, never `auto`.
+
+    #349 risk: `-n auto` on this 16-core dev box spins one worker per core;
+    a serial full-suite pytest process alone measures ~2.9GB RSS, and
+    committed memory is what actually faults a process on Windows when it
+    runs out (not physical RAM — see #349's docstring above), not something
+    16 idle-looking cores would tell you about. `8` here is a conservative
+    pick from that commit-charge headroom math, NOT a benchmarked number —
+    a same-machine `-n auto` vs `-n 8` comparison was attempted and aborted
+    (this dev box had too many other panes contending for cores at the time
+    to produce a clean reading); redo that comparison under a quiet machine
+    before tuning this further. `TAKKUB_QA_XDIST_N` overrides this for boxes
+    with different core/RAM ratios (CI runners, other dev machines) without
+    editing this file.
+    """
+    try:
+        n = int(os.environ.get("TAKKUB_QA_XDIST_N", "8"))
+        if n < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        n = 8
+    return str(n)
+
+
 def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> list[str]:
     """The full tier (`targeted` is None) runs under pytest-xdist — 16 idle
-    cores running 8564 tests serially at ~646s was pure waste. `-n auto`
-    picks a worker per core.
+    cores running 8564 tests serially at ~646s was pure waste. A fixed
+    worker count (see `_xdist_worker_count`) picks fewer workers than cores
+    on purpose — memory scales with workers, not with idle cores.
 
     `--dist loadscope` (NOT `loadgroup` — that only groups items an explicit
     `@pytest.mark.xdist_group` names, everything else is freely distributed
@@ -263,7 +289,7 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     base = [exe] if exe else [py, "-m", "pytest"]
     if targeted:
         return base + list(targeted)
-    return [*base, "-n", "auto", "--dist", "loadscope"]
+    return [*base, "-n", _xdist_worker_count(), "--dist", "loadscope"]
 
 
 def _ruff_cmd(bin_dir: Path | None, py: str) -> list[str]:
