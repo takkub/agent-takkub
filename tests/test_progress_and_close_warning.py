@@ -155,7 +155,11 @@ class TestProgressDoesNotTeardown:
 class TestProgressCli:
     def test_teammate_can_call_progress(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sent: list[dict] = []
-        monkeypatch.setattr(cli, "_request", lambda p: sent.append(p) or {"ok": True})
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda p: sent.append(p) or {"ok": True, "msg": "devops progress reported"},
+        )
         monkeypatch.setenv("TAKKUB_ROLE", "devops")
         rc = cli.main(["progress", "still building"])
         assert rc == 0
