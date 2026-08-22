@@ -201,6 +201,14 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         takkub_dir = tmp_path / "_isolated_takkub"
         monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
         monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
+        # #343: _provider_available()'s CLI-installed TTL cache is module-global
+        # and outlives any single test's monkeypatched discovery result — reset
+        # it here (not just in provider_config's own test fixture) so every
+        # test file that touches _provider_available (e.g. settings_window's
+        # badge sync) starts from a clean cache, same lesson as core-v2-settings
+        # below.
+        if hasattr(pc, "reset_provider_available_cache"):
+            pc.reset_provider_available_cache()
 
     # Core V2 (#309): the five TAKKUB_V2_* flags fall back to the Settings UI's
     # persisted toggle in ~/.takkub/core-v2-settings.json when the env var is

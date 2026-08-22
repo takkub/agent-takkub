@@ -26,9 +26,11 @@ def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     fake = tmp_path / "role-providers.json"
     monkeypatch.setattr(provider_config, "_CONFIG_PATH", fake)
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
-    # _provider_available() caches its result per provider for a TTL — reset
-    # per test so one test's mocked availability can't leak into the next.
-    monkeypatch.setattr(provider_config, "_provider_available_cache", {})
+    # _provider_available()'s CLI-installed probe caches its result per
+    # provider for a TTL — reset per test so one test's mocked discovery
+    # result can't leak into the next (the is_disabled() toggle check is
+    # never cached, so it needs no reset).
+    provider_config.reset_provider_available_cache()
     return fake
 
 
