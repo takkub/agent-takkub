@@ -17,6 +17,8 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import threading
+import weakref
 from pathlib import Path
 
 # Must be set before any QApplication/QCoreApplication is constructed.
@@ -307,7 +309,185 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if mcpb is not None:
         monkeypatch.setattr(mcpb, "_version_cache", {}, raising=False)
 
+    # #344: re-arm every test, not just once at session start. Some test
+    # (test_app_exception_guard.py) legitimately installs app.py's OWN
+    # sys.excepthook mid-session to test it directly, which would otherwise
+    # leave every later test's leaked-QTimer exceptions logged-and-swallowed
+    # by app.py's hook instead of queued for the session-end check below.
+    _install_qt_exception_guard()
+
     yield
+
+    # #344: after every other per-test fixture has torn down (autouse
+    # fixtures set up first among same-scope fixtures, so they tear down
+    # last), stop any QTimer this test leaked before it can fire against the
+    # now-gone state in a later test. See _install_qtimer_leak_tracker's
+    # docstring above for why this is non-fatal.
+    _stop_leaked_qtimers()
+
+
+# #344: pytest install no sys.excepthook of its own, and PyQt6's default
+# behaviour when an exception escapes a slot invoked from C++ (a QTimer
+# firing, a signal emitted through the event loop, …) is qFatal() — a hard
+# process abort with no traceback and no pytest summary. This bit the suite
+# for real: a QTimer leaked by an earlier test (an Orchestrator whose
+# `_idle_watchdog` was never stopped) kept firing after that test's fixtures
+# tore its state down, its slot raised, and the whole run died silently
+# somewhere around the 35-77% mark depending on timing (#344).
+#
+# Same technique `agent_takkub.app._install_exception_guard()` uses for the
+# real GUI entrypoint (read its docstring for the qFatal mechanism) — a
+# NON-default sys.excepthook/threading.excepthook/unraisablehook is enough to
+# flip PyQt6 from aborting to routing the exception here and letting the
+# event loop continue. Tests don't get app.py's boot.log / auto_issue_capture
+# routing (that would risk filing a real GitHub issue, #188, and is a
+# GUI-process concern anyway) — instead the traceback goes straight to the
+# real stderr (bypasses pytest's capsys, so it's visible even without -s) and
+# is queued so a leak fails the SESSION at teardown instead of being silently
+# swallowed. A test that deliberately triggers one on purpose (proving this
+# guard works) must drain the queue with `pop_qt_slot_exceptions()` afterwards
+# — see test_provider_toggle_orchestrator.py.
+_qt_slot_exceptions: list[str] = []
+
+
+def _record_qt_slot_exception(exc_type, exc_value, exc_tb, *, source: str) -> None:
+    import traceback
+
+    tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    current_test = os.environ.get("PYTEST_CURRENT_TEST", "?")
+    entry = f"\n--- UNHANDLED QT EXCEPTION ({source}) during {current_test} ---\n{tb}"
+    _qt_slot_exceptions.append(entry)
+    try:
+        if sys.__stderr__ is not None:
+            sys.__stderr__.write(entry)
+            sys.__stderr__.flush()
+    except Exception:
+        pass
+
+
+def _install_qt_exception_guard() -> None:
+    def _hook(exc_type, exc_value, exc_tb):
+        _record_qt_slot_exception(exc_type, exc_value, exc_tb, source="sys.excepthook")
+
+    sys.excepthook = _hook
+
+    def _thread_hook(args):
+        name = args.thread.name if args.thread is not None else "?"
+        _record_qt_slot_exception(
+            args.exc_type, args.exc_value, args.exc_traceback, source=f"thread:{name}"
+        )
+
+    threading.excepthook = _thread_hook
+
+    if hasattr(sys, "unraisablehook"):
+
+        def _unraisable(unr):
+            _record_qt_slot_exception(
+                type(unr.exc_value), unr.exc_value, unr.exc_traceback, source="unraisable"
+            )
+
+        sys.unraisablehook = _unraisable
+
+
+def pop_qt_slot_exceptions() -> list[str]:
+    """Test-only escape hatch: fetch-and-clear queued Qt slot exceptions.
+
+    A test proving the guard above works (#344) raises inside a Qt slot on
+    purpose and must drain the queue afterwards — otherwise the deliberate
+    exception fails the whole session at `_qt_session_app` teardown below.
+    """
+    drained = list(_qt_slot_exceptions)
+    _qt_slot_exceptions.clear()
+    return drained
+
+
+# #344 follow-up: the excepthook above turns a leaked-timer exception into a
+# diagnosable failure instead of a silent abort, but it only fires when the
+# leaked timer's slot actually raises. backend#2's audit found the leak
+# itself is much broader than the one confirmed case this file already
+# closes: `Orchestrator.__init__` arms THREE QTimers unconditionally
+# (`_idle_watchdog`, `_resource_timer`, `_hot_md_timer`), most Orchestrator-
+# constructing tests across the suite stop only `_idle_watchdog`, and one
+# file alone (test_idle_watchdog.py, 48 tests, each with a function-scoped
+# Orchestrator) leaks 2 timers x 48 — which lines up with the 35% repro
+# death zone (it collects right before test_issues.py).
+#
+# This tracker is deliberately generic: it does not know which object owns a
+# given QTimer, only that one exists and is still ticking after the test
+# that created it tore down — so it catches every leak, including ones no
+# one has audited yet. Every QTimer() construction is recorded in a
+# WeakSet (QTimer.singleShot() is a separate static C++ path that self-
+# cleans after firing once — nothing to track there); `_isolate_runtime`'s
+# per-test teardown below stops anything still active so it can't fire
+# against torn-down state later in the session (the actual abort risk),
+# and queues a one-line note for a session-end report.
+#
+# Deliberately NON-fatal, unlike the exception queue above: as of this
+# writing backend#2 is still auditing ~15 files with this exact leak, so
+# this fires across most of the suite right now — failing on it would turn
+# nearly the whole run red and bury the (rare, always-a-real-bug) exception-
+# escape failures the guard above exists to surface. It only stops the timer
+# and appends to `_leaked_timer_reports`, printed as a non-fatal section by
+# `pytest_terminal_summary` below. Once backend#2's per-file audit lands and
+# this report goes empty, promoting it to `pytest.fail` (same pattern as
+# `_qt_session_app`'s teardown) would be reasonable follow-up — not done
+# here since 15 files still legitimately trip it.
+_live_qtimers: weakref.WeakSet | None = None
+_leaked_timer_reports: list[str] = []
+
+
+def _install_qtimer_leak_tracker() -> None:
+    global _live_qtimers
+    if _live_qtimers is not None:
+        return  # already installed this session
+    _live_qtimers = weakref.WeakSet()
+
+    from PyQt6.QtCore import QTimer
+
+    _original_init = QTimer.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        _live_qtimers.add(self)
+
+    QTimer.__init__ = _tracking_init
+
+
+def _stop_leaked_qtimers() -> None:
+    """Per-test teardown: stop (never fail on) any QTimer still active."""
+    if _live_qtimers is None:
+        return
+    current_test = os.environ.get("PYTEST_CURRENT_TEST", "?")
+    for timer in list(_live_qtimers):
+        try:
+            active = timer.isActive()
+        except RuntimeError:
+            continue  # underlying C++ QTimer already destroyed
+        if not active:
+            continue
+        interval = timer.interval()
+        name = timer.objectName() or "<unnamed>"
+        timer.stop()
+        _leaked_timer_reports.append(
+            f"{current_test}: leaked active QTimer(interval={interval}ms, objectName={name!r})"
+        )
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    if not _leaked_timer_reports:
+        return
+    terminalreporter.section("#344 leaked QTimer summary (non-fatal)")
+    terminalreporter.write_line(
+        f"{len(_leaked_timer_reports)} QTimer(s) were still active after their owning "
+        "test finished; stopped here so they can't fire against torn-down state later "
+        "in the session. backend#2 is auditing these file-by-file — see "
+        "_install_qtimer_leak_tracker's docstring in conftest.py for #344 context. Not "
+        "failing the suite over this on purpose."
+    )
+    for line in _leaked_timer_reports[:50]:
+        terminalreporter.write_line(f"  {line}")
+    if len(_leaked_timer_reports) > 50:
+        terminalreporter.write_line(f"  ... and {len(_leaked_timer_reports) - 50} more")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -343,9 +523,27 @@ def _qt_session_app():
         yield None
         return
 
+    # Install before constructing QApplication: exceptions raised from slots
+    # fired during construction (or by any test module before its own local
+    # fixtures run) must be caught too, not just ones after this point.
+    _install_qt_exception_guard()
+    _install_qtimer_leak_tracker()
+
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
     yield app
     # Do NOT call app.quit() here — session-scoped fixture teardown may race
     # with other fixtures still running.  Let the process exit handle cleanup.
+
+    leaked = pop_qt_slot_exceptions()
+    if leaked:
+        pytest.fail(
+            f"#344: {len(leaked)} unhandled exception(s) escaped a Qt slot during "
+            "the session (full traceback(s) already on stderr above). This is "
+            "almost always a QTimer leaked by an earlier test — e.g. an "
+            "Orchestrator built without stopping `_idle_watchdog` — that kept "
+            "firing after that test's fixtures tore its state down. Find and "
+            "stop the leaking timer; do not silence this check.\n" + "\n".join(leaked),
+            pytrace=False,
+        )
