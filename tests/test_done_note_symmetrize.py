@@ -128,8 +128,18 @@ class TestLongNoteCondenses:
         assert notice.startswith("[backend done] long-note-condense:")
         assert "📄 รายงานเต็ม:" in notice
         assert "file-read tool" in notice
-        # headline is bounded well under the full ~400+ char note
-        assert len(notice) < len(note)
+        # The full note body must not be embedded verbatim — only a bounded
+        # headline. Comparing against the whole `notice` (headline + pointer
+        # path) is OS-dependent: macOS CI's tmp root is long enough that the
+        # pointer path alone can outweigh a short note, flipping the assertion
+        # despite correct condensation. Measure only the headline segment,
+        # which the pointer path can't inflate.
+        assert note not in notice
+        headline_part = notice.split(" · 📄 รายงานเต็ม:", 1)[0]
+        assert len(headline_part) < len(note)
+        # headline is capped to ~200 chars by _truncate_at_word_boundary,
+        # regardless of note length or the OS's tmp path length.
+        assert len(headline_part) <= len("[backend done] ") + 210
 
     def test_pointer_file_exists_and_holds_full_note(self, orch, tmp_path):
         proj = "proj"

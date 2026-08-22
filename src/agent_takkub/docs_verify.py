@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,20 +208,26 @@ def verify_path(ref: PathRef, repo_root: Path) -> VerifyResult:
     )
 
 
-def verify_symbol(
-    ref: SymbolRef,
-    repo_root: Path,
-    search_dirs: tuple[Path, ...] = (Path("src"),),
-) -> VerifyResult:
-    """Search for the symbol definition in source files under search_dirs."""
-    patterns = [
-        re.compile(rf"\bdef\s+{re.escape(ref.method)}\b"),
-        re.compile(rf"\bclass\s+{re.escape(ref.method)}\b"),
-        re.compile(rf"^{re.escape(ref.method)}\s*=", re.MULTILINE),
-    ]
-    if ref.class_name:
-        patterns.append(re.compile(rf"\bclass\s+{re.escape(ref.class_name)}\b"))
+_INDEX_DEF_RE = re.compile(r"\bdef\s+([a-zA-Z_][a-zA-Z0-9_]*)")
+_INDEX_CLASS_RE = re.compile(r"\bclass\s+([a-zA-Z_][a-zA-Z0-9_]*)")
+_INDEX_ASSIGN_RE = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=", re.MULTILINE)
 
+
+@functools.cache
+def _build_symbol_index(
+    repo_root: Path, search_dirs: tuple[Path, ...]
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """One-pass index of def/class/module-assignment names under search_dirs.
+
+    verify_symbol() used to re-glob and re-read every .py file under
+    search_dirs for EACH symbol ref (O(refs x files) — 337 doc refs x 277
+    src files took 93s on this repo, nearly all in repeated re.search()).
+    Cached per (repo_root, search_dirs) so a whole verify_docs() run reads
+    and scans the tree exactly once, then does O(1) set lookups per ref.
+    """
+    def_names: set[str] = set()
+    class_names: set[str] = set()
+    assign_names: set[str] = set()
     for search_dir in search_dirs:
         base = repo_root / search_dir
         if not base.exists():
@@ -230,15 +237,33 @@ def verify_symbol(
                 content = f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            for pat in patterns:
-                if pat.search(content):
-                    return VerifyResult(
-                        ref_text=ref.text,
-                        status="ok",
-                        message="",
-                        source=ref.source,
-                        source_line=ref.source_line,
-                    )
+            def_names.update(_INDEX_DEF_RE.findall(content))
+            class_names.update(_INDEX_CLASS_RE.findall(content))
+            assign_names.update(_INDEX_ASSIGN_RE.findall(content))
+    return frozenset(def_names), frozenset(class_names), frozenset(assign_names)
+
+
+def verify_symbol(
+    ref: SymbolRef,
+    repo_root: Path,
+    search_dirs: tuple[Path, ...] = (Path("src"),),
+) -> VerifyResult:
+    """Check whether the symbol is defined anywhere in source files under search_dirs."""
+    def_names, class_names, assign_names = _build_symbol_index(repo_root, search_dirs)
+    found = (
+        ref.method in def_names
+        or ref.method in class_names
+        or ref.method in assign_names
+        or (ref.class_name is not None and ref.class_name in class_names)
+    )
+    if found:
+        return VerifyResult(
+            ref_text=ref.text,
+            status="ok",
+            message="",
+            source=ref.source,
+            source_line=ref.source_line,
+        )
 
     return VerifyResult(
         ref_text=ref.text,

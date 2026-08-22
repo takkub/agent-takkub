@@ -125,6 +125,14 @@ indent-style = "space"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+# Fires a bit before qa_gate.py's own --timeout (300s targeted / 600s full)
+# and, unlike pytest-timeout's thread-method dump, writes straight to a
+# dup'd stderr fd (stdlib faulthandler) instead of through pytest's
+# TerminalWriter — so it survives both an os._exit() timeout kill and
+# xdist workers, whose only piped channel to the controller is stdout
+# (stderr is left inherited straight through). See qa_gate.py's
+# _pytest_cmd() docstring for the full mechanism.
+faulthandler_timeout = 280
 
 # ──────────────────────────────────────────────────────────────────
 # import-linter: architecture guardrails

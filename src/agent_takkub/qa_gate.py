@@ -285,9 +285,35 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     module's docstring), where spinning up N worker processes costs more
     than the run itself saves.
 
-    `--timeout=120` (pytest-timeout) dumps stack traces from all threads when a
-    test hangs for >2 minutes (targeted runs). `--timeout=300` for full suite
-    allows slower tests to complete while catching ubuntu CI hangs.
+    `--timeout=300` (pytest-timeout) dumps stack traces from all threads when a
+    test hangs for >5 minutes (targeted runs). `--timeout=600` for full suite
+    allows slower tests to complete while catching ubuntu CI hangs. Both were
+    300s/120s before this was widened — the real full-suite worst case (8
+    workers + CPU contention from a concurrently-running cockpit) pushed the
+    single slowest test past 300s on a run with no actual hang, killing its
+    xdist worker (`node down: Not properly terminated`) and failing the gate
+    on nothing but a too-tight budget. 600s still catches a genuine hang fast
+    next to CI's own `timeout-minutes: 20` per job (.github/workflows/ci.yml)
+    — a real full-suite run recently took ~934s (~15.6min) total, so a single
+    test eating up to 600s before this fires would already be starving that
+    budget on its own, hang or not.
+
+    `--timeout-method=thread` is already this platform's default (no
+    SIGALRM on Windows), made explicit here because it matters on the
+    signal-default platforms too: pytest-xdist workers talk to the
+    controller only over an execnet channel built from `Popen(stdout=PIPE)`
+    — stderr is left inherited, not piped, so anything written straight to
+    the real stderr fd survives a worker that dies mid-test, while anything
+    that goes through pytest's own TerminalWriter (i.e. stdout) does not.
+    `--timeout-method=thread`'s handler calls `os._exit()` right after
+    writing its dump — that write races the process exit and is lost before
+    it can be forwarded, which is exactly why a timed-out worker crash in
+    this gate showed only "node down: Not properly terminated" with no
+    stack dump at all. `faulthandler_timeout` in pyproject.toml's pytest
+    config (fires a bit before `--timeout` does) is the actual fix for that:
+    it writes straight to a dup'd stderr fd via the stdlib `faulthandler`
+    module, bypassing pytest's TerminalWriter and therefore surviving both
+    the os._exit() race and xdist's stdout-only channel.
 
     `--max-worker-restart=0` prevents xdist from silently restarting a dead
     worker — a worker crash should fail immediately (no hidden stderr) rather
@@ -296,14 +322,21 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     exe = _resolve_tool(bin_dir, "pytest")
     base = [exe] if exe else [py, "-m", "pytest"]
     if targeted:
-        return [*base, "--timeout=120", "--max-worker-restart=0", *targeted]
+        return [
+            *base,
+            "--timeout=300",
+            "--timeout-method=thread",
+            "--max-worker-restart=0",
+            *targeted,
+        ]
     return [
         *base,
         "-n",
         _xdist_worker_count(),
         "--dist",
         "loadscope",
-        "--timeout=300",
+        "--timeout=600",
+        "--timeout-method=thread",
         "--max-worker-restart=0",
     ]
 
