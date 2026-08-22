@@ -59,7 +59,11 @@ class TestBlockedCliSurface:
         # `done` is a teammate verb — the CLI refuses it for lead.
         monkeypatch.setenv("TAKKUB_ROLE", "qa")
         sent: dict = {}
-        monkeypatch.setattr(cli, "_request", lambda payload: sent.update(payload) or {"ok": True})
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: sent.update(payload) or {"ok": True, "msg": "qa reported done"},
+        )
 
         cli.main(["done", "note here", "--blocked"])
 
@@ -73,7 +77,11 @@ class TestBlockedCliSurface:
         # `done` is a teammate verb — the CLI refuses it for lead.
         monkeypatch.setenv("TAKKUB_ROLE", "qa")
         sent: dict = {}
-        monkeypatch.setattr(cli, "_request", lambda payload: sent.update(payload) or {"ok": True})
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: sent.update(payload) or {"ok": True, "msg": "qa reported done"},
+        )
 
         cli.main(["done", "note here"])
 
@@ -86,7 +94,11 @@ class TestBlockedCliSurface:
         # `done` is a teammate verb — the CLI refuses it for lead.
         monkeypatch.setenv("TAKKUB_ROLE", "qa")
         sent: dict = {}
-        monkeypatch.setattr(cli, "_request", lambda payload: sent.update(payload) or {"ok": True})
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: sent.update(payload) or {"ok": True, "msg": "qa reported done"},
+        )
 
         cli.main(["done", "boom", "--fail"])
 
