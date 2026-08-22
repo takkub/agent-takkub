@@ -20,6 +20,77 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   + tests: `TestBuildWheel`/`TestReleaseWheelStep` (`tests/test_release.py`),
   `npm/scripts/lib.test.js`, `npm/scripts/preflight-publish.test.js`
 
+- **takkub CLI ตายเงียบทั้งระบบเมื่อ venv interpreter ถูกเขียนทับ** (#341) —
+  `venv/Scripts/python.exe` ถูกโปรเซสภายนอกเขียนทับด้วยไฟล์ 29 ไบต์ (ไม่ใช่ PE จริง)
+  ระหว่างเซสชัน แต่ launcher ทุกตัว spawn มันตรงๆ โดยไม่เช็คก่อน → CreateProcess ล้ม
+  แบบเงียบหรือ hang กู้คืนยาก ผู้ใช้เห็นแค่ "ไม่มีอะไรเกิดขึ้น" ไม่มี diagnostic เลย →
+  แก้ 3 จุด: (1) launcher ทั้ง 4 ตัว (`npm/bin/takkub.js`, `npm/bin/agent-takkub.js`,
+  `bin/takkub.cmd`, `bin/takkub`) ตรวจสุขภาพ interpreter แบบ **static** (ขนาดไฟล์ +
+  PE magic bytes บน Windows) ก่อน spawn ทุกครั้ง — จงใจไม่ execute เพื่อทดสอบ เพราะ
+  การ spawn ไฟล์ที่พังคือขั้นที่ทำให้ระบบ lock/hang จนกู้คืนยาก พร้อม diagnostic
+  + วิธีกู้คืนแทนที่จะ exit เงียบ (2) `cli.py` main(): write-path commands (send/
+  done/issue/assign/goal/…) ที่ได้ `ok=True` แต่ไม่มี `msg` ยืนยันจาก daemon ถูก
+  treat เป็น failed (exit non-zero) แทนอ่านเป็น success เงียบๆ — defense-in-depth
+  เผื่อกรณีอื่นที่ไม่ใช่ interpreter พัง (3) `doctor.py::check_installed_integrity()`
+  เพิ่มเช็ค venv-python โดยอ่านไฟล์บนดิสก์ตรงๆ (ไม่ใช่ image ที่โหลดอยู่ใน memory)
+  ทำให้ cockpit ที่กำลังรันอยู่ (image เก่ายังดี) ตรวจจับความเสียหายกลางเซสชันได้
+  แม้ subprocess ใหม่จะรันไม่ได้แล้วก็ตาม
+  + follow-up: (2) เองก็มี false-failure — `takkub issue show` fail ทุกครั้งแม้
+  สำเร็จจริง เพราะ `cmd_issue_show` คืน `{ok: True, msg: ""}` เสมอ (เนื้อหา print
+  ตรงไปยัง stdout แยกจาก `msg` field) ถูก write-confirmation guard ใหม่ override
+  เป็น False → แก้ด้วยตั้ง `quiet=True` เพราะ confirmation จริงอยู่ที่เนื้อหาที่
+  print ไปแล้ว
+  + tests: `tests/test_cli_write_confirmation.py`, `tests/test_doctor.py`,
+  `tests/test_issues.py`
+
+- **`main_thread_stall` เกิดซ้ำทุก 5s tick** (#342) — ยืนยันจาก main-thread stack
+  trace 2 dump ตรงกันใน boot.log: `Orchestrator._idle_watchdog` (5s tick) →
+  `_check_idle_teammates` → `_check_stuck_tool_panes` → `effective_provider_for`
+  → `_provider_available` เรียก `shutil.which()` เดิน PATH สดบน **Qt main thread**
+  ทุก tick ทุก pane ที่ working อยู่บน codex/gemini-agy ข้ามทุกโปรเจกต์ที่เปิด →
+  แก้ด้วย TTL cache 15s เฉพาะ CLI-installed probe (`shutil.which`) ตัวที่แพงจริง
+  + regression ที่ตามมาในรอบเดียวกัน: cache รอบแรกครอบ `is_disabled()` ด้วย ทำให้
+  `settings_window._sync_role_provider_badge()` (ต้องอ่าน provider_state สดทันที
+  ทุกครั้งที่เปลี่ยน combo) เห็นค่า disabled ค้างได้นานถึง 15s — module-global
+  cache ไม่มี reset hook เลย ทำให้ค้างข้ามเทสด้วย (root cause ของ
+  `test_substitute_badge_shown_when_selected_provider_unavailable` ที่ qa เจอ
+  flaky) → แยก cache ให้ครอบเฉพาะ CLI-installed probe ส่วน `is_disabled()` อ่านสด
+  เสมอ (เป็น JSON-file read เล็กๆ ไม่ใช่ตัวที่แพง) เพิ่ม
+  `reset_provider_available_cache()` ให้เทส reset ได้ เรียกจาก conftest.py
+  autouse fixture กันค้างข้ามเทสไฟล์อื่น
+  + ค้างเป็น follow-up: #343 (Lead pane sat unrecognized ~9 ชม. — ไม่ใช่ signal
+  เดียวกับ main_thread_stall, temporal correlation อ่อน จึงเปิดเป็น issue แยก
+  รอ live reproduction)
+  + tests: `tests/test_provider_config.py`
+
+- **pytest suite ตายเงียบแบบ native abort กลาง CI windows — ไม่มี traceback ไม่มี
+  summary** (#344) — จุดตายขยับทุกรอบ (35% ใน repro venv, 46%/51%/77% ข้าม CI run)
+  = timing-dependent ไม่ใช่บั๊กของเทสตัวใดตัวหนึ่ง root cause: QTimer ที่รั่วจาก
+  เทสก่อนหน้ายังยิงต่อใต้ QApplication เดียวที่ `conftest.py::_qt_session_app`
+  ถือไว้ทั้ง session — เมื่อ exception หลุดจาก slot ที่ Qt เรียกจาก C++ โดยไม่มี
+  `sys.excepthook` มารับ (ติดตั้งเฉพาะ GUI entrypoint จริงใน app.py) PyQt6 default
+  คือ qFatal() abort ทั้งโปรเซสทันที (บั๊กคลาสเดียวกับ console-sweeper ที่แก้ไป
+  แล้วใน 33dcf5d) → แก้ 2 ชั้น: (1) `conftest.py` ติดตั้ง sys.excepthook/
+  threading.excepthook/unraisablehook แบบเดียวกับ app.py แปลง hard-abort ให้
+  กลายเป็น traceback ที่อ่านได้ ส่งตรง stderr จริง (bypass capsys) สะสม fail ที่
+  session end แทนกลบเงียบ + generic QTimer leak tracker (audit พบ Orchestrator
+  arm timer จริง 3 ตัวไม่ใช่ 1 ตามที่ issue ระบุตอนแรก — `_idle_watchdog`/
+  `_resource_timer`/`_hot_md_timer` รั่วอยู่ ~15 ไฟล์) track ทุก QTimer ที่ถูก
+  สร้าง stop ตัวที่ยัง active หลังเทสจบ report แบบ non-fatal ผ่าน
+  `pytest_terminal_summary` (2) `Orchestrator.shutdown_timers()` เป็น
+  stop-everything call ตัวเดียว (test-only — Orchestrator สร้างครั้งเดียวต่อ
+  process ไม่เคยถูกแทนที่ระหว่างรัน ส่วน teardown จริงจบด้วย process exit เสมอ
+  ไม่ใช่ hook ที่ตกหล่นในโปรดักชัน) สลับ 66 ไฟล์เทสจาก ad-hoc partial stop มา
+  เรียกตัวเดียว ปิด leak เดียวกันใน `CliServer._reaper`/`ProjectNav._pending_timer`/
+  `ProjectTab._tab_status_timer`/`LeadNotifier._timer` ผ่าน shared fixture helper
+  `tests/_qt_timer_leak_guard.py`
+  + verify: full suite exit 0 ไม่มี native abort (ก่อนแก้ตาย exit 139 ที่ ~35%)
+  + ค้างเป็น follow-up: #345
+  + tests: `tests/conftest.py` (excepthook guard + leak tracker),
+  `tests/test_provider_toggle_orchestrator.py`,
+  `src/agent_takkub/orchestrator.py::shutdown_timers()`,
+  `tests/_qt_timer_leak_guard.py` (+ 68 ไฟล์เทสสลับมาเรียก `shutdown_timers()`)
+
 ## [v1.0.84] - 2026-08-21
 
 ### Changed (เปลี่ยน)
