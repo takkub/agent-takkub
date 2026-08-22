@@ -50,9 +50,11 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
         staticmethod(lambda project: project or TEST_PROJECT),
     )
     o = Orchestrator()
-    # We drive _check_idle_teammates by hand; the auto-firing timer would
-    # race against our assertions.
-    o._idle_watchdog.stop()
+    # We drive _check_idle_teammates by hand; the auto-firing timers (#344:
+    # not just _idle_watchdog — _resource_timer/_hot_md_timer too) would
+    # otherwise race against our assertions and outlive this per-test
+    # instance for the rest of the pytest session.
+    o.shutdown_timers()
     return o
 
 
@@ -682,7 +684,7 @@ def test_signal_emit_no_op_when_disabled(qapp: QCoreApplication) -> None:
 
     o = Orchestrator()
     try:
-        o._idle_watchdog.stop()
+        o.shutdown_timers()
         assert not o._idle_watchdog.isActive()
     finally:
         del o

@@ -42,7 +42,7 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
         staticmethod(lambda project: project or TEST_PROJECT),
     )
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

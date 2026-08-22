@@ -1266,7 +1266,6 @@ def test_orchestrator_construction_spawns_no_graft_subprocess(qapp, monkeypatch)
     monkeypatch.setattr(gab.subprocess, "run", lambda *a, **k: calls.append(a))
 
     o = Orchestrator()
-    o._idle_watchdog.stop()
-    o._hot_md_timer.stop()
+    o.shutdown_timers()
 
     assert calls == [], f"Orchestrator() construction spawned graft subprocess.run calls: {calls}"

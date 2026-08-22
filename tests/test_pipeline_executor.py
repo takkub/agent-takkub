@@ -111,8 +111,7 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) ->
 def _make_orch_with_panes(project: str, roles: list[str]) -> tuple[Orchestrator, dict]:
     """Create Orchestrator with pre-populated fake panes."""
     orch = Orchestrator()
-    orch._idle_watchdog.stop()
-    orch._hot_md_timer.stop()
+    orch.shutdown_timers()
     panes: dict[str, MagicMock] = {}
     for role in roles:
         pane = MagicMock()

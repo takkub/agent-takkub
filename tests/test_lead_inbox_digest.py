@@ -51,7 +51,7 @@ def orch(monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
         staticmethod(lambda project: project or PROJECT),
     )
     instance = Orchestrator()
-    instance._idle_watchdog.stop()
+    instance.shutdown_timers()
     instance._panes_by_project[PROJECT] = {"lead": _lead_pane()}
     return instance
 

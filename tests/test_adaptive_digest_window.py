@@ -54,7 +54,7 @@ def orch(monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
     )
     monkeypatch.delenv("TAKKUB_INBOX_DIGEST_MS", raising=False)
     instance = Orchestrator()
-    instance._idle_watchdog.stop()
+    instance.shutdown_timers()
     instance._panes_by_project[PROJECT] = {"lead": _lead_pane()}
     return instance
 

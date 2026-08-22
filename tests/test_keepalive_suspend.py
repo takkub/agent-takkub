@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 from agent_takkub.project_tab import ProjectTab
 
+from ._qt_timer_leak_guard import stop_timers_after
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -24,6 +26,16 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _stop_tab_status_timer(monkeypatch):
+    # ProjectTab._tab_status_timer starts unconditionally in __init__ (#344)
+    # — every `ProjectTab(...)` in this file otherwise leaves one running
+    # for the rest of the pytest session.
+    finalize = stop_timers_after(monkeypatch, ProjectTab, "_tab_status_timer")
+    yield
+    finalize()
 
 
 class _FakePane(QWidget):

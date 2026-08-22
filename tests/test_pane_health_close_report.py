@@ -70,7 +70,7 @@ def project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 def _orch(roles: list[str]) -> tuple[Orchestrator, dict[str, MagicMock]]:
     orch = Orchestrator()
-    orch._idle_watchdog.stop()
+    orch.shutdown_timers()
     panes: dict[str, MagicMock] = {}
     for role in roles:
         pane = MagicMock()

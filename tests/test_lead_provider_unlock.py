@@ -37,7 +37,7 @@ def qapp() -> QCoreApplication:
 def _make_orchestrator(monkeypatch):
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p or TEST_PROJECT))
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

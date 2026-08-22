@@ -365,7 +365,7 @@ def _capture_spawn_argv(
     )
 
     orch = Orchestrator()
-    orch._idle_watchdog.stop()
+    orch.shutdown_timers()
 
     # We need a fake pane in the right project slot
     fake_pane = MagicMock()

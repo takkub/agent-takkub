@@ -100,7 +100,7 @@ def _make_orch_with_fake_panes(
     """Build an Orchestrator and pre-populate fake panes for the given roles.
     Returns (orch, {role: pane}) so tests can inspect pane.session.write calls."""
     orch = Orchestrator()
-    orch._idle_watchdog.stop()
+    orch.shutdown_timers()
     panes: dict[str, MagicMock] = {}
     for role in roles_with_session:
         pane = MagicMock()

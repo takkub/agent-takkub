@@ -1338,6 +1338,23 @@ class Orchestrator(
         if manager is not None:
             manager.close()
 
+    def shutdown_timers(self) -> None:
+        """Stop every QTimer this Orchestrator owns (#344).
+
+        __init__ arms _resource_timer / _idle_watchdog / _hot_md_timer
+        unconditionally, so any Orchestrator() left reachable past its
+        owner's lifetime keeps ticking under the process-wide QApplication —
+        a leaked timer can fire against long-torn-down state and abort the
+        process with no traceback. The real app never calls this (the whole
+        process exits, taking every timer with it); it exists so tests and
+        any other short-lived Orchestrator owner have one call that can
+        never miss a timer this class adds in the future.
+        """
+        for attr in ("_resource_timer", "_idle_watchdog", "_hot_md_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                timer.stop()
+
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry  (SpawnEngineMixin provides _ps + spawn methods)
     # ──────────────────────────────────────────────────────────────

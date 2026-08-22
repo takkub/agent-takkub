@@ -50,7 +50,7 @@ def test_seconds_since_output_small_right_after_feed() -> None:
 def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p))
     o = Orchestrator()
-    o._idle_watchdog.stop()
+    o.shutdown_timers()
     return o
 
 

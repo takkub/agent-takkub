@@ -221,7 +221,7 @@ class TestAutoTrustProjectNamespace:
             staticmethod(lambda project: project or "proj_b"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         # Plant a pane only in proj_a; proj_b (active) has no backend pane.
         fake_pane = MagicMock()
@@ -252,7 +252,7 @@ class TestAutoTrustProjectNamespace:
             staticmethod(lambda project: project or "proj_b"),
         )
         orch = Orchestrator()
-        orch._idle_watchdog.stop()
+        orch.shutdown_timers()
 
         # proj_b (active) has no backend pane at all
         orch._panes_by_project["proj_b"] = {}
