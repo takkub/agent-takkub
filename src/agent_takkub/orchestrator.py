@@ -543,6 +543,30 @@ STALE_MARKER_QUIET_S = 20.0
 STALE_MARKER_COOLDOWN_S = 600.0
 STALE_MARKER_TAIL_ROWS = 4
 
+# (#343) A pane stuck in the unrecognised-and-quiet state across multiple
+# STALE_MARKER_COOLDOWN_S windows in a row is no longer "one routine 🟡 sweep
+# line" — the real episode this was written for ran ~9h/106 occurrences with
+# nothing above that routine line the whole time and nobody found out until
+# someone happened to run `takkub ma` the next morning. Every Nth consecutive
+# occurrence for the same pane (3 ≈ 30 min of continuous, unresolved
+# staleness — long enough to rule out a one-off blip, short enough to still
+# catch it same-day) fires a louder, separately-classified event with a full
+# diagnostic dump instead. Does NOT change is_at_ready_prompt/marker
+# detection itself — see _check_stale_markers' docstring for why guessing at
+# the marker table here would be actively dangerous.
+_STALE_MARKER_ESCALATE_EVERY = 3
+# The exact marker checks _check_stale_markers tries before concluding a
+# quiet pane is unrecognised — named explicitly here so an escalation dump
+# states which checks were attempted (all False) rather than leaving that
+# implicit in code the reader may not have open.
+_STALE_MARKER_CHECKS_TRIED = (
+    "is_at_ready_prompt",
+    "is_blocked_on_tty_prompt",
+    "is_at_trust_prompt",
+    "is_blocked_on_permission_prompt",
+    "is_at_update_splash",
+)
+
 # A teammate pane in `working` state with no PTY output for this long
 # is treated as hung — claude probably crashed silently, deadlocked on
 # a tool call, or got wedged behind a slow MCP server. Orchestrator
@@ -1278,6 +1302,11 @@ class Orchestrator(
         # quiet + matched by NO state marker = likely an upstream prompt reword
         # that silently broke detection). See _check_stale_markers.
         self._stale_marker_last: dict[str, float] = {}
+        # Per-pane consecutive-occurrence counter for the same signal (#343) —
+        # incremented once per routine log above, reset only on genuine
+        # recovery (marker matches again, or the pane dies). Drives the
+        # louder escalation in _check_stale_markers/_escalate_stale_marker.
+        self._stale_marker_streak: dict[str, int] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -7006,27 +7035,38 @@ class Orchestrator(
         the bottom screen text so the operator sees the real footer and can
         rescue it via TAKKUB_EXTRA_READY_MARKERS — a loud diagnostic instead of
         a silent idle-watchdog stall.
+
+        (#343) A pane that stays continuously unrecognised across multiple
+        cooldown windows in a row escalates past this routine 🟡 line — see
+        _STALE_MARKER_ESCALATE_EVERY and _escalate_stale_marker. This does
+        NOT touch the marker table itself: guessing at a marker fix here
+        would risk misclassifying a real provider crash as "ready", masking
+        the one signal that currently surfaces it at all.
         """
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
+                key = f"{project_name}::{name}"
                 try:
                     sess = pane.session
                     if sess is None or not sess.is_alive:
+                        self._stale_marker_streak.pop(key, None)
                         continue
                     if sess.seconds_since_output() < STALE_MARKER_QUIET_S:
                         continue  # still streaming → genuinely busy, not blind
                     if sess.is_at_ready_prompt():
+                        self._stale_marker_streak.pop(key, None)
                         continue  # recognised idle → markers working
                     if (
                         sess.is_blocked_on_tty_prompt()
                         or sess.is_at_trust_prompt()
                         or sess.is_blocked_on_permission_prompt()
                     ):
+                        self._stale_marker_streak.pop(key, None)
                         continue  # recognised shell/trust/permission prompt
                     if sess.is_at_update_splash():
+                        self._stale_marker_streak.pop(key, None)
                         continue  # recognised codex splash (handled elsewhere)
                     # Alive + settled + unrecognised → markers likely stale.
-                    key = f"{project_name}::{name}"
                     last = self._stale_marker_last.get(key)
                     if last is not None and (now - last) < STALE_MARKER_COOLDOWN_S:
                         continue
@@ -7035,16 +7075,89 @@ class Orchestrator(
                         for ln in sess.display_lines()[-STALE_MARKER_TAIL_ROWS:]
                         if ln.strip()
                     )[:300]
+                    quiet_s = round(sess.seconds_since_output())
                     _log_event(
                         "ready_marker_possibly_stale",
                         role=name,
                         project=project_name,
-                        quiet_s=round(sess.seconds_since_output()),
+                        quiet_s=quiet_s,
                         footer=tail,
                     )
                     self._stale_marker_last[key] = now
+                    streak = self._stale_marker_streak.get(key, 0) + 1
+                    self._stale_marker_streak[key] = streak
+                    if streak % _STALE_MARKER_ESCALATE_EVERY == 0:
+                        self._escalate_stale_marker(
+                            project_name, name, pane, sess, tail, quiet_s, streak, now
+                        )
                 except Exception:
                     continue
+
+    def _escalate_stale_marker(
+        self,
+        project_name: str,
+        name: str,
+        pane: AgentPane,
+        sess: PtySession,
+        tail: str,
+        quiet_s: int,
+        streak: int,
+        now: float,
+    ) -> None:
+        """(#343) Dump full diagnostic state for a pane that has stayed
+        unrecognised-and-quiet across _STALE_MARKER_ESCALATE_EVERY (and every
+        further multiple of it) consecutive occurrences, and make sure a
+        human actually finds out:
+
+          * logs under a distinct event name maintenance.py classifies 🔴
+            (`_SEVERE_EVENTS`), not 🟡 — the routine event stayed 🟡-only for
+            the entire ~9h #343 episode, which is the gap this closes
+          * pings Lead directly via _notify_lead — including when *this* pane
+            IS Lead: that call still lands in the durable pending-notice
+            fallback (see _notify_lead's docstring) when live delivery can't
+            reach a genuinely wedged pane, so the diagnostic is waiting
+            whenever that pane is next recovered/respawned rather than lost
+
+        Best-effort end to end — a failed diagnostic dump must never take the
+        sweep down with it (matches this file's surrounding
+        except-Exception-continue style).
+        """
+        provider = "unknown"
+        model: str | None = None
+        try:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(name, project=project_name)
+            model = sess.current_model_label(provider)
+        except Exception:
+            pass
+        last_progress_ts = 0.0
+        try:
+            last_progress_ts = self._compute_last_progress_ts(name, project_name, pane)
+        except Exception:
+            last_progress_ts = 0.0
+        _log_event(
+            "ready_marker_stale_prolonged",
+            role=name,
+            project=project_name,
+            quiet_s=quiet_s,
+            streak=streak,
+            footer=tail,
+            markers_checked=list(_STALE_MARKER_CHECKS_TRIED),
+            provider=provider,
+            model=model,
+            last_progress_ts=last_progress_ts,
+            last_progress_age_s=(round(now - last_progress_ts) if last_progress_ts else None),
+        )
+        try:
+            self._notify_lead(
+                project_name,
+                f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
+                f"จับไม่ได้เลยติดกัน) — อาจเป็น provider ค้าง/ล่มเงียบ, ไม่ใช่แค่ idle ปกติ "
+                f"(#343). provider={provider} footer: {tail[:150] or '(ว่าง)'}",
+            )
+        except Exception:
+            pass
 
     def _check_proactive_compact(self, now: float) -> None:
         """Inject `/compact` into a Claude pane that's been continuously idle

@@ -48,6 +48,9 @@ _SEVERE_EVENTS: dict[str, str] = {
     "verify_failed": "QA/verify รายงาน FAIL",
     "verify_blocked": "QA/verify รายงานติด blocker (ต้องให้เจ้าของทำ)",
     "pane_limit_parked": "pane ถูกพักเพราะชนเพดาน",
+    "ready_marker_stale_prolonged": (
+        "pane เงียบต่อเนื่องหลาย cooldown ไม่มี marker จับได้เลย (#343 — น่าจะ provider ค้าง/ล่ม)"
+    ),
 }
 _WARN_EVENTS: dict[str, str] = {
     "main_thread_stall": "UI ค้าง (main thread ติด I/O)",

@@ -17,7 +17,12 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import STALE_MARKER_QUIET_S, Orchestrator
+from agent_takkub.orchestrator import (
+    _STALE_MARKER_ESCALATE_EVERY,
+    STALE_MARKER_COOLDOWN_S,
+    STALE_MARKER_QUIET_S,
+    Orchestrator,
+)
 from agent_takkub.pty_session import PtySession
 
 
@@ -132,3 +137,135 @@ def test_flag_is_rate_limited_per_pane(orch: Orchestrator, monkeypatch: pytest.M
     orch._check_stale_markers(1001.0)  # within cooldown → no second log
     stale = [e for e in events if e[0] == "ready_marker_possibly_stale"]
     assert len(stale) == 1
+
+
+# -- #343: escalation past N consecutive occurrences -------------------------
+
+
+def _capture_notify(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    calls: list[tuple] = []
+    monkeypatch.setattr(Orchestrator, "_notify_lead", lambda self, *a, **k: calls.append((a, k)))
+    return calls
+
+
+def _tick_n_cooldowns(orch: Orchestrator, n: int, start: float = 1000.0) -> None:
+    """Fire _check_stale_markers n times, each one full cooldown apart —
+    the same shape as the real #343 timeline (one routine log per ~600s)."""
+    for i in range(n):
+        orch._check_stale_markers(start + i * (STALE_MARKER_COOLDOWN_S + 1))
+
+
+def test_no_escalation_before_the_threshold(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY - 1)
+
+    assert not [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+
+
+def test_escalates_after_n_consecutive_occurrences(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 1
+    payload = escalations[0][1]
+    assert payload["role"] == "lead"
+    assert payload["project"] == "projX"
+    assert payload["streak"] == _STALE_MARKER_ESCALATE_EVERY
+    assert "reworded prompt" in payload["footer"]
+    assert payload["markers_checked"] == [
+        "is_at_ready_prompt",
+        "is_blocked_on_tty_prompt",
+        "is_at_trust_prompt",
+        "is_blocked_on_permission_prompt",
+        "is_at_update_splash",
+    ]
+    # escalating past the routine 🟡 line means actually telling someone —
+    # even (especially) when the wedged pane IS Lead itself, per #343.
+    assert len(notify_calls) == 1
+    assert notify_calls[0][0][0] == "projX"
+    assert "#343" in notify_calls[0][0][1]
+
+
+def test_escalation_repeats_every_n_further_occurrences(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY * 2)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 2
+    assert escalations[0][1]["streak"] == _STALE_MARKER_ESCALATE_EVERY
+    assert escalations[1][1]["streak"] == _STALE_MARKER_ESCALATE_EVERY * 2
+
+
+def test_recovery_resets_the_streak(orch: Orchestrator, monkeypatch: pytest.MonkeyPatch) -> None:
+    key = "projX::backend"
+    sess = _sess(quiet=STALE_MARKER_QUIET_S + 10)
+    _add_pane(orch, "projX", "backend", sess)
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY - 1)
+    assert orch._stale_marker_streak[key] == _STALE_MARKER_ESCALATE_EVERY - 1
+
+    # Marker recognises the pane again — a genuine recovery, not a blip.
+    sess.is_at_ready_prompt.return_value = True
+    orch._check_stale_markers(9000.0)
+    assert key not in orch._stale_marker_streak
+
+    # Goes stale again: streak restarts from zero, so the same number of
+    # further occurrences that used to trip escalation no longer does.
+    sess.is_at_ready_prompt.return_value = False
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY - 1, start=10000.0)
+    assert not [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+
+
+def test_dead_pane_resets_the_streak(orch: Orchestrator, monkeypatch: pytest.MonkeyPatch) -> None:
+    key = "projX::backend"
+    sess = _sess(quiet=STALE_MARKER_QUIET_S + 10)
+    _add_pane(orch, "projX", "backend", sess)
+    _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY - 1)
+    assert orch._stale_marker_streak[key] == _STALE_MARKER_ESCALATE_EVERY - 1
+
+    sess.is_alive = False
+    orch._check_stale_markers(9000.0)
+    assert key not in orch._stale_marker_streak
+
+
+def test_escalation_dump_never_raises_when_helpers_fail(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """provider/model/last-progress lookups are all best-effort — a broken
+    one must not stop the event from being logged at all."""
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+    monkeypatch.setattr(
+        orch,
+        "_compute_last_progress_ts",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 1
+    assert escalations[0][1]["last_progress_ts"] == 0.0
+    assert escalations[0][1]["last_progress_age_s"] is None

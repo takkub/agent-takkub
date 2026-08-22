@@ -175,6 +175,36 @@ def test_targeted_mode_runs_pytest_only_and_writes_no_report(repo, monkeypatch):
     assert recorder[0][0][-1] == "tests/test_x.py"
 
 
+def test_full_gate_runs_pytest_under_xdist(repo, monkeypatch):
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    qa_gate.run_gate(cwd=repo, write_report=False)
+
+    pytest_cmd = recorder[0][0]
+    assert "-n" in pytest_cmd and "auto" in pytest_cmd
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "auto"
+    # loadscope, not loadgroup: loadgroup only groups items explicitly marked
+    # with @pytest.mark.xdist_group — everything else is freely distributed
+    # with NO per-module/class grouping, which is unsafe for a suite that has
+    # never been audited for cross-worker safety (see _pytest_cmd's docstring).
+    assert "--dist" in pytest_cmd and "loadscope" in pytest_cmd
+
+
+def test_targeted_mode_never_uses_xdist(repo, monkeypatch):
+    """A handful of mid-flight paths — worker spin-up would cost more than
+    the run saves (team policy: full suite once at the batch gate)."""
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+
+    qa_gate.run_gate(cwd=repo, targeted=["tests/test_x.py"], write_report=None)
+
+    pytest_cmd = recorder[0][0]
+    assert "-n" not in pytest_cmd
+
+
 def test_pythonpath_src_never_injected(repo, monkeypatch):
     """The gate must NOT add <root>/src to PYTHONPATH — that's the exact
     system-python footgun it exists to rule out: it leaks into
@@ -326,6 +356,98 @@ class TestNodeProjectGate:
 
         assert not report.ok
         assert "refuse" in report.steps[0].detail
+
+
+# ── #349: PYTHONFAULTHANDLER default, memory sampling, native-abort detail ─
+
+
+def test_pythonfaulthandler_defaults_on(repo, monkeypatch):
+    monkeypatch.delenv("PYTHONFAULTHANDLER", raising=False)
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    qa_gate.run_gate(cwd=repo, write_report=False)
+
+    _, env = recorder[0]
+    assert env["PYTHONFAULTHANDLER"] == "1"
+
+
+def test_pythonfaulthandler_explicit_override_preserved(repo, monkeypatch):
+    monkeypatch.setenv("PYTHONFAULTHANDLER", "0")
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    qa_gate.run_gate(cwd=repo, write_report=False)
+
+    _, env = recorder[0]
+    assert env["PYTHONFAULTHANDLER"] == "0"
+
+
+def test_memory_log_written_alongside_step_log(repo, monkeypatch):
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    report = qa_gate.run_gate(cwd=repo, write_report=True)
+
+    pytest_step = report.steps[1]
+    assert pytest_step.memory_log_path is not None
+    assert pytest_step.memory_log_path.exists()
+    content = pytest_step.memory_log_path.read_text(encoding="utf-8")
+    assert "system_available=" in content
+    assert "subprocess_rss=" in content
+
+
+def test_no_memory_log_when_report_not_written(repo, monkeypatch):
+    _make_complete_venv(repo)
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+    assert report.steps[1].memory_log_path is None
+
+
+def test_sample_memory_line_never_raises(monkeypatch):
+    import psutil
+
+    def _boom(*a, **k):
+        raise RuntimeError("permission denied")
+
+    monkeypatch.setattr(psutil, "virtual_memory", _boom)
+    line = qa_gate._sample_memory_line()
+    assert "memory sample failed" in line
+
+
+class TestSilentAbortDetection:
+    def test_defined_pytest_exit_code_is_not_flagged_as_abort(self):
+        # exit 1 = normal "tests failed", pytest's own documented code.
+        assert not qa_gate._is_silent_pytest_abort("pytest", 1, "= 2 failed, 3 passed in 1.2s =")
+
+    def test_undefined_exit_code_with_summary_is_not_flagged(self):
+        # summary line present → pytest reached its own reporting, not an abort.
+        assert not qa_gate._is_silent_pytest_abort("pytest", 127, "= 5 passed in 0.1s =")
+
+    def test_undefined_exit_code_with_no_summary_is_the_349_signature(self):
+        assert qa_gate._is_silent_pytest_abort("pytest", 127, "..F..s..\n(cut off, no summary)")
+
+    def test_only_applies_to_the_pytest_step(self):
+        assert not qa_gate._is_silent_pytest_abort("ruff", 127, "no summary here at all")
+
+    def test_native_abort_marks_step_detail_and_points_at_349(self, repo, monkeypatch):
+        _make_complete_venv(repo)
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [127]))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        pytest_step = report.steps[1]
+        assert pytest_step.ok is False
+        assert pytest_step.returncode == 127
+        assert "NATIVE ABORT" in pytest_step.detail
+        assert "#349" in pytest_step.detail
 
 
 class TestUnknownProjectGate:
