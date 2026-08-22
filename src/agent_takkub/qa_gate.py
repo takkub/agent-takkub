@@ -284,12 +284,28 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     mid-flight (team policy — full suite once at the batch gate, see this
     module's docstring), where spinning up N worker processes costs more
     than the run itself saves.
+
+    `--timeout=120` (pytest-timeout) dumps stack traces from all threads when a
+    test hangs for >2 minutes (targeted runs). `--timeout=300` for full suite
+    allows slower tests to complete while catching ubuntu CI hangs.
+
+    `--max-worker-restart=0` prevents xdist from silently restarting a dead
+    worker — a worker crash should fail immediately (no hidden stderr) rather
+    than restart invisibly and potentially corrupt state or mask a bug.
     """
     exe = _resolve_tool(bin_dir, "pytest")
     base = [exe] if exe else [py, "-m", "pytest"]
     if targeted:
-        return base + list(targeted)
-    return [*base, "-n", _xdist_worker_count(), "--dist", "loadscope"]
+        return [*base, "--timeout=120", "--max-worker-restart=0", *targeted]
+    return [
+        *base,
+        "-n",
+        _xdist_worker_count(),
+        "--dist",
+        "loadscope",
+        "--timeout=300",
+        "--max-worker-restart=0",
+    ]
 
 
 def _ruff_cmd(bin_dir: Path | None, py: str) -> list[str]:

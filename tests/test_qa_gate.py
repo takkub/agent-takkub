@@ -194,6 +194,9 @@ def test_full_gate_runs_pytest_under_xdist(repo, monkeypatch):
     # with NO per-module/class grouping, which is unsafe for a suite that has
     # never been audited for cross-worker safety (see _pytest_cmd's docstring).
     assert "--dist" in pytest_cmd and "loadscope" in pytest_cmd
+    # Timeout flags: full run gets 300s per test, xdist worker restart disabled.
+    assert "--timeout=300" in pytest_cmd
+    assert "--max-worker-restart=0" in pytest_cmd
 
 
 def test_full_gate_xdist_worker_count_overridable_via_env(repo, monkeypatch):
@@ -231,6 +234,9 @@ def test_targeted_mode_never_uses_xdist(repo, monkeypatch):
 
     pytest_cmd = recorder[0][0]
     assert "-n" not in pytest_cmd
+    # Targeted tier gets shorter timeout (120s per test) and worker-restart disabled.
+    assert "--timeout=120" in pytest_cmd
+    assert "--max-worker-restart=0" in pytest_cmd
 
 
 def test_pythonpath_src_never_injected(repo, monkeypatch):

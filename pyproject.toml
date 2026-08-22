@@ -32,6 +32,7 @@ takkub = "agent_takkub.cli:main"
 dev = [
     "pytest>=8",
     "pytest-xdist>=3.6", # parallel full-suite runs (`-n auto` in qa_gate.py) — 16 cores idle serial otherwise
+    "pytest-timeout>=2.1", # hang detection via --timeout (captures stacks before abort)
 
     # Pinned, not floating: CI installs .[dev] fresh, so an unpinned ruff let
     # a newer release land there than the one developers run locally — the
