@@ -15,6 +15,13 @@ src/agent_takkub/_assets/
 .vscode/
 projects.json
 runtime/
+
+# Core V2 storage layout (#309) — `takkub migrate apply` writes a full copy of
+# every V1 registry/state file here under DATA_HOME. On a dev checkout that is
+# the repo root, so a rehearsal leaves 300MB+ of duplicated data sitting in the
+# working tree. It is generated output that `migrate rollback` deletes wholesale
+# (engine.py's rmtree) — never something to commit.
+v2/
 *.log
 # Local issue-store fallback (written only when gh is unavailable). With
 # issues now defaulting to the agent-takkub repo, this can land at repo root.
