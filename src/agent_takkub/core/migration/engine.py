@@ -127,14 +127,29 @@ class MigrationEngine:
             reports.append(r)
             if not r.ok:
                 return reports
-        if self._data_home is not None:
-            # copy-never-move (module docstring): everything under v2/ is a
-            # copy of V1 data, never its only home — once every step's own
-            # rollback reports ok, the whole V2 root is safe to remove
-            # outright rather than trust each step's own bookkeeping to have
-            # deleted every file/empty dir it ever created (#350: leftover
-            # v2/ content otherwise kept `doctor --storage-layout` stuck on
-            # "mixed" forever, permanently failing the plan's own pre-flight
-            # check on any machine that ever ran `apply`).
-            shutil.rmtree(storage_layout_v2(self._data_home).root, ignore_errors=True)
+        if self._data_home is None:
+            # Every per-step rollback above already reported ok — but a
+            # rollback that leaves the whole v2/ root in place is incomplete,
+            # not merely partial (#350 qa follow-up: this used to be a quiet
+            # `if self._data_home is not None:` skip, which meant a future
+            # edit could delete that guard with nothing to catch it — see
+            # test_engine_rollback_without_data_home_raises_instead_of_silently_skipping).
+            # Refuse outright instead of guessing at a fallback target.
+            raise RuntimeError(
+                "MigrationEngine.rollback() needs data_home to remove the V2 "
+                "root; every per-step rollback above succeeded but leaving "
+                "v2/ in place would make this an incomplete rollback. Pass "
+                "data_home=... to the constructor (real callers always do — "
+                "cli.py and settings_core_v2.py both use the default "
+                "MigrationEngine() which resolves it from config.DATA_HOME)."
+            )
+        # copy-never-move (module docstring): everything under v2/ is a
+        # copy of V1 data, never its only home — once every step's own
+        # rollback reports ok, the whole V2 root is safe to remove
+        # outright rather than trust each step's own bookkeeping to have
+        # deleted every file/empty dir it ever created (#350: leftover
+        # v2/ content otherwise kept `doctor --storage-layout` stuck on
+        # "mixed" forever, permanently failing the plan's own pre-flight
+        # check on any machine that ever ran `apply`).
+        shutil.rmtree(storage_layout_v2(self._data_home).root, ignore_errors=True)
         return reports

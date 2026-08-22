@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_takkub.core.migration.backup import BackupManager
 from agent_takkub.core.migration.engine import MigrationEngine
 from agent_takkub.core.migration.journal import MigrationJournal
@@ -248,23 +250,47 @@ def test_engine_inspect_plan_dry_run_always_run_every_step():
     assert len(engine.dry_run()) == 2
 
 
-def test_engine_rollback_runs_in_reverse_order():
+def test_engine_rollback_runs_in_reverse_order(tmp_path):
     a = _FakeStep("a", ok=True)
     b = _FakeStep("b", ok=True)
-    engine = MigrationEngine([a, b])
+    engine = MigrationEngine([a, b], data_home=tmp_path)
     engine.rollback()
     assert a.calls == ["rollback"]
     assert b.calls == ["rollback"]
 
 
-def test_engine_rollback_stops_on_first_failure_in_reverse_order():
+def test_engine_rollback_stops_on_first_failure_in_reverse_order(tmp_path):
     a = _FakeStep("a", ok=True)
     b = _FakeStep("b", ok=False)
-    engine = MigrationEngine([a, b])
+    engine = MigrationEngine([a, b], data_home=tmp_path)
     reports = engine.rollback()
     assert len(reports) == 1
     assert reports[0].step_id == "b"
     assert a.calls == []  # never reached, b failed first in reverse order
+
+
+def test_engine_rollback_without_data_home_raises_instead_of_silently_skipping(monkeypatch):
+    """#350 qa follow-up: `MigrationEngine([...])` with no data_home used to
+    make rollback() silently skip deleting the V2 root via a bare
+    `if self._data_home is not None:` guard — nothing asserted that
+    shutil.rmtree was never called, so a future edit could delete that guard
+    with no test catching it (and storage_layout_v2(None) would then fall
+    back to the real config.DATA_HOME, per the module docstring's warning).
+    rollback() must now refuse outright, and this proves shutil.rmtree is
+    never even reached to do so."""
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "agent_takkub.core.migration.engine.shutil.rmtree",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    a = _FakeStep("a", ok=True)
+    b = _FakeStep("b", ok=True)
+    engine = MigrationEngine([a, b])  # no data_home
+
+    with pytest.raises(RuntimeError, match="data_home"):
+        engine.rollback()
+
+    assert calls == []
 
 
 def test_engine_apply_downgrades_step_ok_when_a_later_step_corrupts_its_target():
