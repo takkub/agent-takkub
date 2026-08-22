@@ -1474,9 +1474,10 @@
       "module": "agent_takkub.core.providers.claude_plan",
       "imports": [],
       "imported_by": [
-        "agent_takkub.core.providers"
+        "agent_takkub.core.providers",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -1516,9 +1517,10 @@
       "imported_by": [
         "agent_takkub.core.providers",
         "agent_takkub.core.providers.claude_adapter",
-        "agent_takkub.core.providers.cli_adapter"
+        "agent_takkub.core.providers.cli_adapter",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -3852,6 +3854,8 @@
         "agent_takkub.core.accounts",
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.providers",
+        "agent_takkub.core.providers.claude_plan",
+        "agent_takkub.core.providers.plan",
         "agent_takkub.core.routing",
         "agent_takkub.core.routing.flag",
         "agent_takkub.gemini_helper",
@@ -3885,7 +3889,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 36
+      "fan_out": 38
     },
     {
       "module": "agent_takkub.spawn_gate",
