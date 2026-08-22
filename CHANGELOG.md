@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`migrate apply` step `runtime-triage` ทับผลของ step `state` แล้วรายงาน `ok` ทั้งคู่ + `rollback` ไม่คืน storage layout เป็น `v1`** (#350) —
+  step 5 (`state`) เขียน `autoresume.json`/`remote.json` ตรงเข้า `v2/state/sessions/`; step 8
+  (`runtime-triage`) copy `RUNTIME_DIR/sessions` **ทั้งโฟลเดอร์** เข้า V2 target เดียวกันด้วย
+  `rmtree` แล้ว `copytree` ทับ — ลบไฟล์ของ step 5 ทิ้งเงียบๆ ทั้งที่ทั้งสอง step รายงาน `ok: true`
+  (เจอเฉพาะตอนรัน `validate` แยกต่างหากทันทีหลัง apply) แก้โดยเปลี่ยนเป็น
+  `copytree(..., dirs_exist_ok=True)` (merge เข้า target แทนการทับทั้งโฟลเดอร์) และเพิ่ม
+  `MigrationEngine.apply()` ให้ re-validate ทุก step หลัง ladder รันจบ ดาวน์เกรด report เป็น
+  `ok: False` ทันทีถ้า on-disk state จริงไม่ตรงกับที่ step อ้าง (กัน silent-success ธีมเดียวกับ
+  #340/#341/#346) — อีกด้าน `migrate rollback` เดิม restore ทีละไฟล์แต่ไม่เคยลบ `v2/` root
+  ทั้งก้อน ทำให้ `doctor --storage-layout` ค้าง `mixed` ตลอดไปหลัง apply ครั้งแรก (ชน pre-flight
+  ของแผนเองที่ห้าม `apply` ทับสภาพ `mixed`) แก้โดยให้ `rollback()` ลบ `v2/` root ทิ้งทั้งก้อนเมื่อ
+  ทุก step คืนสำเร็จครบ (ปลอดภัยตามดีไซน์ copy-never-move — V2 ไม่เคยเป็นที่เก็บข้อมูลตัวจริง)
+
 ## [v1.0.85] - 2026-08-22
 
 ### Fixed (แก้)

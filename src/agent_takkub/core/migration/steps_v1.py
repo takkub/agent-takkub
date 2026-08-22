@@ -744,10 +744,14 @@ class RuntimeTriageStep:
                 src = self.runtime_dir / name
                 dest = self._target(name)
                 self.backups.backup(f"{self.step_id}__{name}", dest)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(src, dest)
+                # MERGE into dest, never replace it wholesale (#350): "sessions"
+                # is the same V2 target the earlier `state` step (autoresume.json
+                # / remote.json) already wrote into — an rmtree+copytree here
+                # silently destroyed that step's files while both steps still
+                # reported ok:true. dirs_exist_ok=True copies src's tree into
+                # dest without touching any dest entry src doesn't also name.
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dest, dirs_exist_ok=True)
                 copied.append(name)
         except OSError as e:
             self.journal.record(self.step_id, "apply", False, str(e))

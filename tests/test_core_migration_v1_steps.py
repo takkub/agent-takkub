@@ -404,3 +404,44 @@ def test_runtime_triage_apply_then_rollback_removes_copied_dir(v1_homes, journal
     assert not target.exists()
     # V1 source untouched throughout.
     assert (runtime_dir / "role-memory" / "demo" / "backend.md").exists()
+
+
+def test_runtime_triage_apply_merges_sessions_without_deleting_state_step_files(
+    v1_homes, journal_backups, tmp_path
+):
+    """#350: `state` (step 5) writes autoresume.json/remote.json directly
+    into `state/sessions/`; `runtime-triage` (step 8) copies
+    RUNTIME_DIR/sessions into that SAME V2 directory. A wholesale
+    rmtree+copytree there silently destroyed step 5's already-applied files
+    while both steps still reported ok:true — only an immediate `validate`
+    caught the loss. Reproduces the collision directly, without going
+    through the CLI."""
+    data_home, settings_home = v1_homes
+    journal, backups = journal_backups
+    (settings_home / "autoresume.json").write_text(json.dumps({"on": True}), encoding="utf-8")
+    (settings_home / "takkub-remote-sessions.json").write_text(
+        json.dumps({"remote": True}), encoding="utf-8"
+    )
+    state_step = build_state_step(
+        journal, backups, data_home=data_home, settings_home=settings_home
+    )
+    assert state_step.apply().ok
+
+    runtime_dir = tmp_path / "runtime"
+    (runtime_dir / "sessions" / "2026-08-22" / "demo").mkdir(parents=True)
+    (runtime_dir / "sessions" / "2026-08-22" / "demo" / "backend-090000.md").write_text(
+        "note", encoding="utf-8"
+    )
+    triage_step = RuntimeTriageStep(
+        journal=journal, backups=backups, data_home=data_home, runtime_dir=runtime_dir
+    )
+    assert triage_step.apply().ok
+
+    layout = storage_layout_v2(data_home)
+    assert read_json(layout.state_sessions / "autoresume.json")["data"] == {"on": True}
+    assert read_json(layout.state_sessions / "remote.json")["data"] == {"remote": True}
+    assert (layout.state_sessions / "2026-08-22" / "demo" / "backend-090000.md").exists()
+
+    # The `state` step's own view of the world is still consistent — a
+    # `validate` run immediately after apply must not find any mismatch.
+    assert state_step.validate().ok

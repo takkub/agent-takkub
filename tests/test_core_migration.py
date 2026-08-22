@@ -4,6 +4,8 @@ stop-the-line semantics (#309 Phase 4)."""
 
 from __future__ import annotations
 
+import json
+
 from agent_takkub.core.migration.backup import BackupManager
 from agent_takkub.core.migration.engine import MigrationEngine
 from agent_takkub.core.migration.journal import MigrationJournal
@@ -263,3 +265,119 @@ def test_engine_rollback_stops_on_first_failure_in_reverse_order():
     assert len(reports) == 1
     assert reports[0].step_id == "b"
     assert a.calls == []  # never reached, b failed first in reverse order
+
+
+def test_engine_apply_downgrades_step_ok_when_a_later_step_corrupts_its_target():
+    """#350: each step's apply() only ever checks its own write — a LATER
+    step overwriting an EARLIER step's already-applied target still lets
+    both report ok:true individually. `apply()` must catch that itself by
+    re-validating the whole ladder once every step has run, not rely on a
+    separate `validate` call to be the first to notice."""
+
+    class _CorruptingStep(_FakeStep):
+        """apply() reports ok:true (its own write succeeded), but its
+        target is already gone by the time anyone checks validate() —
+        standing in for a later step in the ladder having clobbered it in
+        between, exactly like `runtime-triage` did to `state`'s targets."""
+
+        def validate(self) -> StepReport:
+            self.calls.append("validate")
+            return StepReport(self.step_id, "validate", False, "clobbered by later step")
+
+    a = _CorruptingStep("a", ok=True)
+    b = _FakeStep("b", ok=True)
+    engine = MigrationEngine([a, b])
+    reports = engine.apply()
+    assert len(reports) == 2
+    assert reports[0].ok is False
+    assert "clobbered by later step" in reports[0].summary
+    assert reports[1].ok is True
+
+
+def test_full_ladder_apply_validate_rollback_no_cross_step_data_loss(tmp_path, monkeypatch):
+    """#350 regression: run the whole V1->V2 ladder end to end on a fixture.
+    Proves (a) apply()+validate() both stay ok:true for every step, (b) the
+    `state` step's own targets (autoresume/remote-sessions) survive the
+    later `runtime-triage` step untouched, (c) `dry_run()` right after apply
+    shows 0 targets would change, and (d) a full rollback actually returns
+    `doctor --storage-layout` to "v1" instead of getting stuck on "mixed"."""
+    from agent_takkub.core.migration.steps_v1 import (
+        CredentialReferenceStep,
+        ProjectMigrationStep,
+        RoleAgentMigrationStep,
+        RuntimeTriageStep,
+        build_capability_step,
+        build_readonly_registries_step,
+        build_state_step,
+    )
+    from agent_takkub.core.storage.layout import layout_state, storage_layout_v2
+    from agent_takkub.core.storage.legacy_reader import read_json
+
+    data_home = tmp_path / "data_home"
+    settings_home = tmp_path / "settings_home"
+    runtime_dir = tmp_path / "runtime"
+    custom_agents_dir = tmp_path / "custom-agents"
+    for d in (data_home, settings_home, runtime_dir, custom_agents_dir):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(
+        "agent_takkub.core.migration.steps.version_doc_path", lambda: tmp_path / "version.json"
+    )
+
+    (settings_home / "autoresume.json").write_text(json.dumps({"on": True}), encoding="utf-8")
+    (settings_home / "takkub-remote-sessions.json").write_text(
+        json.dumps({"remote": True}), encoding="utf-8"
+    )
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": None, "projects": {}}), encoding="utf-8"
+    )
+    (runtime_dir / "sessions" / "2026-08-22" / "demo").mkdir(parents=True)
+    (runtime_dir / "sessions" / "2026-08-22" / "demo" / "backend.md").write_text(
+        "note", encoding="utf-8"
+    )
+
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(tmp_path / "backups")
+    steps = [
+        VersionMarkerStep(journal=journal, backups=backups),
+        build_readonly_registries_step(
+            journal, backups, data_home=data_home, settings_home=settings_home
+        ),
+        RoleAgentMigrationStep(
+            journal=journal,
+            backups=backups,
+            data_home=data_home,
+            settings_home=settings_home,
+            custom_agents_dir=custom_agents_dir,
+        ),
+        build_capability_step(journal, backups, data_home=data_home, settings_home=settings_home),
+        ProjectMigrationStep(journal=journal, backups=backups, data_home=data_home),
+        build_state_step(journal, backups, data_home=data_home, settings_home=settings_home),
+        CredentialReferenceStep(
+            journal=journal, backups=backups, data_home=data_home, refs_override={}
+        ),
+        RuntimeTriageStep(
+            journal=journal, backups=backups, data_home=data_home, runtime_dir=runtime_dir
+        ),
+    ]
+    engine = MigrationEngine(steps, data_home=data_home)
+
+    apply_reports = engine.apply()
+    assert all(r.ok for r in apply_reports), [(r.step_id, r.summary) for r in apply_reports]
+
+    validate_reports = engine.validate()
+    assert all(r.ok for r in validate_reports), [(r.step_id, r.summary) for r in validate_reports]
+
+    dry_reports = engine.dry_run()
+    state_dry = next(r for r in dry_reports if r.step_id == "state")
+    assert state_dry.detail["would_change"] == []
+
+    layout = storage_layout_v2(data_home)
+    assert read_json(layout.state_sessions / "autoresume.json")["data"] == {"on": True}
+    assert read_json(layout.state_sessions / "remote.json")["data"] == {"remote": True}
+    assert (layout.state_sessions / "2026-08-22" / "demo" / "backend.md").exists()
+
+    assert layout_state(data_home) == "mixed"
+
+    rollback_reports = engine.rollback()
+    assert all(r.ok for r in rollback_reports), [(r.step_id, r.summary) for r in rollback_reports]
+    assert layout_state(data_home) == "v1"
