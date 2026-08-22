@@ -151,3 +151,30 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
         assert env["npm_config_yes"] == "true"
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["MCP_TOOL_TIMEOUT"] == "180000"
+
+    def test_353_shell_pane_gets_isolated_codex_and_opencode_homes(self, qapp, monkeypatch):
+        """#353: a shell pane is still inside the cockpit grid, so a user
+        who hand-runs `codex`/`opencode` at this raw prompt must land on the
+        SAME isolated home the teammate pane of that provider uses — before
+        this fix the shell branch never called `inject_provider_home_env`,
+        so it silently fell through to each provider's OS-wide default home
+        while the codex/opencode teammate panes used the isolated one,
+        making an edit against one config invisible to the other."""
+        import shutil as _shutil_mod
+
+        from agent_takkub import config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", config_mod.DATA_HOME / "installed-test-home")
+        env = _spawn_and_capture_env(
+            qapp,
+            monkeypatch,
+            "shell",
+            patch.object(_shutil_mod, "which", return_value="C:/Windows/System32/pwsh.exe"),
+        )
+        assert env["CODEX_HOME"] == str(config_mod.provider_home_env("codex")["CODEX_HOME"])
+        assert env["XDG_DATA_HOME"] == str(
+            config_mod.provider_home_env("opencode")["XDG_DATA_HOME"]
+        )
+        assert env["XDG_CONFIG_HOME"] == str(
+            config_mod.provider_home_env("opencode")["XDG_CONFIG_HOME"]
+        )

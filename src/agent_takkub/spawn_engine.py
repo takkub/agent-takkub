@@ -1871,6 +1871,22 @@ class SpawnEngineMixin:
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             inject_user_profile_env(env, project_ns)
+            # #353: a shell pane is still inside the cockpit grid — a user
+            # who types `codex`/`opencode` at this raw prompt expects the
+            # SAME isolated home the teammate pane of that provider uses
+            # (`config.provider_home_env`'s "everything on a prod cockpit
+            # stays in DATA_HOME" directive, same as `inject_user_profile_env`
+            # above already does for claude's CLAUDE_CONFIG_DIR). Without
+            # this the shell pane silently fell through to each provider's
+            # OS-wide default home, so a hand-run `codex` here read/wrote a
+            # DIFFERENT config.toml than the one the user's isolated codex
+            # teammate pane used — edits made against one never took effect
+            # against the other. Loop mirrors `doctor.check_provider_isolation`'s
+            # `("codex", "opencode")` — the only two providers with a known
+            # isolation knob; gemini/kimi/cursor have none (PROVIDER_ISOLATION_GAPS)
+            # so injecting for them would be a no-op anyway.
+            for _isolated_provider in ("codex", "opencode"):
+                inject_provider_home_env(env, _isolated_provider)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)

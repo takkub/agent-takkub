@@ -106,11 +106,12 @@ class TestCodexMcpResolutionFailure:
 
     def test_verified_safe_codex_version_spawns_despite_resolve_failure(self, qapp, monkeypatch):
         """H1 (docs/reviews/2026-08-05-graft-mcp-security.md): a codex-cli
-        at/above `_CODEX_RESOLVE_SAFE_MIN_VERSION` never even calls the
+        within the closed `_CODEX_RESOLVE_SAFE_MIN_VERSION`..
+        `_CODEX_RESOLVE_SAFE_MAX_VERSION` window never even calls the
         resolve subprocess (`-c mcp_servers={}` alone is deny-by-default,
         verified against real 0.144.1/0.145.0/0.146.0 binaries) — so a
-        resolve failure that would hard-abort on an old/unknown codex
-        build must NOT block the spawn here."""
+        resolve failure that would hard-abort on an old/unknown/too-new
+        codex build (#352) must NOT block the spawn here."""
         from agent_takkub import mcp_bridge
         from agent_takkub.provider_config import CODEX
 

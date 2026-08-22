@@ -114,16 +114,74 @@ class TestCodexMcpArgv:
         pairs = list(zip(argv[0::2], argv[1::2], strict=True))
         # A non-empty explicit allowlist is still deny-by-default (the
         # regression this task closed): the disable-all-inherited prefix
-        # comes first, then the role's own additive overrides.
+        # comes first, then the role's own additive overrides. No explicit
+        # startup_timeout_sec in the config, so the #351 default is synthesized;
+        # no tool_timeout_sec anywhere in cfg, so it's omitted (no invented default).
         assert pairs == [
             ("-c", "mcp_servers={}"),
             ("-c", "features.plugins=false"),
             ("-c", 'mcp_servers.demo.command="node"'),
             ("-c", 'mcp_servers.demo.args=["-e","1"]'),
             ("-c", 'mcp_servers.demo.env={FOO="1"}'),
+            ("-c", "mcp_servers.demo.startup_timeout_sec=120"),
         ]
         # "type" has no codex equivalent — never forwarded.
         assert not any("type" in tok for tok in argv)
+
+    def test_351_startup_timeout_sec_defaulted_when_config_omits_it(self, isolated_mcp_file):
+        """#351: every cockpit-injected server config lacks startup_timeout_sec
+        entirely, so before this fix codex fell through to its own short
+        built-in default for all of them — the actual root cause of the
+        `delivery_boot_timeout_failed` boot stalls. The bridge must now
+        synthesize a default rather than silently omitting the key."""
+        from agent_takkub import pane_tools_policy as ptp
+        from agent_takkub import shared_dev_tools as sdt
+
+        _write_master(isolated_mcp_file, {"demo": {"command": "node", "args": []}})
+        ptp.set_role_items("codex", "mcps", ["demo"])
+        sdt.regen_role_variants()
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert (
+            f"mcp_servers.demo.startup_timeout_sec={mcp_bridge._CODEX_DEFAULT_STARTUP_TIMEOUT_SEC}"
+            in argv
+        )
+
+    def test_351_explicit_timeout_keys_pass_through_unchanged(self, isolated_mcp_file):
+        """An explicit startup_timeout_sec/tool_timeout_sec in the server's
+        own config must win over the synthesized default, not be clobbered."""
+        from agent_takkub import pane_tools_policy as ptp
+        from agent_takkub import shared_dev_tools as sdt
+
+        _write_master(
+            isolated_mcp_file,
+            {
+                "demo": {
+                    "command": "node",
+                    "args": [],
+                    "startup_timeout_sec": 30,
+                    "tool_timeout_sec": 45,
+                }
+            },
+        )
+        ptp.set_role_items("codex", "mcps", ["demo"])
+        sdt.regen_role_variants()
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert "mcp_servers.demo.startup_timeout_sec=30" in argv
+        assert "mcp_servers.demo.tool_timeout_sec=45" in argv
+        assert not any("startup_timeout_sec=120" in tok for tok in argv)
+
+    def test_351_tool_timeout_sec_omitted_without_invented_default(self, isolated_mcp_file):
+        """Only startup_timeout_sec gets a synthesized default (the measured
+        #351 failure mode); tool_timeout_sec must stay absent from argv when
+        the config doesn't set it, not silently gain a made-up value."""
+        from agent_takkub import pane_tools_policy as ptp
+        from agent_takkub import shared_dev_tools as sdt
+
+        _write_master(isolated_mcp_file, {"demo": {"command": "node", "args": []}})
+        ptp.set_role_items("codex", "mcps", ["demo"])
+        sdt.regen_role_variants()
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert not any("tool_timeout_sec" in tok for tok in argv)
 
     def test_role_with_empty_policy_disables_all_codex_mcp_sources(self, isolated_mcp_file):
         from agent_takkub import pane_tools_policy as ptp
@@ -298,13 +356,16 @@ class TestCodexMcpArgvUsesCachedVersion:
 
 
 class TestCodexResolveVersionGate:
-    """A codex-cli at/above `_CODEX_RESOLVE_SAFE_MIN_VERSION` skips the
-    resolve-and-disable defense-in-depth entirely (empirically verified
-    2026-08-05 against real codex-cli 0.144.1/0.145.0/0.146.0 binaries —
-    `-c mcp_servers={}` alone fully denies on all three, see the module
-    docstring). Below that floor, or when the version can't be determined,
-    the original conservative resolve-and-hard-abort behaviour applies
-    unchanged — that's what `isolated_mcp_file` exercises by default."""
+    """A codex-cli strictly WITHIN the closed
+    `_CODEX_RESOLVE_SAFE_MIN_VERSION`..`_CODEX_RESOLVE_SAFE_MAX_VERSION`
+    window skips the resolve-and-disable defense-in-depth entirely
+    (empirically verified 2026-08-05 against real codex-cli
+    0.144.1/0.145.0/0.146.0 binaries — `-c mcp_servers={}` alone fully
+    denies on all three, see the module docstring). Below the floor, above
+    the ceiling (#352 — a version never verified, e.g. 0.149.0, does NOT
+    reliably deny), or when the version can't be determined, the original
+    conservative resolve-and-hard-abort behaviour applies unchanged —
+    that's what `isolated_mcp_file` exercises by default."""
 
     def test_recent_version_skips_resolve_subprocess_entirely(self, isolated_mcp_file, monkeypatch):
         monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 146, 0))
@@ -367,6 +428,46 @@ class TestCodexResolveVersionGate:
         monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *a: ["inherited_mcp"])
         argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
         assert "mcp_servers.inherited_mcp.enabled=false" in argv
+
+    def test_exact_ceiling_version_still_skips_resolve(self, isolated_mcp_file, monkeypatch):
+        monkeypatch.setattr(
+            mcp_bridge, "_codex_cli_version", lambda *a: mcp_bridge._CODEX_RESOLVE_SAFE_MAX_VERSION
+        )
+        calls = []
+        monkeypatch.setattr(
+            mcp_bridge, "_codex_resolved_mcp_names", lambda *a: calls.append(a) or []
+        )
+        mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert calls == []
+
+    def test_352_version_above_verified_ceiling_uses_resolve_path(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        """#352 regression: an open-ended floor let ANY version at/above
+        0.144.1 skip the resolve-and-disable safety net forever, including
+        codex-cli 0.149.0 — untested at the time, and later confirmed (2026-08-22,
+        via a live `codex exec` session's own `codex.conversation_starts`
+        telemetry, not just `mcp list --json`) to actually leak an
+        out-of-allowlist inherited server into the live MCP manager despite
+        the disable-all prefix. A version above the verified ceiling must
+        fall back to the conservative resolve-and-disable path, not be
+        silently treated as safe."""
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 149, 0))
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *a: ["inherited_mcp"])
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert "mcp_servers.inherited_mcp.enabled=false" in argv
+
+    def test_352_version_above_verified_ceiling_still_hard_aborts_on_resolve_failure(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 149, 0))
+
+        def _boom(*args):
+            raise mcp_bridge.McpResolutionError("codex CLI timed out")
+
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", _boom)
+        with pytest.raises(mcp_bridge.McpResolutionError):
+            mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
 
 
 class TestClaudeMcpArgv:
