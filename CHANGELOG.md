@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.85] - 2026-08-22
+
 ### Fixed (แก้)
 
 - **`takkub release` ไม่ build wheel ใหม่ → npm publish แนบ wheel เวอร์ชันเก่าไปเงียบๆ** (#340) —
