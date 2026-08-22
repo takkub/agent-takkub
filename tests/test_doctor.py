@@ -904,6 +904,13 @@ class TestCheckInstalledIntegrity:
         script_name = "takkub.exe" if sys.platform == "win32" else "takkub"
         (cli_bin_dir / script_name).write_text("", encoding="utf-8")
 
+        py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+        py_bytes = b"MZ" if sys.platform == "win32" else b"\x00"
+        (cli_bin_dir / py_name).write_bytes(py_bytes.ljust(41 * 1024, b"\x00"))
+        monkeypatch.setattr(
+            "agent_takkub.doctor._run", lambda argv: (0, "Python 3.11.8"), raising=False
+        )
+
         monkeypatch.setattr(config_mod, "DATA_HOME", data_home)
         monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
         monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
@@ -928,6 +935,7 @@ class TestCheckInstalledIntegrity:
             "assets-role-files",
             "assets-skill-files",
             "cli-bin",
+            "venv-python",
             "runtime-writable",
         }
 
@@ -985,6 +993,83 @@ class TestCheckInstalledIntegrity:
 
         f = next(x for x in findings if x.name == "cli-bin")
         assert f.status == Status.FAIL
+
+    # -- #341: the venv's own python.exe/python must be validated, not just
+    # -- assumed healthy because it exists. --------------------------------
+
+    def test_venv_python_ok_when_present_and_runs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.OK
+
+    def test_venv_python_fails_when_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+        (config_mod.CLI_BIN_DIR / py_name).unlink()
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.FAIL
+        assert "missing" in f.detail
+
+    def test_venv_python_fails_when_clobbered_with_a_tiny_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Reproduces #341: a live python.exe overwritten with a 29-byte
+        text file — must be caught, not treated as a healthy interpreter."""
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+        (config_mod.CLI_BIN_DIR / py_name).write_text(
+            "graphify-out/.graphify_python", encoding="ascii"
+        )
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.FAIL
+        assert "byte" in f.detail
+        assert "npm install -g agent-takkub --force" in f.fix_hint
+
+    def test_venv_python_fails_when_wrong_magic_bytes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        if sys.platform != "win32":
+            pytest.skip("PE magic-byte check is Windows-only")
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        # Right size, but doesn't start with the PE 'MZ' header.
+        (config_mod.CLI_BIN_DIR / "python.exe").write_bytes(b"\x00" * (41 * 1024))
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.FAIL
+
+    def test_venv_python_warns_when_static_check_passes_but_version_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "agent_takkub.doctor._run", lambda argv: (1, "not a real interpreter"), raising=False
+        )
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.WARN
 
     def test_fails_when_runtime_dir_not_writable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

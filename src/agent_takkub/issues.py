@@ -952,4 +952,9 @@ def cmd_issue_show(args: Any) -> dict:
         return {"ok": False, "msg": str(exc)}
 
     _safe_print(content, end="")
-    return {"ok": True, "msg": ""}
+    # #341 write-confirmation check (cli.py) treats an empty `msg` on a
+    # write-bucketed command as an unconfirmed silent success — "issue" is in
+    # that bucket for `issue new`/`issue close`, and "show" shares the bucket
+    # since the check keys on the top-level command name. `quiet` tells it the
+    # confirmation is genuinely elsewhere: the content just printed above.
+    return {"ok": True, "msg": "", "quiet": True}

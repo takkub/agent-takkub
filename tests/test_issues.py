@@ -448,6 +448,12 @@ def test_cmd_show_success(capsys) -> None:
     assert resp["ok"] is True
     captured = capsys.readouterr()
     assert "Issue content here" in captured.out
+    # #341's write-confirmation check (cli.py) forces ok=False on a write-
+    # bucketed command ("issue" covers show/list/new/close) whose response has
+    # no `msg` and no `quiet` — show's confirmation is the printed content
+    # above, not `msg`, so it must set `quiet` or every `issue show` reports
+    # false failure despite succeeding.
+    assert resp.get("quiet") is True
 
 
 def test_cmd_show_invalid_id_returns_error() -> None:

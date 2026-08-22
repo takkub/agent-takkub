@@ -24,4 +24,17 @@ else
   exit 1
 fi
 
+# #341: a python that EXISTS but was overwritten/truncated by something
+# outside agent-takkub must never be launched — every command built on top
+# of it then fails silently (empty output, no diagnostic). A real
+# interpreter (copy or symlink target) is comfortably >90KB; catch anything
+# wildly smaller before ever spawning it.
+PYSIZE=$(wc -c <"$PY" 2>/dev/null || echo 0)
+if [ "${PYSIZE:-0}" -lt 40960 ]; then
+  echo "[takkub] $PY looks broken (only ${PYSIZE:-0} byte(s) — a real interpreter is much larger)." >&2
+  echo "Something outside agent-takkub overwrote this file. Recreate the venv:" >&2
+  echo "  rm -rf \"$REPO/.venv\" && scripts/run.bat" >&2
+  exit 1
+fi
+
 exec "$PY" -m agent_takkub.cli "$@"

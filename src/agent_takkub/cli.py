@@ -90,6 +90,30 @@ _WAIT_HEARTBEAT_INTERVAL_S = 30.0
 # scheduling its own close via the done→QTimer→close chain.
 TEAMMATE_ONLY_COMMANDS = frozenset({"done", "progress"})
 
+# #341: write-path commands whose whole point is a side effect elsewhere
+# (deliver a message, record a report, log an issue). An `ok: True` response
+# with no confirmation message from these is indistinguishable, to whoever
+# reads the CLI output, from "nothing happened" — the caller sees exit 0 and
+# assumes success while the daemon never actually confirmed anything. Kept
+# separate from LEAD_ONLY/TEAMMATE_ONLY (an authorization concern) — this is
+# purely about never letting a write path read as a silent success.
+_WRITE_COMMANDS_REQUIRE_CONFIRMATION = frozenset(
+    {
+        "send",
+        "done",
+        "progress",
+        "issue",
+        "assign",
+        "goal",
+        "close",
+        "close-all",
+        "restart",
+        "subagent-done",
+        "harvest",
+        "end-session",
+    }
+)
+
 
 def _connect() -> socket.socket:
     port = read_port()
@@ -3303,6 +3327,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ok = bool(resp.get("ok"))
+    # #341: never let a write-path command exit 0 on an unconfirmed response
+    # (ok=True but no message from the daemon) — that reads as success to
+    # whoever's watching exit codes/output even though nothing was confirmed.
+    if (
+        ok
+        and not resp.get("msg")
+        and not resp.get("quiet")
+        and args.command in _WRITE_COMMANDS_REQUIRE_CONFIRMATION
+    ):
+        ok = False
+        resp = {
+            **resp,
+            "msg": (
+                "no confirmation message from the orchestrator — treating this as "
+                "failed rather than silently exiting 0 (this should never happen; "
+                "please report it)"
+            ),
+        }
     if args.command in {"list", "status", "inbox"}:
         try:
             banner = _instance_banner()

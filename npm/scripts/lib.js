@@ -44,6 +44,58 @@ function findWheelForVersion(distDir, version) {
   return match ? path.join(distDir, match) : null;
 }
 
+// A venv python that EXISTS but was overwritten/truncated by something
+// outside agent-takkub (#341 — a stray tool once clobbered a live
+// ~/.agent-takkub/venv/Scripts/python.exe with a 29-byte text file) must
+// never be handed to spawnSync: every command built on top of it then fails
+// to even start, with EMPTY stdout/stderr and no diagnostic — the cockpit
+// "dies silently". This check is deliberately static (stat + a couple of
+// header bytes, no attempt to execute the file) so a broken interpreter is
+// never spawned at all — spawning it is exactly the risky step that can
+// leave the file locked/hard to overwrite during recovery.
+const MIN_PYTHON_EXE_BYTES = 40 * 1024; // a real venv python.exe/python is comfortably >90KB
+
+function pythonLooksExecutable(py) {
+  let stat;
+  try {
+    stat = fs.statSync(py);
+  } catch (_e) {
+    return false;
+  }
+  if (!stat.isFile() || stat.size < MIN_PYTHON_EXE_BYTES) return false;
+  if (process.platform === 'win32') {
+    // Windows PE executables always start with the 'MZ' DOS-header magic.
+    let fd;
+    try {
+      fd = fs.openSync(py, 'r');
+      const buf = Buffer.alloc(2);
+      fs.readSync(fd, buf, 0, 2, 0);
+      return buf[0] === 0x4d && buf[1] === 0x5a; // 'M', 'Z'
+    } catch (_e) {
+      return false;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+  return true;
+}
+
+function brokenInterpreterMessage(py, home) {
+  const venvDirPath = path.join(home, 'venv');
+  return (
+    `[agent-takkub] the cockpit interpreter looks broken (exists but is not a real executable):\n` +
+    `    ${py}\n` +
+    '    Something outside agent-takkub overwrote or truncated this file — the cockpit\n' +
+    '    did not do this to itself. Fix:\n' +
+    '      1) close every running cockpit/takkub window and process for this install\n' +
+    '      2) run: npm install -g agent-takkub --force   (reprovisions the venv in place)\n' +
+    `      3) if step 2 still can't overwrite it, delete this folder by hand:\n` +
+    `             ${venvDirPath}\n` +
+    '         then re-run npm install -g agent-takkub\n' +
+    '    `takkub doctor` (once the interpreter itself works again) also checks this.'
+  );
+}
+
 // Windowless python for GUI launchers (Windows: pythonw.exe = no console
 // window pops up behind the cockpit). macOS has no separate pythonw.
 function venvPythonw() {
@@ -60,4 +112,6 @@ module.exports = {
   venvPythonIfExists,
   venvPythonw,
   findWheelForVersion,
+  pythonLooksExecutable,
+  brokenInterpreterMessage,
 };
