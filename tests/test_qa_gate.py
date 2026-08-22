@@ -177,19 +177,47 @@ def test_targeted_mode_runs_pytest_only_and_writes_no_report(repo, monkeypatch):
 
 def test_full_gate_runs_pytest_under_xdist(repo, monkeypatch):
     _make_complete_venv(repo)
+    monkeypatch.delenv("TAKKUB_QA_XDIST_N", raising=False)
     recorder: list = []
     monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
 
     qa_gate.run_gate(cwd=repo, write_report=False)
 
     pytest_cmd = recorder[0][0]
-    assert "-n" in pytest_cmd and "auto" in pytest_cmd
-    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "auto"
+    # A fixed worker count, never "auto" — see _xdist_worker_count's
+    # docstring (#349: more workers than this box has headroom for risks a
+    # commit-charge fault, not just a slower run).
+    assert "-n" in pytest_cmd
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "8"
     # loadscope, not loadgroup: loadgroup only groups items explicitly marked
     # with @pytest.mark.xdist_group — everything else is freely distributed
     # with NO per-module/class grouping, which is unsafe for a suite that has
     # never been audited for cross-worker safety (see _pytest_cmd's docstring).
     assert "--dist" in pytest_cmd and "loadscope" in pytest_cmd
+
+
+def test_full_gate_xdist_worker_count_overridable_via_env(repo, monkeypatch):
+    _make_complete_venv(repo)
+    monkeypatch.setenv("TAKKUB_QA_XDIST_N", "3")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    qa_gate.run_gate(cwd=repo, write_report=False)
+
+    pytest_cmd = recorder[0][0]
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "3"
+
+
+def test_full_gate_xdist_worker_count_ignores_bad_env(repo, monkeypatch):
+    _make_complete_venv(repo)
+    monkeypatch.setenv("TAKKUB_QA_XDIST_N", "not-a-number")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+    qa_gate.run_gate(cwd=repo, write_report=False)
+
+    pytest_cmd = recorder[0][0]
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "8"
 
 
 def test_targeted_mode_never_uses_xdist(repo, monkeypatch):
