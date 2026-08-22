@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 273,
+  "module_count": 276,
   "modules": [
     {
       "module": "agent_takkub",
@@ -1028,8 +1028,10 @@
       "imports": [
         "agent_takkub.core.conversation.ingest.claude_adapter",
         "agent_takkub.core.conversation.ingest.codex_adapter",
+        "agent_takkub.core.conversation.ingest.cursor_adapter",
         "agent_takkub.core.conversation.ingest.cursor_store",
         "agent_takkub.core.conversation.ingest.gemini_adapter",
+        "agent_takkub.core.conversation.ingest.kimi_adapter",
         "agent_takkub.core.conversation.ingest.opencode_adapter",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.models.conversation"
@@ -1038,7 +1040,7 @@
         "agent_takkub.core.conversation.facade"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.core.conversation.ingest.base",
@@ -1048,10 +1050,12 @@
       "imported_by": [
         "agent_takkub.core.conversation.ingest.claude_adapter",
         "agent_takkub.core.conversation.ingest.codex_adapter",
+        "agent_takkub.core.conversation.ingest.cursor_adapter",
         "agent_takkub.core.conversation.ingest.gemini_adapter",
+        "agent_takkub.core.conversation.ingest.kimi_adapter",
         "agent_takkub.core.conversation.ingest.opencode_adapter"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 1
     },
     {
@@ -1082,6 +1086,19 @@
       "fan_out": 3
     },
     {
+      "module": "agent_takkub.core.conversation.ingest.cursor_adapter",
+      "imports": [
+        "agent_takkub.core.conversation.ingest.base",
+        "agent_takkub.core.models.conversation",
+        "agent_takkub.cursor_helper"
+      ],
+      "imported_by": [
+        "agent_takkub.core.conversation.ingest"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.core.conversation.ingest.cursor_store",
       "imports": [
         "agent_takkub.core.conversation._json_io",
@@ -1100,6 +1117,19 @@
         "agent_takkub.core.conversation.ingest.base",
         "agent_takkub.core.models.conversation",
         "agent_takkub.gemini_helper"
+      ],
+      "imported_by": [
+        "agent_takkub.core.conversation.ingest"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.conversation.ingest.kimi_adapter",
+      "imports": [
+        "agent_takkub.core.conversation.ingest.base",
+        "agent_takkub.core.models.conversation",
+        "agent_takkub.kimi_helper"
       ],
       "imported_by": [
         "agent_takkub.core.conversation.ingest"
@@ -1331,11 +1361,13 @@
         "agent_takkub.core.conversation.ingest.base",
         "agent_takkub.core.conversation.ingest.claude_adapter",
         "agent_takkub.core.conversation.ingest.codex_adapter",
+        "agent_takkub.core.conversation.ingest.cursor_adapter",
         "agent_takkub.core.conversation.ingest.gemini_adapter",
+        "agent_takkub.core.conversation.ingest.kimi_adapter",
         "agent_takkub.core.conversation.ingest.opencode_adapter",
         "agent_takkub.core.conversation.store"
       ],
-      "fan_in": 9,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -1880,9 +1912,10 @@
         "agent_takkub._win_console"
       ],
       "imported_by": [
+        "agent_takkub.core.conversation.ingest.cursor_adapter",
         "agent_takkub.remote.notify"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -2126,6 +2159,15 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.pty_session"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.kimi_helper",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.conversation.ingest.kimi_adapter"
       ],
       "fan_in": 1,
       "fan_out": 0
