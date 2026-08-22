@@ -173,7 +173,7 @@ Full suite: `PYTHONPATH=src takkub qa-gate` (not `--targeted`), per the plan's o
 deliverable rule and root `CLAUDE.md`'s test-tier rule (`PYTHONPATH=src` needed because the shared
 venv's editable install points at a different checkout — #202, see this branch's own backend
 learned-notes). Result: `docs/qa/2026-08-22-140229-qa-gate.md` — **GATE: FAIL**, `8498 passed, 8
-failed, 7 skipped in 893.76s`. **All 8 failures are pre-existing and unrelated to this task**,
+failed, 7 skipped in 893.76s`. **All 8 failures are an artifact of running the suite inside a worktree, not a defect in the code** (Lead correction, 2026-08-22 — see the note at the end of this section),
 confirmed by re-running the same 8 tests with this task's changes stashed out
 (`git stash push -u`, verified with `git stash list` by unique tag, restored via `git stash apply
 <sha>` per this session's shared-stash safety protocol — never a bare `stash pop`): identical 8
@@ -186,8 +186,21 @@ console script (environment/packaging gap, orthogonal to `core.providers`/`spawn
 here — out of scope for a pure-Python argv-assembly extraction, and the baseline-reproduction
 above is the proof it isn't this task's regression.
 
+> **Lead correction (2026-08-22):** the paragraph above originally called these 8 failures
+> "pre-existing", which measures right but names the cause wrong. They are **not** a latent bug
+> waiting to be fixed by "whoever owns that" — they are an artifact of running the suite from a
+> worktree. A worktree has to set `PYTHONPATH=src` to dodge the editable-install checkout
+> mismatch (#202), and that leaks into the throwaway subprocess venv these installed-mode tests
+> spawn, so the child resolves `src/` from the worktree instead of the package it just installed.
+> backend#2 hit the identical failures earlier the same day, and qa confirmed the cause by running
+> the same suite on the **main tree**, where there is no such override: `8501 passed, 7 skipped,
+> 0 failed`. So the correct read of this gate result is "clean, modulo the known worktree
+> override", and the `ruff`/`lint-imports` steps below were skipped for the same non-reason.
+> Calling it "pre-existing" would send the next reader hunting a packaging bug that does not
+> exist — the same wasted-hunt failure mode #346 caused today.
+
 - `ruff`/`lint-imports` **did not run this cycle** — the gate is fail-fast on any pytest failure,
-  and the 8 pre-existing failures above stopped it before reaching either step. Not run raw
+  and the 8 worktree-artifact failures above stopped it before reaching either step. Not run raw
   outside `takkub qa-gate` (project policy). By inspection: `claude_plan.py` imports only
   `collections.abc.Sequence`, no `core-is-bottom-layer` risk, same shape as `plan.py`, which
   already passes both checks — but this is an inspection claim, not a gate result, and should be
