@@ -195,6 +195,7 @@ class TestDisplayStateQuotaPriority:
 
     def test_not_quota_stalled_falls_through_normally(self) -> None:
         pane = MagicMock()
+        pane.session.account_pending_reason.return_value = None
         pane.session.auth_failure_reason.return_value = None
         pane.session.shows_boot_phase_marker.return_value = False
         pane.model.provider_name = "claude"
@@ -207,6 +208,7 @@ class TestDisplayStateQuotaPriority:
         # Existing 4-positional-arg call sites (pre-#301 tests) must be
         # unaffected by the new parameter's default.
         pane = MagicMock()
+        pane.session.account_pending_reason.return_value = None
         pane.session.auth_failure_reason.return_value = None
         pane.session.shows_boot_phase_marker.return_value = False
         pane.session.is_hard_blocked_for.return_value = False

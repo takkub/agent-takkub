@@ -5585,6 +5585,12 @@ class Orchestrator(
             account_reason = session.account_pending_reason(provider)
         except Exception:
             account_reason = None
+        # Same isinstance guard as the tool_marker check below: a loosely
+        # mocked test session's un-stubbed attribute call returns a truthy
+        # MagicMock, not None/str (#346 fix-loop — this exact trap bit
+        # test_quota_detection.py's TestDisplayStateQuotaPriority).
+        if not isinstance(account_reason, str) or not account_reason:
+            account_reason = None
         if account_reason:
             return "blocked:provider-account"
 
