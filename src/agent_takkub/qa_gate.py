@@ -22,8 +22,10 @@ made it the correct one.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +46,72 @@ V2_FLAG_ENV_VARS: tuple[str, ...] = (
 
 _WIN = os.name == "nt"
 
+# #349: full pytest died silently (exit 127, ~1 in 3-4 full runs) with no
+# traceback, no pytest summary, and no evidence of *why* — the leading
+# suspect (OOM) was unprovable because nothing sampled memory while it ran.
+# Sampling every 30s is effectively free next to a 600s+ full run and turns
+# "no evidence" into "here's what memory looked like right before it died".
+_MEMORY_SAMPLE_INTERVAL_S = 30.0
+
+# pytest's own documented exit codes (https://docs.pytest.org/en/stable/
+# reference/exit-codes.html) — anything outside this set (127, a negative
+# signal-kill code, a Windows fault code like 3221225477) is the #349
+# signature: the process died a way pytest itself never defined, which is
+# exactly when a normal "N passed/failed" summary line goes missing too.
+_PYTEST_DEFINED_EXIT_CODES = frozenset({0, 1, 2, 3, 4, 5})
+_PYTEST_SUMMARY_RE = re.compile(
+    r"=+\s+.*\b(?:passed|failed|error|no tests ran|deselected)\b.*\s+=+"
+)
+
+
+def _sample_memory_line() -> str:
+    """One diagnostic line: wall-clock, system available memory, and the
+    RSS of every child process this gate has spawned so far (pytest/ruff/
+    lint-imports run as a direct child, so this is that child's own memory
+    footprint at the moment of the sample).
+
+    psutil is already a hard dependency of this project (resource_governor.py,
+    performance_settings.py) and abstracts the Windows/macOS difference
+    itself — `virtual_memory()` and `Process.children()`/`memory_info()` are
+    the same call on both, so no `sys.platform` branch is needed here; that
+    parity is exactly why the rest of the codebase already relies on psutil
+    the same way cross-platform.
+
+    Must never raise into the sampler thread — a resource-exhaustion moment
+    is exactly when psutil itself is more likely to fail too (permission
+    denied, process already gone).
+    """
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        import psutil
+
+        vm = psutil.virtual_memory()
+        rss_bytes = 0
+        child_count = 0
+        for child in psutil.Process(os.getpid()).children(recursive=True):
+            try:
+                rss_bytes += child.memory_info().rss
+                child_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return (
+            f"{ts}  system_available={vm.available / 1024 / 1024:.0f}MB"
+            f"  system_total={vm.total / 1024 / 1024:.0f}MB"
+            f"  subprocess_rss={rss_bytes / 1024 / 1024:.0f}MB"
+            f"  ({child_count} child process{'es' if child_count != 1 else ''})"
+        )
+    except Exception as e:
+        return f"{ts}  memory sample failed: {type(e).__name__}: {e}"
+
+
+def _is_silent_pytest_abort(name: str, returncode: int, output: str) -> bool:
+    """True for pytest's #349 signature: an exit code pytest itself never
+    documents, with no terminal summary line printed — proof the process
+    died before reaching its own reporting, not a normal test failure."""
+    if name != "pytest" or returncode in _PYTEST_DEFINED_EXIT_CODES:
+        return False
+    return not _PYTEST_SUMMARY_RE.search(output)
+
 
 @dataclass
 class StepResult:
@@ -54,6 +122,7 @@ class StepResult:
     detail: str
     returncode: int | None = None
     log_path: Path | None = None
+    memory_log_path: Path | None = None
 
 
 @dataclass
@@ -158,9 +227,43 @@ def _venv_check(bin_dir: Path | None) -> StepResult:
 
 
 def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> list[str]:
+    """The full tier (`targeted` is None) runs under pytest-xdist — 16 idle
+    cores running 8564 tests serially at ~646s was pure waste. `-n auto`
+    picks a worker per core.
+
+    `--dist loadscope` (NOT `loadgroup` — that only groups items an explicit
+    `@pytest.mark.xdist_group` names, everything else is freely distributed
+    with no grouping at all): loadscope groups every test by its module (bare
+    functions) or class (methods) and always runs one group inside a single
+    worker, in original collection order. This suite was never audited for
+    cross-worker safety before this change, so the safer default that needs
+    no per-file opt-in wins — confirmed necessary, not just theoretical: a
+    bare `patch(...).start()` leak in test_spawn_gate.py (fixed alongside
+    this) used to survive for the rest of *whichever* process happened to run
+    it, silently relied on by a later test class expecting the same leaked
+    state — invisible in serial (fixed collection order always ran them in
+    the same process in the right sequence) and even under plain `load`/
+    un-grouped `loadgroup` (that class could land on a different worker
+    process entirely, which never sees the leak). `loadscope` keeps each
+    class in one worker the way serial always implicitly did; it would NOT
+    have caught this bug on its own before the source leak was fixed, since
+    even one worker still hits the real problem if two *different* scopes
+    (classes) depend on each other's leaked state — audit any future
+    xdist failure the same way: reproduce with `-n 1` (passes) vs a plain
+    single-test run in isolation (fails) to tell "genuine parallel hazard"
+    apart from "was already a hidden test-order dependency parallelism
+    merely exposed".
+
+    The targeted tier stays serial on purpose: it runs a handful of paths
+    mid-flight (team policy — full suite once at the batch gate, see this
+    module's docstring), where spinning up N worker processes costs more
+    than the run itself saves.
+    """
     exe = _resolve_tool(bin_dir, "pytest")
     base = [exe] if exe else [py, "-m", "pytest"]
-    return base + (list(targeted) if targeted else [])
+    if targeted:
+        return base + list(targeted)
+    return [*base, "-n", "auto", "--dist", "loadscope"]
 
 
 def _ruff_cmd(bin_dir: Path | None, py: str) -> list[str]:
@@ -176,6 +279,21 @@ def _lint_imports_cmd(bin_dir: Path | None) -> list[str]:
 
 def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | None) -> StepResult:
     t0 = time.monotonic()
+    # #349: sample memory in the background for the whole life of this step
+    # (30s cadence — cheap next to a 600s+ full pytest run) instead of only
+    # ever finding out after the fact that nothing was recorded. The sampler
+    # reads THIS process's child tree (see _sample_memory_line), so it needs
+    # no reference to the subprocess object below — works the same whether
+    # this step ends up completing normally, refusing, or dying silently.
+    memory_samples: list[str] = [_sample_memory_line()]
+    stop_sampling = threading.Event()
+
+    def _sample_loop() -> None:
+        while not stop_sampling.wait(_MEMORY_SAMPLE_INTERVAL_S):
+            memory_samples.append(_sample_memory_line())
+
+    sampler = threading.Thread(target=_sample_loop, name=f"qa-gate-mem-{name}", daemon=True)
+    sampler.start()
     try:
         proc = subprocess.run(
             cmd,
@@ -190,18 +308,35 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
     except OSError as e:
         # e.g. FileNotFoundError from a resolved-but-deleted-mid-run exe —
         # never let this masquerade as a generic Python traceback.
+        stop_sampling.set()
+        sampler.join(timeout=2)
         return StepResult(
             name, False, False, time.monotonic() - t0, f"refuse: {type(e).__name__}: {e}"
         )
+    stop_sampling.set()
+    sampler.join(timeout=2)
+    memory_samples.append(_sample_memory_line())
     elapsed = time.monotonic() - t0
     output = (proc.stdout or "") + (proc.stderr or "")
     log_path = None
+    memory_log_path = None
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{name}.log"
         log_path.write_text(output, encoding="utf-8")
+        memory_log_path = log_dir / f"{name}-memory.log"
+        memory_log_path.write_text("\n".join(memory_samples) + "\n", encoding="utf-8")
     tail_lines = [ln for ln in output.strip().splitlines() if ln.strip()][-6:]
     detail = " / ".join(tail_lines) if tail_lines else "(no output)"
+    # #349: an exit code pytest never documents, with no summary line, is an
+    # abort — not a test failure. Say so plainly instead of leaving the
+    # reader to guess from a bare non-zero returncode.
+    native_abort = _is_silent_pytest_abort(name, proc.returncode, output)
+    if native_abort:
+        detail = (
+            f"NATIVE ABORT, not a test failure — see #349 (exit {proc.returncode}, "
+            f"pytest never printed its own summary line): {detail}"
+        )
     if proc.returncode != 0:
         # A failed step must be diagnosable from THIS process's stdout alone —
         # on CI the on-runner log file is unreachable after the job dies
@@ -213,14 +348,29 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
         lines = output.splitlines()
         start = next((i for i, ln in enumerate(lines) if "= FAILURES =" in ln), None)
         excerpt = lines[start:] if start is not None else lines
-        print(f"\n----- {name} failure output (excerpt) -----")
+        header = f"\n----- {name} failure output (excerpt) -----"
+        if native_abort:
+            header += (
+                "\n*** NATIVE ABORT — no pytest summary printed, see #349."
+                " This is not a code/test regression to chase. ***"
+            )
+        print(header)
         for ln in excerpt[-200:]:
             print(ln)
         print(f"----- end {name} failure output -----\n")
     # proc.returncode is read straight off the completed subprocess — never
     # inferred from a shell pipe's own $? (the #234-adjacent footgun this
     # gate exists to structurally rule out).
-    return StepResult(name, proc.returncode == 0, False, elapsed, detail, proc.returncode, log_path)
+    return StepResult(
+        name,
+        proc.returncode == 0,
+        False,
+        elapsed,
+        detail,
+        proc.returncode,
+        log_path,
+        memory_log_path,
+    )
 
 
 def _skip(name: str, reason: str) -> StepResult:
@@ -370,6 +520,10 @@ def run_gate(
         write_report = targeted is None
 
     env = dict(os.environ)
+    # #349: zero-cost, and the exact difference between "died silently, no
+    # clue why" and "a C-level traceback pointing at a line" next time a
+    # native abort happens. setdefault so an explicit caller override wins.
+    env.setdefault("PYTHONFAULTHANDLER", "1")
     if v2_flags:
         for name in V2_FLAG_ENV_VARS:
             env[name] = "1"
@@ -431,6 +585,8 @@ def render_table(report: GateReport) -> str:
         lines.append(f"{s.name:<12} {result:<7} {s.seconds:>6.1f}s  {s.detail[:100]}")
         if s.log_path:
             lines.append(f"             log: {s.log_path}")
+        if s.memory_log_path:
+            lines.append(f"             memory log: {s.memory_log_path}")
     lines.append("-" * 72)
     lines.append("GATE: " + ("PASS" if report.ok else "FAIL"))
     if report.report_path:
@@ -455,6 +611,8 @@ def render_report_md(report: GateReport, head: str) -> str:
         lines.append(f"| {s.name} | {result} | {s.seconds:.1f}s | {detail} |")
         if s.log_path:
             lines.append(f"| | | | log: `{s.log_path}` |")
+        if s.memory_log_path:
+            lines.append(f"| | | | memory log: `{s.memory_log_path}` |")
     return "\n".join(lines) + "\n"
 
 

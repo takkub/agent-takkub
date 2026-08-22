@@ -839,12 +839,18 @@ class TestTier1QuietBootStreak:
         with (
             patch("agent_takkub.main_window.QApplication") as mock_qa,
             patch("agent_takkub.main_window.QTimer") as mock_qt,
+            # Scoped (not a leaked bare `.start()`) — a leaked patch here used
+            # to survive for the rest of the process and mask the OTHER Qt
+            # mocking pattern below (direct `patch.object` on the real PyQt6
+            # Flag enum, which Python 3.11 structurally forbids) into
+            # appearing to work. Only masked it when this test happened to
+            # run first in the same process — broke under xdist the moment a
+            # worker ran a later test without this one first.
+            patch("agent_takkub.main_window.Qt") as mock_qt_class,
             patch("agent_takkub.main_window.is_in_send_blocked", return_value=True, create=True),
             patch("agent_takkub.spawn_gate.is_in_send_blocked", return_value=True),
         ):
-            mock_qa.applicationState.return_value = (
-                patch("agent_takkub.main_window.Qt").start().ApplicationState.ApplicationActive
-            )
+            mock_qa.applicationState.return_value = mock_qt_class.ApplicationState.ApplicationActive
             mock_qt.singleShot.side_effect = lambda d, fn: timer_calls.append((d, fn))
             MainWindow._spawn_lead_when_quiet(mw)
 
@@ -862,22 +868,19 @@ class TestTier1QuietBootStreak:
         with (
             patch("agent_takkub.main_window.QApplication") as mock_qa,
             patch("agent_takkub.main_window.QTimer") as mock_qt,
+            # Whole-module patch (not `patch.object` on the real PyQt6 Flag
+            # enum member) — Python 3.11 blocks reassigning an existing Flag
+            # member outright, so patching a real one always raises; this
+            # mocks out the `Qt` name main_window reads instead.
+            patch("agent_takkub.main_window.Qt") as mock_qt_class,
             patch("agent_takkub.spawn_gate.is_in_send_blocked", return_value=False),
         ):
-            mock_qa.applicationState.return_value = type("S", (), {"ApplicationActive": object()})()
-            # Patch Qt.ApplicationState.ApplicationActive comparison
-            import agent_takkub.main_window as mw_mod
+            mock_qa.applicationState.return_value = mock_qt_class.ApplicationState.ApplicationActive
+            mock_qt.singleShot.side_effect = lambda d, fn: timer_calls.append((d, fn))
 
-            with patch.object(
-                mw_mod.Qt.ApplicationState,
-                "ApplicationActive",
-                new=mock_qa.applicationState.return_value,
-            ):
-                mock_qt.singleShot.side_effect = lambda d, fn: timer_calls.append((d, fn))
-
-                # Run N clear turns
-                for _ in range(_BOOT_LEAD_QUIET_N):
-                    MainWindow._spawn_lead_when_quiet(mw)
+            # Run N clear turns
+            for _ in range(_BOOT_LEAD_QUIET_N):
+                MainWindow._spawn_lead_when_quiet(mw)
 
         assert mw.orch.spawn.call_count == 1, "spawn must fire exactly once after N clear turns"
         assert mw.orch.spawn.call_args[0][0] == LEAD.name
@@ -897,23 +900,17 @@ class TestTier1QuietBootStreak:
             call_idx += 1
             return v
 
-        import agent_takkub.main_window as mw_mod
-
         with (
             patch("agent_takkub.main_window.QApplication") as mock_qa,
             patch("agent_takkub.main_window.QTimer") as mock_qt,
+            patch("agent_takkub.main_window.Qt") as mock_qt_class,
             patch("agent_takkub.spawn_gate.is_in_send_blocked", side_effect=_isb),
         ):
-            mock_qa.applicationState.return_value = type("S", (), {"ApplicationActive": object()})()
-            with patch.object(
-                mw_mod.Qt.ApplicationState,
-                "ApplicationActive",
-                new=mock_qa.applicationState.return_value,
-            ):
-                mock_qt.singleShot.side_effect = lambda d, fn: None
+            mock_qa.applicationState.return_value = mock_qt_class.ApplicationState.ApplicationActive
+            mock_qt.singleShot.side_effect = lambda d, fn: None
 
-                for _ in range(len(blocked_sequence)):
-                    MainWindow._spawn_lead_when_quiet(mw)
+            for _ in range(len(blocked_sequence)):
+                MainWindow._spawn_lead_when_quiet(mw)
 
         # After 1 clear then 1 block (reset) then 3 clears: spawn fires once
         assert mw.orch.spawn.call_count == 1
@@ -1063,7 +1060,6 @@ class TestTier1NonInsendConditions:
         mw.orch.spawn.return_value = (True, "spawned")
 
         timer_calls = []
-        import agent_takkub.main_window as mw_mod
 
         active_state = object()
         app_return = active_state if app_active else object()
@@ -1071,9 +1067,14 @@ class TestTier1NonInsendConditions:
         with (
             patch("agent_takkub.main_window.QApplication") as mock_qa,
             patch("agent_takkub.main_window.QTimer") as mock_qt,
+            # Whole-module patch, not `patch.object` on the real PyQt6 Flag
+            # enum member — see TestTier1QuietBootStreak's comment for why
+            # the latter always raises (Python 3.11 Flag immutability) and
+            # only ever appeared to work here via a since-fixed patch leak.
+            patch("agent_takkub.main_window.Qt") as mock_qt_class,
             patch("agent_takkub.spawn_gate.is_in_send_blocked", return_value=not insend_clear),
-            patch.object(mw_mod.Qt.ApplicationState, "ApplicationActive", new=active_state),
         ):
+            mock_qt_class.ApplicationState.ApplicationActive = active_state
             mock_qa.applicationState.return_value = app_return
             mock_qt.singleShot.side_effect = lambda d, fn: timer_calls.append((d, fn))
             MainWindow._spawn_lead_when_quiet(mw)

@@ -31,6 +31,8 @@ takkub = "agent_takkub.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "pytest-xdist>=3.6", # parallel full-suite runs (`-n auto` in qa_gate.py) — 16 cores idle serial otherwise
+
     # Pinned, not floating: CI installs .[dev] fresh, so an unpinned ruff let
     # a newer release land there than the one developers run locally — the
     # local gate passed while CI failed on a rule the old version didn't have.
