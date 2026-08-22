@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 273,
+  "module_count": 274,
   "modules": [
     {
       "module": "agent_takkub",
@@ -1406,6 +1406,7 @@
       "module": "agent_takkub.core.providers",
       "imports": [
         "agent_takkub.core.providers.claude_adapter",
+        "agent_takkub.core.providers.claude_plan",
         "agent_takkub.core.providers.cli_adapter",
         "agent_takkub.core.providers.errors",
         "agent_takkub.core.providers.plan",
@@ -1415,7 +1416,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.providers.claude_adapter",
@@ -1433,6 +1434,15 @@
       ],
       "fan_in": 2,
       "fan_out": 6
+    },
+    {
+      "module": "agent_takkub.core.providers.claude_plan",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.providers"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.core.providers.cli_adapter",

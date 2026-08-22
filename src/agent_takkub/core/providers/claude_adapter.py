@@ -7,14 +7,15 @@ roughly lines 1990-2900) builds its argv inline against live PaneState/env
 mutation and ends by constructing a `PtySession` directly — it is not
 already spec-driven the way the generic non-claude branch is (provider_spec
 docstring: claude_spec's fields are "NOT wired into spawn_engine.py's claude
-argv builder ... faithful documentation ... for a future phase"). Lifting
-that ~800-line block into something `agent_takkub.core` can import would
-mean either (a) extracting it — risky for a single Phase-3 task against a
-module backed by the bulk of the suite's 7,033 tests, explicitly out of
-scope per this phase's "ห้ามแก้ logic ใน branch เดิม" instruction — or
-(b) importing `spawn_engine` from core, which transitively pulls in PyQt6
-(`PtySession`/`QTimer`) and trips the `core-is-bottom-layer` import-linter
-contract. Neither is acceptable this phase.
+argv builder ... faithful documentation ... for a future phase"). Importing
+`spawn_engine` from core would transitively pull in PyQt6 (`PtySession`/
+`QTimer`) and trip the `core-is-bottom-layer` import-linter contract, so it
+is never done — the pure part of the branch (final argv concatenation
+order) is extracted instead, into `claude_plan.assemble_claude_argv`
+(epic #309 2.0.0 Wave A). Same posture as the generic branch's
+`plan.assemble_generic_argv`: extracted, golden-order-tested, importable —
+but NOT wired into `spawn_engine.py`'s own live branch, which still builds
+its argv inline. Rewiring that hot-path caller is a separate, later change.
 
 What IS safe and real: `provider_id()`/`is_available()` call the exact
 functions spawn_engine.py itself consults for claude (there is no
