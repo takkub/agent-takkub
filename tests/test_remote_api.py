@@ -1291,6 +1291,28 @@ class TestLeadHistory:
         assert "abc12345" in result["empty_reason"]["text"]
         assert "abc12345-full-uuid-should-never-appear" not in result["empty_reason"]["text"]
 
+    def test_empty_reason_transcript_unreadable_names_the_provider(self, monkeypatch):
+        """#348: a whole-file schema-drift diagnosis must tell the user which
+        provider failed to parse and that it's likely a format change, not
+        just repeat the generic "no messages yet" wording."""
+        monkeypatch.setattr(
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("codex", [])
+        )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {
+                "code": "transcript_unreadable",
+                "provider": "codex",
+                "session_uuid_short": "abc12345",
+            },
+        )
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result["empty_reason"]["code"] == "transcript_unreadable"
+        assert "codex" in result["empty_reason"]["text"]
+        assert "abc12345" in result["empty_reason"]["text"]
+        assert "abc12345-full-uuid-should-never-appear" not in result["empty_reason"]["text"]
+
     def test_limit_defaults_to_200(self, monkeypatch):
         seen = {}
 

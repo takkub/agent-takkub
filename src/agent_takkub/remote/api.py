@@ -96,6 +96,16 @@ def _empty_reason_payload(diagnosis: dict) -> dict | None:
             "หรือ session ไม่ตรงกับที่ pane จำไว้ (เช่นสั่ง /resume จากเดสก์ท็อป) ลองพิมพ์ข้อความจาก"
             "เดสก์ท็อปอีกครั้ง หรือรีสตาร์ท Lead pane"
         )
+    elif code == "transcript_unreadable":
+        # #348: file resolved and has content, but zero records parsed out of
+        # it — the upstream CLI most likely changed its transcript schema.
+        provider = diagnosis.get("provider") or "?"
+        short = diagnosis.get("session_uuid_short")
+        suffix = f" (session {short}…)" if short else ""
+        text = (
+            f"อ่านบทสนทนาของ {provider} ไม่ออก{suffix} — ไฟล์มีข้อมูลแต่แยกข้อความไม่ได้เลยสักรายการ "
+            "อาจเป็นเพราะ CLI เปลี่ยนรูปแบบไฟล์ ไม่ใช่เพราะยังไม่มีใครคุย ลองอ่านคำตอบที่เดสก์ท็อปแทนไปก่อน"
+        )
     else:
         return None
     return {"code": code, "text": text}
