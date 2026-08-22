@@ -26,6 +26,9 @@ def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     fake = tmp_path / "role-providers.json"
     monkeypatch.setattr(provider_config, "_CONFIG_PATH", fake)
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    # _provider_available() caches its result per provider for a TTL — reset
+    # per test so one test's mocked availability can't leak into the next.
+    monkeypatch.setattr(provider_config, "_provider_available_cache", {})
     return fake
 
 
@@ -191,6 +194,43 @@ class TestEffectiveProviderFor:
         import agent_takkub.provider_state as ps
 
         monkeypatch.setattr(ps, "is_disabled", lambda prov: False)
+        monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
+        assert provider_config._provider_available("codex") is False
+
+    def test_availability_is_cached_within_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Regression for the main_thread_stall root cause: the CLI-installed
+        # probe (shutil.which via find_codex_executable) must not re-run on
+        # every call — the watchdog calls _provider_available every ~5s per
+        # working pane, synchronously on the Qt main thread.
+        calls = {"n": 0}
+
+        def _probe() -> str:
+            calls["n"] += 1
+            return "C:/fake/codex.exe"
+
+        import agent_takkub.codex_helper as ch
+        import agent_takkub.provider_state as ps
+
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: False)
+        monkeypatch.setattr(ch, "find_codex_executable", _probe)
+
+        assert provider_config._provider_available("codex") is True
+        assert provider_config._provider_available("codex") is True
+        assert provider_config._provider_available("codex") is True
+        assert calls["n"] == 1
+
+    def test_availability_cache_expires_after_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.codex_helper as ch
+        import agent_takkub.provider_state as ps
+
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: False)
+        monkeypatch.setattr(ch, "find_codex_executable", lambda: "C:/fake/codex.exe")
+
+        fake_now = [1000.0]
+        monkeypatch.setattr(provider_config.time, "monotonic", lambda: fake_now[0])
+
+        assert provider_config._provider_available("codex") is True
+        fake_now[0] += provider_config._PROVIDER_AVAILABLE_TTL_S + 1
         monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
         assert provider_config._provider_available("codex") is False
 
