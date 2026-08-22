@@ -250,6 +250,28 @@ class ProviderSpec:
     # underlying CLI state, different question — "is it ready" vs "is it
     # stuck").
     auth_transient_markers: tuple[str, ...] = field(default_factory=tuple)
+    # Markers that mean the provider's OWN backend is running an
+    # account/eligibility check unrelated to login credentials — re-running
+    # sign-in fixes nothing, unlike auth_transient_markers above (#346).
+    # Distinguished from that field because the two need different Lead
+    # wording: "please sign in again" is actionable by the user right now,
+    # "we're still verifying your account, try again shortly" is not — the
+    # only real remedies are wait-and-retry or switching provider. Same
+    # grace-gating shape (seconds_since_output() >= AUTH_TRANSIENT_GRACE_SEC
+    # via pty_session.PtySession.account_pending_reason()) so a normal
+    # redrawing spinner next to this text still reads as ordinary boot.
+    # gemini/agy's "Verifying your account..." is the confirmed case (#346:
+    # a live-captured screen showed this banner frozen indefinitely, which a
+    # since-fixed ready-marker bug — see gemini_spec.ready_rules comment —
+    # was misreading as a normal idle composer and blind-delivering into).
+    # No other provider has a confirmed account-verification-gate screen as
+    # of this round (checked: claude/codex/opencode/cursor have no
+    # auth_error_markers/auth_transient_markers entries either — nothing to
+    # migrate; kimi's auth_error_markers "send /login to login" is a genuine
+    # instant login failure, not an account-pending gate, so it stays where
+    # it is) — empty here until a real screen is observed for that provider,
+    # never guessed from docs alone.
+    account_pending_markers: tuple[str, ...] = field(default_factory=tuple)
 
     # ─── 14. Close-time scaffolding filter (#272) ───
     # Process names (matched case-insensitively, `.exe` suffix ignored so one
@@ -743,7 +765,15 @@ gemini_spec = ProviderSpec(
         ReadyRule("? for shortcuts", True),  # pty_session.py:222 (agy idle footer)
         ReadyRule("type your message or", True),  # pty_session.py:223 (legacy gemini CLI)
         ReadyRule("gemini cli update available!", True),  # pty_session.py:224 (#51)
-        ReadyRule("please try again shortly", True),
+        # REMOVED (#346): `ReadyRule("please try again shortly", True)` used
+        # to live here on the assumption that this phrase means the account
+        # check FAILED and dropped back to a normal idle composer. A live
+        # incident (2026-08-22) proved that wrong — the CLI can show this
+        # exact phrase while genuinely frozen, accepting no input at all.
+        # The rule made `is_at_ready_prompt()` return True for that screen,
+        # which made the delivery loop blind-paste a task into it (the task
+        # was silently lost, later reported as `delivery-uncertain`). See
+        # account_pending_markers below for the correct handling of this text.
     ),
     ready_wait_ms=90_000,  # lead_inbox.py:431-435 (agy cold-boot allowance)
     context_strategy="agents_md_file",
@@ -842,7 +872,20 @@ gemini_spec = ProviderSpec(
     # check in this module (module note above `_ready_region`) doubles as
     # the "override a stale marker once a newer identity is on screen"
     # mechanism #256 asked for, with no separate identity-parsing needed.
-    auth_transient_markers=("signing in", "verifying your account", "not signed in"),
+    # "verifying your account" moved OUT of this tuple (#346) — it is not a
+    # sign-in/credentials step, it's Google's own account-eligibility check,
+    # so it gets its own account_pending_markers tier below with distinct
+    # Lead wording instead of being lumped in with the two genuine sign-in
+    # markers here.
+    auth_transient_markers=("signing in", "not signed in"),
+    # CONFIRMED transient (#346, live-captured 2026-08-22): agy can sit on
+    # "Verifying your account..." / "We're finishing verifying your account
+    # eligibility... Please try again shortly." indefinitely — an
+    # account-eligibility check on Google's side, not a login failure.
+    # Grace-gated the same way as auth_transient_markers (see
+    # PtySession.account_pending_reason()) so the first few seconds of a
+    # normal cold boot never false-positives.
+    account_pending_markers=("verifying your account",),
     # #301: field-verified 2026-08-18 19:06, frontend#2 pane — the pane
     # printed exactly "⚠ Individual quota reached. Please upgrade your
     # subscription to increase your limits. Resets in 1h53m57s." before
@@ -1268,6 +1311,16 @@ def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
     boot-time account-check text."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.auth_transient_markers if spec is not None else ()
+
+
+def account_pending_markers_for(provider: str) -> tuple[str, ...]:
+    """Account/eligibility-gate markers for `provider` (see
+    ``ProviderSpec.account_pending_markers``, #346). Empty for a provider
+    with none confirmed, or an unknown provider name — no generic fallback,
+    same reasoning as ``auth_transient_markers_for``: this is exact CLI
+    wording for a specific provider-side gate, not a cross-provider phrase."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.account_pending_markers if spec is not None else ()
 
 
 # ── quota/usage-limit detection (#301) ──────────────────────────────────────

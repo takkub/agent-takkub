@@ -53,6 +53,32 @@ def test_gemini_account_gate_with_idle_footer_is_not_ready(account_gate: str) ->
     assert s.is_at_ready_prompt() is False
 
 
+def test_gemini_account_eligibility_gate_with_trailing_prompt_is_not_ready() -> None:
+    """#346: verbatim live-captured screen from the issue (2026-08-22) —
+    this exact screen used to read as READY on the (disproven) theory that
+    "please try again shortly" means the account check failed and dropped
+    back to a normal idle composer. It doesn't: the CLI was genuinely
+    frozen, accepting no input, and cockpit blind-delivered a task into it
+    that was silently lost. Also asserted NOT a trust/onboarding modal
+    (`is_at_trust_prompt`) — this incident must not resurface as
+    `blocked:trust-prompt` either, only as the new `blocked:provider-account`
+    display state (see test_derive_display_state.py)."""
+    s = _feed_screen(
+        "Antigravity CLI 1.1.17",
+        "monchai500@gmail.com (Google AI Pro)",
+        "Gemini 3.7 Flash (High)",
+        "~/WebstormProjects/agent-takkub/worktrees/agent-takkub/gemini-1787380071",
+        "",
+        "⚠ Verifying your account...",
+        "  We're finishing verifying your account eligibility.",
+        "  This usually takes a moment. Please try again shortly.",
+        ">",
+    )
+    assert s.is_at_ready_prompt() is False
+    assert s.is_at_trust_prompt() is False
+    assert s.is_blocked_on_tty_prompt() is None
+
+
 def test_claude_working_esc_to_interrupt_is_not_ready() -> None:
     # Regression guard for the pre-existing claude busy indicator.
     s = _feed_screen("(esc to interrupt) building...", "bypass permissions")

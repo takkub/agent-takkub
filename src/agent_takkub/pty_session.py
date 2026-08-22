@@ -32,6 +32,7 @@ from .job_object_manager import JobObjectManager
 from .provider_spec import (
     AUTH_TRANSIENT_GRACE_SEC,
     PROVIDER_REGISTRY,
+    account_pending_markers_for,
     auth_error_markers_for,
     auth_transient_markers_for,
     quota_markers_for,
@@ -359,9 +360,12 @@ def _classify_ready(text_lower: str) -> bool:
     reproduce the exact first-match-wins precedence."""
     for b in _READY_HARD_BLOCKERS:
         if b in text_lower:
-            # Bypass 'verifying your account' if the check failed and dropped to prompt
-            if b == "verifying your account" and "please try again shortly" in text_lower:
-                continue
+            # REMOVED (#346): a 'verifying your account' + 'please try again
+            # shortly' bypass used to live here on the assumption that phrase
+            # combo means the account check failed and dropped back to a
+            # normal composer. Live evidence proved it can appear while the
+            # CLI is genuinely frozen accepting no input — see
+            # provider_spec.gemini_spec's account_pending_markers comment.
             return False
     for marker in _extra_ready_markers():
         if marker in text_lower:
@@ -499,14 +503,20 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     # swallow Enter; both observed 2026-07-24 in issue #126 transcripts.
     ("⣷  Signing in...\n? for shortcuts", False, "gemini"),
     ("⚠ Verifying your account...\n? for shortcuts", False, "gemini"),
-    # however if the gate fails and drops to prompt ("please try again shortly")
-    # it is ready again, even if the warning remains on screen.
+    # CORRECTED (#346): this case used to expect ready=True on the theory
+    # that "please try again shortly" means the account check failed and
+    # dropped back to a normal composer. A live incident (2026-08-22)
+    # disproved that — this exact screen was frozen, accepting no input,
+    # while cockpit's old rule read it as idle and blind-delivered a task
+    # into it (silently lost, later reported as `delivery-uncertain`). The
+    # trailing ">" is decorative chrome on this banner, not a live prompt —
+    # see PtySession.account_pending_reason() for the correct handling.
     (
         "⚠ Verifying your account...\n"
         "  L We're finishing verifying your account eligibility.\n"
         "    This usually takes a moment. Please try again shortly.\n\n"
         "> ",
-        True,
+        False,
         "gemini",
     ),
     # agy busy: even if the '? for shortcuts' footer persists, an active
@@ -598,8 +608,7 @@ def _classify_ready_for_provider(text_lower: str, provider: str) -> bool:
     spec = PROVIDER_REGISTRY[provider]
     for b in spec.ready_hard_blockers:
         if b in text_lower:
-            if b == "verifying your account" and "please try again shortly" in text_lower:
-                continue
+            # REMOVED (#346): see the matching note in _classify_ready above.
             return False
     for rule in spec.ready_rules:
         if rule.marker in text_lower:
@@ -1957,6 +1966,32 @@ class PtySession(QObject):
                     return marker
         return None
 
+    def account_pending_reason(self, provider: str) -> str | None:
+        """Return the matched marker if this pane's screen currently shows
+        `provider`'s CLI stuck on its own account/eligibility gate (#346),
+        else ``None``.
+
+        Distinct from ``auth_failure_reason()``: that method answers "is
+        this provider not authenticated" (a login/credentials problem,
+        fixable by signing in again). This answers a different question —
+        "is the provider's OWN backend still deciding whether this account
+        is allowed to proceed" — where re-authenticating fixes nothing and
+        the only real remedies are wait-and-retry or switching provider.
+
+        Same grace-gating as ``auth_failure_reason()``'s transient tier:
+        only counts once the screen has been static for
+        ``AUTH_TRANSIENT_GRACE_SEC`` (``seconds_since_output()``, the
+        spinner-normalized clock), so an animating spinner next to this text
+        still reads as a normal cold boot, not a stuck gate."""
+        markers = account_pending_markers_for(provider)
+        if not markers or self.seconds_since_output() < AUTH_TRANSIENT_GRACE_SEC:
+            return None
+        text = _ready_region(self.display_lines())
+        for marker in markers:
+            if marker in text:
+                return marker
+        return None
+
     def is_hard_blocked_for(self, provider: str) -> bool:
         """True when `provider`'s own `ready_hard_blockers` currently match
         this pane's footer region — i.e. the screen shows an active
@@ -1979,18 +2014,17 @@ class PtySession(QObject):
         are covered by `ready_marker_selftest()`'s shipped-table self-test and
         the task instructions for this change explicitly call out not to risk
         touching that self-tested precedence chain for an unrelated feature.
-        Same `_ready_region` scoping and "verifying your account" /
-        "please try again shortly" carve-out as `_classify_ready_for_provider`,
-        so the two can never disagree about what counts as hard-blocked for a
-        given provider."""
+        Same `_ready_region` scoping as `_classify_ready_for_provider`, so
+        the two can never disagree about what counts as hard-blocked for a
+        given provider. (The "verifying your account" / "please try again
+        shortly" carve-out this docstring used to mention was removed in
+        #346 — see the matching note in `_classify_ready`.)"""
         spec = PROVIDER_REGISTRY.get(provider)
         if spec is None:
             return False
         text = _ready_region(self.display_lines())
         for b in spec.ready_hard_blockers:
             if b in text:
-                if b == "verifying your account" and "please try again shortly" in text:
-                    continue
                 return True
         return False
 

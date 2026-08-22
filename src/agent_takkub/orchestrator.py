@@ -5520,6 +5520,12 @@ class Orchestrator(
              (`rate_limit_reset_at()` is a live scrape — the banner text can
              scroll out of view a tick after the watchdog captured it).
              Reuses that ALREADY-COMPUTED signal instead.
+          0b. **blocked:provider-account** (#346) — `session.
+             account_pending_reason(provider)` matches (gemini/agy stuck on
+             its own "Verifying your account..." eligibility gate past its
+             grace period). Checked ahead of login-required: this is NOT a
+             login/credentials problem (re-authenticating fixes nothing), so
+             it must not be lumped into that label's "log back in" wording.
           1. **login-required** — `session.auth_failure_reason(provider)`
              matches (kimi "send /login to login", gemini stuck "Signing
              in..." past its grace period, ...). The screen is definitive: a
@@ -5574,6 +5580,13 @@ class Orchestrator(
         if session is None:
             return base_state
         provider = getattr(pane.model, "provider_name", None) or "claude"
+
+        try:
+            account_reason = session.account_pending_reason(provider)
+        except Exception:
+            account_reason = None
+        if account_reason:
+            return "blocked:provider-account"
 
         try:
             auth_reason = session.auth_failure_reason(provider)
@@ -5658,7 +5671,8 @@ class Orchestrator(
         `display_state` (#263) is `_derive_display_state`'s unified verdict —
         the same `"state"` value, further refined into "login-required" /
         "booting" / "waiting-delivery" / "busy" / "unknown" / "stalled:quota"
-        (#301) where the raw `"state"` would otherwise show a misleadingly
+        (#301) / "blocked:provider-account" (#346) where the raw `"state"`
+        would otherwise show a misleadingly
         bare "working"/"active" (see that method's docstring for the full
         priority order). This is what `takkub list`/`status` render to Lead;
         `"state"` itself stays exactly as before for every internal consumer
