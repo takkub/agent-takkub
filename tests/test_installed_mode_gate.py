@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -48,6 +49,12 @@ def installed_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
     placement + these four modules' behavior matter here.
     """
     build_dir = tmp_path_factory.mktemp("wheel-build")
+    # `python -m build` reuses <repo_root>/build/ as a staging dir across
+    # runs; a tree left over from a prior source layout (e.g. a since-renamed
+    # _assets file) makes setuptools reference a path that no longer exists
+    # and fail with a spurious WinError 2, even though the current source is
+    # fine (see build_wheel() in release.py for the same fix).
+    shutil.rmtree(_REPO_ROOT / "build", ignore_errors=True)
     result = subprocess.run(
         [sys.executable, "-m", "build", "--wheel", "--outdir", str(build_dir), str(_REPO_ROOT)],
         capture_output=True,

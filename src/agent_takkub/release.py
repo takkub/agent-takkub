@@ -31,6 +31,7 @@ import datetime
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -222,6 +223,10 @@ def build_wheel(repo_root: str | pathlib.Path, *, timeout: float = 300.0) -> pat
     dist.mkdir(exist_ok=True)
     for whl in dist.glob("*.whl"):
         whl.unlink()
+    # `python -m build` reuses repo_root/build/ as a staging dir across runs;
+    # a stale one from a prior _assets tree can reference files that no
+    # longer exist and fail the build with a spurious WinError 2 (#gate hardening).
+    shutil.rmtree(repo_root / "build", ignore_errors=True)
     subprocess.run(
         [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)],
         cwd=str(repo_root),

@@ -385,6 +385,27 @@ class TestBuildWheel:
             with pytest.raises(sp.CalledProcessError):
                 build_wheel(tmp_path)
 
+    def test_deletes_stale_build_dir_before_building(self, tmp_path):
+        """A `build/` staging dir left over from a prior `python -m build`
+        run can reference source files that no longer exist (renamed/removed
+        _assets), failing the next build with a spurious WinError 2 even
+        though the current source is fine — clear it first every time."""
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        stale_build = tmp_path / "build"
+        stale_build.mkdir()
+        (stale_build / "stale.txt").write_text("leftover", encoding="utf-8")
+
+        def _fake_build(*args, **kwargs):
+            assert not stale_build.exists(), "build/ must be gone before `python -m build` runs"
+            (dist / "agent_takkub-1.0.0-py3-none-any.whl").write_text("x", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch("agent_takkub.release.subprocess.run", side_effect=_fake_build):
+            build_wheel(tmp_path)
+
+        assert not stale_build.exists()
+
 
 class TestReleaseWheelStep:
     """release() must build a fresh wheel as part of a real (committed +
