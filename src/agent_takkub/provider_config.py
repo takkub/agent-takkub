@@ -249,12 +249,28 @@ def _provider_from_role_models(key: str) -> str:
 # events (0.7-2s+ each) via captured main-thread stack traces landing here
 # through `_check_idle_teammates` → `_check_stuck_tool_panes` →
 # `effective_provider_for` (2026-08-22 investigation). A short TTL cache is
-# enough — this only needs to be fresher than "the next watchdog tick",
-# not real-time; a disable-toggle or CLI (un)install takes effect within one
+# enough for THIS probe only — it only needs to be fresher than "the next
+# watchdog tick", not real-time; a CLI (un)install takes effect within one
 # TTL window instead of instantly, which is an acceptable trade for cutting
 # a per-pane-per-tick disk probe down to once per TTL.
+#
+# The `is_disabled()` toggle check below is deliberately OUTSIDE this cache
+# (#343 regression from the first cut of this fix): Settings → Providers &
+# Roles' "→ Claude" substitute badge (`settings_window._sync_role_provider_badge`)
+# calls `_provider_available()` synchronously on every combo change and
+# expects the disable toggle to be reflected immediately, not up to
+# `_PROVIDER_AVAILABLE_TTL_S` seconds late. `is_disabled()` is a small JSON-file
+# read, not a PATH walk, so it doesn't need the cache the CLI probe does.
 _PROVIDER_AVAILABLE_TTL_S = 15.0
-_provider_available_cache: dict[str, tuple[float, bool]] = {}
+_provider_cli_installed_cache: dict[str, tuple[float, bool]] = {}
+
+
+def reset_provider_available_cache() -> None:
+    """Clear the CLI-installed TTL cache. Test-only hook so one test's
+    monkeypatched discovery result can't leak into the next via the
+    module-global cache (production code relies on the TTL expiring on its
+    own and never needs to call this)."""
+    _provider_cli_installed_cache.clear()
 
 
 def _provider_available(provider: str) -> bool:
@@ -276,24 +292,14 @@ def _provider_available(provider: str) -> bool:
     call, so a test that monkeypatches ``codex_helper.find_codex_executable``
     keeps working exactly as before.
 
-    Result is cached per provider for `_PROVIDER_AVAILABLE_TTL_S` — see the
-    module comment above this function for why.
+    Only the CLI-installed probe is cached (per provider, for
+    `_PROVIDER_AVAILABLE_TTL_S`) — see the module comment above this
+    function for why the disable-toggle check below is deliberately not.
     """
     if provider == CLAUDE:
         return True
 
-    now = time.monotonic()
-    cached = _provider_available_cache.get(provider)
-    if cached is not None and now - cached[0] < _PROVIDER_AVAILABLE_TTL_S:
-        return cached[1]
-
-    result = _provider_available_uncached(provider)
-    _provider_available_cache[provider] = (now, result)
-    return result
-
-
-def _provider_available_uncached(provider: str) -> bool:
-    # (1) user-intent toggle
+    # (1) user-intent toggle — always read live, never cached.
     try:
         from .provider_state import is_disabled
 
@@ -301,7 +307,19 @@ def _provider_available_uncached(provider: str) -> bool:
             return False
     except Exception:
         pass
-    # (2) CLI actually installed
+
+    # (2) CLI actually installed — this probe IS TTL-cached.
+    now = time.monotonic()
+    cached = _provider_cli_installed_cache.get(provider)
+    if cached is not None and now - cached[0] < _PROVIDER_AVAILABLE_TTL_S:
+        return cached[1]
+
+    result = _provider_cli_installed_uncached(provider)
+    _provider_cli_installed_cache[provider] = (now, result)
+    return result
+
+
+def _provider_cli_installed_uncached(provider: str) -> bool:
     try:
         spec = PROVIDER_REGISTRY.get(provider)
         if spec is not None and spec.custom_discovery_fn is not None:
