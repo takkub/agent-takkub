@@ -64,6 +64,7 @@ class _StubSession:
         raise_on: tuple[str, ...] = (),
         tool_marker: str | None = None,
         seconds_since_output: float = 0.0,
+        account_pending_reason: str | None = None,
     ) -> None:
         self._auth_reason = auth_reason
         self._booting = booting
@@ -71,7 +72,13 @@ class _StubSession:
         self._raise_on = raise_on
         self._tool_marker = tool_marker
         self._seconds_since_output = seconds_since_output
+        self._account_pending_reason = account_pending_reason
         self.is_alive = True
+
+    def account_pending_reason(self, provider: str) -> str | None:
+        if "account_pending" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._account_pending_reason
 
     def auth_failure_reason(self, provider: str) -> str | None:
         if "auth" in self._raise_on:
@@ -120,6 +127,26 @@ class TestPriorityOrder:
         pane = _pane("working", session=session)
         assert Orchestrator._derive_display_state(None, pane, "working", True) == "login-required"
 
+    def test_account_pending_beats_login_required(self) -> None:
+        # #346: an account/eligibility gate is NOT a login problem — it must
+        # win ahead of login-required so Lead never sees the "log back in"
+        # wording for a state that wouldn't be fixed by logging in.
+        session = _StubSession(
+            account_pending_reason="verifying your account",
+            auth_reason="send /login to login",
+            booting=True,
+            hard_blocked=True,
+        )
+        pane = _pane("working", session=session)
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "blocked:provider-account"
+
+    def test_no_account_pending_falls_through_to_login_required(self) -> None:
+        session = _StubSession(account_pending_reason=None, auth_reason="send /login to login")
+        pane = _pane("working", session=session)
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "login-required"
+
     def test_booting_beats_waiting_delivery(self) -> None:
         session = _StubSession(booting=True)
         pane = _pane("working", session=session)
@@ -164,7 +191,7 @@ class TestPriorityOrder:
         assert Orchestrator._derive_display_state(None, pane, "working", False) == "working"
 
     def test_each_signal_check_fails_open_on_exception(self) -> None:
-        for which in ("auth", "booting", "busy", "tool_stuck"):
+        for which in ("account_pending", "auth", "booting", "busy", "tool_stuck"):
             session = _StubSession(raise_on=(which,))
             pane = _pane("active", session=session, provider="cursor")
             # No crash; falls through to whatever the next tier decides —
@@ -229,6 +256,9 @@ class _RealSignalSession:
     def auth_failure_reason(self, provider: str) -> str | None:
         return PtySession.auth_failure_reason(self, provider)
 
+    def account_pending_reason(self, provider: str) -> str | None:
+        return PtySession.account_pending_reason(self, provider)
+
     def shows_startup_marker(self) -> bool:
         return PtySession.shows_startup_marker(self)
 
@@ -247,6 +277,40 @@ class TestRealTranscriptFixtures:
     docs/audit/2026-08-16-263-264-266-notify-truth.md and reuses the same
     strings already confirmed in test_auth_failure_detection.py's
     TestGeminiColdBootNotSignedIn / TestKimiNotLoggedIn fixtures."""
+
+    def test_gemini_stuck_verifying_account_past_grace_is_provider_account_blocked(
+        self,
+    ) -> None:
+        # #346: verbatim live-captured screen from the issue (2026-08-22).
+        # This must NOT read as "login-required" (nothing to log into) and
+        # must NOT read as ready/active either — see the matching
+        # is_at_ready_prompt regression test in test_pty_ready_prompt.py.
+        session = _RealSignalSession(
+            [
+                "Antigravity CLI 1.1.17",
+                "monchai500@gmail.com (Google AI Pro)",
+                "Gemini 3.7 Flash (High)",
+                "~/WebstormProjects/agent-takkub/worktrees/agent-takkub/gemini-1787380071",
+                "",
+                "⚠ Verifying your account...",
+                "  We're finishing verifying your account eligibility.",
+                "  This usually takes a moment. Please try again shortly.",
+                ">",
+            ],
+            seconds_since_output=AUTH_TRANSIENT_GRACE_SEC,
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "blocked:provider-account"
+
+    def test_gemini_verifying_account_during_normal_boot_is_not_blocked_yet(self) -> None:
+        session = _RealSignalSession(
+            ["⚠ Verifying your account...", "  Please try again shortly.", ">"],
+            seconds_since_output=AUTH_TRANSIENT_GRACE_SEC - 1,
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result != "blocked:provider-account"
 
     def test_gemini_stuck_signing_in_past_grace_is_login_required(self) -> None:
         session = _RealSignalSession(

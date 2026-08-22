@@ -85,6 +85,66 @@ class TestTransientMarkers:
         assert reason is None
 
 
+def _account_pending_reason(lines: list[str], provider: str, seconds_since_output: float = 100.0):
+    return PtySession.account_pending_reason(
+        _FakeScreen(lines, seconds_since_output=seconds_since_output), provider
+    )
+
+
+class TestAccountPendingReason:
+    """`PtySession.account_pending_reason` (#346) — distinct from
+    `auth_failure_reason`: this is a provider-side account/eligibility gate
+    (e.g. Google account verification for gemini/agy), not a login/
+    credentials problem, so it must never be reported with "log back in"
+    wording. Verbatim live-captured incident: agy froze on "Verifying your
+    account... We're finishing verifying your account eligibility... Please
+    try again shortly." indefinitely, while a since-removed ready-marker
+    rule misread that exact text as an idle composer (see
+    test_pty_ready_prompt.py's regression test for that half of the fix)."""
+
+    def test_does_not_fire_during_normal_boot(self) -> None:
+        lines = ["", "Verifying your account...", ""]
+        reason = _account_pending_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC - 1
+        )
+        assert reason is None
+
+    def test_fires_once_grace_elapsed_and_screen_static(self) -> None:
+        lines = ["", "Verifying your account...", ""]
+        reason = _account_pending_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason == "verifying your account"
+
+    def test_fires_for_the_full_live_captured_banner(self) -> None:
+        lines = [
+            "⚠ Verifying your account...",
+            "  We're finishing verifying your account eligibility.",
+            "  This usually takes a moment. Please try again shortly.",
+            ">",
+        ]
+        reason = _account_pending_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason == "verifying your account"
+
+    def test_never_fires_for_a_provider_with_none_confirmed(self) -> None:
+        lines = ["", "Verifying your account...", ""]
+        reason = _account_pending_reason(lines, "claude", seconds_since_output=10_000)
+        assert reason is None
+
+    def test_is_not_reported_as_an_auth_failure_reason(self) -> None:
+        # #346: moved OUT of gemini's auth_transient_markers entirely — the
+        # two tiers are now disjoint, so auth_failure_reason() must not
+        # ALSO match this text (that would put "log back in" wording in
+        # front of a Lead who cannot log anything in).
+        lines = ["", "Verifying your account...", ""]
+        reason = _auth_failure_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason is None
+
+
 class TestNarrowedGenericMarkers:
     """The round-2 follow-up dropped several phrases that are ordinary
     HTTP/test-framework vocabulary, not CLI chrome — a backend pane running
@@ -124,7 +184,10 @@ class TestGeminiColdBootNotSignedIn:
     — every single agy spawn tripped it, well before the CLI had even begun
     signing in, let alone failed to. Moved to gemini_spec's own
     auth_transient_markers (grace-gated), same tier as its existing
-    'signing in' / 'verifying your account' entries."""
+    'signing in' entry. ('verifying your account' used to also live in this
+    tuple but moved OUT to its own account_pending_markers tier in #346 —
+    see TestAccountPendingReason below — because it is not a login problem
+    at all, unlike the two entries that remain here.)"""
 
     def test_not_signed_in_is_no_longer_a_generic_instant_marker(self) -> None:
         assert "not signed in" not in GENERIC_AUTH_ERROR_MARKERS
@@ -223,12 +286,15 @@ class TestIsHardBlockedFor:
         lines = ["esc to interrupt"] + [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)]
         assert self._is_hard_blocked(lines, "codex") is False
 
-    def test_verifying_your_account_exception_is_honored(self) -> None:
-        # Same carve-out as _classify_ready_for_provider: a failed identity
-        # check that already dropped back to prompt must not still read as
-        # hard-blocked just because the phrase scrolled through.
+    def test_verifying_your_account_is_hard_blocked_even_with_try_again_shortly(self) -> None:
+        # CORRECTED (#346): this used to assert False via a carve-out that
+        # assumed "please try again shortly" meant the check had already
+        # failed and dropped back to a normal prompt. A live incident proved
+        # that wrong — the CLI can show exactly this text while genuinely
+        # frozen. The carve-out was removed from both this method and
+        # _classify_ready_for_provider; both must agree it's hard-blocked.
         lines = ["verifying your account", "please try again shortly"]
-        assert self._is_hard_blocked(lines, "gemini") is False
+        assert self._is_hard_blocked(lines, "gemini") is True
 
 
 class TestReadyMarkerCalibrationStatus:

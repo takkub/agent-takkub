@@ -42,6 +42,8 @@ _SEVERE_EVENTS: dict[str, str] = {
     "delivery_boot_timeout_failed": "ใบงานตายเพราะ pane boot ไม่ทัน",
     "task_deliver_auth_failure": "ส่งใบงานไม่ได้เพราะ auth ของ provider",
     "auth_failure_warned": "provider auth มีปัญหา",
+    "task_deliver_account_pending": "ส่งใบงานไม่ได้เพราะ provider ยังไม่ผ่าน account verification (ไม่ใช่ auth)",
+    "account_pending_warned": "provider ติด account verification gate (#346)",
     "rate_limit_detected": "ชน rate limit",
     "verify_failed": "QA/verify รายงาน FAIL",
     "verify_blocked": "QA/verify รายงานติด blocker (ต้องให้เจ้าของทำ)",

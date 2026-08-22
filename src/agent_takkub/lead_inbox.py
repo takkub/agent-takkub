@@ -1076,6 +1076,16 @@ class LeadInboxMixin:
         # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
         # marker stops matching OR the pane reaches its own ready prompt.
         auth_failure_streak = [0]
+        # #346: same one-shot/streak shape as auth_failure above, for the
+        # provider's own account/eligibility gate (NOT a login/credentials
+        # problem — see PtySession.account_pending_reason()'s docstring).
+        # Kept separate from auth_failure_warned/streak because the two now
+        # check disjoint marker tables (account_pending_markers vs
+        # auth_error_markers/auth_transient_markers) and need distinct Lead
+        # wording — conflating them would put "log back in" text in front of
+        # a Lead who cannot log anything in.
+        account_pending_warned = [False]
+        account_pending_streak = [0]
 
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
@@ -1351,6 +1361,50 @@ class LeadInboxMixin:
                 _pane_ready_now = pane.session.is_at_ready_prompt()
             except Exception:
                 _pane_ready_now = False
+            if not account_pending_warned[0]:
+                if _pane_ready_now:
+                    # Same "ready wins" reasoning as the auth-failure check
+                    # below — a CLI genuinely stuck on its own account gate
+                    # can never reach its own ready prompt.
+                    account_pending_streak[0] = 0
+                else:
+                    # #346: checked on every poll like the prompt-block and
+                    # auth-failure checks — fails fast instead of riding out
+                    # the ordinary busy/stall path, which could take up to
+                    # BUSY_WAIT_CEILING_SEC to say anything concrete about a
+                    # pane whose provider will never clear this on its own.
+                    try:
+                        _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
+                        _account_reason = pane.session.account_pending_reason(_provider_ap)
+                        if not isinstance(_account_reason, str):
+                            # Defensive: same unconfigured-mock guard as the
+                            # auth-failure check below.
+                            _account_reason = None
+                    except Exception:
+                        _account_reason = None
+                    if _account_reason:
+                        account_pending_streak[0] += 1
+                    else:
+                        account_pending_streak[0] = 0
+                    if _account_reason and account_pending_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
+                        account_pending_warned[0] = True
+                        sent[0] = True
+                        _log_event(
+                            "task_deliver_account_pending",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            provider=_provider_ap,
+                            reason=_account_reason,
+                        )
+                        self._recover_account_pending_pane(
+                            role_name,
+                            project,
+                            pane,
+                            task,
+                            provider=_provider_ap,
+                            reason=_account_reason,
+                        )
+                        return
             if not auth_failure_warned[0]:
                 if _pane_ready_now:
                     # A CLI genuinely stuck on auth can never reach its own
@@ -2174,6 +2228,55 @@ class LeadInboxMixin:
             reason=reason,
         )
 
+    def _warn_lead_account_pending(
+        self, role_name: str, project: str | None, provider: str, reason: str
+    ) -> None:
+        """Lead notice for an account-pending recovery (#346), fired right
+        before `_recover_account_pending_pane` closes+respawns the pane —
+        one combined message (what's wrong + what cockpit did about it),
+        unlike the two-part auth-failure notices above, since there is only
+        one thing to say: this is not a login problem, cockpit already
+        retried the only two things that can help.
+
+        Deliberately does NOT reuse `_warn_lead_auth_failure`'s wording
+        ("log back in") — that advice is actively wrong here; the gate is on
+        the provider's own backend (e.g. Google account eligibility for
+        gemini/agy), not this CLI's credentials. Tells Lead concretely what
+        happened and what to do: wait and retry, or use a different
+        provider for now — cockpit's own degrade-to-claude respawn already
+        does the latter automatically.
+
+        Notifies unconditionally (like `_warn_lead_auth_failure`'s first
+        notice, NOT like `_warn_lead_auth_failure_degrade`'s pane-health-
+        gated second one) — under the default `terminal` pane-health policy
+        a gated notice would only surface at pane close, silently defeating
+        the whole point of detecting this fast (#346's issue was exactly a
+        Lead left with no concrete signal until well after the fact)."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        msg = (
+            f"⏳ [account-pending] {role_name} pane ({display}) ยังไม่ผ่าน account "
+            f'verification ฝั่ง provider ("{reason}") — ไม่ใช่ปัญหา login/credentials '
+            f"ของ cockpit เอง รอสักครู่แล้ว assign ใหม่ หรือสลับ provider ไปก่อน "
+            f"— cockpit degrade เป็น claude substitute แล้ว spawn ใหม่ให้ (#346)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "account_pending_warned",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            reason=reason,
+        )
+
     def _warn_lead_no_content(self, role_name: str, project: str | None, *, degrade: bool) -> None:
         """One-line Lead notice for `_recover_no_content_pane` below — split
         out from the respawn logic so the message can be asserted on
@@ -2282,6 +2385,38 @@ class LeadInboxMixin:
             role_name, self._resolve_project(project), provider, reason
         )
         self._recover_broken_pane(role_name, project, pane, task, degrade=True, kind="auth_failure")
+
+    def _recover_account_pending_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        provider: str,
+        reason: str,
+    ) -> None:
+        """#346: a pane whose provider CLI is stuck on its OWN account/
+        eligibility gate (confirmed over `_AUTH_FAILURE_CONFIRM_POLLS`
+        consecutive polls by `_check` above) — e.g. gemini/agy frozen on
+        "Verifying your account... Please try again shortly."
+
+        Deliberately a separate method from `_recover_auth_failed_pane`
+        above, not a thin wrapper around it: that one's Lead-facing message
+        tells the operator to log back in, which is actively wrong advice
+        here — there is nothing to log into, the gate is on the provider's
+        own backend (Google account eligibility, in the confirmed gemini
+        case). Shares the same close+respawn+degrade-to-claude mechanics via
+        `_recover_broken_pane` (retrying the same provider cannot help any
+        more than it can for a real auth failure — the gate is external to
+        this pane), which also happens to be exactly what the issue's own
+        suggested remedy asks for: wait a bit and reassign, or switch
+        provider — degrading to claude on respawn does the second for free.
+        """
+        self._warn_lead_account_pending(role_name, self._resolve_project(project), provider, reason)
+        self._recover_broken_pane(
+            role_name, project, pane, task, degrade=True, kind="account_pending"
+        )
 
     def _recover_broken_pane(
         self,
