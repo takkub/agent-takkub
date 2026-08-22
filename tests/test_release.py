@@ -6,11 +6,12 @@ with do_commit/do_tag off (and dry_run) so no git is invoked.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_takkub.release import (
+    build_wheel,
     bump_version,
     changelog_has_entries,
     extract_release_notes,
@@ -162,6 +163,7 @@ class TestReleaseGithubStep:
         repo = self._repo(tmp_path)
         with (
             patch("agent_takkub.release._git"),  # stub real git
+            patch("agent_takkub.release.build_wheel"),  # stub `python -m build`
             patch(
                 "agent_takkub.release.create_github_release", return_value=(True, "url://rel")
             ) as m,
@@ -178,6 +180,7 @@ class TestReleaseGithubStep:
         repo = self._repo(tmp_path)
         with (
             patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel"),
             patch("agent_takkub.release.create_github_release") as m,
         ):
             res = release(repo, part="minor", today="2026-05-31", do_github_release=False)
@@ -189,6 +192,7 @@ class TestReleaseGithubStep:
         repo = self._repo(tmp_path)
         with (
             patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel"),
             patch(
                 "agent_takkub.release.create_github_release",
                 return_value=(False, "gh CLI not found"),
@@ -266,6 +270,7 @@ class TestEveryVersionFileMovesTogether:
         repo = _make_repo(tmp_path)
         with (
             patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel"),
             patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
         ):
             release(repo, part="minor", today="2026-05-31")
@@ -283,6 +288,7 @@ class TestEveryVersionFileMovesTogether:
         repo = _make_repo(tmp_path)
         with (
             patch("agent_takkub.release._git") as git,
+            patch("agent_takkub.release.build_wheel"),
             patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
         ):
             release(repo, part="minor", today="2026-05-31")
@@ -313,6 +319,120 @@ class TestEveryVersionFileMovesTogether:
             set_npm_version('{"name": "x"}', "9.9.9")
 
 
+class TestBuildWheel:
+    """`build_wheel()` is what `takkub release` runs so a subsequent `npm
+    publish` can never attach a stale wheel (#340): clear dist/*.whl first,
+    then `python -m build --wheel`, so exactly one (the new) wheel remains."""
+
+    def test_deletes_stale_wheels_before_building(self, tmp_path):
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "agent_takkub-1.0.82-py3-none-any.whl").write_text("old", encoding="utf-8")
+
+        def _fake_build(*args, **kwargs):
+            (dist / "agent_takkub-1.0.83-py3-none-any.whl").write_text("new", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch("agent_takkub.release.subprocess.run", side_effect=_fake_build) as m:
+            out = build_wheel(tmp_path)
+
+        assert m.called
+        remaining = sorted(p.name for p in dist.glob("*.whl"))
+        assert remaining == ["agent_takkub-1.0.83-py3-none-any.whl"]
+        assert out == dist / "agent_takkub-1.0.83-py3-none-any.whl"
+
+    def test_invokes_python_dash_m_build_wheel(self, tmp_path):
+        dist = tmp_path / "dist"
+        dist.mkdir()
+
+        def _fake_build(*args, **kwargs):
+            (dist / "agent_takkub-1.0.0-py3-none-any.whl").write_text("x", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch("agent_takkub.release.subprocess.run", side_effect=_fake_build) as m:
+            build_wheel(tmp_path)
+
+        cmd = m.call_args.args[0]
+        assert cmd[1:4] == ["-m", "build", "--wheel"]
+
+    def test_raises_if_build_produces_no_wheel(self, tmp_path):
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        with patch("agent_takkub.release.subprocess.run", return_value=MagicMock(returncode=0)):
+            with pytest.raises(RuntimeError, match="exactly one wheel"):
+                build_wheel(tmp_path)
+
+    def test_raises_if_build_produces_more_than_one_wheel(self, tmp_path):
+        dist = tmp_path / "dist"
+        dist.mkdir()
+
+        def _fake_build(*args, **kwargs):
+            (dist / "agent_takkub-1.0.0-py3-none-any.whl").write_text("x", encoding="utf-8")
+            (dist / "agent_takkub-1.0.1-py3-none-any.whl").write_text("y", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch("agent_takkub.release.subprocess.run", side_effect=_fake_build):
+            with pytest.raises(RuntimeError, match="exactly one wheel"):
+                build_wheel(tmp_path)
+
+    def test_propagates_subprocess_failure(self, tmp_path):
+        import subprocess as sp
+
+        with patch(
+            "agent_takkub.release.subprocess.run",
+            side_effect=sp.CalledProcessError(1, ["python", "-m", "build"]),
+        ):
+            with pytest.raises(sp.CalledProcessError):
+                build_wheel(tmp_path)
+
+
+class TestReleaseWheelStep:
+    """release() must build a fresh wheel as part of a real (committed +
+    tagged) release — never leaving a stale one from a prior version."""
+
+    def _repo(self, tmp_path):
+        _make_repo(tmp_path, _CHANGELOG)
+        return tmp_path
+
+    def test_build_wheel_invoked_when_committed_and_tagged(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel") as m,
+            patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+        ):
+            release(repo, part="minor", today="2026-05-31")
+        assert m.called
+        assert m.call_args.args[0] == repo
+
+    def test_build_wheel_skipped_without_commit_or_tag(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with patch("agent_takkub.release.build_wheel") as m:
+            release(repo, part="minor", do_commit=False, do_tag=False, today="2026-05-31")
+        assert not m.called
+
+    def test_do_build_wheel_false_skips_it(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel") as m,
+            patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+        ):
+            release(repo, part="minor", today="2026-05-31", do_build_wheel=False)
+        assert not m.called
+
+    def test_build_wheel_failure_aborts_and_reverts(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.build_wheel", side_effect=RuntimeError("build broke")),
+        ):
+            with pytest.raises(RuntimeError, match="build broke"):
+                release(repo, part="minor", today="2026-05-31")
+        # reverted — pyproject still at the pre-release version
+        assert 'version = "0.3.9"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+
+
 def test_release_commit_outlasts_the_pre_commit_chain(tmp_path):
     """`git commit` runs this repo's full pre-commit chain (ruff,
     docs-verify, import-linter, depgraph freshness). On a cold cache that
@@ -322,6 +442,7 @@ def test_release_commit_outlasts_the_pre_commit_chain(tmp_path):
     repo = _make_repo(tmp_path)
     with (
         patch("agent_takkub.release._git") as git,
+        patch("agent_takkub.release.build_wheel"),
         patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
     ):
         release(repo, part="patch", today="2026-05-31")

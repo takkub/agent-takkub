@@ -15,15 +15,18 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { agentTakkubHome, venvDir, venvPython } = require('./lib');
+const { agentTakkubHome, venvDir, venvPython, findWheelForVersion } = require('./lib');
 const preflight = require('./preflight');
 
+// The wheel matching THIS install's declared version (#340) — not the
+// lexically-last filename in dist/. A string sort put "1.0.9" after
+// "1.0.10", and a stale wheel from a previous release (dist/ is gitignored,
+// so nothing flags it) got installed silently under a newer version number.
 function findWheel() {
   // Shipped alongside this package under dist/ (see package.json `files`).
   const dist = path.join(__dirname, '..', '..', 'dist');
-  if (!fs.existsSync(dist)) return null;
-  const whl = fs.readdirSync(dist).filter((f) => f.endsWith('.whl')).sort();
-  return whl.length ? path.join(dist, whl[whl.length - 1]) : null;
+  const version = require('../../package.json').version;
+  return findWheelForVersion(dist, version);
 }
 
 function run(cmd, args) {

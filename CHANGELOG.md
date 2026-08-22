@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`takkub release` ไม่ build wheel ใหม่ → npm publish แนบ wheel เวอร์ชันเก่าไปเงียบๆ** (#340) —
+  `dist/` เป็น gitignore ไม่มีใครเห็นว่าค้าง wheel เวอร์ชันก่อนอยู่ ตอน publish 1.0.84 tarball
+  แนบ `1.0.82-py3-none-any.whl` ไปแทน ผู้ใช้ `npm i -g agent-takkub@latest` ได้โค้ดเก่าโดยไม่มี
+  อะไรเตือน → root cause: 3 จุดพร้อมกัน (1) `release()` bump เวอร์ชันแต่ไม่เคย build wheel เอง
+  (2) ไม่มี guard เทียบเวอร์ชันก่อน publish (3) `postinstall.js`'s `findWheel()` เลือกด้วย
+  `readdirSync().sort()` ตัวสุดท้าย — string sort ทำให้ "1.0.9" > "1.0.10" → แก้ทั้ง 3: `release()`
+  เรียก `build_wheel()` (`python -m build --wheel`, ลบ `dist/*.whl` เก่าทิ้งก่อนเสมอ) หลัง commit+tag
+  ของจริง; `npm publish` มี `prepublishOnly` (`npm/scripts/preflight-publish.js`) เทียบเวอร์ชันใน
+  `package.json` กับชื่อไฟล์ wheel ใน `dist/` ตายทันทีถ้าไม่ตรง/ไม่มี/มีมากกว่า 1 ไฟล์; `postinstall.js`
+  เลือก wheel จากเวอร์ชันที่ประกาศใน `package.json` ตรงๆ (`findWheelForVersion`, shared ใน
+  `npm/scripts/lib.js`)
+  + tests: `TestBuildWheel`/`TestReleaseWheelStep` (`tests/test_release.py`),
+  `npm/scripts/lib.test.js`, `npm/scripts/preflight-publish.test.js`
+
 ## [v1.0.84] - 2026-08-21
 
 ### Changed (เปลี่ยน)

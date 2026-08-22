@@ -211,6 +211,37 @@ def create_github_release(
     return True, (out[-1] if out else "")
 
 
+# `dist/` is gitignored, so a wheel built for a previous version can sit
+# there unnoticed across many releases. `npm publish` bundles whatever's in
+# dist/ verbatim — without this step it happily shipped v1.0.82's code under
+# the v1.0.84 tag (#340). Always deletes whatever's there first and rebuilds,
+# so exactly one (the just-bumped) wheel remains.
+def build_wheel(repo_root: str | pathlib.Path, *, timeout: float = 300.0) -> pathlib.Path:
+    repo_root = pathlib.Path(repo_root)
+    dist = repo_root / "dist"
+    dist.mkdir(exist_ok=True)
+    for whl in dist.glob("*.whl"):
+        whl.unlink()
+    subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=_SUBPROCESS_NO_WINDOW,
+    )
+    wheels = list(dist.glob("*.whl"))
+    if len(wheels) != 1:
+        raise RuntimeError(
+            f"expected exactly one wheel in dist/ after `python -m build --wheel`, "
+            f"found {len(wheels)}: {[w.name for w in wheels]}"
+        )
+    return wheels[0]
+
+
 def _semver_tuple(v: str) -> tuple[int, int, int]:
     a, b, c = (int(x) for x in v.split("."))
     return (a, b, c)
@@ -250,6 +281,7 @@ def release(
     dry_run: bool = False,
     allow_empty: bool = False,
     do_github_release: bool = True,
+    do_build_wheel: bool = True,
     today: str | None = None,
 ) -> dict:
     """Run the release ceremony. Returns a summary dict. With dry_run=True
@@ -309,6 +341,8 @@ def release(
         "dry_run": dry_run,
         "committed": False,
         "tagged": False,
+        "wheel_built": False,
+        "wheel_path": "",
         "github_released": False,
         "github_url": "",
         "github_error": "",
@@ -351,7 +385,15 @@ def release(
         if do_tag:
             _git(repo_root, "tag", "-a", tag, "-m", tag)
             summary["tagged"] = True
-    except (subprocess.SubprocessError, OSError) as exc:
+
+        # Build the wheel `npm publish` will bundle — only for a real
+        # (committed + tagged) release; a rebuild failure aborts the whole
+        # release rather than leaving a stale wheel to publish silently.
+        if do_build_wheel and do_commit and do_tag:
+            wheel_path = build_wheel(repo_root)
+            summary["wheel_built"] = True
+            summary["wheel_path"] = str(wheel_path)
+    except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
         # Restore both tracked files and undo a release commit if tag creation
         # failed after the commit. Preserve any pre-existing file content.
         try:
