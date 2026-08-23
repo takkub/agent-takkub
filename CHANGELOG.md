@@ -8,6 +8,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Remote Reports — แชร์รายงาน/dashboard ผ่าน tunnel domain ตัวเองด้วย share-token ต่อไฟล์** (#367) — `takkub report publish <file.html>
+  [--name] [--project] [--expires 30d] [--label]` → URL `https://<public_url>/<secret>/r/<project>/<name>?k=<token>` ส่งให้ใครก็ได้
+  โดยไม่ต้องมีรหัส Remote · `report list|revoke|rotate` (Lead-only) · route `GET /<secret>/r/...` ใน `remote/http_server.py` ไม่ผ่าน
+  bearer/password แต่ตรวจ token (`hmac.compare_digest`) ผิด/หมดอายุ/ไม่มีไฟล์ → 404 เหมือนกันหมด + lockout แยก + CSP/no-store/noindex ·
+  store `runtime/exports/<ns>/reports/` + `_shares.json` (`remote/reports.py`, standalone-HTML validator reject asset ภายนอก) · ลิงก์ใช้ได้
+  เฉพาะตอนเปิด Remote + tunnel รัน (CLI พิมพ์สถานะทุกครั้ง) · reviewer MERGE-WITH-FIX (`docs/reviews/2026-08-23-367-remote-reports-review.md`)
+
 - **Workspace 1.2.0 เฟส 8 Obsidian hardening** (#365, `10_OBSIDIAN_HARDENING.md`) — `project_identity.resolve_project_id()` (project_id
   จาก `config.load_projects()` ตัวเดียว V2/V1 ไม่นิยามซ้ำ) · `obsidian_metadata.NoteMetadata` canonical frontmatter (knowledge_id/
   project_id/source/kind/trust/content_hash/created_at/updated_at) ใส่ทุก note ที่ cockpit เขียน (`vault_mirror.py`; page เก่าไม่แตะ
@@ -123,6 +130,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ผ่าน repo guard subprocess no-window/encoding + keepalive + editor_widget targeted รอบเดียว
 
 ### Fixed (แก้)
+
+- **Project Explorer ย้ายเข้า sidebar PROJECTS ใต้การ์ดโปรเจค** (#365 feedback) — เดิมเป็น QSplitter panel แยกกลายเป็น 3 คอลัมน์ →
+  ตอนนี้ tree ฝังใต้ row ของโปรเจคที่เลือก (chevron บนการ์ดยุบ/ขยาย, จำ state ต่อโปรเจค key เดิม) `project_nav.py` · `project_tab.py`
+  เหลือ pane area อย่างเดียว · ADR `adr-workspace-shell.md` อัปเดต
+- **พิมพ์ใน Monaco editor ไม่ได้** — คลิกทำให้ `QWebEngineView` ได้ Qt focus แต่ DOM focus ไม่เข้า Monaco (cursor ไม่กระพริบ คีย์หาย) →
+  `_EditorWebView.focus()` forward ทั้ง Qt + `focusActiveEditor()` ใน page ตอน click/focusIn/เปิดไฟล์/โชว์ dock
 
 - **task ledger: `os.replace` retry บน Windows** — `_atomic_write` เจอ `WinError 5` ชั่วคราว (handle อื่นอ่านไฟล์อยู่/AV) แล้ว
   เด้ง warning "[ledger] เขียน INDEX.md ไม่สำเร็จ" แทน notice จริง (CI Windows flake `test_orchestrator_shard`) → bounded retry 8 ครั้ง
