@@ -162,6 +162,9 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         except OSError as e:
             _log.warning("save_policy: could not delete %s: %s", PANE_TOOLS_POLICY_FILE, e)
             return False
+        from .core.storage.dual_write import dual_write_pane_tools_policy
+
+        dual_write_pane_tools_policy({})
         return True
 
     # Validate input.
@@ -205,6 +208,9 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
             tmp.write("\n")
             tmp_path = pathlib.Path(tmp.name)
         tmp_path.replace(PANE_TOOLS_POLICY_FILE)
+        from .core.storage.dual_write import dual_write_pane_tools_policy
+
+        dual_write_pane_tools_policy(payload)
         return True
     except OSError as e:
         _log.warning("save_policy: could not write %s: %s", PANE_TOOLS_POLICY_FILE, e)

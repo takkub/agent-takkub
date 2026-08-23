@@ -125,6 +125,9 @@ def save_policy(policy: dict[str, list[str]]) -> bool:
         except OSError as e:
             _log.warning("save_policy: could not delete %s: %s", SKILL_POLICY_FILE, e)
             return False
+        from .core.storage.dual_write import dual_write_skill_policy
+
+        dual_write_skill_policy({})
         return True
 
     for role, names in policy.items():
@@ -155,6 +158,9 @@ def save_policy(policy: dict[str, list[str]]) -> bool:
             json.dump(payload, tmp, indent=2, ensure_ascii=False)
             tmp.write("\n")
         tmp_path.replace(SKILL_POLICY_FILE)
+        from .core.storage.dual_write import dual_write_skill_policy
+
+        dual_write_skill_policy(payload)
         return True
     except OSError as e:
         _log.warning("save_policy: could not write %s: %s", SKILL_POLICY_FILE, e)

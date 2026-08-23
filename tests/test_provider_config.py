@@ -287,6 +287,38 @@ class TestSaveProviders:
         provider_config.save_providers({"backend": "codex", "ml": "openrouter"})
         assert provider_config.load_providers() == {"backend": "codex"}
 
+    def test_save_dual_writes_global_and_every_project_into_v2(
+        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    ) -> None:
+        """#362 wave 1: `save_providers()` must gather every scope itself
+        (global + each `config.list_project_names()` entry) and hand the
+        merged result to `dual_write_routing` — it can only touch ONE scope
+        per call, so nothing else assembles the full picture."""
+        from agent_takkub import config
+        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+        from agent_takkub.core.storage.legacy_reader import read_json
+
+        data_home = tmp_path / "data_home"
+        (data_home / "v2").mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.core.storage.dual_write._effective_data_home",
+            lambda dh=None: data_home,
+        )
+
+        proj_dir = tmp_path / "projects" / "proj-a"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "role-providers.json").write_text(
+            json.dumps({"qa": "gemini"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
+
+        provider_config.save_providers({"backend": "codex"})
+
+        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
+        written = read_json(target)
+        assert written["global"] == {"backend": "codex"}
+        assert written["projects"] == {"proj-a": {"qa": "gemini"}}
+
 
 class TestRoleProviderMap:
     def test_maps_each_role_to_its_cli(self, redirect_config_path: Path) -> None:

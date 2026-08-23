@@ -103,6 +103,10 @@ def _save(entries: dict[str, dict[str, str]]) -> None:
     tmp.write_text(json.dumps(cleaned, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
 
+    from .core.storage.dual_write import dual_write_role_models
+
+    dual_write_role_models(cleaned)
+
 
 def model_for(role: str, provider: str) -> str | None:
     """Model configured for *role* **when it spawns on *provider***, else None.

@@ -148,6 +148,15 @@ def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
     tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
+    from . import config as _config
+    from .core.storage.dual_write import dual_write_routing
+    from .core.storage.legacy_reader import read_json
+
+    dual_write_routing(
+        read_json(config_path(None)),
+        {name: read_json(config_path(name)) for name in _config.list_project_names()},
+    )
+
 
 def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[str, str]:
     """Return ``{role: provider_for(role)}`` for the given roles (scoped to

@@ -62,6 +62,10 @@ def _save(models: dict[str, str]) -> None:
     tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
 
+    from .core.storage.dual_write import dual_write_provider_models
+
+    dual_write_provider_models(cleaned)
+
 
 def model_for(provider: str) -> str | None:
     """Return the configured model, or ``None`` to use the provider default."""
