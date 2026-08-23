@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 291,
+  "module_count": 292,
   "modules": [
     {
       "module": "agent_takkub",
@@ -170,6 +170,7 @@
         "agent_takkub",
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.issues"
       ],
       "imported_by": [
@@ -177,7 +178,7 @@
         "agent_takkub.auto_issue_signals"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.auto_issue_signals",
@@ -451,7 +452,8 @@
     {
       "module": "agent_takkub.config",
       "imports": [
-        "agent_takkub.core.storage.dual_write"
+        "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority"
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
@@ -551,7 +553,7 @@
         "agent_takkub.worktree_manager"
       ],
       "fan_in": 95,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core",
@@ -1345,9 +1347,10 @@
       "imported_by": [
         "agent_takkub.core.migration.engine",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.disk_usage"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 7
     },
     {
@@ -1674,6 +1677,7 @@
         "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.routing.policy",
         "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_models",
         "agent_takkub.role_models"
       ],
@@ -1682,7 +1686,7 @@
         "agent_takkub.core.routing.facade"
       ],
       "fan_in": 2,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.scheduling",
@@ -1880,6 +1884,7 @@
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_resume",
         "agent_takkub.config",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.custom_roles",
         "agent_takkub.exec_mode",
         "agent_takkub.issues",
@@ -1892,7 +1897,7 @@
         "agent_takkub.rtk_helper",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 14,
+      "fan_in": 15,
       "fan_out": 3
     },
     {
@@ -1923,10 +1928,11 @@
         "agent_takkub.core.routing.router",
         "agent_takkub.core.storage.dual_write",
         "agent_takkub.core.storage.paths",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.design_actions",
         "agent_takkub.doctor"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 1
     },
     {
@@ -1940,9 +1946,10 @@
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.model_catalog.legacy",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_config"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 0
     },
     {
@@ -1964,6 +1971,33 @@
       ],
       "fan_in": 9,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.storage.v2_authority",
+      "imports": [
+        "agent_takkub.core.migration.steps_v1",
+        "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.legacy_reader",
+        "agent_takkub.core_v2_settings"
+      ],
+      "imported_by": [
+        "agent_takkub.auto_issue_capture",
+        "agent_takkub.config",
+        "agent_takkub.core.routing.router",
+        "agent_takkub.custom_roles",
+        "agent_takkub.doctor",
+        "agent_takkub.issues",
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_models",
+        "agent_takkub.provider_state",
+        "agent_takkub.remote.session_store",
+        "agent_takkub.role_models",
+        "agent_takkub.skill_policy"
+      ],
+      "fan_in": 13,
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.core.versioning",
@@ -2036,9 +2070,10 @@
         "agent_takkub.core.routing.flag",
         "agent_takkub.core.scheduling.facade",
         "agent_takkub.core.scheduling.flag",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.settings_core_v2"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 1
     },
     {
@@ -2058,6 +2093,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.roles"
       ],
       "imported_by": [
@@ -2070,7 +2106,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 7,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.design_actions",
@@ -2143,6 +2179,7 @@
         "agent_takkub.core.secrets.backends",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.core.versioning.compatibility",
         "agent_takkub.core.versioning.detector",
         "agent_takkub.core.versioning.probe",
@@ -2164,7 +2201,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 23
+      "fan_out": 24
     },
     {
       "module": "agent_takkub.editor_service",
@@ -2348,7 +2385,8 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.config",
-        "agent_takkub.core.storage.dual_write"
+        "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority"
       ],
       "imported_by": [
         "agent_takkub.auto_issue_capture",
@@ -2357,7 +2395,7 @@
         "agent_takkub.update_worker"
       ],
       "fan_in": 4,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.job_object_manager",
@@ -2766,6 +2804,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
         "agent_takkub.roles",
@@ -2789,7 +2828,7 @@
         "agent_takkub.skill_policy"
       ],
       "fan_in": 15,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.path_safe",
@@ -3011,6 +3050,7 @@
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
         "agent_takkub.core.storage.legacy_reader",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.role_models"
@@ -3043,7 +3083,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 25,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.provider_install",
@@ -3077,6 +3117,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -3088,7 +3129,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 6,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_probe",
@@ -3146,6 +3187,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -3158,7 +3200,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 7,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_update",
@@ -3363,13 +3405,14 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.remote.config"
       ],
       "imported_by": [
         "agent_takkub.remote.auth"
       ],
       "fan_in": 1,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.remote.settings_dialog",
@@ -3438,6 +3481,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -3449,7 +3493,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.roles",
@@ -4077,6 +4121,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.v2_authority",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.roles",
         "agent_takkub.skill_scan"
@@ -4091,7 +4136,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 7,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.skill_scan",

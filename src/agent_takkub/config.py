@@ -471,7 +471,19 @@ def project_docs_dir(project_ns: str) -> Path:
 
 
 def load_projects() -> dict:
+    """``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on
+    and the dual-written ``v2/`` projects registry mirror exists, returns
+    THAT instead of V1's ``projects.json`` — same shape (`dual_write_projects`
+    mirrors the exact document this function would otherwise parse). Falls
+    back to V1 on any v2 miss (not migrated / corrupt mirror)."""
+    from .core.storage.v2_authority import read_projects_registry, v2_authority_enabled
+
     empty = {"active": None, "projects": {}}
+    if v2_authority_enabled():
+        v2_data = read_projects_registry()
+        if isinstance(v2_data, dict):
+            return v2_data
+
     if not PROJECTS_JSON.exists():
         return empty
     try:

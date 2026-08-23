@@ -347,6 +347,14 @@ def _get_local_issues_path(cwd: str | Path | None) -> Path:
 
 def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
     path = _get_local_issues_path(cwd)
+
+    from .core.storage.v2_authority import read_local_issues, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_issues = read_local_issues(path)
+        if v2_issues is not None:
+            return v2_issues
+
     if not path.exists():
         return []
     try:

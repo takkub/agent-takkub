@@ -95,6 +95,16 @@ def config_path(project: str | None = None) -> Path:
     return _CONFIG_PATH
 
 
+def _sanitize_providers(data: dict) -> dict[str, str]:
+    # Drop entries with unknown providers so a typo in the JSON doesn't
+    # silently route a role to nothing.
+    return {
+        str(role).lower(): str(provider).lower()
+        for role, provider in data.items()
+        if str(provider).lower() in VALID_PROVIDERS
+    }
+
+
 def load_providers(project: str | None = None) -> dict[str, str]:
     """Return the role→provider mapping for ``project`` (or global when None).
 
@@ -102,7 +112,34 @@ def load_providers(project: str | None = None) -> dict[str, str]:
     a fresh tab inherits global overrides until it saves its own. Only the
     global file is auto-created on first read (so the user has one to discover);
     per-project files are written lazily on first save. Invalid JSON or non-dict
-    content is treated as empty (silent recovery — never blocks spawn)."""
+    content is treated as empty (silent recovery — never blocks spawn).
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` routing mirror exists, sanitizes THAT scope
+    (global or this project's entry) instead of the V1 file — same
+    sanitizer either way. A project with no v2 entry AT ALL falls back to
+    the V2 global (mirrors V1's "no per-project file -> inherit global").
+    A project WITH an entry (even ``{}``) resolves from it directly, no
+    inheritance — this can't perfectly distinguish V1's "file exists and
+    is empty" (no inheritance) from "file never existed" (inherit) the way
+    V1 itself does, because `dual_write_routing` re-derives every known
+    project's scope on every save via a fail-open JSON read that already
+    collapses "missing" and "empty" to the same `{}` (wave 1's own
+    limitation, not something this reader can recover). In practice this
+    only matters for a project created after the last routing save, before
+    the next dual-write refresh — falls back to V1 the moment that gap
+    shows up as an actual override mismatch, since flag-off is always one
+    env var away.
+    """
+    from .core.storage.v2_authority import read_routing, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_routing = read_routing()
+        if v2_routing is not None:
+            if project and project in v2_routing["projects"]:
+                return _sanitize_providers(v2_routing["projects"][project])
+            return _sanitize_providers(v2_routing["global"])
+
     if project:
         p = config_path(project)
         if not p.exists():
@@ -123,13 +160,7 @@ def load_providers(project: str | None = None) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    # Sanitize: drop entries with unknown providers so a typo in the
-    # JSON doesn't silently route a role to nothing.
-    return {
-        str(role).lower(): str(provider).lower()
-        for role, provider in data.items()
-        if str(provider).lower() in VALID_PROVIDERS
-    }
+    return _sanitize_providers(data)
 
 
 def save_providers(mapping: dict[str, str], project: str | None = None) -> None:

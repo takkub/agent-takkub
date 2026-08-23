@@ -96,14 +96,28 @@ def load_policy() -> dict[str, dict[str, list[str]]]:
 
     If file is missing, corrupt, or empty → return {}. Never raises.
     Safe to call at any time; locks not needed (single JSON reader).
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
+    the V1 file (same shape, same validation below). Falls back to V1 on any
+    v2 miss.
     """
-    if not PANE_TOOLS_POLICY_FILE.is_file():
-        return {}
-    try:
-        data = json.loads(PANE_TOOLS_POLICY_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        _log.debug("load_policy: could not read %s: %s", PANE_TOOLS_POLICY_FILE, e)
-        return {}
+    from .core.storage.v2_authority import read_pane_tools_policy, v2_authority_enabled
+
+    data: dict | None = None
+    if v2_authority_enabled():
+        v2_payload = read_pane_tools_policy()
+        if isinstance(v2_payload, dict):
+            data = v2_payload
+
+    if data is None:
+        if not PANE_TOOLS_POLICY_FILE.is_file():
+            return {}
+        try:
+            data = json.loads(PANE_TOOLS_POLICY_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            _log.debug("load_policy: could not read %s: %s", PANE_TOOLS_POLICY_FILE, e)
+            return {}
 
     if not isinstance(data, dict):
         _log.warning("load_policy: file root is not dict, treating as empty")

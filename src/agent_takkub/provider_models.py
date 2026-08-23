@@ -28,7 +28,19 @@ def _providers() -> frozenset[str]:
 
 
 def _load() -> dict[str, str]:
-    """Load and sanitize configured models; invalid state behaves as empty."""
+    """Load and sanitize configured models; invalid state behaves as empty.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
+    file — same sanitizer either way. Falls back to V1 on any v2 miss.
+    """
+    from .core.storage.v2_authority import read_provider_models, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_data = read_provider_models()
+        if isinstance(v2_data, dict):
+            return _sanitize(v2_data)
+
     if not _PATH.exists():
         return {}
     try:
@@ -37,6 +49,10 @@ def _load() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
+    return _sanitize(data)
+
+
+def _sanitize(data: dict) -> dict[str, str]:
     providers = _providers()
     cleaned: dict[str, str] = {}
     for key, value in data.items():
