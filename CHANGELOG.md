@@ -6,6 +6,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 5 widget + เฟส 6 Design Director UI** (#365) — `preview_widget.py` PreviewHost: **QWebEngineView 1 ตัวทั้งแอป**
+  (dock เหมือน editor) lazy create/destroy · URL (loopback-only) / file mode · device presets Desktop/Tablet/Mobile · Refresh/Open
+  externally · **navigation policy gate ทุก request** ผ่าน `preview_controller.navigation_allowed` · **ไม่มี QWebChannel bridge** ·
+  off-the-record profile · discard-on-hidden (#364 lever 1) · เฟส 6: artifact header (lookup by target) + Approve/Revise →
+  `design_approve`/`design_revise` · `main_window.py` ต่อ `previewOpened/Updated/Closed` → widget (CLI `takkub preview` สั่งเปิดได้) ·
+  RAM ad-hoc: เปิด preview ครั้งแรก ≈ +110–120 MB in-process (ตามคาด ~200–300 MB รวม Monaco+Preview) · full RAM acceptance 3 โปรเจกต์
+  = งานเก็บตกถัดไป
+  + tests: `tests/test_preview_widget.py` (36 — lazy/destroy · nav policy · no-bridge guard · presets · discard · approve/revise ผ่าน
+  design_actions จริง · CLI→widget · opt-in real-QWebEngineView smoke)
+
 - **Phase 10 ชิ้น 2 — readers สลับไปอ่าน `v2/` ภายใต้ `TAKKUB_V2_AUTHORITY` (default **OFF**)** (#362) — `core/storage/v2_authority.py`
   helper เดียว: flag ON + v2 target มี → อ่าน v2 (unwrap `.data`) ไม่งั้น V1 เดิม · fail-open กลับ V1 ทุกจุด (ไม่มี/พัง → V1 + log) ·
   ครอบทุก domain ที่ dual-write: role_models · provider_models · provider_state · pane_tools_policy · skill_policy · custom_roles ·
