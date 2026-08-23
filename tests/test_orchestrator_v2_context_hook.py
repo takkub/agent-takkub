@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 
 from agent_takkub.orchestrator import _inject_v2_context
 
@@ -51,16 +51,22 @@ def test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller(monkey
     monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
     import agent_takkub.core.brain.facade as facade
 
+    entered = threading.Event()
+    release = threading.Event()
+
     def slow(*a, **kw):
-        time.sleep(2)
+        entered.set()
+        release.wait(timeout=10)
         return "## Context (Takkub brain)\n- too slow to matter"
 
     monkeypatch.setattr(facade, "build_context_for_assign", slow)
-    started = time.monotonic()
-    out = _inject_v2_context(_TASK, "proj", "backend", "backend", "claude")
-    elapsed = time.monotonic() - started
-    assert out == _TASK
-    assert elapsed < 1.0  # bounded by the hook's own 300ms timeout, not the 2s worker
+    try:
+        out = _inject_v2_context(_TASK, "proj", "backend", "backend", "claude")
+        assert out == _TASK
+        assert entered.wait(timeout=5)  # worker actually started
+        assert not release.is_set()  # we're back before the worker was ever released
+    finally:
+        release.set()  # let the background thread finish, don't leak it
 
 
 def test_exception_in_facade_call_fails_open(monkeypatch):

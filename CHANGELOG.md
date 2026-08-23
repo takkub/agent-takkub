@@ -8,6 +8,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **flaky test ตัวที่ 3: assert เวลาบนนาฬิกาจริง** — `test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller`
+  วัด wall clock ว่า hook ต้องคืนค่าใน `< 1.0` วินาที (timeout ของ hook เอง 300ms) — บน windows
+  runner ที่โหลดหนักโปรเซสถูก starve จน 300ms กลายเป็น 1.23s แล้วตก (production ถูกต้องแล้ว —
+  `assert out == _TASK` ผ่าน แปลว่าเดินเส้น timeout จริง) → เปลี่ยนไปพิสูจน์สัญญาแบบ deterministic
+  ด้วย `threading.Event` คู่ (`entered`/`release`): worker บล็อกค้างที่ `release.wait()` แล้ว assert
+  `not release.is_set()` หลัง hook คืนค่า = พิสูจน์ว่าไม่ได้รอผลของ worker โดยไม่มีตัวเลขเวลาสักตัว
+  · แข็งแรงกว่าเดิมด้วย: `assert entered.wait()` พิสูจน์ว่า worker ถูกเรียกจริง ซึ่งของเดิมไม่เคยเช็ค
+  · `try/finally` ปล่อย thread เสมอ ไม่ทิ้งค้าง
+
+
+### Fixed (แก้)
+
 - **TOCTOU ใน `pythonLooksExecutable()` — CodeQL alert #29 (`js/file-system-race`)** —
   `npm/scripts/lib.js` เช็ค `statSync(py)` (isFile + size) แล้วค่อย `openSync(py)` อีกครั้งเพื่ออ่าน
   PE header = check-then-use บน **ชื่อไฟล์** คนละจังหวะ ไฟล์ที่ตรวจกับไฟล์ที่อ่านจริงอาจไม่ใช่ตัวเดียวกัน
