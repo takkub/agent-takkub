@@ -76,16 +76,18 @@ src/agent_takkub/core/
 | Phase | ชื่อ | ส่งมอบอะไร | ปล่อย release ได้ไหม | ประเมิน |
 |---|---|---|---|---|
 | **0** | Audit + baseline | เอกสาร 3 ไฟล์นี้ + test baseline | — | ✅ **เสร็จแล้ว** |
-| **1** | Domain models + contracts | `core/models/`, `core/contracts/`, import contracts ใหม่, unit tests | ได้ (dead code ที่ไม่มีใครเรียก) | S |
-| **2** | Provider adapter + Account + Router | wrap spawn 2 branch เป็น adapter, `ProviderAccount` registry, selector (priority/sticky/quota-aware), migrate `user_profile` | ได้ (flag ปิด = เดิม) | **L** |
-| **3** | Secret + Version + Compatibility + Migration engine | `SecretManager`, `version.json`, compat matrix, migration dry-run/journal/rollback, `doctor` เพิ่มบรรทัด | ได้ | M |
-| **4** | Capability Hub | รวม skill/mcp/plugin registry, ย้าย skill store ออกจากชื่อ `.claude` (คิวที่ user สั่งไว้แล้ว), permission engine 2 ชั้น | ได้ | M |
-| **5** | Conversation V2 + Checkpoint | Takkub-owned message store, ingest adapter ต่อ provider, rolling summary, checkpoint, provider-switch | ได้ | **L** |
-| **6** | Second Brain | Memory Manager + candidate pipeline + retrieval + Context Builder ที่ assignment-time + reflection ที่ done | ได้ | **L** |
-| **7** | Scheduler + Resource | ขยาย `ResourceGovernor` เป็น provider/account/project slot + priority + backpressure + pause/checkpoint | ได้ | M |
-| **8** | Storage V2 migration | แยก config/state/runtime/cache, `takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` | ได้ (ต้องมี rollback) | **L** |
-| **9** | UI/CLI | หน้า Accounts/Pools/Models/Routing/Brain/Scheduler/Migration ใน Settings | ได้ | M |
-| **10** | Legacy deprecation | V2.0 legacy supported → V2.1 default V2 → V2.2 warning → V3.0 ลบ | ได้ | S |
+| **1** | Domain models + contracts | `core/models/`, `core/contracts/`, import contracts ใหม่, unit tests | ได้ (dead code ที่ไม่มีใครเรียก) | ✅ เสร็จ — `c12a87e` |
+| **2** | Provider adapter + Account + Router | wrap spawn 2 branch เป็น adapter, `ProviderAccount` registry, selector (priority/sticky/quota-aware), migrate `user_profile` | ได้ (flag ปิด = เดิม) | ✅ เสร็จ — Phase 3 merge `6d1606b` (adapter+account+router) |
+| **3** | Secret + Version + Compatibility + Migration engine | `SecretManager`, `version.json`, compat matrix, migration dry-run/journal/rollback, `doctor` เพิ่มบรรทัด | ได้ | ✅ เสร็จ — Secret `ffbddeb` · Version/Migration `027ebe8` |
+| **4** | Capability Hub | รวม skill/mcp/plugin registry, ย้าย skill store ออกจากชื่อ `.claude` (คิวที่ user สั่งไว้แล้ว), permission engine 2 ชั้น | ได้ | ✅ เสร็จ — `ecfa9b6` · PermissionEngine **wired เข้า cmd_guard แล้ว** (Wave C `3143bf8`) |
+| **5** | Conversation V2 + Checkpoint | Takkub-owned message store, ingest adapter ต่อ provider, rolling summary, checkpoint, provider-switch | ได้ | ✅ เสร็จ — `382029f` · kimi/cursor ingest `440b990` |
+| **6** | Second Brain | Memory Manager + candidate pipeline + retrieval + Context Builder ที่ assignment-time + reflection ที่ done | ได้ | ✅ เสร็จ — `2e82d8a` + `93c117f` |
+| **7** | Scheduler + Resource | ขยาย `ResourceGovernor` เป็น provider/account/project slot + priority + backpressure + pause/checkpoint | ได้ | ✅ เสร็จ — 8a `17cbb80` |
+| **8** | Storage V2 migration | แยก config/state/runtime/cache, `takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` | ได้ (ต้องมี rollback) | ✅ เสร็จ — 8b `4b156d5` · **`migrate apply` รันจริงบน prod Windows 2026-08-23** (`docs/v2/wave-b-apply-report.md`) · Mac ตัดออกจาก critical path (user) |
+| **9** | UI/CLI | หน้า Accounts/Pools/Models/Routing/Brain/Scheduler/Migration ใน Settings | ได้ | ✅ เสร็จ — `b32a618` + `cc0652f` |
+| **10** | Legacy deprecation | V2.0 legacy supported → V2.1 default V2 → V2.2 warning → V3.0 ลบ | ได้ | ⏭ **ถัดไป** — prerequisite ครบแล้ว: flag default-on ตั้งแต่ 1.0.84 · layout migrate แล้ว (`mixed`) · model resolver shadow-read + `model_pin_v2_drift` telemetry (`7ebeac1`) เป็นตัววัดว่า V2 พร้อมเป็น source of truth หรือยัง |
+
+> **สถานะ 2026-08-23 (Wave D, epic #309):** Phase 0–9 เสร็จครบ ship ทีละ flag จน default-on ใน 1.0.84 · layout migration รันจริงบน prod แล้ว · 4 gap ใน `2.0.0-migration-plan.md` §1 ปิดครบ (ingest / argv extract / model registry+resolver / PermissionEngine) · เหลือ Phase 10 (legacy deprecation) ซึ่งเป็น release-policy decision ไม่ใช่งาน engineering ล้วน — ดู `2.0.0-migration-plan.md` §3 Wave D + ประเด็นเลขเวอร์ชัน
 
 **ข้อเสนอลำดับที่ต่างจาก blueprint:** blueprint วาง Version/Migration เป็น Phase 3 และ Secret ไว้ท้ายๆ
 แผนนี้ **ดึง Secret Manager ขึ้นมาอยู่ Phase 3 ด้วย** เพราะ Phase 2 จะสร้าง `ProviderAccount` ที่ต้องอ้าง credential — ถ้าไม่มี `secretRef` ตั้งแต่ต้น จะได้ account registry ที่เก็บ path credential ดิบๆ แล้วต้องมา migrate ตัวเองอีกรอบ
