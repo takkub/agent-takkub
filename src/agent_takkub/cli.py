@@ -52,6 +52,11 @@ LEAD_ONLY_COMMANDS = frozenset(
         # machine-level npm installs — a teammate pane must never mutate the
         # host toolchain mid-task; Lead/terminal decides when to add a CLI.
         "provider",
+        # #367 Remote Reports: publishing/revoking a share link is Lead's
+        # call (same reasoning as harvest/goal above) — enforced here, not
+        # server-side, since `cmd_report` never talks to cli_server (see its
+        # docstring).
+        "report",
     }
 )
 
@@ -113,6 +118,7 @@ _WRITE_COMMANDS_REQUIRE_CONFIRMATION = frozenset(
         "end-session",
         "preview",
         "design",
+        "report",
     }
 )
 
@@ -948,6 +954,103 @@ def cmd_design(args: argparse.Namespace) -> dict:
     if resp.get("ok") and artifact:
         print(f"  artifact_id={artifact.get('artifact_id')} status={artifact.get('status')}")
     return resp
+
+
+def _load_remote_reports():
+    """Dynamic import — same reason/pattern as `main_window.py::_boot`'s
+    `importlib.import_module("agent_takkub.remote")`: the `remote-bolt-on-
+    isolation` import-linter contract forbids `cli.py` from statically
+    importing anything under `agent_takkub.remote` (a plain `from .remote
+    import reports` here would be a contract violation), and this way
+    `rm -rf remote/` degrades `takkub report` to a plain `ModuleNotFoundError`
+    the caller turns into a clean "not installed" result instead of a
+    traceback."""
+    import importlib
+
+    return importlib.import_module("agent_takkub.remote.reports")
+
+
+def cmd_report(args: argparse.Namespace) -> dict:
+    """`takkub report publish|list|revoke|rotate` (#367 Remote Reports) —
+    direct filesystem I/O against `remote/reports.py`'s store, no IPC to the
+    running cockpit: the store lives under `RUNTIME_DIR/exports/<ns>/
+    reports/`, and `remote/http_server.py`'s `/r/` route re-reads
+    `_shares.json` on every request — nothing here needs the cockpit
+    process to be running, so `publish`/`list`/`revoke`/`rotate` all still
+    work with the cockpit closed (the printed remote-status line says
+    whether the URL is actually reachable *right now*). Lead-only is
+    enforced purely by the CLI role gate (`LEAD_ONLY_COMMANDS`, checked in
+    `main()` before this ever runs) — there's no server in this path to add
+    a second gate to."""
+    try:
+        reports_mod = _load_remote_reports()
+    except ModuleNotFoundError:
+        return {
+            "ok": False,
+            "msg": "remote/ is not installed in this build — Remote Reports unavailable",
+        }
+
+    project = getattr(args, "project", None) or _from_project()
+    if not project:
+        try:
+            project, _ = config.active_project()
+        except Exception:
+            project = None
+
+    def _url(name: str, token: str) -> str:
+        try:
+            project_ns = config.validate_name(project or "default", "project")
+        except ValueError:
+            return ""
+        return reports_mod.build_url(project_ns, name, token)
+
+    action = args.report_action
+    status_line = reports_mod.remote_status_text()
+    try:
+        if action == "publish":
+            name = args.name or Path(args.file).name
+            record, warnings = reports_mod.publish(
+                args.file, name, project, expires=args.expires, label=args.label
+            )
+            url = _url(record.name, record.token)
+            lines = [status_line]
+            lines.append(
+                f"URL: {url}"
+                if url
+                else "(local file only — remote public_url/secret_path not set up yet)"
+            )
+            lines.extend(f"warning: {w}" for w in warnings)
+            return {"ok": True, "msg": "\n".join(lines), "name": record.name, "url": url}
+        if action == "list":
+            records = reports_mod.list_shares(project)
+            lines = [status_line]
+            if not records:
+                lines.append("(no published reports)")
+            for r in records:
+                lines.append(
+                    f"  {r.name}  label={r.label or '-'}  created={r.created}  "
+                    f"expires={r.expires or 'never'}"
+                )
+                url = _url(r.name, r.token)
+                if url:
+                    lines.append(f"    {url}")
+            return {"ok": True, "msg": "\n".join(lines)}
+        if action == "revoke":
+            existed = reports_mod.revoke(args.name, project, delete=bool(args.delete))
+            if not existed:
+                return {"ok": False, "msg": f"no such report: {args.name}"}
+            suffix = " (file deleted)" if args.delete else " (file kept)"
+            return {"ok": True, "msg": f"revoked {args.name}{suffix}"}
+        if action == "rotate":
+            record = reports_mod.rotate(args.name, project)
+            url = _url(record.name, record.token)
+            lines = [status_line, f"rotated token for {record.name}"]
+            if url:
+                lines.append(f"URL: {url}")
+            return {"ok": True, "msg": "\n".join(lines), "url": url}
+        return {"ok": False, "msg": f"unknown report action: {action!r}"}
+    except reports_mod.ReportError as exc:
+        return {"ok": False, "msg": str(exc)}
 
 
 def cmd_harvest(args: argparse.Namespace) -> dict:
@@ -2901,6 +3004,44 @@ def main(argv: list[str] | None = None) -> int:
     sdz_rev.add_argument("--id", dest="artifact_id", required=True)
     sdz_rev.add_argument("--feedback", default="")
     sdz_rev.set_defaults(func=cmd_design)
+
+    # #367 Remote Reports — share a standalone file on the cockpit's own
+    # tunnel domain via a per-file token, instead of a Claude Artifact URL.
+    sr = sub.add_parser(
+        "report", help="Remote Reports — share a file on your own tunnel domain (#367)"
+    )
+    sr_sub = sr.add_subparsers(dest="report_action", required=True)
+    sr_pub = sr_sub.add_parser(
+        "publish", help="copy a standalone file into the reports store + mint/reuse its token"
+    )
+    sr_pub.add_argument("file", help="local .html/.png/.jpg/.svg/.pdf/.json/.md file")
+    sr_pub.add_argument(
+        "--name", default=None, help="stored filename (default: the source file's own name)"
+    )
+    sr_pub.add_argument(
+        "--project", default=None, help="project namespace (default: active project)"
+    )
+    sr_pub.add_argument(
+        "--expires",
+        default=None,
+        help="30d, 12h, or none — default: keep existing expiry on republish, else never",
+    )
+    sr_pub.add_argument("--label", default="", help="human label shown by `takkub report list`")
+    sr_pub.set_defaults(func=cmd_report)
+    sr_list = sr_sub.add_parser("list", help="show published reports for a project")
+    sr_list.add_argument("--project", default=None)
+    sr_list.set_defaults(func=cmd_report)
+    sr_revoke = sr_sub.add_parser(
+        "revoke", help="kill a report's link (file stays unless --delete)"
+    )
+    sr_revoke.add_argument("name")
+    sr_revoke.add_argument("--project", default=None)
+    sr_revoke.add_argument("--delete", action="store_true", help="also delete the stored file")
+    sr_revoke.set_defaults(func=cmd_report)
+    sr_rotate = sr_sub.add_parser("rotate", help="issue a new token for a report (old link dies)")
+    sr_rotate.add_argument("name")
+    sr_rotate.add_argument("--project", default=None)
+    sr_rotate.set_defaults(func=cmd_report)
 
     sh = sub.add_parser(
         "harvest",

@@ -52,7 +52,13 @@ takkub issue list                                      # ดู cockpit issue qu
 takkub issue new "<title>" --severity <low|med|high> --tag <a,b> --body "..."  # ลง agent-takkub repo เสมอ (default)
 takkub issue new "<title>" --no-cockpit-bug --body "..."  # opt-out: ลง repo ของ project ที่ active (cwd) แทน
 takkub mcp|plugins list·allow·deny·reset·add·remove    # ปรับ MCP/plugin policy ต่อ role (mutation lead-only)
+takkub report publish <file> [--name n] [--project p] [--expires 30d|12h|none] [--label "..."]  # (#367, lead only) แชร์ไฟล์ standalone (.html/.png/.jpg/.svg/.pdf/.json/.md) ผ่าน share-token URL บน tunnel domain ของ cockpit เอง แทน Claude Artifact URL — ชื่อเดิม republish = ไฟล์ใหม่ token เดิม (ลิงก์ไม่เปลี่ยน); ปฏิเสธ HTML ที่มี external <script>/<link>/<img> (ต้อง standalone จริง)
+takkub report list [--project p]                       # ดูรายการ report ที่ publish แล้ว + URL แต่ละอัน
+takkub report revoke <name> [--project p] [--delete]    # ตัดลิงก์ (token ตาย) — ไฟล์ยังอยู่เว้นแต่ใส่ --delete
+takkub report rotate <name> [--project p]               # ออก token ใหม่ — ลิงก์เก่าตายทันที ลิงก์ใหม่ใช้ได้
 ```
+
+**ข้อจำกัดสำคัญของ `takkub report`:** ลิงก์เปิดจากนอกเครื่องได้ **เฉพาะตอน Remote เปิดอยู่จริง** (Settings → Remote enabled + tunnel connect ขึ้น) — ปิด Remote อยู่ = publish/list ยังทำงาน (เขียนไฟล์ + คืน token ปกติ) แต่ลิงก์ที่ได้ยังเปิดจากนอกไม่ได้ ทุกครั้งที่ `publish`/`list`/`rotate` จะพิมพ์บรรทัดสถานะ Remote ให้ชัดเสมอ (`Remote: เปิดอยู่ (tunnel up) → URL ใช้ได้` หรือ `Remote: ปิดอยู่ → ...`) — คำสั่งนี้**ไม่เปิด Remote ให้อัตโนมัติ**, ต้องไปเปิดเองที่ Settings → Remote ก่อน (ยังไม่มีคำสั่ง CLI สำหรับเปิด/ปิด Remote)
 
 ถ้าไม่ระบุ `--cwd`: frontend/designer→web, backend→api, mobile→mobile (fallback web), devops→api (fallback infra), qa/reviewer/critic→first matched path
 
