@@ -4,6 +4,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`worktrees/` สะสมซากที่ git ไม่รู้จักจนหลายสิบ GB — `takkub worktree clean` มองไม่เห็น** (#355) —
+  วัดจากเครื่องจริง: `~/.agent-takkub/worktrees/TK-ERP` มี 44 โฟลเดอร์ 31.7 GB แต่ `git worktree list`
+  รู้จักแค่ 2 · ซากไม่มี `.git` ไม่มี branch · 99% ของขนาดคือ `node_modules` ตัวละ ~770 MB ·
+  `clean_isolated()`/`list_isolated()` iterate จาก `git worktree list` อย่างเดียว ไม่เคยมองดิสก์ จึง
+  ไม่มีวันเห็น — ผู้ใช้รัน `clean` ได้ "ok: 2 worktree(s)" ก็นึกว่าสะอาดแล้ว · **ต้นเหตุที่ทำให้ซากเกิด
+  ปิดไปแล้วตั้งแต่ #226/#227 (`9bd1a10`, 2026-08-15)** — `git worktree remove` เดิมเดินพาธธรรมดาไม่ใช่
+  extended-length บน Windows พังกลางทางที่ `node_modules` ลึกๆ แต่ registration/branch ถูกลบต่อไปแล้ว
+  (ตรงกับหลักฐานเป๊ะ: ไม่มี `.git` ไม่มี branch) ซากที่เจอสร้างเมื่อ 2026-07-28 = ก่อนไฟล์นั้น
+  → เพิ่ม `WorktreeManager.list_orphans()` สแกน `<DATA_HOME>/worktrees/<project>/*` บนดิสก์เทียบกับ
+  `git worktree list --porcelain` (จำกัดเฉพาะใต้ managed root — anchor ผิดตัวบน Windows อาจ resolve
+  ไปถึง drive root แล้วเดินทั้ง `C:\` · live-pane guard #187 ใช้ร่วมกัน dir ที่ pane ถืออยู่ไม่ถูกนับ)
+  · `takkub worktree clean` **รายงาน** orphan + ขนาดรวมเสมอแต่**ไม่ลบ** (อาจมีงานที่ git ไม่รู้จักค้าง)
+  · `--orphans` ลบทั้ง dir ผ่าน `remove_worktree_tree()` เดิม (long-path/readonly-safe) ·
+  `--orphans-node-modules-only` ลบแค่ `node_modules/` คืน ~99% ของพื้นที่แต่เก็บซอร์สไว้ — ทางที่
+  ปลอดภัยกว่าสำหรับคนไม่แน่ใจ · regression test ยืนยันว่า flow ปัจจุบันที่ rmtree ได้บางส่วนยัง
+  รายงาน leftover ดังๆ ไม่เงียบ · `dir_stats()` ย้ายจาก `disk_usage` มา `worktree_manager`
+  (ทิศทาง import เดิมผิด contract — `disk_usage` import จาก `worktree_manager` อยู่แล้ว)
+  + tests: `TestListOrphans` 6 เคส (`tests/test_worktree_manager.py`), CLI 6 เคส (`tests/test_cli.py`)
+
 ## [v1.0.87] - 2026-08-23
 
 ### Fixed (แก้)

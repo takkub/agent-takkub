@@ -1014,6 +1014,8 @@ class TestWorktreeCli:
         merge_calls: ClassVar[list] = []
         merge_live_paths_calls: ClassVar[list] = []
         clean_live_paths_calls: ClassVar[list] = []
+        orphans: ClassVar[list] = []
+        orphans_live_paths_calls: ClassVar[list] = []
 
         def __init__(self, *a, **k):
             pass
@@ -1033,6 +1035,10 @@ class TestWorktreeCli:
             type(self).clean_live_paths_calls.append(set(live_paths))
             return type(self).clean_lines
 
+        def list_orphans(self, root, live_paths=frozenset()):
+            type(self).orphans_live_paths_calls.append(set(live_paths))
+            return type(self).orphans
+
     @staticmethod
     def _no_cockpit(_payload):
         raise RuntimeError("agent-takkub cockpit is not running (no port file).")
@@ -1047,6 +1053,8 @@ class TestWorktreeCli:
         self._FakeWtMgr.clean_lines = ["REMOVED wt/qa-7"]
         self._FakeWtMgr.clean_live_paths_calls = []
         self._FakeWtMgr.merge_result = (True, "merged")
+        self._FakeWtMgr.orphans = []
+        self._FakeWtMgr.orphans_live_paths_calls = []
         monkeypatch.setattr(wm, "WorktreeManager", self._FakeWtMgr)
         monkeypatch.delenv("TAKKUB_ROLE", raising=False)
         # `clean` now makes a best-effort live-pane-guard query (#187). Default
@@ -1133,6 +1141,58 @@ class TestWorktreeCli:
         rather than propagating the connection error."""
         assert cli.main(["worktree", "clean"]) == 0
         assert self._FakeWtMgr.clean_live_paths_calls[-1] == set()
+
+    def test_clean_reports_orphans_without_flag_but_does_not_delete(self, tmp_path):
+        """#355 default: orphans are surfaced (path + size) but never
+        deleted without an explicit flag — they may hold uncommitted work
+        git no longer has any record of."""
+        orphan = tmp_path / "orphan-1"
+        orphan.mkdir()
+        (orphan / "f.txt").write_text("x")
+        self._FakeWtMgr.orphans = [
+            {"path": str(orphan), "size_bytes": 1, "file_count": 1, "has_node_modules": False}
+        ]
+        assert cli.main(["worktree", "clean"]) == 0
+        assert orphan.exists()  # report-only — never deleted by default
+
+    def test_clean_orphans_flag_deletes_the_whole_dir(self, tmp_path):
+        orphan = tmp_path / "orphan-2"
+        orphan.mkdir()
+        (orphan / "f.txt").write_text("x")
+        self._FakeWtMgr.orphans = [
+            {"path": str(orphan), "size_bytes": 1, "file_count": 1, "has_node_modules": False}
+        ]
+        assert cli.main(["worktree", "clean", "--orphans"]) == 0
+        assert not orphan.exists()
+
+    def test_clean_orphans_node_modules_only_keeps_source(self, tmp_path):
+        orphan = tmp_path / "orphan-3"
+        (orphan / "src").mkdir(parents=True)
+        (orphan / "src" / "app.py").write_text("code")
+        (orphan / "node_modules" / "pkg").mkdir(parents=True)
+        (orphan / "node_modules" / "pkg" / "index.js").write_text("x")
+        self._FakeWtMgr.orphans = [
+            {"path": str(orphan), "size_bytes": 2, "file_count": 2, "has_node_modules": True}
+        ]
+        assert cli.main(["worktree", "clean", "--orphans-node-modules-only"]) == 0
+        assert (orphan / "src" / "app.py").exists()  # source kept
+        assert not (orphan / "node_modules").exists()  # only node_modules removed
+
+    def test_clean_orphans_and_node_modules_only_together_rejected(self):
+        rc = cli.main(["worktree", "clean", "--orphans", "--orphans-node-modules-only"])
+        assert rc != 0
+
+    def test_clean_forwards_live_paths_to_list_orphans(self, monkeypatch):
+        """#355's own scope: list_orphans must get the same live-pane guard
+        as clean_isolated — a dir a live pane sits in is never reported as
+        deletable, even if git has already forgotten it."""
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: {"ok": True, "msg": "1 live worktree(s)", "paths": ["/w/live-9"]},
+        )
+        assert cli.main(["worktree", "clean"]) == 0
+        assert self._FakeWtMgr.orphans_live_paths_calls[-1] == {"/w/live-9"}
 
 
 class TestDiskPruneCli:

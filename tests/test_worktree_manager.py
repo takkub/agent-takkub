@@ -1160,6 +1160,117 @@ class TestListIsolated:
         assert all(r["dirty"] for r in rows)
 
 
+class TestListOrphans:
+    """#355 — dirs git has completely forgotten (no `.git`, no branch, not
+    in `git worktree list`) that `list_isolated`/`clean_isolated` can never
+    see because they only ever iterate git's own view. `list_orphans` walks
+    the on-disk managed root(s) instead."""
+
+    @pytest.fixture(autouse=True)
+    def _data_home(self, tmp_path, monkeypatch):
+        # `list_orphans` never scans outside `<DATA_HOME>/worktrees` (#355
+        # safety net) — pin DATA_HOME under tmp_path so every test's
+        # `tmp_path / "worktrees" / ...` checkout actually lands inside it.
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path)
+
+    def _porcelain(self, project_dir: Path) -> str:
+        # One still-registered worktree anchors the project dir (#355's own
+        # repro: 2 of 44 on-disk dirs were still registered) — that anchor
+        # is what `list_orphans` uses to find the managed root without ever
+        # needing `project_ns`.
+        return (
+            "worktree /repo\n"
+            "HEAD aaaa111\n"
+            "branch refs/heads/main\n"
+            "\n"
+            f"worktree {project_dir / 'frontend-1'}\n"
+            "HEAD bbbb222\n"
+            "branch refs/heads/wt/frontend-1\n"
+        )
+
+    def _runner(self, project_dir: Path) -> FakeRunner:
+        return FakeRunner(
+            [(["worktree", "list", "--porcelain"], _ok(self._porcelain(project_dir)))]
+        )
+
+    def test_finds_dir_git_no_longer_registers(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)  # still registered
+        orphan = project_dir / "backend-2"
+        (orphan / "src").mkdir(parents=True)
+        (orphan / "src" / "app.py").write_text("code", encoding="utf-8")
+
+        rows = WorktreeManager(self._runner(project_dir)).list_orphans("/repo")
+
+        assert [r["path"] for r in rows] == [str(orphan)]
+        assert rows[0]["file_count"] == 1
+        assert rows[0]["size_bytes"] > 0
+        assert rows[0]["has_node_modules"] is False
+
+    def test_registered_dir_never_counted_as_orphan(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+
+        rows = WorktreeManager(self._runner(project_dir)).list_orphans("/repo")
+
+        assert rows == []
+
+    def test_live_pane_path_excluded_even_though_git_forgot_it(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+        live_orphan = project_dir / "backend-2"
+        live_orphan.mkdir()
+
+        rows = WorktreeManager(self._runner(project_dir)).list_orphans(
+            "/repo", live_paths={str(live_orphan)}
+        )
+
+        assert rows == []
+
+    def test_detects_node_modules(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+        orphan = project_dir / "backend-2"
+        (orphan / "node_modules" / "pkg").mkdir(parents=True)
+        (orphan / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+
+        rows = WorktreeManager(self._runner(project_dir)).list_orphans("/repo")
+
+        assert rows[0]["has_node_modules"] is True
+
+    def test_falls_back_to_data_home_slug_match_when_nothing_registered(
+        self, tmp_path, monkeypatch
+    ):
+        """When EVERY worktree of this repo has already been orphaned (git
+        knows about none of them, not even one to anchor on), fall back to
+        matching `<DATA_HOME>/worktrees/*` by the repo dir's own sanitized
+        name — the same slug `worktree_root()` uses at creation time."""
+        from agent_takkub import worktree_manager as wm
+
+        data_home = tmp_path / "data-home"
+        monkeypatch.setattr(wm, "DATA_HOME", data_home)
+        git_root = tmp_path / "TK-ERP"
+        git_root.mkdir()
+        project_dir = data_home / "worktrees" / "TK-ERP"
+        orphan = project_dir / "frontend-3"
+        orphan.mkdir(parents=True)
+
+        r = FakeRunner([(["worktree", "list", "--porcelain"], _ok("worktree /elsewhere\n"))])
+        rows = WorktreeManager(r).list_orphans(str(git_root))
+
+        assert [r_["path"] for r_ in rows] == [str(orphan)]
+
+    def test_no_registered_and_no_data_home_match_returns_empty(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path / "unrelated-data-home")
+        r = FakeRunner([(["worktree", "list", "--porcelain"], _ok("worktree /elsewhere\n"))])
+
+        assert WorktreeManager(r).list_orphans("/some/repo") == []
+
+
 class TestMergeIsolated:
     def _runner(self, extra=None):
         rules = (extra or []) + [
@@ -1339,6 +1450,35 @@ class TestCleanIsolated:
         )
         lines = WorktreeManager(r).clean_isolated("/repo")
         assert all(line.startswith("REMOVED") for line in lines), lines
+        assert r.ran("worktree", "remove")
+        assert r.ran("branch", "-D")
+
+    def test_partial_delete_leftover_is_reported_loudly_not_silent(self, monkeypatch):
+        """#355 root-cause check: the CURRENT flow (#226/#227's rename-first
+        `remove_worktree_tree`) can never reproduce a silent orphan the way
+        pre-fix git-driven deletion did — when the disk delete only
+        partially succeeds, the result is still REMOVED (git's registration
+        is cleaned up, since the ORIGINAL path is confirmed gone either
+        way) but the leftover location is named in the line, never dropped
+        silently."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        monkeypatch.setattr(
+            wm,
+            "remove_worktree_tree",
+            lambda p: (True, f"ย้ายออกจาก {p} แล้ว แต่ไฟล์บางส่วนลบไม่หมด", f"{p}/.trash-stub"),
+        )
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert all(".trash-stub" in line for line in lines), lines
         assert r.ran("worktree", "remove")
         assert r.ran("branch", "-D")
 

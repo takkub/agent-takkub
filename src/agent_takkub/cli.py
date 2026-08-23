@@ -546,8 +546,12 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
     the CLI layer like assign/close. `merge` and `clean` both make a
     best-effort socket call for the live-pane guard (#187, #227) — see
     `_live_worktree_paths_best_effort`.
+
+    `clean` additionally reports (and, with `--orphans`/
+    `--orphans-node-modules-only`, deletes) on-disk checkout dirs git has
+    completely forgotten — see `WorktreeManager.list_orphans` (#355).
     """
-    from .worktree_manager import WorktreeManager
+    from .worktree_manager import WorktreeManager, remove_worktree_tree
 
     cwd = getattr(args, "cwd", None) or os.getcwd()
     mgr = WorktreeManager()
@@ -592,15 +596,67 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         return {"ok": ok, "msg": msg}
 
     if sub == "clean":
+        do_orphans = bool(getattr(args, "orphans", False))
+        do_nm_only = bool(getattr(args, "orphans_node_modules_only", False))
+        if do_orphans and do_nm_only:
+            return {"ok": False, "msg": "ใช้ --orphans หรือ --orphans-node-modules-only อย่างเดียว"}
+
         live_paths = _live_worktree_paths_best_effort()
         lines = mgr.clean_isolated(root, force=bool(args.force), live_paths=live_paths)
-        if not lines:
+        if lines:
+            for line in lines:
+                _utf8_print(f"  {line}")
+        else:
             print("(nothing to clean)")
-            return {"ok": True, "msg": "0 cleaned"}
-        for line in lines:
-            _utf8_print(f"  {line}")
         failed = sum(1 for line in lines if line.startswith("FAILED"))
-        return {"ok": failed == 0, "msg": f"{len(lines)} processed, {failed} failed"}
+
+        # #355 — dirs git has completely forgotten (registration already
+        # pruned) that the git-driven sweep above can never see, because it
+        # only ever iterates `git worktree list`. Always reported; only
+        # deleted when the caller opts in via a flag (may hold uncommitted
+        # work git no longer has any record of).
+        orphans = mgr.list_orphans(root, live_paths=live_paths)
+        orphan_note = ""
+        if orphans:
+            total_bytes = sum(o["size_bytes"] for o in orphans)
+            _utf8_print(f"\norphans (git ไม่รู้จักแล้ว): {len(orphans)} dir, {_fmt_bytes(total_bytes)}")
+            for o in orphans:
+                tag = " [node_modules]" if o["has_node_modules"] else ""
+                _utf8_print(f"  ORPHAN  {_fmt_bytes(o['size_bytes']):>9}  {o['path']}{tag}")
+                if do_orphans:
+                    removed, msg, _leftover = remove_worktree_tree(Path(o["path"]))
+                    if removed and not msg:
+                        _utf8_print("          REMOVED")
+                    else:
+                        _utf8_print(f"          FAILED: {msg or 'ลบไม่ครบ'}")
+                        failed += 1
+                elif do_nm_only:
+                    from .disk_usage import find_node_modules
+
+                    nm_dirs = find_node_modules(Path(o["path"]))
+                    nm_failed = []
+                    for nm in nm_dirs:
+                        removed, msg, _leftover = remove_worktree_tree(nm)
+                        if not (removed and not msg):
+                            nm_failed.append(msg or str(nm))
+                    if nm_failed:
+                        _utf8_print(f"          node_modules ลบไม่ครบ: {'; '.join(nm_failed)}")
+                        failed += 1
+                    else:
+                        _utf8_print(f"          node_modules ลบแล้ว ({len(nm_dirs)} dir)")
+            if do_orphans:
+                orphan_note = f"; ลบ orphan {len(orphans)} dir ({_fmt_bytes(total_bytes)})"
+            elif do_nm_only:
+                orphan_note = f"; ลบ node_modules ใน orphan {len(orphans)} dir"
+            else:
+                orphan_note = (
+                    f"; พบ orphan {len(orphans)} dir ({_fmt_bytes(total_bytes)}) — ยังไม่ลบ "
+                    "(ใส่ --orphans หรือ --orphans-node-modules-only)"
+                )
+
+        if not lines and not orphans:
+            return {"ok": True, "msg": "0 cleaned"}
+        return {"ok": failed == 0, "msg": f"{len(lines)} processed, {failed} failed{orphan_note}"}
 
     return {"ok": False, "msg": f"unknown worktree subcommand: {sub}"}
 
@@ -2468,12 +2524,27 @@ def main(argv: list[str] | None = None) -> int:
     swm.add_argument("--cwd", default=None, help="project dir (default: current dir)")
     swc = swt_sub.add_parser(
         "clean",
-        help="remove leftover wt/* worktrees (safe ones only; --force drops dirty/unmerged too)",
+        help="remove leftover wt/* worktrees (safe ones only; --force drops dirty/unmerged too) "
+        "and report on-disk dirs git no longer knows about at all (#355)",
     )
     swc.add_argument(
         "--force",
         action="store_true",
         help="also remove dirty / unmerged worktrees (their work is LOST)",
+    )
+    swc.add_argument(
+        "--orphans",
+        action="store_true",
+        help="also delete on-disk dirs git has completely forgotten (registration already "
+        "pruned, e.g. a pre-#226/#227 partial Windows delete) — #355; default is report-only "
+        "since these may hold uncommitted work git no longer has any record of",
+    )
+    swc.add_argument(
+        "--orphans-node-modules-only",
+        action="store_true",
+        help="like --orphans but deletes only each orphan's node_modules/ subtrees (usually "
+        "~99%% of its size) and keeps the rest — the safer default for anyone unsure whether "
+        "an orphan still holds real work",
     )
     swc.add_argument("--cwd", default=None, help="project dir (default: current dir)")
     swt.set_defaults(func=cmd_worktree)

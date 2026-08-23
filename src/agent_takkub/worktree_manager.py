@@ -289,6 +289,80 @@ def worktree_dest(project_ns: str, role: str, ts: int) -> Path:
     return dest
 
 
+def dir_stats(path: Path) -> tuple[int, int]:
+    """(total_bytes, file_count) recursively under *path*. Best-effort.
+
+    Lives here (not disk_usage.py) because worktree_manager is the leaf
+    module disk_usage already imports FROM (never the reverse — the
+    `worktree-manager-leaf` import-linter contract forbids it) — disk_usage
+    imports this instead of keeping its own copy of the same walk.
+    """
+    total = 0
+    count = 0
+    if not path.is_dir():
+        return 0, 0
+    try:
+        for root, _dirs, files in os.walk(path, onerror=lambda _e: None):
+            for f in files:
+                fp = Path(root) / f
+                try:
+                    total += fp.stat().st_size
+                    count += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total, count
+
+
+def _dir_has_node_modules(path: Path) -> bool:
+    """True when *path* itself, or anything under it, is/contains a
+    ``node_modules`` dir. Cheap existence probe for `list_orphans`'s report
+    row — stops at the first hit (disk_usage's `find_node_modules` instead
+    enumerates every one, for deletion, so isn't a fit here)."""
+    if (path / "node_modules").is_dir():
+        return True
+    try:
+        for _root, dirnames, _files in os.walk(path, onerror=lambda _e: None):
+            if "node_modules" in dirnames:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _candidate_project_worktree_dirs(git_root: Path, registered_paths: set[Path]) -> set[Path]:
+    """Best-effort set of ``<DATA_HOME>/worktrees/<project>`` dirs that may
+    hold checkouts of *git_root*, for :meth:`WorktreeManager.list_orphans`.
+
+    Primary signal: the parent dir of any currently-registered worktree of
+    this repo — exact, no naming heuristic needed. When git knows about
+    NONE (every worktree of this repo has already been orphaned/pruned —
+    #355's own repro: only 2 of 44 on-disk dirs were still registered, but
+    that still leaves 2 to anchor on), fall back to matching
+    ``<DATA_HOME>/worktrees/*`` entries whose sanitized name equals the
+    repo dir's own sanitized name — the same slug `worktree_root()` uses at
+    creation time. That fallback is a heuristic (a project's registered
+    name can differ from its checkout folder name) and only runs when the
+    primary signal is empty.
+    """
+    from_registered = {p.parent for p in registered_paths}
+    if from_registered:
+        return from_registered
+    root = DATA_HOME / "worktrees"
+    if not root.is_dir():
+        return set()
+    slug = sanitize_ref_component(git_root.name).lower()
+    out: set[Path] = set()
+    try:
+        for d in root.iterdir():
+            if d.is_dir() and sanitize_ref_component(d.name).lower() == slug:
+                out.add(d.resolve())
+    except OSError:
+        pass
+    return out
+
+
 def _port_free(port: int) -> bool:
     """True when nothing is listening on 127.0.0.1:*port* (probe by bind)."""
     import socket
@@ -962,6 +1036,78 @@ class WorktreeManager:
                 }
             )
         return rows
+
+    def list_orphans(
+        self, git_root: str, live_paths: frozenset[str] | set[str] = frozenset()
+    ) -> list[dict]:
+        """On-disk worktree checkout dirs for this repo that git has
+        completely forgotten (#355).
+
+        `list_isolated`/`clean_isolated` both iterate ``git worktree list
+        --porcelain`` — a dir whose registration is already gone (branch
+        deleted, worktree pruned from the registry) but whose files
+        survived on disk is invisible to either, because neither ever looks
+        at the DISK. That shape is exactly what pre-#226/#227 left behind:
+        git's own (pre-fix) recursive delete hit Windows' MAX_PATH mid
+        ``node_modules`` and silently stopped, while the branch/registry
+        cleanup that followed still ran to completion — no ``.git``
+        pointer, no branch, nothing left for git-based discovery to anchor
+        on. This walks the managed root(s) on disk instead and diffs
+        against git's current view.
+
+        Row shape: ``{"path", "size_bytes", "file_count",
+        "has_node_modules"}``, sorted largest-first. *live_paths* mirrors
+        `clean_isolated`'s #187 guard — a dir a live pane is currently
+        sitting in is never listed, even if git has (for whatever reason)
+        already forgotten it.
+
+        Only ever scans under ``<DATA_HOME>/worktrees`` (the managed root
+        every isolated worktree is created under, `worktree_root`) — never
+        the repo's OWN parent dir. Anchoring on the wrong registered entry
+        (e.g. the repo's main, non-isolated worktree — its path can resolve
+        to a drive root on Windows) would otherwise turn this into an
+        unbounded scan of an unrelated, potentially huge directory tree; the
+        managed-root check below is the actual guard, kept even though the
+        anchor is already filtered to isolated ``wt/*`` entries.
+        """
+        root = Path(git_root).resolve()
+        res = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+        registered_isolated = (
+            {
+                Path(ent["path"]).resolve()
+                for ent in parse_worktree_list(res.stdout)
+                if ent.get("branch") and ent["branch"].startswith(f"{_BRANCH_PREFIX}/")
+            }
+            if res.ok
+            else set()
+        )
+        live = {str(Path(p).resolve()) for p in live_paths}
+        managed_root = (DATA_HOME / "worktrees").resolve()
+        orphans: list[dict] = []
+        for project_dir in _candidate_project_worktree_dirs(root, registered_isolated):
+            if project_dir != managed_root and managed_root not in project_dir.parents:
+                continue  # never scan outside the managed worktrees root
+            if not project_dir.is_dir():
+                continue
+            try:
+                children = [c for c in project_dir.iterdir() if c.is_dir()]
+            except OSError:
+                continue
+            for child in children:
+                child_r = child.resolve()
+                if child_r in registered_isolated or str(child_r) in live:
+                    continue
+                size, count = dir_stats(child)
+                orphans.append(
+                    {
+                        "path": str(child),
+                        "size_bytes": size,
+                        "file_count": count,
+                        "has_node_modules": _dir_has_node_modules(child),
+                    }
+                )
+        orphans.sort(key=lambda r: -r["size_bytes"])
+        return orphans
 
     def merge_isolated(
         self,

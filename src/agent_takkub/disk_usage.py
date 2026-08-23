@@ -31,6 +31,7 @@ from .config import DATA_HOME, RUNTIME_DIR, default_claude_config_dir, load_proj
 from .orchestrator_text import prune_old_transcripts
 from .shared_dev_tools import prune_old_browser_profiles
 from .worktree_manager import WorktreeManager, sweep_link_points
+from .worktree_manager import dir_stats as _dir_stats
 
 SAFE = "safe"
 REVIEW = "review"
@@ -74,26 +75,6 @@ _PARTIAL_MIN_AGE_SECONDS = 600  # don't touch a partial clone that might still b
 
 
 # ── low-level filesystem helpers ────────────────────────────────────────────
-
-
-def _dir_stats(path: Path) -> tuple[int, int]:
-    """(total_bytes, file_count) recursively under *path*. Best-effort."""
-    total = 0
-    count = 0
-    if not path.is_dir():
-        return 0, 0
-    try:
-        for root, _dirs, files in os.walk(path, onerror=lambda _e: None):
-            for f in files:
-                fp = Path(root) / f
-                try:
-                    total += fp.stat().st_size
-                    count += 1
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    return total, count
 
 
 def _dir_max_mtime(path: Path) -> float:
