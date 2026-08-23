@@ -98,9 +98,8 @@ def save(current_fingerprint: str, sessions: dict[str, float]) -> None:
     """Persist atomically (tmp+rename), same pattern as `RemoteConfig.save()`."""
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    payload = (
-        json.dumps({"fingerprint": current_fingerprint, "sessions": sessions}, indent=2) + "\n"
-    )
+    doc = {"fingerprint": current_fingerprint, "sessions": sessions}
+    payload = json.dumps(doc, indent=2) + "\n"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     if os.name != "nt":
         os.fchmod(fd, 0o600)
@@ -110,6 +109,10 @@ def save(current_fingerprint: str, sessions: dict[str, float]) -> None:
         tmp.chmod(0o600)
     tmp.replace(_PATH)
 
+    from ..core.storage.dual_write import dual_write_remote_sessions
+
+    dual_write_remote_sessions(doc)
+
 
 def clear() -> None:
     """ "Log out everywhere": drop the whole store. Safe to call when the
@@ -118,3 +121,7 @@ def clear() -> None:
         _PATH.unlink()
     except FileNotFoundError:
         pass
+
+    from ..core.storage.dual_write import dual_write_remote_sessions
+
+    dual_write_remote_sessions(None)

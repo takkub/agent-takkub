@@ -28,6 +28,18 @@ all of that in scope, so ``provider_config.py`` itself re-reads every scope
 still never reaches into ``provider_config`` on its own (see that
 function's docstring for why).
 
+**Ladder step 8 (``runtime-triage``, `RuntimeTriageStep`) is deliberately NOT
+covered here** — its 4 source dirs (`RUNTIME_DIR/{tasks,sessions,role-memory,
+knowledge}`) are per-file fan-outs of unbounded size (pane transcripts, task
+JSON, role-memory markdown), not one small config file each; mirroring every
+write into those trees would mean hooking dozens of call sites for a cost
+this wave's "config + small state files" scope doesn't buy back. Those
+dirs stay synced the same way step 8 already syncs them today —
+`apply_pending()` at boot (`auto_migrate_boot`, #361) — which is a periodic
+catch-up, not live-on-every-write like the mirrors below, so a V2 reader of
+those trees can lag until the next boot. Revisit only if/when wave 2 needs a
+live V2 reader for tasks/sessions/role-memory/knowledge specifically.
+
 **V2 target paths are the one thing reused, never recomputed by hand** —
 from ``core.migration.steps_v1``'s own ``RegistryMapping`` tuples (flat
 registries) or its step classes' own target-path methods (the two fan-out
@@ -215,6 +227,86 @@ def dual_write_custom_role_file(
         _log.warning(
             "v2_write_failed name=%r target=%r err=%s", f"custom-role-md:{name}", target, e
         )
+
+
+def dual_write_local_issues(
+    issues: list, source_path: Path, *, data_home: Path | None = None
+) -> None:
+    """Mirror the cockpit-bug ``.takkub_issues.json`` instance — ladder step
+    5's ``local-issues`` mapping, whose V1 source is always
+    ``DATA_HOME/.takkub_issues.json`` — into ``state/issues/local.json``.
+
+    ``issues._save_local_issues()`` also persists per-*project*
+    ``.takkub_issues.json`` files at arbitrary project cwds (no cockpit-bug
+    flag), which step 5 never mapped a V2 target for. Rather than have
+    ``issues.py`` guess which call is which, this compares ``source_path``
+    (the exact path that call just wrote) against the mapping's own
+    ``source`` and silently no-ops on anything else, same effect as the
+    ``target is None`` guard the other flat-registry mirrors use."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_state_step
+
+    mapping = next(
+        (m for m in build_state_step(data_home=effective).mappings if m.name == "local-issues"),
+        None,
+    )
+    if mapping is None:
+        return
+    try:
+        if source_path.resolve() != mapping.source.resolve():
+            return
+    except OSError:
+        return
+    _write_wrapped("local-issues", mapping.target, _wrap("local-issues", issues))
+
+
+def dual_write_issue_dedup(state: dict, *, data_home: Path | None = None) -> None:
+    """Mirror ``auto_issue_capture._save_state()``'s dedup/rate-cap mapping
+    into ``state/issues/dedup.json`` (ladder step 5's target)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_state_step
+
+    target = _mapping_target(build_state_step(data_home=effective).mappings, "issue-dedup")
+    if target is not None:
+        _write_wrapped("issue-dedup", target, _wrap("issue-dedup", state))
+
+
+def dual_write_autoresume(payload: dict, *, data_home: Path | None = None) -> None:
+    """Mirror ``auto_resume.set_enabled()``'s ``{"enabled": bool}`` into
+    ``state/sessions/autoresume.json`` (ladder step 5's target)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_state_step
+
+    target = _mapping_target(build_state_step(data_home=effective).mappings, "autoresume")
+    if target is not None:
+        _write_wrapped("autoresume", target, _wrap("autoresume", payload))
+
+
+def dual_write_remote_sessions(payload: dict | None, *, data_home: Path | None = None) -> None:
+    """Mirror ``remote.session_store.save()``'s ``{fingerprint, sessions}``
+    into ``state/sessions/remote.json`` (ladder step 5's target), or remove
+    the V2 copy when ``payload`` is ``None`` (``session_store.clear()``)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_state_step
+
+    target = _mapping_target(build_state_step(data_home=effective).mappings, "remote-sessions")
+    if target is None:
+        return
+    if payload is None:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as e:
+            _log.warning("v2_write_failed name=%r target=%r err=%s", "remote-sessions", target, e)
+        return
+    _write_wrapped("remote-sessions", target, _wrap("remote-sessions", payload))
 
 
 def dual_write_projects(data: dict, *, data_home: Path | None = None) -> None:

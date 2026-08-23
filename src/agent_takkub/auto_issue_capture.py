@@ -151,6 +151,10 @@ def _save_state(state: dict) -> bool:
             json.dump(state, f, indent=2)
         os.replace(tmp, _DEDUP_PATH)
         _persist_broken = False
+
+        from .core.storage.dual_write import dual_write_issue_dedup
+
+        dual_write_issue_dedup(state)
         return True
     except OSError as exc:
         try:
