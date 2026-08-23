@@ -21,12 +21,29 @@ Wiring:
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+import logging
+
+from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
 from . import cockpit_theme
 from .agent_pane import AgentPane
+from .path_safe import safe_segment
+from .project_explorer import ProjectExplorer
+
+# Explorer panel width/collapsed state persists per-project under this
+# QSettings domain — the same org/app pair MainWindow already uses for
+# window geometry (`self._settings = QSettings("agent-takkub", "cockpit")`
+# in main_window.py), so UI state stays in one place instead of splitting
+# it between QSettings and projects.json (which holds project *config*,
+# not UI state).
+_EXPLORER_SETTINGS_ORG = "agent-takkub"
+_EXPLORER_SETTINGS_APP = "cockpit"
+_EXPLORER_DEFAULT_WIDTH = 240
+_EXPLORER_MIN_WIDTH = 120
+
+_logger = logging.getLogger(__name__)
 
 # Shared icon canvas for every pane-tab icon (unread-dot + role/status combo)
 # — QTabWidget.setIconSize is tab-bar-wide, so every icon painted onto a tab
@@ -137,10 +154,59 @@ class ProjectTab(QWidget):
         self._tab_status_timer.timeout.connect(self._refresh_teammate_tab_icons)
         self._tab_status_timer.start()
 
+        # ── Project Explorer (left QSplitter panel, #365 phase 1) ──────
+        # Constructed defensively: a malformed projects.json entry or any
+        # other explorer-init failure must never break opening the tab
+        # itself — degrade to "no explorer" instead (matches the workspace
+        # plan's "existing Cockpit must degrade gracefully when new
+        # optional pieces fail").
+        self._settings = QSettings(_EXPLORER_SETTINGS_ORG, _EXPLORER_SETTINGS_APP)
+        self._explorer_settings_key = safe_segment(project_name)
+        self.splitter: QSplitter | None = None
+        self._explorer_toggle_btn: QToolButton | None = None
+        self._explorer_collapsed = False
+        self._explorer_last_width = _EXPLORER_DEFAULT_WIDTH
+        self._explorer_save_timer = QTimer(self)
+        self._explorer_save_timer.setSingleShot(True)
+        self._explorer_save_timer.setInterval(400)
+        self._explorer_save_timer.timeout.connect(self._persist_explorer_width)
+
+        self.explorer: ProjectExplorer | None = None
+        try:
+            self.explorer = ProjectExplorer(project_name)
+        except Exception as exc:  # defensive — see comment above; exercised by tests
+            _logger.warning(
+                "ProjectTab(%s): explorer init failed, continuing without it: %s",
+                project_name,
+                exc,
+            )
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.pane_tabs)
+
+        if self.explorer is not None:
+            self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+            self.splitter.addWidget(self.explorer)
+            self.splitter.addWidget(self.pane_tabs)
+            self.splitter.setStretchFactor(0, 0)
+            self.splitter.setStretchFactor(1, 1)
+            # Drag-to-zero is disabled — the toggle button is the one way to
+            # collapse, so collapsed/expanded state stays unambiguous.
+            self.splitter.setChildrenCollapsible(False)
+            self.splitter.splitterMoved.connect(self._on_splitter_moved)
+            layout.addWidget(self.splitter)
+
+            self._explorer_toggle_btn = QToolButton(self)
+            self._explorer_toggle_btn.setText("‹")
+            self._explorer_toggle_btn.setToolTip("Toggle project explorer")
+            self._explorer_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._explorer_toggle_btn.clicked.connect(self._on_explorer_toggle_clicked)
+            self.pane_tabs.setCornerWidget(self._explorer_toggle_btn, Qt.Corner.TopLeftCorner)
+
+            self._restore_explorer_state()
+        else:
+            layout.addWidget(self.pane_tabs)
 
         if lead_pane is not None:
             # Backwards-compat path for callers that still pass Lead at
@@ -222,6 +288,56 @@ class ProjectTab(QWidget):
             # Reuse the pane's own close chain (orchestrator.close → paneClosed
             # → remove_teammate_tab) instead of tearing down here directly.
             self.paneCloseRequested.emit(role)
+
+    # ------------------------------------------------------------------
+    # explorer collapse/expand + per-project width persistence
+    # ------------------------------------------------------------------
+    def _restore_explorer_state(self) -> None:
+        width = self._settings.value(
+            f"explorer/{self._explorer_settings_key}/width", _EXPLORER_DEFAULT_WIDTH, type=int
+        )
+        collapsed = self._settings.value(
+            f"explorer/{self._explorer_settings_key}/collapsed", False, type=bool
+        )
+        self._explorer_last_width = max(_EXPLORER_MIN_WIDTH, int(width))
+        self.set_explorer_collapsed(bool(collapsed), persist=False)
+
+    def _on_explorer_toggle_clicked(self) -> None:
+        self.set_explorer_collapsed(not self._explorer_collapsed)
+
+    def set_explorer_collapsed(self, collapsed: bool, *, persist: bool = True) -> None:
+        """Hide/show the explorer panel. QSplitter gives a hidden child's
+        space to its sibling automatically; `_explorer_last_width` is what
+        gets restored on the next expand (or the next cockpit launch, via
+        QSettings)."""
+        if self.explorer is None:
+            return
+        collapsed = bool(collapsed)
+        self._explorer_collapsed = collapsed
+        self.explorer.setVisible(not collapsed)
+        if self._explorer_toggle_btn is not None:
+            self._explorer_toggle_btn.setText("›" if collapsed else "‹")
+        if not collapsed and self.splitter is not None:
+            total = max(self.width(), self._explorer_last_width + 200)
+            self.splitter.setSizes([self._explorer_last_width, total - self._explorer_last_width])
+        if persist:
+            self._settings.setValue(f"explorer/{self._explorer_settings_key}/collapsed", collapsed)
+
+    def is_explorer_collapsed(self) -> bool:
+        return self._explorer_collapsed
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        if self._explorer_collapsed or self.explorer is None:
+            return
+        self._explorer_save_timer.start()  # debounce — don't write on every drag tick
+
+    def _persist_explorer_width(self) -> None:
+        if self.explorer is None or self._explorer_collapsed:
+            return
+        width = self.explorer.width()
+        if width >= _EXPLORER_MIN_WIDTH:
+            self._explorer_last_width = width
+            self._settings.setValue(f"explorer/{self._explorer_settings_key}/width", width)
 
     # ------------------------------------------------------------------
     # keep-alive: only the visible pane of the visible project paints
