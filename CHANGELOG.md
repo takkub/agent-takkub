@@ -6,6 +6,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 5 backend — Live Preview controller + Design artifact registry + CLI** (#365) — `preview_controller.py`
+  (state ต่อโปรเจกต์, **URL loopback-only**, file gate = containment + `.html` เท่านั้น, `navigation_allowed` policy fn — QObject เดียว
+  ทั้งแอปตาม RAM rule) · `design_actions.py` (DesignArtifact registry JSONL latest-per-id ใต้ `storage_layout_v2` project artifacts
+  ตาม `schemas/design_artifact.schema.json` — publish/approve/request_revision, approved = terminal) · Orchestrator
+  `preview_command`/`design_publish`/`design_approve`/`design_revise` + signals · CLI `takkub preview open-url|open-file|close|status`
+  และ `takkub design publish|approve|revise` (nested subcommand ตาม convention เดิม, trust-local tier scope ด้วย from_project) ·
+  widget จริง (`preview_widget.py`) = frontend ถัดไป
+  + tests: `test_preview_controller.py` · `test_design_actions.py` · `test_workspace_preview_design_cli.py` (argparse + CliServer
+  round-trip) · ผ่าน repo guard
+
 - **#364 lever 1 — discard renderer ของ pane ที่ซ่อน (วัดจริง: คืน ~65 MB/pane ที่ 4 pane)** — `TerminalWidget.set_keepalive(False)`
   ตั้ง debounce 25 s (`TAKKUB_PANE_DISCARD_DEBOUNCE_MS`) → snapshot buffer (`termGetBufferText`, cap 5,000 บรรทัด) →
   `QWebEnginePage.LifecycleState.Discarded` · `set_keepalive(True)` ยกเลิก timer หรือ re-attach (Active + reload, replay snapshot
