@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,17 @@ class _SyncThread:
 
     def start(self) -> None:
         self._target(*self._args)
+
+
+def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.01) -> bool:
+    """Bounded poll for a threading race window (e.g. `_building.add()` racing
+    the assertion right after it) instead of trusting scheduling timing."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
 
 
 # ── kill switch / missing CLI ────────────────────────────────────────────
@@ -962,6 +974,14 @@ def test_get_build_status_distinguishes_queued_from_in_flight(tmp_path, monkeypa
     # Wait for exactly the semaphore cap (2) to actually enter `_run_build`.
     assert entered.acquire(timeout=5)
     assert entered.acquire(timeout=5)
+
+    # `_building.add()` happens before the semaphore acquire, so the 2 that
+    # entered `_run_build` prove nothing about the other 3, which merely need
+    # to reach the `.add()` line — bound the wait instead of assuming it
+    # already happened by the time this thread gets scheduled again.
+    assert _wait_until(lambda: len(gab._building) == 5, timeout=5), (
+        f"not all 5 threads registered in _building in time: {gab._building!r}"
+    )
 
     status = gab.get_build_status()
     assert status["building"] == 2, "chip must report in-flight, not every queued thread"

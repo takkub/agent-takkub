@@ -15,6 +15,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   + tests: 6 เคสใน `npm/scripts/lib.test.js` (ไม่มีไฟล์ / เล็กกว่า min size / เป็นไดเรกทอรี /
   win32 header ไม่ใช่ MZ / win32 header MZ / non-Windows) mock `process.platform` ทั้งสองฝั่ง
 
+- **flaky test: `test_get_build_status_distinguishes_queued_from_in_flight`** — เทส start 5 thread
+  แต่ sync แค่ 2 (`entered.acquire()` ×2 = รอเฉพาะตัวที่เข้า `_run_build`) แล้ว assert
+  `len(_building) == 5` ทันที ทั้งที่อีก 3 ตัวแค่ต้องไปถึงบรรทัด `_building.add()` ซึ่งอยู่**ก่อน**
+  semaphore (`graft_autobuild.py:615`) — บน windows runner ที่โหลดหนัก + xdist 8 worker
+  thread ที่ 5 ยังไม่ทัน register → `assert 4 == 5` (production ถูกต้องแล้ว ไม่แตะ) → เพิ่ม
+  bounded poll `_wait_until()` รอให้ครบก่อน assert (ไม่ใช่ sleep ตายตัว, ไม่ xfail/skip)
+  assert เดิมครบทั้ง 3 ข้อ · flake ตัวนี้ซ่อนมานาน — xdist ที่เพิ่งเปิดใน 1.0.86 แค่ทำให้มันโผล่
+
 ### Added (เพิ่ม)
 
 - **CI job `npm-wrapper` — เทส JS ของ npm wrapper ไม่เคยรันใน CI มาก่อนเลย** — `.github/workflows/ci.yml`
