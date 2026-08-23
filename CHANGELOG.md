@@ -46,6 +46,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Core V2 Wave C ชิ้นที่ 2 — PermissionEngine rewire เข้า `cli.cmd_guard` (epic #309, แผน §1.2)** —
+  `PermissionEngine` สร้างเสร็จตั้งแต่ Phase 5c แต่ `cmd_guard` (PreToolUse/Bash hook ที่ยิงทุก Bash call
+  ของทุก claude pane) ยังเรียก `pane_guard.classify` ตรง → swap ให้ผ่าน
+  `PermissionEngine().evaluate_shell_command()` · **กับดักที่แผน §1.2 ไม่ได้บอก**: `cmd_guard` ส่ง
+  `mb_fallback_check` (#304 mb-shard escape hatch) และ `cwd` เข้า `classify()` แต่ `evaluate_shell_command`
+  เดิมรับแค่ `(command, role)` — swap ตรงๆ จะทำ mb fallback กับ cwd rule พังเงียบทั้งที่เคลม neutral
+  → ขยาย signature ให้ pass-through ทั้ง 2 kwargs verbatim ก่อน · รักษาสัญญา "Never raises. Any
+  unexpected failure allows the command (exit 0)" ของ `cmd_guard` — engine import/construct/audit พัง
+  → exit 0 ไม่ใช่ exit 2 · audit `capability.shell_command_denied` เฉพาะ DENIED ตามเดิม
+  + tests: parity ทุก verdict ของ `pane_guard` ผ่านเส้นทางใหม่ + mb_fallback_check/cwd ถูกส่งจริง
+  + fail-open · manual smoke ผ่าน hook จริงบน dev cockpit (DENIED → exit 2 + stderr + audit event)
+
 - **Core V2 Wave C ชิ้นที่ 1 — model resolver wiring เข้า `core/routing/` (epic #309, แผน §1.3)** —
   `Router.effective_model_for(role, provider, project)` + façade `effective_model_for_v2` (flag-off =
   เรียก V1 ตรง / flag-on = ผ่าน Router / exception = fail-open กลับ V1 — รูปเดียวกับ

@@ -32,14 +32,19 @@ runs on every single Bash invocation in a guarded pane, and logging each
 one would turn EVENTS_LOG into a per-command firehose for no benefit an
 audit trail actually needs (the interesting signal is what got blocked).
 
-Not yet wired into `cli.cmd_guard` itself (the live `takkub _guard` hook
-still calls `pane_guard.classify` directly) — rewiring that hot path
-belongs to whichever phase actually replaces the caller, so it can be
-proven behavior-neutral under the full suite first; this class is the
-target interface for that, not a live behavior change today.
+Wired into `cli.cmd_guard` (#309 Wave C, plan §1.2) — the live `takkub
+_guard` hook constructs a `PermissionEngine` and calls
+`evaluate_shell_command` instead of calling `pane_guard.classify`
+directly. `cmd_guard` still owns its own outer `except Exception` around
+the whole call (this class does not swallow errors itself beyond what
+`log_capability_event` already no-raises internally) — the fail-open
+contract ("Never raises. Any unexpected failure allows the command")
+lives in `cmd_guard`, unchanged by this rewiring.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from agent_takkub import pane_guard, pane_tools_policy
 
@@ -63,14 +68,23 @@ class PermissionEngine:
         command: str,
         role: str | None,
         *,
+        mb_fallback_check: Callable[[], bool] | None = None,
+        cwd: str | None = None,
         agent: str | None = None,
         provider: str | None = None,
         account: str | None = None,
     ) -> pane_guard.Verdict:
         """Layer 2. Returns `pane_guard.classify`'s `Verdict` unchanged;
         additionally audits a DENIED verdict (see module docstring for why
-        only denials are logged)."""
-        verdict = pane_guard.classify(command, role)
+        only denials are logged).
+
+        *mb_fallback_check* / *cwd* are passed straight through to
+        `pane_guard.classify` verbatim — see that function's docstring for
+        their contracts (the #304 mb-shard grant check and the #314
+        worktree `git commit` carve-out). Neither is inspected or altered
+        here; this façade must not change what the two kwargs mean to the
+        rule engine, only forward them."""
+        verdict = pane_guard.classify(command, role, mb_fallback_check=mb_fallback_check, cwd=cwd)
         if not verdict.allowed:
             log_capability_event(
                 "capability.shell_command_denied",

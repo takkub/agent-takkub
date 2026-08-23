@@ -200,6 +200,22 @@ class TestFailOpen:
 
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
+    def test_permission_engine_exception_allows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#309 Wave C: cmd_guard now goes through PermissionEngine — if
+        *that* layer blows up (construction, audit, anything), the shell
+        must still keep working, same fail-open contract as a raw
+        pane_guard.classify blowup above."""
+        from agent_takkub.core.capabilities import permission_engine
+
+        class BoomEngine:
+            def evaluate_shell_command(self, *_a, **_k):
+                raise RuntimeError("permission engine on fire")
+
+        monkeypatch.setattr(permission_engine, "PermissionEngine", BoomEngine)
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+
 
 class TestMbFallbackWiring:
     """#304 point 3: `cmd_guard` wires `mcp_fallback.is_granted()` into
@@ -230,6 +246,45 @@ class TestMbFallbackWiring:
         _run(monkeypatch, _payload("mb go http://localhost:3000"), TAKKUB_ROLE="qa#2")
         resp = cli.cmd_guard(None)
         assert resp.get("exit_code") == 2
+
+
+class TestPermissionEngineWiring:
+    """#309 Wave C, plan §1.2: cmd_guard now goes through
+    `PermissionEngine.evaluate_shell_command` instead of calling
+    `pane_guard.classify` directly — proves the audit side-effect that
+    only that engine performs actually fires end-to-end through the real
+    hook path, not just in permission_engine's own unit tests."""
+
+    def test_denied_command_is_audited(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        from agent_takkub import config as config_mod
+
+        events_log = tmp_path / "events.log"
+        monkeypatch.setattr(config_mod, "EVENTS_LOG", events_log)
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+
+        resp = cli.cmd_guard(None)
+
+        assert resp["exit_code"] == 2
+        lines = events_log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert payload["event"] == "capability.shell_command_denied"
+        assert payload["who"] == "frontend"
+        assert payload["rule"].startswith("browser_driver")
+
+    def test_allowed_command_is_not_audited(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        from agent_takkub import config as config_mod
+
+        events_log = tmp_path / "events.log"
+        monkeypatch.setattr(config_mod, "EVENTS_LOG", events_log)
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
+        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="frontend")
+
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+        assert not events_log.exists()
 
 
 class TestCliDispatch:

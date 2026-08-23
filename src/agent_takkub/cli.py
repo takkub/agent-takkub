@@ -2026,10 +2026,14 @@ def cmd_guard(_: argparse.Namespace) -> dict:
     silently failing open.
 
     Never raises. Any unexpected failure allows the command (exit 0) — the
-    guard must never be able to wedge a pane's shell. Rules and rationale live
-    in `pane_guard.py`."""
+    guard must never be able to wedge a pane's shell. Goes through
+    `core.capabilities.permission_engine.PermissionEngine.evaluate_shell_command`
+    (#309 Wave C) rather than calling `pane_guard.classify` directly, so a
+    denial is also audited; the outer `except Exception` below is what
+    keeps the fail-open contract, not anything inside that engine. Rules
+    and rationale live in `pane_guard.py`."""
     try:
-        from . import pane_guard
+        from .core.capabilities.permission_engine import PermissionEngine
 
         payload = _read_hook_stdin()
         role = _from_role()
@@ -2052,7 +2056,9 @@ def cmd_guard(_: argparse.Namespace) -> dict:
             return granted
 
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-        verdict = pane_guard.classify(command, role, mb_fallback_check=_mb_fallback_check, cwd=cwd)
+        verdict = PermissionEngine().evaluate_shell_command(
+            command, role, mb_fallback_check=_mb_fallback_check, cwd=cwd
+        )
         if verdict.allowed:
             return {"ok": True, "msg": ""}
         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)

@@ -100,6 +100,39 @@ def test_evaluate_shell_command_audits_denied_verdict(
     assert payload["rule"] == verdict.rule
 
 
+def test_evaluate_shell_command_passes_mb_fallback_check_through(
+    engine: PermissionEngine,
+) -> None:
+    """#309 Wave C gap: evaluate_shell_command must forward
+    mb_fallback_check to pane_guard.classify verbatim — a command denied
+    by the mb-shard rule is allowed once the callback reports a grant,
+    exactly as calling pane_guard.classify directly would behave."""
+    verdict_denied = engine.evaluate_shell_command(
+        "mb go http://localhost:3000", "qa#1", mb_fallback_check=lambda: False
+    )
+    assert verdict_denied.allowed is False
+
+    verdict_allowed = engine.evaluate_shell_command(
+        "mb go http://localhost:3000", "qa#1", mb_fallback_check=lambda: True
+    )
+    assert verdict_allowed.allowed is True
+
+
+def test_evaluate_shell_command_passes_cwd_through(engine: PermissionEngine) -> None:
+    """#309 Wave C gap: evaluate_shell_command must forward cwd to
+    pane_guard.classify verbatim — the #314 worktree git-commit carve-out
+    only engages when cwd is threaded through."""
+    worktree_cwd = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+
+    verdict_no_cwd = engine.evaluate_shell_command('git commit -m "x"', "backend")
+    assert verdict_no_cwd.allowed is False
+
+    verdict_with_cwd = engine.evaluate_shell_command(
+        'git commit -m "x"', "backend", cwd=worktree_cwd
+    )
+    assert verdict_with_cwd.allowed is True
+
+
 def test_evaluate_shell_command_does_not_audit_allowed_verdict(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: PermissionEngine
 ) -> None:

@@ -302,6 +302,7 @@
         "agent_takkub.chatlog_scanner",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.permission_engine",
         "agent_takkub.core.migration.engine",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
@@ -330,7 +331,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 29
+      "fan_out": 30
     },
     {
       "module": "agent_takkub.cli_server",
@@ -848,8 +849,10 @@
         "agent_takkub.pane_guard",
         "agent_takkub.pane_tools_policy"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
       "fan_out": 3
     },
     {
