@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.86] - 2026-08-23
+
 ### Fixed (แก้)
 
 - **`migrate apply` step `runtime-triage` ทับผลของ step `state` แล้วรายงาน `ok` ทั้งคู่ + `rollback` ไม่คืน storage layout เป็น `v1`** (#350) —
@@ -18,6 +20,74 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ทั้งก้อน ทำให้ `doctor --storage-layout` ค้าง `mixed` ตลอดไปหลัง apply ครั้งแรก (ชน pre-flight
   ของแผนเองที่ห้าม `apply` ทับสภาพ `mixed`) แก้โดยให้ `rollback()` ลบ `v2/` root ทิ้งทั้งก้อนเมื่อ
   ทุก step คืนสำเร็จครบ (ปลอดภัยตามดีไซน์ copy-never-move — V2 ไม่เคยเป็นที่เก็บข้อมูลตัวจริง)
+
+- **QTimer.singleShot ของ spawn-stagger รั่วทิ้งไว้ 5 ตัวต่อรอบ spawn** (#345) — `QTimer.singleShot`
+  แบบ static ผูก lifetime ไว้กับ receiver ที่ไม่มีใครถือ ทำให้ timer ค้างใน event loop ต่อให้ pane
+  ถูกปิดไปแล้ว (spawn 20 panes = 100 timer ค้าง) → แก้เป็น instance-owned `QTimer` ที่ owner ถือ
+  reference จริงและ `stop()`+`deleteLater()` ตอน teardown; ไล่ปิดจนเหลือ **0** ทุกเส้นทาง
+  (`f17fe1d` + `aac5dd8`)
+
+- **argv assembly ที่ extract ออกมาแล้วไม่เคยถูกเรียกใช้จริง** (#347) — `assemble_generic_argv` /
+  `assemble_claude_argv` ถูกแยกออกมาเป็นฟังก์ชันบริสุทธิ์ (Wave A, #309) แต่ `spawn_engine` ยัง
+  ประกอบ argv ด้วยโค้ดเดิมคู่ขนาน — เท่ากับมี logic 2 ชุดที่ drift จากกันได้เงียบๆ → wire เข้า
+  call site จริงทั้งสองเส้น (`spawn_engine.py:2188`, `:2971`)
+
+- **transcript parser ระเบิดเมื่อ schema ของทั้งไฟล์เปลี่ยน** (#348) — parser เดิม guard เฉพาะราย
+  record แต่ไม่ได้ guard กรณี provider เปลี่ยนโครงทั้งไฟล์ (top-level ไม่ใช่ list/dict ที่คาด) →
+  เพิ่ม whole-file schema guard คืน result ว่างแทนการโยน exception ขึ้นไปถึง UI
+
+- **codex pane ค้างที่ `Starting MCP servers` ไม่มีวันจบ** (#351) — `_CODEX_SERVER_KEYS` ไม่เคย
+  forward `startup_timeout_sec`/`tool_timeout_sec` ลง config ที่ generate ให้ codex ทำให้ MCP server
+  ที่ handshake ไม่ตอบค้างแบบไม่มี timeout → forward ทั้งสองคีย์ + synthesize default
+  `startup_timeout_sec=120` เมื่อ user ไม่ได้ตั้ง
+
+- **deny-by-default พังบน codex 0.149** (#352) — เดิมมีแค่ `_CODEX_RESOLVE_SAFE_MIN_VERSION`
+  (floor เปิดปลาย) เท่ากับเคลมว่า codex **ทุกเวอร์ชันในอนาคต** ปลอดภัย ทั้งที่ verify มาถึงแค่
+  0.146 → เพิ่ม `_CODEX_RESOLVE_SAFE_MAX_VERSION = (0, 146, 0)` ปิดช่วงเป็น range ที่ทดสอบจริง
+  เวอร์ชันนอกช่วงตกกลับเส้นทาง conservative แทนที่จะเชื่อเงียบๆ
+
+- **shell pane กับ teammate pane ใช้ `CODEX_HOME` คนละที่** (#353) — `doctor.check_provider_isolation`
+  คาด provider home ที่ถูก inject ไว้ แต่เส้นทาง shell pane ใน `spawn_engine` ไม่ได้เรียก
+  `inject_provider_home_env` เลย codex/opencode ที่เปิดจาก shell pane จึงไปอ่าน config คนละชุดกับ
+  ที่ cockpit เตรียมไว้ → เรียก `inject_provider_home_env` ในเส้นทาง shell pane ด้วย
+  (`CODEX_HOME`, `XDG_DATA_HOME`/`XDG_CONFIG_HOME`)
+
+- **CI แขวนเงียบได้ถึง 6 ชั่วโมง + xdist restart worker ที่ตายแล้วรันต่อโดยข้ามเทสไป ~174 ตัว** —
+  `.github/workflows/ci.yml` ไม่เคยมี `timeout-minutes` เลยสักจ็อบ (เจอจริง: ubuntu ค้าง 24+ นาที
+  ขณะที่ windows จบใน 3 นาที) และ xdist default จะ restart worker ที่ตายแล้วเดินหน้าต่อ ทำให้ run
+  จบด้วยสถานะ "ผ่าน" ทั้งที่นับได้ 8442 จาก 8616 → ใส่ `timeout-minutes: 20` ทั้งสองจ็อบ,
+  `--max-worker-restart=0` (worker ตาย = fail ดังๆ พร้อมชื่อเทส), `--timeout` ราย test และ
+  `faulthandler_timeout = 280` ที่ยิงก่อน pytest-timeout — สำคัญเพราะ xdist ต่อเฉพาะ **stdout** ของ
+  worker กลับมาที่ controller (stderr ปล่อย inherit) dump ของ pytest-timeout จึงหายไปกับ
+  `os._exit()` ส่วน faulthandler เขียนลง stderr fd ที่ dup ไว้จึงรอด
+
+### Changed (เปลี่ยน)
+
+- **full test suite รันขนานด้วย pytest-xdist — 357s → 113s** — `takkub qa-gate` (full) ใช้
+  `-n <workers> --dist loadscope` (cap 8 worker, override ด้วย `TAKKUB_QA_XDIST_WORKERS`);
+  `--targeted` ยังรัน serial เหมือนเดิม
+- **`docs-verify` เร็วขึ้น 390 เท่า — 93s → 0.24s** — `verify_symbol()` เดิม glob + อ่านไฟล์ `.py`
+  ทั้ง 277 ไฟล์ **ใหม่ทุกครั้ง** ต่อ doc symbol 1 ตัว (337 ตัว) = O(refs × files) → เปลี่ยนเป็น
+  index รอบเดียวแล้ว cache (`_build_symbol_index`, `functools.cache`) แล้วเช็ค membership O(1)
+  ผลลัพธ์เท่าเดิมทุกประการ (44 results) · `docs-verify` เป็น pre-commit hook ด้วย ทุก commit
+  ที่ผ่านมาจ่ายค่านี้อยู่
+
+### Fixed (test infra)
+
+- **wheel build ชนกันข้าม xdist worker** — `tests/test_installed_mode_gate.py` ให้ทุก worker
+  `python -m build` เข้า `build/` เดียวกันพร้อมกัน (3 worker = 3 error) → build **ครั้งเดียวต่อ
+  pytest run** หลัง cross-process lock (`os.O_CREAT|os.O_EXCL`) + shared wheel cache ที่
+  `tmp_path_factory.getbasetemp().parent` — เร็วขึ้นอีก ~60s ด้วย
+- **`_main_thread_heartbeat_age` รั่วข้ามเทส** — `test_single_instance_watchdog` เขียน module
+  global ทิ้งไว้ ทำให้ `test_no_content_watchdog_cap` `RecursionError` เมื่อ xdist จับคู่ไฟล์คนละ
+  ลำดับ → reset ใน autouse fixture ของ `tests/conftest.py`
+- **`terminate()` race ไม่ใช่ state รั่ว** — `terminate()` default `wait=False` ทำให้
+  `_writer.quit()`/`_reader.quit()` วิ่งบน daemon thread ขณะที่ `request_stop()` ทำแบบ sync เทส
+  ที่ assert ผลของ teardown จึงตกเฉพาะตอนรันเต็ม → เทสเรียก `terminate(wait=True)` (โค้ด
+  production ไม่แตะ — async teardown ตั้งใจให้ Qt main thread ไม่ค้างตอน `taskkill /T`)
+- **assert ที่ผูกกับความยาว tmp path** — `test_done_note_symmetrize` ตกเฉพาะ macOS
+  (`/private/var/folders/...` + `popen-gwN` ของ xdist ยาวเกิน) → assert สัญญาการย่อโน้ตจริง
+  แทนความยาวรวม
 
 ## [v1.0.85] - 2026-08-22
 
