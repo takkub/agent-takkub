@@ -107,6 +107,86 @@ class TestPublish:
         assert record.name == "notes.md"
         assert warnings == []
 
+    def test_publish_rejects_protocol_relative_script(self, tmp_path):
+        src = _html(tmp_path, body='<script src="//evil.example/x.js"></script>')
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_rejects_external_iframe(self, tmp_path):
+        src = _html(tmp_path, body='<iframe src="https://evil.example/"></iframe>')
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_rejects_external_object(self, tmp_path):
+        src = _html(tmp_path, body='<object data="https://evil.example/x"></object>')
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_rejects_external_embed(self, tmp_path):
+        src = _html(tmp_path, body='<embed src="https://evil.example/x">')
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_rejects_external_css_import(self, tmp_path):
+        src = _html(tmp_path, body='<style>@import url("https://evil.example/x.css");</style>')
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_rejects_external_css_background_url(self, tmp_path):
+        src = _html(tmp_path, body="<style>body{background:url(http://evil.example/x.png)}</style>")
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", "demo")
+
+    def test_publish_allows_relative_css_import(self, tmp_path):
+        src = _html(tmp_path, body='<style>@import "local.css"; body{color:red}</style>')
+        record, warnings = reports.publish(src, "status.html", "demo")
+        assert warnings == []
+        assert record.name == "status.html"
+
+
+class TestSvgValidation:
+    """Should-fix #4 (review 2026-08-23-367): `.svg` was on the extension
+    whitelist but never ran through the external-reference check at all —
+    it now gets the same check `.html` gets."""
+
+    def _svg(
+        self,
+        tmp_path,
+        name: str = "pic.svg",
+        body: str = '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    ) -> str:
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        return str(path)
+
+    def test_publish_allows_plain_svg(self, tmp_path):
+        src = self._svg(tmp_path)
+        record, warnings = reports.publish(src, "pic.svg", "demo")
+        assert warnings == []
+        assert record.name == "pic.svg"
+
+    def test_publish_allows_svg_inline_script(self, tmp_path):
+        body = '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'
+        record, warnings = reports.publish(self._svg(tmp_path, body=body), "pic.svg", "demo")
+        assert warnings == []
+        assert record.name == "pic.svg"
+
+    def test_publish_rejects_svg_external_script(self, tmp_path):
+        body = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<script src="https://evil.example/x.js"></script></svg>'
+        )
+        with pytest.raises(reports.ReportError):
+            reports.publish(self._svg(tmp_path, body=body), "pic.svg", "demo")
+
+    def test_publish_rejects_svg_external_image(self, tmp_path):
+        body = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<image href="https://evil.example/x.png"/></svg>'
+        )
+        with pytest.raises(reports.ReportError):
+            reports.publish(self._svg(tmp_path, body=body), "pic.svg", "demo")
+
 
 class TestNameValidation:
     @pytest.mark.parametrize(

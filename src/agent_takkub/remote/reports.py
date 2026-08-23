@@ -58,13 +58,40 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _EXPIRES_RE = re.compile(r"^(\d+)([hd])$")
 
 # publish() rejects a report that isn't standalone — a report served under a
-# share-token must never make the recipient's browser reach out to a third
-# party. Not a full HTML parser; a case-insensitive tag+attribute regex is
-# enough to catch the shapes the issue calls out and cheap to reason about.
+# share-token should never make the recipient's browser reach out to a third
+# party. Not a full HTML/CSS parser; a case-insensitive regex is cheap to
+# reason about and catches the shapes below, but it is a secondary,
+# best-effort gate — `_REPORT_CSP_HEADER` (http_server.py)'s `default-src
+# 'self'` is what actually enforces this at render/fetch time, so a gap here
+# is not by itself exploitable. `//host/...` (protocol-relative) counts as
+# external same as `https?://`.
+_EXTERNAL_URL_RE = r"(?:https?:)?//"
+
+# <script src=.../<link href=.../<img src=.../<image href=... (SVG's raster
+# tag) plus <iframe src=.../<object data=.../<embed src=... (object/embed's
+# external ref is also blocked by the CSP's `object-src 'none'`, but iframe
+# has no such fallback of its own here — default-src covers it, this regex
+# is the extra gate).
 _EXTERNAL_ASSET_RE = re.compile(
-    r"<\s*(?:script|link|img)\b[^>]*\b(?:src|href)\s*=\s*['\"]?\s*https?://",
+    r"<\s*(?:script|link|img|image|iframe|object|embed)\b[^>]*\b(?:src|href|data)\s*=\s*"
+    r"['\"]?\s*" + _EXTERNAL_URL_RE,
     re.IGNORECASE,
 )
+
+# CSS `@import url(...)`/`@import "..."` and any `url(...)` (inline <style>
+# block or a style="..." attribute) pointing at an external origin.
+_EXTERNAL_CSS_URL_RE = re.compile(
+    r"@import\s+(?:url\(\s*)?['\"]?\s*"
+    + _EXTERNAL_URL_RE
+    + r"|url\(\s*['\"]?\s*"
+    + _EXTERNAL_URL_RE,
+    re.IGNORECASE,
+)
+
+# `.html` and `.svg` both get the external-reference check — SVG can carry
+# its own inline `<script>`/external `<image>` reference just like HTML, and
+# it's on the share extension whitelist too (was previously never checked).
+_CHECKED_EXTENSIONS = frozenset({".html", ".svg"})
 
 
 class ReportError(ValueError):
@@ -182,23 +209,28 @@ def _save_shares(project: str | None, data: dict) -> None:
 
 
 def validate_standalone_html(path: Path) -> list[str]:
-    """Only checked for `.html` files. Raises `ReportError` (reject — not a
-    warning) on any external `<script src=http.../<link href=http.../
-    <img src=http...` reference: a report served under a share-token must
-    be self-contained. Returns non-fatal warnings (currently just the
-    > 5 MB size heads-up) for the caller to print alongside a successful
-    publish."""
+    """Checked for `.html` and `.svg` files (see `_CHECKED_EXTENSIONS`).
+    Raises `ReportError` (reject — not a warning) on an external asset tag
+    (`<script>`/`<link>`/`<img>`/`<image>`/`<iframe>`/`<object>`/`<embed>`,
+    absolute or protocol-relative) or an external CSS `url(...)`/`@import`:
+    a report served under a share-token should be self-contained. This is a
+    best-effort regex gate, not the enforcement — `_REPORT_CSP_HEADER`
+    (http_server.py)'s `default-src 'self'` is what actually blocks a
+    report from reaching a third-party origin at render/fetch time, so a
+    shape this regex misses is still blocked there. Returns non-fatal
+    warnings (currently just the > 5 MB size heads-up) for the caller to
+    print alongside a successful publish."""
     warnings: list[str] = []
-    if path.suffix.lower() == ".html":
+    if path.suffix.lower() in _CHECKED_EXTENSIONS:
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
             raise ReportError(f"could not read {path}: {exc}") from None
-        match = _EXTERNAL_ASSET_RE.search(text)
+        match = _EXTERNAL_ASSET_RE.search(text) or _EXTERNAL_CSS_URL_RE.search(text)
         if match:
             raise ReportError(
-                "report must be standalone (no external <script>/<link>/<img>) — "
-                f"found: {match.group(0)[:80]!r}"
+                "report must be standalone (no external script/link/img/iframe/"
+                f"object/embed/CSS reference) — found: {match.group(0)[:80]!r}"
             )
     try:
         size = path.stat().st_size

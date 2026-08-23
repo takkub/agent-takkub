@@ -95,9 +95,12 @@ class AuthGate:
         # #367 Remote Reports: its own counter, same rationale as the
         # password split above — a report-token guess must never share a
         # counter that a legitimate bearer-token holder's own successful
-        # requests keep resetting to 0.
-        self._report_fail_count = 0
-        self._report_locked_until = 0.0
+        # requests keep resetting to 0. Scoped per (project_ns, name) —
+        # review should-fix #1: a global counter meant a legitimate success
+        # against report B reset the fail-count an attacker had built up
+        # brute-forcing an unrelated report A.
+        self._report_fail_counts: dict[tuple[str, str], int] = {}
+        self._report_locked_until: dict[tuple[str, str], float] = {}
         self._tickets: dict[str, tuple[float, str]] = {}
         self.last_request_ts = time.time()
         # Third auth factor (H1 fix): password success is bound to a
@@ -277,27 +280,30 @@ class AuthGate:
                 backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
                 self._pw_locked_until = time.time() + backoff
 
-    # ── report share-token (#367 Remote Reports): global counter, not
-    # per-IP — same reasoning `check_token` documents (all traffic arrives
-    # from one tunnel edge / loopback IP, so per-IP counting is a no-op).
-    # One shared counter across every report name: a wrong `?k=` guess
-    # against ANY report counts against the same budget, not a separate one
-    # per report.
-    def is_report_locked_out(self) -> bool:
+    # ── report share-token (#367 Remote Reports): not per-IP — same
+    # reasoning `check_token` documents (all traffic arrives from one tunnel
+    # edge / loopback IP, so per-IP counting is a no-op). Scoped per
+    # (project_ns, name), not global: a wrong `?k=` guess against report A
+    # only ever counts against A's own budget, never report B's — otherwise
+    # a legitimate success against B would reset an attacker's fail-count
+    # against A (review should-fix #1).
+    def is_report_locked_out(self, project_ns: str, name: str) -> bool:
         with self._lock:
-            return time.time() < self._report_locked_until
+            return time.time() < self._report_locked_until.get((project_ns, name), 0.0)
 
-    def record_report_token_result(self, ok: bool) -> None:
+    def record_report_token_result(self, project_ns: str, name: str, ok: bool) -> None:
         with self._lock:
+            key = (project_ns, name)
             if ok:
-                self._report_fail_count = 0
+                self._report_fail_counts.pop(key, None)
                 return
-            self._report_fail_count += 1
+            count = self._report_fail_counts.get(key, 0) + 1
+            self._report_fail_counts[key] = count
             threshold = max(1, self._config.lockout_after_fails)
-            if self._report_fail_count >= threshold:
-                overflow = self._report_fail_count - threshold
+            if count >= threshold:
+                overflow = count - threshold
                 backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
-                self._report_locked_until = time.time() + backoff
+                self._report_locked_until[key] = time.time() + backoff
 
     # ── single-use SSE ticket (X-check 3.3): EventSource can't send an
     # Authorization header, so `/api/lead?ticket=...` substitutes a
