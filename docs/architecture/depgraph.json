@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 277,
+  "module_count": 280,
   "modules": [
     {
       "module": "agent_takkub",
@@ -1311,6 +1311,35 @@
       "fan_out": 7
     },
     {
+      "module": "agent_takkub.core.model_catalog",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.model_catalog.legacy",
+      "imports": [
+        "agent_takkub.core.models.model",
+        "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.legacy_reader"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.model_catalog.registry",
+      "imports": [
+        "agent_takkub.core.models.model",
+        "agent_takkub.core.storage.jsonl_store",
+        "agent_takkub.core.storage.paths"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.core.models",
       "imports": [],
       "imported_by": [],
@@ -1398,8 +1427,11 @@
     {
       "module": "agent_takkub.core.models.model",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.core.model_catalog.legacy",
+        "agent_takkub.core.model_catalog.registry"
+      ],
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -1795,9 +1827,10 @@
         "agent_takkub.core.accounts.switch_log",
         "agent_takkub.core.brain.store",
         "agent_takkub.core.conversation.store",
-        "agent_takkub.core.migration.journal"
+        "agent_takkub.core.migration.journal",
+        "agent_takkub.core.model_catalog.registry"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 0
     },
     {
@@ -1808,10 +1841,11 @@
       "imported_by": [
         "agent_takkub.core.migration.engine",
         "agent_takkub.core.migration.steps_v1",
+        "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.storage.paths",
         "agent_takkub.doctor"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
@@ -1823,9 +1857,10 @@
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.conversation.summary",
         "agent_takkub.core.migration.registry_copy_step",
-        "agent_takkub.core.migration.steps_v1"
+        "agent_takkub.core.migration.steps_v1",
+        "agent_takkub.core.model_catalog.legacy"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -1842,9 +1877,10 @@
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.journal",
+        "agent_takkub.core.model_catalog.registry",
         "agent_takkub.core.versioning.store"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 2
     },
     {

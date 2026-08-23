@@ -23,7 +23,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   bounded poll `_wait_until()` รอให้ครบก่อน assert (ไม่ใช่ sleep ตายตัว, ไม่ xfail/skip)
   assert เดิมครบทั้ง 3 ข้อ · flake ตัวนี้ซ่อนมานาน — xdist ที่เพิ่งเปิดใน 1.0.86 แค่ทำให้มันโผล่
 
+- **`.gitignore` กฎ `v2/` กลืน `docs/v2/` ทั้งโฟลเดอร์** — กฎที่ตั้งไว้กัน output ของ
+  `migrate apply` บน dev checkout (`<repo>/v2/`) ไม่ได้ anchor ไว้ที่ root มันเลย match
+  `docs/v2/` ด้วย ซึ่งเก็บแผน/รายงาน Core V2 ทั้งชุด → `git add docs/v2/<ไฟล์>` fail
+  และ `git add -A` ข้ามไฟล์ V2 ใหม่แบบเงียบๆ (ไฟล์ที่ track อยู่แล้วรอดมาได้เพราะ gitignore
+  ไม่มีผลกับไฟล์ที่ track แล้ว จึงไม่มีใครเห็นปัญหาจนกว่าจะเพิ่มไฟล์ใหม่) → เปลี่ยนเป็น `/v2/`
+
 ### Added (เพิ่ม)
+
+- **Core V2 model registry store (`core/model_catalog/`) — epic #309 Wave A ชิ้นสุดท้าย** —
+  `core/models/` เดิมมีแต่ dataclass และไม่มีใคร construct เลยนอกจากเทส → เพิ่ม `ModelRegistry` /
+  `ModelProfileRegistry` (JSONL upsert-log + tombstone แพทเทิร์นเดียวกับ `core/accounts/registry.py`)
+  และ `legacy.py` ที่แกะ blob ของ ladder step 1 (`{"schema","migrated_from","migrated_at","data"}`)
+  จาก `models/registry.json` / `models/aliases.json` เป็น `ModelDefinition`/`ModelProfile` จริง
+  fail-open ทุกทาง (ไฟล์ไม่มี/JSON พัง/`data` ผิดรูป → `[]` ไม่ raise — ซึ่งคือสภาพของทุกเครื่อง
+  วันนี้ เพราะยังไม่มีใครรัน `migrate apply`) · แผน §1.3 เดิมระบุให้วางที่ `core/models/registry.py`
+  ซึ่ง**ทำไม่ได้** — contract `core-models-pure` ห้าม `core.models.*` import `core.storage` เด็ดขาด
+  จึงแยกเป็น package ใหม่แบบเดียวกับที่ `core/accounts/` ทำกับ `core/models/account.py`
+  (แก้เอกสาร §1.3 บันทึกเหตุผลไว้แล้ว) · **ยังไม่ wire เข้า `core/routing/`** — resolver คือ Wave C
+  ที่ถูกล็อกไว้หลัง `migrate apply` โดยตั้งใจ
+  + 20 tests (`tests/test_core_model_catalog.py`)
+  - **กันข้อมูลหายเงียบ:** `ModelDefinition.id` ใช้ composite `provider:model` ไม่ใช่ model id เปล่า —
+    `provider-models.json` ให้ 2 provider ชี้ model เดียวกันได้ (claude กับ cursor ต่างก็ `claude-sonnet-5`)
+    แต่ registry key ด้วย `id` ตัวหลังจะทับตัวหน้าทิ้ง แล้ว `for_provider("claude")` คืน `[]`
+    ทั้งที่มี — bug class เดียวกับ #340/#341/#346/#350
+
 
 - **CI job `npm-wrapper` — เทส JS ของ npm wrapper ไม่เคยรันใน CI มาก่อนเลย** — `.github/workflows/ci.yml`
   ไม่มี Node step สักบรรทัด (`grep 'npm test' / 'node --test' / 'setup-node'` = 0 matches) เทสทั้ง 15 ตัว

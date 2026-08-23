@@ -21,7 +21,10 @@ runtime/
 # the repo root, so a rehearsal leaves 300MB+ of duplicated data sitting in the
 # working tree. It is generated output that `migrate rollback` deletes wholesale
 # (engine.py's rmtree) — never something to commit.
-v2/
+# Anchored to the repo root on purpose: a bare `v2/` also matched `docs/v2/`
+# (the whole Core V2 plan/report set), so `git add docs/v2/<anything>` failed and a
+# `git add -A` skipped new V2 docs silently.
+/v2/
 *.log
 # Local issue-store fallback (written only when gh is unavailable). With
 # issues now defaulting to the agent-takkub repo, this can land at repo root.
