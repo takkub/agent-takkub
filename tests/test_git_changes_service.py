@@ -38,6 +38,18 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
 
 
+def _wait_until(predicate, timeout_ms: int = 5000, step_ms: int = 10) -> bool:
+    """Poll `predicate` while pumping the Qt event loop, instead of a single
+    fixed `qWait` — a starved CI worker can push a 30ms QTimer's actual
+    delivery well past a flat wait without the debounce logic itself being
+    wrong. Bounded so a genuine non-fire still fails the test."""
+    elapsed = 0
+    while not predicate() and elapsed < timeout_ms:
+        QTest.qWait(step_ms)
+        elapsed += step_ms
+    return predicate()
+
+
 def _init_repo_with_commit(repo: Path, rel_path: str, content: str) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     _git(repo, "init", "-q")
@@ -294,8 +306,8 @@ class TestGitChangesServiceDebounce:
         svc.request_refresh()
         svc.request_refresh()
         svc.request_refresh()
-        QTest.qWait(150)
 
+        assert _wait_until(lambda: calls == [1])
         assert calls == [1]
 
     def test_no_refresh_before_debounce_window_elapses(self, qapp, monkeypatch, tmp_path) -> None:

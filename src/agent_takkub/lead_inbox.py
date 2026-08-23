@@ -1669,9 +1669,9 @@ class LeadInboxMixin:
                         role_name, project, boot_marker_elapsed_ms / 1000
                     )
                     return
-                seconds_since_output = pane.session.seconds_since_output()
+                seconds_since_output = _timing_or_none(pane.session.seconds_since_output())
                 stall_threshold_sec = _orch_attr("STALL_THRESHOLD_SEC", 300)
-                if seconds_since_output < stall_threshold_sec:
+                if seconds_since_output is not None and seconds_since_output < stall_threshold_sec:
                     # Follow-up to #130: the busy grace period above has no
                     # ceiling of its own, so a pane that produces output
                     # forever without ever returning to ready (e.g. a TUI

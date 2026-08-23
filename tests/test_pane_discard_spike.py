@@ -18,6 +18,7 @@ actual go/no-go call in the #364 writeup were gathered with heavier
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,19 @@ def _run_spike(*extra_args: str, timeout: float = 60.0) -> dict:
     return json.loads(payload)
 
 
+# These are a RAM-measurement instrument, not a correctness regression gate:
+# the script this shells out to constructs real QWebEngineView instances,
+# which test_editor_widget.py documents as unverified — and, since CI run
+# 32633203191, confirmed hard-aborting (Fatal Python error: Segmentation
+# fault, exit -11) — under `QT_QPA_PLATFORM=offscreen` on macOS CI (no
+# display, no xvfb). Same opt-in gate as
+# test_editor_widget.py::test_real_qwebengineview_construction_does_not_abort
+# — run directly with the env var set (and/or on a machine with a real
+# display) to actually exercise these.
+@pytest.mark.skipif(
+    os.environ.get("AGENT_TAKKUB_QT_WEBENGINE_SMOKE") != "1",
+    reason="opt-in — real QWebEngineView segfaults under offscreen/no-display CI (run 32633203191, macOS)",
+)
 @pytest.mark.timeout(90)
 class TestPaneDiscardSpike:
     def test_discard_frees_hidden_renderer_ram(self) -> None:

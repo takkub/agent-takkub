@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
@@ -21,6 +22,22 @@ from agent_takkub.spawn_engine import (
 )
 
 TEST_PROJECT = "spawn-task-test"
+
+
+def _pump_until(app: QCoreApplication, predicate, timeout: float = 5.0) -> bool:
+    """Same idiom as test_remote_e2e_round2.py / test_remote_http_server.py /
+    test_resume_session_picker.py — a fixed `for _ in range(N): processEvents()`
+    spin (no real elapsed time between iterations) can burn through all N
+    calls before a chained `QTimer.singleShot(0, ...)` (spawn -> finally ->
+    _drain_spawn_queue -> singleShot(0, next spawn), one hop per FIFO item)
+    actually becomes due under a starved CI scheduler."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 @pytest.fixture(scope="module")
@@ -382,10 +399,7 @@ def test_fifo_queue_drains_three_claude_assigns_with_preload_events(
         # successful native launch drains the next FIFO item in its finally.
         orch._spawn_in_progress = False
         orch._drain_spawn_queue()
-        for _ in range(20):
-            qapp.processEvents()
-            if len(native_spawns) == len(roles):
-                break
+        _pump_until(qapp, lambda: len(native_spawns) == len(roles))
 
     assert len(native_spawns) == len(roles)
     preloaded_roles = [
