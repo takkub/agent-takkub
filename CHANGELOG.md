@@ -6,6 +6,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Phase 10 ชิ้น 2 — readers สลับไปอ่าน `v2/` ภายใต้ `TAKKUB_V2_AUTHORITY` (default **OFF**)** (#362) — `core/storage/v2_authority.py`
+  helper เดียว: flag ON + v2 target มี → อ่าน v2 (unwrap `.data`) ไม่งั้น V1 เดิม · fail-open กลับ V1 ทุกจุด (ไม่มี/พัง → V1 + log) ·
+  ครอบทุก domain ที่ dual-write: role_models · provider_models · provider_state · pane_tools_policy · skill_policy · custom_roles ·
+  provider_config routing (global+per-project) · `config.load_projects` · issues local-issues · auto_issue dedup · remote session_store ·
+  `Router.effective_model_for` flip authority ตาม flag (ON = V2 authoritative, V1 เป็น shadow) · `doctor --storage-layout` เพิ่ม finding
+  `authority` · **rollback = ปิด flag ทันที ไม่ต้องแตะดิสก์** · Settings Core V2 toggle · ไม่ wire exec_mode/auto_resume/rtk_helper
+  (getter เป็น constant ไม่มี V1 read call site — บันทึกใน plan §3 Wave E) · **การ flip default เป็น ON = การตัดสินใจ release 2.0.0
+  หลัง soak drift=0** ไม่ใช่ในรอบนี้
+  + tests: `tests/test_core_storage_v2_authority.py` (44) · `test_core_routing.py` authority-flip (3) · parity OFF/ON ทุก domain
+
 - **#364 lever 5 — profile main process (pythonw) ด้วยตัวเลขจริง: ไม่พบ leak, ไม่มีอะไรให้ cap** — spike 5 pane จริง (offscreen):
   RSS โต **13.16 MB/pane**, ปิด pane แล้ว TerminalWidget/QWebEngineView object count กลับเป็น 0 ทั้งคู่ → ไม่เสนอ cap ·
   เพิ่ม `takkub doctor --ram --ram-profile` (opt-in, tracemalloc on-demand ผ่าน IPC `ram-profile` ไม่เปิดค้าง) เป็น visibility tool +
