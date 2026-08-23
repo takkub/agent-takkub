@@ -6,6 +6,25 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **Lead pane ค้าง "unrecognised" 9 ชม. ไม่มี auto-recovery (#343)** — ต้นเหตุจาก transcript ของ pane
+  ตัวนั้น: hint line ของ claude (`⏵⏵ bypass permissions on (shift+tab to cycle)`) ที่ marker table ใช้จับ
+  "ready" ถูกวาด**ครั้งเดียวตอน boot** แล้วไม่วาดซ้ำ (ink diff-render) พอ `/compact` redraw ทั้งจอ
+  hint หาย เหลือกล่อง `❯` เปล่าๆ · events.log ยืนยัน 134 ครั้งติดกันจอเป็น `border | ❯ | border`
+  เป๊ะทุกครั้ง และ pane เดียวกันช่วงเดียวกันยังโชว์ hint อีกแบบ (`… · esc to interrupt · ← for
+  agents`) = claude หมุน hint หลายแบบ ไม่ใช่ string คงที่ — ไล่ wording เป็นเกม fragile ที่ #20 เคยเล่น
+  → (1) **auto-recovery probe** ใน `_escalate_stale_marker`: resize-nudge (cols+1 แล้วคืน — ไม่ส่ง
+  keystroke เพราะ keystroke เปลี่ยน state ของ CLI ได้ resize ไม่ได้ ปลอดภัยทุก provider) ยิงครั้งเดียว
+  ต่อ escalation แล้ว**ดูจอใน sweep tick ถัดไป** (2 เฟส — child ต้องมีเวลา repaint จริงก่อน ไม่ใช่
+  อ่าน screen ต่อทันทีหลัง resize ซึ่ง pyte ยังไม่มี byte ใหม่) · log `ready_marker_nudge` ·
+  (2) **structural fallback เฉพาะ claude** `PtySession.is_at_claude_empty_composer()`: จับ 3 แถว
+  ติดกัน border / `❯` ล้วน / border เท่านั้น — ไม่รับ `>` (กันชน shell prompt), มีข้อความค้างใน input
+  ไม่ match, **ไม่ผูกเข้า `is_at_ready_prompt()`/marker table** เรียกเฉพาะจุดที่รู้ provider แล้ว —
+  shell prompt หลัง claude ตายไม่มีทางวาดกรอบ unicode + `❯` จึงไม่กลบสัญญาณ crash ตามที่ใบเตือน ·
+  หลัง nudge ถ้ารู้จัก/ตรง structural → เคลียร์ streak เงียบ ไม่ page Lead · ไม่งั้นดังทันที (🔴 +
+  `_notify_lead`) ในรอบนั้น ไม่รอ streak อีก 3 รอบ
+  + tests: `tests/test_stale_marker_detector.py` (+8: nudge ครั้งเดียว / recovered ไม่ดัง / provider
+  อื่นดัง / จอเปลี่ยนระหว่างเฟสดัง / detector match-reject 4 เคส)
+
 - **`worktrees/` สะสมซากที่ git ไม่รู้จักจนหลายสิบ GB — `takkub worktree clean` มองไม่เห็น** (#355) —
   วัดจากเครื่องจริง: `~/.agent-takkub/worktrees/TK-ERP` มี 44 โฟลเดอร์ 31.7 GB แต่ `git worktree list`
   รู้จักแค่ 2 · ซากไม่มี `.git` ไม่มี branch · 99% ของขนาดคือ `node_modules` ตัวละ ~770 MB ·

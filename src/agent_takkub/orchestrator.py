@@ -567,6 +567,17 @@ _STALE_MARKER_CHECKS_TRIED = (
     "is_at_update_splash",
 )
 
+
+def _stale_marker_footer(sess: PtySession) -> str:
+    """Bottom-of-screen diagnostic text for the stale-marker log/escalation —
+    factored out so _resolve_stale_marker_nudge can re-capture it (phase 2,
+    after a real post-redraw repaint) with exactly the same shape
+    _check_stale_markers used to detect it."""
+    return " | ".join(
+        ln.strip() for ln in sess.display_lines()[-STALE_MARKER_TAIL_ROWS:] if ln.strip()
+    )[:300]
+
+
 # A teammate pane in `working` state with no PTY output for this long
 # is treated as hung — claude probably crashed silently, deadlocked on
 # a tool call, or got wedged behind a slow MCP server. Orchestrator
@@ -1307,6 +1318,14 @@ class Orchestrator(
         # recovery (marker matches again, or the pane dies). Drives the
         # louder escalation in _check_stale_markers/_escalate_stale_marker.
         self._stale_marker_streak: dict[str, int] = {}
+        # Per-pane auto-recovery-probe state (#343 follow-up), present only
+        # between the sweep tick that fired the resize nudge and the NEXT
+        # sweep tick that reads the post-redraw screen — see
+        # _nudge_stale_marker (phase 1) / _resolve_stale_marker_nudge (phase
+        # 2). A key's presence here means "awaiting phase 2", checked first
+        # thing in _check_stale_markers so phase 2 runs unconditionally on
+        # the very next tick, not gated behind the quiet/cooldown checks.
+        self._stale_marker_nudged: dict[str, dict[str, object]] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -7045,11 +7064,18 @@ class Orchestrator(
         a silent idle-watchdog stall.
 
         (#343) A pane that stays continuously unrecognised across multiple
-        cooldown windows in a row escalates past this routine 🟡 line — see
-        _STALE_MARKER_ESCALATE_EVERY and _escalate_stale_marker. This does
-        NOT touch the marker table itself: guessing at a marker fix here
-        would risk misclassifying a real provider crash as "ready", masking
-        the one signal that currently surfaces it at all.
+        cooldown windows in a row gets an auto-recovery probe past this
+        routine 🟡 line — see _STALE_MARKER_ESCALATE_EVERY,
+        _nudge_stale_marker, and _resolve_stale_marker_nudge. This does NOT
+        touch the marker table itself: guessing at a marker fix here would
+        risk misclassifying a real provider crash as "ready", masking the
+        one signal that currently surfaces it at all.
+
+        A key with a probe in flight (`self._stale_marker_nudged`) is
+        resolved FIRST, before any of the ordinary quiet/marker checks below
+        — see _resolve_stale_marker_nudge's docstring for why phase 2 must
+        run unconditionally on the very next sweep tick after the nudge, not
+        whenever this pane next happens to pass the quiet/cooldown gate.
         """
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
@@ -7058,6 +7084,10 @@ class Orchestrator(
                     sess = pane.session
                     if sess is None or not sess.is_alive:
                         self._stale_marker_streak.pop(key, None)
+                        self._stale_marker_nudged.pop(key, None)
+                        continue
+                    if key in self._stale_marker_nudged:
+                        self._resolve_stale_marker_nudge(project_name, name, pane, sess, key, now)
                         continue
                     if sess.seconds_since_output() < STALE_MARKER_QUIET_S:
                         continue  # still streaming → genuinely busy, not blind
@@ -7078,11 +7108,7 @@ class Orchestrator(
                     last = self._stale_marker_last.get(key)
                     if last is not None and (now - last) < STALE_MARKER_COOLDOWN_S:
                         continue
-                    tail = " | ".join(
-                        ln.strip()
-                        for ln in sess.display_lines()[-STALE_MARKER_TAIL_ROWS:]
-                        if ln.strip()
-                    )[:300]
+                    tail = _stale_marker_footer(sess)
                     quiet_s = round(sess.seconds_since_output())
                     _log_event(
                         "ready_marker_possibly_stale",
@@ -7095,11 +7121,169 @@ class Orchestrator(
                     streak = self._stale_marker_streak.get(key, 0) + 1
                     self._stale_marker_streak[key] = streak
                     if streak % _STALE_MARKER_ESCALATE_EVERY == 0:
-                        self._escalate_stale_marker(
-                            project_name, name, pane, sess, tail, quiet_s, streak, now
-                        )
+                        self._nudge_stale_marker(project_name, name, sess, tail, quiet_s, streak)
                 except Exception:
                     continue
+
+    def _nudge_stale_marker(
+        self,
+        project_name: str,
+        name: str,
+        sess: PtySession,
+        tail: str,
+        quiet_s: int,
+        streak: int,
+    ) -> None:
+        """(#343 follow-up) Phase 1 of the two-phase auto-recovery probe: fire
+        a resize bump-and-restore (never a keystroke — see PtySession.resize()'s
+        note; a keystroke can change a CLI's state, a resize can't, and this
+        must stay safe across every provider, not just claude) to force a
+        real redraw, record what the screen looked like BEFORE that redraw,
+        and stop — deliberately WITHOUT reading the screen again yet.
+
+        Why not read it here too: resize() applies pyte's synchronous
+        screen.resize() and returns immediately — it does not, and cannot,
+        wait for the child process to actually notice SIGWINCH/the ConPTY
+        size event and repaint in response. Reading the screen in the same
+        call, right after resize() returns, would just observe the SAME
+        pre-redraw frame again (or, worse, a frame mid-repaint), which is
+        not evidence of anything. The real post-redraw frame only exists
+        after the event loop has run long enough for the child to react —
+        i.e. on a LATER sweep tick. `self._stale_marker_nudged[key]` records
+        the pre-redraw state so `_resolve_stale_marker_nudge` (phase 2, next
+        tick) can compare against it once a real redraw has had a chance to
+        land, and `_check_stale_markers` resolves that key unconditionally
+        first thing on its very next pass.
+
+        Best-effort: a failed resize/read here must never take the sweep
+        down with it (matches this file's surrounding except-Exception-
+        continue style) — phase 2 still runs next tick and, seeing no
+        genuine recovery, falls through to the loud escalation.
+        """
+        provider = "unknown"
+        try:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(name, project=project_name)
+        except Exception:
+            pass
+
+        # Compared against the literal rather than importing provider_config.CLAUDE
+        # here too — that import already failing above is exactly the case where
+        # `provider` stays "unknown", which correctly keeps this False either way.
+        is_claude = provider == "claude"
+        structural_before = False
+        try:
+            structural_before = is_claude and bool(sess.is_at_claude_empty_composer())
+            orig_cols, orig_rows = sess.cols, sess.rows
+            sess.resize(orig_cols + 1, orig_rows)
+            sess.resize(orig_cols, orig_rows)
+        except Exception:
+            pass
+        key = f"{project_name}::{name}"
+        self._stale_marker_nudged[key] = {
+            "provider": provider,
+            "footer_before": tail,
+            "structural_before": structural_before,
+            "quiet_s": quiet_s,
+            "streak": streak,
+        }
+        _log_event(
+            "ready_marker_nudge",
+            role=name,
+            project=project_name,
+            quiet_s=quiet_s,
+            streak=streak,
+            provider=provider,
+            footer_before=tail,
+            structural_before=structural_before,
+        )
+
+    def _resolve_stale_marker_nudge(
+        self,
+        project_name: str,
+        name: str,
+        pane: AgentPane,
+        sess: PtySession,
+        key: str,
+        now: float,
+    ) -> None:
+        """(#343 follow-up) Phase 2 of the two-phase auto-recovery probe, run
+        unconditionally on the sweep tick AFTER _nudge_stale_marker fired the
+        resize — by now the event loop has had a full tick to let the child
+        actually react to the resize and repaint, so reading the screen here
+        reflects a genuine post-redraw frame instead of a same-tick echo of
+        the pre-redraw one (see _nudge_stale_marker's docstring for why phase
+        1 can't do this check itself).
+
+        Two ways this counts as recovered, and either clears the streak
+        without paging anyone:
+          * `is_at_ready_prompt()` now matches — a marker just caught up
+            (the pane may simply have finished the redraw mid-recognition).
+          * claude-only structural fallback: the screen showed the SAME
+            "empty bordered composer" shape (PtySession.is_at_claude_empty_composer())
+            both immediately before the redraw (phase 1) AND now, after it —
+            two independent glimpses of the exact same idle shape bracketing
+            a real repaint is what rules out "caught mid-repaint" (a single
+            glimpse could coincidentally show a bare composer for one frame).
+
+        Anything else — non-claude, shape doesn't match, or doesn't survive
+        the redraw — escalates loudly in THIS same round via
+        _escalate_stale_marker, not after another _STALE_MARKER_ESCALATE_EVERY
+        streak: a failed nudge must never make evidence of a genuinely wedged
+        pane wait multiple cooldown windows longer to surface.
+
+        Best-effort: a failed screen read here is treated as "not recovered"
+        (falls through to the loud path) rather than raising, matching this
+        file's surrounding except-Exception-continue style.
+        """
+        nudge = self._stale_marker_nudged.pop(key, None)
+        if nudge is None:
+            return
+        footer_after = str(nudge["footer_before"])
+        recognised_after = False
+        structural_after = False
+        try:
+            recognised_after = bool(sess.is_at_ready_prompt())
+            structural_after = nudge["provider"] == "claude" and bool(
+                sess.is_at_claude_empty_composer()
+            )
+            footer_after = _stale_marker_footer(sess)
+        except Exception:
+            pass
+        structural_recovered = bool(nudge["structural_before"]) and structural_after
+        quiet_s = int(nudge["quiet_s"])
+        streak = int(nudge["streak"])
+        provider = str(nudge["provider"])
+        if recognised_after or structural_recovered:
+            _log_event(
+                "ready_marker_nudge_recovered",
+                role=name,
+                project=project_name,
+                quiet_s=quiet_s,
+                streak=streak,
+                provider=provider,
+                reason="recognised" if recognised_after else "structural",
+                footer_before=nudge["footer_before"],
+                footer_after=footer_after,
+            )
+            self._stale_marker_streak.pop(key, None)
+            return
+        _log_event(
+            "ready_marker_nudge_result",
+            role=name,
+            project=project_name,
+            quiet_s=quiet_s,
+            streak=streak,
+            provider=provider,
+            footer_before=nudge["footer_before"],
+            footer_after=footer_after,
+            recognised_after=recognised_after,
+            structural_recovered=structural_recovered,
+        )
+        self._escalate_stale_marker(
+            project_name, name, pane, sess, footer_after, quiet_s, streak, now
+        )
 
     def _escalate_stale_marker(
         self,
@@ -7112,10 +7296,11 @@ class Orchestrator(
         streak: int,
         now: float,
     ) -> None:
-        """(#343) Dump full diagnostic state for a pane that has stayed
-        unrecognised-and-quiet across _STALE_MARKER_ESCALATE_EVERY (and every
-        further multiple of it) consecutive occurrences, and make sure a
-        human actually finds out:
+        """(#343) The loud path: a pane that stayed unrecognised-and-quiet
+        across _STALE_MARKER_ESCALATE_EVERY occurrences AND did not recover
+        across the phase-1/phase-2 resize-nudge probe (see
+        _nudge_stale_marker / _resolve_stale_marker_nudge). Dumps full
+        diagnostic state and makes sure a human actually finds out:
 
           * logs under a distinct event name maintenance.py classifies 🔴
             (`_SEVERE_EVENTS`), not 🟡 — the routine event stayed 🟡-only for
@@ -7139,6 +7324,7 @@ class Orchestrator(
             model = sess.current_model_label(provider)
         except Exception:
             pass
+
         last_progress_ts = 0.0
         try:
             last_progress_ts = self._compute_last_progress_ts(name, project_name, pane)

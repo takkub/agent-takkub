@@ -469,6 +469,58 @@ def _ready_region(lines: list[str]) -> str:
     return "\n".join(chunks)
 
 
+# ── Structural empty-composer fallback for claude (#343) ────────────────────
+# #343: a claude pane sat "unrecognised" (is_at_ready_prompt() False, no other
+# state predicate matching either) for ~9h straight. Live telemetry from that
+# episode (134 consecutive ready_marker_possibly_stale captures, same pane,
+# same shape every single time) shows the real screen was NOT garbled or
+# mid-render — it was claude's ordinary bordered input box with an EMPTY
+# prompt and no hint row at all:
+#     ────────────────────────────────────────────  (border)
+#     ❯                                              (prompt, no hint text)
+#     ────────────────────────────────────────────  (border)
+# i.e. the "bypass permissions" / "shift+tab to cycle" hint text this
+# provider's ready_rules depend on (provider_spec.claude_spec) simply was not
+# part of that particular repaint — confirmed by a live-captured OTHER footer
+# from the same incident, "❯ ← for agents", which shows claude's footer is
+# not one fixed hint string but several that come and go, none of which our
+# marker table enumerates. Chasing the exact wording is the fragile game #20
+# already tried once; this instead recognises the STRUCTURE that is common to
+# all of them — an empty composer box — regardless of which hint (if any) is
+# painted above it.
+#
+# Deliberately narrow and claude-ONLY (wired only where the caller already
+# knows the provider — see Orchestrator._nudge_stale_marker /
+# ._resolve_stale_marker_nudge, #343):
+#   - only "❯" (claude's own prompt glyph, never the "❯>" leniency used
+#     elsewhere in this file for other providers' menus) so an unrelated
+#     shell's "$"/">" prompt can't collide;
+#   - the prompt line must be EXACTLY the glyph after stripping — any
+#     leftover typed/pasted text fails the match, so a genuine unsent
+#     paste is never swallowed into "ready";
+#   - requires the pattern on BOTH sides of a forced resize-redraw (see
+#     PtySession.resize()'s #343 note) before a caller treats it as
+#     confirmed-idle, so a screen caught mid-repaint (which could
+#     coincidentally show a bare "❯" for one frame) doesn't false-positive.
+_COMPOSER_BORDER_RE = re.compile(r"^[─━═-]{8,}$")
+_COMPOSER_EMPTY_PROMPT_RE = re.compile(r"^❯$")
+
+
+def _is_claude_empty_composer(lines: list[str]) -> bool:
+    """True when the bottom of the screen is claude's bordered input box with
+    a bare, empty prompt — see the module note above this function."""
+    tail = [ln.strip() for ln in lines[-_READY_TAIL_ROWS:] if ln.strip()]
+    for i in range(len(tail) - 2):
+        top, mid, bot = tail[i], tail[i + 1], tail[i + 2]
+        if (
+            _COMPOSER_BORDER_RE.match(top)
+            and _COMPOSER_EMPTY_PROMPT_RE.match(mid)
+            and _COMPOSER_BORDER_RE.match(bot)
+        ):
+            return True
+    return False
+
+
 # Placeholder claude renders in its input box for a bracketed multi-line paste,
 # e.g. "[Pasted text +42 lines]". Its presence in the input region confirms the
 # paste actually landed (vs a swallowed paste that leaves the box empty — #26).
@@ -1421,6 +1473,13 @@ class PtySession(QObject):
         return float(self.__dict__.get("_output_rate_bps", 0.0))
 
     def resize(self, cols: int, rows: int) -> None:
+        # (#343) Also used as a "force a real redraw" nudge: called with an
+        # unchanged size, setwinsize() would be a no-op the OS/ConPTY layer
+        # may not even forward to the child (no genuine size change to
+        # report), so Orchestrator._nudge_stale_marker's recovery probe
+        # always calls resize(cols+1, rows) then resize(cols, rows) — two
+        # REAL size changes bracketing the original — never a bare repeat of
+        # the current size.
         if cols < 20 or rows < 5:
             return
         self.cols = cols
@@ -1732,6 +1791,14 @@ class PtySession(QObject):
         if "do you trust the contents of this directory" in text:
             return True
         return False
+
+    def is_at_claude_empty_composer(self) -> bool:
+        """(#343) Structural claude-only fallback: bordered input box with a
+        bare, empty prompt — see the module note by _is_claude_empty_composer.
+        NOT part of is_at_ready_prompt()/the marker table — callers must know
+        the pane's provider is claude before trusting this (wired only in
+        Orchestrator._nudge_stale_marker / ._resolve_stale_marker_nudge)."""
+        return _is_claude_empty_composer(self.display_lines())
 
     def is_at_ready_prompt(self) -> bool:
         """True when the underlying TUI is idle at its main input prompt.
