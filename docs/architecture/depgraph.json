@@ -66,6 +66,7 @@
         "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.cursor_helper",
         "agent_takkub.doctor",
+        "agent_takkub.editor_widget",
         "agent_takkub.gemini_helper",
         "agent_takkub.git_changes_service",
         "agent_takkub.git_status",
@@ -77,6 +78,8 @@
         "agent_takkub.opencode_helper",
         "agent_takkub.pane_env",
         "agent_takkub.plugin_installer",
+        "agent_takkub.project_explorer",
+        "agent_takkub.project_file_index",
         "agent_takkub.project_rules",
         "agent_takkub.provider_install",
         "agent_takkub.provider_model_refresh",
@@ -97,7 +100,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 37,
+      "fan_in": 40,
       "fan_out": 0
     },
     {
@@ -2162,6 +2165,7 @@
     {
       "module": "agent_takkub.editor_widget",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.project_explorer",
         "agent_takkub.project_file_index"
       ],
@@ -2169,7 +2173,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -2863,6 +2867,7 @@
     {
       "module": "agent_takkub.project_explorer",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.project_file_index"
@@ -2872,11 +2877,13 @@
         "agent_takkub.project_tab"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.project_file_index",
-      "imports": [],
+      "imports": [
+        "agent_takkub._win_console"
+      ],
       "imported_by": [
         "agent_takkub.editor_service",
         "agent_takkub.editor_widget",
@@ -2885,7 +2892,7 @@
         "agent_takkub.project_explorer"
       ],
       "fan_in": 5,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.project_nav",
