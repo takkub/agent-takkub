@@ -96,6 +96,29 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Phase 10 ชิ้น 1 — dual-write ทุก V1 config writer เข้า `v2/`** (#362) — เหตุผลที่ต้องมาใน 1.1.0 พร้อม auto-migrate:
+  ถ้า `v2/` ถูกสร้างแล้วแต่ Settings ยังเขียน V1 อย่างเดียว การเปลี่ยน model pin ครั้งแรกจะทำให้ `model_pin_v2_drift`
+  ฟ้อง (และ auto-issue) ทั้งที่ไม่ใช่บั๊ก — dual-write คือสิ่งที่ทำให้ telemetry นั้นมีความหมาย · helper กลาง
+  `core/storage/dual_write.py`: **V1 ยัง authoritative** — writer เขียน V1 atomic ก่อนเสมอ แล้ว V2 best-effort
+  (`OSError` → log `v2_write_failed` ไม่ raise ไม่ทำ V1 พัง) · skip เงียบบนเครื่องที่ยังไม่มี `v2/` (สร้างเป็นงาน #361) ·
+  caller ส่ง payload ที่เพิ่งเขียนมาเลย ไม่ re-read จาก path · V2 target path **reuse `RegistryMapping`/target-path
+  methods ของ ladder จริง** ไม่คำนวณซ้ำ (ladder กับ dual-write ไม่ drift กันเอง) · writer ที่ครอบ: `role_models` ·
+  `provider_models` · `pane_tools_policy` · `skill_policy` · `provider_config` routing (global + per-project merge) ·
+  `custom_roles` · projects registry · state writers ไว้ชิ้น 1b
+  + tests: `tests/test_core_storage_dual_write.py` (13) · `test_core_routing.py::test_no_drift_event_after_dual_write_
+  when_pin_changed_via_role_models_save` — เกณฑ์ผ่านตรงตัว: แก้ pin ผ่าน `role_models.save` บน fixture ที่ migrate แล้ว →
+  Router ไม่ log drift อีก · `test_provider_config.py` integration
+
+- **`takkub doctor --ram` — RAM ต่อ pane แยก claude CLI / node·MCP / QtWebEngine** (#364 lever 6, วัดก่อนทุกอย่าง) —
+  `ram_report.py` pure leaf (psutil ที่เป็น dep อยู่แล้ว, ไม่มี Qt/orchestrator import — contract `ram-report-layer`)
+  เดิน process tree จาก pythonw ลง descendant ของแต่ละ pane pid · QtWebEngineProcess ที่ map ไม่ได้ **รายงานเป็น shared
+  ไม่เดา** · `--json` เป็น baseline ก่อน/หลังของ lever อื่น · performance chip เพิ่ม "RAM top 3 (pane)" ใน tooltip ผ่าน
+  QRunnable worker — ไม่เดิน tree บน Qt main thread · `PtySession.pid` public · `Orchestrator.pane_ram_specs()`/
+  `ram_status()` + IPC `ram-status` · ตัวเลขจริงเครื่อง dev: claude ~566–637 MB/pane · **node/MCP ของ pane เดียว 717 MB**
+  (→ lever 4 สำคัญกว่าที่คิด) · main pythonw 479 MB · shared QtWebEngine 4 process 449 MB · total cockpit 4.66 GB
+  + tests: `test_ram_report.py` · `test_doctor_ram_live.py` · `test_orchestrator_ram_status.py` · `test_ram_chip.py` ·
+  `test_pty_session_pid_property.py`
+
 - **ladder step ใหม่ `core-internal-store` (step 8) — ย้าย Core V2 internal store `core_home()` → `v2/system/`** (#360) —
   gap ที่ phase8b ระบุไว้: 8 step เดิมย้ายเฉพาะ V1 config แต่ store ที่ Core V2 เขียนเองตั้งแต่ Phase 1–8a
   (`version.json`, accounts/model_catalog JSONL, secrets, conversations) ยังอยู่ที่ `RUNTIME_DIR/core` ·
