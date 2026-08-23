@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Takkub Design Artifact",
+  "type": "object",
+  "required": [
+    "artifact_id",
+    "project_id",
+    "title",
+    "kind",
+    "target"
+  ],
+  "properties": {
+    "artifact_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "html",
+        "url",
+        "review"
+      ]
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_by_role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "review",
+        "approved",
+        "revision_requested"
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

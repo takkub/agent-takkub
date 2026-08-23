@@ -71,3 +71,37 @@ class TestAutoMigrateBootFinding:
         )
         f = _finding()
         assert "1 issue ค้างส่ง" in f.detail
+
+
+class TestAutoMigratePendingFindings:
+    """#362: `apply_pending()`'s two mixed-state-only outcomes each get
+    their own WARN finding, independent of the base auto-migrate finding
+    above."""
+
+    def test_stale_applied_steps_reports_warn(self) -> None:
+        (config.SETTINGS_HOME / "auto-migrate-state.json").write_text(
+            json.dumps({"applied_version": "1.1.0", "stale_applied_steps": {"state": "mismatch"}}),
+            encoding="utf-8",
+        )
+        f = _finding(name="auto-migrate-stale")
+        assert f.status == doctor.Status.WARN
+        assert "state" in f.detail
+
+    def test_no_stale_steps_omits_the_finding(self) -> None:
+        findings = doctor.check_storage_layout_state()
+        assert not [f for f in findings if f.name == "auto-migrate-stale"]
+
+    def test_pending_rollback_guard_reports_warn(self) -> None:
+        (config.SETTINGS_HOME / "auto-migrate-state.json").write_text(
+            json.dumps(
+                {"applied_version": "1.1.0", "rolled_back_steps": {"core-internal-store": "1.1.0"}}
+            ),
+            encoding="utf-8",
+        )
+        f = _finding(name="auto-migrate-pending-rollback")
+        assert f.status == doctor.Status.WARN
+        assert "core-internal-store" in f.detail
+
+    def test_no_guarded_steps_omits_the_finding(self) -> None:
+        findings = doctor.check_storage_layout_state()
+        assert not [f for f in findings if f.name == "auto-migrate-pending-rollback"]

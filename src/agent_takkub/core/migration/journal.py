@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..storage.jsonl_store import JsonlStore
 from ..storage.paths import core_store_path
@@ -27,6 +28,13 @@ class JournalEntry:
 class MigrationJournal:
     def __init__(self, store: JsonlStore | None = None) -> None:
         self._store = store or JsonlStore(core_store_path(_STORE_NAME))
+
+    @property
+    def store_path(self) -> Path:
+        """Where this journal's own file lives — `CoreInternalStoreStep`
+        (#360) needs this to exclude the journal it is writing to right now
+        from the tree it copies into `v2/system/`."""
+        return self._store.path
 
     def record(self, step_id: str, action: str, ok: bool, detail: str = "") -> JournalEntry:
         entry = JournalEntry(step_id, action, ok, detail, time.time())

@@ -1,0 +1,21 @@
+# Acceptance Criteria
+
+- [ ] Explorer collapsible/resizable and root-safe.
+- [ ] Text file opens/editable in Takkub with local Monaco.
+- [ ] Atomic save.
+- [ ] Concurrent disk change never silently overwrites.
+- [ ] Git changes and diff visible.
+- [ ] Local app URL opens in per-project Preview.
+- [ ] HTML design artifact opens in Preview.
+- [ ] Desktop/tablet/mobile presets.
+- [ ] Designer publish auto-focuses Preview.
+- [ ] Approve -> structured Lead notice.
+- [ ] Revise -> structured Designer feedback.
+- [ ] Existing AgentPane/project switch behavior works.
+- [ ] Graft remains structural code intelligence.
+- [ ] Brain/Conversation remain canonical memory/session.
+- [ ] Obsidian remains curated human knowledge.
+- [ ] OpenViking optional.
+- [ ] No new heavy IO on Qt main thread.
+- [ ] Windows WebEngine soak has no lifecycle/reparent crash regression.
+- [ ] Current QA gate green.

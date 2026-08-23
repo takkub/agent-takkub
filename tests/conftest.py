@@ -138,6 +138,30 @@ def _maybe_module(name: str, *, force: bool):
     return mod
 
 
+def _snapshot_settings_home_files(base: Path) -> dict:
+    """Top-level files directly under a `SETTINGS_HOME`-shaped dir, keyed by
+    name -> (mtime_ns, size). Non-recursive by design: cheap enough to run on
+    every test, and every module-level `_PATH`/`_FILE` constant this fixture
+    isolates below writes directly under SETTINGS_HOME, not into a
+    subdirectory (the one exception, CUSTOM_AGENTS_DIR/*.md, isn't covered —
+    acceptable, this exists to catch the NEXT unisolated module-level
+    constant, not to replace the isolation below)."""
+    snap: dict = {}
+    try:
+        if not base.is_dir():
+            return snap
+        for p in base.iterdir():
+            if p.is_file():
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                snap[p.name] = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        pass
+    return snap
+
+
 @pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Most orchestration unit tests intentionally assert the legacy
@@ -198,6 +222,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # to model the actual leak scenario re-set it themselves.
     monkeypatch.delenv("TAKKUB_ROLE", raising=False)
     cfg = _maybe_module("agent_takkub.config", force=True)
+    # #362 guard setup: capture the REAL SETTINGS_HOME (before anything below
+    # patches `cfg.SETTINGS_HOME` to the isolated tmp dir) and snapshot its
+    # top-level files now, so teardown can detect whether this test wrote to
+    # it despite every isolation patch below. See the check after `yield`.
+    _real_settings_home = getattr(cfg, "SETTINGS_HOME", None) if cfg is not None else None
+    _settings_home_before = (
+        _snapshot_settings_home_files(_real_settings_home)
+        if _real_settings_home is not None
+        else {}
+    )
     if cfg is not None and hasattr(cfg, "PORT_FILE"):
         monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)
     # epic #309 Wave C: core.routing.Router.effective_model_for's own
@@ -283,6 +317,67 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.setattr(
             rm, "_PATH", tmp_path / "_isolated_takkub" / "role-models.json", raising=False
         )
+
+    # #362: provider_models._PATH = SETTINGS_HOME / "provider-models.json" is
+    # bound by value at import time (same shape as role_models._PATH above),
+    # so it was NOT covered by anything in this fixture — settings_window's
+    # provider-roles view touches it, and two xdist workers racing
+    # `tmp.replace(_PATH)` (provider_models._save) against the SAME real
+    # ~/.takkub/provider-models.json produced `PermissionError: [WinError 5]
+    # Access is denied` on windows-latest CI (Windows refuses to replace a
+    # file another process still has a handle open on). Audited every
+    # `<NAME> = SETTINGS_HOME / "..."` module-level binding in src/agent_takkub
+    # (grep, 2026-08-23) and isolate ALL of them here, not just the one that
+    # happened to fail first — each of these is the same unpatched-real-home
+    # bug, just not yet caught by a concurrent write.
+    _settings_home_path_modules = (
+        ("agent_takkub.auto_resume", "_PATH", "autoresume.json"),
+        ("agent_takkub.exec_mode", "_PATH", "exec-mode.json"),
+        ("agent_takkub.plan_tier", "_PATH", "plan.json"),
+        ("agent_takkub.provider_models", "_PATH", "provider-models.json"),
+        ("agent_takkub.provider_state", "_PATH", "disabled-providers.json"),
+        ("agent_takkub.remote.config", "_PATH", "remote.json"),
+        ("agent_takkub.pane_tools_policy", "PANE_TOOLS_POLICY_FILE", "pane-tools.json"),
+        ("agent_takkub.skill_policy", "SKILL_POLICY_FILE", "skill-policy.json"),
+        ("agent_takkub.custom_roles", "CUSTOM_ROLES_FILE", "custom-roles.json"),
+    )
+    for _mod_name, _attr, _fname in _settings_home_path_modules:
+        _m = _maybe_module(_mod_name, force=True)
+        if _m is not None and hasattr(_m, _attr):
+            monkeypatch.setattr(_m, _attr, tmp_path / "_isolated_takkub" / _fname, raising=False)
+
+    # CUSTOM_AGENTS_DIR (a directory of <role>.md files, not a single json
+    # file) is bound the same way in BOTH config.py and custom_roles.py
+    # (`from .config import CUSTOM_AGENTS_DIR`) — custom_roles.create_role()
+    # writes into it via NamedTemporaryFile(dir=CUSTOM_AGENTS_DIR), same
+    # real-home-write risk as the constants above. Patch both copies.
+    _custom_agents_dir = tmp_path / "_isolated_takkub" / "agents"
+    if cfg is not None and hasattr(cfg, "CUSTOM_AGENTS_DIR"):
+        monkeypatch.setattr(cfg, "CUSTOM_AGENTS_DIR", _custom_agents_dir, raising=False)
+    cr = _maybe_module("agent_takkub.custom_roles", force=True)
+    if cr is not None and hasattr(cr, "CUSTOM_AGENTS_DIR"):
+        monkeypatch.setattr(cr, "CUSTOM_AGENTS_DIR", _custom_agents_dir, raising=False)
+
+    # Several modules deliberately resolve their state path lazily from
+    # `config.SETTINGS_HOME` at CALL time instead of binding a module-level
+    # constant, specifically so a test that monkeypatches `config.SETTINGS_
+    # HOME` lands in its own tmp dir (see e.g. auto_issue_signals._flag_path's
+    # docstring: "Resolved at call time so a test monkeypatching SETTINGS_HOME
+    # lands in its own tmp dir"). That convention only works if something
+    # actually patches `config.SETTINGS_HOME` for tests that don't set up
+    # their own isolation fixture (core_v2_settings needed exactly this fix
+    # on 2026-08-19, above) — patch the module attribute itself so every
+    # current AND future lazy `config.SETTINGS_HOME`-reader is covered in one
+    # place, on top of the import-time-bound constants patched individually
+    # above. No known code branches on `SETTINGS_HOME == <anything>` (unlike
+    # `DATA_HOME == REPO_ROOT`, which is why DATA_HOME itself stays untouched
+    # here — see storage_layout_v2 comment above), so this is safe globally.
+    # A test file with its OWN `monkeypatch.setattr(config, "SETTINGS_HOME",
+    # ...)` fixture (e.g. test_auto_migrate_boot.py) still wins — autouse
+    # fixtures from conftest run first, so the test-local one simply
+    # overwrites this default afterward.
+    if cfg is not None and hasattr(cfg, "SETTINGS_HOME"):
+        monkeypatch.setattr(cfg, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False)
 
     # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
     # password-session store unconditionally (not opt-in like the P0 remote
@@ -396,6 +491,37 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # now-gone state in a later test. See _install_qtimer_leak_tracker's
     # docstring above for why this is non-fatal.
     _stop_leaked_qtimers()
+
+    # #362 guard: fail loudly if this test wrote to the REAL SETTINGS_HOME
+    # (top-level files only — see _snapshot_settings_home_files) instead of
+    # the isolated tmp dir every patch above redirects to. A hit here means
+    # some module-level `_PATH`/`_FILE = SETTINGS_HOME / ...` (or a lazy
+    # `config.SETTINGS_HOME`-reader) escaped isolation — the exact failure
+    # class that broke CI as provider_models.py `WinError 5` before this
+    # fixture patched it. Under pytest-xdist, several workers snapshot the
+    # SAME real directory concurrently, so a positive here isn't proof THIS
+    # specific test is the leaker if others ran at the same moment — but it
+    # is proof some test in this run wrote to real user state and needs
+    # fixing, which is the point.
+    if _real_settings_home is not None:
+        _settings_home_after = _snapshot_settings_home_files(_real_settings_home)
+        if _settings_home_after != _settings_home_before:
+            _changed = sorted(
+                (set(_settings_home_after) ^ set(_settings_home_before))
+                | {
+                    name
+                    for name in _settings_home_after.keys() & _settings_home_before.keys()
+                    if _settings_home_after[name] != _settings_home_before[name]
+                }
+            )
+            pytest.fail(
+                f"test wrote to the REAL {_real_settings_home} instead of an "
+                f"isolated tmp dir: {_changed}. Add the offending module's "
+                "`_PATH`/`_FILE = SETTINGS_HOME / ...` constant to "
+                "`_settings_home_path_modules` (or patch it directly) in "
+                "tests/conftest.py's `_isolate_runtime`, same as "
+                "provider_models._PATH (#362)."
+            )
 
 
 @pytest.fixture

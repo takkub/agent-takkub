@@ -20,6 +20,12 @@ class BackupManager:
     def __init__(self, root: Path | None = None) -> None:
         self._root = root or (core_home() / _BACKUP_ROOT_NAME)
 
+    @property
+    def root(self) -> Path:
+        """Where backups are stored — `CoreInternalStoreStep` (#360) needs
+        this to exclude its own backup tree from the copy into `v2/system/`."""
+        return self._root
+
     def backup(self, step_id: str, source: Path) -> Path | None:
         """Copy *source* (file or dir) into a timestamped slot under this
         step's backup dir. Returns None (no-op, not an error) when *source*

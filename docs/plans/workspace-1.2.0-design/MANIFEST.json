@@ -1,0 +1,7 @@
+{
+  "name": "Takkub Workspace & Design Upgrade",
+  "target_release": "1.1.0-candidate",
+  "prepared_date": "2026-08-23",
+  "repo": "https://github.com/takkub/agent-takkub",
+  "baseline_anchor": "19de510a03b64d0fbdd6d69bc8997ae224d84c84"
+}

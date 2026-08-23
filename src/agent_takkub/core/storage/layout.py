@@ -158,6 +158,7 @@ class LegacySemantics(StrEnum):
     PROJECT = "project"  # projects.json fan-out + worktree ownership
     STATE = "state"  # issues / autoresume / remote sessions
     CREDENTIAL = "credential"  # reference only, never copy the secret itself
+    CORE_INTERNAL = "core_internal"  # Core V2's own store under core_home(), not a V1 config file
     UNKNOWN = "unknown"  # semantics not established from source code yet
 
 
@@ -374,5 +375,16 @@ LEGACY_MAPPING: tuple[LegacyMappingEntry, ...] = (
         LegacySemantics.UNKNOWN,
         0,
         "browser_chrome.py — already prunable via disk_usage.py",
+    ),
+    LegacyMappingEntry(
+        "RUNTIME_DIR/core/* (version.json, accounts/model_catalog JSONL stores, "
+        "conversations/, brain/, ...)",
+        "system/ (generic copy of everything under core_home() except the ladder's "
+        "own migration_journal.jsonl + migration_backups/)",
+        LegacySemantics.CORE_INTERNAL,
+        8,
+        "core/storage/paths.py core_home() — #360, CoreInternalStoreStep; core_home()'s own "
+        "legacy-fallback flips every future caller to system/ the instant this step's "
+        "target directory exists",
     ),
 )

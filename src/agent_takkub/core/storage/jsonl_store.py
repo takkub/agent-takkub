@@ -41,6 +41,10 @@ class JsonlStore:
         self._path = path
         self._true_append = true_append
 
+    @property
+    def path(self) -> Path:
+        return self._path
+
     def append(self, record: Mapping[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(dict(record), ensure_ascii=False, sort_keys=True)

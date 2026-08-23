@@ -91,7 +91,7 @@ def test_layout_state_v2_when_v1_markers_gone(tmp_path, monkeypatch):
 
 def test_legacy_mapping_covers_every_ladder_step():
     steps_present = {e.ladder_step for e in LEGACY_MAPPING if e.ladder_step > 0}
-    assert steps_present == {1, 2, 3, 4, 5, 6, 7}
+    assert steps_present == {1, 2, 3, 4, 5, 6, 7, 8}
 
 
 def test_legacy_mapping_entries_have_semantics_and_are_not_blindly_unknown():

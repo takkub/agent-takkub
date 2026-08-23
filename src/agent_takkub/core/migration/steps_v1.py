@@ -2,7 +2,11 @@
 first. Steps 1/3/5 are `RegistryCopyStep` instances built by the factory
 functions below (each is "copy N small V1 JSON files verbatim into their V2
 layout location", nothing more). Steps 2/4/6/7 need real fan-out or
-reference-only semantics and get their own classes here.
+reference-only semantics and get their own classes here. Step 8
+(`CoreInternalStoreStep`, #360) is a different kind of gap entirely: it
+doesn't migrate a V1 *config* file at all, it relocates Core V2's own
+already-V2-shaped internal store (`core_home()`, Phase 1-8a) into the
+`StorageLayoutV2.system` slot reserved for it since Phase 8b.
 
 Every step is copy-never-move: none of them writes to, deletes, or mutates
 a V1 source path — `apply()` only ever creates/overwrites files under
@@ -17,6 +21,7 @@ a step at a `tmp_path` fixture instead of monkeypatching module globals.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -790,3 +795,188 @@ class RuntimeTriageStep:
             return StepReport(self.step_id, "rollback", False, f"restore failed: {e}")
         self.journal.record(self.step_id, "rollback", True, "restored")
         return StepReport(self.step_id, "rollback", True, "restored/removed copied state dirs")
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — Core V2's own internal store (#360, phase8b gap): `core_home()`
+# (`RUNTIME_DIR/core` today) already holds Phase 1-8a's V2-shaped stores —
+# version.json, accounts/model_catalog JSONL, conversations/, brain/, etc —
+# and `core.storage.paths.core_home()` already has a legacy-fallback wired
+# to `StorageLayoutV2.system`, it just has nothing to fall forward TO until
+# this step actually populates it. Once this step's apply() makes
+# `system/` a directory, `core_home()` starts resolving there for every
+# NEW store object constructed from that point on in the process — this
+# step's own `journal`/`backups`, constructed by the engine before any step
+# ran, keep writing to wherever they were pointed at construction time and
+# are never redirected mid-run.
+#
+# `journal`/`backups` are themselves stored under `core_home()`
+# (`journal.py`'s `migration_journal.jsonl`, `backup.py`'s
+# `migration_backups/`) — this step is the one place in the ladder that
+# would otherwise scoop up its own live bookkeeping into the copy. They are
+# excluded by name (`_excluded_names()`), not by scheduling this step last
+# on the ladder (RuntimeTriageStep already holds that slot) — exclusion is
+# correct regardless of ladder position, and is asserted directly by a test
+# rather than left as an ordering assumption.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CoreInternalStoreStep:
+    step_id: str = "core-internal-store"
+    journal: MigrationJournal = field(default_factory=MigrationJournal)
+    backups: BackupManager = field(default_factory=BackupManager)
+    data_home: Path = field(default_factory=lambda: config.DATA_HOME)
+    runtime_dir: Path = field(default_factory=lambda: config.RUNTIME_DIR)
+
+    def _source_root(self) -> Path:
+        # Deliberately NOT `core_home()` — that function is what this step
+        # is migrating *away from*, and it would start reporting a
+        # different answer (`system/`) the moment a prior run of this same
+        # step already created the target. The pre-migration location is
+        # always `RUNTIME_DIR/core`, full stop.
+        return self.runtime_dir / "core"
+
+    def _target(self) -> Path:
+        return storage_layout_v2(self.data_home).system
+
+    def _excluded_names(self) -> frozenset[str]:
+        """Basenames under `_source_root()` this step must never copy —
+        the ladder's own journal file and backup tree, which live there
+        too and are actively being written to by this very apply() call."""
+        source = self._source_root()
+        names: set[str] = set()
+        journal_path = self.journal.store_path
+        if journal_path.parent == source:
+            names.add(journal_path.name)
+        backups_root = self.backups.root
+        if backups_root.parent == source:
+            names.add(backups_root.name)
+        return frozenset(names)
+
+    def _present_entries(self) -> list[str]:
+        source = self._source_root()
+        if not source.is_dir():
+            return []
+        excluded = self._excluded_names()
+        try:
+            return sorted(p.name for p in source.iterdir() if p.name not in excluded)
+        except OSError:
+            return []
+
+    @staticmethod
+    def _copy_entry(src: Path, dest: Path) -> None:
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+
+    def inspect(self) -> StepReport:
+        entries = self._present_entries()
+        excluded = sorted(self._excluded_names())
+        return StepReport(
+            self.step_id,
+            "inspect",
+            True,
+            f"{len(entries)} entrie(s) under {self._source_root()}, "
+            f"{len(excluded)} ladder-owned entrie(s) excluded",
+            detail={"entries": entries, "excluded": excluded},
+        )
+
+    def plan(self) -> StepReport:
+        return StepReport(
+            self.step_id,
+            "plan",
+            True,
+            f"will copy {len(self._present_entries())} entrie(s) from {self._source_root()} "
+            f"into {self._target()} (staged, then atomically materialized if not yet present)",
+            detail={"target": str(self._target())},
+        )
+
+    def dry_run(self) -> StepReport:
+        target = self._target()
+        entries = self._present_entries()
+        would_change = [name for name in entries if not (target / name).exists()]
+        return StepReport(
+            self.step_id,
+            "dry_run",
+            True,
+            f"no disk writes; {len(would_change)}/{len(entries)} entrie(s) not yet copied",
+            detail={"would_change": would_change},
+        )
+
+    def apply(self) -> StepReport:
+        source = self._source_root()
+        target = self._target()
+        entries = self._present_entries()
+        self.backups.backup(self.step_id, target)
+        try:
+            if target.is_dir():
+                # Re-apply: already materialized (this step ran before), so
+                # the core_home() fallback already flipped — merge in place,
+                # no atomicity concern left to protect.
+                for name in entries:
+                    self._copy_entry(source / name, target / name)
+            else:
+                # First materialization: build the whole tree off to one
+                # side, then a single os.replace() makes it appear whole —
+                # core_home()'s fallback only checks `system.is_dir()`, so
+                # it must never observe a half-populated system/.
+                staging = target.parent / "system.staging"
+                if staging.exists():
+                    shutil.rmtree(staging)
+                staging.mkdir(parents=True, exist_ok=True)
+                for name in entries:
+                    self._copy_entry(source / name, staging / name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staging, target)
+        except OSError as e:
+            self.journal.record(self.step_id, "apply", False, str(e))
+            return StepReport(self.step_id, "apply", False, f"copy failed: {e}")
+        self.journal.record(self.step_id, "apply", True, f"{len(entries)} entrie(s)")
+        return StepReport(
+            self.step_id,
+            "apply",
+            True,
+            f"copied {len(entries)} entrie(s) into {target}",
+            detail={"entries": entries},
+        )
+
+    def validate(self) -> StepReport:
+        source = self._source_root()
+        target = self._target()
+        mismatched: list[str] = []
+        for name in self._present_entries():
+            src = source / name
+            dest = target / name
+            if src.is_dir():
+                if not dest.is_dir():
+                    mismatched.append(name)
+            elif not dest.is_file() or dest.read_bytes() != src.read_bytes():
+                mismatched.append(name)
+        ok = not mismatched
+        summary = (
+            "every entry copied and matches the source"
+            if ok
+            else f"{len(mismatched)} entrie(s) mismatched"
+        )
+        return StepReport(self.step_id, "validate", ok, summary, detail={"mismatched": mismatched})
+
+    def rollback(self) -> StepReport:
+        target = self._target()
+        staging = target.parent / "system.staging"
+        try:
+            shutil.rmtree(staging, ignore_errors=True)
+            backup = self.backups.latest_backup(self.step_id, target.name)
+            if backup is None:
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                self.backups.restore(backup, target)
+        except OSError as e:
+            self.journal.record(self.step_id, "rollback", False, str(e))
+            return StepReport(self.step_id, "rollback", False, f"restore failed: {e}")
+        self.journal.record(self.step_id, "rollback", True, "restored")
+        return StepReport(
+            self.step_id, "rollback", True, "restored/removed copied core-internal-store"
+        )

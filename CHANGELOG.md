@@ -6,6 +6,29 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **auto-migrate ตอน boot บนเครื่องที่ migrate ไปแล้ว (`layout=mixed`) รันแค่ version-marker ทุกครั้ง → ladder
+  step ใหม่ที่เพิ่มทีหลัง (#360's `core-internal-store` และทุก step ในอนาคต) ไม่มีวันถูก apply เอง** (#362,
+  ต่อจาก #360/#361) — `MigrationEngine.apply_pending()` ใหม่: รันเฉพาะ step ที่ journal ยังไม่มี entry
+  `applied` หรือ `validate()` ของ step นั้นบอกว่ายังไม่ครบ (เช่น version-marker หลังอัปเวอร์ชัน) ตามลำดับ
+  ladder จริง — step ที่ applied แล้วและ validate ผ่านถูกข้ามไปเลย ไม่เรียก `apply()` ซ้ำ · boot บน `mixed`
+  เปลี่ยนจาก "step 1 เท่านั้น" → `apply_pending()` · failure handling แยกตามชนิด step: step ใหม่ที่ไม่เคย
+  apply มาก่อนพัง → `MigrationEngine.rollback_step()` เฉพาะตัวนั้น + event `auto_migrate_rolled_back(step_id)`
+  + retry-guard คู่ `(version, step_id)` กันรันซ้ำทุก boot จนกว่าเวอร์ชันจะเปลี่ยน ส่วน step เก่าที่เคย apply
+  สำเร็จแต่ validate พังตอนนี้ **ไม่ auto-rollback** (จะทำลาย state ที่เคยดีอยู่) — แค่ log +
+  `takkub doctor --storage-layout` WARN ใหม่ 2 อัน (`auto-migrate-stale`, `auto-migrate-pending-rollback`)
+  ให้คนตรวจเอง · เทสจำลอง "prod วันนี้" จริง: 8 step เดิม apply สำเร็จ (pre-#360 ladder) แล้ว boot
+  บน ladder 9 step วันนี้ → apply เฉพาะ `core-internal-store` ตัวเดียว
+- **เทสเขียนไฟล์ลง `~/.takkub` จริงของเครื่องที่รัน → xdist worker ชนกัน `WinError 5` บน Windows CI (ตัวจริง
+  ตัวสุดท้ายของ #349)** — `tests/conftest.py` `_isolate_runtime` redirect `role_models._PATH`/`provider_config`
+  ไว้แล้ว แต่ไม่เคย redirect `config.SETTINGS_HOME` เอง และ module-level `_PATH = SETTINGS_HOME / ...` ของ
+  `provider_models` (ตัวที่พัง: `test_save_apply_preserves_out_of_scope_role_override` → `os.replace` ชน →
+  `except OSError` → `QMessageBox.critical` → modal guard จับได้ดังๆ) · `auto_resume` · `exec_mode` ·
+  `plan_tier` · `provider_state` · `remote.config` · `pane_tools_policy` · `skill_policy` · `custom_roles`
+  (+`CUSTOM_AGENTS_DIR`) ยังชี้ home จริง → isolate ทั้งหมด + patch `config.SETTINGS_HOME` ไปที่ tmp ทั้งก้อน
+  (ปลอดภัย — ไม่มีโค้ด branch บน `SETTINGS_HOME == …` ต่างจาก `DATA_HOME`) · **guard กันกลับมาอีก**: autouse
+  teardown snapshot ไฟล์ top-level ใต้ SETTINGS_HOME จริงก่อน/หลังทุกเทส — ถ้าอะไรเปลี่ยน = fail ดังทันที
+  ไม่ต้องรอ CI แดงถึงรู้ว่ามีเทสหลุด
+
 - **`takkub wait` ถูกตัดด้วย "interrupted by user input" ทั้งที่ user ไม่ได้พิมพ์** (#357) — ต้นเหตุ:
   xterm.js ส่ง terminal auto-reply (CPR `ESC[r;cR` · DA `ESC[?..c` · DSR · OSC reply · focus in/out)
   ตอน Lead TUI redraw หลัง cockpit inject digest/banner ผ่าน `onData` choke point เดียวกับ keystroke จริง
@@ -73,6 +96,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **ladder step ใหม่ `core-internal-store` (step 8) — ย้าย Core V2 internal store `core_home()` → `v2/system/`** (#360) —
+  gap ที่ phase8b ระบุไว้: 8 step เดิมย้ายเฉพาะ V1 config แต่ store ที่ Core V2 เขียนเองตั้งแต่ Phase 1–8a
+  (`version.json`, accounts/model_catalog JSONL, secrets, conversations) ยังอยู่ที่ `RUNTIME_DIR/core` ·
+  `CoreInternalStoreStep`: copy-never-move · **first apply = staging + `os.replace` atomic swap** เพราะ
+  `paths.core_home()` fallback จะสลับไปอ่าน `v2/system/` ทันทีที่ dir มี — ห้ามให้เห็นครึ่งเดียว · re-apply =
+  merge-in-place · **ยกเว้น `migration_journal.jsonl` + `migration_backups/` ของ ladder เอง** (ผ่าน
+  `journal.store_path`/`backups.root` property ใหม่ ไม่ hardcode ชื่อซ้ำ) — journal ที่กำลังเขียนตัวเองอยู่
+  ห้ามย้าย · validate เทียบไฟล์ต่อไฟล์ + dir presence · rollback ลบ/restore · `LEGACY_MAPPING` เพิ่ม
+  `CORE_INTERNAL` ให้ `doctor --storage-layout` นับ step ถูก
+  + tests: happy path · exclude journal/backups · fallback สลับ**หลัง rename เท่านั้น** (จำลอง copy fail
+  กลางทาง) · rollback fresh/re-apply · parity กับ `AccountRegistry`/`ModelRegistry` จริง · default ladder = 9
+
 - **auto `migrate apply` ตอน boot — ทุก device ได้ storage layout เดียวกันโดยไม่ต้องพิมพ์เอง** (#361, user
   directive: "auto ให้เพื่อนด้วยเลยตอนเปิด จะได้เหมือนกันทุก device") — `auto_migrate_boot.py` (pure Python
   ไม่มี Qt, เทส headless ได้) รันเป็น stage ที่ 2 ใน boot splash เดิม (`boot_update_window.py`) **หลัง
@@ -84,7 +119,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   `MigrationEngine.apply()` → `validate()` ตัวเดียวกับ CLI (ไม่มี ladder ใหม่) → ไม่ผ่าน = **rollback
   อัตโนมัติ** + event `auto_migrate_rolled_back` + doctor WARN · สำเร็จ = `auto_migrate_applied` · state ที่
   `SETTINGS_HOME/auto-migrate-state.json` · เกิน 20s splash ขึ้น "still working" ไม่มี timeout (ห้าม spawn
-  ก่อนจบ) · **ทุก boot ถัดไปรันแค่ step 1** (`apply_version_marker_only()` upsert app version) — ปิดอาการ
+  ก่อนจบ) · **ทุก boot ถัดไปรัน `MigrationEngine.apply_pending()`** — เฉพาะ step ที่ journal ยังไม่ applied หรือ validate ไม่ผ่าน (รวม version-marker) → เครื่องที่ migrate แล้ว (`mixed`) ยังได้ ladder step ใหม่ที่เพิ่มทีหลัง เช่น step 8 `core-internal-store` โดยไม่ต้องพิมพ์เอง · step ใหม่พัง → `rollback_step()` เฉพาะตัว + retry-guard `(version, step_id)` · step เก่าที่เคยสำเร็จแต่ validate พังตอนนี้ → ไม่ auto-rollback แค่ log + doctor WARN — ปิดอาการ
   `version.json` ค้างเวอร์ชันเก่าหลังอัป · headless fallback เมื่อ `TAKKUB_BOOT_UPDATE=0` ·
   `doctor --storage-layout` บอก auto-migrate last run/result + เตือนเมื่อมี local-issue backlog ยังไม่ได้ส่ง
   (เครื่องที่ไม่มี `gh`) · **auto-issue signal ใหม่ 2 ตัว**: `auto_migrate_rolled_back` และ

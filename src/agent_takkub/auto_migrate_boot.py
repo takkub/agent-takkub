@@ -14,14 +14,39 @@ MainWindow — a pane spawned mid-copy writing into RUNTIME_DIR/SETTINGS_HOME
 would look like corruption to `validate()` and trigger a false rollback.
 
 State kept at ``SETTINGS_HOME/auto-migrate-state.json``:
-  ``{"applied_version": "1.1.0"}``           — full ladder already ok once;
-                                                every later boot only re-runs
-                                                step 1 (version-marker).
-  ``{"rolled_back_for_version": "1.1.0"}``   — that version's attempt failed
-                                                validate() and was rolled
-                                                back; never retried until the
-                                                running app version changes
-                                                (no retry-loop on a bad box).
+  ``{"applied_version": "1.1.0"}``           — the first-ever full ladder
+                                                apply (state was "v1") went
+                                                ok.
+  ``{"rolled_back_for_version": "1.1.0"}``   — that first-ever full-ladder
+                                                attempt failed validate() and
+                                                was rolled back whole; never
+                                                retried until the running app
+                                                version changes (no
+                                                retry-loop on a bad box).
+  ``{"rolled_back_steps": {"core-internal-store": "1.1.0"}}``
+                                              — a *mixed*-state boot's
+                                                `apply_pending()` (#362) hit a
+                                                genuinely new ladder step
+                                                (never applied on this
+                                                machine before) that failed
+                                                apply(); it was rolled back
+                                                on its own and is held back by
+                                                this per-(step, version) guard
+                                                until the app version changes
+                                                again — the OTHER pending
+                                                steps that boot are unaffected.
+  ``{"stale_applied_steps": {"state": "..."}}``
+                                              — a *mixed*-state boot found a
+                                                step that already had a
+                                                successful apply on this
+                                                machine, but whose validate()
+                                                now fails — never
+                                                auto-rolled-back (that would
+                                                throw away state that used to
+                                                be fine), just logged and
+                                                surfaced as a
+                                                `takkub doctor --storage-layout`
+                                                WARN for a human to look at.
 """
 
 from __future__ import annotations
@@ -146,18 +171,33 @@ class BootMigrationResult:
     every progress line reported via `progress_cb`, in order — kept here too
     so a caller that didn't pass a callback can still inspect what happened."""
 
-    action: str  # "skipped" | "applied" | "rolled_back" | "step1_only" | "error"
+    action: str  # "skipped" | "applied" | "rolled_back" | "pending_applied" | "pending_rolled_back" | "error"
     reason: str = ""
     messages: list[str] = field(default_factory=list)
 
 
-def _run_step1_only(progress_cb: Callable[[str], None] | None) -> BootMigrationResult:
+def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrationResult:
     """Every boot after a successful full apply (`layout_state() ==
-    "mixed"`) — re-pin `system/version.json` to the running build via the
-    SAME ladder's own step 0, never a fresh `VersionMarkerStep`. Closes the
-    prod incident this task was written to prevent: the marker sitting on
-    an old version (1.0.86) and `validate` complaining about it forever
-    after every later upgrade."""
+    "mixed"`) — run only the ladder steps this machine still needs (#362):
+    `version-marker`'s re-pin every version bump (closes the prod incident
+    this stage was written to prevent — the marker sitting on an old
+    version and `validate` complaining forever after every later upgrade),
+    AND any step added to the ladder since this machine's last full apply
+    (e.g. #360's `core-internal-store` landing on a machine that already
+    migrated under the pre-#360 ladder). A step that already succeeded and
+    still validates clean is left untouched — this is never a full re-walk
+    of the ladder.
+
+    Failure handling is per-step, not whole-ladder:
+    - a step this machine has NEVER applied before (genuinely new) that
+      fails apply() is rolled back on its own via
+      `MigrationEngine.rollback_step()`, and held back by a
+      (version, step_id) retry-guard so it isn't retried every boot — the
+      OTHER pending steps in this same boot are unaffected.
+    - a step this machine already applied successfully before, whose
+      validate() now says it's broken, is NOT auto-rolled-back (that would
+      throw away state that used to be fine) — just logged and recorded for
+      `takkub doctor --storage-layout` to WARN about."""
     messages: list[str] = []
 
     def _report(msg: str) -> None:
@@ -168,13 +208,62 @@ def _run_step1_only(progress_cb: Callable[[str], None] | None) -> BootMigrationR
             except Exception:
                 pass
 
-    _report("ตรวจ version marker…")
+    from . import __version__ as app_version
     from .core.migration.engine import MigrationEngine
 
-    result = MigrationEngine().apply_version_marker_only()
-    if not result.ok:
-        return BootMigrationResult("error", result.summary, messages)
-    return BootMigrationResult("step1_only", messages=messages)
+    _report("ตรวจ pending migration step(s)…")
+    engine = MigrationEngine()
+    applied_before = set(engine.applied_step_ids())
+    guard = load_state().get("rolled_back_steps", {})
+    guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
+
+    reports = engine.apply_pending(skip_step_ids=guarded_now)
+    if not reports:
+        _report("ไม่มี step ที่ต้องรัน")
+        return BootMigrationResult("pending_applied", messages=messages)
+
+    stale = [r for r in reports if not r.ok and r.step_id in applied_before]
+    new_failures = [r for r in reports if not r.ok and r.step_id not in applied_before]
+
+    if stale:
+        for r in stale:
+            _log_boot_event(
+                "auto_migrate_pending_step_stale", step_id=r.step_id, summary=r.summary[:200]
+            )
+            _report(
+                f"'{r.step_id}' (apply สำเร็จมาก่อนหน้านี้) validate ไม่ผ่านตอนนี้ — "
+                "ข้าม auto-rollback, ต้องตรวจด้วยมือ"
+            )
+        st = load_state()
+        stale_map = dict(st.get("stale_applied_steps", {}))
+        stale_map.update({r.step_id: r.summary[:200] for r in stale})
+        st["stale_applied_steps"] = stale_map
+        _save_state(st)
+
+    if new_failures:
+        for r in new_failures:
+            _report(f"'{r.step_id}' ไม่ผ่าน — กำลัง rollback เฉพาะ step นี้…")
+            rb = engine.rollback_step(r.step_id)
+            _log_boot_event(
+                "auto_migrate_rolled_back",
+                step_id=r.step_id,
+                failing_summary=r.summary[:200],
+                rollback_ok=rb.ok,
+            )
+            _report(f"rollback {r.step_id} " + ("สำเร็จ" if rb.ok else "ไม่สำเร็จ — ต้องตรวจด้วยมือ"))
+        st = load_state()
+        guard_map = dict(st.get("rolled_back_steps", {}))
+        guard_map.update({r.step_id: app_version for r in new_failures})
+        st["rolled_back_steps"] = guard_map
+        _save_state(st)
+        return BootMigrationResult(
+            "pending_rolled_back",
+            "; ".join(f"{r.step_id}: {r.summary}" for r in new_failures),
+            messages,
+        )
+
+    _report("pending step(s) apply สำเร็จ")
+    return BootMigrationResult("pending_applied", messages=messages)
 
 
 def run_boot_stage(
@@ -183,9 +272,10 @@ def run_boot_stage(
     """The whole boot-time gate, in order (#361 design §2-4):
 
     1. escape hatches (env / Settings flag off, dev checkout) → skip
-    2. `layout_state()` must be exactly `"v1"` to attempt a first apply —
-       `"v2"` has nothing left to do, `"mixed"` means a prior apply already
-       ran (step-1-only fast path), never re-apply over a `"mixed"` machine
+    2. `layout_state()` must be exactly `"v1"` to attempt a first full-ladder
+       apply — `"v2"` has nothing left to do, `"mixed"` means a prior apply
+       already ran at least once and only `apply_pending()` (#362) runs:
+       never re-walk the whole ladder over a `"mixed"` machine
     3. retry-guard: a version that already rolled back once is never retried
        until the running app version changes
     4. disk-space gate (2x the estimated copy size)
@@ -222,7 +312,7 @@ def run_boot_stage(
     if state == "v2":
         return _done("skipped", "layout-state-v2")
     if state == "mixed":
-        return _run_step1_only(progress_cb)
+        return _run_apply_pending(progress_cb)
 
     # state == "v1" from here — the only state a first-run apply is allowed on.
     st = load_state()

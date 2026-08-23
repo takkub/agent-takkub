@@ -41,6 +41,9 @@ repos:
           --exclude "docs/guides/*.md"
           --exclude "docs/audit/*.md"
           --exclude "docs/v2/*.md"
+          --exclude "docs/plans/2026-08-23-master-dev-plan.md"
+          --exclude "docs/plans/workspace-1.2.0-design/*.md"
+          --exclude "docs/plans/workspace-1.2.0-design/examples/*.md"
           '
         pass_filenames: false
         always_run: true

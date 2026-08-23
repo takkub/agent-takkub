@@ -1,7 +1,7 @@
 """Auto `migrate apply` at boot (#361) — pre-flight gate, happy path,
-validate-fail -> auto-rollback, dev-checkout skip, mixed-state skip (step-1
-fast path), toggle-off skip, and the retry-guard that stops a rolled-back
-version from looping."""
+validate-fail -> auto-rollback, dev-checkout skip, mixed-state pending-step
+apply (#362), toggle-off skip, and the retry-guards (whole-version and
+per-step) that stop a rolled-back attempt from looping."""
 
 from __future__ import annotations
 
@@ -150,40 +150,214 @@ class TestRunBootStageGates:
         assert result.reason == "disk-space"
 
 
-class TestRunBootStageMixedFastPath:
-    def test_mixed_state_runs_step1_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+class TestRunBootStageMixedPendingApply:
+    """#362: a `"mixed"` boot must never re-run the full ladder, but it also
+    must not be limited to the old step-1-only fast path — any ladder step
+    this machine hasn't successfully finished yet gets a chance too."""
+
+    def test_mixed_state_calls_apply_pending_never_the_full_ladder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import agent_takkub.core.storage.layout as layout_mod
 
         monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
-        calls: list[str] = []
+        calls: list[tuple] = []
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: [])
         monkeypatch.setattr(
             MigrationEngine,
-            "apply_version_marker_only",
-            lambda self: (
-                calls.append("apply_version_marker_only")
-                or StepReport("version-marker", "apply", True, "ok")
+            "apply_pending",
+            lambda self, **kw: (
+                calls.append(("apply_pending", kw.get("skip_step_ids")))
+                or [StepReport("core-internal-store", "apply", True, "ok")]
             ),
         )
-        # A "mixed" machine must never re-run the full ladder — only the
-        # step-1 fast path above. Failing this would mean a second `apply()`
-        # ran on top of an already-applied V2 root every single boot.
-        monkeypatch.setattr(MigrationEngine, "apply", lambda self: calls.append("full_apply") or [])
-        result = auto_migrate_boot.run_boot_stage()
-        assert result.action == "step1_only"
-        assert calls == ["apply_version_marker_only"]
+        monkeypatch.setattr(
+            MigrationEngine, "apply", lambda self: calls.append(("full_apply",)) or []
+        )
 
-    def test_mixed_state_step1_failure_reports_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"
+        assert calls == [("apply_pending", set())]
+
+    def test_mixed_state_nothing_pending_reports_pending_applied_with_no_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import agent_takkub.core.storage.layout as layout_mod
 
         monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: ["version-marker"])
+        monkeypatch.setattr(MigrationEngine, "apply_pending", lambda self, **kw: [])
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"
+
+    def test_new_pending_step_failure_rolls_back_only_that_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        # This machine already has "state" applied — "core-internal-store"
+        # has never been applied here before (the #360 gap).
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: ["state"])
         monkeypatch.setattr(
             MigrationEngine,
-            "apply_version_marker_only",
-            lambda self: StepReport("version-marker", "apply", False, "disk full"),
+            "apply_pending",
+            lambda self, **kw: [StepReport("core-internal-store", "apply", False, "disk full")],
         )
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            MigrationEngine,
+            "rollback_step",
+            lambda self, step_id: (
+                rollback_calls.append(step_id) or StepReport(step_id, "rollback", True, "restored")
+            ),
+        )
+        events: list[dict] = []
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "_log_boot_event",
+            lambda ev, **kw: events.append({"event": ev, **kw}),
+        )
+
         result = auto_migrate_boot.run_boot_stage()
-        assert result.action == "error"
-        assert result.reason == "disk full"
+
+        assert result.action == "pending_rolled_back"
+        assert rollback_calls == ["core-internal-store"]
+        assert events and events[0] == {
+            "event": "auto_migrate_rolled_back",
+            "step_id": "core-internal-store",
+            "failing_summary": "disk full",
+            "rollback_ok": True,
+        }
+
+        from agent_takkub import __version__ as app_version
+
+        assert auto_migrate_boot.load_state()["rolled_back_steps"] == {
+            "core-internal-store": app_version
+        }
+
+    def test_new_pending_step_retry_guard_skips_it_on_the_next_boot_same_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: [])
+        calls: list[set] = []
+        monkeypatch.setattr(
+            MigrationEngine,
+            "apply_pending",
+            lambda self, **kw: calls.append(kw.get("skip_step_ids")) or [],
+        )
+        from agent_takkub import __version__ as app_version
+
+        (config.SETTINGS_HOME / "auto-migrate-state.json").write_text(
+            json.dumps({"rolled_back_steps": {"core-internal-store": app_version}}),
+            encoding="utf-8",
+        )
+
+        auto_migrate_boot.run_boot_stage()
+
+        assert calls == [{"core-internal-store"}]
+
+    def test_stale_applied_step_does_not_roll_back_and_is_recorded_for_doctor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A step this machine already applied successfully before, whose
+        validate() now says it's broken, must never be auto-rolled-back —
+        only logged and surfaced via state for `doctor --storage-layout`."""
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: ["state"])
+        monkeypatch.setattr(
+            MigrationEngine,
+            "apply_pending",
+            lambda self, **kw: [StepReport("state", "apply", False, "target missing")],
+        )
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            MigrationEngine,
+            "rollback_step",
+            lambda self, step_id: (
+                rollback_calls.append(step_id) or StepReport(step_id, "rollback", True, "restored")
+            ),
+        )
+        events: list[dict] = []
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "_log_boot_event",
+            lambda ev, **kw: events.append({"event": ev, **kw}),
+        )
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"  # not rolled back — this isn't a boot failure
+        assert rollback_calls == []
+        assert events == [
+            {
+                "event": "auto_migrate_pending_step_stale",
+                "step_id": "state",
+                "summary": "target missing",
+            }
+        ]
+        assert auto_migrate_boot.load_state()["stale_applied_steps"] == {"state": "target missing"}
+
+    def test_prod_today_machine_applies_only_the_new_core_internal_store_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end with the real ladder (#362): a machine that migrated
+        under the pre-#360 ladder (8 steps: version-marker + the 7 V1
+        steps) must, on its next mixed-state boot after upgrading to a
+        build carrying #360's core-internal-store, apply just that one new
+        step — the other 8 stay untouched, no stale/rollback noise at all."""
+        from agent_takkub.core.migration.backup import BackupManager
+        from agent_takkub.core.migration.journal import MigrationJournal
+        from agent_takkub.core.migration.steps import VersionMarkerStep
+        from agent_takkub.core.migration.steps_v1 import (
+            CredentialReferenceStep,
+            ProjectMigrationStep,
+            RoleAgentMigrationStep,
+            RuntimeTriageStep,
+            build_capability_step,
+            build_readonly_registries_step,
+            build_state_step,
+        )
+        from agent_takkub.core.storage.paths import core_home
+
+        journal = MigrationJournal()
+        backups = BackupManager()
+        pre_360_steps = [
+            VersionMarkerStep(journal=journal, backups=backups),
+            build_readonly_registries_step(journal, backups),
+            RoleAgentMigrationStep(journal=journal, backups=backups),
+            build_capability_step(journal, backups),
+            ProjectMigrationStep(journal=journal, backups=backups),
+            build_state_step(journal, backups),
+            CredentialReferenceStep(journal=journal, backups=backups, refs_override={}),
+            RuntimeTriageStep(journal=journal, backups=backups),
+        ]
+        pre_360_engine = MigrationEngine(pre_360_steps, data_home=config.DATA_HOME)
+        apply_reports = pre_360_engine.apply()
+        assert all(r.ok for r in apply_reports), [(r.step_id, r.summary) for r in apply_reports]
+        assert layout_state() == "mixed"
+        assert core_home() == config.RUNTIME_DIR / "core"  # step 8 hasn't run yet
+
+        events: list[dict] = []
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "_log_boot_event",
+            lambda ev, **kw: events.append({"event": ev, **kw}),
+        )
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"
+        assert events == []  # no stale step, no rollback — the 8 old steps were untouched
+        assert core_home() == config.DATA_HOME / "v2" / "system"  # the new step actually ran
 
 
 class TestRunBootStageHappyPath:

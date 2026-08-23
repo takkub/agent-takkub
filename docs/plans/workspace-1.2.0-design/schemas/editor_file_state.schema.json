@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Takkub Editor File State",
+  "type": "object",
+  "required": [
+    "project_id",
+    "path",
+    "version"
+  ],
+  "properties": {
+    "project_id": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "version": {
+      "type": "object",
+      "required": [
+        "mtime_ns",
+        "size"
+      ],
+      "properties": {
+        "mtime_ns": {
+          "type": "integer"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "dirty": {
+      "type": "boolean"
+    },
+    "language": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

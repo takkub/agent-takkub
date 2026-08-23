@@ -14,7 +14,7 @@ one.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from agent_takkub import config
@@ -26,6 +26,7 @@ from .journal import MigrationJournal
 from .report import StepReport
 from .steps import VersionMarkerStep
 from .steps_v1 import (
+    CoreInternalStoreStep,
     CredentialReferenceStep,
     ProjectMigrationStep,
     RoleAgentMigrationStep,
@@ -42,6 +43,7 @@ class MigrationEngine:
         steps: Sequence[MigrationStep] | None = None,
         *,
         data_home: Path | None = None,
+        journal: MigrationJournal | None = None,
     ) -> None:
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
@@ -49,10 +51,17 @@ class MigrationEngine:
             # step list (e.g. unit-test fakes with no real filesystem) must
             # not have `rollback()` reach for a real V2 root it never wrote.
             self._data_home = data_home
+            # Likewise only known when passed explicitly — `apply_pending()`
+            # needs the SAME journal instance the hand-built steps were
+            # wired to (real callers always share one, see below); a
+            # hand-built test that doesn't call apply_pending() can leave
+            # this None.
+            self._journal = journal
         else:
             home = data_home if data_home is not None else config.DATA_HOME
             self._data_home = home
-            journal = MigrationJournal()
+            journal = journal or MigrationJournal()
+            self._journal = journal
             backups = BackupManager()
             # Ladder order (plan §5.3), lowest risk first. Every step shares
             # one journal/backup store so `takkub migrate rollback` can walk
@@ -66,6 +75,7 @@ class MigrationEngine:
                 build_state_step(journal, backups, data_home=home),
                 CredentialReferenceStep(journal=journal, backups=backups, data_home=home),
                 RuntimeTriageStep(journal=journal, backups=backups, data_home=home),
+                CoreInternalStoreStep(journal=journal, backups=backups, data_home=home),
             ]
 
     def inspect(self) -> list[StepReport]:
@@ -86,6 +96,57 @@ class MigrationEngine:
         never a second `VersionMarkerStep` wired to different journal/backup
         stores."""
         return self._steps[0].apply()
+
+    def applied_step_ids(self) -> list[str]:
+        """Step ids the journal already has a successful, not-yet-rolled-
+        back apply for — what `apply_pending()` (#362) treats as "this
+        machine already finished this step". Empty when this engine has no
+        journal at all (a hand-built step list built without one)."""
+        if self._journal is None:
+            return []
+        return self._journal.applied_step_ids()
+
+    def apply_pending(self, *, skip_step_ids: Iterable[str] = ()) -> list[StepReport]:
+        """Run only the ladder steps that still need it (#362 — the gap
+        between #360 adding `core-internal-store` and #361's boot-time
+        auto-apply only ever re-running step 0): a step counts as pending
+        when the journal has no successful apply for it yet, OR it does but
+        the step's own `validate()` says it isn't actually complete right
+        now (e.g. `version-marker` after an app upgrade). A step that is
+        both journal-applied AND currently valid is skipped outright — no
+        `apply()` call, no report, matching "step ที่ applied แล้วข้าม".
+
+        `skip_step_ids` additionally holds back specific steps regardless
+        of their pending-ness — the boot-time per-step retry-guard (#362)
+        uses this so a step that already failed `apply_pending()` once this
+        app version isn't retried every single boot.
+
+        No stop-the-line: every non-skipped pending step gets attempted
+        even if an earlier one in this same call failed, so one broken step
+        never blocks a later, independent one from ever making progress —
+        the caller (`auto_migrate_boot`) decides what a failure means
+        per-step, not this method."""
+        applied_before = set(self.applied_step_ids())
+        skip = set(skip_step_ids)
+        reports: list[StepReport] = []
+        for s in self._steps:
+            step_id = getattr(s, "step_id", "")
+            if step_id in skip:
+                continue
+            if step_id in applied_before and s.validate().ok:
+                continue
+            reports.append(s.apply())
+        return reports
+
+    def rollback_step(self, step_id: str) -> StepReport:
+        """Roll back exactly one ladder step by id — `apply_pending()`'s
+        per-step failure handling (#362) must never reach for the
+        whole-ladder `rollback()`, which would also undo every earlier step
+        that already succeeded, possibly release(s) ago."""
+        for s in self._steps:
+            if getattr(s, "step_id", "") == step_id:
+                return s.rollback()
+        raise KeyError(f"MigrationEngine has no step {step_id!r}")
 
     def apply(self) -> list[StepReport]:
         reports: list[StepReport] = []

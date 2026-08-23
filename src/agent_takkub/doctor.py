@@ -2704,25 +2704,33 @@ def check_storage_layout_state() -> list[Finding]:
                 "(plan §2, Phase 10) removes V1; not itself a problem",
             )
         )
-    findings.append(_auto_migrate_boot_finding())
+    findings.extend(_auto_migrate_boot_findings())
     return findings
 
 
-def _auto_migrate_boot_finding() -> Finding:
-    """[storage-layout/auto-migrate] — what the boot-time auto-migrate gate
-    (#361) did last, or that it never ran on this machine yet. A rollback
-    also surfaces whether the `auto_migrate_rolled_back` auto-issue signal
-    actually reached GitHub, or is sitting in the local `.takkub_issues.json`
-    fallback where a headless/unattended machine would never see it
-    otherwise (#361 design note)."""
+def _auto_migrate_boot_findings() -> list[Finding]:
+    """[storage-layout/auto-migrate*] — what the boot-time auto-migrate gate
+    (#361) did last, or that it never ran on this machine yet. A whole-ladder
+    rollback also surfaces whether the `auto_migrate_rolled_back` auto-issue
+    signal actually reached GitHub, or is sitting in the local
+    `.takkub_issues.json` fallback where a headless/unattended machine would
+    never see it otherwise (#361 design note). On a `"mixed"` machine,
+    `apply_pending()` (#362) can also leave two other kinds of state behind
+    that deserve their own WARN, independent of the base finding above: a
+    genuinely-new step that failed and is sitting behind its per-version
+    retry-guard, and a previously-successful step whose validate() has since
+    gone bad (never auto-rolled-back — a human has to look)."""
     try:
         from .auto_migrate_boot import load_state
     except Exception as e:
-        return Finding(
-            "storage-layout", "auto-migrate", Status.INFO, f"auto_migrate_boot unavailable: {e}"
-        )
+        return [
+            Finding(
+                "storage-layout", "auto-migrate", Status.INFO, f"auto_migrate_boot unavailable: {e}"
+            )
+        ]
 
     state = load_state()
+    findings: list[Finding] = []
     if state.get("rolled_back_for_version"):
         detail = f"rollback แล้ว (version {state['rolled_back_for_version']}) — จะไม่ลองใหม่จนกว่าเวอร์ชันจะเปลี่ยน"
         try:
@@ -2733,15 +2741,50 @@ def _auto_migrate_boot_finding() -> Finding:
                 detail += f" — {backlog.summary}"
         except Exception:
             pass
-        return Finding("storage-layout", "auto-migrate", Status.WARN, detail)
-    if state.get("applied_version"):
-        return Finding(
-            "storage-layout",
-            "auto-migrate",
-            Status.OK,
-            f"apply สำเร็จตอน boot (version {state['applied_version']})",
+        findings.append(Finding("storage-layout", "auto-migrate", Status.WARN, detail))
+    elif state.get("applied_version"):
+        findings.append(
+            Finding(
+                "storage-layout",
+                "auto-migrate",
+                Status.OK,
+                f"apply สำเร็จตอน boot (version {state['applied_version']})",
+            )
         )
-    return Finding("storage-layout", "auto-migrate", Status.INFO, "ยังไม่เคยรัน auto-migrate ตอน boot")
+    else:
+        findings.append(
+            Finding(
+                "storage-layout", "auto-migrate", Status.INFO, "ยังไม่เคยรัน auto-migrate ตอน boot"
+            )
+        )
+
+    stale = state.get("stale_applied_steps") or {}
+    if stale:
+        names = ", ".join(sorted(stale))
+        findings.append(
+            Finding(
+                "storage-layout",
+                "auto-migrate-stale",
+                Status.WARN,
+                f"{len(stale)} step ที่เคย apply สำเร็จ validate ไม่ผ่านตอน boot ล่าสุด ({names}) — "
+                "ไม่ auto-rollback ให้ ต้องตรวจด้วยมือ",
+            )
+        )
+
+    guarded = state.get("rolled_back_steps") or {}
+    if guarded:
+        names = ", ".join(f"{step_id}@{ver}" for step_id, ver in sorted(guarded.items()))
+        findings.append(
+            Finding(
+                "storage-layout",
+                "auto-migrate-pending-rollback",
+                Status.WARN,
+                f"{len(guarded)} pending step ใหม่ apply ไม่ผ่านและถูก rollback ({names}) — "
+                "จะลองใหม่เมื่อ version เปลี่ยน",
+            )
+        )
+
+    return findings
 
 
 def run_all_checks() -> list[Finding]:
