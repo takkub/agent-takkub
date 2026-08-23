@@ -183,12 +183,21 @@ class TestGitStatusServiceDebounce:
         monkeypatch.setattr(GitStatusService, "_run", lambda self: calls.append(1))
 
         svc = GitStatusService(tmp_path, debounce_ms=30)
-        svc.request_refresh()
-        svc.request_refresh()
-        svc.request_refresh()
-        QTest.qWait(150)
+        try:
+            svc.request_refresh()
+            svc.request_refresh()
+            svc.request_refresh()
+            # Bounded pump, not a fixed qWait(150): on a loaded CI runner a
+            # 30 ms single-shot timer can land later than that (ubuntu flake,
+            # same shape as test_file_watch_service's debounce fix).
+            assert _wait_until(lambda: len(calls) >= 1)
+            QTest.qWait(60)  # a second run would have landed by now
 
-        assert calls == [1]
+            assert calls == [1]
+        finally:
+            timer = getattr(svc, "_timer", None)
+            if timer is not None:
+                timer.stop()
 
     def test_no_refresh_before_debounce_window_elapses(self, qapp, monkeypatch, tmp_path) -> None:
         calls: list[int] = []
