@@ -762,6 +762,76 @@ class TestPollWaitUserInputInterrupt:
         assert result["done"] == {"backend": "delivered"}
 
 
+class TestTerminalAutoReplyDetection:
+    """#31 (CodeQL py/redos): `_TERMINAL_AUTO_REPLY_RE`'s old `(?:alt1|...|
+    alt7)+$` fullmatch was rewritten as a token-scanning
+    `_is_terminal_auto_reply_chunk` — same semantics, no backtracking. These
+    tests pin that parity directly (independent of the `poll_wait`
+    machinery `test_terminal_auto_reply_via_on_pane_input_does_not_interrupt`
+    above exercises end to end) and prove an adversarial chunk that never
+    completes a token stays fast."""
+
+    @pytest.mark.parametrize(
+        "chunk",
+        [
+            b"\x1b[24;80R",  # CPR
+            b"\x1b[?1;2c",  # DA1
+            b"\x1b[>0;95;0c",  # DA2
+            b"\x1b[0n",  # DSR
+            b"\x1b]11;rgb:0000/0000/0000\x07",  # OSC, BEL-terminated
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\",  # OSC, ST-terminated
+            b"\x1b[I",  # focus-in
+            b"\x1b[O",  # focus-out
+            b"\x1b[200~",  # bracketed-paste start marker
+            b"\x1b[201~",  # bracketed-paste end marker
+            b"\x1b[24;80R\x1b[?1;2c",  # two tokens back to back
+        ],
+    )
+    def test_pure_auto_reply_chunks_detected(self, chunk: bytes) -> None:
+        assert Orchestrator._is_terminal_auto_reply_chunk(chunk) is True
+
+    @pytest.mark.parametrize(
+        "chunk",
+        [
+            b"",
+            b"hello",
+            b"\x1b[24;80Rx",  # real keystroke tacked onto a real token
+            b"\x1b[24;80",  # truncated — no terminator
+            b"\x1b[",  # bare CSI intro, nothing after
+            b"\x1b]11;rgb:0000/0000/0000",  # OSC with no BEL/ST terminator
+        ],
+    )
+    def test_non_auto_reply_chunks_rejected(self, chunk: bytes) -> None:
+        assert Orchestrator._is_terminal_auto_reply_chunk(chunk) is False
+
+    def test_oversized_chunk_rejected_without_scanning(self) -> None:
+        chunk = b"\x1b[24;80R" * 100  # well past the 512-byte cap
+        assert Orchestrator._is_terminal_auto_reply_chunk(chunk) is False
+
+    def test_adversarial_non_terminating_chunk_stays_fast(self) -> None:
+        """The shape that made the old backtracking regex a ReDoS
+        candidate: many CSI intros in a row that never resolve into a
+        complete token, well past what the length cap alone would reject
+        for. Must reject, and must do so fast regardless of length."""
+        chunk = b"\x1b[" * 10_000
+        start = time.monotonic()
+        result = Orchestrator._is_terminal_auto_reply_chunk(chunk)
+        elapsed = time.monotonic() - start
+        assert result is False
+        assert elapsed < 0.05
+
+    def test_adversarial_chunk_under_length_cap_stays_fast(self) -> None:
+        """Same non-terminating shape as above, but kept under the 512-byte
+        cap so this actually exercises the token scanner itself rather than
+        being short-circuited by the length guard."""
+        chunk = (b"\x1b[" * 200)[:500]
+        start = time.monotonic()
+        result = Orchestrator._is_terminal_auto_reply_chunk(chunk)
+        elapsed = time.monotonic() - start
+        assert result is False
+        assert elapsed < 0.05
+
+
 class TestResolvedEcho:
     """Real incident (2026-08-15): two `takkub wait` processes attached to
     the same project registration — one poll call resolved every role and

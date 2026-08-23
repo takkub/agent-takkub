@@ -209,6 +209,42 @@ class TestNameValidation:
             reports.publish(src, bad_name, "demo")
 
 
+class TestProjectNsValidation:
+    """#31/#32-37 (CodeQL py/path-injection): `reports_root`/`_contained_path`
+    now additionally prove containment via the `os.path.normpath()` +
+    `str.startswith()` idiom CodeQL's own sink analysis recognizes, on top
+    of the regex reject `_project_ns`/`_validate_report_name` already did.
+    These pin that a name/project the regex rejects still raises/404s
+    exactly as before — the extra barrier must not loosen anything."""
+
+    @pytest.mark.parametrize(
+        "bad_project",
+        [
+            "../evil",
+            "a/../../etc",
+            "/etc",
+            "has space",
+            ".hidden",
+            "trailing.",
+            "a\\b",
+        ],
+    )
+    def test_reports_root_rejects_unsafe_project(self, bad_project):
+        with pytest.raises(reports.ReportError):
+            reports.reports_root(bad_project)
+
+    @pytest.mark.parametrize("bad_project", ["../evil", "/etc", "has space"])
+    def test_publish_rejects_unsafe_project(self, tmp_path, bad_project):
+        src = _html(tmp_path)
+        with pytest.raises(reports.ReportError):
+            reports.publish(src, "status.html", bad_project)
+
+    @pytest.mark.parametrize("bad_project", ["../evil", "/etc", "has space"])
+    def test_resolve_rejects_unsafe_project_returns_none(self, tmp_path, bad_project):
+        reports.publish(_html(tmp_path), "status.html", "demo")
+        assert reports.resolve(bad_project, "status.html", "whatever") is None
+
+
 class TestListRevokeRotate:
     def test_list_shares_sorted_by_name(self, tmp_path):
         reports.publish(_html(tmp_path, "a.html"), "b.html", "demo")
