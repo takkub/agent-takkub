@@ -91,6 +91,16 @@ workspace — แผนภายนอก 27 ไฟล์ vendor เข้าม
 - #364 lever 1 ถ้า spike ไม่คุ้ม ต้องบันทึกตัวเลขลงใบ ไม่ทำต่อเงียบๆ
 - #365 เฟส 9 OpenViking: ห้าม vendor AGPL เข้า repo MIT — sidecar เท่านั้น
 
+## 6b. สถานะ ณ 2026-08-23 17:50 (อัปเดตโดย Lead)
+
+| งาน | สถานะ |
+|---|---|
+| 1.1.0 | ✅ ออกแล้ว (npm latest, tag `v1.1.0`) |
+| #362 Phase 10 | ชิ้น 1/1b/1c dual-write ครบทุก mapping + audit test ✅ · 🔄 ชิ้น 2 readers ใต้ `TAKKUB_V2_AUTHORITY` (default OFF) กำลังทำ · soak drift=0 รอเวลา |
+| #364 RAM diet | ✅ ทุก lever ปิด (6 วัด · 4 MCP stale variant bug · 2 subagent · 3 RAM cap · 1 discard ~65 MB/pane · 5 profile ไม่ leak) |
+| #365 Workspace | เฟส 0–4 ✅ (Explorer, Monaco + packaging, safe edit UI, git diff UI) · เฟส 5 backend ✅ · 🔄 เฟส 5 widget + เฟส 6 UI · 🔄 เฟส 10 doctor/soak · 🔄 reviewer เฟส 3/5 · เฟส 7–9 ยังไม่เริ่ม (8 รอ #362, 9 optional) |
+| CI cadence | รวบ merge → targeted ชุดเดียว (รวม repo guard) → push ครั้งเดียว — batch 1 `8880e19`, batch 2 `6e0c20a` |
+
 ## 7. ลำดับรวมหลัง 1.1.0 ออก (pane ≤ 3 พร้อมกัน)
 
 ```
