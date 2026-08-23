@@ -495,6 +495,7 @@ class MainWindow(
     def _on_editor_file_opened(self, _project_name: str, _path: str) -> None:
         self._editor_dock.show()
         self._editor_dock.raise_()
+        self._editor_host.focus()
 
     def _on_preview_opened(self, _project_name: str) -> None:
         self._preview_dock.show()

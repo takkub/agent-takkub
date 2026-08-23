@@ -499,6 +499,24 @@ class _EditorWebView(QWidget):
         else:
             self._pending_js.append(script)
 
+    def focus(self) -> None:
+        """Forward Qt widget focus AND Monaco's own DOM focus (a click
+        landing on the QWebEngineView gives it `hasFocus() == True` at the
+        Qt level, but never moves Chromium's DOM focus into Monaco's hidden
+        input target on its own — so the cursor never blinks and keystrokes
+        go nowhere). Same two-layer forward `terminal_widget.py`'s
+        `mousePressEvent`/`focusInEvent` already does for xterm.js."""
+        self._view.setFocus()
+        self.run_js("if (window.focusActiveEditor) window.focusActiveEditor();")
+
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+        self.focus()
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self.focus()
+
     def destroy(self) -> None:
         """Full teardown so Chromium can release the renderer + JS heap.
         Distinct from hiding — used when the last open tab closes."""
@@ -572,6 +590,14 @@ class EditorHost(QObject):
     def open_count(self) -> int:
         return len(self._open_paths)
 
+    def focus(self) -> None:
+        """Give the WebView (and Monaco's own DOM focus) keyboard focus —
+        called after a file opens and by MainWindow after showing/raising
+        the editor dock, so the cursor is blinking and ready to type
+        the moment a file appears, not only after a click forces it."""
+        if self._view is not None:
+            self._view.focus()
+
     # -- open ------------------------------------------------------------
     def open_file(self, project_name: str, abs_path: str, *, show_diff: bool = False) -> None:
         try:
@@ -629,6 +655,7 @@ class EditorHost(QObject):
                 roots = []
             self._file_watch.add_roots(roots)
             self._file_watch.watch(result.path)
+            self.focus()
         self.fileOpened.emit(project_name, path_str)
         if show_diff and not (result.binary or result.too_large):
             self._on_diff_requested(path_str)
