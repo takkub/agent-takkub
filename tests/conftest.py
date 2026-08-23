@@ -421,6 +421,82 @@ def _install_qt_exception_guard() -> None:
         sys.unraisablehook = _unraisable
 
 
+class UnexpectedModalDialogError(AssertionError):
+    """#349: raised when test code reaches a real Qt modal-dialog static call
+    (QMessageBox.*, QInputDialog.*, QFileDialog.*) that no test explicitly
+    patched. See `_block_qt_modals` below."""
+
+
+_qt_modal_calls: list[tuple[str, str, str]] = []
+
+
+def pop_qt_modal_calls() -> list[tuple[str, str, str]]:
+    """Test-only escape hatch: fetch-and-clear (method, title, text) tuples
+    recorded by `_block_qt_modals`'s default patch before it raised. Mirrors
+    `pop_qt_slot_exceptions` above."""
+    drained = list(_qt_modal_calls)
+    _qt_modal_calls.clear()
+    return drained
+
+
+def _blocked_modal(method_name: str):
+    def _call(*args, **kwargs):
+        # Best-effort extraction: every patched static takes (parent, title,
+        # text, ...) or (parent, caption, dir, ...) — same shape, args[1]/[2].
+        title = args[1] if len(args) > 1 else kwargs.get("title", kwargs.get("caption", ""))
+        text = args[2] if len(args) > 2 else kwargs.get("text", kwargs.get("directory", ""))
+        _qt_modal_calls.append((method_name, str(title), str(text)))
+        raise UnexpectedModalDialogError(
+            f"{method_name}(title={title!r}, text={text!r}) tried to open a real Qt "
+            "modal dialog during a test that never patched it (#349) — under the "
+            "offscreen platform this blocks the event loop forever waiting for a click "
+            "nobody can give it, which is what made worker gw7 look 'crashed' at "
+            "settings_window.py:1238 (QMessageBox.critical in the save-rollback OSError "
+            "path) instead of failing loudly. If this test intentionally exercises this "
+            "dialog, monkeypatch it yourself before triggering the code path — e.g. "
+            f"monkeypatch.setattr({method_name.split('.', 1)[0]}, "
+            f"{method_name.split('.', 1)[1]!r}, lambda *a, **k: ...)."
+        )
+
+    return _call
+
+
+@pytest.fixture(autouse=True)
+def _block_qt_modals(monkeypatch: pytest.MonkeyPatch):
+    """#349 root cause: a real QMessageBox/QInputDialog/QFileDialog modal
+    blocks the Qt event loop forever under the offscreen test platform —
+    nobody can click it — until faulthandler kills the pytest-xdist worker at
+    the 280s timeout, which then reports as an opaque 'worker crashed'
+    indistinguishable from a native abort. That specific path (settings_
+    window.py's Save & Apply OSError-rollback handler) is only reached when a
+    real disk write races, so it slipped through in ~2 of 3 CI runs.
+
+    Patch every static modal-dialog entry point so any call a test did NOT
+    explicitly patch itself fails immediately with a clear message naming the
+    dialog, instead of hanging. This fixture's patch is applied before the
+    test body runs, so a test's own `monkeypatch.setattr(QMessageBox, ...)`
+    (the existing, already-widespread pattern in this suite — see
+    test_settings_window.py, test_project_wizard.py, etc.) simply overrides
+    it for that test; nothing here changes production code, which should
+    keep showing these dialogs to a real user.
+    """
+    try:
+        from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+    except ModuleNotFoundError:
+        yield
+        return
+
+    for name in ("critical", "warning", "information", "question", "about"):
+        monkeypatch.setattr(QMessageBox, name, _blocked_modal(f"QMessageBox.{name}"))
+    for name in ("getItem", "getMultiLineText", "getText", "getInt", "getDouble"):
+        if hasattr(QInputDialog, name):
+            monkeypatch.setattr(QInputDialog, name, _blocked_modal(f"QInputDialog.{name}"))
+    for name in ("getExistingDirectory", "getOpenFileName", "getSaveFileName"):
+        monkeypatch.setattr(QFileDialog, name, _blocked_modal(f"QFileDialog.{name}"))
+
+    yield
+
+
 def pop_qt_slot_exceptions() -> list[str]:
     """Test-only escape hatch: fetch-and-clear queued Qt slot exceptions.
 

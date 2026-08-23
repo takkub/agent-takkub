@@ -8,6 +8,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **#349 ปิดแล้ว — "full pytest ตายเงียบ exit 127" ไม่ใช่ native crash แต่เป็น modal dialog ที่บล็อกค้าง** —
+  CI macOS จับได้ครั้งแรกด้วย instrumentation ที่ใส่ไว้ใน 1.0.86 (`--max-worker-restart=0` +
+  `faulthandler_timeout=280`): worker `gw7` ค้างที่ `settings_window.py:1238` ซึ่งคือ
+  `QMessageBox.critical()` ใน `except (OSError, ValueError)` ของ `_on_save_apply_clicked`
+  — modal dialog บล็อก event loop รอคนกด OK ที่ไม่มีทางมีใครกดใน headless test จน faulthandler
+  ฆ่าโปรเซสที่ 280 วินาที แล้ว xdist รายงานเป็น `worker crashed` ที่แยกไม่ออกจาก native abort ·
+  thread อื่นว่างหมด มีแต่ main thread ค้างบรรทัดเดียว · ที่ **"1 ใน 3 รอบ"** และ reproduce
+  ในเครื่องไม่ได้ เพราะเส้นทางนี้เดินก็ต่อเมื่อการเขียนไฟล์ raise `OSError` จริง ซึ่งเกิดเฉพาะตอน
+  ดิสก์/สิทธิ์แกว่งบน runner
+  → เพิ่ม autouse fixture `_block_qt_modals` ใน `tests/conftest.py`: patch static ของ modal
+  **ทุกตัว** (`QMessageBox.{critical,warning,information,question,about}` ·
+  `QInputDialog.{getItem,getMultiLineText,getText,getInt,getDouble}` ·
+  `QFileDialog.{getExistingDirectory,getOpenFileName,getSaveFileName}`) ให้ **raise
+  `UnexpectedModalDialogError` ทันทีพร้อมบอกว่า dialog ไหนถูกเปิด** แทนที่จะบล็อก — เทสที่เผลอ
+  เดินเข้า error path จึงตกดังๆ ใน 0 วินาที แทนแขวน 280 วินาทีแล้วตายเงียบ · เทสที่ตั้งใจทดสอบ
+  dialog ยัง `monkeypatch` ทับเองได้เหมือนเดิม (แพทเทิร์นที่ suite ใช้อยู่แล้ว) ·
+  **ไม่แตะ production** — dialog ในโค้ดจริงถูกต้องแล้ว user ควรเห็น
+
 - **cockpit ตัวที่สองที่เปิดจาก pane เขียนทับไฟล์ `port` ของตัวแรก → `takkub` ทุกคำสั่ง route ผิด instance** (#354) —
   pane ทุกตัวถูก stamp `TAKKUB_PORT_FILE` ของ cockpit ที่ spawn มัน (ตั้งใจ เพื่อ multi-instance)
   แต่ค่านั้น **inherit ต่อไปยัง process ลูก** — ถ้าลูกเป็น cockpit อีกตัว มันจะเอา path ของ
