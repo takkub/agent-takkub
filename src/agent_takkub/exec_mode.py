@@ -141,5 +141,10 @@ def set_current(mode: str) -> None:
         raise ValueError(f"unknown execution mode: {mode!r}")
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps({"mode": mode}, indent=2) + "\n", encoding="utf-8")
+    payload = {"mode": mode}
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
+
+    from .core.storage.dual_write import dual_write_exec_mode
+
+    dual_write_exec_mode(payload)

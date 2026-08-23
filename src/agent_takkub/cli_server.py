@@ -24,7 +24,8 @@ from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from . import browser_chrome
 from .config import write_port
-from .orchestrator import Orchestrator, _human_duration
+from .orchestrator import Orchestrator, _human_duration, resolve_auto_assign_mode
+from .orchestrator_text import _log_event
 from .spawn_queue_health import SpawnQueueHealthMonitor
 
 # Maximum allowed frame size (bytes). Frames larger than this are rejected so
@@ -517,10 +518,34 @@ class CliServer(QObject):
                             self._reply(sock, ok=False, msg=cwd_err)
                             return
                 if cmd == "assign":
-                    mode = str(req.get("mode", "pane") or "pane")
-                    if mode not in {"pane", "subagent"}:
+                    mode_requested = req.get("mode")
+                    if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
                         self._reply(sock, ok=False, msg="--mode must be pane or subagent")
                         return
+                    # #364 lever 2: when the caller left --mode unset, decide
+                    # pane vs. subagent here instead of defaulting straight to
+                    # "pane" — an explicit --mode from the caller always wins
+                    # (resolve_auto_assign_mode returns it unchanged).
+                    mode, auto_mode_note = resolve_auto_assign_mode(
+                        role,
+                        req.get("task", ""),
+                        requested_mode=mode_requested,
+                        isolation=str(req.get("isolation", "shared") or "shared"),
+                        model=(str(req.get("model", "") or "").strip() or None),
+                        provider=(str(req.get("provider", "") or "").strip().lower() or None),
+                        effort=(str(req.get("effort", "") or "").strip().lower() or None),
+                        plan=bool(req.get("plan", False)),
+                        shard_total=int(req.get("shard_total", 0)),
+                        project=from_project,
+                    )
+                    if auto_mode_note:
+                        _log_event(
+                            "auto_assign_mode",
+                            role=role,
+                            project=from_project,
+                            mode=mode,
+                            note=auto_mode_note,
+                        )
                     from .provider_config import (
                         assign_effort_override_error,
                         assign_model_override_error,
@@ -605,6 +630,8 @@ class CliServer(QObject):
                         feature=str(req.get("feature", "") or ""),
                         mode=mode,
                     )
+                    if auto_mode_note:
+                        msg = f"{msg}\n[{auto_mode_note}]"
                     self._reply(sock, ok=ok, msg=msg)
                     return
                 delay = self._next_spawn_delay_ms(role, from_project)
@@ -633,9 +660,10 @@ class CliServer(QObject):
                             effort=(str(req.get("effort", "") or "").strip().lower() or None),
                         ),
                     )
-                    self._reply(
-                        sock, ok=True, msg=f"task queued for {role} (spawning async, +{delay}ms)"
-                    )
+                    ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
+                    if cmd == "assign" and auto_mode_note:
+                        ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
+                    self._reply(sock, ok=True, msg=ack_msg)
                 return
             elif cmd == "send":
                 ok, msg = self._orch.send(

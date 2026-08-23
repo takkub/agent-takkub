@@ -106,14 +106,19 @@ def set_rtk_enabled(enabled: bool) -> None:
     """Persist the central rtk enable flag. Creates ``SETTINGS_HOME`` if
     missing; never raises on a write failure (best-effort toggle)."""
     path = _enabled_flag_path()
+    payload = {"enabled": bool(enabled)}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"enabled": bool(enabled)}, indent=2) + "\n",
+            json.dumps(payload, indent=2) + "\n",
             encoding="utf-8",
         )
     except OSError:
-        pass
+        return
+
+    from .core.storage.dual_write import dual_write_rtk_enabled
+
+    dual_write_rtk_enabled(payload)
 
 
 def rtk_hook_fragment() -> dict:

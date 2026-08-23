@@ -327,7 +327,15 @@ def _browser_shard_warning(role: str, shards: int) -> str:
 def cmd_assign(args: argparse.Namespace) -> dict:
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
-    mode = getattr(args, "mode", "pane") or "pane"
+    # #364 lever 2: `args.mode` is None when the caller left --mode unset —
+    # `mode_requested` (possibly None) travels to the server as-is so
+    # `resolve_auto_assign_mode` can auto-pick pane vs. subagent for a
+    # short, no-frills task; `mode` (never None) is only for THIS
+    # function's own local validation/display below, which must stay
+    # conservative (pane's stricter rules) since a None request might still
+    # resolve to either mode server-side.
+    mode_requested = getattr(args, "mode", None)
+    mode = mode_requested or "pane"
     _SHARDS_MAX = 20 if mode == "subagent" else 8
     _raw_shards = getattr(args, "shards", 1)
     if _raw_shards is not None:
@@ -439,7 +447,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "provider": provider,
                     "effort": effort,
                     "feature": getattr(args, "feature", "") or "",
-                    "mode": mode,
+                    "mode": mode_requested,
                 }
             )
         )
@@ -467,7 +475,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "provider": provider,
                         "effort": effort,
                         "feature": getattr(args, "feature", "") or "",
-                        "mode": mode,
+                        "mode": mode_requested,
                     }
                 )
             )
@@ -2469,9 +2477,12 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument(
         "--mode",
         choices=("pane", "subagent"),
-        default="pane",
-        help="execution mode: pane (default, existing visible cockpit pane) or subagent "
-        "(native same-provider child in the Lead process; no pane/model diversity)",
+        default=None,
+        help="execution mode: pane (existing visible cockpit pane) or subagent "
+        "(native same-provider child in the Lead process; no pane/model diversity). "
+        "Omit to let the server auto-pick subagent for a short task with no "
+        "isolation/model-diversity/plan need (#364 lever 2) — pass this flag "
+        "explicitly to pin one mode and skip that auto-selection",
     )
     sa.add_argument(
         "--model",

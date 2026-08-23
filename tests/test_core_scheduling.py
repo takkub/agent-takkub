@@ -6,7 +6,9 @@ and the fail-open `.facade` `resource_governor.py` calls into.
 
 from __future__ import annotations
 
+import dataclasses
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -434,8 +436,83 @@ def test_effective_slot_policy_flag_on_reads_persisted_config(monkeypatch):
 
 
 def test_effective_slot_policy_missing_file_fails_open_to_default(monkeypatch):
+    """A missing settings file still parses as all-defaults (`_default_payload()`
+    with `max_panes_global=None`) — every OTHER dimension stays unlimited.
+    `max_panes_global` itself is the one exception (#364 lever 3): `None`
+    triggers the live RAM-derived default rather than staying uncapped, so
+    it's checked separately below, not folded into the `== SlotPolicy()`
+    comparison the other dimensions still get."""
     monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
-    assert scheduling_facade.effective_slot_policy() == SlotPolicy()
+    got = scheduling_facade.effective_slot_policy()
+    assert dataclasses.replace(got, max_panes_global=None) == SlotPolicy()
+    assert isinstance(got.max_panes_global, int) and got.max_panes_global >= 1
+
+
+# ── facade._ram_derived_max_panes_global (#364 lever 3) ─────────────────────
+
+
+class _FakeVM:
+    def __init__(self, total_bytes: int, available_bytes: int) -> None:
+        self.total = total_bytes
+        self.available = available_bytes
+
+
+def test_ram_derived_max_panes_global_is_headroom_over_reserve_divided_by_pane_estimate(
+    monkeypatch,
+):
+    import psutil
+
+    from agent_takkub import performance_settings
+
+    total = 40 * 1024**3
+    available = 20 * 1024**3
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(total, available))
+    monkeypatch.setattr(
+        performance_settings,
+        "load",
+        lambda: SimpleNamespace(min_available_ram_percent=20.0),
+    )
+    reserve = total * 0.20
+    expected = int((available - reserve) // (650 * 1024 * 1024))
+    assert scheduling_facade._ram_derived_max_panes_global() == expected
+    assert expected > 1  # sanity: this case is well above the floor
+
+
+def test_ram_derived_max_panes_global_floors_at_one_when_ram_tight(monkeypatch):
+    import psutil
+
+    from agent_takkub import performance_settings
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(8 * 1024**3, 1 * 1024**3))
+    monkeypatch.setattr(
+        performance_settings,
+        "load",
+        lambda: SimpleNamespace(min_available_ram_percent=20.0),
+    )
+    assert scheduling_facade._ram_derived_max_panes_global() == 1
+
+
+def test_ram_derived_max_panes_global_fails_open_to_none_on_psutil_error(monkeypatch):
+    import psutil
+
+    def boom():
+        raise RuntimeError("psutil blew up")
+
+    monkeypatch.setattr(psutil, "virtual_memory", boom)
+    assert scheduling_facade._ram_derived_max_panes_global() is None
+
+
+def test_effective_slot_policy_honors_explicit_max_panes_global_over_ram_default(monkeypatch):
+    """A value the user actually set in Settings → Scheduler always wins —
+    the RAM-derived default only fills in for `None` (#364 lever 3)."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=3)
+    )
+    got = scheduling_facade.effective_slot_policy()
+    assert got.max_panes_global == 3
 
 
 def test_effective_slot_policy_caches_until_file_mtime_changes(monkeypatch):

@@ -16,6 +16,32 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   เพิ่ม `check_ram_node_children` WARN เมื่อ pane ไหน node/mcp > 350 MB บอก role/project/pid · lazy-start MCP (3ข) พิสูจน์จาก
   ข้อมูลจริงไม่ได้ (claude CLI closed binary) → flag เป็น follow-up ใน #103 ไม่ฟันธง
   + tests: `test_pane_tools_policy.py::test_save_policy_regenerates_stale_variant` · `test_doctor_ram_live.py`
+- **RAM diet lever 2+3 — auto `--mode subagent` + proactive `max_panes_global`** (#364) —
+  `orchestrator.resolve_auto_assign_mode()`: เมื่อ `takkub assign` ไม่ระบุ `--mode` เอง ระบบเลือก `subagent`
+  อัตโนมัติให้เมื่อ task สั้น (< 400 ตัวอักษร) + role ไม่ใช่ reviewer/critic + ไม่มี `#N` shard suffix/`--isolation
+  worktree`/`--plan`/`--model`/`--provider`/`--effort` + role's effective provider เป็น claude (provider อื่น
+  fallback เป็น pane เสมอ พร้อม log อ้าง #103 gap — native subagent รองรับ claude เท่านั้น) · `--mode pane`/`--mode
+  subagent` ที่ระบุเองชนะเสมอไม่มีเงื่อนไข · ผลลัพธ์ auto-select สะท้อนกลับใน assign ack message
+  (`cli_server.py`) ไม่ใช่ตัดสินใจเงียบๆ · `--mode` CLI default เปลี่ยนจาก `"pane"` เป็น `None` (unset = auto)
+  — `core.scheduling.facade.effective_slot_policy()`: `max_panes_global` เมื่อ Settings ไม่ได้ตั้งไว้ (`None` —
+  รวมกรณีไม่มีไฟล์ core-v2-settings.json เลย, แก้บั๊กเดิมที่ไฟล์หายทำให้ทั้ง policy fail-open ทิ้งไม่เคยอ่าน
+  scheduler_policy จริง) คำนวณ default จาก RAM จริงแทนการไม่มี cap: `floor((available − reserve) / 650MB)`,
+  reserve = `performance_settings`'s `min_available_ram_percent` × total RAM (สัดส่วนเดียวกับที่ reactive
+  governor latch สำรองไว้อยู่แล้ว) · sample สดทุกครั้ง (ไม่ผูกกับ settings-file mtime cache) · ค่าที่ user ตั้งเอง
+  ใน Settings → Scheduler ชนะเสมอ · spawn ที่เกิน cap ยัง**คิว**ผ่าน `ResourceGovernor` เดิม (ไม่ปฏิเสธเงียบ) —
+  `_describe_resource_wait` เพิ่มข้อความเฉพาะ `global_panes_limit` บอก RAM free % ตรงๆ แทนโค้ด reason เปล่าๆ
+  + วัดบนเครื่องจริง (39.64GB total / 11.23GB available วันนี้): cap คำนวณได้ 5 panes
+  + tests: `test_orchestrator_auto_assign_mode.py` (ทุกเงื่อนไข exclude + provider-gap fallback) ·
+  `test_core_scheduling.py` (RAM-derived default/floor-at-1/fail-open/explicit-value-wins/missing-file) ·
+  `test_cli_server.py` stagger tests ปักหมุด `mode: pane` ชัดเจนเมื่อทดสอบ pane-specific dispatch
+
+- **Phase 10 ชิ้น 1c — ปิดช่องว่าง dual-write step 1 + mechanical audit กัน drift** (#362) — พบและปิด 3
+  mapping ใน `build_readonly_registries_step` ที่ไม่มี `dual_write_*` hook: `disabled-providers.json`
+  (`provider_state.py`), `exec-mode.json` (`exec_mode.py`), `rtk-enabled.json` (`rtk_helper.py`) — ตามแพทเทิร์น
+  เดิมทุกอย่าง (เขียน V1 ก่อน แล้ว mirror payload เดิมเข้า v2/ แบบ best-effort) · เพิ่ม
+  `test_every_ladder_mapping_has_dual_write_or_documented_exception`: ไล่ mapping จริงจาก step 1/3/5 ทุกตัว
+  เทียบกับตารางที่ประกาศไว้ — fail ถ้ามี mapping ใหม่ในอนาคตไม่มี hook/exception กัน gap แบบนี้เงียบๆ อีก
+  (step 2/4 fan-out + step 6/7/8 exception เดิม ยืนยันแยกอีก 2 เทส) + audit table เต็มเป็น comment ในไฟล์เทส
 
 - **Phase 10 ชิ้น 1b — dual-write state writers ตาม step 5 mapping จริง** (#362) — local-issues · issue-dedup ·
   autoresume · remote-sessions (`auto_issue_capture`/`issues`/`auto_resume`/`remote/session_store`) ผ่าน helper
