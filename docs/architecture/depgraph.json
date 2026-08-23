@@ -165,6 +165,7 @@
       "imports": [
         "agent_takkub",
         "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write",
         "agent_takkub.issues"
       ],
       "imported_by": [
@@ -172,7 +173,7 @@
         "agent_takkub.auto_issue_signals"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.auto_issue_signals",
@@ -210,14 +211,15 @@
     {
       "module": "agent_takkub.auto_resume",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write"
       ],
       "imported_by": [
         "agent_takkub.limit_autoresume",
         "agent_takkub.usage_meter"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.autoskills_installer",
@@ -1869,15 +1871,19 @@
         "agent_takkub.core.storage.layout"
       ],
       "imported_by": [
+        "agent_takkub.auto_issue_capture",
+        "agent_takkub.auto_resume",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
+        "agent_takkub.issues",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.provider_config",
         "agent_takkub.provider_models",
+        "agent_takkub.remote.session_store",
         "agent_takkub.role_models",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 7,
+      "fan_in": 11,
       "fan_out": 3
     },
     {
@@ -2264,7 +2270,8 @@
       "module": "agent_takkub.issues",
       "imports": [
         "agent_takkub._win_console",
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write"
       ],
       "imported_by": [
         "agent_takkub.auto_issue_capture",
@@ -2273,7 +2280,7 @@
         "agent_takkub.update_worker"
       ],
       "fan_in": 4,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.job_object_manager",
@@ -3248,13 +3255,14 @@
       "module": "agent_takkub.remote.session_store",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write",
         "agent_takkub.remote.config"
       ],
       "imported_by": [
         "agent_takkub.remote.auth"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.remote.settings_dialog",

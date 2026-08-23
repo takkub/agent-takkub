@@ -7,11 +7,14 @@ layout.py` already uses."""
 
 from __future__ import annotations
 
+import json
+
 from agent_takkub.core.migration.steps_v1 import (
     ProjectMigrationStep,
     RoleAgentMigrationStep,
     build_capability_step,
     build_readonly_registries_step,
+    build_state_step,
 )
 from agent_takkub.core.storage import dual_write
 from agent_takkub.core.storage.layout import storage_layout_v2
@@ -149,6 +152,119 @@ def test_custom_role_file_mirrors_and_removes(tmp_path):
     assert not target.exists()
 
 
+# ── state: local-issues / issue-dedup / autoresume / remote-sessions ───────
+
+
+def test_local_issues_mirrors_when_path_matches_mapping_source(tmp_path):
+    home = _migrated_home(tmp_path)
+    issues = [{"number": 1, "title": "x"}]
+    source = home / ".takkub_issues.json"
+
+    dual_write.dual_write_local_issues(issues, source, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "local-issues")
+    assert read_json(target)["data"] == issues
+
+
+def test_local_issues_skips_for_a_project_scoped_path(tmp_path):
+    """Only the cockpit-bug instance (DATA_HOME/.takkub_issues.json) has a V2
+    target — a per-project `.takkub_issues.json` at an unrelated cwd must not
+    write anything into V2 at all."""
+    home = _migrated_home(tmp_path)
+    other_project = tmp_path / "some_project" / ".takkub_issues.json"
+
+    dual_write.dual_write_local_issues([{"number": 1}], other_project, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "local-issues")
+    assert not target.exists()
+
+
+def test_local_issues_skips_when_not_migrated(tmp_path):
+    home = tmp_path / "data_home"
+    dual_write.dual_write_local_issues(
+        [{"number": 1}], home / ".takkub_issues.json", data_home=home
+    )
+    assert not (home / "v2").exists()
+
+
+def test_issue_dedup_mirrors_payload(tmp_path):
+    home = _migrated_home(tmp_path)
+    state = {"ValueError:app.py:57": 1234.5}
+    dual_write.dual_write_issue_dedup(state, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "issue-dedup")
+    assert read_json(target)["data"] == state
+
+
+def test_autoresume_mirrors_payload(tmp_path):
+    home = _migrated_home(tmp_path)
+    dual_write.dual_write_autoresume({"enabled": True}, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "autoresume")
+    assert read_json(target)["data"] == {"enabled": True}
+
+
+def test_remote_sessions_mirrors_payload(tmp_path):
+    home = _migrated_home(tmp_path)
+    doc = {"fingerprint": "abc", "sessions": {"hash1": 123.0}}
+    dual_write.dual_write_remote_sessions(doc, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "remote-sessions")
+    assert read_json(target)["data"] == doc
+
+
+def test_remote_sessions_none_removes_v2_copy(tmp_path):
+    home = _migrated_home(tmp_path)
+    dual_write.dual_write_remote_sessions({"fingerprint": "abc", "sessions": {}}, data_home=home)
+
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "remote-sessions")
+    assert target.exists()
+
+    dual_write.dual_write_remote_sessions(None, data_home=home)
+    assert not target.exists()
+
+
+def test_state_step_validates_after_dual_write_mirrors_match_v1(tmp_path):
+    """After every step-5 writer's dual-write call, the ladder's own
+    `RegistryCopyStep.validate()` (which `migrate validate` calls) must see
+    the V2 mirrors as matching their V1 sources."""
+    home = _migrated_home(tmp_path)
+    settings = tmp_path / "settings_home"
+    settings.mkdir()
+
+    issues_doc = [{"number": 1, "title": "x"}]
+    (home / ".takkub_issues.json").write_text(json.dumps(issues_doc), encoding="utf-8")
+    dedup_doc = {"ValueError:app.py:57": 1234.5}
+    (home / "auto_issue_dedup.json").write_text(json.dumps(dedup_doc), encoding="utf-8")
+    autoresume_doc = {"enabled": True}
+    (settings / "autoresume.json").write_text(json.dumps(autoresume_doc), encoding="utf-8")
+    remote_doc = {"fingerprint": "abc", "sessions": {}}
+    (settings / "takkub-remote-sessions.json").write_text(json.dumps(remote_doc), encoding="utf-8")
+
+    dual_write.dual_write_local_issues(issues_doc, home / ".takkub_issues.json", data_home=home)
+    dual_write.dual_write_issue_dedup(dedup_doc, data_home=home)
+    dual_write.dual_write_autoresume(autoresume_doc, data_home=home)
+    dual_write.dual_write_remote_sessions(remote_doc, data_home=home)
+
+    step = build_state_step(data_home=home, settings_home=settings)
+    report = step.validate()
+    assert report.ok, report.detail
+
+
+def test_state_writers_skip_when_not_migrated(tmp_path):
+    home = tmp_path / "data_home"
+    dual_write.dual_write_issue_dedup({"x": 1.0}, data_home=home)
+    dual_write.dual_write_autoresume({"enabled": True}, data_home=home)
+    dual_write.dual_write_remote_sessions({"fingerprint": "a", "sessions": {}}, data_home=home)
+    assert not (home / "v2").exists()
+
+
 # ── projects: registry + per-project fan-out ────────────────────────────────
 
 
@@ -190,5 +306,18 @@ def test_v2_write_failure_is_swallowed_not_raised(tmp_path, caplog):
         dual_write.dual_write_role_models(
             {"backend": {"provider": "codex", "model": "x"}}, data_home=home
         )
+
+    assert any("v2_write_failed" in r.message for r in caplog.records)
+
+
+def test_state_writer_v2_write_failure_is_swallowed_not_raised(tmp_path, caplog):
+    home = _migrated_home(tmp_path)
+    mapping = build_state_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "autoresume")
+    target.parent.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.write_text("blocking file", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="agent_takkub.core.storage.dual_write"):
+        dual_write.dual_write_autoresume({"enabled": True}, data_home=home)
 
     assert any("v2_write_failed" in r.message for r in caplog.records)

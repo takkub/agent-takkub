@@ -392,6 +392,10 @@ def _save_local_issues(issues: list[dict[str, Any]], cwd: str | Path | None) -> 
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(issues, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
+
+        from .core.storage.dual_write import dual_write_local_issues
+
+        dual_write_local_issues(issues, path)
     except Exception as exc:
         try:
             tmp.unlink(missing_ok=True)

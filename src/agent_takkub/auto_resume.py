@@ -72,7 +72,12 @@ def is_enabled() -> bool:
 
 def set_enabled(flag: bool) -> None:
     """Persist the auto-resume toggle atomically."""
+    payload = {"enabled": bool(flag)}
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps({"enabled": bool(flag)}, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
+
+    from .core.storage.dual_write import dual_write_autoresume
+
+    dual_write_autoresume(payload)
