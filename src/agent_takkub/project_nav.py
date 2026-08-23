@@ -32,6 +32,8 @@ from typing import ClassVar
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QEvent,
+    QObject,
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
@@ -185,10 +187,14 @@ _COLLAPSED_W = 64
 _SIDEBAR_MAX_W = 16_777_215  # QWIDGETSIZE_MAX — same "unbounded once expanded" convention _tasks_dock_collapse_toggled uses in main_window.py
 _AVATAR_PX = 34
 
-# Fixed height for a project row's embedded file tree — the row's own
-# QVBoxLayout drives the QListWidgetItem's sizeHint from this, so the tree
-# scrolls internally rather than growing the sidebar indefinitely.
-_EXPLORER_EMBED_H = 260
+# Height floor for a project row's embedded file tree. The tree is sized to
+# *fill* the sidebar list down to its bottom edge (ProjectNav._fit_explorer
+# re-derives it from the list viewport minus every row's header each time the
+# sidebar resizes / selection changes / a row is added), so the only constant
+# left is the minimum it may shrink to before the list itself starts
+# scrolling — user feedback 2026-08-23: a fixed 260px left a dead band under
+# the tree on any tall window.
+_EXPLORER_MIN_H = 120
 
 # Per-project "explorer expanded" flag persists under the same QSettings
 # domain ProjectTab used before the explorer moved into the sidebar (2026-08-23)
@@ -295,9 +301,10 @@ class _ProjectRow(QWidget):
         ec_lay.setSpacing(0)
         if explorer is not None:
             explorer.setParent(self._explorer_container)
-            explorer.setFixedHeight(_EXPLORER_EMBED_H)
+            explorer.setFixedHeight(_EXPLORER_MIN_H)
             ec_lay.addWidget(explorer)
         outer.addWidget(self._explorer_container)
+        self._top = top
 
         self._paint_avatar()
         self.set_collapsed(collapsed)  # also runs the first _update_explorer_visibility()
@@ -363,6 +370,30 @@ class _ProjectRow(QWidget):
             self._lay.setContentsMargins(12, 8, 12, 8)
             self.setToolTip("")
         self._update_explorer_visibility()
+
+    def header_height(self) -> int:
+        """Height of just the card row (avatar/name/badge/chevron) — what the
+        row occupies when its tree is hidden. ProjectNav sums these across
+        every row to find how much of the list viewport is left for the one
+        visible tree."""
+        return self._top.sizeHint().height()
+
+    def explorer_height(self) -> int:
+        return self._explorer.height() if self._explorer is not None else 0
+
+    def set_explorer_height(self, h: int) -> None:
+        """Pin the embedded tree to `h` px (floored at _EXPLORER_MIN_H). The
+        row's sizeHint follows, so the caller must re-sync the list item."""
+        if self._explorer is None:
+            return
+        h = max(_EXPLORER_MIN_H, int(h))
+        if self._explorer.minimumHeight() != h or self._explorer.maximumHeight() != h:
+            self._explorer.setFixedHeight(h)
+            # Force the nested layouts to recompute now — QLayout defers
+            # invalidation to the next event-loop turn, and the caller reads
+            # self.sizeHint() immediately to refresh the QListWidgetItem.
+            self._explorer_container.layout().activate()
+            self.layout().activate()
 
     # -- explorer expand/collapse (chevron on the card itself) --------
     def has_explorer(self) -> bool:
@@ -463,6 +494,11 @@ class ProjectNav(QWidget):
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.currentRowChanged.connect(self._on_row_changed)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
+        # The visible tree fills the list down to its bottom edge — re-fit it
+        # whenever the viewport changes size (window resize, pending section
+        # appearing, sidebar splitter drag).
+        self._fit_pending = False
+        self._list.viewport().installEventFilter(self)
         sb.addWidget(self._list, 1)
 
         # "โปรเจคอื่นที่มี task ค้าง" — sidebar only lists projects with an
@@ -633,6 +669,7 @@ class ProjectNav(QWidget):
         # not avatars) — re-run refresh_pending_projects() so it re-applies
         # its own has_pending && !collapsed visibility check.
         self.refresh_pending_projects()
+        self._schedule_fit_explorer()
         target = _COLLAPSED_W if collapsed else _EXPANDED_W
         if not animate:
             self._sidebar.setFixedWidth(target)
@@ -669,6 +706,46 @@ class ProjectNav(QWidget):
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # Qt override
+        if obj is self._list.viewport() and event.type() == QEvent.Type.Resize:
+            self._schedule_fit_explorer()
+        return super().eventFilter(obj, event)
+
+    def _schedule_fit_explorer(self) -> None:
+        """Coalesce fit requests onto the next event-loop turn: resize events
+        arrive in bursts (splitter drag, animation ticks) and the fit itself
+        changes a row's sizeHint, which can re-enter via another viewport
+        resize when the scrollbar appears/disappears."""
+        if self._fit_pending:
+            return
+        self._fit_pending = True
+        QTimer.singleShot(0, self._fit_explorer)
+
+    def _fit_explorer(self) -> None:
+        """Size the one visible tree so the selected row ends flush with the
+        bottom of the list viewport: viewport height minus every row's header
+        (and the list's inter-item spacing), floored at _EXPLORER_MIN_H — below
+        the floor the list scrolls instead of squashing the tree further."""
+        self._fit_pending = False
+        target_index = -1
+        headers = 0
+        for i in range(self._list.count()):
+            rw = self._row_widget(i)
+            if rw is None:
+                continue
+            headers += rw.header_height()
+            if rw._explorer_container.isVisibleTo(rw):
+                target_index = i
+        if target_index < 0:
+            return
+        rw = self._row_widget(target_index)
+        if rw is None:
+            return
+        spacing = self._list.spacing() * 2 * max(self._list.count(), 1)
+        avail = self._list.viewport().height() - headers - spacing
+        rw.set_explorer_height(avail)
+        self._sync_row_size(target_index)
+
     def _row_widget(self, index: int) -> _ProjectRow | None:
         item = self._list.item(index)
         if item is None:
@@ -696,6 +773,7 @@ class ProjectNav(QWidget):
             if rw is not None:
                 rw.set_selected(i == row)
                 self._sync_row_size(i)
+        self._schedule_fit_explorer()
         self.currentChanged.emit(row)
 
     def _load_explorer_expanded(self, project_key: str) -> bool:
@@ -715,6 +793,7 @@ class ProjectNav(QWidget):
             if self._row_widget(i) is row:
                 self._sync_row_size(i)
                 break
+        self._schedule_fit_explorer()
 
     def _on_context_menu(self, pos: QPoint) -> None:
         item = self._list.itemAt(pos)
@@ -756,6 +835,7 @@ class ProjectNav(QWidget):
             project_key=getattr(w, "project_name", None),
         )
         self.refresh_pending_projects()  # opened project drops out of "pending"
+        self._schedule_fit_explorer()
         return index
 
     def insertTab(self, index: int, w: QWidget, label: str) -> int:
@@ -767,6 +847,7 @@ class ProjectNav(QWidget):
             project_key=getattr(w, "project_name", None),
         )
         self.refresh_pending_projects()
+        self._schedule_fit_explorer()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -786,6 +867,7 @@ class ProjectNav(QWidget):
         if item is not None:
             del item
         self.refresh_pending_projects()  # closed project may reappear as pending
+        self._schedule_fit_explorer()
 
     def setTabText(self, index: int, text: str) -> None:
         rw = self._row_widget(index)

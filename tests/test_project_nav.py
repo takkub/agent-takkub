@@ -450,3 +450,68 @@ class TestExplorerCollapsePersistence:
         nav_b = ProjectNav()
         nav_b.addTab(tab_b, "proj-nav-y")
         assert tab_b.explorer.isHidden() is False
+
+
+class TestExplorerFillsSidebar:
+    """User feedback 2026-08-23 (post-#365): the tree used to be a fixed
+    260px slab, leaving a dead band under it on any tall window. It now
+    fills the list viewport down to the bottom edge — header rows of every
+    project subtracted — and only scrolls internally once the viewport is
+    too short to give it even `_EXPLORER_MIN_H`."""
+
+    @staticmethod
+    def _pump(qapp) -> None:
+        # _fit_explorer is coalesced onto a singleShot(0) — drain it.
+        for _ in range(3):
+            qapp.processEvents()
+
+    def test_tree_height_tracks_list_viewport(self, qapp) -> None:
+        tab = ProjectTab("proj-fill-a")
+        nav = ProjectNav()
+        nav.resize(400, 900)
+        nav.show()
+        nav.addTab(tab, "proj-fill-a")
+        self._pump(qapp)
+        row = nav._row_widget(0)
+
+        viewport_h = nav._list.viewport().height()
+        expected = viewport_h - row.header_height() - nav._list.spacing() * 2
+        assert tab.explorer.height() == max(project_nav_module._EXPLORER_MIN_H, expected)
+        assert tab.explorer.height() > 260  # no longer the old fixed slab
+        # the list item is flush with the viewport: row sizeHint == viewport
+        assert nav._list.item(0).sizeHint().height() <= viewport_h
+        assert nav._list.item(0).sizeHint().height() >= viewport_h - nav._list.spacing() * 2
+
+        # shrink the window → the tree follows, still floored at the min
+        nav.resize(400, 500)
+        self._pump(qapp)
+        h2 = tab.explorer.height()
+        assert project_nav_module._EXPLORER_MIN_H <= h2 < viewport_h
+        nav.close()
+
+    def test_other_rows_headers_are_subtracted(self, qapp) -> None:
+        tab_a = ProjectTab("proj-fill-b")
+        tab_b = ProjectTab("proj-fill-c")
+        nav = ProjectNav()
+        nav.resize(400, 900)
+        nav.show()
+        nav.addTab(tab_a, "proj-fill-b")
+        self._pump(qapp)
+        h_one = tab_a.explorer.height()
+        nav.addTab(tab_b, "proj-fill-c")
+        self._pump(qapp)
+        h_two = tab_a.explorer.height()
+        # second row's header eats into the tree's share
+        assert h_two < h_one
+        assert h_one - h_two >= nav._row_widget(1).header_height() - 2
+        nav.close()
+
+    def test_floor_when_viewport_too_short(self, qapp) -> None:
+        tab = ProjectTab("proj-fill-d")
+        nav = ProjectNav()
+        nav.resize(400, 160)
+        nav.show()
+        nav.addTab(tab, "proj-fill-d")
+        self._pump(qapp)
+        assert tab.explorer.height() == project_nav_module._EXPLORER_MIN_H
+        nav.close()
