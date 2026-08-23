@@ -6,6 +6,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 8 Obsidian hardening** (#365, `10_OBSIDIAN_HARDENING.md`) — `project_identity.resolve_project_id()` (project_id
+  จาก `config.load_projects()` ตัวเดียว V2/V1 ไม่นิยามซ้ำ) · `obsidian_metadata.NoteMetadata` canonical frontmatter (knowledge_id/
+  project_id/source/kind/trust/content_hash/created_at/updated_at) ใส่ทุก note ที่ cockpit เขียน (`vault_mirror.py`; page เก่าไม่แตะ
+  อัตโนมัติ → `obsidian_backfill.py` opt-in) · `obsidian_dedup.DedupIndex` JSONL upsert-log ใต้ `core_home()` persistent ข้าม restart ·
+  `obsidian_boundary.is_indexable()` default-deny (allow `01-Projects/02-Areas`, deny `99-Logs/.obsidian/runtime/secrets`/raw transcript —
+  export ให้ OpenViking เฟส 9) · `takkub doctor --obsidian` (opt-in) + tests 5 ไฟล์ 90 เทส
+- **Workspace 1.2.0 acceptance** (#365) — `docs/audit/2026-08-23-365-workspace-ram-acceptance.md`: เปิด editor+preview 3 โปรเจกต์จริง =
+  **+155 MB** (budget +300) · `16_ACCEPTANCE_CRITERIA.md` 19 ข้อ ✅13 / ⏳6 (ต้อง browser จริง/CI) / ❌0 · `docs/audit/2026-08-23-365-webengine-soak.md`
+  soak 25×3 ผ่าน · reviewer SHOULD ฝั่ง UI ปิดครบ (CHANGES row ผ่าน `resolve_and_contain`, `navigation_allowed` contract pin ลง docstring
+  + เทส `_PreviewPage.acceptNavigationRequest` ตรงๆ, ask-agent 4000-char bound test) · follow-up: QtWebEngineProcess ไม่ถูก reap หลังปิด
+  (offscreen, ต้อง verify จอจริง) → issue แยก
+
 - **Workspace 1.2.0 เฟส 7 design tool integrations** (#365) — `core/capabilities/design_integrations.py`: **Storybook detect จริง**
   (`.storybook/` หรือ `package.json` script · port จาก `-p/--port` · `preview_url` สำหรับ `takkub preview open-url`, ไม่รัน/ไม่แตะ
   network) + 21st.dev/Figma/Penpot = **registry stub opt-in only** (`enabled_for_role` อ่านจาก `pane_tools_policy.effective_mcps`
