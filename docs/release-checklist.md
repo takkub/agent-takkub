@@ -52,23 +52,23 @@ takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fa
 release ถัดไป (ดู `docs/plans/2026-08-23-master-dev-plan.md` §4 "Acceptance" และ
 `docs/plans/workspace-1.2.0-design/16_ACCEPTANCE_CRITERIA.md` สำหรับที่มา):
 
-- [ ] **Acceptance criteria ทั้ง 19 ข้อ** ผ่าน — เช็คทีละข้อใน
+- [x] (13/19 automated+code ✅ · 5 ข้อ UI ต้องตาคน: 2,5,6,7,8 — ดู `docs/audit/2026-08-23-365-workspace-ram-acceptance.md` · 1 = CI) **Acceptance criteria ทั้ง 19 ข้อ** ผ่าน — เช็คทีละข้อใน
       `docs/plans/workspace-1.2.0-design/16_ACCEPTANCE_CRITERIA.md`, ไม่ใช่แค่ "QA gate เขียวก็พอ"
       (ข้อสุดท้าย 2 ข้อในไฟล์นั้น — "no new heavy IO on Qt main thread" กับ "Windows WebEngine soak
       ไม่มี lifecycle/reparent crash regression" — คือสอง item ถัดไปข้างล่างนี้เอง เขียนแยกไว้เพราะมี
       คำสั่งตรวจที่ต้องรันจริง ไม่ใช่แค่ตาดู)
-- [ ] **RAM acceptance**: วัดก่อน/หลังเปิด editor+preview บน 3 โปรเจกต์จริง (ไม่ใช่ soak script's
+- [x] (2026-08-23: +155 MB/3 โปรเจกต์ · ปิดแล้ว → ดู #366 ก่อนสรุป) **RAM acceptance**: วัดก่อน/หลังเปิด editor+preview บน 3 โปรเจกต์จริง (ไม่ใช่ soak script's
       tmp-dir stand-in) — เพิ่มไม่เกิน **+300 MB รวม**, และกลับเป็น **0** เมื่อปิดทั้งหมด (Monaco/Preview
       WebView lazy-create/destroy ตาม master plan §4 ข้อ 2 — ตัวเลขนี้ *ไม่ใช่* per-pane RAM diet ของ
       #364, วัดแยกกัน) · เก็บตัวเลขก่อน/หลังไว้ใน release note เดียวกับที่ #364 levers ทำ
       (`takkub doctor --ram` ก่อน/หลัง sequence เดียวกัน ใช้ `--workspace` ประกอบอ่าน editor/preview
       state ด้วยได้)
-- [ ] **WebEngine soak ผ่าน** — `AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1 .venv/Scripts/python.exe -m pytest
+- [x] (2026-08-23: 25×3 ผ่าน `docs/audit/2026-08-23-365-webengine-soak.md`) **WebEngine soak ผ่าน** — `AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1 .venv/Scripts/python.exe -m pytest
       tests/test_workspace_webengine_soak.py -q` เขียว (หรือรัน `tools/soak_workspace_webengine.py`
       ตรงๆ ด้วย `--cycles` ที่สูงกว่าเทส wrapper สำหรับความมั่นใจเพิ่ม) — สคริปต์นี้สร้าง real
       `QWebEngineView` จริง ดังนั้น**ต้องรันตรงบนเครื่อง Windows จริง ไม่ใช่ CI's offscreen runner**
       (เทสนี้ skip เองถ้าไม่ตั้ง env var — เห็น `ssss` ใน `takkub qa-gate` ปกติ ไม่ใช่บั๊ก)
-- [ ] **Monaco bundle อยู่ในตัว wheel จริง** — `takkub doctor --workspace`'s `[workspace] monaco-bundle`
+- [x] (2026-08-23: wheel build → 46 ไฟล์ `static/editor/**`, vendor 45 + index.html) **Monaco bundle อยู่ในตัว wheel จริง** — `takkub doctor --workspace`'s `[workspace] monaco-bundle`
       Finding เช็คแค่ dev checkout tree (`src/agent_takkub/static/editor/vendor/`), **ไม่ได้พิสูจน์ว่า
       `python -m build` เก็บไฟล์พวกนั้นเข้า wheel จริง** — ต้องตรวจแยกหลัง section 4 (Build wheel):
       ```bash

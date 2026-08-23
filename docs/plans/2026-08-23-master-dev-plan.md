@@ -91,15 +91,16 @@ workspace — แผนภายนอก 27 ไฟล์ vendor เข้าม
 - #364 lever 1 ถ้า spike ไม่คุ้ม ต้องบันทึกตัวเลขลงใบ ไม่ทำต่อเงียบๆ
 - #365 เฟส 9 OpenViking: ห้าม vendor AGPL เข้า repo MIT — sidecar เท่านั้น
 
-## 6b. สถานะ ณ 2026-08-23 17:50 (อัปเดตโดย Lead)
+## 6b. สถานะ ณ 2026-08-23 18:40 (อัปเดตโดย Lead)
 
 | งาน | สถานะ |
 |---|---|
 | 1.1.0 | ✅ ออกแล้ว (npm latest, tag `v1.1.0`) |
-| #362 Phase 10 | ชิ้น 1/1b/1c dual-write ครบทุก mapping + audit test ✅ · 🔄 ชิ้น 2 readers ใต้ `TAKKUB_V2_AUTHORITY` (default OFF) กำลังทำ · soak drift=0 รอเวลา |
+| #362 Phase 10 | ชิ้น 1/1b/1c dual-write ครบ + audit test ✅ · ชิ้น 2 readers ใต้ `TAKKUB_V2_AUTHORITY` (default OFF) ✅ · soak drift=0 รอเวลา → flip default = release decision (2.0.0) |
 | #364 RAM diet | ✅ ทุก lever ปิด (6 วัด · 4 MCP stale variant bug · 2 subagent · 3 RAM cap · 1 discard ~65 MB/pane · 5 profile ไม่ leak) |
-| #365 Workspace | เฟส 0–4 ✅ (Explorer, Monaco + packaging, safe edit UI, git diff UI) · เฟส 5 backend ✅ · 🔄 เฟส 5 widget + เฟส 6 UI · 🔄 เฟส 10 doctor/soak · 🔄 reviewer เฟส 3/5 · เฟส 7–9 ยังไม่เริ่ม (8 รอ #362, 9 optional) |
-| CI cadence | รวบ merge → targeted ชุดเดียว (รวม repo guard) → push ครั้งเดียว — batch 1 `8880e19`, batch 2 `6e0c20a` |
+| #365 Workspace | เฟส 0–8 + 10 ✅ merged (widget/UI `a096ef7`, เฟส 7 `dffeb63`, เฟส 8 `85b9050`, reviewer MUST-FIX + SHOULD ทั้งหมดปิด) · เฟส 9 OpenViking = follow-up นอก 1.2.0 · acceptance: RAM +155 MB/3 โปรเจกต์ (budget 300) ✅ · soak 25×3 ✅ · Monaco ใน wheel ✅ · 19 ข้อ = 13 ✅ / 5 ต้องตาคน (2,5,6,7,8 — user เช็ค 5 นาทีตอนตื่น) / 1 = CI · ⚠ #366 QtWebEngineProcess ไม่ reap หลังปิด (offscreen) → devops verify จอจริง **ก่อน bump 1.2.0** |
+| CI cadence | รวบ merge → targeted ชุดเดียว (รวม repo guard) → push ครั้งเดียว — batch 1 `8880e19`, batch 2 `6e0c20a`, batch 3 `3166bb8` (macOS flake 1 test → แก้ใน batch 4), batch 4 `4bfdf75` |
+| 1.2.0 release | รอ: CI batch 4 เขียว + #366 ปิด → `docs/release-checklist.md` §0b → bump minor |
 
 ## 7. ลำดับรวมหลัง 1.1.0 ออก (pane ≤ 3 พร้อมกัน)
 
