@@ -191,6 +191,17 @@ def _snapshot_settings_home_files(base: Path) -> dict | None:
         return None
 
 
+class _AbundantVM:
+    """Fake `psutil.virtual_memory()` result with generous headroom, used by
+    `_isolate_runtime` below to keep #364 lever 3's RAM-derived
+    `max_panes_global` default (`core.scheduling.facade.
+    _ram_derived_max_panes_global`) from varying by the RAM of the machine
+    running the suite."""
+
+    total = 64 * 1024**3
+    available = 56 * 1024**3
+
+
 @pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Most orchestration unit tests intentionally assert the legacy
@@ -511,6 +522,23 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # leave every later test's leaked-QTimer exceptions logged-and-swallowed
     # by app.py's hook instead of queued for the session-end check below.
     _install_qt_exception_guard()
+
+    # #364 lever 3 CI fix: `_ram_derived_max_panes_global()` derives its
+    # default max_panes_global cap from the machine's REAL available RAM
+    # (`psutil.virtual_memory()`) — on a RAM-constrained CI runner (macOS
+    # runners in particular) that can floor the cap to as low as 2, silently
+    # dropping a 3rd concurrent spawn in any test that doesn't pin its own
+    # slot_policy (proven: test_spawn_task_delivery.py's FIFO queue test lost
+    # its 3rd backend assign on macOS CI while windows/ubuntu stayed green —
+    # not a timing bug, an environment-dependent one). Patch the RAM sample
+    # itself (not `_ram_derived_max_panes_global` directly) so tests keep
+    # exercising the real headroom-over-reserve arithmetic —
+    # test_core_scheduling.py's own RAM-cap tests set their own fake
+    # `psutil.virtual_memory` per test, which simply overrides this default
+    # via the same monkeypatch stack (last `setattr` wins).
+    psu = _maybe_module("psutil", force=True)
+    if psu is not None and hasattr(psu, "virtual_memory"):
+        monkeypatch.setattr(psu, "virtual_memory", lambda: _AbundantVM(), raising=False)
 
     yield
 
