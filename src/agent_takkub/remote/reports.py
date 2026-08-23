@@ -124,7 +124,21 @@ def _project_ns(project: str | None) -> str:
 
 
 def reports_root(project: str | None) -> Path:
-    return (_config.RUNTIME_DIR / "exports" / _project_ns(project) / "reports").resolve()
+    """`_project_ns(project)` already rejects anything unsafe (raises before
+    a `Path` is ever built), but CodeQL's `py/path-injection` sink analysis
+    doesn't recognize a custom validator function as a sanitizing barrier —
+    only its own documented `os.path.normpath()` + `str.startswith()` idiom
+    is. So the containment is proven again here in that exact shape (the
+    query's own "GOOD" example) purely to give the static analysis a
+    barrier it can see; `_project_ns`'s regex reject is what actually stops
+    a bad name at the door."""
+    ns = _project_ns(project)
+    base = _config.RUNTIME_DIR / "exports"
+    base_str = str(base)
+    candidate_str = os.path.normpath(os.path.join(base_str, ns, "reports"))
+    if candidate_str != base_str and not candidate_str.startswith(base_str + os.sep):
+        raise ReportError(f"invalid project: {project!r}")
+    return Path(candidate_str).resolve()
 
 
 def _shares_path(project: str | None) -> Path:
@@ -143,12 +157,23 @@ def _validate_report_name(name: str) -> str:
 
 
 def _contained_path(root: Path, name: str) -> Path:
-    """Same standard-safe pattern `http_server.py`'s `_serve_static` uses:
-    `.resolve()` collapses `..`/symlinks into an absolute path first, then
-    `is_relative_to()` verifies containment before any filesystem read/write
-    — this is also what closes the "symlink inside reports_root pointing
-    outside it" case, not a separate check (resolving *is* dereferencing)."""
-    candidate = (root / name).resolve()
+    """Two containment checks, deliberately not one:
+
+    1. `os.path.normpath()` + `str.startswith()` — CodeQL `py/path-injection`
+       recognizes this exact idiom (its own documented "GOOD" example) as a
+       sanitizing barrier, so this is what actually clears the alert.
+    2. `.resolve()` + `is_relative_to()` — real defense-in-depth: `normpath`
+       is purely lexical (it never touches the filesystem), so it does not
+       dereference a symlink placed inside `root` pointing outside it;
+       `.resolve()` does (resolving *is* dereferencing), which is what
+       closes that case.
+
+    Both must pass; neither alone is both CodeQL-legible and symlink-safe."""
+    root_str = str(root)
+    normalized = os.path.normpath(os.path.join(root_str, name))
+    if normalized != root_str and not normalized.startswith(root_str + os.sep):
+        raise ReportError(f"invalid name: {name!r}")
+    candidate = Path(normalized).resolve()
     if not candidate.is_relative_to(root):
         raise ReportError(f"invalid name: {name!r}")
     return candidate

@@ -9267,17 +9267,51 @@ class Orchestrator(
     #   ESC[200~ / ESC[201~      bracketed-paste markers (no content between)
     # Terminal-structural, not provider- or platform-specific — applies to
     # every pane on every OS this widget runs on.
-    _TERMINAL_AUTO_REPLY_RE = re.compile(
-        rb"^(?:"
-        rb"\x1b\[\d*(?:;\d+)*R"
-        rb"|\x1b\[\?[\d;]*c"
-        rb"|\x1b\[>[\d;]*c"
-        rb"|\x1b\[\d*n"
-        rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    #
+    # (CodeQL py/redos #31) This used to be one `(?:alt1|...|alt7)+$` regex
+    # fullmatched against the whole chunk — a multi-alternative group with
+    # its own quantified subpatterns (`\d*`, `[\d;]*`, `[^\x07\x1b]*`)
+    # wrapped in an outer `+` is exactly the nested-quantifier shape that
+    # can make a backtracking engine explore superlinear-to-exponential
+    # splits on a chunk that ALMOST matches but never quite completes.
+    # Rewritten as a token scanner instead: `_is_terminal_auto_reply_chunk`
+    # below walks the chunk with `re.match` at a fixed, forward-only cursor
+    # — each step consumes exactly one token or the whole chunk is
+    # rejected, so there is no repetition-boundary ambiguity left for the
+    # engine to backtrack over, and the per-token patterns bound every
+    # variable-length run (`{0,N}` instead of bare `*`) so even a single
+    # token can't itself run away on a very long non-terminated chunk.
+    _TERMINAL_AUTO_REPLY_TOKEN_RE = re.compile(
+        rb"\x1b\[\d{0,8}(?:;\d{1,8}){0,8}R"
+        rb"|\x1b\[\?[\d;]{0,32}c"
+        rb"|\x1b\[>[\d;]{0,32}c"
+        rb"|\x1b\[\d{0,8}n"
+        rb"|\x1b\][^\x07\x1b]{0,4096}(?:\x07|\x1b\\)"
         rb"|\x1b\[[IO]"
         rb"|\x1b\[20[01]~"
-        rb")+$"
     )
+
+    # A real terminal auto-reply is at most a few dozen bytes (a CPR is
+    # ~10, DA1/DA2 responses a bit more) — a chunk this long was never
+    # going to be one, so bail before the scanner ever looks at it.
+    _TERMINAL_AUTO_REPLY_MAX_LEN = 512
+
+    @classmethod
+    def _is_terminal_auto_reply_chunk(cls, data: bytes) -> bool:
+        """True iff `data` is nothing but one-or-more terminal auto-reply
+        tokens back to back — same semantics the old `_TERMINAL_AUTO_REPLY_RE.
+        fullmatch(data)` gave, computed by scanning instead of backtracking
+        (see the comment above `_TERMINAL_AUTO_REPLY_TOKEN_RE`)."""
+        if not data or len(data) > cls._TERMINAL_AUTO_REPLY_MAX_LEN:
+            return False
+        pos = 0
+        end = len(data)
+        while pos < end:
+            match = cls._TERMINAL_AUTO_REPLY_TOKEN_RE.match(data, pos)
+            if match is None:
+                return False
+            pos = match.end()
+        return True
 
     def _on_pane_input(self, role_name: str, data: bytes) -> None:
         # Route the keystrokes to the pane that ACTUALLY emitted them, not to
@@ -9300,10 +9334,10 @@ class Orchestrator(
         # (done notices, CC flushes, …) go straight to session.write() and
         # never pass through here, so they can't feed the tracker.
         # (#357) ...except a chunk that is ONLY a terminal auto-reply (no
-        # real keystroke in it at all) — see `_TERMINAL_AUTO_REPLY_RE`'s
+        # real keystroke in it at all) — see `_TERMINAL_AUTO_REPLY_TOKEN_RE`'s
         # comment above. Still forwarded to the PTY exactly as before either
         # way; only the draft/user-input tracking is skipped for it.
-        if pane.role.name == LEAD.name and not self._TERMINAL_AUTO_REPLY_RE.fullmatch(data):
+        if pane.role.name == LEAD.name and not self._is_terminal_auto_reply_chunk(data):
             project_ns = self._project_ns_for_pane(pane)
             if project_ns is not None:
                 self._track_lead_draft_input(project_ns, data)
