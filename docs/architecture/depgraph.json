@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 292,
+  "module_count": 293,
   "modules": [
     {
       "module": "agent_takkub",
@@ -879,6 +879,18 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.core.capabilities.design_integrations",
+      "imports": [
+        "agent_takkub.pane_tools_policy"
+      ],
+      "imported_by": [
+        "agent_takkub.core.capabilities.registry",
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.core.capabilities.permission_engine",
       "imports": [
         "agent_takkub.core.capabilities.audit",
@@ -903,6 +915,7 @@
     {
       "module": "agent_takkub.core.capabilities.registry",
       "imports": [
+        "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.models.capability",
         "agent_takkub.mcp_bridge",
         "agent_takkub.pane_tools_policy",
@@ -911,7 +924,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.capabilities.skill_store",
@@ -2175,6 +2188,7 @@
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
+        "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.secrets.backends",
         "agent_takkub.core.secrets.manager",
@@ -2187,6 +2201,7 @@
         "agent_takkub.hook_wiring",
         "agent_takkub.limit_status",
         "agent_takkub.maintenance",
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.provider_install",
         "agent_takkub.provider_probe",
         "agent_takkub.provider_spec",
@@ -2201,7 +2216,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 24
+      "fan_out": 26
     },
     {
       "module": "agent_takkub.editor_service",
@@ -2812,8 +2827,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.capabilities.permission_engine",
         "agent_takkub.core.capabilities.registry",
+        "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
@@ -2827,7 +2844,7 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 15,
+      "fan_in": 17,
       "fan_out": 7
     },
     {

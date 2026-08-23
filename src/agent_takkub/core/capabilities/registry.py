@@ -23,6 +23,8 @@ from pathlib import Path
 from agent_takkub import mcp_bridge, pane_tools_policy, skill_policy, skill_scan
 from agent_takkub.core.models.capability import CapabilityScope, Skill
 
+from .design_integrations import DesignIntegrationsSnapshot, resolve_design_integrations
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilitySnapshot:
@@ -72,6 +74,16 @@ class CapabilityRegistry:
         """`None` = no cockpit plugin policy for this role; see
         `pane_tools_policy.effective_plugins`."""
         return pane_tools_policy.effective_plugins(role)
+
+    def resolve_design_integrations(
+        self, role: str, roots: list[Path]
+    ) -> DesignIntegrationsSnapshot:
+        """#365 phase 7 — Storybook detection (real) + the opt-in-only
+        21st.dev/Figma/Penpot registry entries, both scoped to `role`/`roots`
+        the same way `resolve_skills` is. Thin pass-through to
+        `design_integrations.resolve_design_integrations`; see that
+        module for why the optional MCPs stay stubs here."""
+        return resolve_design_integrations(role, roots)
 
     def mcp_argv_for_provider(
         self,
