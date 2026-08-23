@@ -6,6 +6,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Phase 10 ชิ้น 1b — dual-write state writers ตาม step 5 mapping จริง** (#362) — local-issues · issue-dedup ·
+  autoresume · remote-sessions (`auto_issue_capture`/`issues`/`auto_resume`/`remote/session_store`) ผ่าน helper
+  `dual_write.py` เดิม · **ตัดสินใจบันทึกไว้**: runtime fan-out dirs (sessions/tasks/role-memory/knowledge — step 8) **ไม่
+  dual-write ต่อไฟล์** (ขนาดไม่มีเพดาน) พึ่ง `apply_pending()` ตอน boot sync เป็นรอบแทน · ไฟล์ที่ไม่อยู่ใน ladder mapping
+  (plan.json/claude_auth_config/graft_store) ไม่ dual-write โดยเจตนา — mapping ของ ladder คือ source of truth
+  + tests: mirror match / skip เมื่อไม่มี v2 / V2 write fail ไม่ raise / `migrate validate` ผ่านหลังเขียน
+
 - **Workspace 1.2.0 เฟส 0–1 — Workspace Shell + Project Explorer** (#365, แผน `docs/plans/workspace-1.2.0-design/` +
   ข้อแก้ 3 ข้อใน `docs/plans/2026-08-23-master-dev-plan.md` §4) — `project_explorer.py` (view, `QTreeView` native —
   **ไม่มี WebEngine ใหม่**) + `project_file_index.py` (service: lazy dir listing บน worker thread, ignore policy
