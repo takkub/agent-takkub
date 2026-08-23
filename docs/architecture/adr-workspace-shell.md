@@ -237,7 +237,7 @@ toggle.
 `ProjectTab` still constructs and signal-wires its `ProjectExplorer` (nothing in phase 1's
 containment/lazy-tree/CHANGES logic changes) but no longer lays it out — `project_nav.py`'s
 `_ProjectRow` reparents the widget into a slot under the row's header strip, showing it only for
-the selected row, and hands it back to `ProjectTab` on `removeTab` so the tab's own `deleteLater()`
+the selected row, and hands it back to `ProjectTab` on `removeTab` so the tab's own deleteLater
 teardown still owns its lifecycle. The per-project expanded/collapsed flag keeps the exact
 `explorer/<safe_segment(project_name)>/collapsed` QSettings key phase 1 used — only which widget
 reads/writes it changed. The sidebar itself changed from a fixed `212px` to a `QSplitter`-resizable
