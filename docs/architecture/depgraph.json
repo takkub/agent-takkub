@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 286,
+  "module_count": 289,
   "modules": [
     {
       "module": "agent_takkub",
@@ -67,6 +67,7 @@
         "agent_takkub.cursor_helper",
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
+        "agent_takkub.git_changes_service",
         "agent_takkub.git_status",
         "agent_takkub.graft_autobuild",
         "agent_takkub.issues",
@@ -96,7 +97,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 36,
+      "fan_in": 37,
       "fan_out": 0
     },
     {
@@ -2147,6 +2148,18 @@
       "fan_out": 23
     },
     {
+      "module": "agent_takkub.editor_service",
+      "imports": [
+        "agent_takkub.project_file_index",
+        "agent_takkub.worktree_manager"
+      ],
+      "imported_by": [
+        "agent_takkub.file_watch_service"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.editor_widget",
       "imports": [
         "agent_takkub.project_explorer",
@@ -2172,6 +2185,16 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.file_watch_service",
+      "imports": [
+        "agent_takkub.editor_service",
+        "agent_takkub.project_file_index"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.gemini_helper",
       "imports": [
         "agent_takkub._win_console"
@@ -2185,6 +2208,16 @@
       ],
       "fan_in": 5,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.git_changes_service",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.project_file_index"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.git_status",
@@ -2845,10 +2878,13 @@
       "module": "agent_takkub.project_file_index",
       "imports": [],
       "imported_by": [
+        "agent_takkub.editor_service",
         "agent_takkub.editor_widget",
+        "agent_takkub.file_watch_service",
+        "agent_takkub.git_changes_service",
         "agent_takkub.project_explorer"
       ],
-      "fan_in": 2,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -4365,13 +4401,14 @@
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
+        "agent_takkub.editor_service",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 2
     }
   ]

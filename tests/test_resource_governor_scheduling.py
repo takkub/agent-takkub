@@ -248,7 +248,18 @@ def test_backpressure_signal_reports_real_active_capacity(monkeypatch):
     rung, with no ramp, regardless of how many panes were actually running.
     """
     monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
-    governor = ResourceGovernor(_limits(), sampler=lambda: (10.0, 90.0, 0))
+    # Explicit slot_policy, not the no-policy default: with no policy given,
+    # a `None` max_panes_global now falls through to #364 lever 3's live
+    # `psutil`-derived cap (core.scheduling.facade._ram_derived_max_panes_global) —
+    # this test wants to control admission with its own `sampler` only, so
+    # pin max_panes_global well above the 5 slots requested below, the same
+    # way every other multi-slot test in this file already pins its own
+    # dimension instead of relying on that host-RAM-dependent fallback.
+    governor = ResourceGovernor(
+        _limits(),
+        sampler=lambda: (10.0, 90.0, 0),
+        slot_policy=SlotPolicy(max_panes_global=100),
+    )
     governor.sample()
     held = [
         governor.request_slot(

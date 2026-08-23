@@ -119,6 +119,20 @@ _RENDER_WAIT_MAX = 6
 # alive" from "actually gone quiet", not measure freshness precisely.
 _PROGRESS_QUIET_THRESHOLD_S = 30.0
 
+
+def _timing_or_none(value: object) -> float | int | None:
+    """A fake/mock session's `seconds_since_output()`/`last_output_monotonic()`
+    (test doubles predating #359's own coverage — test_remote_e2e_round2.py,
+    test_spawn_task_delivery.py's preload-events fixtures) returns a bare
+    MagicMock, not a number. That doesn't raise on the call itself, only on
+    a later `<`/`>` comparison against it — which escapes as an unhandled
+    `TypeError` in a Qt slot (#344 guard misattributes it to whatever
+    unrelated test happens to be running at that moment). Every comparison
+    against one of these two accessors goes through this first so a
+    non-numeric result degrades to "no timing signal" instead of crashing."""
+    return value if isinstance(value, (int, float)) else None
+
+
 # Stall-aware deferral (#133). A fan-out of concurrent pane spawns backlogs
 # the Qt event loop for ~1s at a time (proven via events.log: main_thread_stall
 # episodes of 938-1141ms landing right before bursts of duplicate repaste
@@ -680,7 +694,9 @@ def _delayed_enter_verified(
     # re-baseline against its own write without `nonlocal`. Best-effort: a fake
     # session without the accessor falls back to 0.0 (repaste path unchanged).
     paste_baseline = [
-        session.last_output_monotonic() if hasattr(session, "last_output_monotonic") else 0.0
+        _timing_or_none(session.last_output_monotonic())
+        if hasattr(session, "last_output_monotonic")
+        else 0.0
     ]
 
     def _send_then_verify(remaining: int, busy_remaining: int) -> None:
@@ -779,10 +795,15 @@ def _delayed_enter_verified(
                 # no-op if already submitted; submits a swallowed-CR #22 paste) —
                 # never a second [Pasted text]. A fake session without the
                 # accessor degrades to the prior render-guard behaviour.
-                produced_output = (
-                    session.last_output_monotonic() > paste_baseline[0]
+                _latest_output = (
+                    _timing_or_none(session.last_output_monotonic())
                     if hasattr(session, "last_output_monotonic")
-                    else False
+                    else None
+                )
+                produced_output = (
+                    _latest_output is not None
+                    and paste_baseline[0] is not None
+                    and _latest_output > paste_baseline[0]
                 )
                 if produced_output:
                     _log_verify_decision(
@@ -802,7 +823,8 @@ def _delayed_enter_verified(
                 # bounded grace for output to appear before concluding the bytes
                 # were dropped (repasting into a slow-rendering box is what
                 # stacked 4× [Pasted text]).
-                if render_waits > 0 and session.seconds_since_output() < _RENDER_ACTIVE_S:
+                _quiet_for = _timing_or_none(session.seconds_since_output())
+                if render_waits > 0 and _quiet_for is not None and _quiet_for < _RENDER_ACTIVE_S:
                     QTimer.singleShot(
                         _SUBMIT_VERIFY_GRACE_MS,
                         lambda: _verify(render_waits - 1, stall_grace),
@@ -832,7 +854,7 @@ def _delayed_enter_verified(
                     expires_at=expires_at,
                     validator=validator,
                 )
-                paste_baseline[0] = session.last_output_monotonic()
+                paste_baseline[0] = _timing_or_none(session.last_output_monotonic())
                 QTimer.singleShot(
                     _enter_delay_ms(payload),
                     lambda: _send_then_verify(remaining - 1, busy_remaining),
@@ -1167,7 +1189,7 @@ class LeadInboxMixin:
             # (#359) Baseline captured right before the write — see
             # `_on_settled`'s use below for why.
             write_baseline = (
-                _task_sess.last_output_monotonic()
+                _timing_or_none(_task_sess.last_output_monotonic())
                 if hasattr(_task_sess, "last_output_monotonic")
                 else None
             )
@@ -1226,7 +1248,9 @@ class LeadInboxMixin:
                     # up yet". Any PTY output produced AFTER we wrote the
                     # payload proves the bytes were received regardless.
                     try:
-                        accepted = _task_sess.last_output_monotonic() > write_baseline
+                        _latest = _timing_or_none(_task_sess.last_output_monotonic())
+                        if _latest is not None:
+                            accepted = _latest > write_baseline
                     except Exception:
                         pass
                 if accepted:
@@ -1763,8 +1787,10 @@ class LeadInboxMixin:
         if getattr(pane, "state", None) != "working":
             return False
         try:
-            quiet_for = pane.session.seconds_since_output()
+            quiet_for = _timing_or_none(pane.session.seconds_since_output())
         except Exception:
+            return False
+        if quiet_for is None:
             return False
         return quiet_for < _PROGRESS_QUIET_THRESHOLD_S
 
