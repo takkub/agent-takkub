@@ -1424,6 +1424,82 @@ def check_capability_skill_store() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [design-integrations] — #365 phase 7
+# ---------------------------------------------------------------------------
+
+
+def check_design_integrations() -> list[Finding]:
+    """[design-integrations] — Storybook detection (real, filesystem-only —
+    no network call) per configured project, plus which of the opt-in-only
+    21st.dev/Figma/Penpot MCPs (default OFF, `core.capabilities.
+    design_integrations.OPTIONAL_DESIGN_MCPS`) any role has actually been
+    granted via a `pane_tools_policy` override. Never lists a project/role
+    that has none of these — silence is the expected default, not a WARN."""
+    from . import pane_tools_policy
+    from .config import load_projects
+    from .core.capabilities.design_integrations import OPTIONAL_DESIGN_MCPS, detect_storybook
+
+    findings: list[Finding] = []
+    try:
+        projects: dict = load_projects().get("projects") or {}
+    except Exception as e:
+        findings.append(Finding("design-integrations", "projects.json", Status.FAIL, str(e)))
+        projects = {}
+
+    for proj_name, proj_data in projects.items():
+        roots = [Path(p) for p in (proj_data.get("paths") or {}).values() if p and Path(p).is_dir()]
+        if not roots:
+            continue
+        status = detect_storybook(roots)
+        if status.detected:
+            findings.append(
+                Finding(
+                    "design-integrations",
+                    f"storybook:{proj_name}",
+                    Status.OK,
+                    f"detected at {status.root} — {status.preview_url}",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "design-integrations",
+                    f"storybook:{proj_name}",
+                    Status.INFO,
+                    "no .storybook/ or package.json storybook script — optional",
+                )
+            )
+
+    granted_by: dict[str, list[str]] = {}
+    for role, entry in pane_tools_policy.load_policy().items():
+        for name in entry.get("mcps") or []:
+            granted_by.setdefault(name, []).append(role)
+
+    for mcp in OPTIONAL_DESIGN_MCPS:
+        roles = sorted(granted_by.get(mcp.id, []))
+        if roles:
+            findings.append(
+                Finding(
+                    "design-integrations",
+                    mcp.id,
+                    Status.OK,
+                    f"enabled for role(s): {', '.join(roles)}",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "design-integrations",
+                    mcp.id,
+                    Status.INFO,
+                    "opt-in, off for every role — takkub mcp add <config> --force, then "
+                    f"takkub mcp allow --role <role> {mcp.id}",
+                )
+            )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [venv] — dev-checkout shared editable install (#202)
 # ---------------------------------------------------------------------------
 
@@ -3104,6 +3180,7 @@ def run_all_checks() -> list[Finding]:
         ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
         ("check_capability_skill_store", check_capability_skill_store),
+        ("check_design_integrations", check_design_integrations),
         ("check_editable_install", check_editable_install),
         ("check_arch", check_arch),
         ("check_qt", check_qt),

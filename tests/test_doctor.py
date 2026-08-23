@@ -17,6 +17,7 @@ from agent_takkub.doctor import (
     check_arch,
     check_capability_skill_store,
     check_claude,
+    check_design_integrations,
     check_editable_install,
     check_graft,
     check_installed_integrity,
@@ -1161,6 +1162,94 @@ class TestCheckCapabilitySkillStore:
 
 
 # ---------------------------------------------------------------------------
+# check_design_integrations — #365 phase 7
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDesignIntegrations:
+    def test_no_projects_no_findings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.config as _cfg
+        from agent_takkub import pane_tools_policy as _ptp
+
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        monkeypatch.setattr(_ptp, "load_policy", lambda: {})
+
+        findings = check_design_integrations()
+
+        by_name = {f.name: f for f in findings}
+        # the 3 known-optional MCPs are always reported (off by default);
+        # no project means no storybook: findings for it.
+        assert not any(f.name.startswith("storybook:") for f in findings)
+        assert set(by_name) == {"reference-21st", "figma", "penpot"}
+        assert all(f.status == Status.INFO for f in findings)
+
+    def test_storybook_detected_reports_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as _cfg
+        from agent_takkub import pane_tools_policy as _ptp
+
+        proj_dir = tmp_path / "myapp"
+        (proj_dir / ".storybook").mkdir(parents=True)
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": {"myapp": {"paths": {"root": str(proj_dir)}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        monkeypatch.setattr(_ptp, "load_policy", lambda: {})
+
+        findings = check_design_integrations()
+
+        storybook_finding = next(f for f in findings if f.name == "storybook:myapp")
+        assert storybook_finding.status == Status.OK
+        assert "localhost:6006" in storybook_finding.detail
+
+    def test_no_storybook_reports_info_not_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as _cfg
+        from agent_takkub import pane_tools_policy as _ptp
+
+        proj_dir = tmp_path / "myapp"
+        proj_dir.mkdir()
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": {"myapp": {"paths": {"root": str(proj_dir)}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        monkeypatch.setattr(_ptp, "load_policy", lambda: {})
+
+        findings = check_design_integrations()
+
+        storybook_finding = next(f for f in findings if f.name == "storybook:myapp")
+        assert storybook_finding.status == Status.INFO
+
+    def test_opted_in_mcp_reports_ok_with_role(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as _cfg
+        from agent_takkub import pane_tools_policy as _ptp
+
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        monkeypatch.setattr(
+            _ptp, "load_policy", lambda: {"designer": {"mcps": ["figma"], "plugins": []}}
+        )
+
+        findings = check_design_integrations()
+
+        by_name = {f.name: f for f in findings}
+        assert by_name["figma"].status == Status.OK
+        assert "designer" in by_name["figma"].detail
+        assert by_name["penpot"].status == Status.INFO
+
+
+# ---------------------------------------------------------------------------
 # check_editable_install — dev-checkout shared editable install (#202)
 # ---------------------------------------------------------------------------
 
@@ -1289,6 +1378,7 @@ class TestRunAllChecks:
         no_findings = (
             "check_installed_integrity",
             "check_capability_skill_store",
+            "check_design_integrations",
             "check_env_path",
             "check_npm_registry",
             "check_mini_browser",

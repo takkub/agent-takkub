@@ -149,11 +149,16 @@ class _FakeSock:
         return json.loads(line.decode("utf-8"))
 
 
+_PANE_TOKEN_DESIGNER = "test-pane-token-designer-abc"
+
+
 @pytest.fixture
 def server_and_sock(qapp: QCoreApplication):
     mock_orch = MagicMock()
     mock_orch._lead_token = "lead-token"
-    mock_orch._pane_tokens = {}
+    # Pre-registered pane token bound to project "demo" — tests exercise both
+    # the token-derived-identity path and the reject-with-no/wrong-token path.
+    mock_orch._pane_tokens = {_PANE_TOKEN_DESIGNER: ("demo", "designer")}
     server = CliServer(mock_orch)
     return server, _FakeSock(), mock_orch
 
@@ -174,11 +179,17 @@ class TestPreviewDispatch:
         )
 
         server._dispatch(
-            sock, {"cmd": "preview", "action": "open-url", "url": "http://127.0.0.1:3000"}
+            sock,
+            {
+                "cmd": "preview",
+                "action": "open-url",
+                "url": "http://127.0.0.1:3000",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
         )
 
         mock_orch.preview_command.assert_called_once_with(
-            "open-url", project=None, url="http://127.0.0.1:3000", path=None, device=None
+            "open-url", project="demo", url="http://127.0.0.1:3000", path=None, device=None
         )
         resp = sock.last_response()
         assert resp["ok"] is True
@@ -198,6 +209,17 @@ class TestPreviewDispatch:
         assert resp["ok"] is True
         assert resp["open"] is False
 
+    def test_status_requires_no_token(self, server_and_sock) -> None:
+        """`preview status` stays at the same trust-local tier as
+        `list`/`ram-status` — read-only, no pane/Lead token needed."""
+        server, sock, mock_orch = server_and_sock
+        mock_orch.preview_command.return_value = (True, "no open preview", {"open": False})
+
+        server._dispatch(sock, {"cmd": "preview", "action": "status"})
+
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
     def test_rejection_surfaces_as_not_ok(self, server_and_sock) -> None:
         server, sock, mock_orch = server_and_sock
         mock_orch.preview_command.return_value = (
@@ -207,21 +229,68 @@ class TestPreviewDispatch:
         )
 
         server._dispatch(
-            sock, {"cmd": "preview", "action": "open-url", "url": "http://evil.example.com"}
+            sock,
+            {
+                "cmd": "preview",
+                "action": "open-url",
+                "url": "http://evil.example.com",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
         )
 
         resp = sock.last_response()
         assert resp["ok"] is False
         assert "loopback" in resp["msg"]
 
-    def test_no_token_required(self, server_and_sock) -> None:
-        """preview is trust-local like list/status — a caller with no `auth`
-        token at all must still be able to reach the orchestrator method."""
+    def test_mutating_action_rejected_with_no_token(self, server_and_sock) -> None:
+        """#365 phase 3+5 review MUST-FIX: a caller with no `auth` token at
+        all used to still reach the orchestrator for `open-url`/`open-file`/
+        `close` — any local process could spoof `from_project` and drive
+        another project's Preview. Only `status` stays trust-local."""
+        server, sock, mock_orch = server_and_sock
+
+        server._dispatch(sock, {"cmd": "preview", "action": "close", "from_project": "demo"})
+
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
+        mock_orch.preview_command.assert_not_called()
+
+    def test_cross_project_spoof_ignored_uses_token_project(self, server_and_sock) -> None:
+        """A valid pane token always derives `project` from the token's own
+        registration — a caller-supplied `from_project` claiming a different
+        project is silently overridden, never trusted."""
         server, sock, mock_orch = server_and_sock
         mock_orch.preview_command.return_value = (True, "preview closed", {})
 
-        server._dispatch(sock, {"cmd": "preview", "action": "close"})
+        server._dispatch(
+            sock,
+            {
+                "cmd": "preview",
+                "action": "close",
+                "from_project": "someone-elses-project",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
+        )
 
+        mock_orch.preview_command.assert_called_once_with(
+            "close", project="demo", url=None, path=None, device=None
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_lead_token_allowed_with_caller_supplied_project(self, server_and_sock) -> None:
+        server, sock, mock_orch = server_and_sock
+        mock_orch.preview_command.return_value = (True, "preview closed", {})
+
+        server._dispatch(
+            sock,
+            {"cmd": "preview", "action": "close", "from_project": "demo", "auth": "lead-token"},
+        )
+
+        mock_orch.preview_command.assert_called_once_with(
+            "close", project="demo", url=None, path=None, device=None
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
 
@@ -254,6 +323,7 @@ class TestDesignDispatch:
                 "title": "Dashboard v2",
                 "mode": "html",
                 "from_project": "demo",
+                "auth": "lead-token",
             },
         )
 
@@ -275,11 +345,65 @@ class TestDesignDispatch:
             {"artifact_id": "a1", "status": "approved"},
         )
 
-        server._dispatch(sock, {"cmd": "design", "action": "approve", "artifact_id": "a1"})
+        server._dispatch(
+            sock,
+            {
+                "cmd": "design",
+                "action": "approve",
+                "artifact_id": "a1",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
+        )
 
-        mock_orch.design_approve.assert_called_once_with(None, "a1")
+        # project derived from the pane token ("demo"), not a caller-supplied
+        # from_project (there wasn't one here).
+        mock_orch.design_approve.assert_called_once_with("demo", "a1")
         resp = sock.last_response()
         assert resp["artifact"]["status"] == "approved"
+
+    def test_publish_rejected_with_no_token(self, server_and_sock) -> None:
+        """#365 phase 3+5 review MUST-FIX: `design` used to trust
+        caller-supplied `from_project` outright — any local process could
+        publish/approve/revise a design artifact under a spoofed project."""
+        server, sock, mock_orch = server_and_sock
+
+        server._dispatch(
+            sock,
+            {
+                "cmd": "design",
+                "action": "publish",
+                "path": "x.html",
+                "title": "Dashboard v2",
+                "mode": "html",
+                "from_project": "someone-elses-project",
+            },
+        )
+
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
+        mock_orch.design_publish.assert_not_called()
+
+    def test_approve_cross_project_spoof_ignored(self, server_and_sock) -> None:
+        server, sock, mock_orch = server_and_sock
+        mock_orch.design_approve.return_value = (
+            True,
+            "artifact a1 approved",
+            {"artifact_id": "a1", "status": "approved"},
+        )
+
+        server._dispatch(
+            sock,
+            {
+                "cmd": "design",
+                "action": "approve",
+                "artifact_id": "a1",
+                "from_project": "someone-elses-project",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
+        )
+
+        mock_orch.design_approve.assert_called_once_with("demo", "a1")
 
     def test_revise_round_trip(self, server_and_sock) -> None:
         server, sock, mock_orch = server_and_sock
@@ -291,17 +415,31 @@ class TestDesignDispatch:
 
         server._dispatch(
             sock,
-            {"cmd": "design", "action": "revise", "artifact_id": "a1", "feedback": "move CTA up"},
+            {
+                "cmd": "design",
+                "action": "revise",
+                "artifact_id": "a1",
+                "feedback": "move CTA up",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
         )
 
-        mock_orch.design_revise.assert_called_once_with(None, "a1", feedback="move CTA up")
+        mock_orch.design_revise.assert_called_once_with("demo", "a1", feedback="move CTA up")
         resp = sock.last_response()
         assert resp["artifact"]["status"] == "revision_requested"
 
     def test_unknown_action_rejected(self, server_and_sock) -> None:
         server, sock, mock_orch = server_and_sock
 
-        server._dispatch(sock, {"cmd": "design", "action": "delete", "artifact_id": "a1"})
+        server._dispatch(
+            sock,
+            {
+                "cmd": "design",
+                "action": "delete",
+                "artifact_id": "a1",
+                "auth": _PANE_TOKEN_DESIGNER,
+            },
+        )
 
         resp = sock.last_response()
         assert resp["ok"] is False

@@ -428,7 +428,15 @@ class CliServer(QObject):
             return
 
         # Layer 4 — per-pane capability token for `done`, `progress`, `send`,
-        # and `answer-picker`.
+        # `answer-picker`, `design` (publish/approve/revise), and every
+        # `preview` action except the read-only `status` (#365 phase 3+5
+        # review MUST-FIX: these two used to trust the caller-supplied
+        # `from_project` outright — reachable by ANY local process with no
+        # token at all — letting a spoofed `from_project` open/close another
+        # project's Preview or publish/approve/revise a design artifact
+        # under its name; `preview status` alone stays at the same
+        # trust-local tier as `list`/`ram-status`, matching the module
+        # docstring above `Orchestrator.preview_command`).
         #
         # Each non-Lead pane receives TAKKUB_PANE_TOKEN in its env at spawn time.
         # The token is bound to (project, role) server-side. For these commands,
@@ -438,7 +446,17 @@ class CliServer(QObject):
         #
         # Raw clients that haven't been spawned by the orchestrator have no token
         # and are rejected for these commands.
-        if cmd in ("done", "progress", "send", "answer-picker", "hook", "session-report"):
+        _gated_preview = cmd == "preview" and (req.get("action") or "") != "status"
+        _token_gated_cmds = (
+            "done",
+            "progress",
+            "send",
+            "answer-picker",
+            "hook",
+            "session-report",
+            "design",
+        )
+        if cmd in _token_gated_cmds or _gated_preview:
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
             # Lead token is valid for `send` (Lead sends task specs to teammates),
