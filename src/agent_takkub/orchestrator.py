@@ -5881,6 +5881,44 @@ class Orchestrator(
             "latest_main_thread_stall": dict(getattr(self, "_latest_main_thread_stall", {})),
         }
 
+    def pane_ram_specs(self) -> list[dict]:
+        """Cheap (no psutil) per-pane facts for the RAM report (#364 lever
+        6): role, project, provider and root PID for every live pane across
+        every project namespace. Split out from `ram_status()` so a caller
+        that must not do psutil work on the Qt main thread — the performance
+        chip's background worker — can gather this part inline (main thread,
+        instant) and hand it to `ram_report.collect_ram_report` off-thread."""
+        specs: list[dict] = []
+        for project_ns, panes in self._panes_by_project.items():
+            for role, pane in panes.items():
+                session = getattr(pane, "session", None)
+                specs.append(
+                    {
+                        "role": role,
+                        "project": project_ns,
+                        "provider": getattr(pane, "provider_name", None),
+                        "pid": getattr(session, "pid", None),
+                    }
+                )
+        return specs
+
+    def ram_status(self) -> dict:
+        """Live per-pane RAM breakdown for `takkub doctor --ram` (#364 lever
+        6). Synchronous/on the Qt main thread like `performance_status` above
+        — acceptable here because this is only ever invoked by an explicit,
+        one-off `takkub doctor --ram` call, never a recurring timer tick (the
+        performance chip instead calls `ram_report.collect_ram_report`
+        directly from a background worker — see status_header.py)."""
+        from . import ram_report
+
+        governor = getattr(self, "_resource_governor", None)
+        min_ram = float(governor.limits.min_available_ram_percent) if governor is not None else None
+        return ram_report.collect_ram_report(
+            self.pane_ram_specs(),
+            main_pid=os.getpid(),
+            governor_min_ram_percent=min_ram,
+        )
+
     def record_main_thread_stall(self, details: dict) -> None:
         """Record a watchdog stall with a read-only workload snapshot."""
         try:

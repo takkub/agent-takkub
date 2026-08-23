@@ -11,10 +11,11 @@
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
+        "agent_takkub.ram_report",
         "agent_takkub.remote.api",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 0
     },
     {
@@ -2567,6 +2568,7 @@
         "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.pty_session",
+        "agent_takkub.ram_report",
         "agent_takkub.resource_governor",
         "agent_takkub.role_memory",
         "agent_takkub.role_messages",
@@ -2588,7 +2590,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 42
+      "fan_out": 43
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3083,6 +3085,18 @@
       ],
       "fan_in": 1,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.ram_report",
+      "imports": [
+        "agent_takkub"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator",
+        "agent_takkub.status_header"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.release",
@@ -4035,6 +4049,7 @@
         "agent_takkub.plan_tier",
         "agent_takkub.project_tab",
         "agent_takkub.provider_config",
+        "agent_takkub.ram_report",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
       ],
@@ -4042,7 +4057,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 11
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.system_baseline",

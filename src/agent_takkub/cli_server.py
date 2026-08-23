@@ -777,6 +777,13 @@ class CliServer(QObject):
                 status = self._orch.performance_status(project=from_project)
                 self._reply(sock, ok=True, msg="performance status", **status)
                 return
+            elif cmd == "ram-status":
+                # #364 lever 6: read-only, same trust level as
+                # performance-status — `takkub doctor --ram`'s live per-pane
+                # RAM breakdown.
+                ram = self._orch.ram_status()
+                self._reply(sock, ok=True, msg="ram status", **ram)
+                return
             elif cmd == "remote-mirror-status":
                 # 2026-08-13 remote-mirror-blank fix: `takkub doctor --live`
                 # diagnostic for "phone shows nothing back from Lead".
