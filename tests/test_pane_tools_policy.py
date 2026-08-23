@@ -7,14 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import pane_tools_policy
+from agent_takkub import pane_tools_policy, shared_dev_tools
 
 
 @pytest.fixture
 def policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect pane_tools_policy.PANE_TOOLS_POLICY_FILE to tmp."""
+    """Redirect pane_tools_policy.PANE_TOOLS_POLICY_FILE to tmp.
+
+    Also stubs `shared_dev_tools.regen_role_variants` — `save_policy()`
+    fires it on every successful write (#364 lever 4, keeps the on-disk
+    MCP variant files from going stale) via a local import, so the REAL
+    function would otherwise read the project's real `runtime/shared-
+    mcp.json` and write real `runtime/shared-mcp-<role>.json` variant
+    files as a side effect of this test — a shared file this suite must
+    never touch, same reasoning as redirecting `PANE_TOOLS_POLICY_FILE`
+    itself.
+    """
     policy_file = tmp_path / "pane-tools.json"
     monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file)
+    monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
     return policy_file
 
 
@@ -172,6 +183,56 @@ class TestSavePolicy:
         assert policy_file.exists()
         tmp_files = list(policy_file.parent.glob("*.json.tmp"))
         assert len(tmp_files) == 0  # No tmp leftover
+
+
+class TestSavePolicyRegeneratesVariants:
+    """#364 lever 4: a policy write must not leave the on-disk
+    `shared-mcp-<role>.json` variant — what a pane's `--mcp-config` actually
+    reads at spawn time — stale. Before this, only callers that remembered
+    to call `shared_dev_tools.regen_role_variants()` themselves kept the two
+    in sync; a `pane-tools.json` edit reaching `save_policy()` any other way
+    left the previous grant in place (real spawned RAM: a browser MCP
+    revoked from a role kept spawning its node/Chromium subprocess tree
+    until something else triggered a regen)."""
+
+    def test_save_policy_regenerates_stale_variant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from agent_takkub import shared_dev_tools
+
+        policy_file = tmp_path / "pane-tools.json"
+        shared_mcp_file = tmp_path / "shared-mcp.json"
+        monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file)
+        monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", shared_mcp_file)
+
+        shared_mcp_file.write_text(
+            _json.dumps(
+                {
+                    "mcpServers": {
+                        "graft": {"type": "stdio", "command": "npx", "args": ["graft"]},
+                        "context7": {"type": "stdio", "command": "npx", "args": ["context7"]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        # Old grant on disk (as if written by a previous policy/regen).
+        variant = shared_dev_tools._role_variant_path("backend")
+        variant.write_text(
+            _json.dumps({"mcpServers": {"graft": {"command": "npx", "args": ["graft"]}}}),
+            encoding="utf-8",
+        )
+
+        ok = pane_tools_policy.save_policy({"backend": {"mcps": ["context7"], "plugins": []}})
+
+        assert ok
+        data = _json.loads(variant.read_text(encoding="utf-8"))
+        assert set(data["mcpServers"]) == {"context7"}, (
+            "save_policy() must regenerate the on-disk variant itself — "
+            "not rely on the caller to remember"
+        )
 
 
 class TestEffectiveMcps:

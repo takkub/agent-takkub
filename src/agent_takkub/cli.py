@@ -1648,6 +1648,9 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
                 ram_resp = _request({"cmd": "ram-status"})
             except Exception as e:
                 ram_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+        from .doctor import check_ram_node_children
+
+        findings += check_ram_node_children(ram_resp)
 
     if getattr(args, "core_version", False):
         from .doctor import check_core_version_compat

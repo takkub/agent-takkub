@@ -2389,6 +2389,64 @@ def format_ram_report(resp: dict | None) -> str:
     return "\n".join(lines)
 
 
+# #364 lever 4: a graft-only pane's full node/mcp chain (npx bootstrap + cmd
+# wrapper + the actual `graft mcp` server) measured ~180MB on a real Windows
+# machine (2026-08-23 audit, docs/audit/2026-08-23-364-lever4-mcp-node.md).
+# A single browser MCP (playwright or chrome-devtools) starts in the
+# several-hundred-MB range on its own server process alone, and climbs past
+# 1GB once its own Chromium/GPU/renderer subtree is counted. 350MB sits
+# comfortably above the graft-only baseline (so a normal graft-only code
+# role never trips this) while still well below where a legitimate
+# browser-MCP role (qa/critic/designer) always lands — so a hit here is
+# either a browser-role pane actively mid-test (expected, not a bug) or a
+# non-browser role that somehow ended up with a browser MCP anyway (a real
+# stale-policy/regen bug — see `pane_tools_policy.save_policy`'s
+# `_regen_role_variants_best_effort`, added alongside this check for
+# exactly that failure mode).
+_RAM_NODE_CHILDREN_WARN_BYTES = 350 * 1024 * 1024
+
+
+def check_ram_node_children(
+    resp: dict | None, *, threshold_bytes: int = _RAM_NODE_CHILDREN_WARN_BYTES
+) -> list[Finding]:
+    """[ram] — flag a pane whose node/mcp children carry unusually large RAM
+    (#364 lever 4 visibility: "which pane is the heavy one", not just the
+    aggregate `format_ram_report` table).
+
+    Heuristic, not a policy check: this reads the same already-gathered
+    `ram-status` reply `format_ram_report` renders (never opens the socket
+    itself — see module docstring) and only measures RSS, not which
+    processes those bytes belong to. A hit is a prompt to go look (`takkub
+    doctor --pane <role> --project <project>`), not proof of a leak — a
+    qa/critic/designer pane genuinely mid-browser-test is expected to be
+    here. Silent (returns `[]`) when there is no live report at all: this
+    is additive visibility for `--ram`'s opt-in diagnostic, never a reason
+    to fail a plain `takkub doctor`.
+    """
+    if resp is None or not resp.get("ok"):
+        return []
+    findings: list[Finding] = []
+    for row in resp.get("panes") or []:
+        node_bytes = int(row.get("node_children_rss_bytes", 0))
+        if node_bytes < threshold_bytes:
+            continue
+        role = row.get("role") or "?"
+        project = row.get("project") or "?"
+        pid = row.get("pid")
+        findings.append(
+            Finding(
+                "ram",
+                f"node-children-{role}-{project}",
+                Status.WARN,
+                f"{role}/{project} (pid={pid or '—'}): node/mcp children "
+                f"{_fmt_mb(node_bytes)} — {int(row.get('node_children_count', 0))} process(es), "
+                f"above the {_fmt_mb(threshold_bytes)} baseline for a non-browser role",
+                fix_hint=f"takkub doctor --pane {role} --project {project}",
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # [port] — port-file/instance cross-check (#354, `takkub doctor --live` only)
 # ---------------------------------------------------------------------------

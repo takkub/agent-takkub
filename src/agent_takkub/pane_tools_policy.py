@@ -146,6 +146,40 @@ def load_policy() -> dict[str, dict[str, list[str]]]:
     return out
 
 
+def _regen_role_variants_best_effort() -> None:
+    """Regenerate the on-disk per-role `shared-mcp-<role>.json` variants
+    right after a policy write (#364 lever 4).
+
+    `shared_mcp_config_path_for_role()` — what every claude/codex spawn's
+    `--mcp-config` actually reads — resolves from these variant FILES, not
+    from a live `load_policy()` call. Before this, every `save_policy()`
+    caller had to remember to call `shared_dev_tools.regen_role_variants()`
+    itself afterward (some do — `cli.py`'s `mcp allow/deny/reset`,
+    `settings_window.py`'s Role Manager dialog, `relationships.py`'s
+    apply-draft — but a `pane-tools.json` write reaching this function
+    through any other or future path silently left the OLD variant on
+    disk). A stale variant is not just wrong config — it is real spawned
+    RAM: a role whose policy was edited to DROP a browser MCP (playwright/
+    chrome-devtools) keeps spawning that MCP's node + Chromium subprocess
+    tree (measured ~180-980MB, see #364 lever 4 audit) until *something
+    else* happens to trigger a regen.
+
+    Local import: `shared_dev_tools` imports `pane_tools_policy.
+    effective_mcps` at module level (browser-profile / graft templating),
+    so a module-level import here would be circular — the existing
+    `_default_role_entry()` in this same file already uses this pattern.
+    Best-effort / never raises: `regen_role_variants()` itself only logs on
+    a per-role write failure, and a policy write that already succeeded
+    must not be reported as failed over a variant-file regen hiccup.
+    """
+    try:
+        from .shared_dev_tools import regen_role_variants
+
+        regen_role_variants()
+    except Exception as e:
+        _log.warning("save_policy: could not regen role variants: %s", e)
+
+
 def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
     """Atomically write policy to ~/.takkub/pane-tools.json.
 
@@ -165,6 +199,7 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         from .core.storage.dual_write import dual_write_pane_tools_policy
 
         dual_write_pane_tools_policy({})
+        _regen_role_variants_best_effort()
         return True
 
     # Validate input.
@@ -211,6 +246,7 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         from .core.storage.dual_write import dual_write_pane_tools_policy
 
         dual_write_pane_tools_policy(payload)
+        _regen_role_variants_best_effort()
         return True
     except OSError as e:
         _log.warning("save_policy: could not write %s: %s", PANE_TOOLS_POLICY_FILE, e)

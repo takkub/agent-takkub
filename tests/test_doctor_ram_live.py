@@ -1,6 +1,6 @@
 """#364 lever 6 — `takkub doctor --ram`'s pure formatting layer."""
 
-from agent_takkub.doctor import format_ram_report
+from agent_takkub.doctor import Status, check_ram_node_children, format_ram_report
 
 
 def test_ram_report_reports_cockpit_not_running_when_resp_is_none() -> None:
@@ -79,3 +79,77 @@ def test_ram_report_renders_table_sorted_by_total_desc() -> None:
     assert "1 process(es)" in text
     assert "governor pause line: 12% available" in text
     assert "takkub_version=1.0.87" in text
+
+
+class TestCheckRamNodeChildren:
+    """#364 lever 4 — the `[ram]` node/mcp-children threshold WARN."""
+
+    def test_no_findings_when_resp_is_none(self) -> None:
+        assert check_ram_node_children(None) == []
+
+    def test_no_findings_when_live_check_failed(self) -> None:
+        assert check_ram_node_children({"ok": False, "msg": "connection refused"}) == []
+
+    def test_no_finding_under_threshold(self) -> None:
+        resp = {
+            "ok": True,
+            "panes": [
+                {
+                    "role": "devops",
+                    "project": "proj1",
+                    "pid": 200,
+                    "node_children_rss_bytes": 180_000_000,  # graft-only baseline
+                    "node_children_count": 4,
+                }
+            ],
+        }
+        assert check_ram_node_children(resp) == []
+
+    def test_warns_and_names_the_pane_over_threshold(self) -> None:
+        resp = {
+            "ok": True,
+            "panes": [
+                {
+                    "role": "backend",
+                    "project": "proj1",
+                    "pid": 200,
+                    "node_children_rss_bytes": 180_000_000,
+                    "node_children_count": 4,
+                },
+                {
+                    "role": "qa",
+                    "project": "proj1",
+                    "pid": 300,
+                    "node_children_rss_bytes": 900_000_000,
+                    "node_children_count": 12,
+                },
+            ],
+        }
+
+        findings = check_ram_node_children(resp)
+
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.status == Status.WARN
+        assert finding.category == "ram"
+        assert "qa" in finding.detail
+        assert "proj1" in finding.detail
+        assert "858" in finding.detail  # 900_000_000 bytes -> MiB, matches _fmt_mb's rounding
+        assert "pid=300" in finding.detail
+        assert "backend" not in finding.detail
+
+    def test_custom_threshold_is_honored(self) -> None:
+        resp = {
+            "ok": True,
+            "panes": [
+                {
+                    "role": "devops",
+                    "project": "proj1",
+                    "pid": 200,
+                    "node_children_rss_bytes": 50_000_000,
+                    "node_children_count": 1,
+                }
+            ],
+        }
+        assert check_ram_node_children(resp, threshold_bytes=10_000_000) != []
+        assert check_ram_node_children(resp, threshold_bytes=100_000_000) == []
