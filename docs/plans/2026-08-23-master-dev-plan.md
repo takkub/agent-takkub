@@ -4,6 +4,8 @@
 workspace — แผนภายนอก 27 ไฟล์ vendor เข้ามา + ข้อแก้ 3 ข้อ §4) · epic #365 (workspace) · #362 (Phase 10) · #364 (RAM diet)
 · #361/#360 (auto-migrate + core_home step) · `docs/release-checklist.md` (SemVer policy ใหม่)
 
+**Flow diagram:** `docs/architecture/v2-workspace-flow.md` (โครงสร้าง runtime · timeline · boot flow · resolver · RAM)
+
 ## 0. กฎการทำงานที่ใช้ทั้งแผน (ตกลงกับ user 2026-08-23 — ห้ามละเมิด)
 
 | กฎ | ที่มา |
