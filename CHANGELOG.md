@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.2.0] - 2026-08-23
+
 ### Added (เพิ่ม)
 
 - **Workspace 1.2.0 เฟส 8 Obsidian hardening** (#365, `10_OBSIDIAN_HARDENING.md`) — `project_identity.resolve_project_id()` (project_id
