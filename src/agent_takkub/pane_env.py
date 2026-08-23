@@ -251,16 +251,23 @@ def _apply_port_file(env: dict[str, str]) -> None:
     installed prod cockpit's on PATH → the CLI dials the wrong server and every
     ``takkub send/assign/done`` call fails with connection refused.
 
-    ``config._get_port_file()`` already honours a ``TAKKUB_PORT_FILE`` env
-    override when present and falls back to this process's own
-    ``RUNTIME_DIR/port`` otherwise — exactly the value every pane should use
-    regardless of instance mode. Stamping it here unconditionally (not
-    ``setdefault``) is safe: in multi-instance mode the allowlist copy already
-    equals what this recomputes, so overwriting is a no-op in value.
+    ``config._effective_port_file_for_app()`` resolves exactly the path THIS
+    cockpit instance actually writes its port to (see that function's
+    docstring, #354): it honours a same-instance-derived multi-instance
+    override or one that resolves under this instance's own DATA_HOME, and
+    otherwise falls back to this process's own ``RUNTIME_DIR/port`` — never
+    the app-side client helper ``config._get_port_file()``, which honours
+    ANY inherited override unconditionally. Using that unguarded helper here
+    would stamp a pane spawned by THIS (correctly-behaving) instance with a
+    path pointing at a different cockpit entirely whenever this process
+    itself inherited a stray cross-instance override, sending the new pane's
+    ``takkub`` calls to the wrong cockpit. Stamping it here unconditionally
+    (not ``setdefault``) is safe: in multi-instance mode the allowlist copy
+    already equals what this recomputes, so overwriting is a no-op in value.
     """
     from . import config
 
-    env["TAKKUB_PORT_FILE"] = str(config._get_port_file())
+    env["TAKKUB_PORT_FILE"] = str(config._effective_port_file_for_app())
 
 
 def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:

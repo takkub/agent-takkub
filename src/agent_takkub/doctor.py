@@ -2308,6 +2308,87 @@ def check_performance_live(resp: dict | None) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [port] — port-file/instance cross-check (#354, `takkub doctor --live` only)
+# ---------------------------------------------------------------------------
+
+
+def check_port_identity_live(resp: dict | None) -> list[Finding]:
+    """[port] — catch a port file that answers for a DIFFERENT cockpit
+    instance than the one running `takkub doctor` (#354).
+
+    Pure interpretation only, same reasoning as `check_spawn_queue_live`
+    above: doctor.py must not open the TCP socket itself, so the caller
+    (`cli.cmd_doctor`, `--live` only) resolves the port file the way any
+    other CLI client does and queries `{"cmd": "instance-identity"}` — an
+    open, no-auth read (same trust level as `list`) — then hands the raw
+    response here. Pass `None` when there's no port file at all (cockpit not
+    running for this instance).
+
+    `config.DATA_HOME` inside THIS doctor process is resolved the exact same
+    way every agent-takkub process resolves it (dev checkout -> repo root;
+    installed build -> the isolated home next to its own venv) — so
+    comparing it against the responding instance's own reported DATA_HOME
+    answers "is the port file I just read actually pointing at MY cockpit?"
+    without needing to know anything about how that port file got there.
+    A mismatch means some other cockpit instance's pane leaked its
+    TAKKUB_PORT_FILE into this instance's env (or vice versa) and every
+    `takkub` command from here is silently routed to the wrong cockpit.
+    """
+    from .config import DATA_HOME
+
+    if resp is None:
+        return [
+            Finding(
+                "port",
+                "instance-match",
+                Status.SKIP,
+                "no port file for this instance — cockpit not running, nothing to cross-check",
+            )
+        ]
+    if not resp.get("ok"):
+        return [
+            Finding(
+                "port",
+                "instance-match",
+                Status.WARN,
+                f"could not reach the cockpit at the resolved port file: "
+                f"{resp.get('msg', 'unknown error')}",
+                "the port file may be stale — restart the cockpit, or delete "
+                "the port file under this instance's runtime/ directory",
+            )
+        ]
+
+    remote_home = str(resp.get("data_home") or "")
+    remote_port = resp.get("port")
+    local_home = str(DATA_HOME)
+    if remote_home and remote_home != local_home:
+        return [
+            Finding(
+                "port",
+                "instance-match",
+                Status.FAIL,
+                f"the resolved port file points at port={remote_port} "
+                f"DATA_HOME={remote_home}, but this instance's own DATA_HOME is "
+                f"{local_home} — every `takkub` command run from here is talking "
+                "to a DIFFERENT cockpit (#354: a pane's inherited TAKKUB_PORT_FILE "
+                "clobbered or leaked into this instance's port file)",
+                "close the other cockpit / stray pane holding that port, then "
+                "either delete the port file under this instance's own runtime/ "
+                "and restart this cockpit, or unset TAKKUB_PORT_FILE before "
+                "running takkub from this shell",
+            )
+        ]
+    return [
+        Finding(
+            "port",
+            "instance-match",
+            Status.OK,
+            f"port={remote_port} answers for this instance's own DATA_HOME ({local_home})",
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
 # [remote-mirror] — live check (2026-08-13, `takkub doctor --live` only)
 # ---------------------------------------------------------------------------
 

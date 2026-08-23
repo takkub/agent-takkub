@@ -115,6 +115,21 @@ class TestLeadOnlyCommandsRejectedWithNoAuth:
         assert resp["ok"] is False
         assert "unauthorized" in resp["msg"].lower()
 
+    def test_rejection_message_names_which_cockpit_answered(self, server_and_sock) -> None:
+        # #354: a stale/misrouted port file makes a valid token look
+        # "unauthorized" — the message must point at the routing problem
+        # (port + DATA_HOME of whoever actually answered) instead of a
+        # wrong-token dead end.
+        srv, sock, _ = server_and_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "spawn", "role": "backend", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "DATA_HOME=" in resp["msg"]
+        assert "port=" in resp["msg"]
+        # provider-neutral — must not read like a claude-only message
+        assert "claude" not in resp["msg"].lower()
+
 
 # ─────────────────────────────────────────────────────────────
 # Lead-only commands with wrong auth → unauthorized
@@ -228,6 +243,21 @@ class TestDoneCommand:
         resp = sock.last_response()
         assert resp["ok"] is True
 
+    def test_invalid_pane_token_rejection_names_which_cockpit_answered(
+        self, server_and_sock
+    ) -> None:
+        # #354: same context-carrying rejection for the pane-token gate as
+        # the lead-only gate above — a caller here is more likely to wrongly
+        # conclude "stale pane token, server can't fix it" without this.
+        srv, sock, _ = server_and_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "done", "from": "backend", "note": "x", "auth": "bogus-token"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "TAKKUB_PANE_TOKEN" in resp["msg"]
+        assert "DATA_HOME=" in resp["msg"]
+        assert "port=" in resp["msg"]
+
 
 # ─────────────────────────────────────────────────────────────
 # Non-Lead commands don't require auth
@@ -241,6 +271,17 @@ class TestNonLeadCommandsPassThrough:
         srv._dispatch(sock, {"cmd": "list"})
         resp = sock.last_response()
         assert resp["ok"] is True
+
+    def test_instance_identity_requires_no_auth(self, server_and_sock) -> None:
+        # #354: open, no-auth read (same trust level as `list`) so
+        # `takkub doctor` can cross-check the port file it resolved.
+        srv, sock, _ = server_and_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "instance-identity"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+        assert "port" in resp
+        assert "data_home" in resp
 
     def test_send_requires_pane_token(self, server_and_sock) -> None:
         # `send` now requires a valid pane token (or lead token).

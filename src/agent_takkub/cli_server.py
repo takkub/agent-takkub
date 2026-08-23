@@ -394,7 +394,11 @@ class CliServer(QObject):
             if not lead_token or not secrets.compare_digest(
                 caller_auth.encode(), lead_token.encode()
             ):
-                self._reply(sock, ok=False, msg="unauthorized: lead-only command")
+                self._reply(
+                    sock,
+                    ok=False,
+                    msg=f"unauthorized: lead-only command {self._instance_context()}",
+                )
                 return
 
         # Layer 3 — send-as-lead guard. `send` isn't lead-only (teammates
@@ -466,7 +470,10 @@ class CliServer(QObject):
                 self._reply(
                     sock,
                     ok=False,
-                    msg=f"unauthorized: {cmd} requires a valid pane token (TAKKUB_PANE_TOKEN)",
+                    msg=(
+                        f"unauthorized: {cmd} requires a valid pane token (TAKKUB_PANE_TOKEN) "
+                        f"{self._instance_context()}"
+                    ),
                 )
                 return
 
@@ -726,6 +733,22 @@ class CliServer(QObject):
                         state = f"{state} [{model}]"
                     status[role] = state
                 self._reply(sock, ok=True, msg="status", status=status)
+                return
+            elif cmd == "instance-identity":
+                # #354: read-only, same trust level as `list` — lets
+                # `takkub doctor` (and any other caller) cross-check that the
+                # port file it resolved actually answers for the cockpit
+                # instance it expects, instead of a different one that
+                # clobbered/inherited the same port-file path.
+                from . import config
+
+                self._reply(
+                    sock,
+                    ok=True,
+                    msg="instance identity",
+                    port=self._server.serverPort(),
+                    data_home=str(config.DATA_HOME),
+                )
                 return
             elif cmd == "worktree-live-paths":
                 # #187: read-only, same trust level as `list` — lets `takkub
@@ -1041,3 +1064,16 @@ class CliServer(QObject):
         payload = {"ok": ok, "msg": msg, **extra}
         sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         sock.flush()
+
+    def _instance_context(self) -> str:
+        """Short 'which cockpit answered' tag appended to auth-rejection
+        messages (#354). A stale/misrouted port file makes a valid token look
+        "unauthorized" from the caller's perspective — this points a confused
+        caller at the routing problem (wrong port/DATA_HOME) instead of a
+        wrong-token dead end. Provider-neutral: no wording tied to any one
+        pane provider."""
+        from . import config
+
+        return (
+            f"(answered by cockpit port={self._server.serverPort()} DATA_HOME={config.DATA_HOME})"
+        )

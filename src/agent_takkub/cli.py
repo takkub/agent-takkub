@@ -1516,6 +1516,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     if getattr(args, "live", False):
         from .doctor import (
             check_performance_live,
+            check_port_identity_live,
             check_remote_mirror_live,
             check_spawn_queue_live,
         )
@@ -1523,6 +1524,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         live_resp: dict | None = None
         mirror_resp: dict | None = None
         performance_resp: dict | None = None
+        identity_resp: dict | None = None
         if read_port() is not None:
             try:
                 live_resp = _request({"cmd": "spawn-queue-status"})
@@ -1536,9 +1538,14 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
                 performance_resp = _request({"cmd": "performance-status"})
             except Exception as e:
                 performance_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+            try:
+                identity_resp = _request({"cmd": "instance-identity"})
+            except Exception as e:
+                identity_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
         findings += check_spawn_queue_live(live_resp)
         findings += check_remote_mirror_live(mirror_resp)
         findings += check_performance_live(performance_resp)
+        findings += check_port_identity_live(identity_resp)
 
     if getattr(args, "core_version", False):
         from .doctor import check_core_version_compat

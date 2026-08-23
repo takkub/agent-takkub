@@ -24,15 +24,20 @@ from .orchestrator import _log_event, _write_restart_reason_marker
 
 
 def _release_port_file() -> None:
-    """Delete the *effective* port file (``config._get_port_file()``) so a
-    successor cockpit / fresh boot never reconnects to a stale port number.
+    """Delete the port file THIS instance actually writes to
+    (``config._effective_port_file_for_app()``) so a successor cockpit /
+    fresh boot never reconnects to a stale port number.
 
-    Uses the effective path (honours a multi-instance/custom
-    ``TAKKUB_PORT_FILE`` override) rather than the static ``config.PORT_FILE``
-    constant — see docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md,
-    finding 5."""
+    Uses the app-side effective path (honours a multi-instance/custom
+    ``TAKKUB_PORT_FILE`` override only when it's this instance's own — #354)
+    rather than the static ``config.PORT_FILE`` constant — see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding 5.
+    Deliberately NOT ``config._get_port_file()``: that client-side helper
+    honours ANY inherited override unconditionally, which here could delete
+    (or fail to delete) a DIFFERENT cockpit instance's port file instead of
+    this one's."""
     try:
-        pf = config._get_port_file()
+        pf = config._effective_port_file_for_app()
         if pf.exists():
             pf.unlink()
     except Exception:

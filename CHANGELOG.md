@@ -8,6 +8,35 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **cockpit ตัวที่สองที่เปิดจาก pane เขียนทับไฟล์ `port` ของตัวแรก → `takkub` ทุกคำสั่ง route ผิด instance** (#354) —
+  pane ทุกตัวถูก stamp `TAKKUB_PORT_FILE` ของ cockpit ที่ spawn มัน (ตั้งใจ เพื่อ multi-instance)
+  แต่ค่านั้น **inherit ต่อไปยัง process ลูก** — ถ้าลูกเป็น cockpit อีกตัว มันจะเอา path ของ
+  instance แรกมาเป็นที่เขียนพอร์ต**ของตัวเอง** ทั้งที่ `DATA_HOME` คนละที่ ผลคือทุกคำสั่ง `takkub`
+  ที่ยิงไป instance แรกถูก route ไปหา instance ที่สองแทน · อาการที่เห็นไม่บอกใบ้เลยว่าเป็นเรื่องพอร์ต:
+  `unauthorized: lead-only command` / `unauthorized: ... requires a valid pane token` ทั้งที่
+  `takkub list`/`doctor` ยังทำงานปกติ (แค่ตอบจาก cockpit ผิดตัว) — pane ถึงกับสรุปเองว่าเป็น
+  stale pane token ฝั่ง server ซึ่งผิดทาง · แถมค่าที่ผิดยัง**ถูกอบเข้า env ของทุก pane ที่
+  cockpit นั้น spawn ต่อ** แก้ไฟล์ `port` เฉยๆ จึงไม่พอ ต้อง restart cockpit
+  → แยกการ resolve เป็น 2 ทาง: `config._get_port_file()` (**client-side** — pane/CLI ยัง honor
+  override ทุกกรณีเหมือนเดิม สัญญาเดิมไม่เสีย) กับ `config._effective_port_file_for_app()`
+  (**app-side** — ใช้ตอนเขียนพอร์ตและตอน stamp env ให้ pane) ซึ่งเชื่อ override เฉพาะเมื่อเป็น
+  ตัวที่ process นี้ derive เองสำหรับ multi-instance, หรืออยู่ใต้ `DATA_HOME` ของตัวเอง,
+  **หรือไม่มี pane marker (`TAKKUB_ROLE`) ใน env** — เงื่อนไขสุดท้ายสำคัญ เพราะ
+  `_restart_env` ระบุสัญญาไว้ว่า "user override จาก shell ต้องอยู่รอดข้าม restart" ซึ่ง
+  หน้าตาเหมือน leak ทุกประการถ้าดูแค่ path · `.resolve()` ทั้งสองฝั่งก่อนเทียบ (symlink/case
+  บน Windows) · error `unauthorized` แนบ port + `DATA_HOME` ของ instance ที่ตอบ ·
+  `takkub doctor` เพิ่มหมวด `[port] instance-match` ผ่าน command ใหม่ `instance-identity`
+  + tests: `tests/test_config.py`, `tests/test_pane_port_file.py`, `tests/test_cli_server_auth.py`,
+  `tests/test_doctor_port_identity_live.py` + sync-guard กัน literal ที่ duplicate ข้ามโมดูล
+  (`config.py` ต้องคง `leaf-modules-pure` จึง import `_restart_env` ไม่ได้) drift เงียบ
+
+- **flaky test ตัวที่ 5: `proc.wait(timeout=5)` รอ Windows Job Object ฆ่า process** —
+  `TestKillOnCloseJob` ปิด job handle แล้วรอ `ping` ตาย ภายใน 5 วินาที ปกติเสี้ยววินาที แต่ตอน
+  เครื่องโหลดหนัก (xdist 8 worker) kernel teardown เกิน 5 วินาทีได้ → ขยายเป็น 30 วินาที ·
+  **ต่างจาก 4 ตัวก่อนหน้า**: timeout ตรงนี้ไม่ใช่ assertion ว่า "ต้องเร็วแค่ไหน" แต่เป็น safety
+  bound กันเทสแขวนถาวร การขยายจึงไม่ทำให้เทสอ่อนลง — ถ้า Job Object ไม่ฆ่า process จริง
+  เทสยังตกเหมือนเดิม แค่ตกช้าลง
+
 - **flaky test ตัวที่ 4: assert thread set ทันทีหลัง `stop()`** —
   `test_enabled_starts_a_real_server_and_stop_tears_it_down` assert
   `set(threading.enumerate()) == before` ทันทีที่ `rc.stop()` คืนค่า — แต่ `stop()` join แค่

@@ -188,6 +188,15 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # read or write the real runtime/port.
     monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
     monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+    # config._effective_port_file_for_app()'s #354 guard trusts a foreign-
+    # looking TAKKUB_PORT_FILE unless TAKKUB_ROLE (the pane marker
+    # pane_env.py stamps into every spawned pane) is also present. This test
+    # suite is routinely itself RUN INSIDE a spawned pane (a backend/qa/etc.
+    # teammate), so TAKKUB_ROLE is ambient in the real process env here —
+    # without clearing it, every test that doesn't explicitly delenv it would
+    # spuriously look like a leaked cross-instance override. Tests that need
+    # to model the actual leak scenario re-set it themselves.
+    monkeypatch.delenv("TAKKUB_ROLE", raising=False)
     cfg = _maybe_module("agent_takkub.config", force=True)
     if cfg is not None and hasattr(cfg, "PORT_FILE"):
         monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)

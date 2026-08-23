@@ -263,7 +263,12 @@ class TestKillOnCloseJob:
             time.sleep(0.3)
             assert proc.poll() is None, "process should still be running before the job closes"
             tunnel.ctypes.windll.kernel32.CloseHandle(job)
-            proc.wait(timeout=5)
+            # Not an assertion on how fast the kernel kills the process — just a
+            # safety bound against a hung test. Under heavy load (8 xdist workers +
+            # concurrent tasks) kernel job-object teardown can take well over 5s
+            # even though production behavior is correct; 30s avoids that flake
+            # without weakening what the test actually verifies (see #349 flaky #5).
+            proc.wait(timeout=30)
             assert proc.returncode is not None
         finally:
             if proc.poll() is None:

@@ -627,7 +627,7 @@ def _log_instance_boot() -> None:
             settings_home=str(config.SETTINGS_HOME),
             assets_root=str(config.ASSETS_ROOT),
             cli_bin_dir=str(config.CLI_BIN_DIR),
-            port_file=str(config._get_port_file()),
+            port_file=str(config._effective_port_file_for_app()),
             lock_path=_LOCK_PATH,
         )
     except Exception:

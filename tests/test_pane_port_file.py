@@ -11,10 +11,13 @@ DATA_HOME resolved to (the dev repo's), which is a different cockpit's
 port file → WinError 10061 connection refused, Lead can never spawn a
 teammate.
 
-`config._get_port_file()` already honours a `TAKKUB_PORT_FILE` override
-when present (multi-instance mode) and falls back to this process's own
-`RUNTIME_DIR/port` otherwise (single-instance) — exactly the value every
-spawned pane should receive regardless of mode.
+`config._effective_port_file_for_app()` honours a `TAKKUB_PORT_FILE`
+override when it was derived by THIS process itself (multi-instance mode,
+marked via `_TAKKUB_AUTO_PORT_FILE`) or resolves under this instance's own
+DATA_HOME, and falls back to this process's own `RUNTIME_DIR/port`
+otherwise (single-instance, or a foreign override leaked in from a
+different cockpit instance — #354) — exactly the value every spawned pane
+should receive regardless of mode.
 """
 
 from __future__ import annotations
@@ -49,11 +52,36 @@ class TestApplyPortFile:
     def test_honours_multi_instance_override(
         self, runtime_port: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # Same-DATA_HOME multi-instance mode: `_restart_env.configure_
+        # multi_instance_port_file` sets BOTH TAKKUB_PORT_FILE and the
+        # `_TAKKUB_AUTO_PORT_FILE` provenance marker together — reproduce
+        # that pairing here rather than the override alone (#354 guard
+        # rejects an override with no marker that isn't under DATA_HOME).
         override = tmp_path / "instance-42" / "port"
         monkeypatch.setenv("TAKKUB_PORT_FILE", str(override))
+        monkeypatch.setenv("_TAKKUB_AUTO_PORT_FILE", str(override))
         env: dict[str, str] = {}
         _apply_port_file(env)
         assert env["TAKKUB_PORT_FILE"] == str(override)
+
+    def test_foreign_override_with_no_provenance_marker_is_rejected(
+        self, runtime_port: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # #354: an override inherited from a DIFFERENT cockpit instance's
+        # PANE (no _TAKKUB_AUTO_PORT_FILE marker, not under this instance's
+        # own DATA_HOME, but carrying the TAKKUB_ROLE marker pane_env.py
+        # stamps into every spawned pane) must NOT be stamped into a
+        # newly-spawned pane — that would send the new pane's `takkub`
+        # calls to the wrong cockpit. Without TAKKUB_ROLE this same path
+        # is indistinguishable from a legitimate plain-shell user override
+        # and must be honoured instead (config._PANE_MARKER_ENV).
+        foreign = tmp_path / "other-instance" / "port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(foreign))
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+        env: dict[str, str] = {}
+        _apply_port_file(env)
+        assert env["TAKKUB_PORT_FILE"] == str(runtime_port)
 
     def test_overwrites_stale_value_already_in_env(
         self, runtime_port: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -85,6 +113,7 @@ class TestBuildPaneEnvStampsPortFile:
     ) -> None:
         override = tmp_path / "instance-7" / "port"
         monkeypatch.setenv("TAKKUB_PORT_FILE", str(override))
+        monkeypatch.setenv("_TAKKUB_AUTO_PORT_FILE", str(override))
         env = _build_pane_env()
         assert env["TAKKUB_PORT_FILE"] == str(override)
 
@@ -104,5 +133,6 @@ class TestBuildLeadEnvStampsPortFile:
     ) -> None:
         override = tmp_path / "instance-3" / "port"
         monkeypatch.setenv("TAKKUB_PORT_FILE", str(override))
+        monkeypatch.setenv("_TAKKUB_AUTO_PORT_FILE", str(override))
         env = _build_lead_env()
         assert env["TAKKUB_PORT_FILE"] == str(override)

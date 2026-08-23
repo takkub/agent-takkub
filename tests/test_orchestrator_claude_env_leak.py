@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
+from agent_takkub import config
 from agent_takkub.orchestrator import Orchestrator
 
 TEST_PROJECT = "default"
@@ -186,6 +187,27 @@ class TestClaudeSpawnEnvRegressions:
         env = _spawn_capture_env(orch, "backend")
         assert "TAKKUB_PROJECT" in env
         assert env["TAKKUB_PROJECT"] == TEST_PROJECT
+
+    def test_pane_marker_key_matches_config_pane_marker_env(self, orch: Orchestrator) -> None:
+        """`config._PANE_MARKER_ENV` ("TAKKUB_ROLE") is the marker
+        `_effective_port_file_for_app()` (#354 guard) checks for on this
+        process's own env to tell a leaked cross-instance TAKKUB_PORT_FILE
+        apart from a legitimate user override. spawn_engine.py's three
+        `env["TAKKUB_ROLE"] = role_name` call sites hardcode that string
+        (config.py stays leaf-module-pure and can't import spawn_engine's
+        constant, nor vice versa) rather than referencing the constant, so a
+        rename on either side would go undetected by every other test here —
+        they all hardcode "TAKKUB_ROLE" too. This one asserts against the
+        real env spawn_engine builds for an actual pane, keyed by the live
+        constant: if config._PANE_MARKER_ENV is ever renamed without
+        updating spawn_engine's call sites (or vice versa), the marker
+        silently stops appearing on real panes and the #354 guard falls into
+        its "no marker = trust the override" branch for every pane, with no
+        warning at all.
+        """
+        env = _spawn_capture_env(orch, "backend")
+        assert config._PANE_MARKER_ENV in env
+        assert env[config._PANE_MARKER_ENV] == "backend"
 
     def test_lead_has_takkub_project(self, orch: Orchestrator) -> None:
         env = _spawn_capture_env(orch, "lead")

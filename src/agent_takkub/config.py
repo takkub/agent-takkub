@@ -843,14 +843,114 @@ def agent_role_dir(role: str) -> Path:
 
 
 def _get_port_file() -> Path:
-    """Return the effective port file path (TAKKUB_PORT_FILE overrides default)."""
+    """Return the effective port file path (TAKKUB_PORT_FILE overrides default).
+
+    CLIENT-side resolution only (`read_port()`, CLI/Remote display of "which
+    port am I dialing") — always honours the override unconditionally, by
+    design, so a pane/CLI stamped with a custom TAKKUB_PORT_FILE keeps
+    dialing the cockpit it was spawned under. The app's OWN startup/spawn
+    paths must NOT trust an override this unconditionally — see
+    `_effective_port_file_for_app()` below (#354).
+    """
     override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
     return Path(override) if override else PORT_FILE
 
 
+# Set by `_restart_env.configure_multi_instance_port_file` when THIS process
+# derived its OWN per-PID TAKKUB_PORT_FILE (TAKKUB_ALLOW_MULTI=1 same-
+# DATA_HOME dev/test multi-instance mode). Duplicated here as a literal
+# instead of importing `_restart_env` so config.py keeps its zero-
+# agent_takkub-import invariant (`leaf-modules-pure` import-linter contract)
+# — keep this string in sync with `_restart_env.AUTO_PORT_FILE_ENV`.
+_AUTO_PORT_FILE_ENV = "_TAKKUB_AUTO_PORT_FILE"
+
+# `pane_env.py` (`_PANE_ENV_ALLOWLIST`) stamps `TAKKUB_ROLE` into every pane
+# it spawns (`spawn_engine.py`: claude/generic/lead branches all set
+# `env["TAKKUB_ROLE"] = role_name`) — a cockpit's OWN process never sets this
+# on itself. Its presence is therefore proof this process's env came from
+# (or was inherited from a child of) another cockpit instance's pane rather
+# than a plain user shell, which is the actual #354 leak vector: a pane
+# process — carrying both instance A's TAKKUB_PORT_FILE *and* TAKKUB_ROLE —
+# launches instance B as a plain child, and B inherits the whole env. A user
+# who hand-sets TAKKUB_PORT_FILE in an ordinary shell before launching the
+# cockpit never has TAKKUB_ROLE set, so this distinguishes the two identical-
+# looking cases without false-rejecting the documented override contract
+# (`_restart_env.configure_multi_instance_port_file` docstring: "a
+# pre-existing TAKKUB_PORT_FILE is a user override ... and must survive
+# restarts") — keep in sync with `pane_env._PANE_ENV_ALLOWLIST`.
+_PANE_MARKER_ENV = "TAKKUB_ROLE"
+
+
+def _effective_port_file_for_app() -> Path:
+    """Port file path THIS cockpit instance should write to, and should
+    stamp into its own spawned panes' env (#354 fix).
+
+    Unlike `_get_port_file()`, an inherited ``TAKKUB_PORT_FILE`` is trusted
+    unless it looks like a cross-instance leak specifically:
+
+    * this process derived it itself for same-DATA_HOME multi-instance mode
+      (`_restart_env.configure_multi_instance_port_file`, marked via
+      ``_AUTO_PORT_FILE_ENV``) — deliberately a per-PID temp file OUTSIDE
+      DATA_HOME, so it can't be (and isn't) checked against DATA_HOME below; or
+    * it resolves under this instance's own ``DATA_HOME`` — always trusted; or
+    * no ``TAKKUB_ROLE`` pane marker is present in this process's env — a
+      plain user override from an ordinary shell (or test process) looks
+      identical to a leaked cross-instance value by path alone, so the
+      marker is what tells them apart (see ``_PANE_MARKER_ENV`` above).
+
+    Otherwise the override leaked in from a DIFFERENT cockpit instance: a
+    pane spawned by instance A stamps A's own port-file path (and its own
+    ``TAKKUB_ROLE``) into its env (by design, so panes dial A); if that pane
+    then launches instance B as a plain (non-multi-instance) child process,
+    B inherits both A's ``TAKKUB_PORT_FILE`` and ``TAKKUB_ROLE`` and —
+    without this guard — would overwrite A's port file with B's port number,
+    silently rerouting every ``takkub`` command against A to B instead (root
+    cause of #354). Rejected with a warning; falls back to this instance's
+    own default ``PORT_FILE``.
+
+    Both paths are ``.resolve()``d (follows symlinks, normalises case) before
+    comparison so the check is correct on Windows too — comparing raw,
+    unresolved paths (e.g. via ``Path.is_relative_to``) would miss a symlink
+    or case difference and either wrongly trust or wrongly reject.
+    """
+    override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
+    if not override:
+        return PORT_FILE
+
+    if os.environ.get(_AUTO_PORT_FILE_ENV, "").strip() == override:
+        return Path(override)
+
+    try:
+        override_path = Path(override).resolve()
+        data_home = DATA_HOME.resolve()
+    except (OSError, ValueError):
+        override_path = data_home = None
+
+    if override_path is not None and (
+        override_path == data_home or data_home in override_path.parents
+    ):
+        return Path(override)
+
+    if not os.environ.get(_PANE_MARKER_ENV, "").strip():
+        return Path(override)
+
+    _log.warning(
+        "refusing inherited TAKKUB_PORT_FILE=%s at app startup — it does not "
+        "resolve under this instance's own DATA_HOME (%s) and this process's "
+        "env carries a %s pane marker. A different cockpit instance's pane "
+        "likely leaked this env var into this process (#354). Using this "
+        "instance's own port file (%s) instead.",
+        override,
+        DATA_HOME,
+        _PANE_MARKER_ENV,
+        PORT_FILE,
+    )
+    return PORT_FILE
+
+
 def write_port(port: int) -> None:
     ensure_runtime()
-    _get_port_file().write_text(str(port), encoding="utf-8")
+    _effective_port_file_for_app().write_text(str(port), encoding="utf-8")
 
 
 def read_port() -> int | None:

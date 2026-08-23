@@ -154,6 +154,134 @@ class TestPortFile:
         assert config.read_port() is None
 
 
+class TestEffectivePortFileForApp:
+    """#354: the app-startup port-file resolver must reject an inherited
+    TAKKUB_PORT_FILE that points at a DIFFERENT cockpit instance's DATA_HOME,
+    while `_get_port_file()` (the client/pane read path) keeps honouring any
+    override unconditionally."""
+
+    def test_no_override_returns_default_port_file(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
+        assert config._effective_port_file_for_app() == config.PORT_FILE
+
+    def test_override_under_own_data_home_is_trusted(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        own_override = tmp_path / "runtime" / "custom-port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(own_override))
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+        assert config._effective_port_file_for_app() == own_override
+
+    def test_override_outside_data_home_is_rejected(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # An override outside DATA_HOME is only a #354 leak (rejected) when
+        # this process's env also carries the TAKKUB_ROLE pane marker that
+        # pane_env.py/spawn_engine.py stamp into every spawned pane — that is
+        # what actually distinguishes "instance B inherited pane process A's
+        # full env" from a plain user shell override (see
+        # config._PANE_MARKER_ENV). Without it a foreign-looking path is a
+        # legitimate user override and must be honoured instead — see
+        # test_override_outside_data_home_without_pane_marker_is_honoured.
+        my_home = tmp_path / "my-cockpit"
+        other_home = tmp_path / "other-cockpit"
+        my_home.mkdir()
+        other_home.mkdir()
+        monkeypatch.setattr(config, "DATA_HOME", my_home)
+        foreign_port_file = other_home / "runtime" / "port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(foreign_port_file))
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+        assert config._effective_port_file_for_app() == config.PORT_FILE
+
+    def test_override_outside_data_home_without_pane_marker_is_honoured(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A TAKKUB_PORT_FILE set from a plain user shell (no TAKKUB_ROLE —
+        never stamped on a cockpit's own process, only on panes it spawns)
+        must survive even when it doesn't resolve under this instance's own
+        DATA_HOME — the documented user-override contract
+        (_restart_env.configure_multi_instance_port_file docstring). Guards
+        against re-broadening the #354 guard back into rejecting every
+        foreign-looking path, which also broke a plain `takkub` CLI/test
+        process's TAKKUB_PORT_FILE override (no pane marker at all)."""
+        my_home = tmp_path / "my-cockpit"
+        other_home = tmp_path / "other-cockpit"
+        my_home.mkdir()
+        other_home.mkdir()
+        monkeypatch.setattr(config, "DATA_HOME", my_home)
+        user_port_file = other_home / "runtime" / "port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(user_port_file))
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+        assert config._effective_port_file_for_app() == user_port_file
+
+    def test_self_derived_multi_instance_override_is_trusted_even_outside_data_home(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        derived = (
+            Path("/tmp/agent-takkub-port.12345")
+            if sys.platform != "win32"
+            else tmp_path.parent / "agent-takkub-port.12345"
+        )
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(derived))
+        monkeypatch.setenv("_TAKKUB_AUTO_PORT_FILE", str(derived))
+        assert config._effective_port_file_for_app() == derived
+
+    def test_write_port_uses_guarded_resolver_not_foreign_override(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        my_home = tmp_path / "my-cockpit"
+        other_home = tmp_path / "other-cockpit"
+        my_home.mkdir()
+        (other_home / "runtime").mkdir(parents=True)
+        monkeypatch.setattr(config, "DATA_HOME", my_home)
+        foreign_port_file = other_home / "runtime" / "port"
+        foreign_port_file.write_text("11111", encoding="utf-8")
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(foreign_port_file))
+        # Pane marker present: this models the actual #354 leak (a pane
+        # process — carrying instance A's TAKKUB_ROLE and TAKKUB_PORT_FILE
+        # together — launching instance B as a plain child). Without it, a
+        # foreign-looking override is a legitimate user override instead;
+        # see test_override_outside_data_home_without_pane_marker_is_honoured.
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+
+        config.write_port(54321)
+
+        # this instance's own PORT_FILE got the new port...
+        assert config.PORT_FILE.read_text(encoding="utf-8") == "54321"
+        # ...and the other instance's port file was left untouched.
+        assert foreign_port_file.read_text(encoding="utf-8") == "11111"
+
+    def test_get_port_file_client_path_still_honours_any_override(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "my-cockpit")
+        foreign_port_file = tmp_path / "other-cockpit" / "runtime" / "port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(foreign_port_file))
+        monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+        assert config._get_port_file() == foreign_port_file
+
+    def test_auto_port_file_env_literal_matches_restart_env(self) -> None:
+        """config._AUTO_PORT_FILE_ENV is a deliberate duplicate of
+        `_restart_env.AUTO_PORT_FILE_ENV` (config.py stays leaf-module-pure
+        per import-linter's `leaf-modules-pure` contract, so it can't import
+        `_restart_env` to share the constant) — only a comment enforces the
+        sync today. If someone renames one side without the other, an
+        `_effective_port_file_for_app()` self-derived multi-instance override
+        silently stops being recognised and falls back to the shared
+        PORT_FILE, quietly reintroducing #354."""
+        from agent_takkub import _restart_env
+
+        assert config._AUTO_PORT_FILE_ENV == _restart_env.AUTO_PORT_FILE_ENV
+
+
 class TestAgentRoleDir:
     """Verify that agent_role_dir() materialises CLAUDE.md with the central
     hygiene blocks appended (dev-server + non-interactive shell — issue #52).
