@@ -37,6 +37,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   `real_stat` ทันทีถ้า path ไม่ใช่ไฟล์เป้าหมายของเทส ทำทั้ง `test_stat_retries_then_succeeds`
   และ `test_stat_gives_up_after_max_retries` (ตัวหลังเดิม raise ทุก path = อันตรายกว่า)
 
+- **Wave B: `takkub migrate apply` รันจริงบน prod ครั้งแรก (epic #309)** — ก่อนหน้านี้ ladder
+  ถูกพิสูจน์แค่กับ fixture V1 home และ dry-run แบบ read-only บน dev checkout เท่านั้น รอบนี้รันจริง
+  บน `installed_merged` (`~/.agent-takkub`) → apply 8/8 + validate 8/8,
+  `doctor --storage-layout` = `mixed` (คือสำเร็จ ไม่ใช่ `v2` — copy-never-move ทำให้ V1 ยังอยู่ครบ),
+  `v2/` = 696.9 MB, ไม่มีไฟล์ V1 ไหนถูกลบหรือแก้ · รายงานเต็ม + ตัวเลข pre-flight ที่ต่างจาก
+  baseline (อธิบายได้ทั้ง 4 จุด: คนละ home shape) อยู่ที่ `docs/v2/wave-b-apply-report.md`
+  · ผลพลอยได้: model registry ของ Wave A ได้ทดสอบกับข้อมูลจริงครั้งแรก (แผน §1.3 ระบุเองว่า
+  ทำไม่ได้จนกว่า apply จะรัน) — composite id อ่านข้อมูลจริงถูกต้อง
+
 ### Added (เพิ่ม)
 
 - **Core V2 model registry store (`core/model_catalog/`) — epic #309 Wave A ชิ้นสุดท้าย** —
