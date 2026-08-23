@@ -62,6 +62,17 @@ agent_takkub = [
     "static/fonts/LICENSE.txt",
     "static/fonts/LICENSE-NotoSansThai.txt",
     "static/icons/*.svg",
+    # Editor page (#365 phase 2) + its vendored Monaco AMD bundle — see
+    # static/editor/vendor/README.md for what's trimmed out of the stock
+    # npm package and why. No CDN dependency; this IS the runtime asset.
+    "static/editor/*.html",
+    "static/editor/vendor/monaco-editor/min/LICENSE",
+    "static/editor/vendor/monaco-editor/min/vs/*.js",
+    "static/editor/vendor/monaco-editor/min/vs/basic-languages/*.js",
+    "static/editor/vendor/monaco-editor/min/vs/editor/*.js",
+    "static/editor/vendor/monaco-editor/min/vs/editor/*.css",
+    "static/editor/vendor/monaco-editor/min/vs/language/*/*.js",
+    "static/editor/vendor/monaco-editor/min/vs/assets/*.js",
     # Staged by setup.py's custom build_py from the repo-root CLAUDE.md /
     # .claude/agents/*.md / capabilities/skills/*/SKILL.md right before this
     # list is collected — see config.py's ASSETS_ROOT for the
