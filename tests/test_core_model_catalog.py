@@ -9,6 +9,8 @@ from pathlib import Path
 from agent_takkub.core.model_catalog.legacy import (
     read_legacy_model_profiles,
     read_legacy_models,
+    read_legacy_provider_model_pin,
+    read_legacy_role_model_pin,
 )
 from agent_takkub.core.model_catalog.registry import ModelProfileRegistry, ModelRegistry
 from agent_takkub.core.models.model import ModelDefinition, ModelProfile
@@ -195,3 +197,81 @@ def test_read_legacy_model_profiles_parses_wrapped_blob(tmp_path):
     assert len(profiles) == 1
     assert profiles[0].id == "backend"
     assert profiles[0].model_id == "claude-sonnet-5"
+
+
+# ── read_legacy_role_model_pin / read_legacy_provider_model_pin ────────────
+# (epic #309 Wave C, plan §1.3) — unlike read_legacy_model_profiles() above,
+# these keep the `provider` a pin was saved for, which core.routing.Router
+# needs to reproduce V1 role_models.model_for()'s provider-gating exactly.
+
+
+def test_read_legacy_role_model_pin_missing_file_returns_none(tmp_path):
+    assert read_legacy_role_model_pin("backend", tmp_path) is None
+
+
+def test_read_legacy_role_model_pin_corrupt_json_returns_none(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    layout.models.mkdir(parents=True)
+    (layout.models / "aliases.json").write_text("{not json", encoding="utf-8")
+    assert read_legacy_role_model_pin("backend", tmp_path) is None
+
+
+def test_read_legacy_role_model_pin_role_not_present_returns_none(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(
+        layout.models / "aliases.json", {"frontend": {"provider": "codex", "model": "m1"}}
+    )
+    assert read_legacy_role_model_pin("backend", tmp_path) is None
+
+
+def test_read_legacy_role_model_pin_effort_only_entry_returns_none(tmp_path):
+    """No `model` in the entry (effort-only) is nothing a model pin can
+    represent — same "skip, don't guess" rule read_legacy_model_profiles()
+    already documents."""
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(
+        layout.models / "aliases.json", {"backend": {"provider": "claude", "effort": "high"}}
+    )
+    assert read_legacy_role_model_pin("backend", tmp_path) is None
+
+
+def test_read_legacy_role_model_pin_parses_provider_and_model(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(
+        layout.models / "aliases.json",
+        {"backend": {"provider": "claude", "model": "claude-opus-5", "effort": "high"}},
+    )
+    assert read_legacy_role_model_pin("backend", tmp_path) == ("claude", "claude-opus-5")
+
+
+def test_read_legacy_provider_model_pin_missing_file_returns_none(tmp_path):
+    assert read_legacy_provider_model_pin("claude", tmp_path) is None
+
+
+def test_read_legacy_provider_model_pin_corrupt_json_returns_none(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    layout.models.mkdir(parents=True)
+    (layout.models / "registry.json").write_text("{not json", encoding="utf-8")
+    assert read_legacy_provider_model_pin("claude", tmp_path) is None
+
+
+def test_read_legacy_provider_model_pin_provider_not_present_returns_none(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(layout.models / "registry.json", {"codex": "gpt-5.6"})
+    assert read_legacy_provider_model_pin("claude", tmp_path) is None
+
+
+def test_read_legacy_provider_model_pin_unregistered_provider_returns_none(tmp_path):
+    """V1 `provider_models._load()` silently drops any key not in
+    `provider_spec.PROVIDER_REGISTRY` — a stale migrated entry for a
+    provider since removed from the registry must not resurrect a pin V1
+    itself would no longer honour (epic #309 Wave C parity)."""
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(layout.models / "registry.json", {"some-retired-provider": "old-model"})
+    assert read_legacy_provider_model_pin("some-retired-provider", tmp_path) is None
+
+
+def test_read_legacy_provider_model_pin_parses_model(tmp_path):
+    layout = storage_layout_v2(tmp_path)
+    _write_wrapped(layout.models / "registry.json", {"claude": "claude-sonnet-5"})
+    assert read_legacy_provider_model_pin("claude", tmp_path) == "claude-sonnet-5"

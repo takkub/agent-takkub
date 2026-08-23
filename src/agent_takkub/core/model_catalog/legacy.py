@@ -29,6 +29,7 @@ from pathlib import Path
 from agent_takkub.core.models.model import ModelDefinition, ModelProfile
 from agent_takkub.core.storage.layout import storage_layout_v2
 from agent_takkub.core.storage.legacy_reader import read_json
+from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
 
 def read_legacy_models(data_home: Path | None = None) -> list[ModelDefinition]:
@@ -109,3 +110,54 @@ def read_legacy_model_profiles(data_home: Path | None = None) -> list[ModelProfi
             continue
         profiles.append(ModelProfile(id=role_name, name=role_name, model_id=model_id.strip()))
     return profiles
+
+
+def read_legacy_role_model_pin(role: str, data_home: Path | None = None) -> tuple[str, str] | None:
+    """``(provider, model)`` V1 pinned for *role* via the wrapped `aliases.json`,
+    or ``None`` if the role has no entry, the entry has no `model` (an
+    effort-only entry), or the JSON is missing/malformed.
+
+    Exists separately from :func:`read_legacy_model_profiles` because
+    `ModelProfile` has no `provider` field (see that function's docstring) —
+    `core.routing.Router.effective_model_for` needs the provider to gate a
+    role pin the same way V1 `role_models.model_for(role, provider)` does
+    (a pin saved for one CLI must never leak onto a different one a role got
+    substituted/re-pointed to), which a bare `ModelProfile` can't represent.
+    """
+    path = storage_layout_v2(data_home).models / "aliases.json"
+    data = read_json(path).get("data")
+    if not isinstance(data, dict):
+        return None
+    entry = data.get(role)
+    if not isinstance(entry, dict):
+        return None
+    provider = entry.get("provider")
+    model = entry.get("model")
+    if not isinstance(provider, str) or not provider.strip():
+        return None
+    if not isinstance(model, str) or not model.strip():
+        return None
+    return provider.strip(), model.strip()
+
+
+def read_legacy_provider_model_pin(provider: str, data_home: Path | None = None) -> str | None:
+    """Model V1 pinned for *provider* via the wrapped `registry.json`, or
+    ``None`` if unset/missing/malformed — same source `read_legacy_models()`
+    builds `ModelDefinition`s from, keyed lookup instead of building the
+    full list, mirroring V1 `provider_models.model_for(provider)`.
+
+    `provider_models._load()` silently drops any key not in
+    `provider_spec.PROVIDER_REGISTRY` (a provider removed from the registry
+    since the pin was saved) — mirrored here so a stale migrated entry
+    doesn't resurrect a pin V1 itself would no longer honour.
+    """
+    if provider not in PROVIDER_REGISTRY:
+        return None
+    path = storage_layout_v2(data_home).models / "registry.json"
+    data = read_json(path).get("data")
+    if not isinstance(data, dict):
+        return None
+    model_id = data.get(provider)
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    return model_id.strip()

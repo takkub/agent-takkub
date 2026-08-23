@@ -2084,8 +2084,7 @@ class SpawnEngineMixin:
             provider_model = ""
             model_argv: list[str] = []
             if spec.model_flag:
-                from .provider_models import model_for
-                from .role_models import model_for as role_model_for
+                from .core.routing import effective_model_for_v2
 
                 # A per-role model wins over the provider-level default; empty
                 # falls through to the provider default, then the CLI's own.
@@ -2096,10 +2095,11 @@ class SpawnEngineMixin:
                 # belongs to a different CLI.
                 # Per-assign override is the narrowest choice and therefore
                 # wins over the role setting, provider setting, and CLI default.
-                provider_model = (
-                    _ps_initial.model_override
-                    or role_model_for(base_role, spec.name)
-                    or model_for(spec.name)
+                # epic #309 Wave C: routed through core.routing's façade
+                # instead of calling role_models/provider_models directly —
+                # see core/routing/facade.py's effective_model_for_v2.
+                provider_model = _ps_initial.model_override or (
+                    effective_model_for_v2(base_role, spec.name, project=project_ns) or ""
                 )
                 if provider_model:
                     model_argv.extend([spec.model_flag, provider_model])
@@ -2727,9 +2727,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 if teammate_model:
                     model_argv.extend(["--model", teammate_model])
             else:
+                from .core.routing import effective_model_for_v2
                 from .provider_config import CLAUDE
-                from .provider_models import model_for
-                from .role_models import model_for as role_model_for
 
                 # Precedence: per-role model > claude provider-level model >
                 # the role's tier default. Reaching this branch means claude is
@@ -2742,8 +2741,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # win over a model the user saved with /model on every spawn AND
                 # every crash-respawn --resume, so a teammate could never actually
                 # keep a model its own session picked.
+                #
+                # epic #309 Wave C: routed through core.routing's façade
+                # instead of calling role_models/provider_models directly —
+                # see core/routing/facade.py's effective_model_for_v2.
                 teammate_model = (
-                    role_model_for(base_role, CLAUDE) or model_for(CLAUDE) or tier_model
+                    effective_model_for_v2(base_role, CLAUDE, project=project_ns) or tier_model
                 ).strip()
                 teammate_model = _remap_pinned_model(teammate_model, env)
                 apply_default_model(env, teammate_model)
@@ -2795,9 +2798,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # provider > plan-tier pin — otherwise choosing a Lead model is a
             # silent no-op on a claude Lead while it works on a non-claude one
             # (that path goes through the generic branch above).
+            from .core.routing import effective_model_for_v2
             from .provider_config import CLAUDE as _CLAUDE
-            from .provider_models import model_for as _provider_model_for
-            from .role_models import model_for as _role_model_for
 
             if _ps_initial.model_override:
                 # Deliberate one-off override — same argv-flag reasoning as
@@ -2811,9 +2813,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # override, so it goes through ANTHROPIC_DEFAULT_MODEL — same
                 # reasoning as the teammate branch — instead of --model, which
                 # would clobber a model the Lead's operator saved with /model.
+                #
+                # epic #309 Wave C: routed through core.routing's façade
+                # instead of calling role_models/provider_models directly —
+                # see core/routing/facade.py's effective_model_for_v2.
                 lead_model = (
-                    _role_model_for(role_name, _CLAUDE)
-                    or _provider_model_for(_CLAUDE)
+                    effective_model_for_v2(role_name, _CLAUDE, project=project_ns)
                     or _lead_model_override()
                 )
                 if lead_model:

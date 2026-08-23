@@ -200,6 +200,46 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     cfg = _maybe_module("agent_takkub.config", force=True)
     if cfg is not None and hasattr(cfg, "PORT_FILE"):
         monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)
+    # epic #309 Wave C: core.routing.Router.effective_model_for's own
+    # migration-detection check (`storage_layout_v2().models` existence,
+    # see router.py) reads `storage_layout_v2()`'s DEFAULT target, which
+    # resolves through `config.DATA_HOME` — on a dev checkout that's
+    # REPO_ROOT, and this checkout has a REAL migrated `v2/models/
+    # registry.json`/`aliases.json` on disk (gitignored runtime state from
+    # running this very cockpit locally). Unpatched, every test that spawns
+    # a pane through core.routing (flag ON by default) would silently see
+    # "already migrated" and read THAT file's real pins instead of
+    # whatever role_models/provider_models state the test itself set up —
+    # same "real machine file leaks into a test" lesson as core-v2-
+    # settings/role-models below, confirmed live (test_spawn_default_model_
+    # env.py resolved "sonnet"/"opus" from this checkout's real v2/models/
+    # aliases.json instead of the test's own pins).
+    #
+    # Deliberately narrower than redirecting `config.DATA_HOME` itself:
+    # several `config.py` functions (`provider_home_env`, `instance_display_
+    # version`, ...) branch on `DATA_HOME == REPO_ROOT` to detect "dev
+    # checkout" — globally repointing DATA_HOME breaks that comparison for
+    # every test relying on it (proven: 3 test_spawn_v2_account_env.py
+    # failures the first time this was tried). Patching only
+    # `storage_layout_v2`'s own default keeps `config.DATA_HOME` completely
+    # untouched; the module-attribute swap only reaches `router.py`'s late
+    # (per-call) `from ... import storage_layout_v2` — every OTHER caller
+    # (`core.storage.paths`, `core.model_catalog.legacy`, the migration
+    # engine/steps) imports it at module top level and is unaffected,
+    # exactly the same "late import is patchable, top-level import isn't"
+    # split this file already relies on elsewhere.
+    sl = _maybe_module("agent_takkub.core.storage.layout", force=True)
+    if sl is not None and hasattr(sl, "storage_layout_v2"):
+        isolated_data_home = tmp_path / "_isolated_takkub" / "data-home"
+        _orig_storage_layout_v2 = sl.storage_layout_v2
+        monkeypatch.setattr(
+            sl,
+            "storage_layout_v2",
+            lambda data_home=None: _orig_storage_layout_v2(
+                data_home if data_home is not None else isolated_data_home
+            ),
+            raising=False,
+        )
 
     # Redirect per-role provider config off the real ~/.takkub. effective_provider_for
     # is now on the spawn/assign stagger path (codex-gap detection, #38), so any
@@ -356,6 +396,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # now-gone state in a later test. See _install_qtimer_leak_tracker's
     # docstring above for why this is non-fatal.
     _stop_leaked_qtimers()
+
+
+@pytest.fixture
+def isolated_v2_data_home(tmp_path):
+    """The exact path `_isolate_runtime` (above) redirects `storage_layout_v2()`'s
+    no-arg default to for this test. A test proving epic #309 Wave C parity
+    (core.routing.Router.effective_model_for reading a REAL migrated V2
+    catalog) needs to write into this SAME tree — not just any tmp dir — so
+    the façade's own default resolution finds what the test migrated."""
+    return tmp_path / "_isolated_takkub" / "data-home"
 
 
 # #344: pytest install no sys.excepthook of its own, and PyQt6's default

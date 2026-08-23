@@ -44,6 +44,30 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   (ทิศทาง import เดิมผิด contract — `disk_usage` import จาก `worktree_manager` อยู่แล้ว)
   + tests: `TestListOrphans` 6 เคส (`tests/test_worktree_manager.py`), CLI 6 เคส (`tests/test_cli.py`)
 
+### Added (เพิ่ม)
+
+- **Core V2 Wave C ชิ้นที่ 1 — model resolver wiring เข้า `core/routing/` (epic #309, แผน §1.3)** —
+  `Router.effective_model_for(role, provider, project)` + façade `effective_model_for_v2` (flag-off =
+  เรียก V1 ตรง / flag-on = ผ่าน Router / exception = fail-open กลับ V1 — รูปเดียวกับ
+  `effective_provider_for_v2`) wire เข้า **ทั้ง 3 call site** ใน `spawn_engine.py` (generic-provider
+  branch, claude-teammate branch, claude-lead branch) แทน `role_models.model_for(role, provider) or
+  provider_models.model_for(provider)` — precedence/env override/`--model` override ไม่เปลี่ยน ·
+  **behavior-neutral by construction**: V2 catalog คือสำเนา verbatim ของไฟล์ V1 เดียวกัน จึงต้องคืน
+  ค่าเท่ากันทุกกรณี และพิสูจน์ด้วย parity matrix ที่รัน migrate step 1 จริง (ไม่ใช่ fixture มือ) —
+  7 เคส precedence × provider + not-migrated + V2 JSON พัง + flag-off + Router raise ·
+  รักษาเงื่อนไข **provider-match ของ role pin** (`role_models.model_for` คืนค่าเฉพาะเมื่อ entry.provider
+  == provider) ผ่าน helper ใหม่ใน `model_catalog/legacy.py` ที่อ่าน `(provider, model)` ดิบจาก
+  `aliases.json` — `ModelProfile` ไม่มี field provider ถ้าใช้มันจะทำ role ที่ pin model ของ codex
+  หลุดไปใส่ claude · เครื่องที่ยังไม่ migrate (ทุกเครื่องที่ไม่ใช่ prod) → V1 byte-identical ·
+  **V1 ยัง authoritative — V2 เป็น shadow-read**: เมื่อค่าต่างกัน (เช่น user แก้ pin ใน Settings
+  หลัง migrate ซึ่งเขียน V1 อย่างเดียว ไม่ sync เข้า `v2/`) คืน V1 + log `model_pin_v2_drift`
+  เป็นหลักฐานบน production ว่า V2 พร้อมเป็น source of truth หรือยังก่อน Phase 10 สลับ authority ·
+  `tests/conftest.py` isolate `storage_layout_v2()` แบบแคบ (ไม่ repoint `config.DATA_HOME` ซึ่งจะพัง
+  `provider_home_env` ที่เช็ค `DATA_HOME == REPO_ROOT`) — เพราะ dev checkout นี้มี `v2/models/*.json`
+  จริงจากการซ้อม migrate หลุดเข้าเทส
+  + tests: `tests/test_core_routing.py`, `tests/test_core_model_catalog.py` · เทส spawn เดิมทั้งหมด
+  เขียวโดยไม่แก้ expected values
+
 ## [v1.0.87] - 2026-08-23
 
 ### Fixed (แก้)

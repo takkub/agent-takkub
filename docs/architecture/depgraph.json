@@ -1322,11 +1322,14 @@
       "imports": [
         "agent_takkub.core.models.model",
         "agent_takkub.core.storage.layout",
-        "agent_takkub.core.storage.legacy_reader"
+        "agent_takkub.core.storage.legacy_reader",
+        "agent_takkub.provider_spec"
       ],
-      "imported_by": [],
-      "fan_in": 0,
-      "fan_out": 3
+      "imported_by": [
+        "agent_takkub.core.routing.router"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.core.model_catalog.registry",
@@ -1587,14 +1590,16 @@
       "imports": [
         "agent_takkub.core.routing.flag",
         "agent_takkub.core.routing.router",
-        "agent_takkub.provider_config"
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_models",
+        "agent_takkub.role_models"
       ],
       "imported_by": [
         "agent_takkub.core.routing",
         "agent_takkub.settings_core_v2"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.core.routing.flag",
@@ -1626,14 +1631,18 @@
       "module": "agent_takkub.core.routing.router",
       "imports": [
         "agent_takkub.core.contracts.routing_policy",
-        "agent_takkub.core.routing.policy"
+        "agent_takkub.core.model_catalog.legacy",
+        "agent_takkub.core.routing.policy",
+        "agent_takkub.core.storage.layout",
+        "agent_takkub.provider_models",
+        "agent_takkub.role_models"
       ],
       "imported_by": [
         "agent_takkub.core.routing",
         "agent_takkub.core.routing.facade"
       ],
       "fan_in": 2,
-      "fan_out": 2
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.scheduling",
@@ -1842,10 +1851,11 @@
         "agent_takkub.core.migration.engine",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.model_catalog.legacy",
+        "agent_takkub.core.routing.router",
         "agent_takkub.core.storage.paths",
         "agent_takkub.doctor"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {
@@ -2867,12 +2877,13 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.core.routing.facade",
+        "agent_takkub.core.routing.router",
         "agent_takkub.provider_model_refresh",
         "agent_takkub.settings_management.repositories.providers",
-        "agent_takkub.settings_window",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
@@ -2900,6 +2911,7 @@
         "agent_takkub.boot_update_window",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
+        "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.versioning.detector",
         "agent_takkub.core.versioning.probe",
         "agent_takkub.doctor",
@@ -2922,7 +2934,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 25,
+      "fan_in": 26,
       "fan_out": 4
     },
     {
@@ -3210,12 +3222,14 @@
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
+        "agent_takkub.core.routing.facade",
+        "agent_takkub.core.routing.router",
         "agent_takkub.provider_config",
         "agent_takkub.provider_model_refresh",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
@@ -3905,7 +3919,6 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.provider_bootstrap",
         "agent_takkub.provider_config",
-        "agent_takkub.provider_models",
         "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
         "agent_takkub.role_memory",
@@ -3925,7 +3938,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 38
+      "fan_out": 37
     },
     {
       "module": "agent_takkub.spawn_gate",
