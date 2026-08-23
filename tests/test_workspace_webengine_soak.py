@@ -75,6 +75,31 @@ class TestWorkspaceWebEngineSoak:
         assert editor["stuck_open_cycles"] == []
         assert editor["stuck_closed_cycles"] == []
 
+    def test_editor_webengine_process_reaped_after_close(self) -> None:
+        """#366: the Python-level checks above (`has_view()`/`open_count()`)
+        only prove a flag flipped, not that the OS-level `QtWebEngineProcess`
+        actually exited — a real regression here previously passed the two
+        checks above while accumulating one stray renderer process per cycle
+        (confirmed both offscreen and on a real windowed display; root cause
+        was the soak script's own pump — `processEvents()` in a
+        `time.sleep()` loop never let Chromium's deferred-delete/IPC
+        handshake complete, fixed by pumping a real nested `QEventLoop`
+        instead — see docs/audit/2026-08-23-366-webengine-process-reap.md).
+        Tolerance is exact (`<=` baseline, which is 0 for a fresh process),
+        not a fudge factor: the fixed harness reaps in ~0.5-1.5s in practice
+        against a 30s default timeout, so any leftover process here is a
+        real regression, not pump-timing noise."""
+        result = _run_soak()
+        editor = result["editor"]
+        assert (
+            editor["webengine_process_count_after"] <= editor["webengine_process_count_before"]
+        ), (
+            f"stray QtWebEngineProcess after {editor['cycles']} cycles: "
+            f"{editor['webengine_process_count_after']} (baseline "
+            f"{editor['webengine_process_count_before']}), reap_seconds="
+            f"{editor['webengine_reap_seconds']}"
+        )
+
     def test_preview_state_machine_cycles_without_error(self) -> None:
         result = _run_soak()
         assert result["preview"]["errors"] == []

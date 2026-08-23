@@ -16,7 +16,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   **+155 MB** (budget +300) · `16_ACCEPTANCE_CRITERIA.md` 19 ข้อ ✅13 / ⏳6 (ต้อง browser จริง/CI) / ❌0 · `docs/audit/2026-08-23-365-webengine-soak.md`
   soak 25×3 ผ่าน · reviewer SHOULD ฝั่ง UI ปิดครบ (CHANGES row ผ่าน `resolve_and_contain`, `navigation_allowed` contract pin ลง docstring
   + เทส `_PreviewPage.acceptNavigationRequest` ตรงๆ, ask-agent 4000-char bound test) · follow-up: QtWebEngineProcess ไม่ถูก reap หลังปิด
-  (offscreen, ต้อง verify จอจริง) → issue แยก
+  (offscreen, ต้อง verify จอจริง) → issue แยก **ปิดแล้ว, ดูล่าง #366**
+
+- **#366 — QtWebEngineProcess reap fix: เป็นบั๊กของ soak harness ไม่ใช่แอป** —
+  `docs/audit/2026-08-23-366-webengine-process-reap.md`: verify จอจริงก่อนพบว่ายังค้าง (5 cycles/3 projects → 4 process ค้าง,
+  ไม่ลง 0 ใน 90s แม้จอจริง) ตรงข้ามกับสมมติฐาน offscreen-artifact เดิม — ไล่ root cause เจอว่า `tools/soak_workspace_webengine.py`'s
+  `_pump()` เดิม (`processEvents()` ใน `time.sleep()` loop) ไม่เคย deliver `QEvent::DeferredDelete` ให้ `QWebEngineView`/`QWebEnginePage`
+  เลย (`sip.isdeleted()` เป็น False ค้างตลอด 30s) — Chromium's IPC shutdown handshake ต้องการ real nested `QEventLoop`
+  (`loop.exec()`) ถึงจะ deliver ได้ (bare-probe reap ใน ~1s ทันทีที่เปลี่ยนมาใช้) · `EditorHost`/`PreviewHost`'s teardown code
+  **ไม่ต้องแก้เลย** — โปรดักชันรันใต้ `app.exec()` อยู่แล้ว จึงไม่เจอบั๊กนี้จริง · แก้ `_pump()` ให้ปั๊มผ่าน `QEventLoop` จริงแทน →
+  reap 0 stray process ทั้ง real display (0.5–1.5s, 5/15 cycles) และ offscreen (0.5s) · เพิ่ม `webengine_process_count_after`
+  assertion เข้า `tests/test_workspace_webengine_soak.py` (เดิมมองไม่เห็น bug นี้เพราะเช็คแค่ Python-level flag) ·
+  acceptance doc §2 อัปเดตเป็น "ปิดแล้ว ≈0" แล้ว
 
 - **Workspace 1.2.0 เฟส 7 design tool integrations** (#365) — `core/capabilities/design_integrations.py`: **Storybook detect จริง**
   (`.storybook/` หรือ `package.json` script · port จาก `-p/--port` · `preview_url` สำหรับ `takkub preview open-url`, ไม่รัน/ไม่แตะ

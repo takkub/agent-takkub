@@ -132,7 +132,39 @@ preview each get their own `QWebEngineProfile`/renderer process by design, which
 the dominant cost here, not per-project multiplication — RAM rule already guarantees
 no second view is ever created per project).
 
+### UPDATE 2026-08-23 (devops, #366) — resolved: soak-harness bug, not an app bug
+
+The "does NOT return to baseline" finding below was measured with
+`tools/soak_workspace_webengine.py`'s `_pump()` helper, which drove the Qt
+event loop via bare `QApplication.processEvents()` calls in a Python
+`time.sleep()` loop. That pumping style **never delivers
+`QEvent::DeferredDelete` to `QWebEngineView`/`QWebEnginePage`** on this
+Qt/Windows build — confirmed by isolating probes (`sip.isdeleted()` stayed
+`False` across 30s of that pumping, on both offscreen and a real windowed
+display) — while a real nested `QEventLoop`/`app.exec()` reaps the same
+object graph in ~0.5–1.5s with **zero changes** to `editor_widget.py` /
+`preview_widget.py`. Since the production app always runs under
+`app.exec()`, this was never a real leak in the running app — full
+root-cause writeup: `docs/audit/2026-08-23-366-webengine-process-reap.md`.
+
+`tools/soak_workspace_webengine.py`'s pump was fixed accordingly. Re-run,
+same method (`close_all()`/`close_project()`, then poll):
+
+| elapsed after close | webengine process count | scenario |
+|---:|---:|---|
+| 0.5s | 0 | offscreen, 5 cycles / 3 projects |
+| 1.1s | 0 | real display, 5 cycles / 3 projects |
+| 0.5s | 0 | real display, 15 cycles / 3 projects |
+
+**"≈0 after close" now PASSES**, both offscreen and on a real display — the
+✅/❌ table below and the master-plan RAM acceptance criterion (§4, "0 เมื่อ
+ปิด") are both satisfied. The original section is kept below unedited as the
+record of what was actually measured before the fix.
+
 ### Results — after close (the "≈0" number): does NOT return to baseline in this harness
+
+**(superseded — see "UPDATE 2026-08-23" above; kept for the historical record
+of what was measured before the harness fix.)**
 
 `editor_host.close_all()` + `preview_host.close_project(...)` were called, then RSS
 was sampled on a decay curve (5/10/15/20/30s after close, `gc.collect()` before each
@@ -237,7 +269,7 @@ browser/GUI session to fully confirm (none available in this environment/role) �
 | 15 | Obsidian remains curated human knowledge | ✅ | Not touched by #365; unrelated subsystem. |
 | 16 | OpenViking optional | ✅ | Not touched by #365; unrelated subsystem/flag. |
 | 17 | No new heavy IO on Qt main thread | ✅ | Confirmed by the phase 3-5 review's "Concurrency/IO" item: every git subprocess call sets `timeout=`; all FS/git work runs on `QThreadPool` workers; `FileWatchService`'s handler only queues a debounced flush, actual stat+hash happens in `_SnapshotWorker.run`. |
-| 18 | Windows WebEngine soak has no lifecycle/reparent crash regression | ✅ | Ran on this machine (win32): both the one-off 3-project script and `tools/soak_workspace_webengine.py --cycles 5 --projects 3` exit 0, `"ok": true`, zero `open_errors`/`stuck_open_cycles`/`stuck_closed_cycles` — no hard-abort/reparent crash. **Separate from and does not cover** the process-not-reaped RAM finding in §2, which is a leak, not a crash. |
+| 18 | Windows WebEngine soak has no lifecycle/reparent crash regression | ✅ | Ran on this machine (win32): both the one-off 3-project script and `tools/soak_workspace_webengine.py --cycles 5 --projects 3` exit 0, `"ok": true`, zero `open_errors`/`stuck_open_cycles`/`stuck_closed_cycles` — no hard-abort/reparent crash. §2's process-not-reaped finding is now also resolved (#366, harness pump bug, not an app bug — see UPDATE above) and covered by a new `webengine_process_count_after` assertion in `tests/test_workspace_webengine_soak.py`. |
 | 19 | Current QA gate green | ⏳ | Targeted gate for every file this task touched is green locally (`takkub qa-gate --targeted` over the four files in §1). **GitHub CI on `origin/main`'s last-pushed commit (`3166bb8`) is currently red** — `ci` workflow fails on `tests/test_file_watch_service.py::TestDebounce::test_rapid_changes_to_same_path_flush_once` (macOS-only flake). This is already fixed in the local (unpushed) `main` at commit `b5fd018` ("test(file-watch): debounce test bounded pump + stop timer (macOS CI flake, #365)") — local `main` has moved well past `origin/main` (phase 7 Capability Hub, a full WebEngine soak 25×3 audit, etc.) with none of it pushed/CI-verified yet. Real "is the gate green" answer needs a push + fresh CI run, which is outside this task's/role's scope (push is Lead's call). |
 
 ### Summary
@@ -247,6 +279,7 @@ browser/GUI session to fully confirm (none available in this environment/role) �
   either a real browser/GUI session (items 2/5/6/7/8 — visual Monaco/diff/Preview
   rendering, none of which this role can produce here) or a fresh pushed CI run
   (item 19) to fully close out.
-- ❌ 0/19 outright broken, but §2's RAM "≈0 after close" number is a real, measured
-  gap flagged for follow-up — not swept under either the ✅ item 18 (crash-only) or
-  any of the ⏳ rows above.
+- ❌ 0/19 outright broken. §2's RAM "≈0 after close" number was flagged as a real,
+  measured gap at the time this review was written; **resolved 2026-08-23 (#366)**
+  — see the UPDATE note in §2 — it was a soak-harness pumping bug
+  (`tools/soak_workspace_webengine.py`'s `_pump()`), not an app-code leak.
