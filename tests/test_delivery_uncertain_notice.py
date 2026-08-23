@@ -115,3 +115,36 @@ class TestUncertainDeliveryNotice:
             orch._warn_lead_delivery_uncertain("gemini", "P")
 
         assert not _written_strings(dead.session)
+
+    def test_suppressed_when_pane_is_working_with_recent_output(self, orch: Orchestrator) -> None:
+        """#359: a long task paste that genuinely landed can still trip the
+        "still ready" verdict — if the pane is visibly working with recent
+        output, don't tell Lead to reassign it."""
+        lead = _pane(_live_session())
+        gemini = _pane(_live_session())
+        gemini.state = "working"
+        gemini.session.seconds_since_output.return_value = 2.0
+        orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}
+
+        with patch("agent_takkub.lead_inbox._log_event") as log_event:
+            orch._warn_lead_delivery_uncertain("gemini", "P")
+
+        assert not _written_strings(lead.session)
+        assert any(
+            c.args and c.args[0] == "delivery_uncertain_suppressed" for c in log_event.mock_calls
+        )
+
+    def test_still_warns_when_working_but_quiet_a_while(self, orch: Orchestrator) -> None:
+        """Being in 'working' state alone isn't enough — the pane must have
+        produced output recently, or this would mask a genuinely stuck
+        delivery just because nothing ever reset its state."""
+        lead = _pane(_live_session())
+        gemini = _pane(_live_session())
+        gemini.state = "working"
+        gemini.session.seconds_since_output.return_value = 999.0
+        orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._warn_lead_delivery_uncertain("gemini", "P")
+
+        assert _written_strings(lead.session)

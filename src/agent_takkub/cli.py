@@ -1199,6 +1199,19 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     whatever wait registration is active for this project — the cleanup
     path for a wait that's stuck watching a role that will never resolve
     (or one the caller simply no longer wants to keep blocking on).
+
+    #357: a `reason: "user_input"` interrupt cannot always be trusted as
+    "the owner actually typed something" — the same `_on_pane_input` choke
+    point that stamps `_lead_last_user_input_ts` also carries terminal
+    auto-replies (e.g. a cursor-position/device-attributes response the
+    embedded xterm.js emits through its one public `onData` event when the
+    Lead pane's own TUI redraws after a cockpit-injected digest/banner/
+    notice — that echo is indistinguishable from a real keystroke at the
+    widget layer, which has no API to tag it otherwise). `--no-interrupt`
+    is the escape hatch: instead of stopping on that specific reason, this
+    loop quietly re-attaches to whatever roles are still pending and keeps
+    polling — a genuine blocking report from an outside role (plain
+    `interrupt`, no `reason`) still stops the wait immediately, unaffected.
     """
     if getattr(args, "cancel", False):
         result = _request(_with_project({"cmd": "wait-cancel", "from": _from_role()}))
@@ -1207,6 +1220,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
 
     timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
+    no_interrupt = getattr(args, "no_interrupt", False)
 
     begin = _request(
         _with_project(
@@ -1263,6 +1277,30 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 last_heartbeat = now_t
             last_pending_keys = pending_keys
             interrupt = poll.get("interrupt")
+            if interrupt and interrupt.get("reason") == "user_input" and no_interrupt:
+                # #357: caller asked to ride out this specific interrupt
+                # reason — the server already tore down the registration
+                # (poll_wait ends it on ANY interrupt), so transparently
+                # re-attach to whatever roles are still pending instead of
+                # surfacing it as a stop. Outer `start`/`timeout` bookkeeping
+                # is unaffected — only this sub-registration is new.
+                remaining = timeout - (time.time() - start)
+                if remaining <= 0:
+                    break
+                rebegin = _request(
+                    _with_project(
+                        {
+                            "cmd": "wait-begin",
+                            "roles": sorted(pending_keys),
+                            "timeout": remaining,
+                            "from": _from_role(),
+                        }
+                    )
+                )
+                if not rebegin.get("ok"):
+                    return rebegin
+                wait_id = rebegin.get("wait_id")
+                continue
             if interrupt:
                 interrupted_by = interrupt
                 if interrupt.get("reason") == "user_input":
@@ -2872,6 +2910,15 @@ def main(argv: list[str] | None = None) -> int:
         "--cancel",
         action="store_true",
         help="release the active wait registration for this project (#249) instead of blocking",
+    )
+    swt.add_argument(
+        "--no-interrupt",
+        action="store_true",
+        dest="no_interrupt",
+        help="(#357) keep waiting through a 'reason: user_input' interrupt instead of "
+        "stopping — transparently re-attaches to the still-pending roles and keeps "
+        "polling until they resolve or --timeout elapses. Does NOT suppress a genuine "
+        "blocking report from an outside role (#253) — that still stops the wait.",
     )
     swt.set_defaults(func=cmd_wait)
 

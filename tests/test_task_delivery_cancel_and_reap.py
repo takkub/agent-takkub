@@ -292,3 +292,51 @@ class TestReapStaleDeliveries:
     def test_noop_without_delivery_manager(self, orch: Orchestrator) -> None:
         orch._panes_by_project["P"] = {}
         orch._reap_stale_deliveries()  # must not raise
+
+    def test_suppressed_when_pane_is_working_with_recent_output(self, orch: Orchestrator) -> None:
+        """#359: a long task paste can outlast the fixed delivery TTL to
+        ingest even though it genuinely landed — if the pane is visibly
+        working with recent output, don't tell Lead to reassign it."""
+        now = [100.0]
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        backend.state = "working"
+        backend.session.seconds_since_output.return_value = 2.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+        manager.create(
+            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+        )
+        orch._delivery_manager = manager
+        now[0] = 200.0
+
+        with patch("agent_takkub.lead_inbox._log_event") as log_event:
+            orch._reap_stale_deliveries()
+
+        assert not _written_strings(lead.session)
+        assert any(
+            c.args and c.args[0] == "delivery_stale_reap_suppressed" for c in log_event.mock_calls
+        )
+
+    def test_still_reaps_when_pane_quiet_a_while(self, orch: Orchestrator) -> None:
+        """'working' state alone isn't enough — recent output is required,
+        or a pane wedged in 'working' forever would mask a genuinely stuck
+        delivery."""
+        now = [100.0]
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        backend.state = "working"
+        backend.session.seconds_since_output.return_value = 999.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+        manager.create(
+            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+        )
+        orch._delivery_manager = manager
+        now[0] = 200.0
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._reap_stale_deliveries()
+
+        notices = _written_strings(lead.session)
+        assert any("[delivery-stale-reap]" in m and "backend" in m for m in notices)

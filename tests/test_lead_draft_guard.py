@@ -183,6 +183,73 @@ class TestOnPaneInputStampsLastUserInputTs:
         assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is not None
 
 
+class TestOnPaneInputFiltersTerminalAutoReplies:
+    """#357: xterm.js's public `onData` fires identically for a real
+    keystroke and for a terminal-generated auto-reply to an escape-sequence
+    query the PTY's own output just triggered (cursor-position/device-
+    attributes/focus reports) — pasting a cockpit notice/digest/banner makes
+    the target CLI redraw, which can trigger exactly this, and it used to be
+    stamped as the owner interrupting. A chunk that is ONLY one or more such
+    replies (no real keystroke content) must not stamp `_lead_last_user_input_ts`
+    or feed the draft tracker — forwarding to the PTY is unaffected either way."""
+
+    @pytest.mark.parametrize(
+        "auto_reply",
+        [
+            b"\x1b[24;80R",  # CPR — cursor position report
+            b"\x1b[?1;2c",  # DA1 — primary device attributes
+            b"\x1b[>0;276;0c",  # DA2 — secondary device attributes
+            b"\x1b[0n",  # DSR — device status report reply
+            b"\x1b]11;rgb:0000/0000/0000\x07",  # OSC reply (color query answer)
+            b"\x1b[I",  # focus-in report
+            b"\x1b[O",  # focus-out report
+            b"\x1b[24;80R\x1b[0n",  # more than one, back to back
+        ],
+    )
+    def test_pure_auto_reply_chunk_does_not_stamp_anything(
+        self, orch: Orchestrator, auto_reply: bytes
+    ) -> None:
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        orch._on_pane_input("lead", auto_reply)
+
+        assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is None
+        assert getattr(orch, "_lead_draft_state", {}).get(TEST_PROJECT) is None
+        pane.session.write.assert_called_once_with(auto_reply)
+
+    @pytest.mark.parametrize(
+        "real_input",
+        [
+            b"a",
+            b"\r",
+            b"hello",
+            b"pasted task text",
+        ],
+    )
+    def test_real_keystrokes_and_paste_still_stamp(
+        self, orch: Orchestrator, real_input: bytes
+    ) -> None:
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        orch._on_pane_input("lead", real_input)
+
+        assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is not None
+
+    def test_mixed_chunk_with_real_content_still_stamps(self, orch: Orchestrator) -> None:
+        """Conservative by design: a chunk that isn't PURELY an auto-reply
+        (even one real character mixed in with escape bytes) must still
+        count as user input — never suppress a genuine keystroke to catch
+        an auto-reply."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        orch._on_pane_input("lead", b"\x1b[24;80Ra")
+
+        assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is not None
+
+
 class TestProjectNsForPane:
     def test_finds_owning_project_by_identity(self, orch: Orchestrator) -> None:
         pane_a = _make_pane("lead")

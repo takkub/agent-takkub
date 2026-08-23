@@ -160,6 +160,56 @@ class TestBootMarkerBlindPasteGuard:
         assert len(failures) == 1, "the task must end as an explicit failure, not silence"
         assert failures[0]["role"] == "codex"
 
+    def test_pre_spawn_wait_does_not_count_against_boot_marker_ceiling(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#356: a role parked in the spawn gate's deferred set (or just slow
+        to get an actual session under machine load — the same condition
+        that gets a task resource-governor-queued in the first place) must
+        not have that pre-spawn wait counted against `BOOT_STALL_CEILING_SEC`
+        once its session finally comes up and shows a boot marker — that
+        ceiling measures how long the pane has been stuck on ITS OWN boot
+        marker, not how long delivery has been polling overall."""
+        monkeypatch.setattr(orch_mod, "BOOT_STALL_CEILING_SEC", 1)  # 1s ceiling — fake clock
+        lead = _pane(_live_session())
+        codex = _pane(None)  # no session yet — simulates spawn-gate deferral
+        orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
+        orch._spawn_deferred = {"P::codex"}
+
+        live = _live_session()
+        live.is_at_ready_prompt.return_value = False  # never ready
+        live.shows_boot_phase_marker.return_value = True  # marker never clears
+        calls = {"n": 0}
+
+        def _fire(_ms, fn):
+            calls["n"] += 1
+            if calls["n"] == 20:
+                # Session finally attaches after a long pre-spawn wait —
+                # ~2.85s of "no session yet" ticks already accumulated.
+                codex.session = live
+            fn()
+
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(_fire))
+        failures: list[float] = []
+        monkeypatch.setattr(
+            orch,
+            "_fail_boot_stalled_delivery",
+            lambda role, project, elapsed: failures.append(elapsed),
+        )
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
+
+        assert calls["n"] > 20, "must have kept polling through the pre-spawn wait"
+        assert len(failures) == 1
+        # The 1s ceiling must be measured from when the session came alive
+        # (~tick 20), not from when polling started — the old bug would trip
+        # this the very first tick after the session appeared, reporting an
+        # elapsed close to the full ~2.85s+ pre-spawn wait instead.
+        assert failures[0] < 1.5, (
+            f"pre-spawn wait leaked into the boot-marker ceiling: {failures[0]}"
+        )
+
     def test_ready_pane_delivers_immediately_unaffected(
         self, orch: Orchestrator, monkeypatch
     ) -> None:

@@ -721,6 +721,31 @@ class TestPollWaitUserInputInterrupt:
         assert result["interrupt"] is None
         assert PROJECT not in orch._lead_last_user_input_ts
 
+    def test_terminal_auto_reply_via_on_pane_input_does_not_interrupt(
+        self, orch: Orchestrator
+    ) -> None:
+        """#357 end-to-end: a pure terminal auto-reply chunk (e.g. a cursor-
+        position report xterm.js answers automatically when the Lead pane's
+        TUI redraws after a cockpit-injected digest/banner/notice) routed
+        through the REAL `_on_pane_input` choke point must not interrupt an
+        active wait — unlike an actual keystroke, which still does (see
+        TestPollWaitUserInputInterrupt above for that side)."""
+        from unittest.mock import MagicMock
+
+        _register_working(orch, "backend")
+        lead_pane = MagicMock()
+        lead_pane.role.name = "lead"
+        lead_pane.session = MagicMock()
+        orch._panes_by_project.setdefault(PROJECT, {})["lead"] = lead_pane
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+
+        orch._on_pane_input("lead", b"\x1b[24;80R")  # CPR — cursor position report
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+        assert "backend" in result["pending"]
+
     def test_no_pending_roles_never_computes_user_input_interrupt(self, orch: Orchestrator) -> None:
         """Matches the existing #253/#259 gating: once every watched role
         has already resolved, the poll is about to end the registration on
@@ -1051,6 +1076,125 @@ class TestCliWaitCommand:
         assert "interrupted" in out
         assert "พิมพ์ข้อความใหม่เข้ามา" in out
         assert "needs attention" not in out, "must not read like a role-report interrupt"
+        assert [c["cmd"] for c in calls] == ["wait-begin", "wait-poll", "wait-end"]
+
+    def test_no_interrupt_flag_rides_out_user_input_and_keeps_watching(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#357: a `reason: user_input` interrupt can be a false positive
+        (terminal auto-reply, not a real keystroke — see cmd_wait's
+        docstring) — `--no-interrupt` must transparently re-attach to the
+        still-pending roles instead of stopping, and keep going until the
+        roles actually resolve."""
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                wid = "w1" if len(calls) == 1 else "w2"
+                return {
+                    "ok": True,
+                    "msg": "watching 1 role(s)",
+                    "wait_id": wid,
+                    "roles": ["backend"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                if payload["wait_id"] == "w1":
+                    return {
+                        "ok": True,
+                        "msg": "1 role(s) still pending",
+                        "done": {},
+                        "failed": {},
+                        "gone": {},
+                        "pending": {"backend": "ยังทำงานอยู่"},
+                        "elapsed": 2.0,
+                        "expired": False,
+                        "interrupt": {
+                            "role": "lead",
+                            "detail": "มีข้อความใหม่จากคุณเข้ามาระหว่างที่ wait กำลังรออยู่",
+                            "reason": "user_input",
+                        },
+                    }
+                return {
+                    "ok": True,
+                    "msg": "resolved",
+                    "done": {"backend": "delivered"},
+                    "failed": {},
+                    "gone": {},
+                    "pending": {},
+                    "elapsed": 3.0,
+                    "expired": False,
+                    "interrupt": None,
+                }
+            if payload["cmd"] == "wait-end":
+                return {"ok": True, "msg": "wait ended"}
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--role", "backend", "--no-interrupt"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "all roles resolved" in out or "resolved after" in out
+        assert "interrupted" not in out
+        # re-attached once (second wait-begin) after the suppressed interrupt,
+        # then polled the new registration to resolution — no wait-end needed
+        # since the final poll left nothing pending.
+        assert [c["cmd"] for c in calls] == [
+            "wait-begin",
+            "wait-poll",
+            "wait-begin",
+            "wait-poll",
+        ]
+
+    def test_no_interrupt_flag_still_stops_on_a_real_blocking_report(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """--no-interrupt only rides out the user_input false-positive
+        reason (#357) — a genuine #253 outside-role blocking report must
+        still stop the wait immediately."""
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                return {
+                    "ok": True,
+                    "msg": "watching 1 role(s)",
+                    "wait_id": "w1",
+                    "roles": ["backend"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                return {
+                    "ok": True,
+                    "msg": "1 role(s) still pending",
+                    "done": {},
+                    "failed": {},
+                    "gone": {},
+                    "pending": {"backend": "ยังทำงานอยู่"},
+                    "elapsed": 5.0,
+                    "expired": False,
+                    "interrupt": {"role": "devops", "detail": "[devops FAILED] boom"},
+                }
+            if payload["cmd"] == "wait-end":
+                return {"ok": True, "msg": "wait ended"}
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--role", "backend", "--no-interrupt"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "interrupted" in out
+        assert "devops" in out
         assert [c["cmd"] for c in calls] == ["wait-begin", "wait-poll", "wait-end"]
 
     def test_cancel_flag_sends_wait_cancel_and_skips_poll(

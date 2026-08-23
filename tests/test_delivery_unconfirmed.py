@@ -597,6 +597,81 @@ class TestVerifiedEnterWiring:
         plain.assert_not_called()
 
 
+class TestSettledOutputSinceWriteSignal:
+    """#359: a long task paste can exhaust `_delayed_enter_verified`'s small
+    swallow-resend budget while still reading "ready prompt" — the CLI just
+    hasn't visibly started processing a big paste yet — even though the
+    bytes were genuinely received. `_on_settled` must not conclude
+    UNCERTAIN (and warn Lead to reassign) when PTY output has already
+    appeared since the write, regardless of what is_at_ready_prompt() says
+    at settle time."""
+
+    def test_output_after_write_settles_accepted_not_uncertain(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        import itertools
+
+        reviewer = _pane(_live_session())
+        # Never flips busy and the box always reads empty — exactly what a
+        # long-but-genuinely-delivered paste's tail end can look like.
+        reviewer.session.is_at_ready_prompt.return_value = True
+        reviewer.session.shows_pending_input.return_value = False
+        # Strictly increasing on every call, so any read taken later than an
+        # earlier one is provably higher — models real output arriving as
+        # the CLI starts working the paste.
+        counter = itertools.count(1.0)
+        reviewer.session.last_output_monotonic.side_effect = lambda: next(counter)
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            orch._send_when_ready(
+                "reviewer", "a rather long task " * 200, max_wait_ms=1000, project="P"
+            )
+
+        delivery = next(iter(orch._delivery_manager._deliveries.values()))
+        assert delivery.state.value == "accepted"
+        lead_written = " ".join(
+            c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
+        )
+        assert "delivery-uncertain" not in lead_written
+
+    def test_no_output_since_write_still_settles_uncertain(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """Control case: a genuinely never-submitted paste (no output at
+        all, ever) must still warn Lead exactly as before."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        reviewer.session.shows_pending_input.return_value = False
+        reviewer.session.last_output_monotonic.return_value = 0.0
+        reviewer.session.seconds_since_output.return_value = 999.0
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+
+        delivery = next(iter(orch._delivery_manager._deliveries.values()))
+        assert delivery.state.value == "uncertain"
+        lead_written = " ".join(
+            c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
+        )
+        assert "delivery-uncertain" in lead_written
+
+
 class TestSpawnFailureNotSilent:
     """#26 root cause: when spawn can't register the pane (main_window routing
     desync), assign must NOT silently drop — it logs and warns the Lead."""

@@ -8836,6 +8836,42 @@ class Orchestrator(
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return box.exec() == QMessageBox.StandardButton.Ok
 
+    # (#357) A chunk that xterm.js's `onData` forwards can be a REAL keystroke
+    # OR a terminal-generated auto-reply to an escape-sequence query the PTY's
+    # own OUTPUT just triggered (cursor-position/device-attributes/focus
+    # reports) — xterm.js's public `onData` API does not distinguish the two,
+    # so both arrive at `_on_pane_input` through the exact same path. Measured
+    # live: pasting a Lead Inbox digest/banner/notice makes the target CLI
+    # redraw, which queries the terminal (e.g. cursor position) and xterm.js
+    # answers automatically — that reply used to be indistinguishable from the
+    # owner typing, falsely stamping `_lead_last_user_input_ts` and cutting a
+    # `takkub wait` short with "interrupted by user input" seconds after the
+    # digest landed, nothing typed. A human cannot type these byte sequences
+    # via a keyboard, so a chunk matching ONLY one or more of them — no
+    # printable text, no CR/LF — is filtered out here. A chunk with even one
+    # real character mixed in still counts as user input (conservative: never
+    # suppress a genuine keystroke to catch an auto-reply).
+    #   ESC[<row>;<col>R   CPR   — cursor position report
+    #   ESC[?...c          DA1   — primary device attributes
+    #   ESC[>...c          DA2   — secondary device attributes
+    #   ESC[<n>n           DSR   — device status report reply (e.g. ESC[0n)
+    #   ESC]...BEL / ESC]...ST   OSC reply (e.g. color-query answers)
+    #   ESC[I / ESC[O      focus-in / focus-out reporting
+    #   ESC[200~ / ESC[201~      bracketed-paste markers (no content between)
+    # Terminal-structural, not provider- or platform-specific — applies to
+    # every pane on every OS this widget runs on.
+    _TERMINAL_AUTO_REPLY_RE = re.compile(
+        rb"^(?:"
+        rb"\x1b\[\d*(?:;\d+)*R"
+        rb"|\x1b\[\?[\d;]*c"
+        rb"|\x1b\[>[\d;]*c"
+        rb"|\x1b\[\d*n"
+        rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+        rb"|\x1b\[[IO]"
+        rb"|\x1b\[20[01]~"
+        rb")+$"
+    )
+
     def _on_pane_input(self, role_name: str, data: bytes) -> None:
         # Route the keystrokes to the pane that ACTUALLY emitted them, not to
         # `self.panes[role_name]`. `self.panes` resolves to the *active project*
@@ -8856,7 +8892,11 @@ class Orchestrator(
         # Lead pane's terminal actually emits — engine-originated writes
         # (done notices, CC flushes, …) go straight to session.write() and
         # never pass through here, so they can't feed the tracker.
-        if pane.role.name == LEAD.name:
+        # (#357) ...except a chunk that is ONLY a terminal auto-reply (no
+        # real keystroke in it at all) — see `_TERMINAL_AUTO_REPLY_RE`'s
+        # comment above. Still forwarded to the PTY exactly as before either
+        # way; only the draft/user-input tracking is skipped for it.
+        if pane.role.name == LEAD.name and not self._TERMINAL_AUTO_REPLY_RE.fullmatch(data):
             project_ns = self._project_ns_for_pane(pane)
             if project_ns is not None:
                 self._track_lead_draft_input(project_ns, data)

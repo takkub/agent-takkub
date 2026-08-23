@@ -108,6 +108,17 @@ _SUBMIT_BUSY_MAX_RESENDS = 150
 _RENDER_ACTIVE_S = 1.0
 _RENDER_WAIT_MAX = 6
 
+# (#359) A pane whose last PTY output is more recent than this is clearly
+# alive and actively progressing right now — used to suppress a delivery-
+# uncertain/stale-reap notice that would otherwise tell Lead to reassign a
+# task that has, in fact, already reached a working pane. Measured false
+# positive: a ~5KB task paste took long enough to ingest that the fixed
+# delivery-tracking TTL (120s) and swallow-verify budget elapsed before the
+# pane visibly transitioned, even though it was genuinely working the whole
+# time. Generous on purpose — this only needs to distinguish "clearly still
+# alive" from "actually gone quiet", not measure freshness precisely.
+_PROGRESS_QUIET_THRESHOLD_S = 30.0
+
 # Stall-aware deferral (#133). A fan-out of concurrent pane spawns backlogs
 # the Qt event loop for ~1s at a time (proven via events.log: main_thread_stall
 # episodes of 938-1141ms landing right before bursts of duplicate repaste
@@ -1050,6 +1061,20 @@ class LeadInboxMixin:
         # deferred set (spawn_engine._spawn_deferred), stop trusting
         # max_wait_ms for the "no session yet" branch — see _check below.
         gate_seen = [False]
+        # (#356) `elapsed[0]`'s value the first poll that finds the session
+        # alive — deliberately captured so the boot-marker ceiling below can
+        # measure FROM here, not from `elapsed[0]`'s absolute value. `elapsed[0]`
+        # keeps accumulating through the (uncapped) "no session yet" wait
+        # above, so a delivery whose session took a while to come up
+        # (spawn-gate deferral, or just a slow spawn under machine load —
+        # the exact condition that gets a task queued by the resource
+        # governor in the first place) would otherwise have that pre-spawn
+        # wait counted directly against `BOOT_STALL_CEILING_SEC`, which is
+        # meant to measure how long the pane has been stuck on ITS OWN boot
+        # marker — a pane that had barely begun booting could trip the
+        # ceiling on its very first post-alive poll. Set once, never reset,
+        # for the life of this delivery.
+        elapsed_at_session_alive: list[int | None] = [None]
         ready_streak = [0]
         # #130: logged once (not every 150ms poll) the first time the hard
         # timeout is deferred because the pane is busy, not stuck.
@@ -1139,6 +1164,13 @@ class LeadInboxMixin:
                 )
                 self._warn_lead_delivery_blocked(role_name, project)
                 return
+            # (#359) Baseline captured right before the write — see
+            # `_on_settled`'s use below for why.
+            write_baseline = (
+                _task_sess.last_output_monotonic()
+                if hasattr(_task_sess, "last_output_monotonic")
+                else None
+            )
             wrote = _safe_session_write(
                 _task_sess,
                 payload,
@@ -1186,6 +1218,17 @@ class LeadInboxMixin:
                     accepted = not _task_sess.is_at_ready_prompt()
                 except Exception:
                     accepted = False
+                if not accepted and write_baseline is not None:
+                    # (#359) A long paste can legitimately return to the
+                    # ready prompt before the CLI visibly starts processing
+                    # it — "still ready" alone can't tell "never submitted"
+                    # from "submitted, and busy-rendering just hasn't shown
+                    # up yet". Any PTY output produced AFTER we wrote the
+                    # payload proves the bytes were received regardless.
+                    try:
+                        accepted = _task_sess.last_output_monotonic() > write_baseline
+                    except Exception:
+                        pass
                 if accepted:
                     manager.mark_accepted(delivery.delivery_id)
                 else:
@@ -1285,6 +1328,8 @@ class LeadInboxMixin:
                     role=role_name,
                 )
                 return
+            if elapsed_at_session_alive[0] is None:
+                elapsed_at_session_alive[0] = elapsed[0]
             if not prompt_blocked_warned[0]:
                 # #186: recognise "blocked on a prompt that needs a keypress"
                 # as its own state, checked on every poll independent of
@@ -1574,18 +1619,31 @@ class LeadInboxMixin:
                     # around. Cut it at BOOT_STALL_CEILING_SEC and fail the
                     # delivery out loud instead — a wrong outcome Lead can see
                     # beats a task that quietly stops existing.
+                    # (#356) Measured relative to `elapsed_at_session_alive[0]`,
+                    # not `elapsed[0]`'s raw value — the latter also carries
+                    # whatever time was spent waiting for the session to even
+                    # come up (spawn-gate deferral, or a slow spawn under
+                    # machine load), which is a different wait with no
+                    # ceiling of its own (see the "no session yet" branch
+                    # above). Using the raw value here would let that
+                    # pre-boot wait eat directly into this budget, tripping
+                    # the ceiling on a pane whose OWN boot marker had barely
+                    # been on screen at all.
                     boot_ceiling_ms = _orch_attr("BOOT_STALL_CEILING_SEC", 300) * 1000
-                    if elapsed[0] < boot_ceiling_ms:
+                    boot_marker_elapsed_ms = elapsed[0] - (elapsed_at_session_alive[0] or 0)
+                    if boot_marker_elapsed_ms < boot_ceiling_ms:
                         QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
                         return
                     _log_event(
                         "task_deliver_boot_marker_ceiling_timeout",
                         project=self._resolve_project(project),
                         role=role_name,
-                        elapsed_sec=round(elapsed[0] / 1000, 1),
+                        elapsed_sec=round(boot_marker_elapsed_ms / 1000, 1),
                     )
                     sent[0] = True
-                    self._fail_boot_stalled_delivery(role_name, project, elapsed[0] / 1000)
+                    self._fail_boot_stalled_delivery(
+                        role_name, project, boot_marker_elapsed_ms / 1000
+                    )
                     return
                 seconds_since_output = pane.session.seconds_since_output()
                 stall_threshold_sec = _orch_attr("STALL_THRESHOLD_SEC", 300)
@@ -1680,6 +1738,36 @@ class LeadInboxMixin:
             kwargs["allow_repaste"] = False
         target(role_name, task, **kwargs)
 
+    def _pane_shows_real_progress(self, project_ns: str, role_name: str) -> bool:
+        """(#359) True if *role_name*'s pane is alive, in the "working"
+        state, and produced PTY output within `_PROGRESS_QUIET_THRESHOLD_S`
+        — i.e. it is unmistakably doing something right now, regardless of
+        what the delivery-tracking state machine (UNCERTAIN / stale-reap)
+        separately concluded about whether its confirmation was seen. Used
+        to suppress a delivery-uncertain/stale-reap notice that would
+        otherwise send Lead to reassign a task onto a pane already working
+        it — a real near-miss on a long task paste whose ingest time
+        outran the fixed delivery TTL.
+
+        Deliberately narrow (state + very recent output only) rather than
+        trying to prove the SPECIFIC delivery landed — that proof is
+        exactly what's ambiguous here (see `_delayed_enter_verified`'s own
+        docstring on why "ready + empty box" can't be resolved definitively
+        for every provider/timing combination). This only answers "is
+        something clearly happening on this pane right now", which is
+        enough to know a reassign would be premature.
+        """
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is None or pane.session is None or not pane.session.is_alive:
+            return False
+        if getattr(pane, "state", None) != "working":
+            return False
+        try:
+            quiet_for = pane.session.seconds_since_output()
+        except Exception:
+            return False
+        return quiet_for < _PROGRESS_QUIET_THRESHOLD_S
+
     def _reap_stale_deliveries(self) -> None:
         """Sweep `_delivery_manager` for deliveries that have been stuck in
         an in-flight state (never confirmed accepted) past their TTL and
@@ -1695,17 +1783,34 @@ class LeadInboxMixin:
         `_send_when_ready` poll loop already gave up and stopped ticking on
         its own (`sent[0] = True` paths) without ever reaching a terminal
         DeliveryManager state — the one gap none of the poll loop's own
-        one-shot warnings above cover."""
+        one-shot warnings above cover.
+
+        (#359) Before notifying, checks `_pane_shows_real_progress` — a
+        long task paste can outlast the fixed TTL to ingest even though it
+        genuinely landed, and the pane is by then visibly working it. The
+        delivery is still reaped either way (its OWN confirmation really is
+        stale — this only decides whether to also cry wolf to Lead about
+        it), so a rare miss on this check costs nothing beyond the noisy
+        notice this fix exists to remove."""
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_manager is None:
             return
         for delivery in delivery_manager.expire_stale():
+            if self._pane_shows_real_progress(delivery.project_id, delivery.pane_id):
+                _log_event(
+                    "delivery_stale_reap_suppressed",
+                    role=delivery.pane_id,
+                    project=delivery.project_id,
+                    delivery_id=delivery.delivery_id,
+                )
+                continue
             self._notify_lead(
                 delivery.project_id,
                 f"⚠️ [delivery-stale-reap] task delivery ค้างอยู่สำหรับ {delivery.pane_id} "
                 f"นานเกิน {delivery.expires_at - delivery.created_at:.0f}s โดยไม่ยืนยันว่า "
                 f"ถึงมือ ({delivery.state.value}) — ยกเลิกอัตโนมัติแล้ว ถ้า {delivery.pane_id} "
-                f"ยังไม่ได้รับ task ให้ assign ใหม่ (issue #255)",
+                f"status ยังเป็น working อยู่ (`takkub status`) ไม่ต้อง assign ใหม่ — assign ใหม่"
+                f"เฉพาะตอนที่ยืนยันแล้วว่า pane ไม่ได้รับ task จริงๆ (issue #255)",
                 from_role="system",
                 note="delivery_stale_reap",
             )
@@ -1782,17 +1887,30 @@ class LeadInboxMixin:
 
         Fires once per delivery, from `_on_settled`'s single terminal branch.
         No-op when warning the Lead about itself.
+
+        (#359) Also a no-op when `_pane_shows_real_progress` sees the pane
+        already alive/working with very recent output — a long task paste
+        can settle on "still at ready prompt" before the CLI visibly starts
+        processing it even though the paste landed; this is the same
+        false-positive `_reap_stale_deliveries` guards against, checked
+        here too since `_on_settled` may call this before that fresh output
+        arrives.
         """
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
+        if self._pane_shows_real_progress(project_ns, role_name):
+            _log_event("delivery_uncertain_suppressed", role=role_name, project=project_ns)
+            return
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
         msg = (
             f"⚠️ [delivery-uncertain] {role_name} pane กลับไปอยู่ที่ ready prompt หลัง resend "
             f"Enter จนครบ — ใบงานอาจไม่ได้ถูก submit จริง (ค้างอยู่ในช่องพิมพ์ หรือหายไปเลย) "
-            f"cockpit ไม่ paste ซ้ำให้เอง (#134) — เปิด pane ดูตรงๆ แล้ว assign ใหม่ถ้าไม่ถึงมือ"
+            f"cockpit ไม่ paste ซ้ำให้เอง (#134) — ถ้า {role_name} status ยังเป็น working "
+            f"อยู่ (`takkub status`) ไม่ต้อง assign ใหม่ — เปิด pane ดูตรงๆ ก่อน แล้ว assign "
+            f"ใหม่เฉพาะตอนที่ยืนยันแล้วว่าไม่ถึงมือจริง"
         )
         self._notify_lead(project_ns, msg)
         _log_event("delivery_uncertain_warned", role=role_name, project=project_ns)

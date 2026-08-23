@@ -754,6 +754,17 @@ class TestMergeProposal:
         )
         assert "พร้อม merge" not in msg
 
+    def test_cleanup_step_avoids_raw_git_worktree_remove(self):
+        """#358 — raw `git worktree remove` fails with 'Filename too long' on
+        Windows when the worktree has nested node_modules (pnpm); the
+        cleanup step must point at the long-path-safe `takkub worktree`
+        subcommands instead (fixed in #226)."""
+        info = WorktreeInfo(path="/w/p", branch="wt/frontend-9", base_sha="base9", git_root="/repo")
+        msg = build_merge_proposal("frontend", info, 4, " src/x.ts | 10 +++")
+        assert "cleanup: `git" not in msg  # cleanup step no longer opens with raw git
+        assert "takkub worktree clean" in msg
+        assert "takkub worktree merge --role frontend" in msg
+
     def test_files_touched_summary_included(self):
         info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
         stat = " src/api/users.py | 5 +++--\n docs/readme.md | 1 +\n"

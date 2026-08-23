@@ -6,6 +6,33 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **`takkub wait` ถูกตัดด้วย "interrupted by user input" ทั้งที่ user ไม่ได้พิมพ์** (#357) — ต้นเหตุ:
+  xterm.js ส่ง terminal auto-reply (CPR `ESC[r;cR` · DA `ESC[?..c` · DSR · OSC reply · focus in/out)
+  ตอน Lead TUI redraw หลัง cockpit inject digest/banner ผ่าน `onData` choke point เดียวกับ keystroke จริง
+  แยกไม่ได้ด้วย API สาธารณะ (`wasUserInput` ไม่ expose) → แยกด้วย **byte-pattern** ที่ `_on_pane_input`:
+  chunk ที่เป็น escape-reply ล้วน (ไม่มี printable/CR/LF) ไม่ stamp `user_input`/draft-tracker — คนพิมพ์จริง
+  ไม่มีทางพิมพ์สิ่งเหล่านี้ · chunk ผสมยังถือเป็น user input (conservative) · เพิ่ม `takkub wait
+  --no-interrupt` เป็น belt-and-suspenders: ride-out เฉพาะ reason=user_input โดย re-attach role ที่ยัง
+  pending ไม่กระทบ interrupt จริงจาก role อื่น (#253)
+- **merge proposal ข้อ cleanup ยังแนะ `git worktree remove` ดิบที่พัง "Filename too long" บน Windows** (#358) —
+  fix ของ #226 อยู่ใน `takkub worktree merge/clean` เท่านั้น แต่ข้อความ proposal พา Lead ไปทางที่พัง
+  (เกิดจริง 3/3 worktree ของ saas_admin วันนี้) → proposal แนะ `takkub worktree merge --role <r>` /
+  `takkub worktree clean` แทน + regression test
+- **delivery-uncertain / delivery-stale-reap false positive บนใบงานยาว → เสี่ยง assign ซ้ำ** (#359) —
+  TTL 120s + resend budget คงที่ ไม่สเกลตามขนาด paste: pane รับใบงาน ~5KB จริงแต่ verify chain settle
+  เป็น UNCERTAIN/expired ก่อน CLI จะโชว์ progress → เพิ่ม `Orchestrator._pane_shows_real_progress()`
+  (state=working + output สดใหม่) เช็คก่อนแจ้ง Lead ทั้ง 2 จุด (`_warn_lead_delivery_uncertain`,
+  `_reap_stale_deliveries`) — ไม่มี notice ถ้า pane ทำงานจริง (state ยัง reap ตามเดิม แค่ไม่ cry-wolf) ·
+  **แก้ที่จุดกำเนิดด้วย**: `_on_settled` เทียบ `last_output_monotonic()` หลัง write กับ baseline ก่อน write
+  — มี output ใหม่ = accepted แม้ `is_at_ready_prompt()` ยัง True · notice ที่เหลือบอกชัด "ถ้า status ยัง
+  working ไม่ต้อง assign ใหม่" · ไม่เปลี่ยน policy ของ #255/#336/#339
+- **`delivery_boot_timeout_failed` false positive ตอนเครื่องโหลดหนัก** (#356, auto-captured ×2) —
+  `elapsed[0]` ใน `_send_when_ready._check()` ถูกใช้ร่วม 2 เฟส (รอ session เกิด — ไม่มี ceiling เพราะ
+  spawn-gate defer ได้ไม่จำกัด / รอ boot marker — ceiling 300s) **ไม่เคย reset ข้ามเฟส** → เวลาที่ governor
+  กัก pane ก่อน spawn (memory_low) รั่วเข้า budget ของ boot-marker ทำให้ล้ม ceiling ตั้งแต่ poll แรกหลัง
+  session alive ทั้งที่ pane เพิ่งเริ่ม boot → capture `elapsed_at_session_alive` แล้ววัด ceiling จากจุดนั้น
+  (ยัง tick-based ไม่ใช่ `time.monotonic()` เพราะเทสทั้งชุดพึ่ง synchronous QTimer mock)
+
 - **Lead pane ค้าง "unrecognised" 9 ชม. ไม่มี auto-recovery (#343)** — ต้นเหตุจาก transcript ของ pane
   ตัวนั้น: hint line ของ claude (`⏵⏵ bypass permissions on (shift+tab to cycle)`) ที่ marker table ใช้จับ
   "ready" ถูกวาด**ครั้งเดียวตอน boot** แล้วไม่วาดซ้ำ (ink diff-render) พอ `/compact` redraw ทั้งจอ

@@ -1650,8 +1650,9 @@ def build_merge_proposal(
     else:
         lines.append(f"2. merge:  `git -C {info.git_root} merge --no-ff {info.branch}`")
         lines.append(
-            f"3. cleanup: `git -C {info.git_root} worktree remove {info.path}` "
-            f"แล้ว `git -C {info.git_root} branch -d {info.branch}`"
+            f"3. cleanup: `takkub worktree clean` (long-path-safe — "
+            f"ห้ามใช้ `git worktree remove` ดิบ พังกับ node_modules ซ้อนบน Windows, #226/#358) "
+            f"· หรือรวมข้อ 2-3 เป็นคำสั่งเดียว: `takkub worktree merge --role {role}`"
         )
     lines.append("worktree ยังอยู่จนกว่าจะ merge — อย่าลบก่อน · render proposal ให้ user confirm ก่อน fire")
     return "\n".join(lines)
