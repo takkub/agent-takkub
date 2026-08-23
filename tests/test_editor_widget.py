@@ -6,13 +6,18 @@ thread (see project_file_index.py's own test file for the same convention).
 
 EditorHost's lazy-create/destroy lifecycle is tested with a stub
 `view_factory` instead of a real QWebEngineView — constructing a real one
-hard-aborts pytest even under QT_QPA_PLATFORM=offscreen on this codebase
-(see tests/test_terminal_widget.py's note on the identical issue with
-xterm.js's QWebEngineView).
+used to hard-abort pytest even under QT_QPA_PLATFORM=offscreen on this
+codebase (see tests/test_terminal_widget.py's note on the identical issue
+with xterm.js's QWebEngineView). Root-caused and fixed in conftest.py's
+`_qt_session_app` (#364 lever-1 follow-up, confirmed on Windows) — this
+file still uses the stub for the bulk of the suite (faster, no renderer
+process per test) but see `test_real_qwebengineview_construction_does_not_abort`
+below for an opt-in real-construction smoke test.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -449,3 +454,33 @@ class TestBridgeRouting:
 
 def test_max_editor_file_bytes_is_a_sane_positive_bound() -> None:
     assert 0 < MAX_EDITOR_FILE_BYTES <= 10_000_000
+
+
+# ── real QWebEngineView smoke (#364 lever-1 follow-up) ──────────────────────
+#
+# opt-in only (set AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1) — conftest.py's
+# `_qt_session_app` now constructs QApplication with `[sys.argv[0]]` instead
+# of `[]`, which fixed the hard-abort documented in this module's docstring
+# (repro'd directly: docs/audit/2026-08-23-364-lever1-pane-discard-spike.md).
+# That fix is confirmed on Windows only — a real QWebEngineView spinning up
+# its renderer process under `QT_QPA_PLATFORM=offscreen` on CI's macos/ubuntu
+# runners (no display, no xvfb) is unverified territory, so this stays out of
+# the default gate until someone confirms it green there too. Run it directly
+# with the env var set to check.
+@pytest.mark.skipif(
+    os.environ.get("AGENT_TAKKUB_QT_WEBENGINE_SMOKE") != "1",
+    reason="opt-in — see comment above; unverified on CI's macos/ubuntu runners",
+)
+def test_real_qwebengineview_construction_does_not_abort(qapp) -> None:
+    """Exercises the exact construction path (`_EditorWebView.__init__` ->
+    `QWebEngineView(self)` + `.load(...)`) that used to hard-abort the whole
+    pytest process (Windows exit -1073740791) before the argv fix — the rest
+    of this file only ever exercises `_StubEditorView`, which never touches
+    real Qt WebEngine code at all."""
+    view = ew._EditorWebView()
+    try:
+        QTest.qWait(500)  # let the renderer process actually spawn
+        assert view._view is not None
+    finally:
+        view.destroy()
+        QTest.qWait(50)

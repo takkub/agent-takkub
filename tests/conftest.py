@@ -883,7 +883,16 @@ def _qt_session_app():
 
     app = QApplication.instance()
     if app is None:
-        app = QApplication([])
+        # #364 lever-1 spike (docs/audit/2026-08-23-364-lever1-pane-discard-
+        # spike.md): QApplication([]) leaves argc=0, no argv[0] — Chromium's
+        # base::CommandLine::Init chokes on that and the process hard-aborts
+        # natively (Windows exit -1073740791) the instant a real
+        # QWebEngineView spins up its renderer, even under
+        # QT_QPA_PLATFORM=offscreen. [sys.argv[0]] (not the full sys.argv —
+        # pytest/xdist's own flags aren't guaranteed safe to hand to
+        # Chromium's arg parser) supplies just enough for a valid
+        # command line; confirmed by direct repro both ways.
+        app = QApplication([sys.argv[0]])
     yield app
     # Do NOT call app.quit() here — session-scoped fixture teardown may race
     # with other fixtures still running.  Let the process exit handle cleanup.
