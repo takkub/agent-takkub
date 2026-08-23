@@ -148,3 +148,27 @@ class TestUncertainDeliveryNotice:
             orch._warn_lead_delivery_uncertain("gemini", "P")
 
         assert _written_strings(lead.session)
+
+    def test_fake_session_returning_mock_timing_does_not_crash_and_still_warns(
+        self, orch: Orchestrator
+    ) -> None:
+        """A fake/mock session (a test double predating #359's own coverage
+        — test_remote_e2e_round2.py, test_spawn_task_delivery.py's preload-
+        events fixtures) leaves `seconds_since_output()` unconfigured, so it
+        returns a MagicMock rather than a number. That must not escape
+        `_pane_shows_real_progress` as an unhandled `TypeError` from
+        comparing a MagicMock to a float (#344 guard would surface it on
+        whatever unrelated test happened to be running in the same Qt
+        slot) — it must be treated the same as "no progress", same as the
+        quiet-pane case above."""
+        lead = _pane(_live_session())
+        gemini = _pane(_live_session())
+        gemini.state = "working"
+        # Deliberately NOT setting .return_value — seconds_since_output()
+        # returns a bare MagicMock, the exact shape a stale test double has.
+        orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._warn_lead_delivery_uncertain("gemini", "P")
+
+        assert _written_strings(lead.session)

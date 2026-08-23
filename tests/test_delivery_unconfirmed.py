@@ -662,6 +662,37 @@ class TestSettledOutputSinceWriteSignal:
         ):
             orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
 
+    def test_fake_session_returning_mock_timing_settles_without_crashing(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """A fake/mock session (a test double predating #359's own coverage
+        — test_remote_e2e_round2.py, test_spawn_task_delivery.py's preload-
+        events fixtures) leaves `last_output_monotonic()` unconfigured, so
+        both the write-time baseline and `_on_settled`'s later read return a
+        MagicMock rather than a number. Comparing those with `>` must not
+        escape `_on_settled` as an unhandled `TypeError` (#344 guard would
+        misattribute it to whatever unrelated test happened to be running in
+        the same Qt slot) — it settles the same as "no real output since
+        write" (uncertain, warns Lead), same as the control case above."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        reviewer.session.shows_pending_input.return_value = False
+        reviewer.session.seconds_since_output.return_value = 999.0
+        # Deliberately NOT setting .return_value — last_output_monotonic()
+        # returns a bare MagicMock, the exact shape a stale test double has.
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+
+        delivery = next(iter(orch._delivery_manager._deliveries.values()))
+        assert delivery.state.value == "uncertain"
+
         delivery = next(iter(orch._delivery_manager._deliveries.values()))
         assert delivery.state.value == "uncertain"
         lead_written = " ".join(
