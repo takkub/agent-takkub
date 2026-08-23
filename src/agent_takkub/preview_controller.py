@@ -137,9 +137,37 @@ class PreviewController(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._states: dict[str, PreviewState] = {}
+        # #365 phase 10 diagnostics (13_PERFORMANCE_AND_QT_RULES.md rule
+        # 10, "navigation policy blocks count") — incremented only by
+        # `check_navigation` below, never by the pure `navigation_allowed`
+        # helper itself (a future widget can still call that directly
+        # without going through this counter).
+        self._nav_block_counts: dict[str, int] = {}
 
     def status(self, project: str) -> PreviewState | None:
         return self._states.get(project)
+
+    def all_states(self) -> dict[str, PreviewState]:
+        """Every project with a currently open Preview — `takkub doctor
+        --workspace`'s per-project state row."""
+        return dict(self._states)
+
+    def check_navigation(self, project: str, target_url: str) -> bool:
+        """Convenience wrapper a future `preview_widget.py` can call
+        instead of the bare `navigation_allowed` helper: same policy
+        decision, plus a diagnostics counter on a refusal. Raises
+        `ValueError` if `project` has no open Preview (same as
+        `set_device`/`set_approved` above)."""
+        current = self._states.get(project)
+        if current is None:
+            raise ValueError(f"no open preview for project {project!r}")
+        allowed = navigation_allowed(current, target_url)
+        if not allowed:
+            self._nav_block_counts[project] = self._nav_block_counts.get(project, 0) + 1
+        return allowed
+
+    def nav_block_counts(self) -> dict[str, int]:
+        return dict(self._nav_block_counts)
 
     def open_url(self, project: str, url: str, *, device: str = _DEFAULT_DEVICE) -> PreviewState:
         if not is_loopback_url(url):

@@ -199,3 +199,36 @@ class TestDiskChangeEmission:
         _wait_until(lambda: len(received) == 1)
 
         assert received[0][0] == str(f.resolve())
+
+
+# ── diagnostics (#365 phase 10) ───────────────────────────────────────────
+
+
+class TestDiagnostics:
+    def test_reports_watched_and_debounce_ms(self, qapp, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.py"
+        f.write_text("x", encoding="utf-8")
+        svc = FileWatchService([root], debounce_ms=250)
+        svc.watch(f)
+
+        diag = svc.diagnostics()
+
+        assert diag["watched_count"] == 1
+        assert diag["debounce_ms"] == 250
+        assert diag["pending_count"] == 0
+        assert diag["debounce_pending"] is False
+
+    def test_pending_count_reflects_unflushed_changes(self, qapp, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.py"
+        f.write_text("x", encoding="utf-8")
+        svc = FileWatchService([root], debounce_ms=500)
+
+        svc._on_file_changed(str(f.resolve()))
+
+        diag = svc.diagnostics()
+        assert diag["pending_count"] == 1
+        assert diag["debounce_pending"] is True

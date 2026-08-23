@@ -114,6 +114,18 @@ class FileWatchService(QObject):
     def watched_paths(self) -> list[str]:
         return list(self._watcher.files())
 
+    def diagnostics(self) -> dict:
+        """`takkub doctor --workspace`'s "file watcher backlog/debounce
+        pending" row (13_PERFORMANCE_AND_QT_RULES.md rule 10). Pure
+        attribute reads — `self._pending`/`self._watcher.files()` are
+        already-live state, no extra work triggered by calling this."""
+        return {
+            "watched_count": len(self._watcher.files()),
+            "pending_count": len(self._pending),
+            "debounce_ms": self._timer.interval(),
+            "debounce_pending": self._timer.isActive(),
+        }
+
     def _on_file_changed(self, path: str) -> None:
         p = Path(path)
         # A replace-based save (write temp + rename over target) drops the

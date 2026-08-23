@@ -6,6 +6,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 10 — `takkub doctor --workspace` diagnostics + WebEngine lifecycle soak** (#365, `13_PERFORMANCE_AND_QT_RULES.md`
+  ข้อ 10) — เพิ่ม opt-in flag ตาม pattern `--ram`/`--live`: `[workspace] monaco-bundle` Finding (pure/local, เช็ค
+  loader.js/editor.main.js/LICENSE ใต้ `static/editor/vendor/` + ขนาด) + IPC `workspace-status` (live editor host
+  instance/tab count, preview state ต่อโปรเจกต์ + navigation-block counter ใหม่บน `PreviewController`, design artifact
+  count/status, file watcher backlog/debounce, git_changes last-run ms+error, tree scan time) — เพิ่ม `diagnostics()`
+  method เบาๆ (ไม่แตะ main thread) ใน `file_watch_service.py`/`git_changes_service.py`/`project_file_index.py`
+  (`ProjectFileIndex`) ตัวที่ไม่เคยมี metric มาก่อน · `Orchestrator.set_editor_host`/`register_workspace_diag_source`
+  ให้ main_window ผูก live object เข้ากับ diagnostics แบบ opt-in (ไม่มี = SKIP ไม่ใช่ FAIL) · `tools/soak_workspace_webengine.py`
+  (standalone script ตาม pattern `spike_pane_discard_ram.py`) — วน editor open/close จริง (`EditorHost` + real
+  `QWebEngineView`) + preview state machine + pane discard/reattach ข้ามโปรเจกต์ N รอบ วัด RSS/object count ก่อน-หลัง,
+  proof "ไม่ reparent crash" คือ exit code 0 หลัง N รอบ (ไม่ใช่ identity check ที่ CPython id() recycle หลอกได้) —
+  เทส wrapper opt-in `AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1` (`test_workspace_webengine_soak.py`) · เพิ่ม release gate
+  1.2.0 checklist ใน `docs/release-checklist.md` (acceptance 19 ข้อ + RAM +≤300 MB/ปิดแล้ว 0 + soak ผ่าน + Monaco
+  bundle ยืนยันอยู่ในตัว wheel จริง — ตรวจแล้วด้วย `python -m build` จริง 1 รอบ)
+
 - **#364 lever 5 — profile main process (pythonw) ด้วยตัวเลขจริง: ไม่พบ leak, ไม่มีอะไรให้ cap** — spike 5 pane จริง (offscreen):
   RSS โต **13.16 MB/pane**, ปิด pane แล้ว TerminalWidget/QWebEngineView object count กลับเป็น 0 ทั้งคู่ → ไม่เสนอ cap ·
   เพิ่ม `takkub doctor --ram --ram-profile` (opt-in, tracemalloc on-demand ผ่าน IPC `ram-profile` ไม่เปิดค้าง) เป็น visibility tool +

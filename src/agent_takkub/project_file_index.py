@@ -24,6 +24,7 @@ import fnmatch
 import logging
 import os
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,6 +191,12 @@ def _safe_emit(signal, *args) -> None:
 class _ListDirSignals(QObject):
     finished = pyqtSignal(str, list)  # (directory str, list[FileEntry])
     failed = pyqtSignal(str, str)  # (directory str, error message)
+    # #365 phase 10 diagnostics (13_PERFORMANCE_AND_QT_RULES.md rule 10):
+    # (directory str, elapsed_ms, entry_count) — timed inside the worker
+    # thread, never on the Qt main thread; the connected slot only stores
+    # three numbers, same trivial-assignment tier as every other
+    # QRunnable→QObject result slot in this codebase.
+    timed = pyqtSignal(str, float, int)
 
 
 class _ListDirWorker(QRunnable):
@@ -205,11 +212,14 @@ class _ListDirWorker(QRunnable):
 
     def run(self) -> None:  # called by QThreadPool
         key = str(self.directory)
+        t0 = time.perf_counter()
         try:
             entries = list_dir_sync(self.directory, self.roots)
         except PathEscapesRootsError as exc:
             _safe_emit(self.signals.failed, key, str(exc))
             return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        _safe_emit(self.signals.timed, key, elapsed_ms, len(entries))
         _safe_emit(self.signals.finished, key, entries)
 
 
@@ -226,11 +236,19 @@ class ProjectFileIndex(QObject):
     def __init__(self, roots: Sequence[Path], parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.roots = [Path(r).resolve() for r in roots]
+        # #365 phase 10 diagnostics (13_PERFORMANCE_AND_QT_RULES.md rule 10,
+        # "tree scan time") — last completed scan only, not a history; cheap
+        # attributes updated from `_on_worker_timed` (main thread, trivial).
+        self._last_scan_dir: str | None = None
+        self._last_scan_ms: float | None = None
+        self._last_scan_entry_count: int = 0
+        self._scan_count: int = 0
 
     def request_list(self, directory: Path) -> None:
         worker = _ListDirWorker(Path(directory), self.roots)
         worker.signals.finished.connect(self._on_worker_finished)
         worker.signals.failed.connect(self._on_worker_failed)
+        worker.signals.timed.connect(self._on_worker_timed)
         QThreadPool.globalInstance().start(worker)
 
     def _on_worker_finished(self, path: str, entries: list) -> None:
@@ -238,6 +256,22 @@ class ProjectFileIndex(QObject):
 
     def _on_worker_failed(self, path: str, error: str) -> None:
         self.dirListFailed.emit(path, error)
+
+    def _on_worker_timed(self, path: str, elapsed_ms: float, entry_count: int) -> None:
+        self._last_scan_dir = path
+        self._last_scan_ms = elapsed_ms
+        self._last_scan_entry_count = entry_count
+        self._scan_count += 1
+
+    def diagnostics(self) -> dict:
+        """`takkub doctor --workspace`'s "tree scan time" row — last
+        completed `request_list` only (no history kept)."""
+        return {
+            "last_scan_dir": self._last_scan_dir,
+            "last_scan_ms": self._last_scan_ms,
+            "last_scan_entry_count": self._last_scan_entry_count,
+            "scan_count": self._scan_count,
+        }
 
 
 # ── git status (skeleton — real wiring lands in phase 4, #365 §4) ──────────

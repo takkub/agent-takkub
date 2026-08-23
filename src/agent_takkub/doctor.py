@@ -2308,6 +2308,136 @@ def check_performance_live(resp: dict | None) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [workspace] — #365 phase 10, `takkub doctor --workspace` only
+# ---------------------------------------------------------------------------
+
+# Relative to this package's static/editor/vendor/ dir (pyproject.toml
+# [tool.setuptools.package-data] globs these three exact files in) — the
+# smallest set that proves a real Monaco bundle is present, not just an
+# empty vendor/ tree: the AMD loader, the bundled editor entrypoint, and
+# its license (dropping the license would be a redistribution problem, not
+# just a missing-file one).
+_MONACO_BUNDLE_FILES = (
+    "monaco-editor/min/vs/loader.js",
+    "monaco-editor/min/vs/editor/editor.main.js",
+    "monaco-editor/min/LICENSE",
+)
+
+
+def check_workspace_monaco_bundle(vendor_dir: Path | None = None) -> list[Finding]:
+    """Pure/local — no live cockpit needed, same tier as `check_installed_integrity`.
+    Checks the package's own `static/editor/vendor/` tree, not an installed
+    wheel's (see docs/release-checklist.md for the separate "Monaco bundle
+    ships in the built wheel" release-gate check, which needs an actual
+    `python -m build` and is out of scope for a fast `doctor` run).
+    `vendor_dir` is test-only (real callers never pass it)."""
+    if vendor_dir is None:
+        vendor_dir = Path(__file__).resolve().parent / "static" / "editor" / "vendor"
+    missing = []
+    total_bytes = 0
+    for rel in _MONACO_BUNDLE_FILES:
+        p = vendor_dir / rel
+        if not p.is_file():
+            missing.append(rel)
+        else:
+            total_bytes += p.stat().st_size
+    if missing:
+        return [
+            Finding(
+                "workspace",
+                "monaco-bundle",
+                Status.FAIL,
+                f"missing {len(missing)}/{len(_MONACO_BUNDLE_FILES)} file(s) under "
+                f"{vendor_dir}: {', '.join(missing)}",
+                fix_hint="re-vendor the Monaco bundle per static/editor/vendor/README.md",
+            )
+        ]
+    return [
+        Finding(
+            "workspace",
+            "monaco-bundle",
+            Status.OK,
+            f"{len(_MONACO_BUNDLE_FILES)} core file(s) present, {total_bytes / (1024**2):.1f} MB",
+        )
+    ]
+
+
+def format_workspace_report(resp: dict | None) -> str:
+    """Render the `takkub doctor --workspace` live diagnostics (the Monaco
+    bundle check itself is a plain Finding, rendered by `format_report`
+    already — this only covers the live IPC half). Same "no port file =
+    skip" / "live round-trip failed = report the failure" convention as
+    `format_ram_report`."""
+    if resp is None:
+        return "[workspace]\n  cockpit is not running — live workspace diagnostics unavailable"
+    if not resp.get("ok"):
+        return (
+            f"[workspace]\n  live workspace diagnostics failed: {resp.get('msg', 'unknown error')}"
+        )
+
+    lines: list[str] = ["[workspace]"]
+
+    editor = resp.get("editor_host") or {}
+    if editor.get("registered"):
+        lines.append(
+            f"  editor host: instance={'yes' if editor.get('has_view') else 'no'} "
+            f"open_tabs={editor.get('open_count', 0)}"
+        )
+    else:
+        lines.append("  editor host: not registered (no live MainWindow in this cockpit)")
+
+    preview = resp.get("preview") or {}
+    if not preview:
+        lines.append("  preview: no project has an open Preview")
+    else:
+        for proj, state in sorted(preview.items()):
+            lines.append(
+                f"  preview[{proj}]: mode={state.get('mode')} device={state.get('device')} "
+                f"approved={state.get('approved')} nav_blocks={state.get('nav_blocks', 0)}"
+            )
+
+    artifacts = resp.get("design_artifacts") or {}
+    if not artifacts:
+        lines.append("  design artifacts: none published")
+    else:
+        for proj, info in sorted(artifacts.items()):
+            if "error" in info:
+                lines.append(f"  design artifacts[{proj}]: read failed — {info['error']}")
+                continue
+            by_status = ", ".join(f"{k}={v}" for k, v in sorted(info.get("by_status", {}).items()))
+            lines.append(f"  design artifacts[{proj}]: {info.get('count', 0)} total ({by_status})")
+
+    per_project = resp.get("per_project") or {}
+    if not per_project:
+        lines.append(
+            "  file watcher / git changes / tree scan: no project has a registered "
+            "diagnostic source (explorer not open in this cockpit)"
+        )
+    else:
+        for proj, sources in sorted(per_project.items()):
+            fw = sources.get("file_watch")
+            if fw is not None:
+                lines.append(
+                    f"  file_watch[{proj}]: watched={fw.get('watched_count', 0)} "
+                    f"pending={fw.get('pending_count', 0)} debounce_ms={fw.get('debounce_ms')}"
+                )
+            gc_ = sources.get("git_changes")
+            if gc_ is not None:
+                err = f" error={gc_['last_status_error']}" if gc_.get("last_status_error") else ""
+                lines.append(
+                    f"  git_changes[{proj}]: last_status_ms={gc_.get('last_status_ms')}{err} "
+                    f"runs={gc_.get('status_run_count', 0)}"
+                )
+            ti = sources.get("tree_index")
+            if ti is not None:
+                lines.append(
+                    f"  tree_scan[{proj}]: last_scan_ms={ti.get('last_scan_ms')} "
+                    f"entries={ti.get('last_scan_entry_count', 0)} scans={ti.get('scan_count', 0)}"
+                )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # [ram] — per-pane RAM breakdown (#364 lever 6, `takkub doctor --ram` only)
 # ---------------------------------------------------------------------------
 
