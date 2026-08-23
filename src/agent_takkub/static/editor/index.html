@@ -294,6 +294,24 @@
       }
     });
 
+    // Called from Python (EditorHost._EditorWebView.focus()) whenever
+    // Qt-level widget focus lands on the WebView — a click reaching the
+    // QWebEngineView does NOT by itself move Chromium's DOM focus into
+    // Monaco's own hidden input target, so without this the cursor never
+    // blinks and keystrokes go nowhere even though the widget itself
+    // reports hasFocus() == true.
+    function focusActiveEditor() {
+      if (!monacoAvailable) return;
+      const tab = tabs.get(activePath);
+      if (!tab || tab.kind !== 'code') return;
+      if (tab.viewMode === 'diff' && diffEditor) {
+        diffEditor.getModifiedEditor().focus();
+      } else if (codeEditor) {
+        codeEditor.focus();
+      }
+    }
+    window.focusActiveEditor = focusActiveEditor;
+
     function saveActiveTab() {
       const tab = tabs.get(activePath);
       if (!tab || tab.kind !== 'code') return;

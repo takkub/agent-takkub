@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -251,9 +251,13 @@ class _StubEditorView(QWidget):
         super().__init__()
         self.run_js_calls: list[str] = []
         self.destroyed_called = False
+        self.focus_calls = 0
 
     def run_js(self, script: str) -> None:
         self.run_js_calls.append(script)
+
+    def focus(self) -> None:
+        self.focus_calls += 1
 
     def destroy(self) -> None:
         self.destroyed_called = True
@@ -301,6 +305,20 @@ class TestLazyCreateAndSingleInstance:
         assert len(stub_factory.created) == 1
         view = stub_factory.created[0]
         assert any("editorOpenFile" in call for call in view.run_js_calls)
+
+    def test_open_file_focuses_the_view(self, container, stub_factory, tmp_path) -> None:
+        """A freshly opened file must actually receive keyboard focus
+        (cursor blinking, ready to type) rather than only getting it if the
+        user happens to click again afterward."""
+        f = tmp_path / "a.py"
+        f.write_text("print(1)\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+
+        view = stub_factory.created[0]
+        assert view.focus_calls >= 1
 
     def test_opening_a_second_file_reuses_the_same_view(
         self, container, stub_factory, tmp_path
@@ -746,6 +764,46 @@ def test_real_qwebengineview_construction_does_not_abort(qapp) -> None:
     try:
         QTest.qWait(500)  # let the renderer process actually spawn
         assert view._view is not None
+    finally:
+        view.destroy()
+        QTest.qWait(50)
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGENT_TAKKUB_QT_WEBENGINE_SMOKE") != "1",
+    reason="opt-in — see comment above; unverified on CI's macos/ubuntu runners",
+)
+def test_mouse_press_and_focus_in_forward_focus_to_view_and_monaco(qapp) -> None:
+    """Regression: clicking into Monaco did nothing — the QWebEngineView
+    reached Qt-level `hasFocus() == True` on click, but Chromium's DOM focus
+    never moved into Monaco's own hidden input target, so keystrokes went
+    nowhere. Reproduced directly on a real, on-screen `_EditorWebView`:
+    `mousePressEvent` forwards, but `focusInEvent` does NOT fire from a raw
+    click on the child view (Qt doesn't propagate focus-in to ancestors
+    that way) — both are still wired, mirroring terminal_widget.py's
+    identical belt-and-suspenders
+    pattern for xterm.js, so a programmatic `.setFocus()` elsewhere (e.g.
+    EditorHost.focus() on file-open) is covered too."""
+    view = ew._EditorWebView()
+    try:
+        QTest.qWait(500)  # let the renderer process actually spawn
+        calls: list = []
+        view._view.setFocus = lambda *a, **k: calls.append("view.setFocus")
+        view.run_js = lambda script: calls.append(("run_js", script))
+
+        view.show()
+        QTest.qWaitForWindowExposed(view)
+
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton)
+        assert "view.setFocus" in calls, "mousePressEvent did not forward Qt focus"
+        assert any(isinstance(c, tuple) and "focusActiveEditor" in c[1] for c in calls), (
+            "mousePressEvent did not ask JS to move Monaco's DOM focus"
+        )
+
+        calls.clear()
+        view.setFocus()
+        QTest.qWait(50)
+        assert "view.setFocus" in calls, "focusInEvent did not forward Qt focus"
     finally:
         view.destroy()
         QTest.qWait(50)
