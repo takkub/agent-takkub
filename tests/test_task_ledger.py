@@ -513,3 +513,45 @@ class TestCloseRole:
         ok, msg = task_ledger.close_role(PROJECT, "nope", frozenset())
         assert ok is False
         assert "no open ledger row" in msg
+
+
+class TestAtomicWriteWindowsRetry:
+    """`_atomic_write` retries `os.replace` on PermissionError (Windows
+    transient lock, CI flake in test_orchestrator_shard) — bounded, and the
+    last failure still propagates so callers' OSError warnings keep working."""
+
+    def test_retries_then_succeeds(self, tmp_path, monkeypatch):
+        from agent_takkub import task_ledger
+
+        calls = {"n": 0}
+        real_replace = task_ledger.os.replace
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(5, "Access is denied")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(task_ledger.os, "replace", flaky)
+        monkeypatch.setattr(task_ledger, "_REPLACE_RETRY_SLEEP_S", 0.0)
+        target = tmp_path / "state.json"
+        task_ledger._atomic_write(target, "{}")
+        assert target.read_text(encoding="utf-8") == "{}"
+        assert calls["n"] == 3
+
+    def test_gives_up_after_bounded_retries(self, tmp_path, monkeypatch):
+        import pytest
+
+        from agent_takkub import task_ledger
+
+        calls = {"n": 0}
+
+        def always(src, dst):
+            calls["n"] += 1
+            raise PermissionError(5, "Access is denied")
+
+        monkeypatch.setattr(task_ledger.os, "replace", always)
+        monkeypatch.setattr(task_ledger, "_REPLACE_RETRY_SLEEP_S", 0.0)
+        with pytest.raises(PermissionError):
+            task_ledger._atomic_write(tmp_path / "state.json", "{}")
+        assert calls["n"] == task_ledger._REPLACE_RETRIES

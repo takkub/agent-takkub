@@ -46,6 +46,7 @@ import logging
 import os
 import pathlib
 import re
+import time
 from datetime import datetime
 
 from .config import RUNTIME_DIR
@@ -85,11 +86,30 @@ def _display_path(p: str) -> str:
     return str(p).replace(os.sep, "/")
 
 
+_REPLACE_RETRIES = 8
+_REPLACE_RETRY_SLEEP_S = 0.025
+
+
 def _atomic_write(path: pathlib.Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    # Windows: `os.replace` over a file another handle is momentarily reading
+    # (a concurrent `_load_state`, the Explorer git-status thread, AV scan)
+    # raises PermissionError/WinError 5 even though the rename would succeed
+    # a few ms later — seen as a flake in CI (`test_orchestrator_shard`
+    # late-complete notice replaced by a "[ledger] เขียน INDEX.md ไม่สำเร็จ"
+    # warning). Bounded retry; the final attempt re-raises so callers' OSError
+    # handling is unchanged. POSIX rename never hits this — the loop exits on
+    # the first iteration there.
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_SLEEP_S * (attempt + 1))
 
 
 def _load_state(project: str) -> dict:

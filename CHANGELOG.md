@@ -111,6 +111,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **task ledger: `os.replace` retry บน Windows** — `_atomic_write` เจอ `WinError 5` ชั่วคราว (handle อื่นอ่านไฟล์อยู่/AV) แล้ว
+  เด้ง warning "[ledger] เขียน INDEX.md ไม่สำเร็จ" แทน notice จริง (CI Windows flake `test_orchestrator_shard`) → bounded retry 8 ครั้ง
+  แล้วค่อย raise · POSIX ไม่กระทบ
+
+- **agy "Verifying your account" ใบงานหายเงียบ (regression #346)** (#363) — root cause: `account_pending_reason()` และ
+  `is_at_ready_prompt()` สแกน `_ready_region` 6 แถวเท่ากัน → footer chrome ดัน banner 3 บรรทัดหลุดหน้าต่าง, ready อ่านผิดเป็น READY แล้ว
+  reset streak ทุก poll → ไม่เคยเข้า `blocked:provider-account` ไม่เตือน Lead paste ทิ้ง · แก้: `account_pending_reason()` สแกน
+  `_BOOT_MARKER_TAIL_ROWS` (20 แถว, แบบเดียวกับ #284) + `lead_inbox` ไม่ให้ ready verdict กด account-pending check (ใช้กับทุก provider ที่มี
+  `account_pending_markers`) → recovery เดิมของ #346 (close+respawn+degrade) ทำงาน · tests fixture จาก banner จริง
+
 - **Editor save size cap + JS-string invariant** (#365 reviewer SHOULD-2/3) — `editor_service.save_atomic` reject save ที่ encode
   เกิน `max_bytes` (cap เดียวกับ read-side) ก่อนเขียน → `SaveResult(error=...)` ไม่แตะไฟล์เดิม (JS→Python `saveFile` ไม่ trust ความยาว
   จาก page อีกต่อไป) · `editor_widget._js_str()` = `json.dumps(..., ensure_ascii=True)` helper เดียวทุก `run_js` call site (กัน U+2028/
