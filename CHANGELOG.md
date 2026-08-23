@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.0.87] - 2026-08-23
+
 ### Fixed (แก้)
 
 - **TOCTOU ใน `pythonLooksExecutable()` — CodeQL alert #29 (`js/file-system-race`)** —
