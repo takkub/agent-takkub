@@ -147,7 +147,11 @@ def reports_root(project: str | None) -> Path:
 
 
 def _shares_path(project: str | None) -> Path:
-    return reports_root(project) / _SHARES_FILENAME
+    # Through `_contained_path` (realpath + startswith right before the
+    # return) rather than a bare `/` join: CodeQL's py/path-injection barrier
+    # applies to the checked string itself, so joining even a constant onto
+    # the already-checked root afterwards re-opened the alert (#35/#36).
+    return _contained_path(reports_root(project), _SHARES_FILENAME)
 
 
 def _validate_report_name(name: str) -> str:
