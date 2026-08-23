@@ -234,6 +234,48 @@ def navigation_allowed(current: PreviewState, target_url: str) -> bool:
     navigation policy" in `12_SECURITY_THREAT_MODEL.md`: never off to a
     second local file. A caller wanting a genuinely different target goes
     back through `open_url`/`open_file`, not an in-page nav.
+
+    Contract for the widget calling this (implemented by `preview_widget.py`
+    `_PreviewPage`; reviewer finding #4, 2026-08-23 phase 3-5 review — this
+    is the pinned answer, not just a recommendation for a future PR):
+
+    - **Every top-level navigation** — link click, JS `window.location`
+      assignment, and a server-side HTTP redirect the dev server issues
+      after `open_url` — must go through this check.
+      `QWebEnginePage.acceptNavigationRequest` is invoked by Chromium for
+      each hop of a redirect chain individually (a redirect is its own
+      `NavigationRequest`, not folded into the original one), so a widget
+      that calls this function from `acceptNavigationRequest` unconditionally
+      (not filtering on the `nav_type` argument) already covers redirects —
+      no separate redirect-specific hook exists or is needed.
+    - **Sub-frame (iframe) navigations are deliberately NOT passed through
+      this check** — the widget must return `True` unconditionally for
+      `is_main_frame=False` without calling this function. The threat model
+      here is the top-level page a user could be redirected off of; embedded
+      content is already sandboxed by the browser's own frame isolation, and
+      running this policy against a same-origin app's own iframes (common in
+      dev-server previews) would produce false-positive blocks.
+    - **A new-window/popup request (`target="_blank"`, `window.open()`) must
+      never reach this function at all** — the widget must not construct a
+      second `QWebEngineView`, ever (the app-wide "exactly ONE Preview
+      widget" rule this module's docstring states). `QWebEnginePage`'s
+      *default* `createWindow` implementation already returns `None` and
+      silently refuses to create the popup without any override needed —
+      confirmed by the identical, already-shipped behavior documented at
+      `terminal_widget.py`'s `_on_open_url` ("WebLinksAddon's default handler
+      uses window.open(), which QtWebEngine silently blocks (no
+      `createWindow` override)"). `_PreviewPage` relies on that same
+      fail-closed default rather than adding a redundant override — a widget
+      that *did* override `createWindow` to return a page would need to
+      route that page's own `acceptNavigationRequest` through this function
+      too, so the simplest and safest contract is: no popup, ever.
+    - This function itself never reaches Qt — it is pure `(PreviewState,
+      str) -> bool` so it can be unit-tested without constructing a real
+      `QWebEnginePage`/`QWebEngineView` (see `test_preview_controller.py`).
+      The Qt-facing wiring (`acceptNavigationRequest` → this function →
+      `_on_blocked` on refusal) lives in `preview_widget.py`'s `_PreviewPage`
+      and is covered by `test_preview_widget.py`'s
+      `TestPreviewPageNavigationContract`.
     """
     if current.mode == "file":
         return target_url == current.target

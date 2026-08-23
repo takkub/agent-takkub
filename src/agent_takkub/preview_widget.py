@@ -130,12 +130,23 @@ def _default_artifact_lookup(project: str, target: str) -> dict | None:
 
 
 class _PreviewPage(QWebEnginePage):
-    """Every navigation Chromium is about to follow on this page is checked
+    """Every top-level navigation Chromium is about to follow on this page —
+    including each hop of a server-side HTTP redirect, which Chromium
+    re-queries `acceptNavigationRequest` for individually — is checked
     against `nav_check` (`PreviewHost.navigation_allowed`, injected at
-    construction) before it's allowed through. Sub-frame navigations
-    (iframes) pass through unchecked — the threat model's concern is the
-    top-level page a user could be redirected off of, not embedded content
-    already sandboxed by the browser's own frame isolation."""
+    construction) before it's allowed through; `nav_type` is never filtered
+    on, so redirect coverage is automatic rather than a separate hook.
+    Sub-frame navigations (iframes) pass through unchecked — the threat
+    model's concern is the top-level page a user could be redirected off of,
+    not embedded content already sandboxed by the browser's own frame
+    isolation. New-window/popup requests (`target="_blank"`, `window.open()`)
+    never reach `nav_check` at all: this class deliberately has no
+    `createWindow` override, so `QWebEnginePage`'s own default (returns
+    `None`, silently refusing the popup — the same fail-closed behavior
+    `terminal_widget.py`'s `_on_open_url` docstring already documents for
+    the terminal's WebEngine view) applies, matching the app-wide "exactly
+    ONE Preview widget, never a second window" rule. Full contract pinned in
+    `preview_controller.navigation_allowed`'s docstring."""
 
     def __init__(
         self,

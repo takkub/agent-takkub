@@ -254,6 +254,24 @@ class TestChangesPanel:
         assert row0.data(0, pe._IS_DIR_ROLE) is False
         assert row0.data(0, pe._PATH_ROLE) == str((one_root_project / "src/a.py").resolve())
 
+    def test_row_path_escaping_roots_is_skipped_not_crashed(self, qapp, one_root_project) -> None:
+        # Defense-in-depth (reviewer finding #5, 2026-08-23 phase 3-5
+        # review): `change.path` comes from `git status --porcelain=v2`,
+        # which can't contain `..` for a well-formed working tree — but
+        # `_on_changes_changed` must still route it through
+        # `resolve_and_contain` rather than trusting it, same as every
+        # other path this module hands back.
+        explorer = pe.ProjectExplorer("proj")
+
+        explorer._on_changes_changed(
+            [FileChange(path="../outside.py", status="M"), FileChange(path="src/a.py", status="M")]
+        )
+
+        assert explorer._changes_item.text(0) == "CHANGES (2)"  # count reflects raw git output
+        assert explorer._changes_item.childCount() == 1  # only the in-root row survives
+        row0 = explorer._changes_item.child(0)
+        assert row0.data(0, pe._PATH_ROLE) == str((one_root_project / "src/a.py").resolve())
+
     def test_going_back_to_zero_changes_re_hides_and_clears(self, qapp, one_root_project) -> None:
         explorer = pe.ProjectExplorer("proj")
         explorer._on_changes_changed([FileChange(path="a.py", status="M")])
