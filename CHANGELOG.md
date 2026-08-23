@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **Workspace 1.2.0 เฟส 0–1 — Workspace Shell + Project Explorer** (#365, แผน `docs/plans/workspace-1.2.0-design/` +
+  ข้อแก้ 3 ข้อใน `docs/plans/2026-08-23-master-dev-plan.md` §4) — `project_explorer.py` (view, `QTreeView` native —
+  **ไม่มี WebEngine ใหม่**) + `project_file_index.py` (service: lazy dir listing บน worker thread, ignore policy
+  `.git node_modules .next dist build coverage runtime venv .venv __pycache__` + เคารพ `.gitignore`, canonical-path
+  containment ใต้ project roots, ปฏิเสธ traversal/symlink) · QSplitter ซ้ายใน `ProjectTab` collapse/expand จำ
+  width/collapsed ต่อโปรเจกต์ (QSettings ตัวเดียวกับ window geometry) · context menu Open externally / Reveal / Copy path
+  (Open in Takkub + Ask Agent = เฟส 2) · git status badge เป็น skeleton (`GitStatusService`, debounced) ต่อจริงเฟส 4 ·
+  **`main_window.py` ไม่แตะเลย** (ลด surface ชน PR ตามกฎ) · ADR `docs/architecture/adr-workspace-shell.md` ·
+  **บั๊กความปลอดภัยที่เจอระหว่างเขียน**: NTFS junction บน Windows รายงาน `is_symlink()=False` แต่ `resolve()` ทะลุ →
+  junction ที่ชี้ออกนอก root หลุดผ่าน containment เงียบๆ ถ้า gate เฉพาะ symlink-flagged → re-verify containment ทุก entry
+  (พิสูจน์ด้วย junction จริงผ่าน `worktree_manager._make_link`) · keepalive/project-switch เดิมไม่เปลี่ยน
+  + tests: `tests/test_project_file_index.py` · `tests/test_project_explorer.py` · `tests/test_project_tab_explorer.py`
+
 ## [v1.1.0] - 2026-08-23
 
 ### Fixed (แก้)
