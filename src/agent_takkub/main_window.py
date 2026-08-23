@@ -273,6 +273,10 @@ class MainWindow(
         self._editor_host.gitRefreshNeeded.connect(self._on_editor_git_refresh_needed)
         self._editor_host.askAgentRequested.connect(self._on_editor_ask_agent)
         self.orch.openFileInEditorRequested.connect(self._editor_host.open_file)
+        # #365 phase 10: lets `takkub doctor --workspace` report editor host
+        # instance/tab-count state (orchestrator.py has no reference of its
+        # own — the EditorHost is app-wide and MainWindow-owned).
+        self.orch.set_editor_host(self._editor_host)
 
         # Build the initial tab for the active project. Order matters: adding the
         # ProjectTab to the stack re-parents it; if a QWebEngineView were already
@@ -440,6 +444,14 @@ class MainWindow(
         tab.openDiffRequested.connect(
             lambda proj, path: self._editor_host.open_file(proj, path, show_diff=True)
         )
+        # #365 phase 10: register this project's live explorer index (tree
+        # scan time) with the orchestrator for `takkub doctor --workspace`.
+        # `tab.explorer` can be None (degrades gracefully on a malformed
+        # projects.json entry — see ProjectTab's own comment on this).
+        if tab.explorer is not None:
+            self.orch.register_workspace_diag_source(
+                tab.project_name, "tree_index", tab.explorer.index
+            )
 
     def _on_tab_pane_close_requested(self, role: str, project: str, tab: ProjectTab) -> None:
         pane = tab.teammate_panes.get(role)
@@ -1305,6 +1317,10 @@ class MainWindow(
             self._usage_corner.setParent(None)
             self._limit_label_host = None
         self.tabs.removeTab(index)
+        # #365 phase 10: drop this project's registered diagnostic sources
+        # (tab.explorer is about to be torn down with the tab) so a later
+        # `takkub doctor --workspace` doesn't read from a deleted QObject.
+        self.orch.unregister_workspace_diag_sources(tab.project_name)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
         try:

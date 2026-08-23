@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import logging
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,16 +123,13 @@ def parse_status_v2(output: str) -> list[FileChange]:
     return changes
 
 
-def changes_sync(repo_root: Path) -> list[FileChange]:
-    """Blocking `git status --porcelain=v2 -z`. Best-effort — a non-repo,
-    missing git, or timeout all yield an empty list rather than raising,
-    matching GitStatusService's own contract.
-
-    `encoding="utf-8"` is explicit, not `text=True`'s locale default — git
-    writes path bytes as UTF-8 regardless of the OS locale, and on a
-    non-UTF-8 Windows locale (e.g. Thai cp874) the platform default would
-    raise `UnicodeDecodeError` on a Unicode filename instead of decoding it.
-    """
+def _changes_sync_diag(repo_root: Path) -> tuple[list[FileChange], str | None]:
+    """Same subprocess call `changes_sync` makes, plus the error text
+    `changes_sync`'s best-effort contract otherwise swallows — used by
+    `_StatusWorker` so `GitChangesService.diagnostics()` (#365 phase 10,
+    13_PERFORMANCE_AND_QT_RULES.md rule 10) can report "last run ms +
+    error" without a second subprocess call. `changes_sync` itself keeps
+    its existing "always a list, never raises" contract."""
     try:
         proc = subprocess.run(
             ["git", "status", "--porcelain=v2", "-z", "--untracked-files=normal"],
@@ -144,10 +142,23 @@ def changes_sync(repo_root: Path) -> list[FileChange]:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug("git_changes_service: status failed for %s: %s", repo_root, exc)
-        return []
+        return [], f"{type(exc).__name__}: {exc}"
     if proc.returncode != 0:
-        return []
-    return parse_status_v2(proc.stdout)
+        return [], f"git exited {proc.returncode}: {(proc.stderr or '').strip()[:200]}"
+    return parse_status_v2(proc.stdout), None
+
+
+def changes_sync(repo_root: Path) -> list[FileChange]:
+    """Blocking `git status --porcelain=v2 -z`. Best-effort — a non-repo,
+    missing git, or timeout all yield an empty list rather than raising,
+    matching GitStatusService's own contract.
+
+    `encoding="utf-8"` is explicit, not `text=True`'s locale default — git
+    writes path bytes as UTF-8 regardless of the OS locale, and on a
+    non-UTF-8 Windows locale (e.g. Thai cp874) the platform default would
+    raise `UnicodeDecodeError` on a Unicode filename instead of decoding it.
+    """
+    return _changes_sync_diag(repo_root)[0]
 
 
 # ── diff against HEAD ────────────────────────────────────────────────────
@@ -233,6 +244,9 @@ def diff_sync(
 
 class _StatusSignals(QObject):
     finished = pyqtSignal(list)  # list[FileChange]
+    # #365 phase 10 diagnostics: (elapsed_ms, error_or_empty) — timed inside
+    # the worker thread; the connected slot only stores two values.
+    timed = pyqtSignal(float, str)
 
 
 class _StatusWorker(QRunnable):
@@ -242,12 +256,16 @@ class _StatusWorker(QRunnable):
         self.signals = _StatusSignals()
 
     def run(self) -> None:  # called by QThreadPool
-        result = changes_sync(self.repo_root)
+        t0 = time.perf_counter()
+        result, error = _changes_sync_diag(self.repo_root)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
         _safe_emit(self.signals.finished, result)
+        _safe_emit(self.signals.timed, elapsed_ms, error or "")
 
 
 class _DiffSignals(QObject):
     finished = pyqtSignal(object)  # DiffResult
+    timed = pyqtSignal(float)  # elapsed_ms — error already lives on DiffResult.error
 
 
 class _DiffWorker(QRunnable):
@@ -262,8 +280,11 @@ class _DiffWorker(QRunnable):
         self.signals = _DiffSignals()
 
     def run(self) -> None:  # called by QThreadPool
+        t0 = time.perf_counter()
         result = diff_sync(self.repo_root, self.roots, self.abs_path, self.max_bytes)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
         _safe_emit(self.signals.finished, result)
+        _safe_emit(self.signals.timed, elapsed_ms)
 
 
 # ── GitChangesService — the app-facing QObject ───────────────────────────
@@ -293,6 +314,15 @@ class GitChangesService(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(debounce_ms)
         self._timer.timeout.connect(self._run)
+        # #365 phase 10 diagnostics (13_PERFORMANCE_AND_QT_RULES.md rule
+        # 10, "git_changes service last run ms + error") — last completed
+        # run only, not a history.
+        self._last_status_ms: float | None = None
+        self._last_status_error: str | None = None
+        self._last_diff_ms: float | None = None
+        self._last_diff_error: str | None = None
+        self._status_run_count: int = 0
+        self._diff_run_count: int = 0
 
     def request_refresh(self) -> None:
         self._timer.start()
@@ -300,15 +330,40 @@ class GitChangesService(QObject):
     def _run(self) -> None:
         worker = _StatusWorker(self.repo_root)
         worker.signals.finished.connect(self._on_status_finished)
+        worker.signals.timed.connect(self._on_status_timed)
         QThreadPool.globalInstance().start(worker)
 
     def _on_status_finished(self, result: list) -> None:
         self.changesChanged.emit(result)
 
+    def _on_status_timed(self, elapsed_ms: float, error: str) -> None:
+        self._last_status_ms = elapsed_ms
+        self._last_status_error = error or None
+        self._status_run_count += 1
+
     def request_diff(self, abs_path: Path) -> None:
         worker = _DiffWorker(self.repo_root, self.roots, Path(abs_path), MAX_DIFF_FILE_BYTES)
         worker.signals.finished.connect(self._on_diff_finished)
+        worker.signals.timed.connect(self._on_diff_timed)
         QThreadPool.globalInstance().start(worker)
 
     def _on_diff_finished(self, result: DiffResult) -> None:
+        self._last_diff_error = result.error
         self.diffReady.emit(result)
+
+    def _on_diff_timed(self, elapsed_ms: float) -> None:
+        self._last_diff_ms = elapsed_ms
+        self._diff_run_count += 1
+
+    def diagnostics(self) -> dict:
+        """`takkub doctor --workspace`'s "git_changes service last run ms +
+        error" row. Pure attribute reads, no subprocess call triggered."""
+        return {
+            "last_status_ms": self._last_status_ms,
+            "last_status_error": self._last_status_error,
+            "status_run_count": self._status_run_count,
+            "last_diff_ms": self._last_diff_ms,
+            "last_diff_error": self._last_diff_error,
+            "diff_run_count": self._diff_run_count,
+            "debounce_pending": self._timer.isActive(),
+        }

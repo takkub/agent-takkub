@@ -1722,6 +1722,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             if ram_resp is not None and ram_resp.get("ok"):
                 ram_resp["main_process_profile"] = profile_resp
 
+    workspace_resp: dict | None = None
+    if getattr(args, "workspace", False):
+        from .doctor import check_workspace_monaco_bundle
+
+        findings += check_workspace_monaco_bundle()
+        if read_port() is not None:
+            try:
+                workspace_resp = _request({"cmd": "workspace-status"})
+            except Exception as e:
+                workspace_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+
     if getattr(args, "core_version", False):
         from .doctor import check_core_version_compat
 
@@ -1753,13 +1764,19 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             }
             for f in findings
         ]
+        # #364 lever 6 / #365 phase 10: `--ram`/`--workspace` are each meant
+        # as a before/after baseline, so they keep their raw dict (not
+        # flattened into Finding text) — the one case where `doctor --json`'s
+        # shape grows from a bare list to {findings, ...}; plain `--json`
+        # (neither flag) stays unchanged. Additive so `--ram --workspace
+        # --json` carries both.
+        extra_payload: dict = {}
         if getattr(args, "ram", False):
-            # #364 lever 6: `--ram --json` is meant as a before/after baseline
-            # for the other RAM-diet levers, so it keeps the raw byte-level
-            # `ram_resp` dict (not flattened into Finding text) — this is the
-            # one case where `doctor --json`'s shape grows from a bare list to
-            # {findings, ram}; plain `--json` (no `--ram`) is unchanged.
-            _utf8_print(_json.dumps({"findings": findings_payload, "ram": ram_resp}, indent=2))
+            extra_payload["ram"] = ram_resp
+        if getattr(args, "workspace", False):
+            extra_payload["workspace"] = workspace_resp
+        if extra_payload:
+            _utf8_print(_json.dumps({"findings": findings_payload, **extra_payload}, indent=2))
         else:
             _utf8_print(_json.dumps(findings_payload, indent=2))
     else:
@@ -1769,6 +1786,11 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
             _utf8_print("")
             _utf8_print(format_ram_report(ram_resp))
+        if getattr(args, "workspace", False):
+            from .doctor import format_workspace_report
+
+            _utf8_print("")
+            _utf8_print(format_workspace_report(workspace_resp))
 
     n_fail = sum(1 for f in findings if f.status == Status.FAIL)
     ok = n_fail == 0
@@ -3352,6 +3374,16 @@ def main(argv: list[str] | None = None) -> int:
         "running; no effect without --ram. A lower-bound diagnostic, not a "
         "full accounting of the process's RSS — see "
         "ram_report.collect_main_process_profile's docstring.",
+    )
+    sdoc.add_argument(
+        "--workspace",
+        action="store_true",
+        help="also report Workspace/IDE-lite diagnostics (#365 phase 10): "
+        "Monaco bundle presence on disk, live editor host/preview/design "
+        "artifact/file-watcher/git-changes/tree-scan state where the "
+        "cockpit is running; opt-in, off by default so plain `takkub "
+        "doctor` is unchanged. The live half is skipped (not failed) when "
+        "the cockpit isn't running.",
     )
     sdoc.add_argument(
         "--storage-layout",

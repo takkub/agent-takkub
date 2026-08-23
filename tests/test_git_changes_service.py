@@ -323,3 +323,69 @@ class TestGitChangesServiceDebounce:
 
 def test_max_diff_file_bytes_is_a_sane_positive_bound() -> None:
     assert 0 < MAX_DIFF_FILE_BYTES <= 10_000_000
+
+
+# ── diagnostics (#365 phase 10) ───────────────────────────────────────────
+
+
+class TestDiagnostics:
+    def test_initial_diagnostics_are_empty(self, qapp, tmp_path: Path) -> None:
+        svc = GitChangesService(tmp_path, [tmp_path])
+
+        diag = svc.diagnostics()
+
+        assert diag["last_status_ms"] is None
+        assert diag["last_status_error"] is None
+        assert diag["status_run_count"] == 0
+        assert diag["last_diff_ms"] is None
+        assert diag["last_diff_error"] is None
+        assert diag["diff_run_count"] == 0
+
+    def test_successful_status_run_records_timing_no_error(
+        self, qapp, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "a.txt", "x\n")
+        svc = GitChangesService(repo, [repo], debounce_ms=10)
+
+        svc.request_refresh()
+        assert _wait_until(lambda: svc.diagnostics()["status_run_count"] == 1)
+
+        diag = svc.diagnostics()
+        assert diag["last_status_ms"] is not None
+        assert diag["last_status_ms"] >= 0.0
+        assert diag["last_status_error"] is None
+
+    def test_status_run_against_non_repo_records_error(
+        self, qapp, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        svc = GitChangesService(plain, [plain], debounce_ms=10)
+
+        svc.request_refresh()
+        assert _wait_until(lambda: svc.diagnostics()["status_run_count"] == 1)
+
+        diag = svc.diagnostics()
+        assert diag["last_status_error"] is not None
+
+    def test_diff_run_records_timing_and_result_error(
+        self, qapp, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "a.txt", "x\n")
+        (repo / "a.txt").write_text("changed\n", encoding="utf-8")
+        svc = GitChangesService(repo, [repo])
+
+        svc.request_diff(repo / "a.txt")
+        assert _wait_until(lambda: svc.diagnostics()["diff_run_count"] == 1)
+
+        diag = svc.diagnostics()
+        assert diag["last_diff_ms"] is not None
+        assert diag["last_diff_error"] is None

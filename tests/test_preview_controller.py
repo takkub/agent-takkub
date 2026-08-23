@@ -257,6 +257,55 @@ class TestPreviewController:
         assert controller.status("a") is None
         assert controller.status("b") is not None
 
+    def test_all_states_reflects_open_and_closed_projects(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("a", "http://127.0.0.1:3000")
+        controller.open_url("b", "http://127.0.0.1:4000")
+
+        assert set(controller.all_states()) == {"a", "b"}
+
+        controller.close("a")
+        assert set(controller.all_states()) == {"b"}
+
+
+# ── check_navigation (#365 phase 10 diagnostics) ──────────────────────────
+
+
+class TestCheckNavigation:
+    def test_no_open_preview_raises(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        with pytest.raises(ValueError, match="no open preview"):
+            controller.check_navigation("demo", "http://127.0.0.1:3000/")
+
+    def test_allowed_navigation_does_not_increment_counter(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("demo", "http://127.0.0.1:3000")
+
+        allowed = controller.check_navigation("demo", "http://127.0.0.1:3000/about")
+
+        assert allowed is True
+        assert controller.nav_block_counts() == {}
+
+    def test_blocked_navigation_increments_counter(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("demo", "http://127.0.0.1:3000")
+
+        allowed1 = controller.check_navigation("demo", "http://evil.example.com/")
+        allowed2 = controller.check_navigation("demo", "http://127.0.0.1:4000/")
+
+        assert allowed1 is False
+        assert allowed2 is False
+        assert controller.nav_block_counts() == {"demo": 2}
+
+    def test_block_counts_are_per_project(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("a", "http://127.0.0.1:3000")
+        controller.open_url("b", "http://127.0.0.1:4000")
+
+        controller.check_navigation("a", "http://evil.example.com/")
+
+        assert controller.nav_block_counts() == {"a": 1}
+
 
 # ── navigation_allowed ────────────────────────────────────────────────────
 

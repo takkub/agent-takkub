@@ -18,6 +18,7 @@ from agent_takkub.project_file_index import (
     IGNORED_NAMES,
     GitStatusService,
     PathEscapesRootsError,
+    ProjectFileIndex,
     list_dir_sync,
     resolve_and_contain,
 )
@@ -198,3 +199,50 @@ class TestGitStatusServiceDebounce:
         QTest.qWait(50)
 
         assert calls == []
+
+
+# ── ProjectFileIndex: diagnostics (#365 phase 10) ────────────────────────
+
+
+def _wait_until(predicate, timeout_ms: int = 3000, step_ms: int = 25) -> bool:
+    elapsed = 0
+    while not predicate() and elapsed < timeout_ms:
+        QTest.qWait(step_ms)
+        elapsed += step_ms
+    return predicate()
+
+
+class TestProjectFileIndexDiagnostics:
+    def test_initial_diagnostics_are_empty(self, qapp, tmp_path: Path) -> None:
+        index = ProjectFileIndex([tmp_path])
+
+        diag = index.diagnostics()
+
+        assert diag["last_scan_dir"] is None
+        assert diag["last_scan_ms"] is None
+        assert diag["last_scan_entry_count"] == 0
+        assert diag["scan_count"] == 0
+
+    def test_request_list_records_timing_and_entry_count(self, qapp, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "a.py").write_text("x", encoding="utf-8")
+        (root / "b.py").write_text("y", encoding="utf-8")
+        index = ProjectFileIndex([root])
+
+        index.request_list(root)
+        assert _wait_until(lambda: index.diagnostics()["scan_count"] == 1)
+
+        diag = index.diagnostics()
+        assert diag["last_scan_dir"] == str(root.resolve())
+        assert diag["last_scan_ms"] is not None
+        assert diag["last_scan_ms"] >= 0.0
+        assert diag["last_scan_entry_count"] == 2
+
+    def test_repeated_scans_increment_scan_count(self, qapp, tmp_path: Path) -> None:
+        index = ProjectFileIndex([tmp_path])
+
+        index.request_list(tmp_path)
+        assert _wait_until(lambda: index.diagnostics()["scan_count"] == 1)
+        index.request_list(tmp_path)
+        assert _wait_until(lambda: index.diagnostics()["scan_count"] == 2)

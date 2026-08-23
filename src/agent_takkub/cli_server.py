@@ -812,6 +812,13 @@ class CliServer(QObject):
                 ram = self._orch.ram_status()
                 self._reply(sock, ok=True, msg="ram status", **ram)
                 return
+            elif cmd == "workspace-status":
+                # #365 phase 10: read-only, same trust level as ram-status —
+                # `takkub doctor --workspace`'s live editor/preview/design
+                # artifact/watcher diagnostics.
+                ws = self._orch.workspace_status(project=from_project)
+                self._reply(sock, ok=True, msg="workspace status", **ws)
+                return
             elif cmd == "ram-profile":
                 # #364 lever 5: read-only, same trust level as ram-status —
                 # `takkub doctor --ram --ram-profile`'s opt-in main-process

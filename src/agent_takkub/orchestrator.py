@@ -1308,6 +1308,23 @@ class Orchestrator(
         self._preview_controller.opened.connect(self.previewOpened)
         self._preview_controller.updated.connect(self.previewUpdated)
         self._preview_controller.closed.connect(self.previewClosed)
+        # #365 phase 10: `takkub doctor --workspace` diagnostic sources.
+        # `_editor_host_ref` mirrors `_spawn_gate_pred`'s injection pattern
+        # (see that field's comment below) — MainWindow owns the one
+        # app-wide EditorHost and registers it via `set_editor_host` after
+        # constructing it; None here (and in every headless/test path) is a
+        # normal "no live window" state, not an error.
+        # `_workspace_diag_sources` is project → {source_key: live object},
+        # registered/unregistered by main_window as ProjectTab explorers
+        # come and go (`register_workspace_diag_source` /
+        # `unregister_workspace_diag_sources` below) — a source with a
+        # `.diagnostics()` method (FileWatchService/GitChangesService/
+        # ProjectFileIndex all have one) is read directly by
+        # `workspace_status`; one that never got instantiated for a given
+        # project simply isn't in the dict, which `workspace_status`
+        # reports as "not wired", never as a failure.
+        self._editor_host_ref = None
+        self._workspace_diag_sources: dict[str, dict[str, object]] = {}
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -6058,6 +6075,98 @@ class Orchestrator(
         from . import ram_report
 
         return ram_report.collect_main_process_profile()
+
+    # ──────────────────────────────────────────────────────────────
+    # #365 phase 10 — workspace diagnostics injection + `takkub doctor
+    # --workspace` IPC (13_PERFORMANCE_AND_QT_RULES.md rule 10)
+    # ──────────────────────────────────────────────────────────────
+    def set_editor_host(self, host) -> None:
+        """Injected by main_window right after constructing the one
+        app-wide EditorHost. `host` is never imported/typed here —
+        `editor_widget.py` pulls in PyQt6.QtWebEngineWidgets, which this
+        module has no reason to depend on just for a diagnostics read."""
+        self._editor_host_ref = host
+
+    def register_workspace_diag_source(self, project: str, key: str, obj: object) -> None:
+        self._workspace_diag_sources.setdefault(project, {})[key] = obj
+
+    def unregister_workspace_diag_sources(self, project: str) -> None:
+        self._workspace_diag_sources.pop(project, None)
+
+    def workspace_status(self, project: str | None = None) -> dict:
+        """Live workspace diagnostics for `takkub doctor --workspace`
+        (#365 phase 10). Synchronous/on the Qt main thread, same
+        one-off-only convention as `ram_status`/`performance_status` above
+        — every read here is either a trivial attribute (the registered
+        sources' `.diagnostics()` methods are pure state reads, see each
+        module's own doctstring) or a small local JSONL fold (design
+        artifacts), never a fresh subprocess/filesystem scan triggered by
+        this call itself.
+        """
+        project_ns = self._resolve_project(project) if project else None
+        projects = [project_ns] if project_ns else sorted(self._workspace_diag_sources)
+
+        editor: dict = {"registered": False}
+        host = self._editor_host_ref
+        if host is not None:
+            editor = {
+                "registered": True,
+                "has_view": bool(host.has_view()),
+                "open_count": int(host.open_count()),
+            }
+
+        preview_states: dict[str, dict] = {}
+        controller = getattr(self, "_preview_controller", None)
+        nav_blocks: dict[str, int] = {}
+        if controller is not None:
+            nav_blocks = controller.nav_block_counts()
+            for proj, state in controller.all_states().items():
+                if project_ns is not None and proj != project_ns:
+                    continue
+                preview_states[proj] = {
+                    **state.as_dict(),
+                    "nav_blocks": nav_blocks.get(proj, 0),
+                }
+
+        design_artifacts: dict[str, dict] = {}
+        if project_ns is not None:
+            candidate_projects = [project_ns]
+        else:
+            from .config import load_projects as _load_projects_ws
+
+            candidate_projects = sorted(_load_projects_ws().get("projects") or {})
+        for proj in candidate_projects:
+            try:
+                from .design_actions import DesignArtifactRegistry
+
+                artifacts = DesignArtifactRegistry(proj).all()
+            except Exception as exc:  # defensive — a malformed store must not crash doctor
+                design_artifacts[proj] = {"error": f"{type(exc).__name__}: {exc}"}
+                continue
+            if not artifacts:
+                continue
+            by_status: dict[str, int] = {}
+            for a in artifacts:
+                by_status[a.status] = by_status.get(a.status, 0) + 1
+            design_artifacts[proj] = {"count": len(artifacts), "by_status": by_status}
+
+        per_project_sources: dict[str, dict] = {}
+        for proj in projects:
+            sources = self._workspace_diag_sources.get(proj, {})
+            row: dict = {}
+            for key in ("tree_index", "file_watch", "git_changes"):
+                obj = sources.get(key)
+                if obj is not None and hasattr(obj, "diagnostics"):
+                    row[key] = obj.diagnostics()
+            if row:
+                per_project_sources[proj] = row
+
+        return {
+            "editor_host": editor,
+            "preview": preview_states,
+            "design_artifacts": design_artifacts,
+            "per_project": per_project_sources,
+        }
 
     # ──────────────────────────────────────────────────────────────
     # #365 phase 5 — Live Preview + design artifact IPC
