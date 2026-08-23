@@ -148,3 +148,79 @@ is no `saveFile` bridge slot, and every Monaco model is created with `readOnly: 
 inside the editor shows a toast instead of writing. Phase 3 (`editor_service.py`,
 `file_watch_service.py`) owns atomic writes, dirty-state, and the mtime+size+sha256 conflict UI
 already speced in `04_MONACO_EDITOR_SPEC.md`.
+
+## Phase 3 — safe edit (UI over the merged `editor_service.py`/`file_watch_service.py`)
+
+**Conflict baseline is server-tracked, never client-supplied.** `EditorHost._file_states`
+(path → `EditorFileState`) is the single source of truth for what a save is checked against —
+set on open and on a successful save, and deliberately **not** updated by a disk-watch
+notification (`_on_disk_changed`'s docstring) or by a failed/conflicting save. The alternative —
+trusting whatever "expected version" JS echoes back — would let a compromised or buggy renderer
+forge a stale-looking version and force an overwrite; keeping the baseline server-side means the
+worst a hostile page content could do is *fail* to save, never silently win a conflict it lost.
+
+**A conflict resolves in one round-trip, not three.** `_SaveWorker` already runs off the Qt main
+thread, so when `save_atomic` reports a conflict the same worker immediately re-reads the current
+disk text (`read_file_for_editor`) and ships it to JS in the same `editorConflict(path, diskText)`
+call — the JS-side `[Compare]` button builds its diff view from data it already has, no second
+`requestDiff` needed. `[Keep mine]` re-snapshots the disk right before writing (`force=True` in
+`_SaveWorker`) instead of trusting the conflict-time snapshot, so a second genuinely-new race
+during the dialog is caught rather than blindly overwritten.
+
+**Compare reuses the live model, not a copy.** `04_MONACO_EDITOR_SPEC.md`'s "diff editor" is one
+shared `IStandaloneDiffEditor` (phase 2 decision, still true) — a conflict's "Compare" sets its
+`modified` side to `tab.model` itself (not a fresh model with a snapshot of the text), so the
+diff keeps reflecting the user's edits as they keep typing instead of freezing at conflict-time.
+The cost is one piece of bookkeeping: `disposeDiffModels()` never disposes a `modified` model
+that turns out to be `tab.model`, and any code that's about to write a *different* diff pair
+(the git-HEAD "±" toggle) checks for and discards a live-linked leftover first rather than
+`setValue`-ing over the user's buffer through it.
+
+**`FileWatchService` roots accumulate; they aren't fixed at construction.** The module's own
+constructor takes a fixed root list (right for a per-project service), but `EditorHost` is one
+app-wide instance whose open files can belong to *any* project a tab has open — so `add_roots()`
+was added (small, additive) and `EditorHost` calls it with each project's roots the first time
+one of its files opens. The alternative (one `FileWatchService` per project, torn down with its
+last tab) would have duplicated `EditorHost`'s own "one instance total" shape for no benefit —
+the watcher's containment check is defense-in-depth over paths that were already
+`resolve_and_contain`-checked once by `read_file_for_editor` on open.
+
+**Disk-changed is a banner, never an auto-reload — including when the buffer is clean.** Even a
+non-dirty tab doesn't silently pull in the new disk content; the user always clicks
+`[Reload disk]`. The self-save-echo problem (the watcher firing for the file *we* just wrote) is
+solved by diffing the watcher's snapshot against `_file_states` (`_states_differ`, a local
+mtime_ns/size/sha256 comparison — not a shared import of `editor_service`'s private
+`_has_conflict`, kept as its own small copy since the two call sites want different consequences
+from the same comparison) rather than by suppressing the watch during a save.
+
+## Phase 4 — CHANGES panel (UI over the merged `git_changes_service.py`)
+
+**A second git service per explorer, not a superset replacing the first.** `GitStatusService`
+(phase 1, `project_file_index.py`) keeps badging tree rows exactly as it did; `GitChangesService`
+(this phase) is a sibling instance in the same `ProjectExplorer`, feeding a distinct "CHANGES (n)"
+tree row. Merging them into one service would have meant either porcelain-v2-only badges (a
+behavior change to an already-shipped feature, out of scope) or maintaining two parsers behind
+one service — two small, single-purpose services was the smaller change.
+
+**Click → diff is one round-trip through `EditorHost`, not a second diff surface.** A CHANGES row
+click emits `ProjectExplorer.changeActivated` → `ProjectTab.openDiffRequested` →
+`EditorHost.open_file(project, path, show_diff=True)`, which opens the file tab and immediately
+calls the existing `_on_diff_requested` once the read lands — reusing phase 2's git-HEAD diff
+path verbatim instead of giving `GitChangesService`'s own (unused by the UI) `request_diff`/
+`diffReady` a second Monaco surface to feed. Exactly 2 DOM editors total stays true.
+
+**No eager refresh at construction.** `GitChangesService.request_refresh()` is triggered by the
+same events that already trigger `GitStatusService`'s: a real directory listing
+(`_on_dir_listed`), plus (new) `EditorHost.gitRefreshNeeded` after a save or an external
+disk-change — never unconditionally in `ProjectExplorer.__init__`. An unconditional refresh would
+arm both services' debounce `QTimer`s for every opened project tab, including ones the user never
+touches git through — a real regression risk for the existing `#344`/`#345` leaked-QTimer guard
+this test suite enforces, for a panel that's meant to be lazy like the rest of the tree.
+
+**Ask Agent sends through `Orchestrator.send`, the same path `takkub send` uses — never a new
+channel.** The editor's "Ask Agent" (Monaco context-menu action + a per-tab "?" button) collects a
+bounded selection (≤4000 chars, capped client-side and again in `MainWindow._on_editor_ask_agent`
+defensively) and free-text request, then calls `orch.send(LEAD.name, msg, from_role="editor",
+project=project_name)` — the identical call `Orchestrator.send()` already serves for CLI/IPC
+sends, so it inherits that path's existing queueing-for-unspawned-Lead and delivery-tracking
+behavior for free instead of re-implementing a parallel one.

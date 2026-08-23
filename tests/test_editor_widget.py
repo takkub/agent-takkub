@@ -34,7 +34,10 @@ from agent_takkub.editor_widget import (
     read_file_for_editor,
     read_head_blob,
 )
+from agent_takkub.file_watch_service import FileWatchService
 from agent_takkub.project_file_index import PathEscapesRootsError
+
+from ._qt_timer_leak_guard import stop_timers_after
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +46,20 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _stop_file_watch_timer(monkeypatch):
+    # Every EditorHost constructs its own FileWatchService (#365 phase 3),
+    # whose `_timer` can arm from a real QFileSystemWatcher fileChanged
+    # signal fired by these tests' own saves/reloads landing on real files —
+    # same convention as test_project_explorer.py's git-service timer guard.
+    finalize = stop_timers_after(monkeypatch, FileWatchService, "_timer")
+    yield
+    try:
+        finalize()
+    except RuntimeError:
+        pass
 
 
 def _wait_until(predicate, timeout_ms: int = 3000, step_ms: int = 25) -> None:
@@ -225,6 +242,9 @@ class _StubEditorView(QWidget):
     revealRequested = pyqtSignal(str)
     tabClosed = pyqtSignal(str)
     askAgentRequested = pyqtSignal(str, int, int, str, str)
+    saveRequested = pyqtSignal(str, str)
+    keepMineRequested = pyqtSignal(str, str)
+    reloadRequested = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -454,6 +474,235 @@ class TestBridgeRouting:
 
 def test_max_editor_file_bytes_is_a_sane_positive_bound() -> None:
     assert 0 < MAX_EDITOR_FILE_BYTES <= 10_000_000
+
+
+# ── save / conflict / reload / disk-watch (#365 phase 3) ────────────────────
+
+
+class TestSave:
+    def test_successful_save_writes_disk_and_notifies_view(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        view.run_js_calls.clear()
+
+        view.saveRequested.emit(str(f.resolve()), "new content\n")
+        _wait_until(lambda: any("editorSaveResult" in c for c in view.run_js_calls))
+
+        call = next(c for c in view.run_js_calls if "editorSaveResult" in c)
+        assert "true" in call
+        assert f.read_text(encoding="utf-8") == "new content\n"
+        # Not a hardcoded byte count: save_atomic preserves the original
+        # file's newline convention (04_MONACO_EDITOR_SPEC.md), and the
+        # fixture write above went through pathlib's own platform-default
+        # newline translation — f.stat().st_size is the actual disk truth.
+        assert host._file_states[str(f.resolve())].size == f.stat().st_size
+
+    def test_save_emits_git_refresh_needed_for_the_owning_project(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj-g", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        received: list[str] = []
+        host.gitRefreshNeeded.connect(received.append)
+
+        view.saveRequested.emit(str(f.resolve()), "y")
+        _wait_until(lambda: received == ["proj-g"])
+
+    def test_save_for_a_path_never_opened_is_ignored(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        host = EditorHost(container, view_factory=stub_factory)
+        host._ensure_view()
+        view = stub_factory.created[0]
+
+        view.saveRequested.emit(str(tmp_path / "never-opened.py"), "text")
+        QTest.qWait(150)
+
+        assert view.run_js_calls == []
+
+
+class TestSaveConflict:
+    def test_disk_changed_since_open_reports_conflict_with_disk_text(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        view.run_js_calls.clear()
+        f.write_text("changed on disk\n", encoding="utf-8")
+
+        view.saveRequested.emit(str(f.resolve()), "my edits\n")
+        _wait_until(lambda: any("editorConflict" in c for c in view.run_js_calls))
+
+        call = next(c for c in view.run_js_calls if "editorConflict" in c)
+        assert "changed on disk" in call
+        assert not any("editorSaveResult" in c for c in view.run_js_calls)
+        assert f.read_text(encoding="utf-8") == "changed on disk\n"  # never overwritten silently
+
+    def test_conflict_does_not_move_the_save_baseline(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+        baseline_before = host._file_states[key]
+        f.write_text("changed on disk\n", encoding="utf-8")
+
+        view.saveRequested.emit(key, "my edits\n")
+        _wait_until(lambda: any("editorConflict" in c for c in view.run_js_calls))
+
+        assert host._file_states[key] == baseline_before
+
+
+class TestKeepMine:
+    def test_keep_mine_overwrites_despite_a_stale_baseline(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+        f.write_text("changed on disk\n", encoding="utf-8")  # baseline is now stale
+
+        view.keepMineRequested.emit(key, "forced overwrite\n")
+        _wait_until(lambda: any("editorSaveResult" in c for c in view.run_js_calls))
+
+        assert any("true" in c for c in view.run_js_calls if "editorSaveResult" in c)
+        assert f.read_text(encoding="utf-8") == "forced overwrite\n"
+
+
+class TestReloadFromDisk:
+    def test_reload_sends_fresh_disk_content_and_updates_baseline(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+        f.write_text("changed on disk\n", encoding="utf-8")
+        view.run_js_calls.clear()
+
+        view.reloadRequested.emit(key)
+        _wait_until(lambda: any("editorReloadDisk" in c for c in view.run_js_calls))
+
+        call = next(c for c in view.run_js_calls if "editorReloadDisk" in c)
+        assert "changed on disk" in call
+        assert host._file_states[key].size == f.stat().st_size
+
+    def test_reload_for_unknown_path_is_ignored(self, container, stub_factory, tmp_path) -> None:
+        host = EditorHost(container, view_factory=stub_factory)
+        host._ensure_view()
+        view = stub_factory.created[0]
+
+        view.reloadRequested.emit(str(tmp_path / "never-opened.py"))
+        QTest.qWait(150)
+
+        assert view.run_js_calls == []
+
+
+class TestDiskWatch:
+    def test_external_change_notifies_the_view(self, container, stub_factory, tmp_path) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        view.run_js_calls.clear()
+
+        f.write_text("changed externally\n", encoding="utf-8")
+        host._file_watch._on_file_changed(str(f.resolve()))
+        _wait_until(lambda: any("editorDiskChanged" in c for c in view.run_js_calls))
+
+    def test_own_save_does_not_trigger_the_disk_changed_banner(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+
+        view.saveRequested.emit(key, "my own edit\n")
+        _wait_until(lambda: any("editorSaveResult" in c for c in view.run_js_calls))
+        view.run_js_calls.clear()
+
+        # The watcher's own debounced notification for the write we just
+        # made — must be recognized as an echo, not an external edit.
+        host._file_watch._on_file_changed(key)
+        QTest.qWait(200)
+
+        assert not any("editorDiskChanged" in c for c in view.run_js_calls)
+
+    def test_deleted_file_notifies_removed(self, container, stub_factory, tmp_path) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("original\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+        view.run_js_calls.clear()
+
+        f.unlink()
+        host._file_watch._on_file_changed(key)
+        _wait_until(lambda: any("editorDiskRemoved" in c for c in view.run_js_calls))
+
+    def test_closing_a_tab_unwatches_it(self, container, stub_factory, tmp_path) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        key = str(f.resolve())
+        assert key in host._file_watch.watched_paths()
+
+        view.tabClosed.emit(key)
+
+        assert key not in host._file_watch.watched_paths()
+
+
+class TestOpenWithDiff:
+    def test_show_diff_true_also_requests_the_diff(
+        self, container, stub_factory, tmp_path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        _init_repo_with_commit(tmp_path, "a.py", "old\n")
+        (tmp_path / "a.py").write_text("new\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+
+        host.open_file("proj", str(tmp_path / "a.py"), show_diff=True)
+
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        _wait_until(lambda: any("editorShowDiff" in c for c in view.run_js_calls))
 
 
 # ── real QWebEngineView smoke (#364 lever-1 follow-up) ──────────────────────
