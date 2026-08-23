@@ -1743,6 +1743,11 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
         findings += check_storage_layout_state()
 
+    if getattr(args, "obsidian", False):
+        from .doctor import check_obsidian
+
+        findings += check_obsidian()
+
     pane_role = getattr(args, "pane", None)
     if pane_role:
         from .config import active_project
@@ -3390,6 +3395,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also report V1/V2/mixed storage layout state (#309 Phase 8b); "
         "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
+    sdoc.add_argument(
+        "--obsidian",
+        action="store_true",
+        help="also report Obsidian vault hardening state (#365 phase 8): vault "
+        "presence, canonical-metadata coverage, persistent dedup index size, "
+        "default-deny indexing boundary; opt-in, off by default so plain "
+        "`takkub doctor` is unchanged",
     )
     sdoc.add_argument(
         "--pane",
