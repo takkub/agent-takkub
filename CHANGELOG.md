@@ -6,6 +6,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 7 design tool integrations** (#365) — `core/capabilities/design_integrations.py`: **Storybook detect จริง**
+  (`.storybook/` หรือ `package.json` script · port จาก `-p/--port` · `preview_url` สำหรับ `takkub preview open-url`, ไม่รัน/ไม่แตะ
+  network) + 21st.dev/Figma/Penpot = **registry stub opt-in only** (`enabled_for_role` อ่านจาก `pane_tools_policy.effective_mcps`
+  เดียวกับ spawn — default OFF, ไม่มี bypass, secret ผ่าน `secret_ref` เท่านั้น) · `CapabilityRegistry.resolve_design_integrations` ·
+  `takkub doctor` section `[design-integrations]` · `.claude/agents/designer.md` reference priority: Storybook → design system ของ
+  โปรเจกต์ → external MCP (last resort) + anti-AI checklist
+  + tests: `tests/test_core_capabilities_design_integrations.py` (detect/port/stub/policy) · `tests/test_doctor.py` (+section)
+
 - **Workspace 1.2.0 เฟส 5 widget + เฟส 6 Design Director UI** (#365) — `preview_widget.py` PreviewHost: **QWebEngineView 1 ตัวทั้งแอป**
   (dock เหมือน editor) lazy create/destroy · URL (loopback-only) / file mode · device presets Desktop/Tablet/Mobile · Refresh/Open
   externally · **navigation policy gate ทุก request** ผ่าน `preview_controller.navigation_allowed` · **ไม่มี QWebChannel bridge** ·
@@ -90,6 +98,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ผ่าน repo guard subprocess no-window/encoding + keepalive + editor_widget targeted รอบเดียว
 
 ### Fixed (แก้)
+
+- **`takkub preview`/`design` IPC ต้องมี pane token** (#365 reviewer MUST-FIX) — เดิม `cli_server` เชื่อ `from_project` ที่ caller
+  ส่งมาตรงๆ (process ใดก็ได้ในเครื่องเปิด/ปิด Preview หรือ publish/approve/revise artifact แทนโปรเจกต์อื่นได้) → ตอนนี้ `design` ทุก
+  action + `preview` ทุก action ยกเว้น `status` อยู่ชั้นเดียวกับ `done/progress/send` (token ผูก project+role) ·
+  `tests/test_workspace_preview_design_cli.py` (+ spoof cases)
 
 - **CI batch หลัง merge 1.2.0 ชุดแรก (run 32633203191)** — 4 ต้นเหตุ: (1) `test_pane_discard_spike` ×4 segfault บน macos
   offscreen — เป็นเครื่องมือวัด RAM ไม่ใช่ regression gate → opt-in `AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1` (2) debounce test ของ
