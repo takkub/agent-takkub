@@ -485,6 +485,22 @@ def load_projects() -> dict:
     return data
 
 
+def save_projects_json(data: dict) -> bool:
+    """Persist the full projects.json document to V1, then best-effort
+    mirror it into v2/ (#362 wave 1 dual-write). Every writer of
+    ``PROJECTS_JSON`` (this module's own project-tab helpers below, plus
+    ``project_wizard.py``'s add/edit-project flows) goes through this one
+    function instead of calling ``_write_json_atomic(PROJECTS_JSON, ...)``
+    directly, so the v2 mirror can never be forgotten at a new call site."""
+    PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    ok = _write_json_atomic(PROJECTS_JSON, data)
+    if ok:
+        from .core.storage.dual_write import dual_write_projects
+
+        dual_write_projects(data)
+    return ok
+
+
 def active_project() -> tuple[str | None, dict]:
     """Return (project_name, project_dict) for the active project, or (None, {})."""
     data = load_projects()
@@ -637,7 +653,7 @@ def set_active_project(name: str) -> bool:
     if name not in data.get("projects", {}):
         return False
     data["active"] = name
-    return _write_json_atomic(PROJECTS_JSON, data)
+    return save_projects_json(data)
 
 
 def clear_active_project() -> None:
@@ -649,7 +665,7 @@ def clear_active_project() -> None:
     stale name pointing at a project with no open tab."""
     data = load_projects()
     data["active"] = None
-    _write_json_atomic(PROJECTS_JSON, data)
+    save_projects_json(data)
 
 
 def get_open_tabs() -> list[str]:
@@ -687,7 +703,7 @@ def set_open_tabs(names: list[str]) -> None:
         seen.add(n)
         cleaned.append(n)
     data["open_tabs"] = cleaned
-    _write_json_atomic(PROJECTS_JSON, data)
+    save_projects_json(data)
 
 
 # Central dev-server hygiene appended to EVERY role's materialised CLAUDE.md so

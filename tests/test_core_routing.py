@@ -412,6 +412,36 @@ def test_facade_model_flag_off_never_touches_router(monkeypatch):
     assert effective_model_for_v2("backend", "claude") == "claude-haiku-4-5"
 
 
+# -- #362 wave 1: dual-write keeps the V2 shadow copy fresh, so re-pinning a
+# model no longer produces a `model_pin_v2_drift` event -------------------
+
+
+def test_no_drift_event_after_dual_write_when_pin_changed_via_role_models_save(
+    v1_model_state, isolated_v2_data_home, caplog
+):
+    """The whole point of #362 wave 1: once every V1 writer also mirrors
+    into v2/, `role_models.set_model()` (the same call Settings makes) keeps
+    the migrated V2 copy in sync — the drift `test_effective_model_for_
+    prefers_v1_over_stale_v2_after_migration` above proves V1 survives is
+    no longer *drift*, because V2 isn't stale anymore."""
+    _write_v1_model_state(
+        v1_model_state,
+        roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
+        providers={"claude": "claude-sonnet-5"},
+    )
+    _migrate(isolated_v2_data_home, v1_model_state)
+
+    # Re-pin AFTER migration through the real writer (dual-write hook lives
+    # inside `role_models._save()`), not by hand-writing V1 JSON.
+    role_models.set_model("backend", "claude", "claude-fable-5")
+
+    with caplog.at_level("WARNING", logger="agent_takkub.core.routing.router"):
+        result = Router().effective_model_for("backend", "claude")
+
+    assert result == "claude-fable-5"
+    assert not any("model_pin_v2_drift" in r.message for r in caplog.records)
+
+
 def test_facade_model_flag_on_fails_open_on_router_exception(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_ROUTER", "1")
     monkeypatch.setattr(role_models, "model_for", lambda role, provider: None)

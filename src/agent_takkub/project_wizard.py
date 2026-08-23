@@ -13,7 +13,6 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .config import _write_json_atomic
 from .project_tab import ProjectTab
 
 
@@ -369,7 +368,7 @@ class ProjectWizardMixin:
         *presets* overrides the stored preset list when provided; otherwise the
         existing list is preserved (import / edit flows that don't touch presets).
         """
-        from .config import PROJECTS_JSON, load_projects
+        from .config import load_projects, save_projects_json
 
         if rules_content is not None:
             from .project_rules import write_project_rules
@@ -388,8 +387,7 @@ class ProjectWizardMixin:
         }
         data["active"] = name
 
-        PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(PROJECTS_JSON, data)
+        save_projects_json(data)
 
         self._refresh_project_list()
         if name in self._open_projects():
@@ -538,7 +536,7 @@ class ProjectWizardMixin:
             QVBoxLayout,
         )
 
-        from .config import PROJECTS_JSON, load_projects
+        from .config import load_projects, save_projects_json
 
         data = load_projects()
         existing = (data.get("projects") or {}).get(proj_name, {})
@@ -613,8 +611,7 @@ class ProjectWizardMixin:
             "presets": existing_presets,
         }
 
-        PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(PROJECTS_JSON, data)
+        save_projects_json(data)
 
         self._refresh_project_list()
         self._status.showMessage(f"Updated project '{proj_name}'", 4_000)

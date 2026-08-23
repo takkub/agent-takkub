@@ -149,6 +149,9 @@ def save_custom_roles(roles: dict[str, Role]) -> bool:
             json.dump(payload, tmp, indent=2, ensure_ascii=False)
             tmp.write("\n")
         tmp_path.replace(CUSTOM_ROLES_FILE)
+        from .core.storage.dual_write import dual_write_custom_roles_registry
+
+        dual_write_custom_roles_registry(payload)
         return True
     except OSError as e:
         _log.warning("save_custom_roles: could not write %s: %s", CUSTOM_ROLES_FILE, e)
@@ -243,6 +246,9 @@ def create_role(
         tmp_path.unlink(missing_ok=True)
         return False, f"เขียน role file ไม่สำเร็จ: {e}"
 
+    from .core.storage.dual_write import dual_write_custom_role_file
+
+    dual_write_custom_role_file(name, content)
     return True, ""
 
 
@@ -269,6 +275,10 @@ def delete_role(name: str) -> bool:
         role_file_path(name).unlink(missing_ok=True)
     except OSError as e:
         _log.warning("delete_role: could not remove role file for %r: %s", name, e)
+
+    from .core.storage.dual_write import dual_write_custom_role_file
+
+    dual_write_custom_role_file(name, None)
     return True
 
 
