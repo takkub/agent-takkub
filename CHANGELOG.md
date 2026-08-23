@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.1.0] - 2026-08-23
+
 ### Fixed (แก้)
 
 - **auto-migrate ตอน boot บนเครื่องที่ migrate ไปแล้ว (`layout=mixed`) รันแค่ version-marker ทุกครั้ง → ladder
