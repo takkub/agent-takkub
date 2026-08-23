@@ -8,11 +8,13 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from agent_takkub import cockpit_theme, task_ledger
 from agent_takkub import project_nav as project_nav_module
+from agent_takkub.git_changes_service import GitChangesService
+from agent_takkub.project_file_index import GitStatusService
 from agent_takkub.project_nav import ProjectNav
 from agent_takkub.project_tab import ProjectTab
 
@@ -37,12 +39,48 @@ def _isolate_runtime_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 def _stop_nav_tab_timers(monkeypatch):
     # ProjectNav._pending_timer and ProjectTab._tab_status_timer both start
     # unconditionally in __init__ (#344) — every construction in this file
-    # otherwise leaves one running for the rest of the pytest session.
+    # otherwise leaves one running for the rest of the pytest session. A
+    # ProjectTab with a real ProjectExplorer (TestExplorerEmbedding below)
+    # also spins up GitStatusService/GitChangesService's own QTimers.
     finalize_nav = stop_timers_after(monkeypatch, ProjectNav, "_pending_timer")
     finalize_tab = stop_timers_after(monkeypatch, ProjectTab, "_tab_status_timer")
+    finalize_git = stop_timers_after(monkeypatch, GitStatusService, "_timer")
+    finalize_changes = stop_timers_after(monkeypatch, GitChangesService, "_timer")
     yield
     finalize_nav()
     finalize_tab()
+    for finalize in (finalize_git, finalize_changes):
+        try:
+            finalize()
+        except RuntimeError:
+            pass  # explorer (and its child git service/QTimer) already GC'd
+
+
+@pytest.fixture(autouse=True)
+def _stub_project_roots(monkeypatch, tmp_path: pathlib.Path) -> None:
+    """Every ProjectTab constructed in this file builds a real
+    ProjectExplorer, which reads project_roots() — stub it so no test needs
+    a real projects.json / DATA_HOME (same fixture as test_project_tab_explorer.py)."""
+    from agent_takkub import project_explorer as pe
+
+    monkeypatch.setattr(pe, "project_roots", lambda name: {"main": tmp_path})
+
+
+@pytest.fixture(autouse=True)
+def isolated_nav_qsettings(monkeypatch, tmp_path: pathlib.Path) -> str:
+    """Redirect ProjectNav's `QSettings("agent-takkub", "cockpit")` calls
+    (every `ProjectNav()` construction makes one, for the explorer's
+    per-project expanded/collapsed flag) to a throwaway per-test INI file —
+    without this, every test in this file would read/write the real
+    machine's registry/INI store under the same org/app MainWindow uses for
+    window geometry. Autouse: this isn't opt-in per test."""
+    ini_path = str(tmp_path / "cockpit_settings.ini")
+
+    def _factory(*_args, **_kwargs):
+        return QSettings(ini_path, QSettings.Format.IniFormat)
+
+    monkeypatch.setattr(project_nav_module, "QSettings", _factory)
+    return ini_path
 
 
 def _page(text: str) -> QWidget:
@@ -288,3 +326,127 @@ class TestPendingProjectsSection:
         assert nav._pending_list.isHidden() is False
         nav.set_sidebar_collapsed(True, animate=False)
         assert nav._pending_list.isHidden() is True
+
+
+class TestExplorerEmbedding:
+    """#365 feedback 2026-08-23: the file tree now lives directly under its
+    own project's sidebar card — not a separate QSplitter panel between the
+    sidebar and the pane area (that lasted one release; see project_nav.py's
+    module docstring). Only the currently-selected row ever shows a tree,
+    and a chevron on that row is the one manual toggle."""
+
+    def test_explorer_embedded_and_shown_for_first_selected_project(self, qapp) -> None:
+        tab = ProjectTab("proj-embed-a")
+        nav = ProjectNav()
+        nav.addTab(tab, "proj-embed-a")
+        row = nav._row_widget(0)
+
+        assert row.has_explorer() is True
+        assert tab.explorer.parent() is row._explorer_container
+        assert tab.explorer.isHidden() is False
+        assert row._chevron.isHidden() is False
+
+    def test_switching_project_hides_previous_row_tree_and_shows_new(self, qapp) -> None:
+        tab_a = ProjectTab("proj-embed-b")
+        tab_b = ProjectTab("proj-embed-c")
+        nav = ProjectNav()
+        nav.addTab(tab_a, "proj-embed-b")
+        nav.addTab(tab_b, "proj-embed-c")
+        row_a, row_b = nav._row_widget(0), nav._row_widget(1)
+
+        # row 0 auto-selected on first add; row 1's tree/chevron stay hidden
+        # until it becomes the active project.
+        assert tab_a.explorer.isHidden() is False
+        assert row_b._chevron.isHidden() is True
+
+        nav.setCurrentIndex(1)
+
+        assert tab_a.explorer.isHidden() is True
+        assert row_a._chevron.isHidden() is True
+        assert tab_b.explorer.isHidden() is False
+        assert row_b._chevron.isHidden() is False
+
+    def test_chevron_click_collapses_and_expands_the_tree(self, qapp) -> None:
+        tab = ProjectTab("proj-embed-d")
+        nav = ProjectNav()
+        nav.addTab(tab, "proj-embed-d")
+        row = nav._row_widget(0)
+        assert tab.explorer.isHidden() is False
+
+        row._chevron.click()
+        assert tab.explorer.isHidden() is True
+
+        row._chevron.click()
+        assert tab.explorer.isHidden() is False
+
+    def test_rail_collapse_hides_chevron_and_tree_regardless_of_expanded_flag(self, qapp) -> None:
+        tab = ProjectTab("proj-embed-rail")
+        nav = ProjectNav()
+        nav.addTab(tab, "proj-embed-rail")
+        row = nav._row_widget(0)
+        assert tab.explorer.isHidden() is False
+
+        nav.set_sidebar_collapsed(True, animate=False)
+        assert row._chevron.isHidden() is True
+        assert tab.explorer.isHidden() is True
+
+        nav.set_sidebar_collapsed(False, animate=False)
+        assert row._chevron.isHidden() is False
+        assert tab.explorer.isHidden() is False  # remembered expanded, not lost
+
+    def test_remove_tab_reparents_explorer_back_to_project_tab(self, qapp) -> None:
+        tab = ProjectTab("proj-embed-e")
+        nav = ProjectNav()
+        nav.addTab(tab, "proj-embed-e")
+
+        nav.removeTab(0)
+
+        assert tab.explorer.parent() is tab
+
+    def test_project_with_no_explorer_gets_no_chevron(self, qapp) -> None:
+        nav = ProjectNav()
+        nav.addTab(_page("plain"), "plain")  # bare QLabel has no .explorer
+        row = nav._row_widget(0)
+
+        assert row.has_explorer() is False
+        assert row._chevron.isHidden() is True
+
+    def test_signals_still_reach_project_tab_after_embedding(self, qapp) -> None:
+        tab = ProjectTab("proj-embed-f")
+        nav = ProjectNav()
+        nav.addTab(tab, "proj-embed-f")
+        received: list[tuple[str, str]] = []
+        tab.openFileRequested.connect(lambda proj, path: received.append((proj, path)))
+
+        tab.explorer.fileActivated.emit("/abs/path/x.py")
+
+        assert received == [("proj-embed-f", "/abs/path/x.py")]
+
+
+class TestExplorerCollapsePersistence:
+    """The chevron's expanded/collapsed flag persists per-project in
+    QSettings — same mechanism/keys ProjectTab used before the explorer
+    moved into the sidebar."""
+
+    def test_collapsed_state_persists_across_nav_instances(self, qapp) -> None:
+        tab1 = ProjectTab("proj-nav-persist")
+        nav1 = ProjectNav()
+        nav1.addTab(tab1, "proj-nav-persist")
+        nav1._row_widget(0)._chevron.click()  # collapse
+        assert tab1.explorer.isHidden() is True
+
+        tab2 = ProjectTab("proj-nav-persist")
+        nav2 = ProjectNav()
+        nav2.addTab(tab2, "proj-nav-persist")
+        assert tab2.explorer.isHidden() is True  # remembered collapsed
+
+    def test_different_projects_do_not_share_collapse_state(self, qapp) -> None:
+        tab_a = ProjectTab("proj-nav-x")
+        nav_a = ProjectNav()
+        nav_a.addTab(tab_a, "proj-nav-x")
+        nav_a._row_widget(0)._chevron.click()  # collapse only proj-nav-x
+
+        tab_b = ProjectTab("proj-nav-y")
+        nav_b = ProjectNav()
+        nav_b.addTab(tab_b, "proj-nav-y")
+        assert tab_b.explorer.isHidden() is False

@@ -224,3 +224,24 @@ defensively) and free-text request, then calls `orch.send(LEAD.name, msg, from_r
 project=project_name)` — the identical call `Orchestrator.send()` already serves for CLI/IPC
 sends, so it inherits that path's existing queueing-for-unspawned-Lead and delivery-tracking
 behavior for free instead of re-implementing a parallel one.
+
+## Post-phase-1 revision — Explorer moved into the sidebar (2026-08-23)
+
+User feedback on the 1.2.0 build: the phase-1 `QSplitter` inside `ProjectTab` (decision above,
+"Where the QSplitter lives") put the file tree between the `ProjectNav` sidebar and the pane
+area, reading as an unwanted third column. Requested instead: the tree nests **under its own
+project's sidebar card** (VS Code/Obsidian-style — click a project, its card expands to show the
+tree below it; other cards stay collapsed), with a chevron on the card itself as the only manual
+toggle.
+
+`ProjectTab` still constructs and signal-wires its `ProjectExplorer` (nothing in phase 1's
+containment/lazy-tree/CHANGES logic changes) but no longer lays it out — `project_nav.py`'s
+`_ProjectRow` reparents the widget into a slot under the row's header strip, showing it only for
+the selected row, and hands it back to `ProjectTab` on `removeTab` so the tab's own `deleteLater()`
+teardown still owns its lifecycle. The per-project expanded/collapsed flag keeps the exact
+`explorer/<safe_segment(project_name)>/collapsed` QSettings key phase 1 used — only which widget
+reads/writes it changed. The sidebar itself changed from a fixed `212px` to a `QSplitter`-resizable
+minimum-`212px` (drag up to unbounded, same "release maximumWidth after the expand animation"
+convention `_tasks_dock_collapse_toggled` already used in `main_window.py`) since a tree needs more
+room than the old rail-width sidebar gave it. See `project_nav.py`'s module docstring for the
+current shape.
