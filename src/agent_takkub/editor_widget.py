@@ -1,4 +1,6 @@
-"""EditorHost: the single, app-wide Monaco WebView (#365 phase 2 — read-only).
+"""EditorHost: the single, app-wide Monaco WebView (#365 phase 2 read-only +
+phase 3 safe edit: atomic save, dirty state, mtime+size+sha256 conflict
+UI, disk-change watch).
 
 RAM hard rule (`docs/plans/2026-08-23-master-dev-plan.md` §4, binding over
 `04_MONACO_EDITOR_SPEC.md`/`13_PERFORMANCE_AND_QT_RULES.md`'s "one Monaco
@@ -22,23 +24,40 @@ Wiring (mirrors `terminal_widget.py`'s Python↔JS split):
     editorOpenUnavailable(path, reason, size)   — binary / too-large fallback
     editorShowDiff(path, originalText, modifiedText)
     editorDiffFailed(path, reason)
+    editorSaveResult(path, ok, error)           — phase 3
+    editorConflict(path, diskText)              — phase 3
+    editorReloadDisk(path, text)                — phase 3
+    editorDiskChanged(path) / editorDiskRemoved(path)  — phase 3 (file_watch_service)
   JS → Python (via `_EditorBridge`, QWebChannel object `bridge`):
     requestDiff(path) / openExternally(path) / revealInExplorer(path) /
     notifyTabClosed(path) / askAgent(path, startLine, endLine, selectedText,
-    request) [phase 3+ placeholder — wired, not yet actionable] / ready()
+    request) / saveFile(path, text) / keepMineSave(path, text) /
+    reloadFromDisk(path) / ready()
 
-Phase 2 is read-only: every Monaco model is created with `readOnly: true`
-(static/editor/index.html), and there is no `saveFile` bridge slot at all —
-Ctrl+S writes land in phase 3 (`docs/plans/2026-08-23-master-dev-plan.md`
-§4 phase table).
+Phase 3 (`editor_service.py`/`file_watch_service.py`, both backend-owned —
+this module only calls them): Monaco models are editable, Ctrl+S sends
+`bridge.saveFile(path, text)`. `EditorHost` tracks the last-known
+`EditorFileState` per open path (`_file_states`, set on open/save — never
+mutated by a disk-watch notification, see `_on_disk_changed`) and passes it
+as `expected` to `editor_service.save_atomic`. A conflict answers back
+`editorConflict(path, diskText)` (the current disk content, read fresh in
+the same worker) so the JS side can offer `[Compare] [Reload disk] [Keep
+mine]` without a second round-trip. "Keep mine" re-snapshots the disk state
+at write time and forces the overwrite; "Reload disk" replaces the buffer
+with fresh disk content and clears dirty. `FileWatchService` watches every
+currently-open path and drives a disk-changed banner (JS decides whether to
+show it; never an auto-reload) — `_on_disk_changed` diffs the incoming
+snapshot against `_file_states` to tell an external edit apart from the
+echo of our own save.
 
 Security (12_SECURITY_THREAT_MODEL.md): every path this module touches goes
 through `project_file_index.resolve_and_contain` against that project's
 configured roots — the same containment gate the Explorer's own context-menu
 actions use. `MAX_EDITOR_FILE_BYTES` bounds what ever reaches the renderer;
 a binary or oversized file gets a read-only placeholder tab instead of its
-content. File IO and the git-HEAD diff both run on a `QThreadPool` worker
-thread (13_PERFORMANCE_AND_QT_RULES.md rule 1/2), never the Qt main thread.
+content. File IO, the git-HEAD diff, and every save/reload both run on a
+`QThreadPool` worker thread (13_PERFORMANCE_AND_QT_RULES.md rule 1/2), never
+the Qt main thread.
 """
 
 from __future__ import annotations
@@ -58,6 +77,8 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from ._win_console import SUBPROCESS_NO_WINDOW
+from .editor_service import Conflict, EditorFileState, save_atomic, stat_snapshot
+from .file_watch_service import FileWatchService
 from .project_explorer import project_roots
 from .project_file_index import PathEscapesRootsError, resolve_and_contain
 
@@ -69,7 +90,6 @@ _INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "index.html"))
 # 2 MB — generous for source files, small enough that a single open never
 # stalls the renderer or ships a giant string over the QWebChannel bridge.
 MAX_EDITOR_FILE_BYTES = 2_000_000
-_BINARY_SNIFF_BYTES = 8192
 _GIT_TIMEOUT_S = 10.0
 
 
@@ -89,10 +109,7 @@ class OpenFileResult:
     binary: bool
     too_large: bool
     size: int
-
-
-def _looks_binary(sample: bytes) -> bool:
-    return b"\x00" in sample
+    state: EditorFileState  # versioned snapshot — the save-conflict baseline
 
 
 def read_file_for_editor(
@@ -104,23 +121,25 @@ def read_file_for_editor(
     `roots`. Never raises for a binary/too-large file — those come back as
     `text=None` with the corresponding flag set, so the caller can render a
     placeholder instead of dumping raw bytes into a text editor.
+
+    Metadata (binary/too_large/size + the mtime_ns/sha256 conflict baseline)
+    comes from `editor_service.stat_snapshot` — the same snapshot phase 3's
+    save path checks disk against — so "what the editor thinks it opened"
+    and "what a later Ctrl+S compares to" can never drift apart.
     """
     resolved = resolve_and_contain(path, roots)
-    size = resolved.stat().st_size
-    with resolved.open("rb") as fh:
-        sample = fh.read(_BINARY_SNIFF_BYTES)
-    binary = _looks_binary(sample)
-    too_large = size > max_bytes
+    state = stat_snapshot(resolved, max_bytes)
     text = None
-    if not binary and not too_large:
+    if not state.binary and not state.too_large:
         text = resolved.read_text(encoding="utf-8", errors="replace")
     return OpenFileResult(
         path=resolved,
         text=text,
         language_hint=resolved.suffix.lstrip(".").lower(),
-        binary=binary,
-        too_large=too_large,
-        size=size,
+        binary=state.binary,
+        too_large=state.too_large,
+        size=state.size,
+        state=state,
     )
 
 
@@ -179,6 +198,21 @@ def build_diff_result(
         )
     original = read_head_blob(repo_root, resolved)
     return DiffResult(path=resolved, original_text=original, modified_text=current.text, error=None)
+
+
+def _states_differ(a: EditorFileState | None, b: EditorFileState | None) -> bool:
+    """Same comparison `editor_service._has_conflict` makes, kept as a local
+    copy (not an import of that private helper) — used here only to decide
+    whether a disk-watch notification is our own save echoing back (state
+    unchanged) or a genuine external edit (state moved), never to gate a
+    write itself."""
+    if a is None or b is None:
+        return True
+    if a.mtime_ns != b.mtime_ns or a.size != b.size:
+        return True
+    if a.sha256 is not None and b.sha256 is not None:
+        return a.sha256 != b.sha256
+    return False
 
 
 def _reveal_in_file_manager(path: Path) -> None:
@@ -256,6 +290,84 @@ class _DiffWorker(QRunnable):
         _safe_emit(self.signals.finished, result)
 
 
+class _SaveSignals(QObject):
+    saved = pyqtSignal(str, object)  # path, EditorFileState
+    conflict = pyqtSignal(str, object, object)  # path, Conflict, OpenFileResult|None
+    failed = pyqtSignal(str, str)  # path, error
+
+
+class _SaveWorker(QRunnable):
+    """`force=True` (the "Keep mine" flow) re-snapshots the disk right
+    before writing instead of trusting the possibly-stale `expected` the
+    caller passed in — an intentional overwrite should race against *now*,
+    not against whatever conflict was reported a moment earlier. A second,
+    genuinely new conflict during that narrow window still comes back as
+    `conflict`, handled by the same path as a normal save."""
+
+    def __init__(
+        self,
+        path: Path,
+        text: str,
+        expected: EditorFileState | None,
+        roots: Sequence[Path],
+        max_bytes: int,
+        *,
+        force: bool = False,
+    ) -> None:
+        super().__init__()
+        self.path = path
+        self.text = text
+        self.expected = expected
+        self.roots = list(roots)
+        self.max_bytes = max_bytes
+        self.force = force
+        self.signals = _SaveSignals()
+
+    def run(self) -> None:  # called by QThreadPool
+        expected = self.expected
+        if self.force:
+            try:
+                resolved = resolve_and_contain(self.path, self.roots)
+                expected = stat_snapshot(resolved, self.max_bytes) if resolved.exists() else None
+            except (PathEscapesRootsError, OSError):
+                pass  # fall through with the original `expected` — save_atomic re-checks anyway
+        result = save_atomic(self.path, self.text, expected, self.roots, self.max_bytes)
+        if result.ok:
+            _safe_emit(self.signals.saved, str(self.path), result.state)
+            return
+        if result.conflict is not None:
+            disk_read: OpenFileResult | None = None
+            try:
+                disk_read = read_file_for_editor(self.path, self.roots, self.max_bytes)
+            except (PathEscapesRootsError, OSError) as exc:
+                logger.debug("editor_widget: conflict disk-read failed for %s: %s", self.path, exc)
+            _safe_emit(self.signals.conflict, str(self.path), result.conflict, disk_read)
+            return
+        _safe_emit(self.signals.failed, str(self.path), result.error or "save failed")
+
+
+class _ReloadSignals(QObject):
+    finished = pyqtSignal(str, object)  # path, OpenFileResult
+    failed = pyqtSignal(str, str)  # path, error
+
+
+class _ReloadWorker(QRunnable):
+    def __init__(self, path: Path, roots: Sequence[Path], max_bytes: int) -> None:
+        super().__init__()
+        self.path = path
+        self.roots = list(roots)
+        self.max_bytes = max_bytes
+        self.signals = _ReloadSignals()
+
+    def run(self) -> None:  # called by QThreadPool
+        try:
+            result = read_file_for_editor(self.path, self.roots, self.max_bytes)
+        except (PathEscapesRootsError, OSError) as exc:
+            _safe_emit(self.signals.failed, str(self.path), str(exc))
+            return
+        _safe_emit(self.signals.finished, str(self.path), result)
+
+
 # ---------------------------------------------------------------------------
 # QWebChannel bridge — JS → Python calls
 # ---------------------------------------------------------------------------
@@ -268,8 +380,10 @@ class _EditorBridge(QObject):
     openExternallyRequested = pyqtSignal(str)  # path
     revealRequested = pyqtSignal(str)  # path
     tabClosedSig = pyqtSignal(str)  # path
-    # path, startLine, endLine, selectedText, request — phase 3+ placeholder
     askAgentRequested = pyqtSignal(str, int, int, str, str)
+    saveRequested = pyqtSignal(str, str)  # path, text
+    keepMineRequested = pyqtSignal(str, str)  # path, text
+    reloadRequested = pyqtSignal(str)  # path
     pageReady = pyqtSignal()
 
     @pyqtSlot(str)
@@ -294,6 +408,18 @@ class _EditorBridge(QObject):
     ) -> None:
         self.askAgentRequested.emit(path, start_line, end_line, selected_text, request)
 
+    @pyqtSlot(str, str)
+    def saveFile(self, path: str, text: str) -> None:
+        self.saveRequested.emit(path, text)
+
+    @pyqtSlot(str, str)
+    def keepMineSave(self, path: str, text: str) -> None:
+        self.keepMineRequested.emit(path, text)
+
+    @pyqtSlot(str)
+    def reloadFromDisk(self, path: str) -> None:
+        self.reloadRequested.emit(path)
+
     @pyqtSlot()
     def ready(self) -> None:
         self.pageReady.emit()
@@ -314,6 +440,9 @@ class _EditorWebView(QWidget):
     revealRequested = pyqtSignal(str)
     tabClosed = pyqtSignal(str)
     askAgentRequested = pyqtSignal(str, int, int, str, str)
+    saveRequested = pyqtSignal(str, str)
+    keepMineRequested = pyqtSignal(str, str)
+    reloadRequested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -334,6 +463,9 @@ class _EditorWebView(QWidget):
         self._bridge.revealRequested.connect(self.revealRequested)
         self._bridge.tabClosedSig.connect(self.tabClosed)
         self._bridge.askAgentRequested.connect(self.askAgentRequested)
+        self._bridge.saveRequested.connect(self.saveRequested)
+        self._bridge.keepMineRequested.connect(self.keepMineRequested)
+        self._bridge.reloadRequested.connect(self.reloadRequested)
 
         self._page_ready = False
         self._pending_js: list[str] = []
@@ -387,6 +519,9 @@ class EditorHost(QObject):
     emptied = pyqtSignal()  # last tab closed — view destroyed
     # project_name, path, startLine, endLine, selectedText, request
     askAgentRequested = pyqtSignal(str, str, int, int, str, str)
+    # A save landed, or the watcher saw a genuine external edit — either way
+    # the project's git-changes panel is now possibly stale (phase 4).
+    gitRefreshNeeded = pyqtSignal(str)  # project_name
 
     def __init__(
         self,
@@ -406,6 +541,15 @@ class EditorHost(QObject):
         self._view_factory = view_factory or _EditorWebView
         self._view: _EditorWebView | None = None
         self._open_paths: dict[str, str] = {}  # path -> project_name
+        # Save-conflict baseline per open path — set on open/save only, never
+        # by a disk-watch notification (see _on_disk_changed's module note).
+        self._file_states: dict[str, EditorFileState] = {}
+        # One app-wide watcher spanning every open project's roots (accumulated
+        # via add_roots as files from new projects get opened) — mirrors this
+        # host's own "one instance for the whole app" shape.
+        self._file_watch = FileWatchService([], parent=self)
+        self._file_watch.diskChanged.connect(self._on_disk_changed)
+        self._file_watch.diskRemoved.connect(self._on_disk_removed)
 
     # -- introspection (also used by tests) ---------------------------
     def has_view(self) -> bool:
@@ -415,7 +559,7 @@ class EditorHost(QObject):
         return len(self._open_paths)
 
     # -- open ------------------------------------------------------------
-    def open_file(self, project_name: str, abs_path: str) -> None:
+    def open_file(self, project_name: str, abs_path: str, *, show_diff: bool = False) -> None:
         try:
             roots = list(project_roots(project_name).values())
         except Exception as exc:  # defensive — malformed projects.json entry
@@ -428,7 +572,7 @@ class EditorHost(QObject):
         self._ensure_view()
         worker = _OpenFileWorker(Path(abs_path), roots, MAX_EDITOR_FILE_BYTES)
         worker.signals.finished.connect(
-            lambda result, proj=project_name: self._on_file_read(proj, result)
+            lambda result, proj=project_name, sd=show_diff: self._on_file_read(proj, result, sd)
         )
         worker.signals.failed.connect(self._on_file_failed)
         QThreadPool.globalInstance().start(worker)
@@ -443,12 +587,18 @@ class EditorHost(QObject):
         self._view.openExternallyRequested.connect(self._on_open_externally)
         self._view.revealRequested.connect(self._on_reveal)
         self._view.askAgentRequested.connect(self._on_ask_agent)
+        self._view.saveRequested.connect(self._on_save_requested)
+        self._view.keepMineRequested.connect(self._on_keep_mine_requested)
+        self._view.reloadRequested.connect(self._on_reload_requested)
 
-    def _on_file_read(self, project_name: str, result: OpenFileResult) -> None:
+    def _on_file_read(
+        self, project_name: str, result: OpenFileResult, show_diff: bool = False
+    ) -> None:
         if self._view is None:
             return  # destroyed before the worker finished (rapid open+close-all)
         path_str = str(result.path)
         self._open_paths[path_str] = project_name
+        self._file_states[path_str] = result.state
         if result.binary or result.too_large:
             reason = "binary" if result.binary else "too_large"
             self._view.run_js(
@@ -460,7 +610,15 @@ class EditorHost(QObject):
                 f"editorOpenFile({json.dumps(path_str)}, {json.dumps(result.text)}, "
                 f"{json.dumps(result.language_hint)});"
             )
+            try:
+                roots = list(project_roots(project_name).values())
+            except Exception:  # defensive — same guard as open_file above
+                roots = []
+            self._file_watch.add_roots(roots)
+            self._file_watch.watch(result.path)
         self.fileOpened.emit(project_name, path_str)
+        if show_diff and not (result.binary or result.too_large):
+            self._on_diff_requested(path_str)
 
     def _on_file_failed(self, path: str, error: str) -> None:
         self.fileOpenFailed.emit(path, error)
@@ -468,6 +626,8 @@ class EditorHost(QObject):
     # -- close / RAM lifecycle -------------------------------------------
     def _on_tab_closed(self, path: str) -> None:
         self._open_paths.pop(path, None)
+        self._file_states.pop(path, None)
+        self._file_watch.unwatch(Path(path))
         if not self._open_paths:
             self._destroy_view()
 
@@ -482,7 +642,10 @@ class EditorHost(QObject):
 
     def close_all(self) -> None:
         """Force-close every tab (e.g. app shutdown). No-op if already empty."""
+        for path in list(self._open_paths):
+            self._file_watch.unwatch(Path(path))
         self._open_paths.clear()
+        self._file_states.clear()
         self._destroy_view()
 
     # -- diff --------------------------------------------------------------
@@ -534,7 +697,7 @@ class EditorHost(QObject):
             return
         action(resolved)
 
-    # -- ask agent (phase 3+ placeholder) ----------------------------------
+    # -- ask agent -----------------------------------------------------------
     def _on_ask_agent(
         self, path: str, start_line: int, end_line: int, selected_text: str, request: str
     ) -> None:
@@ -542,3 +705,96 @@ class EditorHost(QObject):
         self.askAgentRequested.emit(
             project_name, path, start_line, end_line, selected_text, request
         )
+
+    # -- save / conflict (phase 3) --------------------------------------------
+    def _on_save_requested(self, path: str, text: str) -> None:
+        self._dispatch_save(path, text, force=False)
+
+    def _on_keep_mine_requested(self, path: str, text: str) -> None:
+        self._dispatch_save(path, text, force=True)
+
+    def _dispatch_save(self, path: str, text: str, *, force: bool) -> None:
+        project_name = self._open_paths.get(path)
+        if project_name is None:
+            return
+        try:
+            roots = list(project_roots(project_name).values())
+        except Exception:  # defensive — same guard as open_file
+            return
+        if not roots:
+            return
+        expected = self._file_states.get(path)
+        worker = _SaveWorker(Path(path), text, expected, roots, MAX_EDITOR_FILE_BYTES, force=force)
+        worker.signals.saved.connect(self._on_save_ok)
+        worker.signals.conflict.connect(self._on_save_conflict)
+        worker.signals.failed.connect(self._on_save_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_save_ok(self, path: str, state: EditorFileState) -> None:
+        self._file_states[path] = state
+        if self._view is not None:
+            self._view.run_js(f"editorSaveResult({json.dumps(path)}, true, null);")
+        project_name = self._open_paths.get(path)
+        if project_name is not None:
+            self.gitRefreshNeeded.emit(project_name)
+
+    def _on_save_conflict(
+        self, path: str, conflict: Conflict, disk_read: OpenFileResult | None
+    ) -> None:
+        if self._view is None:
+            return
+        disk_text = None
+        if disk_read is not None and not disk_read.binary and not disk_read.too_large:
+            disk_text = disk_read.text
+        # Deliberately NOT updating self._file_states here — the baseline
+        # stays the stale snapshot the buffer was actually opened/saved
+        # against, so a later plain Ctrl+S (without going through
+        # [Keep mine]) still correctly re-detects the same conflict instead
+        # of silently overwriting on retry.
+        self._view.run_js(f"editorConflict({json.dumps(path)}, {json.dumps(disk_text)});")
+
+    def _on_save_failed(self, path: str, error: str) -> None:
+        if self._view is not None:
+            self._view.run_js(f"editorSaveResult({json.dumps(path)}, false, {json.dumps(error)});")
+
+    # -- reload from disk (phase 3) -------------------------------------------
+    def _on_reload_requested(self, path: str) -> None:
+        project_name = self._open_paths.get(path)
+        if project_name is None:
+            return
+        try:
+            roots = list(project_roots(project_name).values())
+        except Exception:  # defensive — same guard as open_file
+            return
+        if not roots:
+            return
+        worker = _ReloadWorker(Path(path), roots, MAX_EDITOR_FILE_BYTES)
+        worker.signals.finished.connect(self._on_reload_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_reload_finished(self, path: str, result: OpenFileResult) -> None:
+        if self._view is None:
+            return
+        self._file_states[path] = result.state
+        if result.binary or result.too_large:
+            reason = "binary" if result.binary else "too_large"
+            self._view.run_js(
+                f"editorOpenUnavailable({json.dumps(path)}, {json.dumps(reason)}, {result.size});"
+            )
+        else:
+            self._view.run_js(f"editorReloadDisk({json.dumps(path)}, {json.dumps(result.text)});")
+
+    # -- disk watch (phase 3, file_watch_service.py) --------------------------
+    def _on_disk_changed(self, path: str, state: EditorFileState) -> None:
+        baseline = self._file_states.get(path)
+        if baseline is not None and not _states_differ(baseline, state):
+            return  # matches our own last open/save — the watcher just echoed it back
+        if self._view is not None:
+            self._view.run_js(f"editorDiskChanged({json.dumps(path)});")
+        project_name = self._open_paths.get(path)
+        if project_name is not None:
+            self.gitRefreshNeeded.emit(project_name)
+
+    def _on_disk_removed(self, path: str) -> None:
+        if self._view is not None:
+            self._view.run_js(f"editorDiskRemoved({json.dumps(path)});")

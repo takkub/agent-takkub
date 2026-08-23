@@ -17,6 +17,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   + tests: `test_agent_pane_discard_eligibility.py` (ใหม่) · `test_terminal_widget.py` · ram/doctor/orchestrator passthrough ·
   `test_pane_discard_spike.py` (scrollback_lost → False)
 
+- **#365 เฟส 3+4 UI — editable Monaco + save/conflict flow + CHANGES panel + Ask Agent** (ต่อยอด
+  service layer `7e88fd2`) — เฟส 3: Monaco เขียนได้ (`readOnly:false`) · dirty marker (`●`) บน tab ·
+  Ctrl+S → `bridge.saveFile` → `editor_service.save_atomic` บน worker thread (baseline tracked
+  server-side ใน `EditorHost._file_states`, ไม่เชื่อ version จาก JS) · conflict → `[Compare]`
+  (diff editor ใช้ `tab.model` ตัวจริงเป็น modified side ไม่ใช่ copy — diff ตามการพิมพ์สด) /
+  `[Reload disk]` / `[Keep mine]` (re-snapshot disk ณ เวลาที่กด ก่อนบังคับ overwrite) ·
+  `file_watch_service.FileWatchService` (roots สะสมได้ผ่าน `add_roots()` ใหม่ — 1 instance ครอบทุก
+  project) ต่อไฟล์ที่เปิด → banner "changed/deleted on disk" (ไม่ reload เงียบแม้ buffer clean) —
+  แยกแยะ external edit vs. self-save echo ด้วย mtime_ns/size/sha256 diff กับ baseline · binary/
+  large ยัง read-only fallback เดิม · เฟส 4: Explorer section "CHANGES (n)" จาก
+  `git_changes_service.GitChangesService` (background + debounce, ไม่ eager-refresh ตอน construct
+  กัน QTimer leak) · badge M/A/D/R (R ไม่มีใน GitStatusService เดิม) · คลิกแถว → เปิดไฟล์ + diff
+  vs HEAD ในรอบเดียว (`EditorHost.open_file(..., show_diff=True)`) · refresh debounce หลัง save/
+  disk_changed ผ่าน `EditorHost.gitRefreshNeeded` → `ProjectExplorer.refresh_changes()` · Ask Agent
+  (context menu Monaco + ปุ่ม "?" ต่อ tab) ส่ง selection ที่ bound (≤4000 ตัวอักษร) + request ไป
+  Lead ผ่าน `Orchestrator.send()` เดียวกับ `takkub send` — ไม่ยัดทั้งไฟล์, ไม่เดา agent attribution ·
+  ADR อัปเดต (`docs/architecture/adr-workspace-shell.md` phase 3+4) · tests ใหม่/ขยาย:
+  `test_editor_widget.py` (save/conflict/keep-mine/reload/disk-watch/open-with-diff) ·
+  `test_project_explorer.py`/`test_project_tab_explorer.py` (CHANGES panel + signal forwarding) ·
+  ผ่าน repo guard subprocess no-window/encoding + keepalive + editor_widget targeted รอบเดียว
+
 ### Fixed (แก้)
 
 - **module ใหม่ของ workspace ชน repo guard** — `editor_widget.py` / `project_explorer.py` / `project_file_index.py` ทุก subprocess call

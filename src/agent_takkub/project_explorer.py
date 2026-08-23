@@ -1,5 +1,6 @@
 """Project Explorer — collapsible left-panel file tree for a ProjectTab
-(#365 phase 1: Workspace Shell + Project Explorer).
+(#365 phase 1: Workspace Shell + Project Explorer; phase 4 adds the
+CHANGES section below).
 
 View only. All filesystem IO is dispatched through `project_file_index.py`
 on a background thread (`ProjectFileIndex`/`GitStatusService`); this module
@@ -9,8 +10,22 @@ read-only context-menu actions (open externally / reveal / copy path).
 "Open in Takkub" (file rows only) and double-click both emit a path for
 `ProjectTab` to route to `main_window`'s app-wide `EditorHost` (#365 phase 2).
 
+CHANGES section (#365 phase 4, `git_changes_service.py`): a top-level tree
+row "CHANGES (n)", hidden while there are no changes, populated from
+`GitChangesService.changesChanged` (background + debounced, same shape as
+`GitStatusService`'s own badge refresh). A single click on a change row
+emits `changeActivated` — `ProjectTab`/`MainWindow` route that to
+`EditorHost.open_file(..., show_diff=True)`, which opens the file and
+immediately requests its git-HEAD diff, so this panel never needs its own
+diff round-trip or a second Monaco surface. Attribution is deliberately
+absent: `FileChange` carries only path + status letter, never a guessed
+author/role (05_GIT_DIFF_AND_AGENT_CHANGES.md — "never guess agent
+attribution from git alone").
+
 Not wired up here (later phase, left as a disabled menu placeholder):
-  * "Ask Agent" — needs a target pane picker.
+  * per-row "Ask Agent" from the context menu — the editor tab's own Ask
+    Agent (Monaco context menu / "?" tab button) covers the phase 3+4 scope
+    with a bounded selection; a file-level variant here is future work.
 """
 
 from __future__ import annotations
@@ -36,6 +51,7 @@ from PyQt6.QtWidgets import (
 from . import cockpit_theme
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
+from .git_changes_service import FileChange, GitChangesService
 from .project_file_index import (
     FileEntry,
     GitStatusService,
@@ -53,12 +69,17 @@ _PATH_ROLE = 0x0100
 _IS_DIR_ROLE = 0x0101
 _LOADED_ROLE = 0x0102
 _PLACEHOLDER_ROLE = 0x0103
+_CHANGES_HEADER_ROLE = 0x0104
+_CHANGE_ROW_ROLE = 0x0105
 
 _GIT_STATUS_COLORS = {
     "M": cockpit_theme.STATE_WARN_BRIGHT,
     "A": cockpit_theme.STATE_OK_BRIGHT,
     "D": cockpit_theme.STATE_ERROR_BRIGHT,
 }
+# "R" (rename) only appears in the CHANGES list — GitStatusService's own
+# per-row badges (_GIT_STATUS_COLORS above) never see it, porcelain v1.
+_GIT_CHANGE_COLORS = {**_GIT_STATUS_COLORS, "R": cockpit_theme.STATE_INFO_BRIGHT}
 
 _TREE_QSS = f"""
 QTreeWidget {{
@@ -94,10 +115,12 @@ def project_roots(project_name: str) -> dict[str, Path]:
 
 class ProjectExplorer(QWidget):
     fileActivated = pyqtSignal(str)  # double-click on a file — absolute path
+    # Single click on a CHANGES-section row — absolute path (phase 4).
+    changeActivated = pyqtSignal(str)
 
-    # Phase 2 placeholders — declared now so phase 2 only has to connect,
-    # not re-plumb the menu. Never emitted today: both menu actions are
-    # disabled below.
+    # Phase 2 placeholder — declared now so a later phase only has to
+    # connect, not re-plumb the menu. Never emitted today: the menu action
+    # is disabled below.
     openInTakkubRequested = pyqtSignal(str)
     askAgentRequested = pyqtSignal(str)
 
@@ -112,16 +135,19 @@ class ProjectExplorer(QWidget):
         self._pending: dict[str, list[QTreeWidgetItem]] = {}
 
         # One project can list several roots (web/api/... per _ROLE_PATH_PREFS);
-        # git status badges key off whichever root comes first — good enough
-        # for the common single-repo project, and a no-op (no badges) for
-        # paths outside that root. Phase 4 can walk up to each root's own
-        # nearest .git if that turns out to matter in practice.
+        # git status badges + the CHANGES panel key off whichever root comes
+        # first — good enough for the common single-repo project, and a
+        # no-op for paths outside that root. A project spanning several
+        # independent repos only gets badges/changes under that one root.
         self.git_status: GitStatusService | None = None
+        self.git_changes: GitChangesService | None = None
         self._git_status_map: dict[str, str] = {}
         if self.roots:
             first_root = next(iter(self.roots.values()))
             self.git_status = GitStatusService(first_root, parent=self)
             self.git_status.statusChanged.connect(self._on_git_status_changed)
+            self.git_changes = GitChangesService(first_root, list(self.roots.values()), parent=self)
+            self.git_changes.changesChanged.connect(self._on_changes_changed)
 
         self._dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self._file_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
@@ -133,6 +159,7 @@ class ProjectExplorer(QWidget):
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.tree.itemClicked.connect(self._on_item_clicked)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -140,6 +167,18 @@ class ProjectExplorer(QWidget):
         layout.addWidget(self.tree)
 
         self._populate_roots()
+
+        # Appended after the per-root folders (not before) so it never
+        # shifts every existing root-folder index — hidden until the first
+        # non-empty status. Populated by the same trigger GitStatusService's
+        # own badges use (a real directory listing, see _on_dir_listed) plus
+        # MainWindow routing EditorHost.gitRefreshNeeded here after a save
+        # or an external disk change — no eager refresh at construction, to
+        # avoid arming GitChangesService's debounce timer for every tab that
+        # never touches git (matches the existing lazy-tree philosophy).
+        self._changes_item = QTreeWidgetItem(self.tree, ["CHANGES"])
+        self._changes_item.setData(0, _CHANGES_HEADER_ROLE, True)
+        self._changes_item.setHidden(True)
 
     # ------------------------------------------------------------------
     # tree population (lazy — one directory per request, worker thread)
@@ -183,8 +222,7 @@ class ProjectExplorer(QWidget):
                 else:
                     child.setIcon(0, self._file_icon)
                 self._apply_badge(child)
-        if self.git_status is not None:
-            self.git_status.request_refresh()
+        self.refresh_changes()
 
     def _on_dir_list_failed(self, path: str, error: str) -> None:
         self._pending.pop(path, None)
@@ -197,6 +235,13 @@ class ProjectExplorer(QWidget):
         if path:
             self.fileActivated.emit(path)
 
+    def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if not item.data(0, _CHANGE_ROW_ROLE):
+            return
+        path = item.data(0, _PATH_ROLE)
+        if path:
+            self.changeActivated.emit(path)
+
     # ------------------------------------------------------------------
     # git status badges (M/A/D — background + debounced, see GitStatusService)
     # ------------------------------------------------------------------
@@ -207,9 +252,44 @@ class ProjectExplorer(QWidget):
     def _repaint_badges(self, parent_item: QTreeWidgetItem) -> None:
         for i in range(parent_item.childCount()):
             item = parent_item.child(i)
-            if not item.data(0, _PLACEHOLDER_ROLE):
-                self._apply_badge(item)
-                self._repaint_badges(item)
+            # Change rows get their own status-letter color from
+            # _on_changes_changed (includes "R", which GitStatusService's
+            # porcelain-v1 badges never emit) — never overwritten here.
+            if item.data(0, _PLACEHOLDER_ROLE) or item.data(0, _CHANGE_ROW_ROLE):
+                continue
+            self._apply_badge(item)
+            self._repaint_badges(item)
+
+    # ------------------------------------------------------------------
+    # CHANGES panel (M/A/D/R vs HEAD — background + debounced,
+    # see GitChangesService; #365 phase 4)
+    # ------------------------------------------------------------------
+    def refresh_changes(self) -> None:
+        """Ask both git services to re-check. Called after a directory
+        listing, and by `MainWindow` after an editor save or an external
+        disk-change notification (`EditorHost.gitRefreshNeeded`)."""
+        if self.git_status is not None:
+            self.git_status.request_refresh()
+        if self.git_changes is not None:
+            self.git_changes.request_refresh()
+
+    def _on_changes_changed(self, changes: list[FileChange]) -> None:
+        if self.git_changes is None:
+            return
+        self._changes_item.takeChildren()
+        self._changes_item.setText(0, f"CHANGES ({len(changes)})")
+        self._changes_item.setHidden(len(changes) == 0)
+        repo_root = self.git_changes.repo_root
+        for change in changes:
+            row = QTreeWidgetItem(self._changes_item, [f"{change.status}  {change.path}"])
+            row.setIcon(0, self._file_icon)
+            row.setData(0, _PATH_ROLE, str((repo_root / change.path).resolve()))
+            row.setData(0, _IS_DIR_ROLE, False)
+            row.setData(0, _CHANGE_ROW_ROLE, True)
+            color = _GIT_CHANGE_COLORS.get(change.status)
+            row.setForeground(0, QColor(color) if color else QColor(cockpit_theme.TEXT_SECONDARY))
+        if changes:
+            self._changes_item.setExpanded(True)
 
     def _apply_badge(self, item: QTreeWidgetItem) -> None:
         if self.git_status is None or not self._git_status_map:

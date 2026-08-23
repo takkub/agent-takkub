@@ -11,6 +11,7 @@ from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from agent_takkub import project_tab
+from agent_takkub.git_changes_service import GitChangesService
 from agent_takkub.project_file_index import GitStatusService
 from agent_takkub.project_tab import ProjectTab
 
@@ -31,12 +32,14 @@ def _stop_timers(monkeypatch):
         monkeypatch, ProjectTab, "_tab_status_timer", "_explorer_save_timer"
     )
     finalize_git = stop_timers_after(monkeypatch, GitStatusService, "_timer")
+    finalize_changes = stop_timers_after(monkeypatch, GitChangesService, "_timer")
     yield
     finalize_tab()
-    try:
-        finalize_git()
-    except RuntimeError:
-        pass  # explorer (and its child GitStatusService/QTimer) already GC'd
+    for finalize in (finalize_git, finalize_changes):
+        try:
+            finalize()
+        except RuntimeError:
+            pass  # explorer (and its child git service/QTimer) already GC'd
 
 
 @pytest.fixture
@@ -105,6 +108,30 @@ class TestExplorerConstruction:
         lead = _FakePane()
         tab.attach_lead(lead)
         assert tab.pane_tabs.indexOf(lead) == 0
+
+
+class TestExplorerSignalForwarding:
+    def test_change_activated_forwards_as_open_diff_requested(
+        self, qapp, isolated_qsettings
+    ) -> None:
+        tab = ProjectTab("proj-changes")
+        received: list[tuple[str, str]] = []
+        tab.openDiffRequested.connect(lambda proj, path: received.append((proj, path)))
+
+        tab.explorer.changeActivated.emit("/abs/path/a.py")
+
+        assert received == [("proj-changes", "/abs/path/a.py")]
+
+    def test_file_activated_still_forwards_as_open_file_requested(
+        self, qapp, isolated_qsettings
+    ) -> None:
+        tab = ProjectTab("proj-files")
+        received: list[tuple[str, str]] = []
+        tab.openFileRequested.connect(lambda proj, path: received.append((proj, path)))
+
+        tab.explorer.fileActivated.emit("/abs/path/b.py")
+
+        assert received == [("proj-files", "/abs/path/b.py")]
 
 
 class TestCollapseExpand:

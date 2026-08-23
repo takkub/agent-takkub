@@ -114,6 +114,9 @@ class ProjectTab(QWidget):
     # Explorer double-click or "Open in Takkub" → MainWindow routes this to
     # the app-wide EditorHost (#365 phase 2). Carries (project_name, path).
     openFileRequested = pyqtSignal(str, str)
+    # A CHANGES-row click (#365 phase 4) → MainWindow opens the file AND
+    # immediately shows its git-HEAD diff. Carries (project_name, path).
+    openDiffRequested = pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -187,6 +190,7 @@ class ProjectTab(QWidget):
         if self.explorer is not None:
             self.explorer.fileActivated.connect(self._on_explorer_open_file)
             self.explorer.openInTakkubRequested.connect(self._on_explorer_open_file)
+            self.explorer.changeActivated.connect(self._on_explorer_change_activated)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -280,6 +284,9 @@ class ProjectTab(QWidget):
 
     def _on_explorer_open_file(self, path: str) -> None:
         self.openFileRequested.emit(self.project_name, path)
+
+    def _on_explorer_change_activated(self, path: str) -> None:
+        self.openDiffRequested.emit(self.project_name, path)
 
     def _strip_tab_close_button(self, index: int) -> None:
         bar = self.pane_tabs.tabBar()

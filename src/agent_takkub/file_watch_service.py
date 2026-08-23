@@ -96,6 +96,16 @@ class FileWatchService(QObject):
         self._timer.setInterval(debounce_ms)
         self._timer.timeout.connect(self._flush)
 
+    def add_roots(self, roots: Sequence[Path]) -> None:
+        """Extend the containment allow-list. `EditorHost` is one app-wide
+        instance spanning every open project (unlike a per-project service),
+        so its roots accumulate as each project's files get opened rather
+        than being fixed at construction."""
+        for r in roots:
+            resolved = Path(r).resolve()
+            if resolved not in self.roots:
+                self.roots.append(resolved)
+
     def watch(self, path: Path) -> None:
         try:
             resolved = resolve_and_contain(Path(path), self.roots)

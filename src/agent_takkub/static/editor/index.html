@@ -66,6 +66,44 @@
       transition: opacity 160ms ease, transform 160ms ease;
     }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* -- disk-changed banner (per active tab) -- */
+    #disk-banner {
+      display: none; align-items: center; gap: 10px; flex: 0 0 auto;
+      background: #422006; border-bottom: 1px solid #a16207; color: #fde047;
+      font-size: 12px; padding: 6px 12px;
+    }
+    #disk-banner span { flex: 1 1 auto; }
+    #disk-banner button {
+      background: transparent; color: #fde047; border: 1px solid rgba(253,224,71,0.4);
+      border-radius: 5px; padding: 3px 10px; font-size: 11px; cursor: pointer;
+    }
+    #disk-banner button:hover { background: rgba(253,224,71,0.12); }
+
+    /* -- modals: ask-agent / conflict -- */
+    .modal-overlay {
+      display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+      align-items: center; justify-content: center; z-index: 50;
+    }
+    .modal-box {
+      background: #1c1f26; border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
+      padding: 16px; width: 420px; max-width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    }
+    .modal-box .modal-title { font-size: 13px; color: #f2f3f5; margin-bottom: 8px; font-weight: 600; }
+    .modal-box .modal-context { font-size: 11px; color: #9aa0aa; margin-bottom: 8px; }
+    .modal-box textarea {
+      width: 100%; box-sizing: border-box; background: #101216; color: #e6e6e6;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 8px;
+      font-size: 13px; font-family: inherit; resize: vertical;
+    }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    .modal-actions button {
+      background: #232732; color: #e9ebef; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer;
+    }
+    .modal-actions button:hover { background: #2a2f3c; }
+    .modal-actions button.primary { background: #E3B341; color: #241a00; border-color: #E3B341; }
+    .modal-actions button.primary:hover { background: #eec25a; }
   </style>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <!-- Bundled locally per 04_MONACO_EDITOR_SPEC.md ("bundle Monaco locally;
@@ -78,6 +116,11 @@
 <body>
   <div id="root">
     <div id="tabbar"></div>
+    <div id="disk-banner">
+      <span id="disk-banner-text"></span>
+      <button id="disk-banner-reload">Reload disk</button>
+      <button id="disk-banner-dismiss">Dismiss</button>
+    </div>
     <div id="surface">
       <div id="monaco-code"></div>
       <div id="monaco-diff" style="display:none;"></div>
@@ -87,6 +130,36 @@
     </div>
   </div>
   <div id="toast"></div>
+
+  <!-- Ask Agent — bounded selection + free-text request, sent via
+       bridge.askAgent (Python forwards it to Lead through the existing
+       takkub-send IPC, never the whole file — 05_GIT_DIFF_AND_AGENT_CHANGES.md). -->
+  <div id="ask-agent-modal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title">Ask Agent</div>
+      <div class="modal-context" id="ask-agent-context"></div>
+      <textarea id="ask-agent-input" rows="3" placeholder="What should the agent do with this selection?"></textarea>
+      <div class="modal-actions">
+        <button id="ask-agent-cancel">Cancel</button>
+        <button id="ask-agent-send" class="primary">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Save conflict — disk moved since this file was loaded/last saved.
+       04_MONACO_EDITOR_SPEC.md conflict rule: never overwrite silently. -->
+  <div id="conflict-modal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title">File changed on disk</div>
+      <div class="modal-context" id="conflict-message"></div>
+      <div class="modal-actions">
+        <button id="conflict-cancel">Cancel</button>
+        <button id="conflict-compare">Compare</button>
+        <button id="conflict-reload">Reload disk</button>
+        <button id="conflict-keep-mine" class="primary">Keep mine</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     'use strict';
@@ -121,9 +194,18 @@
     let diffEditor = null;   // monaco.editor.IStandaloneDiffEditor
 
     // path -> { kind: 'code'|'unavailable', text, languageHint, reason, size,
-    //           model, viewMode: 'source'|'diff', diffModels: {original, modified}|null }
+    //           model, viewMode: 'source'|'diff', diffModels: {original, modified}|null,
+    //           dirty, diskChanged, diskRemoved }
+    // `diffModels.modified` is EITHER a fresh model (git-HEAD diff, via
+    // editorShowDiff) OR `tab.model` itself (conflict "Compare", so the
+    // diff reflects live edits) — disposeDiffModels() below knows not to
+    // double-dispose the shared case. Only one diffModels pair exists per
+    // tab at a time; the two flows never coexist (see toggleDiff/Compare).
     const tabs = new Map();
     let activePath = null;
+    let askAgentSelection = null;
+    let askAgentTargetPath = null;
+    let conflictPath = null;
 
     const LANG_BY_EXT = {
       js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
@@ -183,13 +265,15 @@
       monacoAvailable = ok;
       if (ok) {
         codeEditor = monaco.editor.create(document.getElementById('monaco-code'), {
-          readOnly: true,
+          readOnly: false,
           automaticLayout: true,
           minimap: { enabled: false },
           theme: 'vs-dark',
           fontSize: 13,
           scrollBeyondLastLine: false,
         });
+        // Diff view stays read-only — edits happen in the source tab only,
+        // the diff surface is for comparison (git-HEAD or a save conflict).
         diffEditor = monaco.editor.createDiffEditor(document.getElementById('monaco-diff'), {
           readOnly: true,
           automaticLayout: true,
@@ -197,8 +281,12 @@
           theme: 'vs-dark',
           fontSize: 13,
         });
-        codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-          showToast('Read-only in this version — editing lands in a later release.');
+        codeEditor.addAction({
+          id: 'takkub-ask-agent',
+          label: 'Ask Agent…',
+          contextMenuGroupId: 'navigation',
+          contextMenuOrder: 1.5,
+          run: () => { if (activePath) openAskAgentModal(activePath); },
         });
       } else {
         document.getElementById('monaco-code').style.display = 'none';
@@ -206,10 +294,26 @@
       }
     });
 
+    function saveActiveTab() {
+      const tab = tabs.get(activePath);
+      if (!tab || tab.kind !== 'code') return;
+      if (!monacoAvailable) {
+        showToast('Editing needs the Monaco bundle (not installed).');
+        return;
+      }
+      const text = tab.model.getValue();
+      if (bridge) bridge.saveFile(tab.path, text);
+    }
+
+    // Capture phase so Ctrl+S is caught regardless of which element has
+    // focus (editor, tab bar, a modal input) — stopPropagation keeps
+    // Monaco's own internal Ctrl+S handling from also firing for the same
+    // keystroke.
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        showToast('Read-only in this version — editing lands in a later release.');
+        e.stopPropagation();
+        saveActiveTab();
       }
     }, true);
 
@@ -227,10 +331,20 @@
 
         const name = document.createElement('span');
         name.className = 'name';
-        name.textContent = baseName(path);
+        let label = baseName(path);
+        if (tab.dirty) label = '● ' + label; // ● unsaved changes
+        if (tab.diskChanged) label = label + ' ⚠'; // ⚠ changed/removed on disk
+        name.textContent = label;
         el.appendChild(name);
 
         if (tab.kind === 'code') {
+          const askBtn = document.createElement('button');
+          askBtn.className = 'diff-toggle';
+          askBtn.textContent = '?';
+          askBtn.title = 'Ask Agent about this file/selection';
+          askBtn.addEventListener('click', (ev) => { ev.stopPropagation(); openAskAgentModal(path); });
+          el.appendChild(askBtn);
+
           const diffBtn = document.createElement('button');
           diffBtn.className = 'diff-toggle' + (tab.viewMode === 'diff' ? ' on' : '');
           diffBtn.textContent = '±';
@@ -287,7 +401,43 @@
         pre.textContent = tab.text;
       }
       renderTabBar();
+      renderDiskBanner();
     }
+
+    // ------------------------------------------------------------------
+    // disk-changed banner (per active tab — set by editorDiskChanged/
+    // editorDiskRemoved, cleared by editorReloadDisk or a manual dismiss)
+    // ------------------------------------------------------------------
+    function renderDiskBanner() {
+      const tab = tabs.get(activePath);
+      const banner = document.getElementById('disk-banner');
+      if (!tab || !tab.diskChanged) {
+        banner.style.display = 'none';
+        return;
+      }
+      let msg = tab.diskRemoved
+        ? `${baseName(activePath)} was deleted on disk.`
+        : `${baseName(activePath)} changed on disk.`;
+      if (tab.dirty) msg += ' You have unsaved edits — saving will still check for conflicts.';
+      document.getElementById('disk-banner-text').textContent = msg;
+      banner.style.display = 'flex';
+    }
+
+    function clearDiskChangedBanner(path) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      tab.diskChanged = false;
+      tab.diskRemoved = false;
+      if (path === activePath) renderDiskBanner();
+      renderTabBar();
+    }
+
+    document.getElementById('disk-banner-reload').addEventListener('click', () => {
+      if (bridge && activePath) bridge.reloadFromDisk(activePath);
+    });
+    document.getElementById('disk-banner-dismiss').addEventListener('click', () => {
+      if (activePath) clearDiskChangedBanner(activePath);
+    });
 
     function renderPlaceholder(tab) {
       const ph = document.getElementById('placeholder');
@@ -329,13 +479,23 @@
     window.editorOpenFile = function (path, text, languageHint) {
       let tab = tabs.get(path);
       if (!tab) {
-        tab = { kind: 'code', path, text, languageHint, viewMode: 'source', diffModels: null, model: null };
+        tab = {
+          kind: 'code', path, text, languageHint, viewMode: 'source', diffModels: null, model: null,
+          dirty: false, diskChanged: false, diskRemoved: false, pendingConflictDiskText: null,
+        };
         if (monacoAvailable) {
           tab.model = monaco.editor.createModel(text, languageFor(languageHint), monaco.Uri.file(path));
+          tab.model.onDidChangeContent(() => {
+            tab.dirty = true;
+            renderTabBar();
+          });
         }
         tabs.set(path, tab);
       } else {
         tab.text = text; // reopen with fresh content
+        tab.dirty = false;
+        tab.diskChanged = false;
+        tab.diskRemoved = false;
         if (monacoAvailable && tab.model) tab.model.setValue(text);
       }
       activateTab(path);
@@ -358,10 +518,15 @@
       const tab = tabs.get(path);
       if (!tab || tab.kind !== 'code') return;
       if (monacoAvailable) {
-        if (tab.diffModels) {
+        // A diffModels pair whose `modified` IS tab.model came from a
+        // conflict "Compare" (see disposeDiffModels) — stale for a
+        // git-HEAD diff, and reusing it would overwrite the live buffer
+        // via setValue. Dispose and rebuild in that case.
+        if (tab.diffModels && tab.diffModels.modified !== tab.model) {
           tab.diffModels.original.setValue(originalText);
           tab.diffModels.modified.setValue(modifiedText);
         } else {
+          disposeDiffModels(tab);
           tab.diffModels = {
             original: monaco.editor.createModel(originalText, languageFor(tab.languageHint)),
             modified: monaco.editor.createModel(modifiedText, languageFor(tab.languageHint)),
@@ -378,8 +543,69 @@
     };
 
     // ------------------------------------------------------------------
+    // save / conflict / disk-change — Python -> JS (#365 phase 3)
+    // ------------------------------------------------------------------
+    window.editorSaveResult = function (path, ok, error) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      if (ok) {
+        tab.dirty = false;
+        showToast(`Saved ${baseName(path)}`);
+      } else {
+        showToast(`Save failed: ${error || 'unknown error'}`);
+      }
+      renderTabBar();
+    };
+
+    window.editorConflict = function (path, diskText) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      tab.pendingConflictDiskText = diskText;
+      showConflictDialog(path);
+    };
+
+    window.editorReloadDisk = function (path, text) {
+      const tab = tabs.get(path);
+      if (!tab || tab.kind !== 'code') return;
+      tab.text = text;
+      tab.dirty = false;
+      if (monacoAvailable && tab.model) tab.model.setValue(text);
+      disposeDiffModels(tab);
+      tab.viewMode = 'source';
+      clearDiskChangedBanner(path);
+      if (path === activePath) activateTab(path);
+      else renderTabBar();
+      showToast(`Reloaded ${baseName(path)} from disk`);
+    };
+
+    window.editorDiskChanged = function (path) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      tab.diskChanged = true;
+      tab.diskRemoved = false;
+      renderTabBar();
+      if (path === activePath) renderDiskBanner();
+    };
+
+    window.editorDiskRemoved = function (path) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      tab.diskChanged = true;
+      tab.diskRemoved = true;
+      renderTabBar();
+      if (path === activePath) renderDiskBanner();
+    };
+
+    // ------------------------------------------------------------------
     // tab interactions
     // ------------------------------------------------------------------
+    function disposeDiffModels(tab) {
+      if (!tab.diffModels) return;
+      tab.diffModels.original.dispose();
+      if (tab.diffModels.modified !== tab.model) tab.diffModels.modified.dispose();
+      tab.diffModels = null;
+    }
+
     function toggleDiff(path) {
       const tab = tabs.get(path);
       if (!tab || tab.kind !== 'code') return;
@@ -387,6 +613,12 @@
         tab.viewMode = 'source';
         activateTab(path);
         return;
+      }
+      // A diffModels pair left over from a conflict "Compare" is stale for
+      // the git-HEAD diff — drop it and re-fetch rather than showing the
+      // wrong comparison.
+      if (tab.diffModels && tab.diffModels.modified === tab.model) {
+        disposeDiffModels(tab);
       }
       if (tab.diffModels) {
         tab.viewMode = 'diff';
@@ -399,11 +631,8 @@
     function closeTab(path) {
       const tab = tabs.get(path);
       if (!tab) return;
+      disposeDiffModels(tab);
       if (tab.model) tab.model.dispose();
-      if (tab.diffModels) {
-        tab.diffModels.original.dispose();
-        tab.diffModels.modified.dispose();
-      }
       tabs.delete(path);
       if (activePath === path) {
         activePath = null;
@@ -420,6 +649,103 @@
       }
       if (bridge) bridge.notifyTabClosed(path);
     }
+
+    // ------------------------------------------------------------------
+    // save conflict dialog: [Compare] [Reload disk] [Keep mine] [Cancel]
+    // ------------------------------------------------------------------
+    function showConflictDialog(path) {
+      conflictPath = path;
+      document.getElementById('conflict-message').textContent =
+        `${baseName(path)} changed on disk since you opened it. Your edits are still here.`;
+      document.getElementById('conflict-modal').style.display = 'flex';
+    }
+
+    function hideConflictDialog() {
+      document.getElementById('conflict-modal').style.display = 'none';
+      conflictPath = null;
+    }
+
+    document.getElementById('conflict-cancel').addEventListener('click', hideConflictDialog);
+
+    document.getElementById('conflict-compare').addEventListener('click', () => {
+      const tab = tabs.get(conflictPath);
+      if (tab && monacoAvailable) {
+        disposeDiffModels(tab);
+        const diskText = tab.pendingConflictDiskText || '';
+        // `modified` is tab.model itself (not a copy) so the diff reflects
+        // live edits as the user keeps typing — see the tabs Map comment.
+        tab.diffModels = {
+          original: monaco.editor.createModel(diskText, languageFor(tab.languageHint)),
+          modified: tab.model,
+        };
+        tab.viewMode = 'diff';
+        activateTab(tab.path);
+      }
+      hideConflictDialog();
+    });
+
+    document.getElementById('conflict-reload').addEventListener('click', () => {
+      if (bridge && conflictPath) bridge.reloadFromDisk(conflictPath);
+      hideConflictDialog();
+    });
+
+    document.getElementById('conflict-keep-mine').addEventListener('click', () => {
+      const tab = tabs.get(conflictPath);
+      if (tab && bridge) {
+        const text = monacoAvailable && tab.model ? tab.model.getValue() : tab.text;
+        bridge.keepMineSave(tab.path, text);
+      }
+      hideConflictDialog();
+    });
+
+    // ------------------------------------------------------------------
+    // Ask Agent: bounded selection (or none) + free-text request
+    // ------------------------------------------------------------------
+    function currentSelectionInfo() {
+      const tab = tabs.get(activePath);
+      if (!tab || tab.kind !== 'code' || !monacoAvailable) return null;
+      const editorRef = (tab.viewMode === 'diff' && diffEditor)
+        ? diffEditor.getModifiedEditor()
+        : codeEditor;
+      const sel = editorRef.getSelection();
+      const model = editorRef.getModel();
+      if (!sel || !model) return null;
+      const text = model.getValueInRange(sel).slice(0, 4000); // bounded — never the whole file
+      return { startLine: sel.startLineNumber, endLine: sel.endLineNumber, text };
+    }
+
+    function openAskAgentModal(path) {
+      if (path !== activePath) activateTab(path);
+      const info = currentSelectionInfo();
+      document.getElementById('ask-agent-context').textContent = info
+        ? `${baseName(path)} — lines ${info.startLine}-${info.endLine}`
+        : `${baseName(path)} — no selection`;
+      askAgentSelection = info;
+      askAgentTargetPath = path;
+      const input = document.getElementById('ask-agent-input');
+      input.value = '';
+      document.getElementById('ask-agent-modal').style.display = 'flex';
+      input.focus();
+    }
+
+    function closeAskAgentModal() {
+      document.getElementById('ask-agent-modal').style.display = 'none';
+      askAgentSelection = null;
+      askAgentTargetPath = null;
+    }
+
+    document.getElementById('ask-agent-cancel').addEventListener('click', closeAskAgentModal);
+    document.getElementById('ask-agent-send').addEventListener('click', () => {
+      const request = document.getElementById('ask-agent-input').value.trim();
+      if (!request || !askAgentTargetPath || !bridge) {
+        closeAskAgentModal();
+        return;
+      }
+      const sel = askAgentSelection || { startLine: 1, endLine: 1, text: '' };
+      bridge.askAgent(askAgentTargetPath, sel.startLine, sel.endLine, sel.text, request);
+      closeAskAgentModal();
+      showToast('Sent to agent.');
+    });
   </script>
 </body>
 </html>

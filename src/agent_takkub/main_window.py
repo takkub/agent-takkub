@@ -65,6 +65,7 @@ from .editor_widget import EditorHost
 from .limit_panel import LimitPanelMixin
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
+from .project_explorer import project_roots
 from .project_nav import ProjectNav
 from .project_tab import ProjectTab
 from .project_wizard import ProjectWizardMixin
@@ -269,6 +270,8 @@ class MainWindow(
         self._editor_host = EditorHost(editor_container, parent=self)
         self._editor_host.fileOpened.connect(self._on_editor_file_opened)
         self._editor_host.emptied.connect(self._editor_dock.hide)
+        self._editor_host.gitRefreshNeeded.connect(self._on_editor_git_refresh_needed)
+        self._editor_host.askAgentRequested.connect(self._on_editor_ask_agent)
         self.orch.openFileInEditorRequested.connect(self._editor_host.open_file)
 
         # Build the initial tab for the active project. Order matters: adding the
@@ -432,6 +435,11 @@ class MainWindow(
         # app-wide EditorHost, same destination as the terminal-path-click
         # route wired through orch.openFileInEditorRequested above.
         tab.openFileRequested.connect(self._editor_host.open_file)
+        # CHANGES-row click (#365 phase 4) → open the file AND its git-HEAD
+        # diff in one round-trip.
+        tab.openDiffRequested.connect(
+            lambda proj, path: self._editor_host.open_file(proj, path, show_diff=True)
+        )
 
     def _on_tab_pane_close_requested(self, role: str, project: str, tab: ProjectTab) -> None:
         pane = tab.teammate_panes.get(role)
@@ -442,6 +450,48 @@ class MainWindow(
     def _on_editor_file_opened(self, _project_name: str, _path: str) -> None:
         self._editor_dock.show()
         self._editor_dock.raise_()
+
+    def _on_editor_git_refresh_needed(self, project_name: str) -> None:
+        """A save landed, or the disk watcher saw a genuine external edit
+        (`EditorHost.gitRefreshNeeded`) — re-check that project's CHANGES
+        panel + tree badges. Both services debounce their own refresh, so
+        this is cheap even if it fires repeatedly in a short window."""
+        tab = self._tab_for_project(project_name)
+        if tab is not None and tab.explorer is not None:
+            tab.explorer.refresh_changes()
+
+    def _on_editor_ask_agent(
+        self,
+        project_name: str,
+        path: str,
+        start_line: int,
+        end_line: int,
+        selected_text: str,
+        request: str,
+    ) -> None:
+        """Editor "Ask Agent" (#365 phase 3) — a bounded selection + free
+        text, routed to Lead through the same `Orchestrator.send` the CLI's
+        `takkub send` uses. Never the whole file (05_GIT_DIFF_AND_AGENT_
+        CHANGES.md); `selected_text` is already client-bounded (4000 chars,
+        static/editor/index.html), bounded again here defensively."""
+        rel = path
+        try:
+            for root in project_roots(project_name).values():
+                try:
+                    rel = str(Path(path).resolve().relative_to(root))
+                    break
+                except ValueError:
+                    continue
+        except Exception:  # defensive — malformed projects.json entry
+            pass
+        bounded_text = (selected_text or "")[:4000]
+        location = f"L{start_line}-{end_line}" if start_line and end_line else "no selection"
+        msg = f"[Ask Agent] {project_name}/{rel} ({location})\n{request}"
+        if bounded_text.strip():
+            msg += f"\n\n```\n{bounded_text}\n```"
+        ok, err = self.orch.send(LEAD.name, msg, from_role="editor", project=project_name)
+        if not ok:
+            _log_event("editor_ask_agent_send_failed", project=project_name, path=path, error=err)
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
         if role_name == LEAD.name:
