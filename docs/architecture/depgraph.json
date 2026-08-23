@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 285,
+  "module_count": 286,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2143,6 +2143,18 @@
       "fan_out": 23
     },
     {
+      "module": "agent_takkub.editor_widget",
+      "imports": [
+        "agent_takkub.project_explorer",
+        "agent_takkub.project_file_index"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.exec_mode",
       "imports": [
         "agent_takkub.config"
@@ -2455,6 +2467,7 @@
         "agent_takkub.cli_server",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.editor_widget",
         "agent_takkub.graft_autobuild",
         "agent_takkub.lead_context",
         "agent_takkub.limit_panel",
@@ -2478,7 +2491,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 22
+      "fan_out": 23
     },
     {
       "module": "agent_takkub.maintenance",
@@ -2816,18 +2829,20 @@
         "agent_takkub.project_file_index"
       ],
       "imported_by": [
+        "agent_takkub.editor_widget",
         "agent_takkub.project_tab"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 3
     },
     {
       "module": "agent_takkub.project_file_index",
       "imports": [],
       "imported_by": [
+        "agent_takkub.editor_widget",
         "agent_takkub.project_explorer"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {

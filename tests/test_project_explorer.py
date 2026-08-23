@@ -159,18 +159,36 @@ class TestFileActivation:
 
 
 class TestContextMenu:
-    def test_open_in_takkub_and_ask_agent_are_disabled_placeholders(
-        self, qapp, one_root_project
-    ) -> None:
+    def test_ask_agent_is_a_disabled_placeholder(self, qapp, one_root_project) -> None:
+        explorer = pe.ProjectExplorer("proj")
+        menu = explorer._build_context_menu(one_root_project, True)
+
+        by_text = {a.text(): a for a in menu.actions() if a.text()}
+        assert by_text["Ask Agent"].isEnabled() is False
+        assert by_text["Open externally"].isEnabled() is True
+        assert by_text["Reveal"].isEnabled() is True
+        assert by_text["Copy path"].isEnabled() is True
+
+    def test_open_in_takkub_disabled_for_a_directory(self, qapp, one_root_project) -> None:
         explorer = pe.ProjectExplorer("proj")
         menu = explorer._build_context_menu(one_root_project, True)
 
         by_text = {a.text(): a for a in menu.actions() if a.text()}
         assert by_text["Open in Takkub"].isEnabled() is False
-        assert by_text["Ask Agent"].isEnabled() is False
-        assert by_text["Open externally"].isEnabled() is True
-        assert by_text["Reveal"].isEnabled() is True
-        assert by_text["Copy path"].isEnabled() is True
+
+    def test_open_in_takkub_emits_signal_for_a_file(self, qapp, one_root_project) -> None:
+        f = one_root_project / "a.py"
+        f.write_text("x")
+        explorer = pe.ProjectExplorer("proj")
+        menu = explorer._build_context_menu(f, False)
+        by_text = {a.text(): a for a in menu.actions() if a.text()}
+        assert by_text["Open in Takkub"].isEnabled() is True
+
+        received: list[str] = []
+        explorer.openInTakkubRequested.connect(received.append)
+        by_text["Open in Takkub"].trigger()
+
+        assert received == [str(f)]
 
     def test_copy_path_action_copies_to_clipboard(self, qapp, one_root_project) -> None:
         explorer = pe.ProjectExplorer("proj")

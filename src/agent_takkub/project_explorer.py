@@ -6,8 +6,10 @@ on a background thread (`ProjectFileIndex`/`GitStatusService`); this module
 never touches disk itself except for the already-`resolve_and_contain`-ed,
 read-only context-menu actions (open externally / reveal / copy path).
 
-Not wired up here (phase 2+, left as disabled menu placeholders):
-  * "Open in Takkub" — needs the Monaco editor dock.
+"Open in Takkub" (file rows only) and double-click both emit a path for
+`ProjectTab` to route to `main_window`'s app-wide `EditorHost` (#365 phase 2).
+
+Not wired up here (later phase, left as a disabled menu placeholder):
   * "Ask Agent" — needs a target pane picker.
 """
 
@@ -254,11 +256,14 @@ class ProjectExplorer(QWidget):
         )
         menu.addSeparator()
         act_open_takkub = menu.addAction("Open in Takkub")
-        act_open_takkub.setEnabled(False)
-        act_open_takkub.setToolTip("Coming in phase 2 (Monaco editor)")
+        if is_dir:
+            act_open_takkub.setEnabled(False)
+            act_open_takkub.setToolTip("Select a file, not a folder")
+        else:
+            act_open_takkub.triggered.connect(lambda: self.openInTakkubRequested.emit(str(path)))
         act_ask_agent = menu.addAction("Ask Agent")
         act_ask_agent.setEnabled(False)
-        act_ask_agent.setToolTip("Coming in phase 2")
+        act_ask_agent.setToolTip("Coming in a later phase")
         return menu
 
     @staticmethod

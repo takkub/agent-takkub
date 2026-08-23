@@ -1039,6 +1039,15 @@ class SpawnEngineMixin:
         pane.spawnRequested.connect(self._on_pane_spawn_clicked)
         pane.closeRequested.connect(self._on_pane_close_clicked)
         pane.inputBytes.connect(self._on_pane_input)
+        # #365 phase 2: HeadlessPane has no terminal/editor affordance, so
+        # this signal only exists on the real (display-backed) AgentPane.
+        open_editor_signal = getattr(pane, "openInEditorRequested", None)
+        if open_editor_signal is not None:
+            open_editor_signal.connect(
+                lambda path, proj=self._resolve_project(project): (
+                    self.openFileInEditorRequested.emit(proj, path)
+                )
+            )
         # Display-backed panes own the Claude JSONL poller and expose the
         # edge-triggered cap signal. HeadlessPane intentionally has no poller
         # yet, so capability-check the signal instead of inventing usage.

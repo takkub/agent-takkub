@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>agent-takkub editor</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%; width: 100%;
+      background: #0e0e10;
+      color: #e6e6e6;
+      font-family: "Segoe UI", "Cascadia Mono", "Consolas", sans-serif;
+      overflow: hidden;
+    }
+    #root { position: absolute; inset: 0; display: flex; flex-direction: column; }
+
+    /* -- tab bar -- */
+    #tabbar {
+      display: flex; align-items: stretch; flex-wrap: nowrap; overflow-x: auto;
+      background: #101216; border-bottom: 1px solid rgba(255,255,255,0.09);
+      min-height: 32px; flex: 0 0 auto;
+    }
+    .tab {
+      display: flex; align-items: center; gap: 6px;
+      padding: 0 6px 0 10px; font-size: 12px; color: #c7ccd4;
+      border-right: 1px solid rgba(255,255,255,0.06); cursor: pointer;
+      white-space: nowrap; user-select: none;
+    }
+    .tab:hover { background: #181b21; }
+    .tab.active { background: #191c22; color: #f2f3f5; box-shadow: inset 0 -2px 0 0 #E3B341; }
+    .tab .name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+    .tab .diff-toggle, .tab .close {
+      border: none; background: transparent; color: #7b828f; cursor: pointer;
+      font-size: 12px; line-height: 1; padding: 3px 4px; border-radius: 4px;
+    }
+    .tab .diff-toggle:hover, .tab .close:hover { background: rgba(255,255,255,0.12); color: #f2f3f5; }
+    .tab .diff-toggle.on { color: #E3B341; }
+
+    /* -- editor surfaces -- */
+    #surface { position: relative; flex: 1 1 auto; }
+    #monaco-code, #monaco-diff, #plain-view { position: absolute; inset: 0; }
+    #plain-view {
+      margin: 0; padding: 10px; overflow: auto; white-space: pre;
+      font-family: "Cascadia Mono", "Consolas", monospace; font-size: 13px; line-height: 1.4;
+    }
+    #placeholder {
+      position: absolute; inset: 0; display: none; flex-direction: column;
+      align-items: center; justify-content: center; gap: 10px; color: #9aa0aa; font-size: 13px;
+      text-align: center; padding: 24px;
+    }
+    #placeholder button {
+      background: #232732; color: #e9ebef; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer;
+    }
+    #placeholder button:hover { background: #2a2f3c; }
+    #empty-state {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #5b626e; font-size: 13px;
+    }
+
+    /* -- toast -- */
+    #toast {
+      position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: #232732; color: #f2f3f5; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px; padding: 8px 16px; font-size: 12px; opacity: 0; pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <!-- Bundled locally per 04_MONACO_EDITOR_SPEC.md ("bundle Monaco locally;
+       no production CDN dependency"). Vendored by devops packaging
+       (docs/plans/2026-08-23-master-dev-plan.md §4 phase 2) into
+       static/editor/vendor/monaco-editor/min/vs/. Loaded dynamically below
+       (not a static <script> tag) so a missing bundle degrades to the
+       plain read-only viewer instead of a hard page-load failure. -->
+</head>
+<body>
+  <div id="root">
+    <div id="tabbar"></div>
+    <div id="surface">
+      <div id="monaco-code"></div>
+      <div id="monaco-diff" style="display:none;"></div>
+      <pre id="plain-view" style="display:none;"></pre>
+      <div id="placeholder"></div>
+      <div id="empty-state">Open a file from the Explorer to get started.</div>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+  <script>
+    'use strict';
+
+    // ------------------------------------------------------------------
+    // Qt bridge
+    // ------------------------------------------------------------------
+    let bridge = null;
+    new QWebChannel(qt.webChannelTransport, (channel) => {
+      bridge = channel.objects.bridge;
+      if (bridge && bridge.ready) bridge.ready();
+    });
+
+    // ------------------------------------------------------------------
+    // toast (Ctrl+S read-only notice, diff-unavailable notice, ...)
+    // ------------------------------------------------------------------
+    let toastTimer = null;
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+    }
+
+    // ------------------------------------------------------------------
+    // tab state — one entry per open path. `monacoAvailable` decides
+    // whether tabs render through Monaco models or the plain <pre> fallback.
+    // ------------------------------------------------------------------
+    let monacoAvailable = false;
+    let codeEditor = null;   // monaco.editor.IStandaloneCodeEditor
+    let diffEditor = null;   // monaco.editor.IStandaloneDiffEditor
+
+    // path -> { kind: 'code'|'unavailable', text, languageHint, reason, size,
+    //           model, viewMode: 'source'|'diff', diffModels: {original, modified}|null }
+    const tabs = new Map();
+    let activePath = null;
+
+    const LANG_BY_EXT = {
+      js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+      ts: 'typescript', tsx: 'typescript',
+      py: 'python', pyw: 'python',
+      json: 'json', jsonc: 'json',
+      md: 'markdown', markdown: 'markdown',
+      html: 'html', htm: 'html',
+      css: 'css', scss: 'scss', less: 'less',
+      yml: 'yaml', yaml: 'yaml',
+      sh: 'shell', bash: 'shell', zsh: 'shell',
+      ps1: 'powershell', psm1: 'powershell',
+      rs: 'rust', go: 'go',
+      java: 'java', kt: 'kotlin',
+      c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cc: 'cpp',
+      cs: 'csharp', rb: 'ruby', php: 'php',
+      sql: 'sql', xml: 'xml', toml: 'ini', ini: 'ini', cfg: 'ini',
+      dockerfile: 'dockerfile', txt: 'plaintext',
+    };
+    function languageFor(hint) {
+      return LANG_BY_EXT[(hint || '').toLowerCase()] || 'plaintext';
+    }
+    function baseName(p) {
+      const norm = (p || '').replace(/\\/g, '/');
+      const parts = norm.split('/');
+      return parts[parts.length - 1] || norm;
+    }
+
+    // ------------------------------------------------------------------
+    // Monaco bootstrap — AMD loader from the local vendor bundle. Falls
+    // back to the plain <pre> viewer if the bundle isn't present (devops
+    // hasn't vendored it yet) or fails to initialize within the timeout.
+    // ------------------------------------------------------------------
+    function initMonaco(onDone) {
+      const loader = document.createElement('script');
+      loader.src = 'vendor/monaco-editor/min/vs/loader.js';
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        onDone(ok);
+      };
+      loader.onerror = () => finish(false);
+      loader.onload = () => {
+        try {
+          window.require.config({ paths: { vs: 'vendor/monaco-editor/min/vs' } });
+          window.require(['vs/editor/editor.main'], () => finish(true), () => finish(false));
+        } catch (e) {
+          finish(false);
+        }
+      };
+      document.head.appendChild(loader);
+      setTimeout(() => finish(false), 4000);
+    }
+
+    initMonaco((ok) => {
+      monacoAvailable = ok;
+      if (ok) {
+        codeEditor = monaco.editor.create(document.getElementById('monaco-code'), {
+          readOnly: true,
+          automaticLayout: true,
+          minimap: { enabled: false },
+          theme: 'vs-dark',
+          fontSize: 13,
+          scrollBeyondLastLine: false,
+        });
+        diffEditor = monaco.editor.createDiffEditor(document.getElementById('monaco-diff'), {
+          readOnly: true,
+          automaticLayout: true,
+          renderSideBySide: true,
+          theme: 'vs-dark',
+          fontSize: 13,
+        });
+        codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+          showToast('Read-only in this version — editing lands in a later release.');
+        });
+      } else {
+        document.getElementById('monaco-code').style.display = 'none';
+        document.getElementById('monaco-diff').style.display = 'none';
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        showToast('Read-only in this version — editing lands in a later release.');
+      }
+    }, true);
+
+    // ------------------------------------------------------------------
+    // tab bar rendering
+    // ------------------------------------------------------------------
+    function renderTabBar() {
+      const bar = document.getElementById('tabbar');
+      bar.innerHTML = '';
+      for (const [path, tab] of tabs) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (path === activePath ? ' active' : '');
+        el.title = path;
+        el.addEventListener('click', () => activateTab(path));
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = baseName(path);
+        el.appendChild(name);
+
+        if (tab.kind === 'code') {
+          const diffBtn = document.createElement('button');
+          diffBtn.className = 'diff-toggle' + (tab.viewMode === 'diff' ? ' on' : '');
+          diffBtn.textContent = '±';
+          diffBtn.title = 'Diff vs HEAD';
+          diffBtn.addEventListener('click', (ev) => { ev.stopPropagation(); toggleDiff(path); });
+          el.appendChild(diffBtn);
+        }
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'close';
+        closeBtn.textContent = '×';
+        closeBtn.title = 'Close';
+        closeBtn.addEventListener('click', (ev) => { ev.stopPropagation(); closeTab(path); });
+        el.appendChild(closeBtn);
+
+        bar.appendChild(el);
+      }
+    }
+
+    function hideAllSurfaces() {
+      document.getElementById('monaco-code').style.display = 'none';
+      document.getElementById('monaco-diff').style.display = 'none';
+      document.getElementById('plain-view').style.display = 'none';
+      document.getElementById('placeholder').style.display = 'none';
+      document.getElementById('empty-state').style.display = 'none';
+    }
+
+    function activateTab(path) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      activePath = path;
+      hideAllSurfaces();
+
+      if (tab.kind === 'unavailable') {
+        renderPlaceholder(tab);
+        renderTabBar();
+        return;
+      }
+
+      // kind === 'code'
+      if (tab.viewMode === 'diff' && tab.diffModels) {
+        if (monacoAvailable) {
+          document.getElementById('monaco-diff').style.display = '';
+          diffEditor.setModel(tab.diffModels);
+        } else {
+          renderPlainDiffFallback(tab);
+        }
+      } else if (monacoAvailable) {
+        document.getElementById('monaco-code').style.display = '';
+        codeEditor.setModel(tab.model);
+      } else {
+        const pre = document.getElementById('plain-view');
+        pre.style.display = '';
+        pre.textContent = tab.text;
+      }
+      renderTabBar();
+    }
+
+    function renderPlaceholder(tab) {
+      const ph = document.getElementById('placeholder');
+      ph.style.display = 'flex';
+      ph.innerHTML = '';
+      const msg = document.createElement('div');
+      const reasonText = tab.reason === 'binary' ? 'Binary file' : 'File too large to preview';
+      msg.textContent = `${reasonText} (${formatSize(tab.size)}) — ${baseName(tab.path)}`;
+      ph.appendChild(msg);
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.gap = '8px';
+      const openBtn = document.createElement('button');
+      openBtn.textContent = 'Open externally';
+      openBtn.addEventListener('click', () => { if (bridge) bridge.openExternally(tab.path); });
+      const revealBtn = document.createElement('button');
+      revealBtn.textContent = 'Reveal';
+      revealBtn.addEventListener('click', () => { if (bridge) bridge.revealInExplorer(tab.path); });
+      row.appendChild(openBtn);
+      row.appendChild(revealBtn);
+      ph.appendChild(row);
+    }
+
+    function renderPlainDiffFallback(tab) {
+      const pre = document.getElementById('plain-view');
+      pre.style.display = '';
+      pre.textContent = 'Diff view needs the Monaco bundle (not installed) — showing current file instead.\n\n' + tab.text;
+    }
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    // ------------------------------------------------------------------
+    // Python → JS API (called via runJavaScript)
+    // ------------------------------------------------------------------
+    window.editorOpenFile = function (path, text, languageHint) {
+      let tab = tabs.get(path);
+      if (!tab) {
+        tab = { kind: 'code', path, text, languageHint, viewMode: 'source', diffModels: null, model: null };
+        if (monacoAvailable) {
+          tab.model = monaco.editor.createModel(text, languageFor(languageHint), monaco.Uri.file(path));
+        }
+        tabs.set(path, tab);
+      } else {
+        tab.text = text; // reopen with fresh content
+        if (monacoAvailable && tab.model) tab.model.setValue(text);
+      }
+      activateTab(path);
+    };
+
+    window.editorOpenUnavailable = function (path, reason, size) {
+      let tab = tabs.get(path);
+      if (!tab) {
+        tab = { kind: 'unavailable', path, reason, size };
+        tabs.set(path, tab);
+      } else {
+        tab.kind = 'unavailable';
+        tab.reason = reason;
+        tab.size = size;
+      }
+      activateTab(path);
+    };
+
+    window.editorShowDiff = function (path, originalText, modifiedText) {
+      const tab = tabs.get(path);
+      if (!tab || tab.kind !== 'code') return;
+      if (monacoAvailable) {
+        if (tab.diffModels) {
+          tab.diffModels.original.setValue(originalText);
+          tab.diffModels.modified.setValue(modifiedText);
+        } else {
+          tab.diffModels = {
+            original: monaco.editor.createModel(originalText, languageFor(tab.languageHint)),
+            modified: monaco.editor.createModel(modifiedText, languageFor(tab.languageHint)),
+          };
+        }
+      }
+      tab.viewMode = 'diff';
+      if (path === activePath) activateTab(path);
+      else renderTabBar();
+    };
+
+    window.editorDiffFailed = function (path, _reason) {
+      showToast(`Diff unavailable for ${baseName(path)}.`);
+    };
+
+    // ------------------------------------------------------------------
+    // tab interactions
+    // ------------------------------------------------------------------
+    function toggleDiff(path) {
+      const tab = tabs.get(path);
+      if (!tab || tab.kind !== 'code') return;
+      if (tab.viewMode === 'diff') {
+        tab.viewMode = 'source';
+        activateTab(path);
+        return;
+      }
+      if (tab.diffModels) {
+        tab.viewMode = 'diff';
+        activateTab(path);
+        return;
+      }
+      if (bridge) bridge.requestDiff(path); // response arrives via editorShowDiff
+    }
+
+    function closeTab(path) {
+      const tab = tabs.get(path);
+      if (!tab) return;
+      if (tab.model) tab.model.dispose();
+      if (tab.diffModels) {
+        tab.diffModels.original.dispose();
+        tab.diffModels.modified.dispose();
+      }
+      tabs.delete(path);
+      if (activePath === path) {
+        activePath = null;
+        const remaining = Array.from(tabs.keys());
+        if (remaining.length) {
+          activateTab(remaining[remaining.length - 1]);
+        } else {
+          hideAllSurfaces();
+          document.getElementById('empty-state').style.display = 'flex';
+          renderTabBar();
+        }
+      } else {
+        renderTabBar();
+      }
+      if (bridge) bridge.notifyTabClosed(path);
+    }
+  </script>
+</body>
+</html>

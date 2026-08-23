@@ -70,6 +70,10 @@ class AgentPane(QFrame):
     # Edge-triggered session-cap crossing. Orchestrator decides role-specific
     # action (teammate advisory vs Lead UI notice).
     sessionCapExceeded = pyqtSignal(int, int)  # prompt, threshold
+    # #365 phase 2 — a path clicked in this pane's terminal ("Open in
+    # Takkub"). Forwarded from TerminalWidget; orchestrator.register_pane
+    # binds the project name and routes it to the editor host.
+    openInEditorRequested = pyqtSignal(str)  # absolute path
 
     def __init__(self, role: Role, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -267,6 +271,7 @@ class AgentPane(QFrame):
         self._terminal = TerminalWidget()
         self._terminal.inputBytes.connect(lambda data: self.inputBytes.emit(self.role.name, data))
         self._terminal.fontSizeChanged.connect(self._save_font_size)
+        self._terminal.openInEditorRequested.connect(self.openInEditorRequested)
         # Seed the terminal with this pane's default lock state (teammate=locked).
         self._terminal.set_input_locked(self._input_locked)
         self._stack.addWidget(self._terminal)
