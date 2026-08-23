@@ -8,6 +8,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **flaky test ตัวที่ 4: assert thread set ทันทีหลัง `stop()`** —
+  `test_enabled_starts_a_real_server_and_stop_tears_it_down` assert
+  `set(threading.enumerate()) == before` ทันทีที่ `rc.stop()` คืนค่า — แต่ `stop()` join แค่
+  accept-loop thread ของตัวเอง ส่วน handler thread ที่ `ThreadingMixIn` แตกออกมาตอน `_start()`
+  ยิง loopback probe (`diagnostics.probe_local`) ไม่มีใคร track/join มันจบทีหลังเสี้ยววินาที
+  ปกติไม่ทัน แต่บน windows CI ที่โหลดหนักมันโผล่ → bounded poll รอ thread set converge (5s)
+  แล้วค่อย assert — leak จริงยังตกเหมือนเดิม (ไม่มีวัน converge) แค่ตกช้าลง 5 วินาที ·
+  ข้อความ assert บอก `leaked=` / `missing=` แทน repr ทึบๆ ที่อ่านไม่ออกว่า thread ไหนเกิน
+- **sweep แพทเทิร์น "assert post-condition ของงาน async ทันที" ทั้ง `tests/`** — flaky ทั้ง 4 ตัว
+  ของวันนี้เป็นโรคเดียวกัน (thread เริ่มไม่ทัน / ตายไม่ทัน / นาฬิกาช้ากว่าที่คิด) จึงไล่หา
+  `threading.enumerate()`/`active_count()`/`is_alive()` ที่ assert ทันทีหลัง
+  `stop()`/`close()`/`terminate()`/`quit()`/`shutdown()` ทั้งหมด — **ที่เหลือปลอดภัยแล้วทุกตัว**
+  (มี `join(timeout=)` ก่อน assert, ใช้ `_pump_until` เดิม, หรือ assert ค่าที่ capture ไว้ก่อน teardown)
+  ไม่พบตัวใหม่
+
 - **ไล่เก็บ assert เชิงเวลาที่เหลือทั้ง `tests/`** — sweep หา `assert elapsed < <ตัวเลข>` ทั้งหมด
   เจออีก 3 จุด แก้ 2 ปล่อย 1: `test_remote_http_server.py:1107` (`elapsed < 1.0` — **ซ้ำซ้อน**
   เพราะบรรทัดถัดไป `assert pending.reply.empty()` พิสูจน์สัญญาเดียวกันแบบ deterministic อยู่แล้ว →

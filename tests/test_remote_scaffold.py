@@ -8,6 +8,7 @@ import importlib
 import json
 import socket
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,26 @@ def _isolated(tmp_path, monkeypatch):
     # `RUNTIME_DIR/tunnel/tunnel_pid.json` (which could point at a genuinely
     # live cockpit's tunnel) while running this suite.
     monkeypatch.setattr(tunnel_config, "_PID_FILE", tmp_path / "tunnel_pid.json")
+
+
+def _wait_for_threads_to_settle(before: set, *, timeout: float = 5.0) -> set:
+    """Poll `threading.enumerate()` until it converges back to `before`.
+
+    `rc.stop()` only joins the server's own accept-loop thread — the
+    per-request `ThreadingMixIn` handler thread spawned by `_start()`'s own
+    loopback probe (`diagnostics.probe_local`) finishes asynchronously a
+    beat later and isn't tracked/joined by anyone. That's normally sub-ms,
+    but under a loaded CI runner it can outlast an immediate check. Give it
+    a real deadline instead of asserting the instant `stop()` returns — a
+    genuine leak (stop() failing to tear a thread down at all) still never
+    converges and still fails, just after `timeout` instead of instantly.
+    """
+    deadline = time.monotonic() + timeout
+    after = set(threading.enumerate())
+    while after != before and time.monotonic() < deadline:
+        time.sleep(0.02)
+        after = set(threading.enumerate())
+    return after
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +97,10 @@ class TestMaybeStart:
             assert rc._server.port != 0
         finally:
             rc.stop()
-        assert set(threading.enumerate()) == before
+        after = _wait_for_threads_to_settle(before)
+        leaked = after - before
+        missing = before - after
+        assert after == before, f"thread leak after rc.stop(): leaked={leaked} missing={missing}"
 
 
 class TestBootTimeReap:
