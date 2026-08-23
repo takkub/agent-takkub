@@ -16,6 +16,10 @@ class Check:
     name: str
     cmd: list[str]
     stack: str  # "python" | "node"
+    # Where to run `cmd`; None = the project root the check was detected in.
+    # Set for per-workspace-package typechecks in a monorepo without a root
+    # tsconfig (#368) so `tsc` resolves that package's own node_modules.
+    cwd: Path | None = None
 
 
 @dataclass
@@ -67,30 +71,176 @@ def detect_stack(cwd: Path) -> list[Check]:
         )
 
     if (cwd / "package.json").exists():
-        npm = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
-        npx = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
+        checks.extend(node_checks(cwd))
+
+    return checks
+
+
+# ---------------------------------------------------------------------------
+# Node detection (#329 delegate, #368 typecheck-always)
+# ---------------------------------------------------------------------------
+
+# Lockfile → package manager. Checked in this order; first hit wins. Never
+# hardcode npm: `npm run verify` in a pnpm workspace either fails outright or
+# resolves a different dependency tree than the one CI uses (#368).
+_LOCKFILE_PM: tuple[tuple[str, str], ...] = (
+    ("pnpm-lock.yaml", "pnpm"),
+    ("yarn.lock", "yarn"),
+    ("bun.lockb", "bun"),
+    ("bun.lock", "bun"),
+    ("package-lock.json", "npm"),
+    ("npm-shrinkwrap.json", "npm"),
+)
+
+
+def detect_package_manager(cwd: Path, pkg: dict | None = None) -> str:
+    """``"pnpm"`` | ``"yarn"`` | ``"bun"`` | ``"npm"`` for the project at *cwd*.
+
+    Lockfile first (what's actually installed), then package.json's
+    `packageManager` field (corepack pin), then npm as the last resort.
+    """
+    for lock, pm in _LOCKFILE_PM:
+        if (cwd / lock).exists():
+            return pm
+    pin = (pkg or {}).get("packageManager")
+    if isinstance(pin, str):
+        name = pin.split("@", 1)[0].strip()
+        if name in {"pnpm", "yarn", "bun", "npm"}:
+            return name
+    return "npm"
+
+
+def _exe(name: str) -> str:
+    """Resolve a Node-ecosystem launcher cross-platform: on Windows the
+    global installs are `.cmd` shims that `shell=False` subprocess can't
+    find by bare name, so probe that spelling first."""
+    return shutil.which(f"{name}.cmd") or shutil.which(name) or name
+
+
+def pm_run(pm: str, script: str) -> list[str]:
+    """`<pm> run <script>` for the detected package manager."""
+    return [_exe(pm), "run", script]
+
+
+def pm_exec(pm: str, *args: str) -> list[str]:
+    """Run a locally-installed binary (`tsc`, `eslint`) through the package
+    manager's own exec path so it resolves from node_modules/.bin."""
+    if pm == "pnpm":
+        return [_exe("pnpm"), "exec", *args]
+    if pm == "yarn":
+        return [_exe("yarn"), *args]
+    if pm == "bun":
+        return [_exe("bunx"), *args]
+    return [_exe("npx"), "--no-install", *args]
+
+
+def _workspace_globs(cwd: Path, pkg: dict) -> list[str]:
+    """Workspace package globs from pnpm-workspace.yaml (`packages:` list) or
+    package.json `workspaces` (array, or `{"packages": [...]}`). Negations
+    (`!…`) are dropped — they only ever exclude, and an over-inclusive
+    typecheck is the safe failure here."""
+    globs: list[str] = []
+    ws_yaml = cwd / "pnpm-workspace.yaml"
+    if ws_yaml.exists():
         try:
-            pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pkg = {}
+            in_packages = False
+            for raw in ws_yaml.read_text(encoding="utf-8").splitlines():
+                line = raw.split("#", 1)[0].rstrip()
+                if not line.strip():
+                    continue
+                if not line.startswith((" ", "\t", "-")):
+                    in_packages = line.strip().rstrip(":") == "packages"
+                    continue
+                if in_packages and line.strip().startswith("- "):
+                    globs.append(line.strip()[2:].strip().strip("'\""))
+        except OSError:
+            pass
+    ws = pkg.get("workspaces")
+    if isinstance(ws, dict):
+        ws = ws.get("packages")
+    if isinstance(ws, list):
+        globs.extend(str(g) for g in ws if isinstance(g, str))
+    return [g for g in globs if g and not g.startswith("!")]
 
-        scripts = pkg.get("scripts", {})
+
+def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
+    """Every workspace package directory (relative to *cwd*) that carries its
+    own tsconfig.json — the monorepo shape where the root has none, so a root
+    `tsc --noEmit` would typecheck nothing (#368: lottery/turbo)."""
+    found: list[Path] = []
+    for g in _workspace_globs(cwd, pkg):
+        for d in sorted(cwd.glob(g)):
+            if not d.is_dir() or "node_modules" in d.parts:
+                continue
+            if (d / "tsconfig.json").exists() and (d / "package.json").exists():
+                found.append(d.relative_to(cwd))
+    return found
+
+
+def node_checks(cwd: Path) -> list[Check]:
+    """The Node gate (#329 + #368). Order matters — typecheck runs BEFORE test
+    because the whole point is that vitest/jest transpile through esbuild and
+    never see a type error: a spec written against an old signature passes
+    locally and only fails at CI. Detection (first hit wins):
+
+      1. `verify` script            → `<pm> run verify`   (project's own combo)
+      2. `typecheck` script         → `<pm> run typecheck` + `test`
+      3. root tsconfig.json         → `<pm exec> tsc -p tsconfig.json --noEmit` + `test`
+         no root tsconfig, monorepo → one tsc per workspace package that has one
+      4. no TypeScript at all       → `test` alone, as before
+    Then `lint` (eslint) if an eslint config exists.
+    """
+    try:
+        pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pkg = {}
+    if not isinstance(pkg, dict):
+        pkg = {}
+    scripts = pkg.get("scripts") or {}
+    if not isinstance(scripts, dict):
+        scripts = {}
+    pm = detect_package_manager(cwd, pkg)
+    checks: list[Check] = []
+
+    if "verify" in scripts:
+        checks.append(Check(name="verify", cmd=pm_run(pm, "verify"), stack="node"))
+    else:
+        if "typecheck" in scripts:
+            checks.append(Check(name="typecheck", cmd=pm_run(pm, "typecheck"), stack="node"))
+        elif (cwd / "tsconfig.json").exists():
+            checks.append(
+                Check(
+                    name="typecheck",
+                    cmd=pm_exec(pm, "tsc", "-p", "tsconfig.json", "--noEmit"),
+                    stack="node",
+                )
+            )
+        else:
+            for rel in workspace_tsconfigs(cwd, pkg):
+                checks.append(
+                    Check(
+                        name=f"typecheck:{rel.as_posix()}",
+                        cmd=pm_exec(pm, "tsc", "-p", "tsconfig.json", "--noEmit"),
+                        stack="node",
+                        cwd=cwd / rel,
+                    )
+                )
         if "test" in scripts:
-            checks.append(Check(name="npm-test", cmd=[npm, "test"], stack="node"))
+            checks.append(Check(name="test", cmd=pm_run(pm, "test"), stack="node"))
 
-        if (cwd / "tsconfig.json").exists():
-            checks.append(Check(name="tsc", cmd=[npx, "tsc", "--noEmit"], stack="node"))
-
-        eslintrc_patterns = [
-            ".eslintrc",
-            ".eslintrc.js",
-            ".eslintrc.json",
-            ".eslintrc.yaml",
-            ".eslintrc.yml",
-        ]
-        if any((cwd / p).exists() for p in eslintrc_patterns) or glob.glob(str(cwd / ".eslintrc*")):
-            checks.append(Check(name="eslint", cmd=[npx, "eslint", "."], stack="node"))
-
+    eslintrc_patterns = [
+        ".eslintrc",
+        ".eslintrc.js",
+        ".eslintrc.json",
+        ".eslintrc.yaml",
+        ".eslintrc.yml",
+        "eslint.config.js",
+        "eslint.config.mjs",
+        "eslint.config.cjs",
+        "eslint.config.ts",
+    ]
+    if any((cwd / p).exists() for p in eslintrc_patterns) or glob.glob(str(cwd / ".eslintrc*")):
+        checks.append(Check(name="lint", cmd=pm_exec(pm, "eslint", "."), stack="node"))
     return checks
 
 
@@ -106,7 +256,7 @@ def run_checks(checks: list[Check], cwd: Path, timeout: int = 600) -> VerifyResu
         try:
             proc = subprocess.run(
                 check.cmd,
-                cwd=str(cwd),
+                cwd=str(check.cwd or cwd),
                 capture_output=True,
                 shell=False,
                 timeout=timeout,

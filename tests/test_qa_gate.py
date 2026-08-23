@@ -381,6 +381,52 @@ class TestNodeProjectGate:
         assert note.skipped
         assert "apps/frontend" in note.detail
 
+    def test_typecheck_red_fails_the_gate_even_when_test_would_pass(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """#368: vitest transpiles via esbuild and never sees a type error —
+        a spec calling `new CustomerController(platform)` after the ctor
+        grew a 2nd arg passed the old gate (`npm test` only) and went red at
+        CI with TS2554. Typecheck now runs first; red there = gate FAIL."""
+        recorder: list = []
+        # rc sequence for the non-git calls: typecheck=1, (test would be 0)
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, [1, 0]))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        names = [s.name for s in report.steps]
+        assert names.index("typecheck") < names.index("test")
+        assert not report.ok
+        assert next(s for s in report.steps if s.name == "typecheck").ok is False
+        assert next(s for s in report.steps if s.name == "test").skipped
+
+    def test_verify_script_is_preferred_and_uses_the_lockfile_pm(
+        self, node_repo, monkeypatch
+    ) -> None:
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test", "verify": "turbo run typecheck test"}}',
+            encoding="utf-8",
+        )
+        (node_repo / "tsconfig.json").unlink()
+        (node_repo / "pnpm-lock.yaml").write_text("", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        ran = [cmd for cmd, _env in recorder]
+        assert len(ran) == 1 and ran[0][1:] == ["run", "verify"]
+        assert "pnpm" in str(ran[0][0])
+        assert report.ok
+
+    def test_targeted_still_typechecks_whole_project(self, node_repo, monkeypatch) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        qa_gate.run_gate(cwd=node_repo, targeted=["src/x.ts"], write_report=False)
+
+        assert any("tsc" in " ".join(map(str, cmd)) for cmd, _ in recorder)
+
     def test_a_node_project_with_nothing_runnable_refuses_clearly(
         self, node_repo, monkeypatch
     ) -> None:

@@ -535,9 +535,9 @@ def _non_python_gate(
                 False,
                 False,
                 0.0,
-                f"refuse: Node project at {root} but nothing to run — no `test` script, "
-                "no tsconfig.json, no eslint config. Add one, or run the project's own "
-                "command directly.",
+                f"refuse: Node project at {root} but nothing to run — no `verify`/"
+                "`typecheck`/`test` script, no tsconfig.json (root or workspace), no "
+                "eslint config. Add one, or run the project's own command directly.",
             )
         )
         return report
@@ -554,20 +554,23 @@ def _non_python_gate(
     if targeted:
         # Never silently swallow them: a Node gate has no generic way to map
         # source paths onto a test selection, and pretending otherwise is how
-        # a "targeted" run quietly became a full one with no one told.
+        # a "targeted" run quietly became a full one with no one told. The
+        # typecheck in particular always runs whole-project (#368) — tsc
+        # can't be narrowed to a path list without losing the cross-file
+        # signature drift it exists to catch.
         report.steps.append(
             StepResult(
                 "targeted",
                 True,
                 True,
                 0.0,
-                "--targeted is Python-only — these paths did NOT narrow anything: "
-                + " ".join(targeted),
+                "--targeted is Python-only — these paths did NOT narrow anything "
+                "(typecheck + test run whole-project): " + " ".join(targeted),
             )
         )
 
     for index, check in enumerate(checks):
-        step = _run_step(check.name, check.cmd, env, root, log_dir)
+        step = _run_step(check.name, check.cmd, env, check.cwd or root, log_dir)
         report.steps.append(step)
         if not step.ok:
             for rest in checks[index + 1 :]:

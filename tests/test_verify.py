@@ -43,7 +43,7 @@ def test_detect_stack_package_json_with_test_script(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
     checks = detect_stack(tmp_path)
     names = [c.name for c in checks]
-    assert "npm-test" in names
+    assert "test" in names
 
 
 def test_detect_stack_package_json_with_tsconfig(tmp_path: Path) -> None:
@@ -51,7 +51,9 @@ def test_detect_stack_package_json_with_tsconfig(tmp_path: Path) -> None:
     (tmp_path / "tsconfig.json").write_text("{}")
     checks = detect_stack(tmp_path)
     names = [c.name for c in checks]
-    assert "tsc" in names
+    assert "typecheck" in names
+    tc = next(c for c in checks if c.name == "typecheck")
+    assert tc.cmd[-4:] == ["tsc", "-p", "tsconfig.json", "--noEmit"]
 
 
 def test_detect_stack_package_json_with_eslintrc(tmp_path: Path) -> None:
@@ -59,7 +61,7 @@ def test_detect_stack_package_json_with_eslintrc(tmp_path: Path) -> None:
     (tmp_path / ".eslintrc.json").write_text("{}")
     checks = detect_stack(tmp_path)
     names = [c.name for c in checks]
-    assert "eslint" in names
+    assert "lint" in names
 
 
 def test_detect_stack_empty_cwd(tmp_path: Path) -> None:
@@ -74,7 +76,118 @@ def test_detect_stack_mixed_both_stacks(tmp_path: Path) -> None:
     checks = detect_stack(tmp_path)
     names = [c.name for c in checks]
     assert "pytest" in names
-    assert "npm-test" in names
+    assert "test" in names
+
+
+# ---------------------------------------------------------------------------
+# #368 — Node gate must typecheck, always, and use the project's own pm
+# ---------------------------------------------------------------------------
+
+
+def _pkg(tmp_path: Path, scripts: dict, **extra) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": scripts, **extra}))
+
+
+def test_node_verify_script_wins_and_runs_alone(tmp_path: Path) -> None:
+    """lottery shape: root `verify` = `turbo run typecheck test`, no root
+    tsconfig — the old gate ran only `npm test` here (false-PASS, #368)."""
+    _pkg(
+        tmp_path,
+        {
+            "test": "turbo run test",
+            "typecheck": "turbo run typecheck",
+            "verify": "turbo run typecheck test",
+        },
+    )
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    checks = detect_stack(tmp_path)
+    assert [c.name for c in checks] == ["verify"]
+    assert checks[0].cmd[1:] == ["run", "verify"]
+    assert "pnpm" in Path(checks[0].cmd[0]).name
+
+
+def test_node_typecheck_script_runs_before_test(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "vitest run", "typecheck": "tsc --noEmit"})
+    (tmp_path / "yarn.lock").write_text("")
+    checks = detect_stack(tmp_path)
+    assert [c.name for c in checks] == ["typecheck", "test"]
+    assert all("yarn" in Path(c.cmd[0]).name for c in checks)
+    assert checks[0].cmd[1:] == ["run", "typecheck"]
+
+
+def test_node_root_tsconfig_falls_back_to_tsc_then_test(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "vitest run"})
+    (tmp_path / "tsconfig.json").write_text("{}")
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    assert [c.name for c in checks] == ["typecheck", "test"]
+    assert "npx" in Path(checks[0].cmd[0]).name
+    assert checks[0].cmd[-3:] == ["-p", "tsconfig.json", "--noEmit"]
+    assert checks[0].cwd is None
+
+
+def test_node_monorepo_without_root_tsconfig_typechecks_each_workspace(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "vitest run"})
+    (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'apps/*'\n  - packages/*\n")
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    for rel in ("apps/api", "apps/web", "packages/shared", "packages/no-ts"):
+        d = tmp_path / rel
+        d.mkdir(parents=True)
+        (d / "package.json").write_text("{}")
+        if rel != "packages/no-ts":
+            (d / "tsconfig.json").write_text("{}")
+    (tmp_path / "apps" / "api" / "node_modules" / "dep").mkdir(parents=True)
+    checks = detect_stack(tmp_path)
+    names = [c.name for c in checks]
+    assert names == [
+        "typecheck:apps/api",
+        "typecheck:apps/web",
+        "typecheck:packages/shared",
+        "test",
+    ]
+    assert checks[0].cwd == tmp_path / "apps" / "api"
+    assert checks[0].cmd[1:] == ["exec", "tsc", "-p", "tsconfig.json", "--noEmit"]
+
+
+def test_node_package_json_workspaces_field_is_honoured(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "jest"}, workspaces={"packages": ["libs/*"]})
+    d = tmp_path / "libs" / "core"
+    d.mkdir(parents=True)
+    (d / "package.json").write_text("{}")
+    (d / "tsconfig.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    assert [c.name for c in checks] == ["typecheck:libs/core", "test"]
+
+
+def test_node_without_typescript_still_just_runs_test(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "jest"})
+    checks = detect_stack(tmp_path)
+    assert [c.name for c in checks] == ["test"]
+
+
+def test_detect_package_manager_order(tmp_path: Path) -> None:
+    from agent_takkub.verify import detect_package_manager
+
+    assert detect_package_manager(tmp_path) == "npm"
+    assert detect_package_manager(tmp_path, {"packageManager": "pnpm@9.1.0"}) == "pnpm"
+    (tmp_path / "yarn.lock").write_text("")
+    assert detect_package_manager(tmp_path, {"packageManager": "pnpm@9.1.0"}) == "yarn"
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    assert detect_package_manager(tmp_path) == "pnpm"
+
+
+def test_run_checks_uses_the_checks_own_cwd(tmp_path: Path) -> None:
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    c = Check(
+        name="x",
+        cmd=[sys.executable, "-c", "import os; print(os.getcwd())"],
+        stack="node",
+        cwd=sub,
+    )
+    res = run_checks([c], tmp_path)
+    assert res.all_passed
+    assert Path(res.checks[0].stdout_tail.strip()).resolve() == sub.resolve()
 
 
 # ---------------------------------------------------------------------------

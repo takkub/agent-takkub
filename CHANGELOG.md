@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **qa-gate (Node) รัน typecheck เสมอ — ปิด false-PASS ที่ไปแดง CI ด้วย TS2554** (#368) — เดิม Node gate รันแค่ `npm test` (+ `tsc` เฉพาะเมื่อ
+  root มี tsconfig.json ซึ่ง monorepo/turbo ไม่มี) → vitest transpile ผ่าน esbuild ไม่เช็ค type → spec ที่ signature drift ผ่าน gate ทุก pane
+  แล้วไปแดงที่ CI (lottery 2026-08-23, parallel worktree) · ตอนนี้ `verify.node_checks()` เลือกตามลำดับ `verify` script › `typecheck` script ›
+  `tsc -p tsconfig.json --noEmit` (root ไม่มี → ทุก workspace package จาก `pnpm-workspace.yaml`/`workspaces` ที่มี tsconfig, รันใน cwd ของ
+  package นั้น) › ไม่มี TS = `test` อย่างเดียว · typecheck มาก่อน `test` + fail-fast = typecheck แดง gate FAIL แม้ test เขียว · package manager
+  จาก lockfile (`pnpm-lock.yaml`/`yarn.lock`/`bun.lock*`/`package-lock.json`) หรือ `packageManager` field — ไม่ hardcode npm, resolve `.cmd`
+  shim บน Windows · step ชื่อ `verify`/`typecheck[:pkg]`/`test`/`lint` · `--targeted` บน Node ยังบอกว่าไม่ narrow และ typecheck รันเต็ม ·
+  `Check.cwd` ใหม่ (verify.run_checks + qa_gate._run_step เคารพ) · tests 3 shape (verify / tsconfig / no-TS) + monorepo + เคส typecheck แดง
+  test เขียว → FAIL · docs: cli-reference + CLAUDE.md บรรทัด Node gate
+- **Sidebar Project Explorer เต็มถึงขอบล่าง** — tree ใต้ project card เคย fixed 260px เหลือแถบว่างใต้ tree บนจอสูง; ตอนนี้
+  `ProjectNav._fit_explorer` คำนวณจาก viewport ของ list − header ทุก row (re-fit ตอน resize/splitter/เปลี่ยนโปรเจค/เพิ่ม-ปิด tab/chevron,
+  coalesce `singleShot(0)`), floor `_EXPLORER_MIN_H=120` แล้ว list สกอลแทน
+
 ## [v1.2.0] - 2026-08-23
 
 ### Added (เพิ่ม)
