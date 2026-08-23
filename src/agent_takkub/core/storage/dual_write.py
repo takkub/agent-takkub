@@ -134,6 +134,51 @@ def dual_write_provider_models(models: dict, *, data_home: Path | None = None) -
         _write_wrapped("provider-models", target, _wrap("provider-models", models))
 
 
+def dual_write_disabled_providers(state: dict, *, data_home: Path | None = None) -> None:
+    """Mirror ``provider_state.save()``'s cleaned mapping into
+    ``providers/registry.json`` (ladder step 1's target)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_readonly_registries_step
+
+    target = _mapping_target(
+        build_readonly_registries_step(data_home=effective).mappings, "disabled-providers"
+    )
+    if target is not None:
+        _write_wrapped("disabled-providers", target, _wrap("disabled-providers", state))
+
+
+def dual_write_exec_mode(payload: dict, *, data_home: Path | None = None) -> None:
+    """Mirror ``exec_mode.set_current()``'s ``{"mode": ...}`` into
+    ``config/execution.json`` (ladder step 1's target)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_readonly_registries_step
+
+    target = _mapping_target(
+        build_readonly_registries_step(data_home=effective).mappings, "exec-mode"
+    )
+    if target is not None:
+        _write_wrapped("exec-mode", target, _wrap("exec-mode", payload))
+
+
+def dual_write_rtk_enabled(payload: dict, *, data_home: Path | None = None) -> None:
+    """Mirror ``rtk_helper.set_rtk_enabled()``'s ``{"enabled": bool}`` into
+    ``config/features/rtk.json`` (ladder step 1's target)."""
+    effective = _effective_data_home(data_home)
+    if not _v2_present(effective):
+        return
+    from ..migration.steps_v1 import build_readonly_registries_step
+
+    target = _mapping_target(
+        build_readonly_registries_step(data_home=effective).mappings, "rtk-enabled"
+    )
+    if target is not None:
+        _write_wrapped("rtk-enabled", target, _wrap("rtk-enabled", payload))
+
+
 def dual_write_pane_tools_policy(file_payload: dict, *, data_home: Path | None = None) -> None:
     """Mirror ``pane_tools_policy.save_policy()``'s on-disk shape
     (``{"version": 1, "roles": {...}}``, or ``{}`` after a delete) into

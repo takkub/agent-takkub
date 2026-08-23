@@ -79,6 +79,10 @@ def save(state: dict[str, bool]) -> None:
     tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
 
+    from .core.storage.dual_write import dual_write_disabled_providers
+
+    dual_write_disabled_providers(cleaned)
+
 
 def is_disabled(provider: str) -> bool:
     """True iff `provider` is currently disabled. Unknown providers → False."""

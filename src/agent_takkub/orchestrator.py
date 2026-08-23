@@ -888,6 +888,13 @@ def _describe_resource_wait(
     queue_note = (
         f" · {queue_len} queued machine-wide for {resource_class.value}" if queue_len > 1 else ""
     )
+    if reason == "global_panes_limit":
+        # #364 lever 3: `max_panes_global` denies proactively, before the
+        # RAM/CPU governor latch above ever trips — name RAM explicitly here
+        # too so this never reads as a bare, unexplained limit code (never a
+        # silent rejection, same rule as every other queued-role message).
+        stats = f" (RAM free {metrics[1]:.0f}%)" if metrics else ""
+        return f"{role_name} queued — machine-wide pane cap reached{stats}{blocked_by}{queue_note}"
     return (
         f"{role_name} queued — waiting for {resource_class.value} slot "
         f"({reason}{blocked_by}){queue_note}"
@@ -989,6 +996,101 @@ def _inject_v2_context(
     except Exception:
         _log_event("context_builder_hook_error", role=role_name, project=project_ns)
         return task
+
+
+#: Roles that routinely need a different model/provider than the Lead's own
+#: (model diversity) or independent-process isolation — a native subagent
+#: shares the Lead's own process/provider, so it can never stand in for
+#: these. #364 lever 2.
+AUTO_SUBAGENT_EXCLUDED_ROLES: frozenset[str] = frozenset({"reviewer", "critic"})
+
+#: Heuristic ceiling on task text length for "short enough to auto-run as a
+#: subagent" — a longer spec usually means multi-step work that benefits
+#: from a visible, resumable pane rather than a same-process child. #364
+#: lever 2; adjust if real usage shows this cutting the wrong way.
+AUTO_SUBAGENT_MAX_TASK_CHARS = 400
+
+
+def resolve_auto_assign_mode(
+    role_name: str,
+    task: str,
+    *,
+    requested_mode: str | None,
+    isolation: str,
+    model: str | None,
+    provider: str | None,
+    effort: str | None,
+    plan: bool,
+    shard_total: int,
+    project: str | None,
+) -> tuple[str, str | None]:
+    """Decide the effective `assign` mode when the caller left `--mode`
+    unset (#364 lever 2 — auto-route short, no-frills tasks to a native
+    subagent instead of a full pane; ~650MB/spawn saved).
+
+    Returns `(mode, note)`. `note` is `None` whenever `requested_mode` was
+    given explicitly (an explicit `--mode pane` or `--mode subagent` always
+    wins, unconditionally — nothing to explain); otherwise it is a short
+    human-readable reason worth echoing back in the assign ack, so an
+    auto-picked mode is never silent.
+
+    Picks `"subagent"` only when EVERY one of these holds — anything else
+    falls back to `"pane"`, the safe/status-quo default:
+      - `requested_mode is None` (caller didn't pin a mode itself)
+      - not `plan` and `shard_total <= 1` (plan/shard fan-out are out of
+        this lever's scope — both already support `--mode subagent`
+        explicitly when the caller asks for it)
+      - no `model`/`provider`/`effort` override (all three are already
+        rejected outright for an explicit `--mode subagent`; auto-selection
+        must not silently drop an override the caller asked for by
+        upgrading to a mode that can't honor it)
+      - `isolation != "worktree"` (a subagent shares the Lead's own
+        process/cwd — it cannot hold a separate git worktree)
+      - `role_name` has no `#N` shard suffix (an explicit fan-out target,
+        even one dispatched outside `--shards` with `shard_total` unset —
+        keep it in a pane alongside its siblings)
+      - the base role isn't in `AUTO_SUBAGENT_EXCLUDED_ROLES`
+      - `task` is under `AUTO_SUBAGENT_MAX_TASK_CHARS`
+      - the role's EFFECTIVE provider is claude — a native subagent only
+        ever runs the Lead's own provider (claude); every other provider
+        (codex/gemini/opencode/kimi/cursor) has no subagent equivalent yet
+        (#103 gap). Auto-selection must never silently downgrade a
+        codex/gemini-routed role's engine by running it through a claude
+        subagent instead of its own pane — it falls back to pane and says
+        so, rather than picking one quietly.
+    """
+    if requested_mode is not None:
+        return requested_mode, None
+    if plan or shard_total > 1:
+        return "pane", None
+    if model or provider or effort:
+        return "pane", None
+    if isolation == "worktree":
+        return "pane", None
+    if _split_shard(role_name)[1] is not None:
+        # An explicit `role#N` target — fan-out coordination, even when this
+        # particular call's `shard_total` wasn't set (e.g. a direct `role#N`
+        # assign outside `--shards`). Keep it in a pane like its siblings.
+        return "pane", None
+    base_role = _split_shard(role_name)[0].lower().strip()
+    if base_role in AUTO_SUBAGENT_EXCLUDED_ROLES:
+        return "pane", None
+    if len(task or "") > AUTO_SUBAGENT_MAX_TASK_CHARS:
+        return "pane", None
+
+    from .provider_config import effective_provider_for
+
+    provider_now = effective_provider_for(base_role, project)
+    if provider_now != "claude":
+        return "pane", (
+            f"auto-subagent skipped for {role_name!r}: effective provider is "
+            f"{provider_now!r}, not claude — native subagents only support "
+            "claude today (#103 gap); using pane instead"
+        )
+    return "subagent", (
+        f"auto-selected --mode subagent for {role_name!r}: task under "
+        f"{AUTO_SUBAGENT_MAX_TASK_CHARS} chars, no isolation/model-diversity/plan need"
+    )
 
 
 class Orchestrator(

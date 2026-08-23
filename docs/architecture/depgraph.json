@@ -1707,13 +1707,14 @@
         "agent_takkub.core.scheduling.models",
         "agent_takkub.core.scheduling.policy",
         "agent_takkub.core.scheduling.priority_queue",
-        "agent_takkub.core_v2_settings"
+        "agent_takkub.core_v2_settings",
+        "agent_takkub.performance_settings"
       ],
       "imported_by": [
         "agent_takkub.resource_governor"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.scheduling.flag",
@@ -1875,15 +1876,18 @@
         "agent_takkub.auto_resume",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
+        "agent_takkub.exec_mode",
         "agent_takkub.issues",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.provider_config",
         "agent_takkub.provider_models",
+        "agent_takkub.provider_state",
         "agent_takkub.remote.session_store",
         "agent_takkub.role_models",
+        "agent_takkub.rtk_helper",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 11,
+      "fan_in": 14,
       "fan_out": 3
     },
     {
@@ -2145,14 +2149,15 @@
     {
       "module": "agent_takkub.exec_mode",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write"
       ],
       "imported_by": [
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.gemini_helper",
@@ -2729,12 +2734,13 @@
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.core.scheduling.facade",
         "agent_takkub.orchestrator",
         "agent_takkub.resource_governor",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {
@@ -3039,6 +3045,7 @@
       "module": "agent_takkub.provider_state",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -3051,7 +3058,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 7,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.provider_update",
@@ -3386,14 +3393,15 @@
     {
       "module": "agent_takkub.rtk_helper",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.storage.dual_write"
       ],
       "imported_by": [
         "agent_takkub.hook_wiring",
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.services",

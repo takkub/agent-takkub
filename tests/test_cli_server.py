@@ -152,7 +152,13 @@ class TestAsyncSpawnDispatch:
         srv = CliServer(orch)
         sock = _FakeSock()
 
-        srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "do x"}))
+        # mode pinned to pane: this test is about the deferred/staggered pane
+        # dispatch contract, not #364 lever 2's auto-subagent selection — a
+        # short task on a bare role would otherwise auto-pick subagent, which
+        # runs orch.assign() inline instead of deferring it.
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
 
         # Replied right away, before the orchestrator did any spawn work.
         r = _replies(sock)
@@ -746,7 +752,12 @@ class TestSpawnStagger:
     def test_first_assign_has_zero_delay(self, qapp: QCoreApplication) -> None:
         srv = CliServer(_FakeOrch())
         sock = _FakeSock()
-        srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+        # mode pinned to pane: a bare short-task role would otherwise
+        # auto-pick subagent (#364 lever 2), which skips the staggered
+        # pane-spawn dispatch this test exercises.
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "x", "mode": "pane"})
+        )
         assert _delay_ms(_replies(sock)[0]["msg"]) == 0  # lone assign unchanged
 
     def test_parallel_assigns_are_staggered(self, qapp: QCoreApplication) -> None:
@@ -758,8 +769,12 @@ class TestSpawnStagger:
             # Distinct task text per call so the #233 assign-dedup guard (same
             # (project, role, task) fingerprint within its window) doesn't
             # collapse these into a single dispatch — this test is about the
-            # spawn-stagger delay, a separate concern.
-            srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": f"x{i}"}))
+            # spawn-stagger delay, a separate concern. mode pinned to pane,
+            # same reason as test_first_assign_has_zero_delay above.
+            srv._dispatch(
+                sock,
+                _auth({"cmd": "assign", "role": "backend", "task": f"x{i}", "mode": "pane"}),
+            )
             delays.append(_delay_ms(_replies(sock)[0]["msg"]))
         d0, d1, d2 = delays
         assert d0 == 0
@@ -783,7 +798,10 @@ class TestSpawnStagger:
         srv._codex_gap_ms = 10_000
         s1, s2 = _FakeSock(), _FakeSock()
         srv._dispatch(s1, _auth({"cmd": "assign", "role": "codex", "task": "x"}))
-        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend", "task": "y"}))
+        # mode pinned to pane on the backend leg: same reason as
+        # test_first_assign_has_zero_delay above (the codex leg already
+        # auto-falls-back to pane via the #103 provider gap, unaffected).
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend", "task": "y", "mode": "pane"}))
         backend_delay = _delay_ms(_replies(s2)[0]["msg"])
         # backend is spaced by the general gap, NOT held back the full codex gap.
         assert 0 < backend_delay <= 400
@@ -883,12 +901,14 @@ class TestBrowserShardSpawnStagger:
 
     def test_non_shard_qa_not_penalized_by_browser_shard_gap(self, qapp: QCoreApplication) -> None:
         # A single "qa" (no #N suffix) pane is not a fan-out shard — normal gap.
+        # mode pinned to pane: a bare short-task role would otherwise
+        # auto-pick subagent (#364 lever 2), which skips staggered dispatch.
         srv = CliServer(_FakeOrch())
         srv._spawn_gap_ms = 400
         srv._browser_shard_gap_ms = 3_000
         s1, s2 = _FakeSock(), _FakeSock()
-        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
-        srv._dispatch(s2, _auth({"cmd": "assign", "role": "qa", "task": "y"}))
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend", "task": "x", "mode": "pane"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "qa", "task": "y", "mode": "pane"}))
         assert 0 < _delay_ms(_replies(s2)[0]["msg"]) <= 400
 
     def test_non_browser_shard_not_penalized_by_browser_shard_gap(

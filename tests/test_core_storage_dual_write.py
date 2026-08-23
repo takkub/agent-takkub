@@ -69,6 +69,51 @@ def test_provider_models_mirrors_into_registry_target(tmp_path):
     assert read_json(target)["data"] == models
 
 
+def test_disabled_providers_mirrors_into_registry_target(tmp_path):
+    """#362 wave 1c — `provider_state.save()` was the first known gap in
+    ladder step 1: a mapping existed in `build_readonly_registries_step`
+    with no `dual_write_*` hook wired to it."""
+    home = _migrated_home(tmp_path)
+    state = {"codex": True}
+    dual_write.dual_write_disabled_providers(state, data_home=home)
+
+    mapping = build_readonly_registries_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "disabled-providers")
+    assert read_json(target)["data"] == state
+
+
+def test_exec_mode_mirrors_into_execution_target(tmp_path):
+    """#362 wave 1c — `exec_mode.set_current()` was the second known gap."""
+    home = _migrated_home(tmp_path)
+    payload = {"mode": "parallel"}
+    dual_write.dual_write_exec_mode(payload, data_home=home)
+
+    mapping = build_readonly_registries_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "exec-mode")
+    assert read_json(target)["data"] == payload
+
+
+def test_rtk_enabled_mirrors_into_features_target(tmp_path):
+    """#362 wave 1c — `rtk_helper.set_rtk_enabled()` was found by the
+    mechanical audit below (same shape as the two known gaps above, not
+    previously flagged)."""
+    home = _migrated_home(tmp_path)
+    payload = {"enabled": True}
+    dual_write.dual_write_rtk_enabled(payload, data_home=home)
+
+    mapping = build_readonly_registries_step(data_home=home).mappings
+    target = next(m.target for m in mapping if m.name == "rtk-enabled")
+    assert read_json(target)["data"] == payload
+
+
+def test_readonly_registries_skip_when_not_migrated(tmp_path):
+    home = tmp_path / "data_home"
+    dual_write.dual_write_disabled_providers({"codex": True}, data_home=home)
+    dual_write.dual_write_exec_mode({"mode": "parallel"}, data_home=home)
+    dual_write.dual_write_rtk_enabled({"enabled": True}, data_home=home)
+    assert not (home / "v2").exists()
+
+
 # ── capability: pane_tools_policy / skill_policy ────────────────────────────
 
 
@@ -321,3 +366,130 @@ def test_state_writer_v2_write_failure_is_swallowed_not_raised(tmp_path, caplog)
         dual_write.dual_write_autoresume({"enabled": True}, data_home=home)
 
     assert any("v2_write_failed" in r.message for r in caplog.records)
+
+
+# ── mechanical audit (#362 wave 1c): every ladder mapping → dual_write hook ─
+#
+# V1 file                              -> V2 target                          -> writer module        -> dual-write hooked?
+# settings/provider-models.json        -> models/registry.json               -> provider_models.py    -> yes (dual_write_provider_models)
+# settings/role-models.json            -> models/aliases.json                -> role_models.py        -> yes (dual_write_role_models)
+# settings/disabled-providers.json     -> providers/registry.json            -> provider_state.py      -> yes (dual_write_disabled_providers) [wave 1c: was missing]
+# settings/exec-mode.json              -> config/execution.json              -> exec_mode.py           -> yes (dual_write_exec_mode)           [wave 1c: was missing]
+# settings/rtk-enabled.json            -> config/features/rtk.json           -> rtk_helper.py          -> yes (dual_write_rtk_enabled)         [wave 1c: was missing]
+# settings/pane-tools.json             -> capabilities/mcp/permissions.json  -> pane_tools_policy.py   -> yes (dual_write_pane_tools_policy)
+# settings/skill-policy.json           -> capabilities/skills/registry.json  -> skill_policy.py        -> yes (dual_write_skill_policy)
+# DATA_HOME/.takkub_issues.json        -> state/issues/local.json            -> issues.py              -> yes (dual_write_local_issues)
+# DATA_HOME/auto_issue_dedup.json      -> state/issues/dedup.json            -> auto_issue_capture.py  -> yes (dual_write_issue_dedup)
+# settings/autoresume.json             -> state/sessions/autoresume.json     -> auto_resume.py         -> yes (dual_write_autoresume)
+# settings/takkub-remote-sessions.json -> state/sessions/remote.json         -> remote/session_store.py -> yes (dual_write_remote_sessions)
+# settings/custom-roles.json           -> agents/custom/registry.json        -> custom_roles.py        -> yes (dual_write_custom_roles_registry) [step 2, not RegistryMapping]
+# custom_agents_dir/<role>.md          -> agents/custom/<role>.md            -> custom_roles.py        -> yes (dual_write_custom_role_file)      [step 2, not RegistryMapping]
+# role-providers.json (global+project) -> config/routing.json                -> provider_config.py     -> yes (dual_write_routing)               [step 2, not RegistryMapping]
+# DATA_HOME/projects.json              -> projects/registry.json + per-id    -> config.py              -> yes (dual_write_projects)              [step 4, not RegistryMapping]
+# (none — computed, not a V1 writer)   -> providers/<p>/provider.json etc.   -> (n/a)                  -> exception: step 6 has no V1 payload to mirror (CredentialReferenceStep computes fresh from config-dir presence every apply())
+# RUNTIME_DIR/{tasks,sessions,...}     -> state_* trees                     -> (many, unbounded)      -> exception: step 7, documented in dual_write.py's module docstring (per-file fan-out, too costly to hook live; synced by apply_pending() at boot)
+# RUNTIME_DIR/core                     -> system/                           -> (n/a — already V2-shaped) -> exception: step 8, documented in dual_write.py's module docstring (not a V1 config mirror)
+
+# Ladder step 1/3/5 mapping name -> the dual_write_* function wired to it.
+# A name intentionally does NOT collapse to `dual_write_<name.replace("-", "_")}`
+# in every case (e.g. "pane-tools" -> `dual_write_pane_tools_policy`), so this
+# table is spelled out explicitly rather than derived — the whole point is to
+# catch a NEW mapping added to one of the three step-1/3/5 factories below
+# without anyone adding a line here (or to `dual_write.py`) at the same time.
+_FLAT_MAPPING_DUAL_WRITE_FNS: dict[str, str] = {
+    # ladder step 1 — readonly-registries
+    "provider-models": "dual_write_provider_models",
+    "role-models": "dual_write_role_models",
+    "disabled-providers": "dual_write_disabled_providers",
+    "exec-mode": "dual_write_exec_mode",
+    "rtk-enabled": "dual_write_rtk_enabled",
+    # ladder step 3 — capability
+    "pane-tools": "dual_write_pane_tools_policy",
+    "skill-policy": "dual_write_skill_policy",
+    # ladder step 5 — state
+    "local-issues": "dual_write_local_issues",
+    "issue-dedup": "dual_write_issue_dedup",
+    "autoresume": "dual_write_autoresume",
+    "remote-sessions": "dual_write_remote_sessions",
+}
+
+
+def test_every_ladder_mapping_has_dual_write_or_documented_exception(tmp_path):
+    """Mechanical drift guard (#362 wave 1c). Ladder steps 1/3/5 are built
+    from flat `RegistryMapping` tuples — this walks every mapping those
+    three step factories actually report today and cross-checks it against
+    `_FLAT_MAPPING_DUAL_WRITE_FNS` above. Fails if:
+
+    - a mapping exists in the ladder with no entry here (the exact gap
+      `disabled-providers`/`exec-mode`/`rtk-enabled` shipped with before
+      this test existed — a future new mapping would silently ship the
+      same way without this), or
+    - an entry here no longer matches any live mapping (stale audit row),
+      or
+    - the named `dual_write_*` function was renamed/removed from
+      `dual_write.py` out from under the table.
+
+    Steps 2/4/6/7/8 aren't `RegistryMapping`-based and are covered by the
+    table comment above plus the two tests below instead."""
+    home = tmp_path / "data_home"
+    live_mapping_names = {
+        m.name
+        for step_factory in (
+            build_readonly_registries_step,
+            build_capability_step,
+            build_state_step,
+        )
+        for m in step_factory(data_home=home).mappings
+    }
+    assert live_mapping_names, "sanity: the ladder steps must report at least one mapping"
+
+    documented_names = set(_FLAT_MAPPING_DUAL_WRITE_FNS)
+    missing = live_mapping_names - documented_names
+    assert not missing, (
+        f"ladder mapping(s) {sorted(missing)} have no dual_write_* hook and no "
+        "entry in _FLAT_MAPPING_DUAL_WRITE_FNS (test_core_storage_dual_write.py) — "
+        "add a dual_write_* function in dual_write.py, wire it into the V1 writer, "
+        "and add it to this table"
+    )
+    stale = documented_names - live_mapping_names
+    assert not stale, (
+        f"_FLAT_MAPPING_DUAL_WRITE_FNS names {sorted(stale)} no longer exist in the ladder"
+    )
+
+    for mapping_name, fn_name in _FLAT_MAPPING_DUAL_WRITE_FNS.items():
+        assert hasattr(dual_write, fn_name), (
+            f"{mapping_name!r} names {fn_name}, which no longer exists on dual_write.py"
+        )
+
+
+def test_step_2_and_4_fanout_targets_have_dual_write_hooks():
+    """Steps 2 (`RoleAgentMigrationStep`) and 4 (`ProjectMigrationStep`)
+    build their V2 targets from step-instance methods, not a flat
+    `RegistryMapping` tuple, so they fall outside the mechanical audit
+    above — asserted directly here instead."""
+    for fn_name in (
+        "dual_write_custom_roles_registry",
+        "dual_write_custom_role_file",
+        "dual_write_routing",
+        "dual_write_projects",
+    ):
+        assert hasattr(dual_write, fn_name), f"{fn_name} missing from dual_write.py"
+
+
+def test_step_6_7_8_remain_the_documented_no_hook_exceptions():
+    """Steps 6/7/8 deliberately have no `dual_write_*` hook — pinning each
+    step's id here so a rename doesn't silently detach it from its written
+    rationale (step 6: below; steps 7/8: `dual_write.py`'s module
+    docstring). Step 6 (`CredentialReferenceStep`) computes its records
+    fresh from provider config-dir presence on every `apply()` — there is
+    no in-memory V1 payload a caller persists for dual-write to mirror,
+    unlike every other step."""
+    from agent_takkub.core.migration.steps_v1 import (
+        CoreInternalStoreStep,
+        CredentialReferenceStep,
+        RuntimeTriageStep,
+    )
+
+    assert CredentialReferenceStep.step_id == "credential-reference"
+    assert RuntimeTriageStep.step_id == "runtime-triage"
+    assert CoreInternalStoreStep.step_id == "core-internal-store"
