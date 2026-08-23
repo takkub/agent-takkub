@@ -68,12 +68,14 @@ _CSP_HEADER = (
     "img-src 'self' data:; style-src 'self' 'unsafe-inline'"
 )
 
-# #367 Remote Reports (`/r/` route): a report is a standalone document —
-# `publish()`/`validate_standalone_html` already reject any external
-# <script src=http.../<link href=http.../<img src=http... reference before a
-# file is ever stored (`reports.py`), so allowing inline script/style here
-# (unlike the shell's `_CSP_HEADER` above) can never let a report reach a
-# third-party origin — everything this CSP permits is same-origin or inline.
+# #367 Remote Reports (`/r/` route): a report is a standalone document.
+# `publish()`/`validate_standalone_html` (`reports.py`) reject the external
+# reference shapes it knows to look for at store time, but that regex-based
+# check is a secondary gate, not the enforcement — this CSP is what actually
+# blocks a report from reaching a third-party origin at render/fetch time
+# (default-src 'self' catches anything the store-time check misses via
+# directive fallback), which is why inline script/style can safely be
+# allowed here (unlike the shell's `_CSP_HEADER` above).
 _REPORT_CSP_HEADER = (
     "default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; "
     "base-uri 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
@@ -689,20 +691,29 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         checked with `hmac.compare_digest` inside `reports.resolve`. Wrong/
         missing/expired token and "no such report" all answer with the
         exact same 404 (§7.5 — never let a guess distinguish "exists" from
-        "doesn't"), and a wrong token counts against its own global lockout
-        (`AuthGate.record_report_token_result` — separate from `check_token`
-        /`check_password`'s counters so a report guesser can never be reset
-        by an unrelated successful bearer request, same H1 rationale)."""
+        "doesn't"), and a wrong token counts against its own lockout,
+        scoped per (project_ns, name) (`AuthGate.record_report_token_result`
+        — separate from `check_token`/`check_password`'s counters so a
+        report guesser can never be reset by an unrelated successful bearer
+        request, same H1 rationale; and separate per-report so a success
+        against one report can never reset a guess streak against another).
+        A request with no `k` at all doesn't count against the counter,
+        mirroring `check_token`'s `if token:` guard — reaching this route
+        already required the secret path, so a bare probe with the query
+        string dropped shouldn't contribute to locking out the real
+        recipient."""
         parts = rest.split("/", 3)  # ["", "r", "<project_ns>", "<name>"]
         if len(parts) != 4 or not parts[2] or not parts[3]:
             self._reject()
             return
         project_ns, name = parts[2], parts[3]
-        if self.server.auth.is_report_locked_out():
+        token = query.get("k")
+        if self.server.auth.is_report_locked_out(project_ns, name):
             self._reject()
             return
-        path = reports.resolve(project_ns, name, query.get("k"))
-        self.server.auth.record_report_token_result(path is not None)
+        path = reports.resolve(project_ns, name, token)
+        if token:
+            self.server.auth.record_report_token_result(project_ns, name, path is not None)
         if path is None:
             self._reject()
             return
@@ -718,6 +729,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         )
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Security-Policy", _REPORT_CSP_HEADER)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "private, no-store")
         self.send_header("X-Robots-Tag", "noindex")
         self.end_headers()

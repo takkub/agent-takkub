@@ -67,6 +67,7 @@ class TestReportRoute:
         csp = headers.get("Content-Security-Policy")
         assert csp is not None
         assert "script-src 'self' 'unsafe-inline'" in csp
+        assert headers.get("X-Content-Type-Options") == "nosniff"
 
     def test_wrong_secret_path_is_404(self, server, published):
         status, _, _ = _get(_url(server, f"/wrong/r/demo/status.html?k={published.token}"))
@@ -147,7 +148,7 @@ class TestReportLockout:
     def test_lockout_is_independent_of_bearer_lockout(self, server, published):
         for _ in range(2):
             _get(_url(server, "/sek/r/demo/status.html?k=wrong"))
-        assert server.auth.is_report_locked_out()
+        assert server.auth.is_report_locked_out("demo", "status.html")
         assert not server.auth.is_locked_out()  # check_token's own counter untouched
 
     def test_successful_request_resets_report_fail_count(self, server, published):
@@ -157,4 +158,37 @@ class TestReportLockout:
         # one more wrong guess alone must not trip the threshold (2) again
         status, _, _ = _get(_url(server, "/sek/r/demo/status.html?k=wrong"))
         assert status == 404
-        assert not server.auth.is_report_locked_out()
+        assert not server.auth.is_report_locked_out("demo", "status.html")
+
+    def test_success_on_one_report_does_not_reset_another_reports_fail_count(
+        self, server, published, tmp_path
+    ):
+        """Should-fix #1 (review 2026-08-23-367): the lockout counter is
+        scoped per (project_ns, name), not global — a legitimate success
+        against report B must not reset the fail-count an attacker built up
+        brute-forcing an unrelated report A."""
+        src2 = tmp_path / "src2.html"
+        src2.write_text("<html><body>other</body></html>", encoding="utf-8")
+        other = reports.publish(src2, "other.html", "demo")[0]
+
+        # one wrong guess against A ("status.html")
+        _get(_url(server, "/sek/r/demo/status.html?k=wrong"))
+        # a legitimate success against B ("other.html") — must not touch A's counter
+        status, _, _ = _get(_url(server, f"/sek/r/demo/other.html?k={other.token}"))
+        assert status == 200
+        assert not server.auth.is_report_locked_out("demo", "status.html")
+        # A's fail count is still 1 — one more wrong guess trips the threshold (2)
+        status, _, _ = _get(_url(server, "/sek/r/demo/status.html?k=wrong"))
+        assert status == 404
+        assert server.auth.is_report_locked_out("demo", "status.html")
+        assert not server.auth.is_report_locked_out("demo", "other.html")
+
+    def test_missing_token_requests_do_not_count_toward_lockout(self, server, published):
+        """Should-fix #2: a request with no `k` at all must not count as a
+        failure, mirroring `check_token`'s `if token:` guard."""
+        for _ in range(5):  # well past lockout_after_fails=2
+            status, _, _ = _get(_url(server, "/sek/r/demo/status.html"))
+            assert status == 404
+        assert not server.auth.is_report_locked_out("demo", "status.html")
+        status, _, _ = _get(_url(server, f"/sek/r/demo/status.html?k={published.token}"))
+        assert status == 200
