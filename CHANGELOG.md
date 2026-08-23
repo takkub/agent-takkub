@@ -6,6 +6,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **#364 lever 1 — discard renderer ของ pane ที่ซ่อน (วัดจริง: คืน ~65 MB/pane ที่ 4 pane)** — `TerminalWidget.set_keepalive(False)`
+  ตั้ง debounce 25 s (`TAKKUB_PANE_DISCARD_DEBOUNCE_MS`) → snapshot buffer (`termGetBufferText`, cap 5,000 บรรทัด) →
+  `QWebEnginePage.LifecycleState.Discarded` · `set_keepalive(True)` ยกเลิก timer หรือ re-attach (Active + reload, replay snapshot
+  ก่อน flush `_pending_writes` — ส่วนที่เขียนระหว่าง discarded ได้ ANSI เต็ม ส่วนก่อนหน้าเป็น plain text) · **veto**: Lead pane ของ
+  project active · pane ที่ PTY output < 10 s · race ที่สลับกลับกลางทาง snapshot async → abort discard · `_page_ready` gate ครอบ
+  "discarded" ด้วย (write/IPC ไม่ทิ้ง) · toggle Settings Performance `pane_discard_enabled` + `TAKKUB_PANE_DISCARD=0/1` ชนะ ·
+  `doctor --ram` แสดง `[discarded]` ต่อ pane · re-attach 375–420 ms · 6 pane/5 hidden เหลือ ~40 MB/pane (เกิน
+  `--renderer-process-limit=4` — ถ้าเปลี่ยน pane policy ต้องวัดใหม่) · ผลวัดจริง `runtime/exports/.../lever1-impl-discard-{4,6}pane.json`
+  + tests: `test_agent_pane_discard_eligibility.py` (ใหม่) · `test_terminal_widget.py` · ram/doctor/orchestrator passthrough ·
+  `test_pane_discard_spike.py` (scrollback_lost → False)
+
+### Fixed (แก้)
+
+- **module ใหม่ของ workspace ชน repo guard** — `editor_widget.py` / `project_explorer.py` / `project_file_index.py` ทุก subprocess call
+  ใส่ `creationflags=SUBPROCESS_NO_WINDOW` + text-mode `encoding="utf-8", errors="replace"` (guard
+  `test_subprocess_no_window_guard` / `test_subprocess_text_encoding_guard` ที่ทำ CI แดงหลัง `7120b90`)
+
 - **Workspace 1.2.0 เฟส 3+4 service layer (ยังไม่มี UI)** (#365) — `editor_service.py` (pure Python: `read_for_edit` →
   state mtime_ns/size/sha256/language + binary/size guard · `save_atomic` same-dir temp + `os.replace` long-path-safe · **ห้าม
   overwrite เงียบ**: disk state ≠ expected → `Conflict` ไม่เขียน · containment reuse `project_file_index`) · `file_watch_service.py`
