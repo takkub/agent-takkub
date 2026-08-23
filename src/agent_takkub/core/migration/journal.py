@@ -1,7 +1,9 @@
 """Append-only migration journal — one line per step-outcome, replayed in
 reverse by `MigrationEngine.rollback()`. Built on `core.storage.jsonl_store`
-(same atomic-append / corruption-tolerant-read guarantees), stored at
-`core_store_path("migration_journal")` — no new home declared.
+(same atomic-append / corruption-tolerant-read guarantees), stored under
+`migration_home()` — a fixed location, deliberately NOT `core_home()`
+(#362: the journal must survive independently of its own migration target,
+see `migration_home()`'s docstring).
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..storage.jsonl_store import JsonlStore
-from ..storage.paths import core_store_path
+from ..storage.paths import migration_home
 
 _STORE_NAME = "migration_journal"
 
@@ -27,7 +29,7 @@ class JournalEntry:
 
 class MigrationJournal:
     def __init__(self, store: JsonlStore | None = None) -> None:
-        self._store = store or JsonlStore(core_store_path(_STORE_NAME))
+        self._store = store or JsonlStore(migration_home() / f"{_STORE_NAME}.jsonl")
 
     @property
     def store_path(self) -> Path:

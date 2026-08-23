@@ -11,14 +11,16 @@ import shutil
 import time
 from pathlib import Path
 
-from ..storage.paths import core_home
+from ..storage.paths import migration_home
 
 _BACKUP_ROOT_NAME = "migration_backups"
 
 
 class BackupManager:
     def __init__(self, root: Path | None = None) -> None:
-        self._root = root or (core_home() / _BACKUP_ROOT_NAME)
+        # Deliberately `migration_home()`, NOT `core_home()` — see
+        # `migration_home()`'s docstring (#362).
+        self._root = root or (migration_home() / _BACKUP_ROOT_NAME)
 
     @property
     def root(self) -> Path:

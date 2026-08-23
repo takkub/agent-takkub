@@ -105,6 +105,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   `journal.store_path`/`backups.root` property ใหม่ ไม่ hardcode ชื่อซ้ำ) — journal ที่กำลังเขียนตัวเองอยู่
   ห้ามย้าย · validate เทียบไฟล์ต่อไฟล์ + dir presence · rollback ลบ/restore · `LEGACY_MAPPING` เพิ่ม
   `CORE_INTERNAL` ให้ `doctor --storage-layout` นับ step ถูก
+  · **2 บั๊กที่ qa ดักได้ก่อน release** (เกิดบนเครื่องจริงแน่นอนเพราะ apply/validate/rollback เป็นคนละ process เสมอ): (1) `_excluded_names()` เทียบ parent ของ journal ที่ resolve แบบ dynamic — พอ `core_home()` สลับไป `v2/system/` หลัง apply, engine ใหม่ตอน `validate` มองไม่เห็นว่า journal ที่ค้างใน source ต้องยกเว้น → false mismatch → แก้เป็น exclude ตาม**ชื่อ**เสมอ · (2) journal/backups ของ ladder เองอยู่ *ข้างใน* target ที่ step นี้ rmtree ตอน rollback → `journal.record()` mkdir target กลับมาทั้งที่ว่างเปล่า → `core_home()` ค้างชี้ target แอปมองไม่เห็น accounts/conversations ทั้งที่ข้อมูลอยู่ครบใน source → เพิ่ม `paths.migration_home()` = path คงที่ `RUNTIME_DIR/core` (ไม่ flip) ให้ journal/backup ใช้เป็น default — ladder's own bookkeeping ต้องไม่อยู่ในสิ่งที่ ladder ย้าย/ลบ (engine.py ระบุเจตนานี้อยู่แล้ว) · เครื่องเดิมไม่ต้อง migrate journal (migration_home == pre-flip core_home) · regression test จำลอง engine คนละตัว (apply ด้วย A → validate+rollback ด้วย B)
   + tests: happy path · exclude journal/backups · fallback สลับ**หลัง rename เท่านั้น** (จำลอง copy fail
   กลางทาง) · rollback fresh/re-apply · parity กับ `AccountRegistry`/`ModelRegistry` จริง · default ladder = 9
 

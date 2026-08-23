@@ -32,6 +32,28 @@ def core_home() -> Path:
     return config.RUNTIME_DIR / "core"
 
 
+def migration_home() -> Path:
+    """Fixed home for the migration ladder's own journal + backup tree —
+    always `RUNTIME_DIR/core`, unlike `core_home()` above which flips to
+    `system/` the moment `CoreInternalStoreStep.apply()` materializes it.
+
+    The journal/backups must survive independently of `core_home()`'s
+    migration target: if they tracked `core_home()`, a *second* engine
+    constructed after that flip (a later boot's pre-flight validate, or a
+    rollback run separately) would have its journal/backups resolve under
+    `target` instead of the fixed pre-migration location. Rollback's
+    `shutil.rmtree(target)` would then wipe them, and the very next
+    `journal.record()` call — which `mkdir(parents=True)`s its own file's
+    parent — would recreate `target` as an empty directory right after
+    rollback just deleted it, leaving `core_home()` pointed at an empty
+    `system/` while the real data sits untouched under `source` (#362).
+
+    No data migration needed on existing machines: this equals
+    `core_home()`'s own pre-flip fallback, so every journal/backups file
+    ever written is already sitting exactly here."""
+    return config.RUNTIME_DIR / "core"
+
+
 def core_store_path(name: str) -> Path:
     return core_home() / f"{name}.jsonl"
 

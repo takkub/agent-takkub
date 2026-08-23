@@ -842,17 +842,19 @@ class CoreInternalStoreStep:
 
     def _excluded_names(self) -> frozenset[str]:
         """Basenames under `_source_root()` this step must never copy —
-        the ladder's own journal file and backup tree, which live there
-        too and are actively being written to by this very apply() call."""
-        source = self._source_root()
-        names: set[str] = set()
-        journal_path = self.journal.store_path
-        if journal_path.parent == source:
-            names.add(journal_path.name)
-        backups_root = self.backups.root
-        if backups_root.parent == source:
-            names.add(backups_root.name)
-        return frozenset(names)
+        the ladder's own journal file and backup tree.
+
+        `journal`/`backups` are built on `migration_home()` (#362), a
+        fixed path equal to `_source_root()` — never `core_home()`, which
+        flips to `target` once this step's own apply() materializes it.
+        So the journal/backups genuinely live *in* `source` for the whole
+        lifetime of every engine, apply's and any later one's alike, and
+        excluding them by name here (rather than by re-checking whether
+        they currently resolve under `source`) is just belt-and-suspenders
+        against a future caller passing a different `journal`/`backups`
+        instance in — not a defense against a flip that can no longer
+        happen to the defaults."""
+        return frozenset({self.journal.store_path.name, self.backups.root.name})
 
     def _present_entries(self) -> list[str]:
         source = self._source_root()

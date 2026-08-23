@@ -735,3 +735,57 @@ def test_core_internal_store_step_parity_with_real_registries(tmp_path, monkeypa
     assert [a.id for a in accounts_after] == ["acct-1"]
     models_after = ModelRegistry().all()
     assert [m.id for m in models_after] == ["model-1"]
+
+
+def test_core_internal_store_step_validate_and_rollback_survive_a_fresh_engine_after_apply(
+    tmp_path, monkeypatch
+):
+    """Regression (#362): a SECOND process/engine constructed after apply()
+    already flipped `core_home()` to `system/` must still see its
+    journal/backups resolve under the fixed `migration_home()` (== source),
+    never under `core_home()`'s dynamic target — otherwise rollback's
+    `shutil.rmtree(target)` immediately gets undone by the very next
+    `journal.record()` call, which `mkdir(parents=True)`s its own file's
+    parent back into existence. Before the fix (journal/backups built on
+    `core_home()`), this reproduced exactly: rollback reported ok, but
+    `target` came back as an empty directory that `core_home()` then kept
+    pointing at, hiding the real data still sitting under `source`."""
+    from agent_takkub.core.migration.steps_v1 import CoreInternalStoreStep
+    from agent_takkub.core.storage.paths import core_home, migration_home
+
+    data_home = tmp_path / "data_home"
+    runtime_dir = data_home / "runtime"
+    source = runtime_dir / "core"
+    source.mkdir(parents=True)
+    (source / "version.json").write_text(json.dumps({"app": "1.1.0"}), encoding="utf-8")
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", runtime_dir)
+
+    # Engine A: journal/backups resolve under the fixed `migration_home()`,
+    # which equals `source` before anything has migrated.
+    assert core_home() == source
+    assert migration_home() == source
+    engine_a = CoreInternalStoreStep(data_home=data_home, runtime_dir=runtime_dir)
+    apply_report = engine_a.apply()
+    assert apply_report.ok, apply_report.summary
+
+    # core_home() has now flipped to `system/` for anything constructed
+    # from this point on — but migration_home() has NOT, by design.
+    target = data_home / "v2" / "system"
+    assert core_home() == target
+    assert migration_home() == source
+
+    # Engine B: a fresh instance simulating a later process (e.g. a
+    # subsequent boot's pre-flight validate, or a rollback invoked
+    # separately) — its journal/backups still resolve under `source`,
+    # unaffected by core_home()'s flip.
+    engine_b = CoreInternalStoreStep(data_home=data_home, runtime_dir=runtime_dir)
+    assert engine_b.journal.store_path.parent == source
+    assert engine_b.backups.root.parent == source
+
+    validate_report = engine_b.validate()
+    assert validate_report.ok, validate_report.summary
+
+    rollback_report = engine_b.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    assert not target.exists()
