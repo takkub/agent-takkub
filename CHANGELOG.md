@@ -29,6 +29,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   และ `git add -A` ข้ามไฟล์ V2 ใหม่แบบเงียบๆ (ไฟล์ที่ track อยู่แล้วรอดมาได้เพราะ gitignore
   ไม่มีผลกับไฟล์ที่ track แล้ว จึงไม่มีใครเห็นปัญหาจนกว่าจะเพิ่มไฟล์ใหม่) → เปลี่ยนเป็น `/v2/`
 
+- **flaky test ตัวที่ 2: `TestPermissionErrorRetry` patch `pathlib.Path.stat` ทั้งโปรเซส** —
+  เทส monkeypatch `Path.stat` ที่ระดับคลาส แล้วนับ call ด้วย counter ที่ raise `PermissionError`
+  2 ครั้งแรก — ระหว่างที่ patch ค้าง โค้ดอื่นในโปรเซสเดียวกัน (thread เบื้องหลัง) เรียก
+  `mkdir()`/`is_dir()` ไปกิน quota ของ counter แล้ว `PermissionError` โผล่นอกเทสตัวเอง
+  (traceback ชี้ `pathlib.py:1250 is_dir()` ไม่ใช่ assert ของเทส) → ให้ patch delegate กลับไป
+  `real_stat` ทันทีถ้า path ไม่ใช่ไฟล์เป้าหมายของเทส ทำทั้ง `test_stat_retries_then_succeeds`
+  และ `test_stat_gives_up_after_max_retries` (ตัวหลังเดิม raise ทุก path = อันตรายกว่า)
+
 ### Added (เพิ่ม)
 
 - **Core V2 model registry store (`core/model_catalog/`) — epic #309 Wave A ชิ้นสุดท้าย** —

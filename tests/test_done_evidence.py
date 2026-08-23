@@ -454,6 +454,8 @@ class TestPermissionErrorRetry:
         calls = {"n": 0}
 
         def flaky_stat(self):
+            if self != path:
+                return real_stat(self)
             calls["n"] += 1
             if calls["n"] < 3:
                 raise PermissionError("locked")
@@ -469,8 +471,11 @@ class TestPermissionErrorRetry:
     def test_stat_gives_up_after_max_retries(self, orch, tmp_path, monkeypatch):
         path = tmp_path / "always-locked.png"
         path.write_bytes(b"x")
+        real_stat = pathlib.Path.stat
 
         def always_raise(self):
+            if self != path:
+                return real_stat(self)
             raise PermissionError("locked")
 
         monkeypatch.setattr(pathlib.Path, "stat", always_raise)
