@@ -1162,6 +1162,14 @@ class Orchestrator(
     # Explorer). register_pane binds project_name via closure over each
     # pane's openInEditorRequested; main_window routes this to EditorHost.
     openFileInEditorRequested = pyqtSignal(str, str)  # project, absolute path
+    # #365 phase 5 — mirrors PreviewController's own opened/updated/closed
+    # signals one level up, so main_window/the future preview_widget.py can
+    # connect once to the Orchestrator instead of reaching into
+    # `self._preview_controller` directly. `state` is a `PreviewState | None`
+    # (None only for the closed case's own dedicated signal below).
+    previewOpened = pyqtSignal(str, object)  # project, PreviewState
+    previewUpdated = pyqtSignal(str, object)  # project, PreviewState
+    previewClosed = pyqtSignal(str)  # project
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -1289,6 +1297,17 @@ class Orchestrator(
         from .browser_chrome import NativeChromeManager
 
         self._native_chrome = NativeChromeManager()
+        # #365 phase 5: per-project Live Preview state. One controller for
+        # the whole app (RAM rule, master plan §4) — the eventual
+        # `preview_widget.py` (frontend, not built yet) will connect its
+        # opened/updated/closed signals; today `preview_command` below is
+        # the only caller, via `takkub preview` IPC.
+        from .preview_controller import PreviewController
+
+        self._preview_controller = PreviewController(self)
+        self._preview_controller.opened.connect(self.previewOpened)
+        self._preview_controller.updated.connect(self.previewUpdated)
+        self._preview_controller.closed.connect(self.previewClosed)
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -6029,6 +6048,126 @@ class Orchestrator(
             main_pid=os.getpid(),
             governor_min_ram_percent=min_ram,
         )
+
+    # ──────────────────────────────────────────────────────────────
+    # #365 phase 5 — Live Preview + design artifact IPC
+    #
+    # Not lead-only (LEAD_ONLY_COMMANDS/_LEAD_ONLY_CMDS): these commands
+    # never touch pane lifecycle (spawn/close/assign) and never read another
+    # role's message/report content — same "trust-local, scoped by
+    # from_project" tier `list`/`ram-status`/`performance-status` already
+    # sit at. Any pane legitimately drives its own project's Preview (e.g.
+    # frontend focusing its own dev server, or a Designer/critic pane
+    # publishing a mockup) — restricting that to Lead would just make Lead
+    # a relay for work that isn't Lead's to do.
+    # ──────────────────────────────────────────────────────────────
+    def preview_command(
+        self,
+        action: str,
+        *,
+        project: str | None,
+        url: str | None = None,
+        path: str | None = None,
+        device: str | None = None,
+    ) -> tuple[bool, str, dict]:
+        """`takkub preview` IPC. Returns `(ok, msg, extra)` — `extra` carries
+        the resulting `PreviewState` (as a dict) for `open-url`/`open-file`/
+        `status`, empty for `close`."""
+        from .preview_controller import approved_artifact_roots
+
+        project_ns = self._resolve_project(project)
+        controller = self._preview_controller
+        try:
+            if action == "open-url":
+                if not url:
+                    return False, "missing arg: 'url'", {}
+                state = controller.open_url(project_ns, url, device=device or "desktop")
+            elif action == "open-file":
+                if not path:
+                    return False, "missing arg: 'path'", {}
+                roots = approved_artifact_roots(project_ns)
+                state = controller.open_file(project_ns, path, roots, device=device or "desktop")
+            elif action == "close":
+                closed = controller.close(project_ns)
+                return closed, ("preview closed" if closed else "no open preview"), {}
+            elif action == "status":
+                state = controller.status(project_ns)
+                if state is None:
+                    return True, "no open preview", {"open": False}
+                return True, "preview status", {"open": True, **state.as_dict()}
+            else:
+                return False, f"unknown preview action: {action!r}", {}
+        except ValueError as exc:  # loopback/extension/containment policy rejection
+            return False, str(exc), {}
+        return (
+            True,
+            f"preview {action.replace('-', ' ')}: {state.mode} {state.target}",
+            state.as_dict(),
+        )
+
+    def design_publish(
+        self,
+        project: str | None,
+        path: str,
+        title: str,
+        mode: str,
+        *,
+        from_role: str | None = None,
+    ) -> tuple[bool, str, dict]:
+        """`takkub design publish` IPC — validates, records a `draft`
+        artifact, and ensures Preview shows it (protocol doc: "cockpit
+        validates -> ensures Preview -> opens/focuses")."""
+        from .design_actions import DesignArtifactError, publish_design_artifact
+
+        project_ns = self._resolve_project(project)
+        try:
+            artifact = publish_design_artifact(
+                project_ns,
+                path,
+                title,
+                mode,
+                created_by_role=from_role,
+                preview_controller=self._preview_controller,
+            )
+        except (DesignArtifactError, ValueError) as exc:
+            return False, str(exc), {}
+        return True, f"published design artifact {artifact.artifact_id}", artifact.as_dict()
+
+    def design_approve(self, project: str | None, artifact_id: str) -> tuple[bool, str, dict]:
+        from .design_actions import DesignArtifactError, approve
+
+        project_ns = self._resolve_project(project)
+        try:
+            artifact = approve(project_ns, artifact_id)
+        except DesignArtifactError as exc:
+            return False, str(exc), {}
+        # Short, artifact-id-only notice — never resend the artifact's HTML.
+        self._notify_lead(
+            project_ns,
+            f'✅ [design] artifact {artifact_id} approved — "{artifact.title}"',
+            from_role="system",
+            note="design-approve",
+        )
+        return True, f"artifact {artifact_id} approved", artifact.as_dict()
+
+    def design_revise(
+        self, project: str | None, artifact_id: str, *, feedback: str = ""
+    ) -> tuple[bool, str, dict]:
+        from .design_actions import DesignArtifactError, request_revision
+
+        project_ns = self._resolve_project(project)
+        try:
+            artifact = request_revision(project_ns, artifact_id, feedback=feedback)
+        except DesignArtifactError as exc:
+            return False, str(exc), {}
+        feedback_note = f" — {feedback}" if feedback else ""
+        self._notify_lead(
+            project_ns,
+            f'🔁 [design] revision requested for artifact {artifact_id} — "{artifact.title}"{feedback_note}',
+            from_role="system",
+            note="design-revise",
+        )
+        return True, f"revision requested for artifact {artifact_id}", artifact.as_dict()
 
     def record_main_thread_stall(self, details: dict) -> None:
         """Record a watchdog stall with a read-only workload snapshot."""
