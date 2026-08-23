@@ -29,6 +29,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **CI batch หลัง merge 1.2.0 ชุดแรก (run 32633203191)** — 4 ต้นเหตุ: (1) `test_pane_discard_spike` ×4 segfault บน macos
+  offscreen — เป็นเครื่องมือวัด RAM ไม่ใช่ regression gate → opt-in `AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1` (2) debounce test ของ
+  `git_changes_service` ใช้ `qWait(150)` คงที่ → bounded `_wait_until` (3) ERROR `test_win_console_sweeper` = QTimer ของ (2) ค้าง
+  ตอน teardown โดน guard #344 จับที่เทสถัดไป — หายเองเมื่อแก้ (2) (4) `test_fifo_queue_drains_three_claude_assigns` —
+  `processEvents()` 20 รอบไม่มีเวลาจริง → `_pump_until` **และ** จุดเทียบ `seconds_since_output < stall_threshold` ใน
+  `_send_when_ready` ที่ `ea4aa62` wrap ไม่ครบ (MagicMock → TypeError ใน QTimer slot) → `_timing_or_none()` ครบทุกจุดแล้ว
+  (grep ทั้ง repo: จุดอื่นมี guard อยู่แล้ว)
+
 - **module ใหม่ของ workspace ชน repo guard** — `editor_widget.py` / `project_explorer.py` / `project_file_index.py` ทุก subprocess call
   ใส่ `creationflags=SUBPROCESS_NO_WINDOW` + text-mode `encoding="utf-8", errors="replace"` (guard
   `test_subprocess_no_window_guard` / `test_subprocess_text_encoding_guard` ที่ทำ CI แดงหลัง `7120b90`)
