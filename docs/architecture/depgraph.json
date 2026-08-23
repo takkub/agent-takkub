@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 283,
+  "module_count": 285,
   "modules": [
     {
       "module": "agent_takkub",
@@ -384,6 +384,7 @@
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
+        "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.settings_core_v2",
@@ -407,7 +408,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 28,
+      "fan_in": 29,
       "fan_out": 0
     },
     {
@@ -499,6 +500,7 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
+        "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
@@ -541,7 +543,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 93,
+      "fan_in": 94,
       "fan_out": 1
     },
     {
@@ -2706,10 +2708,11 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.lead_context",
+        "agent_takkub.project_tab",
         "agent_takkub.role_memory",
         "agent_takkub.task_ledger"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -2799,6 +2802,28 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.project_explorer",
+      "imports": [
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.config",
+        "agent_takkub.project_file_index"
+      ],
+      "imported_by": [
+        "agent_takkub.project_tab"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.project_file_index",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.project_explorer"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.project_nav",
       "imports": [
         "agent_takkub.cockpit_theme",
@@ -2830,7 +2855,9 @@
       "module": "agent_takkub.project_tab",
       "imports": [
         "agent_takkub.agent_pane",
-        "agent_takkub.cockpit_theme"
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.path_safe",
+        "agent_takkub.project_explorer"
       ],
       "imported_by": [
         "agent_takkub.limit_panel",
@@ -2839,7 +2866,7 @@
         "agent_takkub.status_header"
       ],
       "fan_in": 4,
-      "fan_out": 2
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.project_wizard",
