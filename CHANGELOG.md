@@ -73,6 +73,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **auto `migrate apply` ตอน boot — ทุก device ได้ storage layout เดียวกันโดยไม่ต้องพิมพ์เอง** (#361, user
+  directive: "auto ให้เพื่อนด้วยเลยตอนเปิด จะได้เหมือนกันทุก device") — `auto_migrate_boot.py` (pure Python
+  ไม่มี Qt, เทส headless ได้) รันเป็น stage ที่ 2 ใน boot splash เดิม (`boot_update_window.py`) **หลัง
+  provider-update ก่อน MainWindow/spawn pane เสมอ** (= จังหวะ "cockpit ปิด" ที่แผน §2.3 ต้องการ — ไม่มีใคร
+  เขียนไฟล์ที่ ladder อ่าน; ordering test คุมไว้) · **pre-flight gate ต้องผ่านครบ**ถึงจะรัน ไม่งั้น skip + log:
+  `layout_state() == "v1"` เท่านั้น (ห้ามทับ `mixed`) · ไม่ใช่ dev checkout (`DATA_HOME == REPO_ROOT`) ·
+  ดิสก์ว่าง ≥ 2× ประมาณการ · เคย rollback แล้วไม่ลองซ้ำจนกว่า app version เปลี่ยน (กัน loop) · ปิดได้ด้วย
+  `TAKKUB_AUTO_MIGRATE=0` (ชนะเสมอ) หรือ Settings → Core V2 toggle `auto_migrate` (default ON) · รัน
+  `MigrationEngine.apply()` → `validate()` ตัวเดียวกับ CLI (ไม่มี ladder ใหม่) → ไม่ผ่าน = **rollback
+  อัตโนมัติ** + event `auto_migrate_rolled_back` + doctor WARN · สำเร็จ = `auto_migrate_applied` · state ที่
+  `SETTINGS_HOME/auto-migrate-state.json` · เกิน 20s splash ขึ้น "still working" ไม่มี timeout (ห้าม spawn
+  ก่อนจบ) · **ทุก boot ถัดไปรันแค่ step 1** (`apply_version_marker_only()` upsert app version) — ปิดอาการ
+  `version.json` ค้างเวอร์ชันเก่าหลังอัป · headless fallback เมื่อ `TAKKUB_BOOT_UPDATE=0` ·
+  `doctor --storage-layout` บอก auto-migrate last run/result + เตือนเมื่อมี local-issue backlog ยังไม่ได้ส่ง
+  (เครื่องที่ไม่มี `gh`) · **auto-issue signal ใหม่ 2 ตัว**: `auto_migrate_rolled_back` และ
+  `model_pin_v2_drift` (≥1/24h) — เครื่องเพื่อนที่พังหรือ V2 ไม่ตรง V1 จะเปิด issue รายงานกลับมาเอง
+  = 1.1.0 บนเครื่องเพื่อนเป็น "ตัวทดลองของเครื่องตัวเอง" ที่ฟ้องเองเมื่อไม่ตรง
+  + tests: `tests/test_auto_migrate_boot.py` (24 — gate ทุกข้อ/happy/rollback+event/dev skip/mixed skip/
+  toggle off/retry-guard/disk), `tests/test_boot_update_window.py` (worker + ordering),
+  `tests/test_doctor_auto_migrate.py`, `tests/test_auto_issue_signals.py`, `tests/test_core_migration.py`
+
 - **Core V2 Wave C ชิ้นที่ 2 — PermissionEngine rewire เข้า `cli.cmd_guard` (epic #309, แผน §1.2)** —
   `PermissionEngine` สร้างเสร็จตั้งแต่ Phase 5c แต่ `cmd_guard` (PreToolUse/Bash hook ที่ยิงทุก Bash call
   ของทุก claude pane) ยังเรียก `pane_guard.classify` ตรง → swap ให้ผ่าน

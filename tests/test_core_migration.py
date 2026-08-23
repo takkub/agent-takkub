@@ -320,6 +320,18 @@ def test_engine_apply_downgrades_step_ok_when_a_later_step_corrupts_its_target()
     assert reports[1].ok is True
 
 
+def test_apply_version_marker_only_runs_just_step_zero(tmp_path):
+    """#361 boot fast-path: `apply_version_marker_only()` must touch only
+    the version marker, never re-walk the rest of the ladder."""
+    a = _FakeStep("version-marker", ok=True)
+    b = _FakeStep("b", ok=True)
+    engine = MigrationEngine([a, b], data_home=tmp_path)
+    report = engine.apply_version_marker_only()
+    assert report.ok is True
+    assert a.calls == ["apply"]
+    assert b.calls == []  # never touched
+
+
 def test_full_ladder_apply_validate_rollback_no_cross_step_data_loss(tmp_path, monkeypatch):
     """#350 regression: run the whole V1->V2 ladder end to end on a fixture.
     Proves (a) apply()+validate() both stay ok:true for every step, (b) the

@@ -279,3 +279,85 @@ class TestDeliveryFailureReasons:
         log = _log(tmp_path / "events.log", _delivery_failures(now, 3, "writer_queue_full"))
         hits = sig.scan_for_signals(log, now=now)
         assert all("writer_queue_full" in s for s in hits[0].samples)
+
+
+class TestAutoMigrateAndDriftSignals:
+    """#361 — `auto_migrate_rolled_back` / `model_pin_v2_drift` fire at most
+    once per boot, so both use `min_count=1` over a 24h window (wider than
+    the 6h scan default) rather than the repeated-N-times shape every other
+    rule above uses."""
+
+    def test_single_rollback_within_24h_fires(self, tmp_path: Path) -> None:
+        now = datetime(2026, 8, 23, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(hours=20)).isoformat(),
+                    "event": "auto_migrate_rolled_back",
+                    "failing_step": "state",
+                }
+            ],
+        )
+        hits = sig.scan_for_signals(log, now=now)
+        assert [h.rule.key for h in hits] == ["auto_migrate_rolled_back"]
+
+    def test_rollback_older_than_24h_does_not_fire(self, tmp_path: Path) -> None:
+        """The 6h scan default would already exclude this, but the point of
+        the rule's own `window_hours=24` override is that a 20h-old event
+        (past the default, within the rule's own window) still counts — this
+        proves the OTHER edge, past even the rule's own wider window."""
+        now = datetime(2026, 8, 23, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [{"ts": (now - timedelta(hours=25)).isoformat(), "event": "auto_migrate_rolled_back"}],
+        )
+        assert sig.scan_for_signals(log, now=now) == []
+
+    def test_single_model_pin_drift_within_24h_fires(self, tmp_path: Path) -> None:
+        now = datetime(2026, 8, 23, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(hours=10)).isoformat(),
+                    "event": "model_pin_v2_drift",
+                    "role": "backend",
+                }
+            ],
+        )
+        hits = sig.scan_for_signals(log, now=now)
+        assert [h.rule.key for h in hits] == ["model_pin_v2_drift"]
+
+    def test_a_20h_old_rollback_survives_alongside_events_past_the_6h_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression guard for the widened pre-filter cutoff: a normal
+        6h-windowed rule's own old events must not accidentally widen ITS
+        window too, and the 24h rule's event must not be pruned by the 6h
+        default before ever reaching its own per-rule check."""
+        now = datetime(2026, 8, 23, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(hours=20)).isoformat(),
+                    "event": "auto_migrate_rolled_back",
+                },
+                {"ts": (now - timedelta(hours=20)).isoformat(), "event": "stuck_pane_recover"},
+            ],
+        )
+        hits = sig.scan_for_signals(log, now=now)
+        assert [h.rule.key for h in hits] == ["auto_migrate_rolled_back"]
+
+    def test_issue_body_reports_the_rules_own_window_not_the_scan_default(
+        self, tmp_path: Path
+    ) -> None:
+        now = datetime(2026, 8, 23, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [{"ts": (now - timedelta(hours=20)).isoformat(), "event": "auto_migrate_rolled_back"}],
+        )
+        hit = sig.scan_for_signals(log, now=now)[0]
+        title, _body = sig.build_issue(hit)
+        assert "/24h" in title

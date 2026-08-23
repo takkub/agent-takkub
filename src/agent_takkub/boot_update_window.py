@@ -31,6 +31,7 @@ from PyQt6.QtCore import (
     QRectF,
     QRunnable,
     Qt,
+    QThread,
     QThreadPool,
     QTimer,
     pyqtSignal,
@@ -107,6 +108,28 @@ def boot_update_enabled() -> bool:
 
 class _WorkerSignals(QObject):
     finished = pyqtSignal(str, str, str, str)  # provider, status, detail, model_note
+
+
+class _AutoMigrateWorker(QThread):
+    """Runs `auto_migrate_boot.run_boot_stage()` off the Qt main thread
+    (#361) — same `QThread` + `resultReady` signal shape as
+    `settings_core_v2._MigrationReportThread`. `stepReady` streams the
+    stage's own progress lines onto the splash footer so a slow first-run
+    copy never reads as a frozen window."""
+
+    stepReady = pyqtSignal(str)
+    resultReady = pyqtSignal(object)  # auto_migrate_boot.BootMigrationResult
+
+    def run(self) -> None:  # worker thread
+        from .auto_migrate_boot import run_boot_stage
+
+        try:
+            result = run_boot_stage(progress_cb=self.stepReady.emit)
+        except Exception as e:  # pragma: no cover - defensive, must never wedge boot
+            from .auto_migrate_boot import BootMigrationResult
+
+            result = BootMigrationResult("error", f"{type(e).__name__}: {e}")
+        self.resultReady.emit(result)
 
 
 def _model_note(name: str, binary: str | None) -> str:
@@ -702,6 +725,56 @@ class BootUpdateWindow(QWidget):
         self._timeout_timer.stop()
         self.finished.emit()
 
+    def run_auto_migrate_stage(self) -> None:
+        """Second splash stage (#361), run after the provider-update stage
+        above finishes and BEFORE `run_boot_update_gate` constructs
+        MainWindow — no pane may exist yet while the ladder reads/copies V1
+        state, or a mid-copy write would look like corruption to
+        `validate()` and trigger a false rollback.
+
+        Blocks via a local `QEventLoop` (never a nested `QApplication
+        .exec()`, same idiom `close_animated`/`run_boot_update_gate` already
+        use) until the worker thread's `resultReady` fires. Deliberately NO
+        timeout: unlike the provider-update stage, this ladder is only ever
+        allowed to run once per machine — cutting it off early would leave a
+        half-applied V2 root. Instead, a one-shot 20s timer swaps the footer
+        text to an explicit "this can take a while" notice so a large
+        first-run copy (`runtime-triage`'s sessions/tasks) never reads as a
+        frozen window (#361 design note: "ห้ามบล็อกจนมืด").
+        """
+        from PyQt6.QtCore import QEventLoop
+
+        self._footer_label.setText("กำลังตรวจสอบ storage layout…")
+        self._resize_to_content()
+
+        worker = _AutoMigrateWorker(self)
+        loop = QEventLoop()
+        worker.resultReady.connect(loop.quit)
+
+        def _on_step(msg: str) -> None:
+            self._footer_label.setText(msg)
+            self._resize_to_content()
+
+        worker.stepReady.connect(_on_step)
+
+        slow_timer = QTimer(self)
+        slow_timer.setSingleShot(True)
+        slow_timer.timeout.connect(self._on_auto_migrate_slow)
+        slow_timer.start(20_000)
+
+        worker.start()
+        loop.exec()
+        slow_timer.stop()
+        worker.wait()
+        self._footer_label.setText("")
+        self._resize_to_content()
+
+    def _on_auto_migrate_slow(self) -> None:
+        self._footer_label.setText(
+            "กำลังย้าย storage layout ครั้งแรก — เครื่องที่มีข้อมูลเยอะอาจใช้เวลาหลายสิบวินาที ไม่ต้องปิดโปรแกรม"
+        )
+        self._resize_to_content()
+
 
 def _font(family: str, size: int, weight: int = 400):
     from PyQt6.QtGui import QFont
@@ -736,6 +809,10 @@ def run_boot_update_gate(main_window_factory):
     splash.show()
     QTimer.singleShot(0, splash.start)
     loop.exec()
+    # Second stage (#361) — storage-layout auto-migrate, still gating
+    # MainWindow: must finish before any pane can spawn, same reasoning the
+    # provider-update stage above already established for this splash.
+    splash.run_auto_migrate_stage()
     window = main_window_factory()
     splash.close_animated()
     return window

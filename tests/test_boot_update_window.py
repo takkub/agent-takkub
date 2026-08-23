@@ -215,6 +215,9 @@ class TestRunBootUpdateGate:
             def start(self) -> None:
                 self.finished.emit()
 
+            def run_auto_migrate_stage(self) -> None:
+                pass
+
             def close(self) -> None:
                 pass
 
@@ -225,6 +228,134 @@ class TestRunBootUpdateGate:
         sentinel = object()
         result = bw.run_boot_update_gate(lambda: sentinel)
         assert result is sentinel
+
+    def test_auto_migrate_stage_runs_before_main_window_construction(
+        self, qapp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#361 ordering test: no pane may exist while the migration ladder
+        reads/copies V1 state, or a mid-copy write would look like
+        corruption to `validate()` and trigger a false rollback — so the
+        auto-migrate stage must finish before `MainWindow` (here, the
+        `main_window_factory` call) is ever constructed."""
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        order: list[str] = []
+
+        class _FakeSplash(QObject):
+            finished = pyqtSignal()
+
+            def show(self) -> None:
+                pass
+
+            def start(self) -> None:
+                self.finished.emit()
+
+            def run_auto_migrate_stage(self) -> None:
+                order.append("auto_migrate")
+
+            def close(self) -> None:
+                pass
+
+            def close_animated(self) -> None:
+                pass
+
+        monkeypatch.setattr(bw, "BootUpdateWindow", _FakeSplash)
+
+        def _factory():
+            order.append("main_window")
+            return object()
+
+        bw.run_boot_update_gate(_factory)
+        assert order == ["auto_migrate", "main_window"]
+
+
+class TestAutoMigrateWorker:
+    def test_streams_progress_and_delivers_result(
+        self, qapp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PyQt6.QtCore import QEventLoop
+
+        from agent_takkub import auto_migrate_boot
+
+        def _fake_run_boot_stage(progress_cb=None):
+            if progress_cb is not None:
+                progress_cb("step one")
+                progress_cb("step two")
+            return auto_migrate_boot.BootMigrationResult(
+                "applied", messages=["step one", "step two"]
+            )
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", _fake_run_boot_stage)
+
+        worker = bw._AutoMigrateWorker()
+        steps: list[str] = []
+        results: list[object] = []
+        worker.stepReady.connect(steps.append)
+        loop = QEventLoop()
+
+        def _on_result(result: object) -> None:
+            results.append(result)
+            loop.quit()
+
+        worker.resultReady.connect(_on_result)
+        worker.start()
+        loop.exec()
+        worker.wait()
+
+        assert steps == ["step one", "step two"]
+        assert results[0].action == "applied"
+
+    def test_exception_in_run_boot_stage_never_escapes_the_thread(
+        self, qapp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PyQt6.QtCore import QEventLoop
+
+        from agent_takkub import auto_migrate_boot
+
+        def _boom(progress_cb=None):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", _boom)
+
+        worker = bw._AutoMigrateWorker()
+        results: list[object] = []
+        loop = QEventLoop()
+
+        def _on_result(result: object) -> None:
+            results.append(result)
+            loop.quit()
+
+        worker.resultReady.connect(_on_result)
+        worker.start()
+        loop.exec()
+        worker.wait()
+
+        assert results[0].action == "error"
+        assert "boom" in results[0].reason
+
+
+class TestBootUpdateWindowAutoMigrateStage:
+    def test_run_auto_migrate_stage_blocks_until_worker_finishes_and_clears_footer(
+        self, qapp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "run_boot_stage",
+            lambda progress_cb=None: auto_migrate_boot.BootMigrationResult("skipped", "disabled"),
+        )
+        win = bw.BootUpdateWindow()
+        win.run_auto_migrate_stage()
+        assert win._footer_label.text() == ""
+
+    def test_slow_timeout_swaps_footer_text_without_aborting(self, qapp) -> None:
+        """The 20s "this can take a while" notice — never a real timeout,
+        just a status swap so a slow first-run copy doesn't read as a frozen
+        window (#361 design note: "ห้ามบล็อกจนมืด")."""
+        win = bw.BootUpdateWindow()
+        win._on_auto_migrate_slow()
+        assert "ครั้งแรก" in win._footer_label.text()
 
 
 def _STATUS(mod, key: str) -> str:

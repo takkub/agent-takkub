@@ -2704,7 +2704,44 @@ def check_storage_layout_state() -> list[Finding]:
                 "(plan §2, Phase 10) removes V1; not itself a problem",
             )
         )
+    findings.append(_auto_migrate_boot_finding())
     return findings
+
+
+def _auto_migrate_boot_finding() -> Finding:
+    """[storage-layout/auto-migrate] — what the boot-time auto-migrate gate
+    (#361) did last, or that it never ran on this machine yet. A rollback
+    also surfaces whether the `auto_migrate_rolled_back` auto-issue signal
+    actually reached GitHub, or is sitting in the local `.takkub_issues.json`
+    fallback where a headless/unattended machine would never see it
+    otherwise (#361 design note)."""
+    try:
+        from .auto_migrate_boot import load_state
+    except Exception as e:
+        return Finding(
+            "storage-layout", "auto-migrate", Status.INFO, f"auto_migrate_boot unavailable: {e}"
+        )
+
+    state = load_state()
+    if state.get("rolled_back_for_version"):
+        detail = f"rollback แล้ว (version {state['rolled_back_for_version']}) — จะไม่ลองใหม่จนกว่าเวอร์ชันจะเปลี่ยน"
+        try:
+            from .maintenance import check_local_issue_backlog
+
+            backlog = check_local_issue_backlog()
+            if backlog.status == "attention":
+                detail += f" — {backlog.summary}"
+        except Exception:
+            pass
+        return Finding("storage-layout", "auto-migrate", Status.WARN, detail)
+    if state.get("applied_version"):
+        return Finding(
+            "storage-layout",
+            "auto-migrate",
+            Status.OK,
+            f"apply สำเร็จตอน boot (version {state['applied_version']})",
+        )
+    return Finding("storage-layout", "auto-migrate", Status.INFO, "ยังไม่เคยรัน auto-migrate ตอน boot")
 
 
 def run_all_checks() -> list[Finding]:

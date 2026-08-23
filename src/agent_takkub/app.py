@@ -762,8 +762,23 @@ def _boot_main_window() -> MainWindow:
     from .boot_update_window import boot_update_enabled, run_boot_update_gate
 
     if not boot_update_enabled():
+        # No provider-update splash to piggyback a progress surface on
+        # (TAKKUB_BOOT_UPDATE=0, normally a dev/test opt-out) — the
+        # storage-layout auto-migrate gate (#361) must still run and still
+        # finish before MainWindow spawns any pane; only the UI progress
+        # surface is skipped, logged to the boot log instead.
+        _run_auto_migrate_headless()
         return MainWindow()
     return run_boot_update_gate(MainWindow)
+
+
+def _run_auto_migrate_headless() -> None:
+    try:
+        from .auto_migrate_boot import run_boot_stage
+
+        run_boot_stage(progress_cb=_boot_log)
+    except Exception as e:  # pragma: no cover - defensive, must never block boot
+        _boot_log(f"auto-migrate boot stage errored: {type(e).__name__}: {e}")
 
 
 def _set_macos_app_name(name: str = "agent-takkub") -> None:

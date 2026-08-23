@@ -31,7 +31,18 @@ SCHEMA_VERSION = 1
 # unbuilt per `core.brain.facade`'s own docstring) — kept here anyway so the
 # Overview view has one place to persist it the day that module exists,
 # rather than needing a schema migration later.
-FLAG_NAMES: tuple[str, ...] = ("router", "conversation", "context", "brain", "scheduler")
+#
+# "auto_migrate" (#361) joined later, same shape — the boot-time `migrate
+# apply` gate's Settings-page escape hatch, `TAKKUB_AUTO_MIGRATE` env always
+# wins over it (see `auto_migrate_boot.auto_migrate_enabled`).
+FLAG_NAMES: tuple[str, ...] = (
+    "router",
+    "conversation",
+    "context",
+    "brain",
+    "scheduler",
+    "auto_migrate",
+)
 
 # Default-ON since 1.0.84 (epic #309's last rung before 2.0.0). Every flag
 # shipped off through the Phase 1-9 build-out and then ran with all five on

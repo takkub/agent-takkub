@@ -77,6 +77,16 @@ class MigrationEngine:
     def dry_run(self) -> list[StepReport]:
         return [s.dry_run() for s in self._steps]
 
+    def apply_version_marker_only(self) -> StepReport:
+        """Run just step 0 (`version-marker`) — the boot-time fast path once
+        the full ladder has already applied once (#361): every later boot
+        only needs `system/version.json` re-pinned to the running build, not
+        a re-walk of the whole ladder. Reuses the same step object the
+        default ladder already built (or `steps[0]` for a hand-built list),
+        never a second `VersionMarkerStep` wired to different journal/backup
+        stores."""
+        return self._steps[0].apply()
+
     def apply(self) -> list[StepReport]:
         reports: list[StepReport] = []
         for s in self._steps:

@@ -94,6 +94,12 @@ _FLAG_ROWS: tuple[tuple[str, str, str, bool], ...] = (
         "Scheduler — provider/account/project slot limits + backpressure",
         True,
     ),
+    (
+        "auto_migrate",
+        "TAKKUB_AUTO_MIGRATE",
+        "Auto migrate storage layout ตอน boot — v1 -> mixed ครั้งเดียว, validate + auto-rollback ในตัว (#361)",
+        True,
+    ),
 )
 
 _PRIORITY_NAMES: tuple[str, ...] = tuple(p.name for p in Priority)
