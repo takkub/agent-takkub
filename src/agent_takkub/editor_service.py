@@ -66,6 +66,12 @@ class EditorFileState:
     bom: bool
 
 
+class SaveTooLargeError(ValueError):
+    """The text to save exceeds `max_bytes` — same shape as
+    `PathEscapesRootsError`: raised internally, caught by `save_atomic`, and
+    surfaced as a `SaveResult(error=...)` rather than propagated."""
+
+
 @dataclass(frozen=True)
 class Conflict:
     disk: EditorFileState | None  # None when the file was deleted since `expected` was read
@@ -207,6 +213,11 @@ def save_atomic(
     conflict only if something already exists on disk. Otherwise a missing
     disk file (deleted since load) or a mismatched mtime_ns/size/sha256 is
     a conflict too. Never writes on a conflict.
+
+    Also rejects (via `SaveResult.error`, never writing) when `text` encodes
+    to more than `max_bytes` — the same cap `stat_snapshot` uses on the read
+    side, checked here on the encoded UTF-8 length so a save can never
+    produce a file `read_for_edit` would come back flagging `too_large`.
     """
     try:
         resolved = resolve_and_contain(Path(path), roots)
@@ -227,6 +238,13 @@ def save_atomic(
         return SaveResult(
             ok=False, state=None, conflict=Conflict(disk=current, ours=expected), error=None
         )
+
+    try:
+        encoded_len = len(text.encode("utf-8"))
+        if encoded_len > max_bytes:
+            raise SaveTooLargeError(f"save exceeds max size: {encoded_len} > {max_bytes} bytes")
+    except SaveTooLargeError as exc:
+        return SaveResult(ok=False, state=None, conflict=None, error=str(exc))
 
     try:
         _write_atomic_text(resolved, _encode_for_write(text, expected))
