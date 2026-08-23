@@ -6,6 +6,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **#364 lever 5 — profile main process (pythonw) ด้วยตัวเลขจริง: ไม่พบ leak, ไม่มีอะไรให้ cap** — spike 5 pane จริง (offscreen):
+  RSS โต **13.16 MB/pane**, ปิด pane แล้ว TerminalWidget/QWebEngineView object count กลับเป็น 0 ทั้งคู่ → ไม่เสนอ cap ·
+  เพิ่ม `takkub doctor --ram --ram-profile` (opt-in, tracemalloc on-demand ผ่าน IPC `ram-profile` ไม่เปิดค้าง) เป็น visibility tool +
+  `docs/audit/2026-08-23-364-lever5-main-process-profile.md` · `tools/spike_main_process_ram_profile.py` + spike test opt-in
+  (`AGENT_TAKKUB_QT_WEBENGINE_SMOKE=1`) · **#364 ทุก lever ปิดครบ**: 6 วัด → 4 MCP (stale variant bug) → 2 subagent → 3 cap →
+  1 discard (~65 MB/pane) → 5 profile (ไม่มี leak)
+
 - **Workspace 1.2.0 เฟส 5 backend — Live Preview controller + Design artifact registry + CLI** (#365) — `preview_controller.py`
   (state ต่อโปรเจกต์, **URL loopback-only**, file gate = containment + `.html` เท่านั้น, `navigation_allowed` policy fn — QObject เดียว
   ทั้งแอปตาม RAM rule) · `design_actions.py` (DesignArtifact registry JSONL latest-per-id ใต้ `storage_layout_v2` project artifacts
