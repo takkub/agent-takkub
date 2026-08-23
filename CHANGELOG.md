@@ -6,6 +6,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **Workspace 1.2.0 เฟส 3+4 service layer (ยังไม่มี UI)** (#365) — `editor_service.py` (pure Python: `read_for_edit` →
+  state mtime_ns/size/sha256/language + binary/size guard · `save_atomic` same-dir temp + `os.replace` long-path-safe · **ห้าม
+  overwrite เงียบ**: disk state ≠ expected → `Conflict` ไม่เขียน · containment reuse `project_file_index`) · `file_watch_service.py`
+  (QFileSystemWatcher debounced เฉพาะไฟล์ที่เปิด → `workspace.file.disk_changed`) · `git_changes_service.py` (`git status
+  --porcelain=v2 -z` บน worker + unified diff เทียบ HEAD — baseline policy เดียวชัด, ไม่เดา agent attribution)
+  + tests 54 (`test_editor_service.py` · `test_file_watch_service.py` · `test_git_changes_service.py`) · ผ่าน repo guard
+  subprocess no-window/encoding
+
+### Fixed (แก้)
+
+- **#359 follow-up: delivery progress check โยน `TypeError` เมื่อ session เป็น fake/MagicMock → ERROR รั่วไปเทสข้างๆ + delivery
+  chain ของ shard ขาดกลางทาง (CI แดง 3 OS หลัง `9723002`)** — `lead_inbox.py` เพิ่ม `_timing_or_none()` แล้ว route 4 จุดเทียบ
+  `seconds_since_output()`/`last_output_monotonic()` ผ่านมัน (`_pane_shows_real_progress`, `_on_settled`, 2 จุดใน
+  `_delayed_enter_verified._verify`) — ค่าไม่ใช่ตัวเลข = ไม่มี progress, ไม่ raise ออกจาก slot · เทส governor ที่ไม่ได้ pin
+  `slot_policy` แก้ให้ตั้งชัด (default `max_panes_global` กลายเป็น RAM-derived โดยเจตนา) · regression: fake session คืน MagicMock
+  → ไม่ raise · 5 ไฟล์เดิมรันรวม invocation เดียวเขียว
+
 - **#364 lever 1 — spike: discard renderer ของ pane ที่ซ่อน วัดจริงแล้ว GO** — `QWebEnginePage.setLifecycleState(Discarded)`
   บน pane ที่ไม่ใช่ current tab จริงๆ (isVisible()=False, ตรงกับ `ProjectTab._apply_pane_keepalive` เดิมเป๊ะ) คืน renderer
   process **ทั้งตัว** ไม่ใช่แค่ heap ว่าง — วัดได้ **~65 MB/pane** ที่ 4 pane รวม (Lead + teammate ≤3 ตามนโยบายวันนี้ ชนพอดี
