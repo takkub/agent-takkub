@@ -99,6 +99,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **Editor save size cap + JS-string invariant** (#365 reviewer SHOULD-2/3) — `editor_service.save_atomic` reject save ที่ encode
+  เกิน `max_bytes` (cap เดียวกับ read-side) ก่อนเขียน → `SaveResult(error=...)` ไม่แตะไฟล์เดิม (JS→Python `saveFile` ไม่ trust ความยาว
+  จาก page อีกต่อไป) · `editor_widget._js_str()` = `json.dumps(..., ensure_ascii=True)` helper เดียวทุก `run_js` call site (กัน U+2028/
+  U+2029 ตัด JS string) + tests
+
 - **`takkub preview`/`design` IPC ต้องมี pane token** (#365 reviewer MUST-FIX) — เดิม `cli_server` เชื่อ `from_project` ที่ caller
   ส่งมาตรงๆ (process ใดก็ได้ในเครื่องเปิด/ปิด Preview หรือ publish/approve/revise artifact แทนโปรเจกต์อื่นได้) → ตอนนี้ `design` ทุก
   action + `preview` ทุก action ยกเว้น `status` อยู่ชั้นเดียวกับ `done/progress/send` (token ผูก project+role) ·
