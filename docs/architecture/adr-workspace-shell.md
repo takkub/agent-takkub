@@ -171,7 +171,7 @@ during the dialog is caught rather than blindly overwritten.
 shared `IStandaloneDiffEditor` (phase 2 decision, still true) — a conflict's "Compare" sets its
 `modified` side to `tab.model` itself (not a fresh model with a snapshot of the text), so the
 diff keeps reflecting the user's edits as they keep typing instead of freezing at conflict-time.
-The cost is one piece of bookkeeping: `disposeDiffModels()` never disposes a `modified` model
+The cost is one piece of bookkeeping: disposeDiffModels() (JS ใน static/editor/index.html) never disposes a `modified` model
 that turns out to be `tab.model`, and any code that's about to write a *different* diff pair
 (the git-HEAD "±" toggle) checks for and discards a live-linked leftover first rather than
 `setValue`-ing over the user's buffer through it.
