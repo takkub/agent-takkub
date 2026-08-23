@@ -457,6 +457,40 @@ class TestInstalledRemoteAssets:
         }
 
 
+class TestInstalledEditorAssets:
+    """The wheel must ship the editor page + its vendored Monaco bundle
+    (#365 phase 2) — package_data is additive/opt-in per pattern, so a typo'd
+    or missing pattern silently drops files with no build-time error."""
+
+    def test_wheel_ships_editor_page_and_vendored_monaco(
+        self, installed_venv: Path, installed_home: Path
+    ) -> None:
+        out = _run_in_venv(
+            installed_venv,
+            installed_home,
+            """
+            import json
+            from pathlib import Path
+            import agent_takkub
+
+            editor = Path(agent_takkub.__file__).parent / "static" / "editor"
+            vendor_vs = editor / "vendor" / "monaco-editor" / "min" / "vs"
+            print(json.dumps({
+                "index_html": (editor / "index.html").is_file(),
+                "loader_js": (vendor_vs / "loader.js").is_file(),
+                "editor_main_js": (vendor_vs / "editor" / "editor.main.js").is_file(),
+                "monaco_license": (editor / "vendor" / "monaco-editor" / "min" / "LICENSE").is_file(),
+            }))
+            """,
+        )
+        assert out == {
+            "index_html": True,
+            "loader_js": True,
+            "editor_main_js": True,
+            "monaco_license": True,
+        }
+
+
 class TestCrossProcessLock:
     """`_cross_process_lock` is what serializes `installed_venv`'s wheel
     build across pytest-xdist worker *processes* — plain fast, no-build unit
