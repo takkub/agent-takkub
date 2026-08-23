@@ -2813,6 +2813,7 @@ def check_storage_layout_state() -> list[Finding]:
     """
     try:
         from .core.storage.layout import LEGACY_MAPPING, layout_state, storage_layout_v2
+        from .core.storage.v2_authority import authority_state, v2_authority_enabled
     except Exception as e:
         return [
             Finding(
@@ -2827,7 +2828,14 @@ def check_storage_layout_state() -> list[Finding]:
             "state",
             Status.OK,
             f"{state} — {storage_layout_v2().root}",
-        )
+        ),
+        Finding(
+            "storage-layout",
+            "authority",
+            Status.OK,
+            f"{authority_state()} — TAKKUB_V2_AUTHORITY={'on' if v2_authority_enabled() else 'off'} "
+            "(#362 Phase 10 wave 2: which side every dual-written domain's reader answers from)",
+        ),
     ]
     if state == "v1":
         findings.append(

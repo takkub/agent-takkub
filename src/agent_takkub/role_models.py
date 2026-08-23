@@ -48,7 +48,19 @@ def _load() -> dict[str, dict[str, str]]:
     Tolerates a legacy bare-string value (``{role: "model"}``) by dropping it —
     such an entry carries no provider, so honouring it is exactly the
     wrong-model-to-wrong-CLI hazard this module exists to prevent.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
+    file — same sanitizer either way, so callers see identical output. Falls
+    back to V1 on any v2 miss (not migrated / corrupt mirror).
     """
+    from .core.storage.v2_authority import read_role_models, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_data = read_role_models()
+        if isinstance(v2_data, dict):
+            return _sanitize(v2_data)
+
     if not _PATH.exists():
         return {}
     try:
@@ -57,6 +69,10 @@ def _load() -> dict[str, dict[str, str]]:
         return {}
     if not isinstance(data, dict):
         return {}
+    return _sanitize(data)
+
+
+def _sanitize(data: dict) -> dict[str, dict[str, str]]:
     cleaned: dict[str, dict[str, str]] = {}
     for key, value in data.items():
         role = str(key).strip()

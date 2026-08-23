@@ -56,7 +56,18 @@ def load() -> dict[str, bool]:
     """Return current state mapping. Missing file or corrupt JSON → empty dict.
 
     Always returns a fresh dict — callers can mutate without side effects.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
+    file. Falls back to V1 on any v2 miss.
     """
+    from .core.storage.v2_authority import read_disabled_providers, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_data = read_disabled_providers()
+        if isinstance(v2_data, dict):
+            return _sanitize(v2_data)
+
     if not _PATH.exists():
         return {}
     try:
@@ -66,8 +77,12 @@ def load() -> dict[str, bool]:
         return {}
     if not isinstance(data, dict):
         return {}
-    # Sanitize: drop entries with providers not in TOGGLABLE so a stale
-    # entry from a previous build doesn't silently survive.
+    return _sanitize(data)
+
+
+def _sanitize(data: dict) -> dict[str, bool]:
+    # Drop entries with providers not in TOGGLABLE so a stale entry from a
+    # previous build doesn't silently survive.
     return {str(k): bool(v) for k, v in data.items() if str(k) in TOGGLABLE}
 
 

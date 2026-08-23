@@ -33,10 +33,14 @@ class Router:
     def effective_model_for(
         self, role: str, provider: str, project: str | None = None
     ) -> str | None:
-        """V1-authoritative model pin lookup, with the V2 model catalog read
-        alongside it purely as a shadow — never as the answer.
+        """Model pin lookup — V1-authoritative by default, V2-authoritative
+        when ``TAKKUB_V2_AUTHORITY`` is on (#362 Phase 10 wave 2). Either
+        way both sides are read and compared; the side NOT chosen is only
+        ever a shadow, logged as ``model_pin_v2_drift`` when it disagrees
+        with the side that was actually returned.
 
-        **Why V1 still wins outright (Wave C fix, prod incident 2026-08-23):**
+        **Why V1 still wins by default (Wave C fix, prod incident
+        2026-08-23):**
         `migrate apply` copies V1's role/provider model pins into
         `v2/models/{registry,aliases}.json` exactly once. Nothing syncs that
         copy back when the user changes a pin afterwards in Settings ->
@@ -49,13 +53,11 @@ class Router:
         avoid. Returning V1 unconditionally makes that impossible by
         construction.
 
-        The V2 read below is kept — not deleted — so this method still
-        proves V2-catalog parity against live production data before Phase
-        10 flips which side is authoritative: every call where V1 and V2
-        disagree emits a `model_pin_v2_drift` event (see `_log_event`
-        below), which is the evidence Phase 10 needs that V2 isn't safe to
-        promote yet. Read this as "intentionally shadow, not forgotten to
-        switch."
+        The V2 read below is kept regardless of which side wins — every call
+        where V1 and V2 disagree emits a `model_pin_v2_drift` event (see
+        `_log_drift` below) naming which side was actually returned, so a
+        drift-free soak with the flag ON is exactly the evidence #362 needs
+        before its default flips in a future release.
 
         Deliberately NOT routed through `RoutingPolicy.resolve()` —
         `core.contracts.routing_policy`'s own docstring flags folding model
@@ -103,24 +105,35 @@ class Router:
             v2_value = read_legacy_provider_model_pin(provider, data_home)
 
         if v2_value != v1_value:
-            self._log_drift(role, provider, v1_value, v2_value, data_home)
+            from agent_takkub.core.storage.v2_authority import v2_authority_enabled
+
+            authoritative = v2_value if v2_authority_enabled() else v1_value
+            self._log_drift(role, provider, v1_value, v2_value, authoritative, data_home)
+            return authoritative
 
         return v1_value
 
     @staticmethod
     def _log_drift(
-        role: str, provider: str, v1_value: str | None, v2_value: str | None, data_home
+        role: str,
+        provider: str,
+        v1_value: str | None,
+        v2_value: str | None,
+        authoritative: str | None,
+        data_home,
     ) -> None:
         key = (role, provider)
         if key in _DRIFT_LOGGED:
             return
         _DRIFT_LOGGED.add(key)
         _log.warning(
-            "model_pin_v2_drift role=%r provider=%r v1=%r v2=%r data_home=%r — V2 catalog "
-            "copy is stale (Settings writes only reach V1); resolved from V1",
+            "model_pin_v2_drift role=%r provider=%r v1=%r v2=%r authoritative=%r "
+            "data_home=%r — sides disagree, resolved from %s",
             role,
             provider,
             v1_value,
             v2_value,
-            str(data_home),
+            authoritative,
+            data_home,
+            "V2" if authoritative == v2_value else "V1",
         )

@@ -132,6 +132,13 @@ def _signature(exc_type: type[BaseException], exc_tb) -> str:
 
 
 def _load_state() -> dict:
+    from .core.storage.v2_authority import read_issue_dedup, v2_authority_enabled
+
+    if v2_authority_enabled():
+        v2_state = read_issue_dedup()
+        if isinstance(v2_state, dict):
+            return v2_state
+
     if not _DEDUP_PATH.exists():
         return {}
     try:

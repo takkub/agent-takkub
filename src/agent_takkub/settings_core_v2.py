@@ -100,6 +100,13 @@ _FLAG_ROWS: tuple[tuple[str, str, str, bool], ...] = (
         "Auto migrate storage layout ตอน boot — v1 -> mixed ครั้งเดียว, validate + auto-rollback ในตัว (#361)",
         True,
     ),
+    (
+        "v2_authority",
+        "TAKKUB_V2_AUTHORITY",
+        "V2 authority — สลับ reader ทุก domain (models/routing/capabilities/roles/projects/state) "
+        "ไปอ่าน v2/ เป็นหลัก แทน V1, fail-open กลับ V1 ถ้า v2/ ยังไม่มี/พัง (#362 Phase 10 wave 2, default ปิด)",
+        True,
+    ),
 )
 
 _PRIORITY_NAMES: tuple[str, ...] = tuple(p.name for p in Priority)

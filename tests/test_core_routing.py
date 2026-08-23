@@ -442,6 +442,85 @@ def test_no_drift_event_after_dual_write_when_pin_changed_via_role_models_save(
     assert not any("model_pin_v2_drift" in r.message for r in caplog.records)
 
 
+# -- #362 wave 2: TAKKUB_V2_AUTHORITY flips which side WINS when V1 and V2
+# disagree (still shadow-compares the other side either way). Once the flag
+# is on, `role_models.model_for`/`provider_models.model_for` themselves also
+# read from v2 (their own wave-2 wiring), so a REAL end-to-end V1-only edit
+# can no longer diverge from the router's own v2 read — both converge on the
+# same mirror file. These tests isolate the router's flip logic on its own
+# by mocking the two sides directly (`role_models.model_for`/
+# `provider_models.model_for` for "v1", `read_legacy_role_model_pin` for
+# "v2"), the same style `test_facade_model_flag_off_never_touches_router`
+# above already uses. --------------------------------------------------
+
+
+def test_effective_model_for_v2_authoritative_when_flag_on(
+    v1_model_state, isolated_v2_data_home, monkeypatch
+):
+    """Flag ON reverses Wave C's default: V2 answers, V1 becomes the shadow
+    (opposite of the flag-off tests above, same drift telemetry either way)."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    _write_v1_model_state(
+        v1_model_state,
+        roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
+        providers={"claude": "claude-sonnet-5"},
+    )
+    _migrate(isolated_v2_data_home, v1_model_state)  # only to satisfy the "not migrated" guard
+
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider: "claude-fable-5")
+    monkeypatch.setattr(
+        "agent_takkub.core.model_catalog.legacy.read_legacy_role_model_pin",
+        lambda role, data_home: ("claude", "claude-opus-5"),
+    )
+
+    assert Router().effective_model_for("backend", "claude") == "claude-opus-5"
+
+
+def test_effective_model_for_still_v1_authoritative_when_flag_off(
+    v1_model_state, isolated_v2_data_home, monkeypatch
+):
+    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    _write_v1_model_state(
+        v1_model_state,
+        roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
+        providers={"claude": "claude-sonnet-5"},
+    )
+    _migrate(isolated_v2_data_home, v1_model_state)
+
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider: "claude-fable-5")
+    monkeypatch.setattr(
+        "agent_takkub.core.model_catalog.legacy.read_legacy_role_model_pin",
+        lambda role, data_home: ("claude", "claude-opus-5"),
+    )
+
+    assert Router().effective_model_for("backend", "claude") == "claude-fable-5"
+
+
+def test_effective_model_for_v2_authority_logs_drift_naming_the_winner(
+    v1_model_state, isolated_v2_data_home, monkeypatch, caplog
+):
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    _write_v1_model_state(
+        v1_model_state,
+        roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
+        providers={"claude": "claude-sonnet-5"},
+    )
+    _migrate(isolated_v2_data_home, v1_model_state)
+
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider: "claude-fable-5")
+    monkeypatch.setattr(
+        "agent_takkub.core.model_catalog.legacy.read_legacy_role_model_pin",
+        lambda role, data_home: ("claude", "claude-opus-5"),
+    )
+
+    with caplog.at_level("WARNING", logger="agent_takkub.core.routing.router"):
+        Router().effective_model_for("backend", "claude")
+
+    records = [r for r in caplog.records if "model_pin_v2_drift" in r.message]
+    assert len(records) == 1
+    assert "resolved from V2" in records[0].message
+
+
 def test_facade_model_flag_on_fails_open_on_router_exception(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_ROUTER", "1")
     monkeypatch.setattr(role_models, "model_for", lambda role, provider: None)

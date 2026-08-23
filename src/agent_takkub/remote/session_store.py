@@ -73,13 +73,28 @@ def fingerprint(config: RemoteConfig) -> str:
 
 def load(current_fingerprint: str) -> dict[str, float]:
     """Read ``{token_hash: expiry_epoch}``. Missing/corrupt/fingerprint-
-    mismatched -> ``{}`` — never raises, never creates the file."""
-    if not _PATH.exists():
-        return {}
-    try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    mismatched -> ``{}`` — never raises, never creates the file.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
+    file — same sanitizer either way. Falls back to V1 on any v2 miss.
+    """
+    from ..core.storage.v2_authority import read_remote_sessions, v2_authority_enabled
+
+    data: dict | None = None
+    if v2_authority_enabled():
+        v2_doc = read_remote_sessions()
+        if isinstance(v2_doc, dict):
+            data = v2_doc
+
+    if data is None:
+        if not _PATH.exists():
+            return {}
+        try:
+            data = json.loads(_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
     if not isinstance(data, dict):
         return {}
     if data.get("fingerprint") != current_fingerprint:

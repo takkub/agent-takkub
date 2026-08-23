@@ -89,14 +89,27 @@ def load_policy() -> dict[str, list[str]]:
 
     Never raises. Unknown roles and invalid names are silently filtered,
     mirroring `pane_tools_policy.load_policy`'s tolerance.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
+    the V1 file. Falls back to V1 on any v2 miss.
     """
-    if not SKILL_POLICY_FILE.is_file():
-        return {}
-    try:
-        data = json.loads(SKILL_POLICY_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        _log.debug("load_policy: could not read %s: %s", SKILL_POLICY_FILE, e)
-        return {}
+    from .core.storage.v2_authority import read_skill_policy, v2_authority_enabled
+
+    data: dict | None = None
+    if v2_authority_enabled():
+        v2_payload = read_skill_policy()
+        if isinstance(v2_payload, dict):
+            data = v2_payload
+
+    if data is None:
+        if not SKILL_POLICY_FILE.is_file():
+            return {}
+        try:
+            data = json.loads(SKILL_POLICY_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            _log.debug("load_policy: could not read %s: %s", SKILL_POLICY_FILE, e)
+            return {}
     if not isinstance(data, dict):
         return {}
     roles = data.get("roles")

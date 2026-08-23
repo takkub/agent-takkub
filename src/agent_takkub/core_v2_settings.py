@@ -35,6 +35,10 @@ SCHEMA_VERSION = 1
 # "auto_migrate" (#361) joined later, same shape — the boot-time `migrate
 # apply` gate's Settings-page escape hatch, `TAKKUB_AUTO_MIGRATE` env always
 # wins over it (see `auto_migrate_boot.auto_migrate_enabled`).
+#
+# "v2_authority" (#362 Phase 10 wave 2) is the odd one out — see
+# `_DEFAULT_FLAGS` below for why it does NOT inherit the default-True most
+# of this tuple gets.
 FLAG_NAMES: tuple[str, ...] = (
     "router",
     "conversation",
@@ -42,6 +46,7 @@ FLAG_NAMES: tuple[str, ...] = (
     "brain",
     "scheduler",
     "auto_migrate",
+    "v2_authority",
 )
 
 # Default-ON since 1.0.84 (epic #309's last rung before 2.0.0). Every flag
@@ -54,7 +59,16 @@ FLAG_NAMES: tuple[str, ...] = (
 # `load()` starts from these defaults and then applies the persisted values
 # over them, so an explicit `false` on disk is still an explicit `false`. Only
 # a missing file — or a key that never existed — picks up the new default.
-_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES}
+#
+# `v2_authority` is deliberately excluded from the default-True sweep: it
+# switches every dual-written domain's READER from V1 to V2 (#362 Phase 10
+# wave 2), which is a bigger jump than "the resolver code path is live" —
+# the other five flags default ON precisely because wave 1's dual-write and
+# a soak period already proved drift=0 for THEM; this one still needs its
+# own soak before its default flips, which is a 2.0.0 release decision, not
+# something this module makes unilaterally by inheriting the sweep.
+_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES if name != "v2_authority"}
+_DEFAULT_FLAGS["v2_authority"] = False
 
 
 @dataclass(frozen=True, slots=True)

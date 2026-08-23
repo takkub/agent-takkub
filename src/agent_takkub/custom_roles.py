@@ -88,14 +88,28 @@ def _default_role_template(name: str, label: str) -> str:
 
 
 def load_custom_roles() -> dict[str, Role]:
-    """Load the custom-role registry. Never raises; missing/corrupt -> {}."""
-    if not CUSTOM_ROLES_FILE.is_file():
-        return {}
-    try:
-        data = json.loads(CUSTOM_ROLES_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        _log.debug("load_custom_roles: could not read %s: %s", CUSTOM_ROLES_FILE, e)
-        return {}
+    """Load the custom-role registry. Never raises; missing/corrupt -> {}.
+
+    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
+    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
+    the V1 file. Falls back to V1 on any v2 miss.
+    """
+    from .core.storage.v2_authority import read_custom_roles_registry, v2_authority_enabled
+
+    data: dict | None = None
+    if v2_authority_enabled():
+        v2_payload = read_custom_roles_registry()
+        if isinstance(v2_payload, dict):
+            data = v2_payload
+
+    if data is None:
+        if not CUSTOM_ROLES_FILE.is_file():
+            return {}
+        try:
+            data = json.loads(CUSTOM_ROLES_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            _log.debug("load_custom_roles: could not read %s: %s", CUSTOM_ROLES_FILE, e)
+            return {}
     if not isinstance(data, dict):
         return {}
     raw_roles = data.get("roles")
