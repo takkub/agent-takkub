@@ -69,6 +69,12 @@ class _FakeTerminalWidget(QWidget):
     def set_idle(self, idle: bool) -> None:
         pass
 
+    def set_discard_enabled(self, enabled: bool) -> None:
+        pass
+
+    def set_discard_guard(self, guard) -> None:
+        pass
+
     def setFocus(self) -> None:
         pass
 

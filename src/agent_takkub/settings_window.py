@@ -1310,6 +1310,30 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         note.setWordWrap(True)
         lay.addWidget(note)
 
+        # #364 lever 1: discard a hidden pane's Chromium renderer after it
+        # sits inactive past the debounce window — frees ~60MB/pane at the
+        # current pane-ceiling, at the cost of a sub-400ms reload when the
+        # user switches back. Lead panes and panes with fresh PTY output are
+        # always exempt regardless of this toggle.
+        discard_panel = QWidget(view)
+        discard_panel.setObjectName("panel")
+        discard_lay = QVBoxLayout(discard_panel)
+        discard_lay.setContentsMargins(16, 16, 16, 16)
+        discard_lay.setSpacing(8)
+        self._pane_discard_chk = QCheckBox(
+            "คืน RAM ของ pane ที่ซ่อนอยู่ (discard renderer)", discard_panel
+        )
+        self._pane_discard_chk.setToolTip(
+            "เปิดอยู่โดยค่าเริ่มต้น หลัง pane ถูกซ่อน (สลับ tab/project ไปที่อื่น) ค้างไว้สักครู่\n"
+            "cockpit จะปล่อย renderer ของ pane นั้นเพื่อคืน RAM ~60MB/pane\n"
+            "กลับมาดูอีกครั้งจะ reload ให้ใหม่ภายในเสี้ยววินาที — scrollback เก่าก่อน discard\n"
+            "จะกลับมาเป็นข้อความล้วน (ไม่มีสี), ข้อความที่มาระหว่างซ่อนไม่หาย สีครบเหมือนเดิม\n\n"
+            "Lead pane และ pane ที่เพิ่งมี output ไม่ถูก discard ไม่ว่าตั้งค่านี้ไว้อย่างไร\n"
+            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_PANE_DISCARD=0"
+        )
+        discard_lay.addWidget(self._pane_discard_chk)
+        lay.addWidget(discard_panel)
+
         # #297: the switch for automatic cockpit bug reports. Lives here rather
         # than buried in a config file because it decides whether something
         # leaves the user's machine — that has to be findable and reversible.
@@ -1347,6 +1371,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         self._performance_mode.currentIndexChanged.connect(self._on_performance_mode_changed)
         for spin in self._performance_fields.values():
             spin.valueChanged.connect(self._mark_dirty)
+        self._pane_discard_chk.toggled.connect(self._mark_dirty)
         return view
 
     def _on_auto_issue_toggled(self, enabled: bool) -> None:
@@ -1355,7 +1380,11 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         auto_issue_signals.set_auto_issue_enabled(bool(enabled))
 
     def _load_performance_form(self, settings: performance_settings.PerformanceSettings) -> None:
-        controls = [self._performance_mode, *self._performance_fields.values()]
+        controls = [
+            self._performance_mode,
+            *self._performance_fields.values(),
+            self._pane_discard_chk,
+        ]
         for control in controls:
             control.blockSignals(True)
         try:
@@ -1363,6 +1392,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
             self._performance_mode.setCurrentIndex(max(0, idx))
             for name, spin in self._performance_fields.items():
                 spin.setValue(round(getattr(settings, name)))
+            self._pane_discard_chk.setChecked(settings.pane_discard_enabled)
         finally:
             for control in controls:
                 control.blockSignals(False)
@@ -1378,6 +1408,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         return performance_settings.validate(
             performance_settings.PerformanceSettings(
                 mode=str(self._performance_mode.currentData() or "balanced"),
+                pane_discard_enabled=self._pane_discard_chk.isChecked(),
                 **values,
             )
         )

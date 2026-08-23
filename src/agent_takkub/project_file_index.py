@@ -30,6 +30,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 logger = logging.getLogger(__name__)
 
 # Always hidden regardless of .gitignore — matches 03_PROJECT_EXPLORER_SPEC.md.
@@ -259,7 +261,10 @@ class _GitStatusWorker(QRunnable):
                 cwd=str(self.repo_root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=_GIT_STATUS_TIMEOUT_S,
+                creationflags=SUBPROCESS_NO_WINDOW,
             )
             if proc.returncode == 0:
                 for line in proc.stdout.splitlines():

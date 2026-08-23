@@ -17,10 +17,18 @@ class _FakeSession:
         self.pid = pid
 
 
+class _FakeTerminal:
+    def __init__(self, is_discarded: bool = False) -> None:
+        self.is_discarded = is_discarded
+
+
 class _FakePane:
-    def __init__(self, provider_name: str | None, pid: int | None) -> None:
+    def __init__(
+        self, provider_name: str | None, pid: int | None, *, discarded: bool = False
+    ) -> None:
         self.provider_name = provider_name
         self.session = _FakeSession(pid) if pid is not None else None
+        self._terminal = _FakeTerminal(discarded)
 
 
 def test_pane_ram_specs_is_cheap_and_covers_every_project() -> None:
@@ -42,9 +50,41 @@ def test_pane_ram_specs_is_cheap_and_covers_every_project() -> None:
         "project": "proj1",
         "provider": "claude",
         "pid": 200,
+        "discarded": False,
     }
     assert by_key[("proj1", "lead")]["pid"] is None
     assert by_key[("proj2", "qa")]["pid"] == 300
+
+
+def test_pane_ram_specs_reports_discarded_flag() -> None:
+    """#364 lever 1: `doctor --ram` needs to know which pane's renderer is
+    currently discarded, not just its (near-zero) RSS number."""
+    fake = SimpleNamespace(
+        _panes_by_project={
+            "proj1": {
+                "backend": _FakePane("claude", 200, discarded=True),
+                "lead": _FakePane("claude", 201, discarded=False),
+            }
+        }
+    )
+
+    specs = Orchestrator.pane_ram_specs(fake)
+
+    by_key = {(s["project"], s["role"]): s for s in specs}
+    assert by_key[("proj1", "backend")]["discarded"] is True
+    assert by_key[("proj1", "lead")]["discarded"] is False
+
+
+def test_pane_ram_specs_defaults_discarded_false_without_terminal() -> None:
+    """A pane double lacking `_terminal` (older test doubles, __new__-built
+    panes) must not raise — defaults to not-discarded."""
+    fake = SimpleNamespace(
+        _panes_by_project={"proj1": {"backend": SimpleNamespace(provider_name="claude")}}
+    )
+
+    specs = Orchestrator.pane_ram_specs(fake)
+
+    assert specs[0]["discarded"] is False
 
 
 def test_ram_status_forwards_pane_specs_and_governor_threshold(monkeypatch) -> None:
@@ -72,7 +112,13 @@ def test_ram_status_forwards_pane_specs_and_governor_threshold(monkeypatch) -> N
     assert result == {"ok": True}
     assert captured["min_ram"] == 12.0
     assert captured["specs"] == [
-        {"role": "backend", "project": "proj1", "provider": "claude", "pid": 200}
+        {
+            "role": "backend",
+            "project": "proj1",
+            "provider": "claude",
+            "pid": 200,
+            "discarded": False,
+        }
     ]
 
 

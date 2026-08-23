@@ -70,16 +70,25 @@ class TestPaneDiscardSpike:
         # proves discard is doing *something* real on this machine, not 0.
         assert result["rss_freed_mb_per_hidden_pane"] > 10.0
 
-    def test_reattach_restores_content_and_reports_scrollback_loss(self) -> None:
+    def test_reattach_restores_content_and_preserves_scrollback(self) -> None:
+        """Lever 1 implementation (post-spike): TerminalWidget snapshots the
+        buffer as plain text before discarding and replays it in
+        `_on_page_ready` right after reattach, so scrollback is no longer
+        lost — this was the spike's one open limitation, now closed."""
         result = _run_spike("--lifecycle", "discard")
         assert len(result["reattach"]) == 1
         reattach = result["reattach"][0]
         assert reattach["new_content_matched"] is True
         assert reattach["total_ms"] < 5000
-        # Documents the known limitation (see #364 writeup) rather than
-        # silently regressing to "fixed" — a future implementation that
-        # replays scrollback from pyte should flip this test, not delete it.
-        assert reattach["scrollback_lost"] is True
+        assert reattach["scrollback_lost"] is False
+
+    def test_write_while_discarded_queues_not_drops(self) -> None:
+        """#364 lever 1 requirement: a PTY write arriving while the pane is
+        discarded (TerminalWidget._page_ready gate) must survive to reattach
+        via `_pending_writes`, not vanish into a torn-down page."""
+        result = _run_spike("--lifecycle", "discard")
+        reattach = result["reattach"][0]
+        assert reattach["mid_discard_write_preserved"] is True
 
     def test_frozen_lifecycle_does_not_free_meaningful_ram(self) -> None:
         result = _run_spike("--lifecycle", "frozen")

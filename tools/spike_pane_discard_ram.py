@@ -4,6 +4,17 @@ Question this answers: does `QWebEnginePage.setLifecycleState(Discarded)` on a
 HIDDEN pane's QWebEngineView actually return renderer RAM on this machine, how
 much per pane, and how expensive is re-attaching when the user switches back?
 
+Post-spike (implementation landed): `--lifecycle discard` no longer pokes
+`setLifecycleState` directly — it drives `TerminalWidget.set_keepalive()` and
+waits for the real debounce timer + `is_discarded` (sped up via
+`--discard-debounce-ms` / `TAKKUB_PANE_DISCARD_DEBOUNCE_MS`), and reattach
+goes through `set_keepalive(True)` → `TerminalWidget._reattach()`. This
+measures the shipped mechanism end-to-end, including the scrollback-snapshot
+replay, not just Chromium's raw capability. `--lifecycle frozen` still pokes
+the page directly — Frozen was never wired into the automatic lifecycle,
+kept only as a RAM-freed comparison baseline (see module docstring further
+down, "Frozen (contrast...)" in the #364 writeup).
+
 STANDALONE SCRIPT — do NOT import this from pytest and do NOT construct these
 widgets inside a pytest process. Two hard requirements fall out of that:
 
@@ -86,13 +97,22 @@ def _pump(app: QApplication, predicate, timeout_s: float, step_s: float = 0.02) 
     return time.monotonic() - t0
 
 
-def _get_buffer_text(app: QApplication, pane: TerminalWidget, timeout_s: float = 3.0) -> str:
+def _get_buffer_text(
+    app: QApplication, pane: TerminalWidget, timeout_s: float = 3.0, contains: str | None = None
+) -> str:
     """Poll termGetBufferText() until it returns non-blank content or timeout.
 
     xterm.js applies term.write() asynchronously (its own internal write
     queue, drained on later frames) — a single immediate read-back races it.
     Retrying for up to `timeout_s` is what actually observing production
     behaviour requires; a one-shot read under-reports fidelity.
+
+    `contains`: wait for this specific substring instead of merely "non-blank".
+    Needed once the buffer can already be non-blank BEFORE the write we're
+    actually waiting on lands (e.g. #364 lever 1's post-reattach scrollback
+    replay makes the buffer non-blank immediately — a bare "non-blank" check
+    would return that stale snapshot instead of waiting for a marker written
+    afterward, which is exactly the false negative this fixes).
     """
     deadline = time.monotonic() + timeout_s
     last = ""
@@ -105,7 +125,10 @@ def _get_buffer_text(app: QApplication, pane: TerminalWidget, timeout_s: float =
         pane.request_buffer_text(_cb)
         _pump(app, lambda got=got: "t" in got, 2.0)
         last = got.get("t") or ""
-        if last.strip():
+        if contains is not None:
+            if contains in last:
+                return last
+        elif last.strip():
             return last
         time.sleep(0.1)
     return last
@@ -143,6 +166,7 @@ class ReattachResult:
     total_ms: float
     scrollback_lost: bool
     new_content_matched: bool
+    mid_discard_write_preserved: bool | None = None  # None = not applicable (frozen lifecycle)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,8 +187,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--boot-timeout-s", type=float, default=15.0)
     parser.add_argument("--reattach-timeout-s", type=float, default=6.0)
+    parser.add_argument(
+        "--discard-debounce-ms",
+        type=int,
+        default=300,
+        help=(
+            "TerminalWidget's real debounce is ~25s (TAKKUB_PANE_DISCARD_DEBOUNCE_MS); "
+            "shortened here so the spike doesn't sit waiting. Only used when "
+            "--lifecycle=discard — this drives TerminalWidget's own timer instead of "
+            "poking QWebEnginePage.setLifecycleState directly, so the measurement "
+            "exercises the actual production code path (agent_pane.py's Lead/streaming "
+            "guard is NOT installed here — this measures the mechanism, not the policy)."
+        ),
+    )
     parser.add_argument("--json-out", type=str, default=None)
     args = parser.parse_args(argv)
+
+    if args.lifecycle == "discard":
+        os.environ["TAKKUB_PANE_DISCARD_DEBOUNCE_MS"] = str(args.discard_debounce_ms)
 
     hidden_n = args.hidden if args.hidden is not None else max(1, args.panes - 1)
     if hidden_n >= args.panes:
@@ -213,7 +253,26 @@ def main(argv: list[str] | None = None) -> int:
         assert not p.isVisible(), (
             "hidden pane must be a non-current QTabWidget tab for discard to take"
         )
-        p._view.page().setLifecycleState(lifecycle_state)
+        if args.lifecycle == "discard":
+            # Real code path: set_keepalive(False) already fired above (part of
+            # the "who is looking at what" loop) and armed TerminalWidget's own
+            # debounce timer — just wait for it to actually discard, rather than
+            # calling setLifecycleState ourselves (that would test Chromium's
+            # capability again, not our #364 lever 1 implementation).
+            _pump(app, lambda p=p: p.is_discarded, args.reattach_timeout_s)
+            assert p.is_discarded, "TerminalWidget's own debounce timer never discarded this pane"
+            # #364 lever 1 requirement: PTY bytes arriving while a pane is
+            # discarded must queue, not drop. write_bytes() into a discarded
+            # (not-page_ready) pane must not raise and must be recoverable
+            # after reattach — checked for real via the MIDDISCARD marker
+            # below, not just "didn't crash".
+            idx = hidden_panes.index(p)
+            p.write_bytes(f"MIDDISCARD-{idx} while discarded\r\n")
+        else:
+            # Frozen isn't wired into TerminalWidget's automatic lifecycle at
+            # all (see module docstring) — poke it directly as a comparison
+            # baseline against the real Discarded path above.
+            p._view.page().setLifecycleState(lifecycle_state)
 
     time.sleep(args.settle_ms / 1000.0)
     _pump(app, lambda: True, 0.3)
@@ -223,7 +282,6 @@ def main(argv: list[str] | None = None) -> int:
 
     reattach_results: list[ReattachResult] = []
     for idx, p in enumerate(hidden_panes):
-        page = p._view.page()
         if args.lifecycle == "frozen":
             # Frozen never unloads the page (that's exactly why it frees ~0
             # RAM — see module docstring) — there is no reload to time and no
@@ -240,9 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         # sample above, so "had real content pre-discard" is already known —
         # querying a *discarded* page's buffer isn't meaningful (no JS context
         # to answer runJavaScript at all while LifecycleState.Discarded).
-        p._page_ready = False
         tabs.setCurrentWidget(p)  # user switches back to this tab
-        page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        p.set_keepalive(True)  # real code path: drives TerminalWidget._reattach()
         reload_elapsed = _pump(app, lambda p=p: p._page_ready, args.reattach_timeout_s)
         reload_ms = reload_elapsed * 1000.0
         if not p._page_ready:
@@ -253,13 +310,26 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
 
-        post_reload_text = _get_buffer_text(app, p, timeout_s=0.5)
+        mid_discard_marker = f"MIDDISCARD-{idx}"
+        post_reload_text = _get_buffer_text(
+            app,
+            p,
+            timeout_s=1.5,
+            contains=(mid_discard_marker if args.lifecycle == "discard" else None),
+        )
         scrollback_lost = lifecycle_effective[idx] and not post_reload_text.strip()
+        # The write issued while this pane sat discarded must have queued
+        # (TerminalWidget._page_ready gate) and been flushed on reattach —
+        # not silently dropped. Only meaningful for the discard lifecycle;
+        # Frozen never actually discards (see module docstring).
+        mid_discard_preserved = (
+            mid_discard_marker in post_reload_text if args.lifecycle == "discard" else None
+        )
 
         t1 = time.monotonic()
         marker = f"POSTREATTACH-{idx}"
         p.write_bytes(f"{marker} \x1b[1mbold\x1b[0m\r\n")
-        text_after = _get_buffer_text(app, p, timeout_s=3.0)
+        text_after = _get_buffer_text(app, p, timeout_s=3.0, contains=marker)
         repaint_ms = (time.monotonic() - t1) * 1000.0
 
         reattach_results.append(
@@ -272,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
                 total_ms=round(reload_ms + repaint_ms, 1),
                 scrollback_lost=scrollback_lost,
                 new_content_matched=marker in text_after,
+                mid_discard_write_preserved=mid_discard_preserved,
             )
         )
         # Leave the tab where it started so the next iteration's baseline is comparable.

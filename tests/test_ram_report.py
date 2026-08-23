@@ -119,6 +119,29 @@ def test_collect_ram_report_never_guesses_an_unattributable_qtwebengine() -> Non
     assert report["governor_min_available_ram_percent"] is None
 
 
+def test_collect_ram_report_passes_through_discarded_flag() -> None:
+    """#364 lever 1: `discarded` is caller-supplied (this module never
+    touches TerminalWidget) — just verify it round-trips per pane, defaulting
+    to False when the caller's spec omits it."""
+    psutil_module, main_pid = _build_tree()
+    pane_specs = [
+        {
+            "role": "backend",
+            "project": "proj1",
+            "provider": "claude",
+            "pid": 200,
+            "discarded": True,
+        },
+        {"role": "codex", "project": "proj1", "provider": "codex", "pid": 300},
+    ]
+
+    report = collect_ram_report(pane_specs, main_pid=main_pid, psutil_module=psutil_module)
+
+    by_role = {row["role"]: row for row in report["panes"]}
+    assert by_role["backend"]["discarded"] is True
+    assert by_role["codex"]["discarded"] is False
+
+
 def test_collect_ram_report_marks_missing_or_unknown_pids_instead_of_guessing() -> None:
     psutil_module, main_pid = _build_tree()
     pane_specs = [

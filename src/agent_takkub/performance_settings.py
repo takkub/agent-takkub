@@ -40,6 +40,12 @@ class PerformanceSettings:
     # `from_dict` below defaults it for settings files saved before this
     # field existed rather than discarding the whole persisted file.
     overload_deadband_timeout_s: float = 120.0
+    # #364 lever 1: discard the Chromium renderer of a hidden pane after it
+    # sits inactive past the debounce window (TerminalWidget's own timer —
+    # this is just the on/off switch). Same "added after schema shipped"
+    # story as overload_deadband_timeout_s above — defaulted in from_dict
+    # for settings files saved before this field existed.
+    pane_discard_enabled: bool = True
 
     def to_dict(self) -> dict:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}

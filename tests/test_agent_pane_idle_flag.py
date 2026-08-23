@@ -62,6 +62,12 @@ class _FakeTerminalWidget(QWidget):
     def clear_view(self) -> None:
         pass
 
+    def set_discard_enabled(self, enabled: bool) -> None:
+        pass
+
+    def set_discard_guard(self, guard) -> None:
+        pass
+
 
 @pytest.fixture(autouse=True)
 def _fake_terminal(monkeypatch):

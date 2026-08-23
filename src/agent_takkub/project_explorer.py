@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
 from .project_file_index import (
     FileEntry,
@@ -275,9 +276,11 @@ class ProjectExplorer(QWidget):
                 if is_dir:
                     os.startfile(str(path))
                 else:
-                    subprocess.Popen(["explorer", f"/select,{path}"])
+                    subprocess.Popen(
+                        ["explorer", f"/select,{path}"], creationflags=SUBPROCESS_NO_WINDOW
+                    )
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(path)])
+                subprocess.Popen(["open", "-R", str(path)], creationflags=SUBPROCESS_NO_WINDOW)
             else:
                 target = path if is_dir else path.parent
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
