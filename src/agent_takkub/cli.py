@@ -1641,6 +1641,14 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         findings += check_performance_live(performance_resp)
         findings += check_port_identity_live(identity_resp)
 
+    ram_resp: dict | None = None
+    if getattr(args, "ram", False):
+        if read_port() is not None:
+            try:
+                ram_resp = _request({"cmd": "ram-status"})
+            except Exception as e:
+                ram_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+
     if getattr(args, "core_version", False):
         from .doctor import check_core_version_compat
 
@@ -1662,23 +1670,32 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     if args.json:
         import json as _json
 
-        _utf8_print(
-            _json.dumps(
-                [
-                    {
-                        "category": f.category,
-                        "name": f.name,
-                        "status": f.status.value,
-                        "detail": f.detail,
-                        "fix_hint": f.fix_hint,
-                    }
-                    for f in findings
-                ],
-                indent=2,
-            )
-        )
+        findings_payload = [
+            {
+                "category": f.category,
+                "name": f.name,
+                "status": f.status.value,
+                "detail": f.detail,
+                "fix_hint": f.fix_hint,
+            }
+            for f in findings
+        ]
+        if getattr(args, "ram", False):
+            # #364 lever 6: `--ram --json` is meant as a before/after baseline
+            # for the other RAM-diet levers, so it keeps the raw byte-level
+            # `ram_resp` dict (not flattened into Finding text) — this is the
+            # one case where `doctor --json`'s shape grows from a bare list to
+            # {findings, ram}; plain `--json` (no `--ram`) is unchanged.
+            _utf8_print(_json.dumps({"findings": findings_payload, "ram": ram_resp}, indent=2))
+        else:
+            _utf8_print(_json.dumps(findings_payload, indent=2))
     else:
         _utf8_print(format_report(findings))
+        if getattr(args, "ram", False):
+            from .doctor import format_ram_report
+
+            _utf8_print("")
+            _utf8_print(format_ram_report(ram_resp))
 
     n_fail = sum(1 for f in findings if f.status == Status.FAIL)
     ok = n_fail == 0
@@ -3200,6 +3217,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also run Core V2 Schema/Adapter/Compat checks per provider (#309 Phase 4); "
         "opt-in, off by default so plain `takkub doctor` is unchanged",
+    )
+    sdoc.add_argument(
+        "--ram",
+        action="store_true",
+        help="also query the running cockpit for a live per-pane RAM breakdown "
+        "(#364 lever 6): provider CLI / node-MCP children / QtWebEngine per pane, "
+        "plus main process and machine-wide numbers; opt-in, off by default so "
+        "plain `takkub doctor` is unchanged. Skipped (not failed) when the "
+        "cockpit isn't running.",
     )
     sdoc.add_argument(
         "--storage-layout",

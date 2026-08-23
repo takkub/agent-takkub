@@ -333,6 +333,24 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "ram-report-layer"
+type = "forbidden"
+# ram_report (#364 lever 6, `takkub doctor --ram`) is a pure leaf like
+# disk_usage above: psutil + dataclasses only. Both orchestrator.py (the
+# live `ram-status` IPC path) and status_header.py's background chip worker
+# import it, so it must stay free of orchestrator/UI/CLI or either edge
+# becomes a cycle.
+source_modules = ["agent_takkub.ram_report"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+    "agent_takkub.doctor",
+]
+
+[[tool.importlinter.contracts]]
 name = "project-wizard-layer"
 type = "forbidden"
 # project_wizard is a UI-layer mixin (mixed into MainWindow). It must not pull

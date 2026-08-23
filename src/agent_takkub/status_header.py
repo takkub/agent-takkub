@@ -9,6 +9,7 @@ MainWindow method can touch them unchanged.
 
 from __future__ import annotations
 
+import os
 import time
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
@@ -58,6 +59,47 @@ class _GraftSnapshotWorker(QRunnable):
     def run(self) -> None:
         try:
             snapshot = StatusHeaderMixin._graft_progress_snapshot()
+        except Exception:
+            snapshot = None
+        try:
+            self.signals.finished.emit(snapshot)
+        except RuntimeError:
+            # The window may have been deleted while the pool job was running.
+            pass
+
+
+# ── RAM chip snapshot (#364 lever 6) — reuses the graft worker's exact
+# QRunnable/QThreadPool shape above: `ram_report.collect_ram_report` walks a
+# process tree, which is too slow for a 2s Qt-thread timer tick, so the
+# actual psutil work happens off-thread here too. Cadence is coarser (15s vs
+# graft's 10s) since a process-tree walk costs more per call than a handful
+# of `is_dir()` checks. `_ram_snapshot_worker_busy` lives on the mixin
+# instance (not module-level) exactly like `_graft_snapshot_worker_busy`.
+_RAM_SNAPSHOT_TTL_S = 15.0
+
+
+class _RamSnapshotSignals(QObject):
+    finished = pyqtSignal(object)
+
+
+class _RamSnapshotWorker(QRunnable):
+    """Compute the per-pane RAM breakdown off the Qt thread.
+
+    `pane_specs`/`main_pid` are gathered on the Qt thread first (cheap, no
+    psutil — see `Orchestrator.pane_ram_specs`) and handed in here so `run()`
+    never touches orchestrator/pane/Qt objects, only psutil."""
+
+    def __init__(self, pane_specs: list[dict], main_pid: int) -> None:
+        super().__init__()
+        self.signals = _RamSnapshotSignals()
+        self._pane_specs = pane_specs
+        self._main_pid = main_pid
+
+    def run(self) -> None:
+        try:
+            from . import ram_report
+
+            snapshot = ram_report.collect_ram_report(self._pane_specs, main_pid=self._main_pid)
         except Exception:
             snapshot = None
         try:
@@ -367,6 +409,9 @@ class StatusHeaderMixin:
         self._chip_performance.setStyleSheet(self._performance_chip_style(False))
         self._chip_performance.clicked.connect(self._show_performance_health_dialog)
         self._performance_status_cache: dict = {}
+        self._ram_snapshot_cache: dict | None = None
+        self._ram_snapshot_cache_at: float = 0.0
+        self._ram_snapshot_worker_busy = False
         self._refresh_performance_health_chip()
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
@@ -740,6 +785,7 @@ class StatusHeaderMixin:
             f"SYS {state} · CPU {cpu}% · RAM {ram}% · H {heavy}/{heavy_limit or '—'} · Q {total_queue}"
         )
         self._chip_performance.setStyleSheet(self._performance_chip_style(overloaded))
+        self._schedule_ram_snapshot()
         by_class = snap.get("active_tasks_by_class") or {}
         browser = int(by_class.get("browser", 0))
         browser_limit = int(limits.get("max_browser_global", 0))
@@ -772,8 +818,59 @@ class StatusHeaderMixin:
             f"Writer depth: {writer_depth} · stale drops: {stale_drops} · full: {queue_full}\n"
             f"Duplicate notices prevented: {int(snap.get('duplicate_notices_prevented', 0))}\n"
             f"Main-thread stalls: {int(snap.get('main_thread_stall_count', 0))}\n"
+            f"{self._ram_top3_tooltip_line()}\n"
             "Click for the complete live snapshot."
         )
+
+    def _ram_top3_tooltip_line(self) -> str:
+        """'RAM top 3 (pane): ...' from the background-worker cache (#364
+        lever 6) — empty string (no line) until the first worker pass lands,
+        never a synchronous psutil call from this Qt-thread method."""
+        snapshot = getattr(self, "_ram_snapshot_cache", None)
+        if not snapshot:
+            return "RAM top 3 (pane): (sampling…)"
+        panes = sorted(
+            snapshot.get("panes") or [],
+            key=lambda row: int(row.get("total_bytes", 0)),
+            reverse=True,
+        )[:3]
+        if not panes:
+            return "RAM top 3 (pane): —"
+        parts = [
+            f"{row.get('role', '?')} {int(row.get('total_bytes', 0)) / (1024**2):.0f}MB"
+            for row in panes
+        ]
+        return "RAM top 3 (pane): " + " · ".join(parts)
+
+    def _schedule_ram_snapshot(self) -> None:
+        """Start one background RAM snapshot, never stacking overlapping
+        scans, and no more often than `_RAM_SNAPSHOT_TTL_S` (#364 lever 6)."""
+        if "_chip_performance" not in self.__dict__:
+            return
+        if self.__dict__.get("_ram_snapshot_worker_busy", False):
+            return
+        cache_at = self.__dict__.get("_ram_snapshot_cache_at", 0.0)
+        if time.time() - cache_at < _RAM_SNAPSHOT_TTL_S:
+            return
+        orch = getattr(self, "orch", None)
+        specs_getter = getattr(orch, "pane_ram_specs", None)
+        if not callable(specs_getter):
+            return
+        try:
+            pane_specs = specs_getter()
+        except Exception:
+            return
+        self._ram_snapshot_worker_busy = True
+        worker = _RamSnapshotWorker(pane_specs, os.getpid())
+        worker.signals.finished.connect(self._on_ram_snapshot_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_ram_snapshot_ready(self, snapshot: object) -> None:
+        """Qt-thread completion slot: cache worker data only, no psutil."""
+        self._ram_snapshot_worker_busy = False
+        self._ram_snapshot_cache_at = time.time()
+        if isinstance(snapshot, dict):
+            self._ram_snapshot_cache = snapshot
 
     def _show_performance_health_dialog(self) -> None:
         self._refresh_performance_health_chip()

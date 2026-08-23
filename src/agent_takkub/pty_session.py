@@ -1472,6 +1472,13 @@ class PtySession(QObject):
     def output_rate_bps(self) -> float:
         return float(self.__dict__.get("_output_rate_bps", 0.0))
 
+    @property
+    def pid(self) -> int | None:
+        """Root PID of the spawned provider CLI process (#364 lever 6's
+        `takkub doctor --ram` — the only public accessor for `_pid`, which
+        used to be read only inside this class)."""
+        return self.__dict__.get("_pid")
+
     def resize(self, cols: int, rows: int) -> None:
         # (#343) Also used as a "force a real redraw" nudge: called with an
         # unchanged size, setwinsize() would be a no-op the OS/ConPTY layer

@@ -2308,6 +2308,88 @@ def check_performance_live(resp: dict | None) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [ram] — per-pane RAM breakdown (#364 lever 6, `takkub doctor --ram` only)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_mb(n: int) -> str:
+    return f"{n / (1024**2):.0f} MB"
+
+
+def format_ram_report(resp: dict | None) -> str:
+    """Render the `takkub doctor --ram` live per-pane RAM table.
+
+    Pure interpretation only, same convention as `check_performance_live`
+    above: `resp` is the raw `ram-status` IPC reply, gathered by
+    `cli.cmd_doctor` (doctor.py must not open the socket itself — see module
+    docstring). `None` means no port file at all (cockpit not running for
+    this instance); `{"ok": False, ...}` means the live round-trip itself
+    failed.
+
+    A row's own `pid`/RSS numbers are never invented — a pane whose process
+    couldn't be found gets a `note` explaining why instead of a guessed
+    value (see `ram_report.collect_ram_report`'s docstring for the same rule
+    applied to the QtWebEngineProcess/pane mapping)."""
+    if resp is None:
+        return "[ram]\n  cockpit is not running — live RAM report unavailable"
+    if not resp.get("ok"):
+        return f"[ram]\n  live RAM report failed: {resp.get('msg', 'unknown error')}"
+
+    lines: list[str] = ["[ram]"]
+    panes = resp.get("panes") or []
+    if not panes:
+        lines.append("  no live panes")
+    else:
+        lines.append(
+            f"  {'role':<14}{'project':<16}{'provider':<10}{'pid':>8}"
+            f"{'cli':>10}{'node/mcp':>10}{'qtwe':>10}{'total':>10}"
+        )
+        for row in sorted(panes, key=lambda r: int(r.get("total_bytes", 0)), reverse=True):
+            note = f"  ({row['note']})" if row.get("note") else ""
+            lines.append(
+                f"  {row.get('role', '')!s:<14}{row.get('project', '')!s:<16}"
+                f"{row.get('provider') or '—'!s:<10}{row.get('pid') or '—'!s:>8}"
+                f"{_fmt_mb(int(row.get('cli_rss_bytes', 0))):>10}"
+                f"{_fmt_mb(int(row.get('node_children_rss_bytes', 0))):>10}"
+                f"{_fmt_mb(int(row.get('qtwebengine_rss_bytes', 0))):>10}"
+                f"{_fmt_mb(int(row.get('total_bytes', 0))):>10}{note}"
+            )
+
+    main_proc = resp.get("main_process") or {}
+    shared = resp.get("shared_qtwebengine") or {}
+    lines.append("")
+    lines.append(
+        f"  main process (pythonw)  pid={main_proc.get('pid', '—')}  "
+        f"{_fmt_mb(int(main_proc.get('rss_bytes', 0)))}"
+    )
+    lines.append(
+        f"  shared QtWebEngine (not attributable to one pane)  "
+        f"{int(shared.get('process_count', 0))} process(es)  "
+        f"{_fmt_mb(int(shared.get('rss_bytes', 0)))}"
+    )
+    lines.append(
+        f"  total panes: {_fmt_mb(int(resp.get('total_panes_bytes', 0)))}   "
+        f"total cockpit: {_fmt_mb(int(resp.get('total_cockpit_bytes', 0)))}"
+    )
+    machine_total = int(resp.get("machine_total_bytes", 0))
+    machine_avail_pct = float(resp.get("machine_available_percent", 0.0))
+    min_ram = resp.get("governor_min_available_ram_percent")
+    governor_line = (
+        f"governor pause line: {float(min_ram):.0f}% available"
+        if min_ram is not None
+        else "governor pause line: unknown"
+    )
+    lines.append(
+        f"  machine: {_fmt_mb(machine_total)} total, {machine_avail_pct:.1f}% available   "
+        f"({governor_line})"
+    )
+    lines.append(
+        f"  generated_at={resp.get('generated_at')}  takkub_version={resp.get('takkub_version')}"
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # [port] — port-file/instance cross-check (#354, `takkub doctor --live` only)
 # ---------------------------------------------------------------------------
 
