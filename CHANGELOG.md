@@ -131,6 +131,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **CodeQL 7 alerts (#31–#37)** — py/path-injection ×6 ใน `remote/reports.py`/`http_server.py`: เพิ่ม `os.path.normpath`+`startswith`
+  barrier ที่ CodeQL รู้จัก (คง `resolve()+is_relative_to()` ไว้กัน symlink) · py/redos ×1 `_TERMINAL_AUTO_REPLY_RE` (#357) → token scanner
+  forward-only + bounded quantifiers + max 512 bytes (adversarial 10k `ESC[` < 50 ms)
+
 - **Project Explorer ย้ายเข้า sidebar PROJECTS ใต้การ์ดโปรเจค** (#365 feedback) — เดิมเป็น QSplitter panel แยกกลายเป็น 3 คอลัมน์ →
   ตอนนี้ tree ฝังใต้ row ของโปรเจคที่เลือก (chevron บนการ์ดยุบ/ขยาย, จำ state ต่อโปรเจค key เดิม) `project_nav.py` · `project_tab.py`
   เหลือ pane area อย่างเดียว · ADR `adr-workspace-shell.md` อัปเดต
