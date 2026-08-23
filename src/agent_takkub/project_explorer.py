@@ -281,9 +281,13 @@ class ProjectExplorer(QWidget):
         self._changes_item.setHidden(len(changes) == 0)
         repo_root = self.git_changes.repo_root
         for change in changes:
+            try:
+                resolved = resolve_and_contain(repo_root / change.path, list(self.roots.values()))
+            except PathEscapesRootsError:
+                continue  # shouldn't happen for a well-formed git status line — refuse, don't crash
             row = QTreeWidgetItem(self._changes_item, [f"{change.status}  {change.path}"])
             row.setIcon(0, self._file_icon)
-            row.setData(0, _PATH_ROLE, str((repo_root / change.path).resolve()))
+            row.setData(0, _PATH_ROLE, str(resolved))
             row.setData(0, _IS_DIR_ROLE, False)
             row.setData(0, _CHANGE_ROW_ROLE, True)
             color = _GIT_CHANGE_COLORS.get(change.status)

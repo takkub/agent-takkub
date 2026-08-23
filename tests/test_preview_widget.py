@@ -273,6 +273,104 @@ class TestNavigationPolicy:
         assert blocked == [("demo", "https://evil.example.com")]
 
 
+# ── _PreviewPage.acceptNavigationRequest contract (reviewer finding #4,
+# 2026-08-23 phase 3-5 review; contract pinned in
+# preview_controller.navigation_allowed's docstring) ─────────────────────
+#
+# `_PreviewPage` subclasses the real `QWebEnginePage`, so constructing one
+# needs a real `QWebEngineProfile` — same "hard-aborts pytest" constraint
+# `test_editor_widget.py`/this file's own module docstring document. But
+# `acceptNavigationRequest`'s body only touches `self._nav_check`/
+# `self._on_blocked` (plain attributes, never a Qt-bound call), so it can be
+# exercised as an unbound function against a bare duck-typed stand-in —
+# no QtWebEngine construction, no opt-in flag needed.
+
+
+class _FakePreviewPageSelf:
+    def __init__(self, nav_check) -> None:
+        self._nav_check = nav_check
+        self.blocked: list[str] = []
+        self._on_blocked = self.blocked.append
+
+
+class TestPreviewPageNavigationContract:
+    def test_main_frame_navigation_consults_nav_check_and_allows(self) -> None:
+        checked: list[str] = []
+        fake = _FakePreviewPageSelf(lambda url: checked.append(url) or True)
+
+        allowed = pw._PreviewPage.acceptNavigationRequest(
+            fake, pw.QUrl("http://127.0.0.1:3000/about"), object(), True
+        )
+
+        assert allowed is True
+        assert checked == ["http://127.0.0.1:3000/about"]
+        assert fake.blocked == []
+
+    def test_main_frame_navigation_refused_by_nav_check_is_blocked_and_reported(self) -> None:
+        fake = _FakePreviewPageSelf(lambda url: False)
+
+        allowed = pw._PreviewPage.acceptNavigationRequest(
+            fake, pw.QUrl("https://evil.example.com"), object(), True
+        )
+
+        assert allowed is False
+        assert fake.blocked == ["https://evil.example.com"]
+
+    def test_nav_check_is_consulted_regardless_of_nav_type_covers_redirects(self) -> None:
+        # Chromium calls acceptNavigationRequest once per hop of a redirect
+        # chain (each redirect is its own NavigationRequest) — the widget
+        # covers that automatically by never filtering on `nav_type`. This
+        # sweeps a handful of stand-in nav_type values to pin that
+        # independence, since the real QWebEnginePage.NavigationType enum
+        # isn't meaningfully constructible outside a real page.
+        for fake_nav_type in ("link_clicked", "typed", "redirect", "form_submitted", object()):
+            checked: list[str] = []
+            fake = _FakePreviewPageSelf(lambda url, checked=checked: checked.append(url) or True)
+
+            allowed = pw._PreviewPage.acceptNavigationRequest(
+                fake, pw.QUrl("http://127.0.0.1:3000/"), fake_nav_type, True
+            )
+
+            assert allowed is True
+            assert checked == ["http://127.0.0.1:3000/"]
+
+    def test_sub_frame_iframe_navigation_bypasses_nav_check_entirely(self) -> None:
+        checked: list[str] = []
+        fake = _FakePreviewPageSelf(lambda url: checked.append(url) or False)  # would refuse
+
+        allowed = pw._PreviewPage.acceptNavigationRequest(
+            fake, pw.QUrl("https://embedded.example.com/widget"), object(), False
+        )
+
+        assert allowed is True  # iframe nav is let through unconditionally
+        assert checked == []  # nav_check never even called for a sub-frame
+        assert fake.blocked == []
+
+    def test_nav_check_raising_fails_closed(self) -> None:
+        def _boom(_url: str) -> bool:
+            raise RuntimeError("policy bug")
+
+        fake = _FakePreviewPageSelf(_boom)
+
+        allowed = pw._PreviewPage.acceptNavigationRequest(
+            fake, pw.QUrl("http://127.0.0.1:3000/"), object(), True
+        )
+
+        assert allowed is False
+        assert fake.blocked == ["http://127.0.0.1:3000/"]
+
+    def test_no_createwindow_override_relies_on_qt_default_fail_closed(self) -> None:
+        # New-window/popup requests (target="_blank", window.open()) must
+        # never reach nav_check at all — _PreviewPage deliberately has no
+        # createWindow override, so QWebEnginePage's own default (returns
+        # None, silently refusing the popup) applies. Confirmed identical
+        # behavior already shipped in terminal_widget.py's _on_open_url
+        # docstring. Pinning the absence here so a future edit that adds an
+        # override notices it must route through nav_check too (see the
+        # navigation_allowed docstring contract).
+        assert "createWindow" not in vars(pw._PreviewPage)
+
+
 # ── device presets ────────────────────────────────────────────────────────
 
 
