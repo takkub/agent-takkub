@@ -55,29 +55,32 @@ function findWheelForVersion(distDir, version) {
 // leave the file locked/hard to overwrite during recovery.
 const MIN_PYTHON_EXE_BYTES = 40 * 1024; // a real venv python.exe/python is comfortably >90KB
 
+// Opens the path exactly once and stats/reads that same descriptor for the
+// rest of the check — never stat a path and then separately open it, which
+// leaves a window for the file at that name to change between the two
+// syscalls (CodeQL js/file-system-race, alert #29).
 function pythonLooksExecutable(py) {
-  let stat;
+  let fd;
   try {
-    stat = fs.statSync(py);
+    fd = fs.openSync(py, 'r');
   } catch (_e) {
     return false;
   }
-  if (!stat.isFile() || stat.size < MIN_PYTHON_EXE_BYTES) return false;
-  if (process.platform === 'win32') {
-    // Windows PE executables always start with the 'MZ' DOS-header magic.
-    let fd;
-    try {
-      fd = fs.openSync(py, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size < MIN_PYTHON_EXE_BYTES) return false;
+    if (process.platform === 'win32') {
+      // Windows PE executables always start with the 'MZ' DOS-header magic.
       const buf = Buffer.alloc(2);
       fs.readSync(fd, buf, 0, 2, 0);
       return buf[0] === 0x4d && buf[1] === 0x5a; // 'M', 'Z'
-    } catch (_e) {
-      return false;
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
     }
+    return true;
+  } catch (_e) {
+    return false;
+  } finally {
+    fs.closeSync(fd);
   }
-  return true;
 }
 
 function brokenInterpreterMessage(py, home) {

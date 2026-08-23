@@ -4,6 +4,26 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **TOCTOU ใน `pythonLooksExecutable()` — CodeQL alert #29 (`js/file-system-race`)** —
+  `npm/scripts/lib.js` เช็ค `statSync(py)` (isFile + size) แล้วค่อย `openSync(py)` อีกครั้งเพื่ออ่าน
+  PE header = check-then-use บน **ชื่อไฟล์** คนละจังหวะ ไฟล์ที่ตรวจกับไฟล์ที่อ่านจริงอาจไม่ใช่ตัวเดียวกัน
+  → เปลี่ยนเป็น `openSync()` ครั้งเดียวแล้ว `fstatSync(fd)` + `readSync(fd)` จาก descriptor เดิมตลอด
+  (`closeSync` ใน `finally` ครอบทุกเส้นทางรวม early-return) ผลลัพธ์เหมือนเดิมทุกเคส ยังเป็น static
+  check ล้วนไม่มี spawn/exec ตามเจตนาเดิมของ #341 · rule เดียวกับ alert #4 (`pathfix.js`) ที่เคยแก้ไปแล้ว
+  + tests: 6 เคสใน `npm/scripts/lib.test.js` (ไม่มีไฟล์ / เล็กกว่า min size / เป็นไดเรกทอรี /
+  win32 header ไม่ใช่ MZ / win32 header MZ / non-Windows) mock `process.platform` ทั้งสองฝั่ง
+
+### Added (เพิ่ม)
+
+- **CI job `npm-wrapper` — เทส JS ของ npm wrapper ไม่เคยรันใน CI มาก่อนเลย** — `.github/workflows/ci.yml`
+  ไม่มี Node step สักบรรทัด (`grep 'npm test' / 'node --test' / 'setup-node'` = 0 matches) เทสทั้ง 15 ตัว
+  ใน `npm/scripts/*.test.js` จึงรันเฉพาะตอนมีคนพิมพ์ `npm test` เอง — รวมถึง guard ของ #340
+  (กัน publish wheel ผิดเวอร์ชันเงียบๆ อย่างที่เกิดกับ 1.0.84) และ guard ของ #341/#29 →
+  เพิ่ม job `npm-wrapper` (ubuntu-latest, `timeout-minutes: 5`, `permissions: contents: read`,
+  `setup-node@v4` lts/*, รัน `npm test` ตรงๆ — `package.json` ไม่มี dependency จึงไม่ต้อง `npm ci`)
+
 ## [v1.0.86] - 2026-08-23
 
 ### Fixed (แก้)

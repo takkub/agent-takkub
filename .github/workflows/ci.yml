@@ -120,3 +120,28 @@ jobs:
 
       - name: Run installed-mode gate
         run: python -m pytest tests/test_installed_mode_gate.py -v
+
+  npm-wrapper:
+    # npm/scripts/*.js are the cross-platform Windows/macOS launcher shims
+    # (postinstall wheel-pick, pathfix, shortcut, preflight-publish) — pure
+    # JS, no native deps, and their tests mock process.platform for both
+    # win32 and linux internally, so one ubuntu runner covers them. Was
+    # previously exercised only via a human typing `npm test` — CI never
+    # ran it, so regressions here (including the #340 wheel-pick guard)
+    # could land unnoticed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      # package.json declares no dependencies/devDependencies — nothing to
+      # install, so skip npm ci and run the test script directly.
+      - name: Run npm wrapper tests
+        run: npm test
