@@ -65,6 +65,7 @@ from .editor_widget import EditorHost
 from .limit_panel import LimitPanelMixin
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
+from .preview_widget import PreviewHost
 from .project_explorer import project_roots
 from .project_nav import ProjectNav
 from .project_tab import ProjectTab
@@ -278,6 +279,38 @@ class MainWindow(
         # own — the EditorHost is app-wide and MainWindow-owned).
         self.orch.set_editor_host(self._editor_host)
 
+        # ── preview dock: the ONE app-wide Live Preview WebView (#365 phase 5) ──
+        # Same master-plan §4 RAM hard rule as the editor dock above, same
+        # lazy-create/destroy shape — see preview_widget.py's module
+        # docstring. Orchestrator's previewOpened/Updated/Closed are a 1:1
+        # re-emit of PreviewController's own signals (orchestrator.py
+        # __init__), so `takkub preview`/`takkub design publish` (any pane,
+        # any project) reaches this dock through the same CLI -> IPC ->
+        # Orchestrator path every other cockpit command uses.
+        self._preview_dock = QDockWidget("Preview", self)
+        self._preview_dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+        preview_container = QWidget()
+        self._preview_dock.setWidget(preview_container)
+        self._preview_dock.setMinimumWidth(480)
+        self._preview_dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._preview_dock)
+        self._preview_host = PreviewHost(preview_container, parent=self)
+        self._preview_host.opened.connect(self._on_preview_opened)
+        self._preview_host.closed.connect(self._preview_dock.hide)
+        self._preview_host.approveRequested.connect(self._on_preview_approve_requested)
+        self._preview_host.reviseRequested.connect(self._on_preview_revise_requested)
+        self._preview_host.navigationBlocked.connect(self._on_preview_navigation_blocked)
+        # #364 lever 1: discard the shared renderer once the dock isn't on
+        # screen (hidden, or just not the active tab in a tabified group) —
+        # same "hidden = discard candidate" wiring terminal_widget.py's
+        # pane-tab keep-alive uses, applied to the dock instead of a tab.
+        self._preview_dock.visibilityChanged.connect(self._preview_host.set_keepalive)
+        self.orch.previewOpened.connect(self._preview_host.show_state)
+        self.orch.previewUpdated.connect(self._preview_host.show_state)
+        self.orch.previewClosed.connect(self._preview_host.close_project)
+
         # Build the initial tab for the active project. Order matters: adding the
         # ProjectTab to the stack re-parents it; if a QWebEngineView were already
         # nested inside when that happens, Chromium's renderer crashes silently
@@ -462,6 +495,32 @@ class MainWindow(
     def _on_editor_file_opened(self, _project_name: str, _path: str) -> None:
         self._editor_dock.show()
         self._editor_dock.raise_()
+
+    def _on_preview_opened(self, _project_name: str) -> None:
+        self._preview_dock.show()
+        self._preview_dock.raise_()
+
+    def _on_preview_approve_requested(self, project: str, artifact_id: str) -> None:
+        """Preview's Approve button (#365 phase 6). `Orchestrator.design_approve`
+        owns the actual status transition + the "notice Lead" step
+        (design_actions.py's docstring: deliberately not this widget's job)
+        — this just relays the click and pushes the result back into the
+        header."""
+        ok, msg, artifact = self.orch.design_approve(project, artifact_id)
+        if ok:
+            self._preview_host.set_artifact_status(artifact.get("status", ""))
+        else:
+            self._status.showMessage(f"approve failed: {msg}", 6_000)
+
+    def _on_preview_revise_requested(self, project: str, artifact_id: str, feedback: str) -> None:
+        ok, msg, artifact = self.orch.design_revise(project, artifact_id, feedback=feedback)
+        if ok:
+            self._preview_host.set_artifact_status(artifact.get("status", ""))
+        else:
+            self._status.showMessage(f"revise failed: {msg}", 6_000)
+
+    def _on_preview_navigation_blocked(self, project: str, url: str) -> None:
+        self._status.showMessage(f"preview[{project}]: navigation blocked — {url}", 6_000)
 
     def _on_editor_git_refresh_needed(self, project_name: str) -> None:
         """A save landed, or the disk watcher saw a genuine external edit
