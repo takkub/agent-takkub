@@ -109,12 +109,20 @@ class TestDebounce:
         svc = FileWatchService([root], debounce_ms=30)
 
         key = str(f.resolve())
-        svc._on_file_changed(key)
-        svc._on_file_changed(key)
-        svc._on_file_changed(key)
-        QTest.qWait(150)
+        try:
+            svc._on_file_changed(key)
+            svc._on_file_changed(key)
+            svc._on_file_changed(key)
+            # Bounded pump, not a fixed `qWait(150)`: on a loaded macOS CI
+            # runner a 30 ms single-shot timer can take >150 ms to fire,
+            # which both failed the assert and leaked the still-armed QTimer
+            # into the #344/#345 leak check.
+            _wait_until(lambda: len(flushes) >= 1)
+            QTest.qWait(60)  # a second flush would have landed by now
 
-        assert len(flushes) == 1
+            assert len(flushes) == 1
+        finally:
+            svc._timer.stop()
 
     def test_no_flush_before_debounce_window_elapses(self, qapp, tmp_path) -> None:
         root = tmp_path / "proj"
