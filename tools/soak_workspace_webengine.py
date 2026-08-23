@@ -43,21 +43,32 @@ import tempfile
 import time
 from pathlib import Path
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# #366 — --real-display skips offscreen/--disable-gpu so this can be run
+# against an actual windowed session (checked before argparse runs since
+# QT_QPA_PLATFORM/QTWEBENGINE_CHROMIUM_FLAGS must be set before PyQt6 import).
+_REAL_DISPLAY = "--real-display" in sys.argv
+
+if not _REAL_DISPLAY:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # Same production-mirroring Chromium flags spike_pane_discard_ram.py uses —
 # see that module's docstring for why each one matters under offscreen/no-display.
+# --disable-gpu/--disable-gpu-compositing are offscreen-only: #366 found Chromium
+# logs a GLES3 context failure under offscreen+disable-gpu on every run, a
+# suspected cause of QtWebEngineProcess never reaping — a real display doesn't
+# need either flag, so drop them there to test that hypothesis.
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--disable-background-timer-throttling --disable-renderer-backgrounding "
-    "--disable-backgrounding-occluded-windows --renderer-process-limit=4 "
-    "--disable-gpu --disable-gpu-compositing",
+    "--disable-backgrounding-occluded-windows --renderer-process-limit=4"
+    + ("" if _REAL_DISPLAY else " --disable-gpu --disable-gpu-compositing"),
 )
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
 import psutil  # noqa: E402
+from PyQt6.QtCore import QEventLoop, QTimer  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QTabWidget, QWidget  # noqa: E402
 
 # Import BEFORE QApplication is constructed — see module docstring.
@@ -67,12 +78,28 @@ from agent_takkub.preview_controller import PreviewController  # noqa: E402
 from agent_takkub.terminal_widget import TerminalWidget  # noqa: E402
 
 
+def _run_loop_ms(ms: int) -> None:
+    """Pump a *real* nested `QEventLoop` (`exec()`, not repeated bare
+    `processEvents()` calls) for `ms` milliseconds. #366: Chromium's
+    WebEngine deferred-delete/IPC shutdown handshake was empirically found
+    to never complete under `processEvents()`-in-a-`time.sleep()`-loop
+    pumping — confirmed stuck across 30s of that style, on both offscreen
+    and a real windowed display — but reaps within ~1s under a real nested
+    event loop, isolated with a bare QWebEngineView + `app.exec()` probe (see
+    docs/audit/2026-08-23-366-webengine-process-reap.md). `EditorHost`/
+    `PreviewHost`'s teardown code itself was unchanged by this fix — the
+    production app always runs under `app.exec()`, so this was a soak-harness
+    pumping-style artifact, not an app-code leak."""
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()
+
+
 def _pump(app: QApplication, predicate, timeout_s: float, step_s: float = 0.02) -> float:
     t0 = time.monotonic()
     while not predicate() and time.monotonic() - t0 < timeout_s:
-        app.processEvents()
-        time.sleep(step_s)
-    app.processEvents()
+        _run_loop_ms(int(step_s * 1000))
+    _run_loop_ms(0)
     return time.monotonic() - t0
 
 
@@ -114,7 +141,12 @@ def _make_projects(n: int) -> dict[str, dict]:
 
 
 def _editor_soak(
-    app: QApplication, projects: dict, cycles: int, settle_ms: int, boot_timeout_s: float
+    app: QApplication,
+    projects: dict,
+    cycles: int,
+    settle_ms: int,
+    boot_timeout_s: float,
+    reap_timeout_s: float = 30.0,
 ) -> dict:
     def _fake_project_roots(name: str) -> dict[str, Path]:
         return {"main": projects[name]["root"]}
@@ -152,21 +184,29 @@ def _editor_soak(
         _pump(app, lambda: host.open_count() > 0 or open_errors, boot_timeout_s)
         if host.open_count() == 0 and not open_errors:
             stuck_open.append(cycle)
-        time.sleep(settle_ms / 1000.0)
-        _pump(app, lambda: True, 0.1)
+        _run_loop_ms(settle_ms)
         host.close_all()
         _pump(app, lambda: not host.has_view(), 3.0)
         if host.has_view():
             stuck_closed.append(cycle)
 
     # Chromium renderer processes exit asynchronously after `deleteLater` —
-    # give the last cycle's teardown a real chance to complete before
-    # sampling, or "after" over-reports (stale not-yet-exited processes),
-    # same settle-before-sample convention spike_pane_discard_ram.py uses.
-    time.sleep(settle_ms / 1000.0)
-    _pump(app, lambda: True, 0.3)
-    after_rss = _rss_mb()
+    # #366: rather than one fixed-delay sample (which made a genuine stuck
+    # process indistinguishable from "still tearing down"), poll process
+    # count on a decay curve for up to reap_timeout_s, pumping the event
+    # loop throughout (deleteLater only fires on a processed event) so a
+    # process that reaps at, say, 12s is recorded as reaped-at-12s rather
+    # than averaged away by a single end-of-window sample.
+    t0 = time.monotonic()
+    reap_seconds: float | None = None
     after_webengine_mb, after_webengine_n = _webengine_rss_mb()
+    while time.monotonic() - t0 < reap_timeout_s:
+        _run_loop_ms(500)
+        after_webengine_mb, after_webengine_n = _webengine_rss_mb()
+        if after_webengine_n <= before_webengine_n:
+            reap_seconds = round(time.monotonic() - t0, 1)
+            break
+    after_rss = _rss_mb()
     after_gc = _gc_count("_EditorWebView")
 
     return {
@@ -181,6 +221,7 @@ def _editor_soak(
         "webengine_rss_mb_after": round(after_webengine_mb, 1),
         "webengine_process_count_before": before_webengine_n,
         "webengine_process_count_after": after_webengine_n,
+        "webengine_reap_seconds": reap_seconds,
         "gc_editorwebview_before": before_gc,
         "gc_editorwebview_after": after_gc,
     }
@@ -260,6 +301,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settle-ms", type=int, default=150)
     parser.add_argument("--boot-timeout-s", type=float, default=15.0)
     parser.add_argument("--discard-debounce-ms", type=int, default=200)
+    parser.add_argument("--reap-timeout-s", type=float, default=30.0)
+    parser.add_argument(
+        "--real-display",
+        action="store_true",
+        help="skip offscreen/--disable-gpu — run against an actual windowed session (#366)",
+    )
     parser.add_argument("--json-out", type=str, default=None)
     args = parser.parse_args(argv)
 
@@ -269,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     projects = _make_projects(args.projects)
 
-    editor = _editor_soak(app, projects, args.cycles, args.settle_ms, args.boot_timeout_s)
+    editor = _editor_soak(
+        app, projects, args.cycles, args.settle_ms, args.boot_timeout_s, args.reap_timeout_s
+    )
     preview = _preview_soak(projects, args.cycles)
     discard_reattach = _discard_reattach_soak(
         app, args.cycles, args.discard_debounce_ms, args.boot_timeout_s
@@ -279,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
         not editor["open_errors"]
         and not editor["stuck_open_cycles"]
         and not editor["stuck_closed_cycles"]
+        # #366: has_view()/open_count() above only prove a Python flag
+        # flipped, not that the OS-level QtWebEngineProcess actually exited.
+        and editor["webengine_process_count_after"] <= editor["webengine_process_count_before"]
         and not preview["errors"]
         and not discard_reattach["boot_failed"]
         and discard_reattach["all_ok"]
