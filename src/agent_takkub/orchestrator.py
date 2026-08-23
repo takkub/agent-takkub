@@ -6049,6 +6049,16 @@ class Orchestrator(
             governor_min_ram_percent=min_ram,
         )
 
+    def ram_profile(self) -> dict:
+        """On-demand main-process tracemalloc/gc profile for `takkub doctor
+        --ram --ram-profile` (#364 lever 5). Same synchronous/opt-in-only
+        convention as `ram_status` above — see `ram_report.collect_main_process_profile`'s
+        docstring for why this is a lower-bound diagnostic, not a full
+        accounting of this process's RSS."""
+        from . import ram_report
+
+        return ram_report.collect_main_process_profile()
+
     # ──────────────────────────────────────────────────────────────
     # #365 phase 5 — Live Preview + design artifact IPC
     #

@@ -812,6 +812,15 @@ class CliServer(QObject):
                 ram = self._orch.ram_status()
                 self._reply(sock, ok=True, msg="ram status", **ram)
                 return
+            elif cmd == "ram-profile":
+                # #364 lever 5: read-only, same trust level as ram-status —
+                # `takkub doctor --ram --ram-profile`'s opt-in main-process
+                # tracemalloc/gc snapshot. Briefly enables tracemalloc if it
+                # wasn't already on; never left running (see
+                # ram_report.collect_main_process_profile's docstring).
+                profile = self._orch.ram_profile()
+                self._reply(sock, ok=True, msg="ram profile", **profile)
+                return
             elif cmd == "remote-mirror-status":
                 # 2026-08-13 remote-mirror-blank fix: `takkub doctor --live`
                 # diagnostic for "phone shows nothing back from Lead".

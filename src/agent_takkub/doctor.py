@@ -2391,6 +2391,29 @@ def format_ram_report(resp: dict | None) -> str:
     lines.append(
         f"  generated_at={resp.get('generated_at')}  takkub_version={resp.get('takkub_version')}"
     )
+
+    profile = resp.get("main_process_profile")
+    if profile is not None:
+        lines.append("")
+        lines.append("  [ram-profile] main process (#364 lever 5 — opt-in, on-demand)")
+        if not profile.get("ok"):
+            lines.append(f"    ram-profile failed: {profile.get('msg', 'unknown error')}")
+        else:
+            traced_mb = int(profile.get("tracemalloc_traced_current_bytes", 0)) / (1024**2)
+            lines.append(
+                f"    tracemalloc: {traced_mb:.1f} MB traced Python-heap "
+                f"(lower bound only — see doctor.py's --ram-profile help for why)"
+            )
+            lines.append("    top Python-heap allocators:")
+            for a in (profile.get("top_allocators") or [])[:10]:
+                lines.append(
+                    f"      {_fmt_mb(int(a.get('size_bytes', 0))):>8}  "
+                    f"{a.get('count', 0):>6}x  {a.get('file', '')}:{a.get('line', '')}"
+                )
+            lines.append(f"    gc object count: {profile.get('gc_object_count', 0)}")
+            watched = profile.get("watched_pane_object_counts") or {}
+            watched_str = "  ".join(f"{k}={v}" for k, v in watched.items())
+            lines.append(f"    watched pane objects (leak check): {watched_str}")
     return "\n".join(lines)
 
 

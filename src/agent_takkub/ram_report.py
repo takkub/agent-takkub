@@ -29,7 +29,9 @@ reported as shared overhead instead (see `check_pane_mcp_handshake`-style
 
 from __future__ import annotations
 
+import gc
 import time
+import tracemalloc
 from collections.abc import Mapping, Sequence
 
 import psutil
@@ -37,6 +39,16 @@ import psutil
 from . import __version__ as _TAKKUB_VERSION
 
 _QTWEBENGINE_MARKER = "qtwebengineprocess"
+
+# #364 lever 5: the object types this process's own gc census specifically
+# calls out, because they're the ones the issue itself named as suspects
+# (pyte screen history / transcript buffers / display cache / closed-pane Qt
+# widgets) — see `orchestrator.Orchestrator.ram_profile`'s docstring and
+# docs/audit/2026-08-23-364-lever5-main-process-profile.md for what was
+# actually found for each. `AgentPane`/`TerminalWidget`/`PtySession` are the
+# per-teammate-pane objects; `HeadlessPane` is #365's subagent-mode
+# equivalent (no Qt widget, still worth counting).
+_WATCHED_TYPE_NAMES = ("AgentPane", "TerminalWidget", "PtySession", "HeadlessPane")
 
 
 def _rss_bytes(proc: object) -> int:
@@ -210,4 +222,87 @@ def collect_ram_report(
         "machine_available_bytes": machine_available,
         "machine_available_percent": machine_available_percent,
         "governor_min_available_ram_percent": governor_min_ram_percent,
+    }
+
+
+def collect_main_process_profile(*, top_n: int = 15) -> dict:
+    """On-demand, temporary main-process profile (#364 lever 5).
+
+    Unlike `collect_ram_report` above, this can only ever describe the
+    process it runs IN (tracemalloc/gc have no remote mode), so there is no
+    `main_pid` parameter — the caller is always the live cockpit's own IPC
+    handler, on the Qt main thread, same trust/cost tier as `ram_status`'s
+    `ram-status` (an explicit opt-in diagnostic, never a recurring timer
+    tick).
+
+    Two different techniques, because they answer two different questions
+    and neither alone is enough:
+
+    * **tracemalloc top allocators** answers "what's actively allocating
+      Python-heap memory in this window." It is necessarily a WEAK signal
+      here: tracemalloc only sees allocations that happen after `.start()`,
+      so calling it on an already-warm process (as this always is — the
+      cockpit has been running for a while by the time someone asks for a
+      profile) massively undercounts already-resident memory. It also only
+      tracks the Python object heap (`pymalloc`) — it cannot see PyQt6/Qt/
+      Chromium's own C++ allocations, which is most of a cockpit's RSS. Spike
+      measurement confirmed both of these directly: a controlled subprocess
+      that started tracemalloc before any import still only ever traced a
+      few MB even after booting 5 real WebEngine-backed panes whose RSS grew
+      by 65 MB (see docs/audit/2026-08-23-364-lever5-main-process-profile.md)
+      — the traced total is a lower bound, not a full accounting. Still
+      useful for spotting *runaway* Python-heap growth (something producing
+      thousands of new objects at one line), just not for "what's the
+      300-480 MB made of."
+    * **gc object census** (`gc.get_objects()` grouped by `type(obj).__name__`)
+      answers "what Python objects are alive right now," independent of when
+      they were allocated — this is the retroactive-safe half, and the one
+      that can actually prove or disprove a leak (`watched_pane_object_count`
+      vs. the caller's own live pane count — a mismatch means something is
+      keeping a closed pane's objects referenced).
+
+    Never leaves tracemalloc running: if this call is the one that started
+    it, it stops it again before returning. If tracemalloc was already
+    running for some other reason (e.g. `PYTHONTRACEMALLOC=1` in the
+    environment), this respects that and leaves it running afterward — it
+    only ever turns off what it turned on.
+    """
+    already_tracing = tracemalloc.is_tracing()
+    if not already_tracing:
+        tracemalloc.start(1)
+    gc.collect()
+    snapshot = tracemalloc.take_snapshot()
+    stats = snapshot.statistics("lineno")
+    top_allocators = [
+        {
+            "file": stat.traceback[0].filename,
+            "line": stat.traceback[0].lineno,
+            "size_bytes": int(stat.size),
+            "count": int(stat.count),
+        }
+        for stat in stats[:top_n]
+    ]
+    traced_current_bytes, traced_peak_bytes = tracemalloc.get_traced_memory()
+    if not already_tracing:
+        tracemalloc.stop()
+
+    objs = gc.get_objects()
+    type_counts: dict[str, int] = {}
+    for obj in objs:
+        name = type(obj).__name__
+        type_counts[name] = type_counts.get(name, 0) + 1
+    top_types = sorted(type_counts.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+
+    return {
+        "generated_at": time.time(),
+        "takkub_version": _TAKKUB_VERSION,
+        "tracemalloc_was_already_running": already_tracing,
+        "tracemalloc_traced_current_bytes": int(traced_current_bytes),
+        "tracemalloc_traced_peak_bytes": int(traced_peak_bytes),
+        "top_allocators": top_allocators,
+        "gc_object_count": len(objs),
+        "top_object_types": [{"type": t, "count": c} for t, c in top_types],
+        "watched_pane_object_counts": {
+            name: type_counts.get(name, 0) for name in _WATCHED_TYPE_NAMES
+        },
     }
