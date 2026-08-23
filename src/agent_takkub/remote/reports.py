@@ -133,12 +133,17 @@ def reports_root(project: str | None) -> Path:
     barrier it can see; `_project_ns`'s regex reject is what actually stops
     a bad name at the door."""
     ns = _project_ns(project)
-    base = _config.RUNTIME_DIR / "exports"
-    base_str = str(base)
-    candidate_str = os.path.normpath(os.path.join(base_str, ns, "reports"))
+    base_str = os.path.realpath(str(_config.RUNTIME_DIR / "exports"))
+    # `os.path.realpath` is the normalization step (lexical `..` collapse AND
+    # symlink dereference in one call), and the `startswith` check is applied
+    # to that final string — nothing re-normalizes afterwards, which is the
+    # exact shape CodeQL's py/path-injection query accepts as a barrier (a
+    # later `.resolve()` after the check would count as a fresh, unchecked
+    # normalization and re-open the alert).
+    candidate_str = os.path.realpath(os.path.join(base_str, ns, "reports"))
     if candidate_str != base_str and not candidate_str.startswith(base_str + os.sep):
         raise ReportError(f"invalid project: {project!r}")
-    return Path(candidate_str).resolve()
+    return Path(candidate_str)
 
 
 def _shares_path(project: str | None) -> Path:
@@ -157,26 +162,19 @@ def _validate_report_name(name: str) -> str:
 
 
 def _contained_path(root: Path, name: str) -> Path:
-    """Two containment checks, deliberately not one:
-
-    1. `os.path.normpath()` + `str.startswith()` — CodeQL `py/path-injection`
-       recognizes this exact idiom (its own documented "GOOD" example) as a
-       sanitizing barrier, so this is what actually clears the alert.
-    2. `.resolve()` + `is_relative_to()` — real defense-in-depth: `normpath`
-       is purely lexical (it never touches the filesystem), so it does not
-       dereference a symlink placed inside `root` pointing outside it;
-       `.resolve()` does (resolving *is* dereferencing), which is what
-       closes that case.
-
-    Both must pass; neither alone is both CodeQL-legible and symlink-safe."""
-    root_str = str(root)
-    normalized = os.path.normpath(os.path.join(root_str, name))
-    if normalized != root_str and not normalized.startswith(root_str + os.sep):
+    """Containment in the one shape that is BOTH symlink-safe and legible to
+    CodeQL's `py/path-injection` query: `os.path.realpath()` normalizes
+    lexically (`..`) *and* dereferences symlinks (a link placed inside `root`
+    pointing outside it resolves to its real target here), then
+    `str.startswith()` on that final string is the check. No further
+    `.resolve()`/normalization happens after the check — CodeQL treats any
+    post-check normalization as a new unchecked sink, which is why the
+    earlier normpath-then-resolve version still raised the alert."""
+    root_str = os.path.realpath(str(root))
+    candidate_str = os.path.realpath(os.path.join(root_str, name))
+    if candidate_str == root_str or not candidate_str.startswith(root_str + os.sep):
         raise ReportError(f"invalid name: {name!r}")
-    candidate = Path(normalized).resolve()
-    if not candidate.is_relative_to(root):
-        raise ReportError(f"invalid name: {name!r}")
-    return candidate
+    return Path(candidate_str)
 
 
 def _now_iso() -> str:
