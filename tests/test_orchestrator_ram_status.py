@@ -91,3 +91,19 @@ def test_ram_status_tolerates_a_missing_governor(monkeypatch) -> None:
     Orchestrator.ram_status(fake)
 
     assert captured["governor_min_ram_percent"] is None
+
+
+def test_ram_profile_delegates_to_ram_report(monkeypatch) -> None:
+    """#364 lever 5 — `Orchestrator.ram_profile` is a thin, argument-free
+    delegation to `ram_report.collect_main_process_profile` (that function
+    can only ever describe the process it runs in, so there is nothing else
+    for this method to gather or pass through)."""
+    import agent_takkub.ram_report as ram_report_mod
+
+    sentinel = {"ok": True, "gc_object_count": 42}
+    monkeypatch.setattr(ram_report_mod, "collect_main_process_profile", lambda: sentinel)
+
+    fake = SimpleNamespace()
+    result = Orchestrator.ram_profile(fake)
+
+    assert result is sentinel

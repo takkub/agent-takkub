@@ -1660,6 +1660,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
         findings += check_ram_node_children(ram_resp)
 
+        if getattr(args, "ram_profile", False) and read_port() is not None:
+            # #364 lever 5: only fetched when both --ram and --ram-profile
+            # are passed (no effect on plain --ram) — see cli_server's
+            # ram-profile handler for why this briefly enables tracemalloc.
+            try:
+                profile_resp = _request({"cmd": "ram-profile"})
+            except Exception as e:
+                profile_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+            if ram_resp is not None and ram_resp.get("ok"):
+                ram_resp["main_process_profile"] = profile_resp
+
     if getattr(args, "core_version", False):
         from .doctor import check_core_version_compat
 
@@ -3240,6 +3251,17 @@ def main(argv: list[str] | None = None) -> int:
         "plus main process and machine-wide numbers; opt-in, off by default so "
         "plain `takkub doctor` is unchanged. Skipped (not failed) when the "
         "cockpit isn't running.",
+    )
+    sdoc.add_argument(
+        "--ram-profile",
+        action="store_true",
+        help="with --ram, also do a one-off main-process tracemalloc/gc snapshot "
+        "(#364 lever 5): top Python-heap allocators + object census, "
+        "including a leak check on watched pane object types. Briefly "
+        "enables tracemalloc if it wasn't already on, never leaves it "
+        "running; no effect without --ram. A lower-bound diagnostic, not a "
+        "full accounting of the process's RSS — see "
+        "ram_report.collect_main_process_profile's docstring.",
     )
     sdoc.add_argument(
         "--storage-layout",

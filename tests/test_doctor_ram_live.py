@@ -1,5 +1,7 @@
 """#364 lever 6 — `takkub doctor --ram`'s pure formatting layer."""
 
+from typing import ClassVar
+
 from agent_takkub.doctor import Status, check_ram_node_children, format_ram_report
 
 
@@ -79,6 +81,65 @@ def test_ram_report_renders_table_sorted_by_total_desc() -> None:
     assert "1 process(es)" in text
     assert "governor pause line: 12% available" in text
     assert "takkub_version=1.0.87" in text
+
+
+class TestFormatRamReportMainProcessProfile:
+    """#364 lever 5 — the opt-in `--ram-profile` section of `format_ram_report`."""
+
+    _BASE_RESP: ClassVar[dict] = {
+        "ok": True,
+        "generated_at": 1_700_000_000.0,
+        "takkub_version": "1.0.87",
+        "main_process": {"pid": 100, "rss_bytes": 300_000_000},
+        "shared_qtwebengine": {"rss_bytes": 0, "process_count": 0},
+        "panes": [],
+        "total_panes_bytes": 0,
+        "total_cockpit_bytes": 300_000_000,
+        "machine_total_bytes": 16_000_000_000,
+        "machine_available_bytes": 4_000_000_000,
+        "machine_available_percent": 25.0,
+        "governor_min_available_ram_percent": 12.0,
+    }
+
+    def test_no_section_when_profile_absent(self) -> None:
+        text = format_ram_report(self._BASE_RESP)
+        assert "ram-profile" not in text
+
+    def test_reports_profile_fetch_failure(self) -> None:
+        resp = {**self._BASE_RESP, "main_process_profile": {"ok": False, "msg": "timeout"}}
+        text = format_ram_report(resp)
+        assert "ram-profile failed: timeout" in text
+
+    def test_renders_allocators_and_watched_object_counts(self) -> None:
+        resp = {
+            **self._BASE_RESP,
+            "main_process_profile": {
+                "ok": True,
+                "tracemalloc_traced_current_bytes": 5_000_000,
+                "top_allocators": [
+                    {
+                        "file": "agent_takkub/orchestrator.py",
+                        "line": 42,
+                        "size_bytes": 1_000_000,
+                        "count": 10,
+                    },
+                ],
+                "gc_object_count": 12345,
+                "watched_pane_object_counts": {
+                    "AgentPane": 3,
+                    "TerminalWidget": 3,
+                    "PtySession": 3,
+                    "HeadlessPane": 0,
+                },
+            },
+        }
+        text = format_ram_report(resp)
+        assert "orchestrator.py:42" in text
+        assert "gc object count: 12345" in text
+        assert "AgentPane=3" in text
+        assert "TerminalWidget=3" in text
+        assert "PtySession=3" in text
+        assert "HeadlessPane=0" in text
 
 
 class TestCheckRamNodeChildren:
