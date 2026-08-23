@@ -6,6 +6,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **#364 lever 1 — spike: discard renderer ของ pane ที่ซ่อน วัดจริงแล้ว GO** — `QWebEnginePage.setLifecycleState(Discarded)`
+  บน pane ที่ไม่ใช่ current tab จริงๆ (isVisible()=False, ตรงกับ `ProjectTab._apply_pane_keepalive` เดิมเป๊ะ) คืน renderer
+  process **ทั้งตัว** ไม่ใช่แค่ heap ว่าง — วัดได้ **~65 MB/pane** ที่ 4 pane รวม (Lead + teammate ≤3 ตามนโยบายวันนี้ ชนพอดี
+  `--renderer-process-limit=4`) ผ่านเกณฑ์ ≥60 MB/pane ในแผน · แต่เหลือแค่ **~39 MB/pane** ถ้า pane เกิน 4 (Chromium แชร์
+  renderer process ข้าม limit) — **ต้องวัดใหม่ถ้าจะขยับ pane cap** · re-attach (setLifecycleState(Active) → รอ pageReady
+  เดิม → เขียนซ้ำ) ~300–390ms รวม ไม่พัง QWebChannel bridge · **ข้อเสียจริง**: xterm.js scrollback หายหมดตอน re-attach —
+  `PtySession.screen` ก็กู้ให้ไม่ได้เพราะเป็น `pyte.Screen` เปล่า (ไม่ใช่ `HistoryScreen`) เก็บแค่ตาราง visible ปัจจุบัน ไม่มี
+  scrollback มาตั้งแต่ต้น · Frozen ไม่ช่วยเรื่อง RAM เลย (~0, ตามดีไซน์ Chromium) ไม่ต้องใช้ fallback · ยืนยันด้วยโค้ด+รันจริงว่า
+  ไม่ชน ready-marker/idle-detection/delivery-verify (`pty_session.py`/`task_delivery.py` ไม่ import QtWebEngineWidgets เลย)
+  · **side-finding**: เจอ root cause ของ "QWebEngineView จริงชน pytest abort แม้ offscreen" ที่บันทึกไว้ใน
+  test_terminal_widget.py/test_editor_widget.py — `QApplication([])` (argv ว่าง) ทำให้ Chromium's base::CommandLine
+  พังตอน renderer spawn (native abort, exit -1073740791) ส่วน `QApplication(sys.argv)` บูตได้ปกติ — ยังไม่ได้แก้ที่ต้นตอ
+  (pytest fixture เอง argv ไม่ sanitize เท่าสคริปต์เดี่ยว) flag ไว้เป็น follow-up · รายงานเต็ม +
+  ดีไซน์ implementation ร่าง (ยังไม่ทำ): `docs/audit/2026-08-23-364-lever1-pane-discard-spike.md`
+  + tools: `tools/spike_pane_discard_ram.py` (สคริปต์เดี่ยว วัดซ้ำได้ ห้ามรันใน pytest process เอง) +
+  tests: `tests/test_pane_discard_spike.py` (shell ออก subprocess กัน hard-abort ชน pytest)
+
 - **#364 lever 4 — node/MCP ต่อ pane: วัดจริงแล้วไม่ใช่ leak แต่เจอบั๊ก stale MCP variant** — วัดจาก process tree:
   dev instance ทุก pane node/mcp = 0 MB (role policy + graft worktree-exclusion ทำงานถูก) · pane โหมด browser จริง =
   playwright (~980 MB รวม chrome tree) + chrome-devtools (~369 MB) + graft (~182 MB) ≈ 1.6 GB **legit** และหายสะอาดเมื่อปิด pane
