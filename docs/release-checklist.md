@@ -48,6 +48,11 @@ takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fa
 
 ## 1. ตัดสินเวอร์ชันใหม่ (SemVer)
 
+> **ใช้ SemVer ให้ถูกจริง (user directive 2026-08-23):** ที่ผ่านมา bump แค่ patch 87 รอบทั้งที่หลายรอบมี
+> feature — ตั้งแต่ 1.1.0 เป็นต้นไป: **minor** เมื่อมีความสามารถใหม่ที่ของเดิมยังใช้ได้ · **patch** เฉพาะ
+> รอบแก้บั๊กล้วน · **major** (2.0.0) เมื่อมีของพังของเดิมจริง — กรณี Core V2 คือตอน Phase 10 ลบ V1 /
+> สลับ authority ไม่ใช่ตอน engine เปิด
+
 ดู diff ตั้งแต่ release ก่อนหน้า แล้วเลือก patch/minor/major ตามหลัก SemVer ปกติ
 
 **อย่า hardcode เลขไว้ในเอกสารนี้** (เคยเขียน "ปัจจุบันอยู่ที่ 1.0.12" แล้วเน่าค้าง 66 เวอร์ชัน) —
