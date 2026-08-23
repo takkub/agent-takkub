@@ -1101,10 +1101,7 @@ class TestBridgeOffMainThreadDispatch:
         bridge = http_server._Bridge(_FakeOrch())
         pending = http_server._PendingRequest(action="pulse", params={})
 
-        start = time.time()
         bridge._handle(pending)
-        elapsed = time.time() - start
-        assert elapsed < 1.0
 
         assert pending.reply.empty(), "api.pulse should still be blocked on the gate"
         gate.set()

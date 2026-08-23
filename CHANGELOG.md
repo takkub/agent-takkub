@@ -8,6 +8,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **ไล่เก็บ assert เชิงเวลาที่เหลือทั้ง `tests/`** — sweep หา `assert elapsed < <ตัวเลข>` ทั้งหมด
+  เจออีก 3 จุด แก้ 2 ปล่อย 1: `test_remote_http_server.py:1107` (`elapsed < 1.0` — **ซ้ำซ้อน**
+  เพราะบรรทัดถัดไป `assert pending.reply.empty()` พิสูจน์สัญญาเดียวกันแบบ deterministic อยู่แล้ว →
+  ลบทิ้งพร้อม `start`/`elapsed` ที่ไม่ได้ใช้) · `test_pty_spawn_timeout.py:57` (`elapsed < 3.0` →
+  `assert not release.is_set()` ใช้ Event ที่มีอยู่แล้วพิสูจน์ว่า timeout ยิงตอน native call
+  ยังค้างอยู่จริง) · `test_pty_backend_missing_cwd.py:33` **ไม่แตะ** — guard raise แบบ synchronous
+  ไม่มี thread/sleep เข้ามาเกี่ยว ไม่ใช่ flaky-shaped
+
 - **flaky test ตัวที่ 3: assert เวลาบนนาฬิกาจริง** — `test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller`
   วัด wall clock ว่า hook ต้องคืนค่าใน `< 1.0` วินาที (timeout ของ hook เอง 300ms) — บน windows
   runner ที่โหลดหนักโปรเซสถูก starve จน 300ms กลายเป็น 1.23s แล้วตก (production ถูกต้องแล้ว —

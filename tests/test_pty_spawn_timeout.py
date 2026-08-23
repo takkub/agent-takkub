@@ -13,7 +13,6 @@ test_pty_session_spawn_timeout.py for that integration.
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -48,13 +47,11 @@ def test_spawn_pty_bounded_raises_timeout_without_blocking_caller(monkeypatch) -
 
     monkeypatch.setattr(backend, "spawn_pty", _slow)
 
-    t0 = time.time()
     with pytest.raises(PtySpawnTimeout):
         spawn_pty_bounded(["slow"], cwd=None, env=None, rows=24, cols=80, timeout_sec=0.2)
-    elapsed = time.time() - t0
-    # Bounded by the timeout, not the 10s the (simulated) native call would
-    # otherwise take — this is the actual #139 fix: fail fast, don't hang.
-    assert elapsed < 3.0
+    # Raised while the (simulated) native call is still wedged on the gate —
+    # proves it's bounded by the timeout, not the caller waiting it out (#139).
+    assert not release.is_set()
 
     release.set()  # let the abandoned worker thread finish instead of leaking
 
