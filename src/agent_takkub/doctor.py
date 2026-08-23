@@ -3169,6 +3169,92 @@ def _auto_migrate_boot_findings() -> list[Finding]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# [obsidian]
+# ---------------------------------------------------------------------------
+
+
+def check_obsidian() -> list[Finding]:
+    """[obsidian/*] — vault presence, canonical-metadata coverage (#365
+    phase 8, `10_OBSIDIAN_HARDENING.md`), persistent dedup index size, and
+    the default-deny indexing boundary. Opt-in only via `takkub doctor
+    --obsidian` (never part of `run_all_checks()`'s default tuple) — most
+    installs have no vault configured, and that is expected, not broken.
+    """
+    try:
+        from .obsidian_boundary import ALLOWLIST_PREFIXES, DENYLIST_PREFIXES
+        from .obsidian_dedup import count as dedup_count
+        from .vault_mirror import _resolve_vault_dir
+    except Exception as e:
+        return [Finding("obsidian", "modules", Status.INFO, f"obsidian modules unavailable: {e}")]
+
+    vault = _resolve_vault_dir()
+    if vault is None:
+        return [
+            Finding(
+                "obsidian",
+                "vault",
+                Status.INFO,
+                "no vault found (checked $TAKKUB_VAULT_DIR and ~/second-brain, neither has a "
+                "01-Projects/ folder) — the vault mirror is opt-in; this is expected on most "
+                "machines",
+            )
+        ]
+
+    findings = [Finding("obsidian", "vault", Status.OK, str(vault))]
+
+    scanned = 0
+    missing = 0
+    for sub in ("01-Projects", "02-Areas"):
+        d = vault / sub
+        if not d.is_dir():
+            continue
+        for md in d.rglob("*.md"):
+            scanned += 1
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if not text.startswith("---\n") or "knowledge_id:" not in text:
+                missing += 1
+
+    if scanned == 0:
+        findings.append(Finding("obsidian", "canonical-metadata", Status.INFO, "no notes yet"))
+    elif missing == 0:
+        findings.append(
+            Finding(
+                "obsidian",
+                "canonical-metadata",
+                Status.OK,
+                f"{scanned} note(s), all carry canonical frontmatter",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "obsidian",
+                "canonical-metadata",
+                Status.WARN,
+                f"{missing}/{scanned} note(s) predate canonical metadata (#365 phase 8)",
+                fix_hint="opt-in only, never automatic — "
+                "`python -m agent_takkub.obsidian_backfill <project>`",
+            )
+        )
+
+    findings.append(
+        Finding("obsidian", "dedup-index", Status.OK, f"{dedup_count()} knowledge_id(s) tracked")
+    )
+    findings.append(
+        Finding(
+            "obsidian",
+            "boundary",
+            Status.OK,
+            f"allow={list(ALLOWLIST_PREFIXES)} deny={list(DENYLIST_PREFIXES)}",
+        )
+    )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (

@@ -28,9 +28,25 @@ import tempfile
 import time
 from datetime import datetime
 
+from . import obsidian_dedup
 from .config import REPO_ROOT
+from .obsidian_metadata import TRUST_AUTO, TRUST_DISTILLED, NoteMetadata
+from .project_identity import resolve_project_id
 
 _distill_log = logging.getLogger(__name__)
+
+
+def _safe_project_id(project: str) -> str:
+    """`project_identity.resolve_project_id`, degrading to the raw string
+    on an invalid name — canonical-metadata writers must never raise just
+    because a caller's project string fails `validate_name`'s stricter
+    check; the existing `validate_name` call each writer already makes
+    before touching disk is what actually rejects unsafe input."""
+    try:
+        return resolve_project_id(project)
+    except ValueError:
+        return project
+
 
 # Where to look for the Obsidian vault that mirrors cockpit decision
 # logs. Resolution order:
@@ -143,8 +159,12 @@ def _render_decision_note(
     vault mirror. Single source of truth so the two copies don't drift.
 
     Body layout (Obsidian-friendly):
-      - YAML frontmatter: role / project / date / tags → enables
-        Dataview queries and `tag:#session` filters.
+      - YAML frontmatter: role / project / date / tags, plus canonical
+        metadata (`knowledge_id` / `project_id` / `source` / `kind` /
+        `trust` / `content_hash` / `created_at` / `updated_at` — #365
+        phase 8) → enables Dataview queries, `tag:#session` filters, and
+        a stable identity independent of the (mutable) `project` display
+        string.
       - `[[01-Projects/<project>|<project>]]` backlink in body so the
         graph view clusters each session under its project page.
       - Plain markdown `## Note` block so events.log/hot.md scrapers
@@ -154,16 +174,26 @@ def _render_decision_note(
         one `less -R` away.
     """
     iso = now.isoformat(timespec="seconds")
+    scrubbed = _scrub_note(note)
+    meta = NoteMetadata.new(
+        project_id=_safe_project_id(project),
+        source="takkub-done",
+        kind="session",
+        trust=TRUST_AUTO,
+        text=scrubbed,
+        now=now,
+    )
     body = (
         f"---\n"
         f"role: {role}\n"
         f"project: {project}\n"
         f"date: {iso}\n"
         f"tags: [session, {role}, {project}]\n"
-        f"---\n\n"
+        + "".join(f"{line}\n" for line in meta.frontmatter_lines())
+        + "---\n\n"
         f"# {role} done · {iso}\n\n"
         f"**Role:** {role}\n\n"
-        f"## Note\n\n{_scrub_note(note)}\n"
+        f"## Note\n\n{scrubbed}\n"
     )
     if transcript_path:
         try:
@@ -450,43 +480,95 @@ def _moc_for_note(note: str) -> str | None:
     return None
 
 
-def _scaffold_moc(vault: pathlib.Path, rel_path: str, content: str) -> None:
-    """Create a MOC stub at ``vault/rel_path`` if it does not yet exist."""
+# project_id shared by every MOC page — MOC content spans multiple
+# projects by design (bug-patterns/architecture-decisions are cross-
+# project indexes), so there is no single owning project_id to resolve.
+_MOC_PROJECT_ID = "_global"
+
+
+def _scaffold_moc(
+    vault: pathlib.Path, rel_path: str, content: str, *, now: datetime | None = None
+) -> None:
+    """Create a MOC stub at ``vault/rel_path`` if it does not yet exist,
+    with canonical frontmatter (#365 phase 8) prepended."""
     moc = vault / rel_path
     if moc.is_file():
         return
+    meta = NoteMetadata.new(
+        project_id=_MOC_PROJECT_ID,
+        source="distill",
+        kind="moc",
+        trust=TRUST_DISTILLED,
+        text=content,
+        now=now,
+    )
+    fm = "---\n" + "".join(f"{line}\n" for line in meta.frontmatter_lines()) + "---\n\n"
     try:
         moc.parent.mkdir(parents=True, exist_ok=True)
-        moc.write_text(content, encoding="utf-8")
+        moc.write_text(fm + content, encoding="utf-8")
     except OSError:
         pass
 
 
-def _ensure_project_page(vault: pathlib.Path, project: str) -> pathlib.Path:
-    """Return path to ``01-Projects/<project>.md``, creating a minimal stub if absent."""
+def _ensure_project_page(
+    vault: pathlib.Path, project: str, *, now: datetime | None = None
+) -> pathlib.Path:
+    """Return path to ``01-Projects/<project>.md``, creating a minimal stub
+    (with canonical frontmatter — #365 phase 8) if absent. An existing page
+    is returned untouched, frontmatter or not — this never rewrites a
+    note already in the vault."""
     page = vault / "01-Projects" / f"{project}.md"
     if not page.is_file():
         try:
-            page.parent.mkdir(parents=True, exist_ok=True)
-            page.write_text(
-                f"# {project}\n\n{_CURATED_SECTION}\n\n{_CURATED_INTRO}\n",
-                encoding="utf-8",
+            body = f"# {project}\n\n{_CURATED_SECTION}\n\n{_CURATED_INTRO}\n"
+            meta = NoteMetadata.new(
+                project_id=_safe_project_id(project),
+                source="distill",
+                kind="project",
+                trust=TRUST_DISTILLED,
+                text=body,
+                now=now,
             )
+            fm = "---\n" + "".join(f"{line}\n" for line in meta.frontmatter_lines()) + "---\n\n"
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(fm + body, encoding="utf-8")
         except OSError:
             pass
     return page
 
 
-def _append_decision_entry(page: pathlib.Path, entry: str) -> None:
+_UPDATED_AT_RE = re.compile(r"^updated_at: .*$", re.MULTILINE)
+
+
+def _touch_frontmatter_updated_at(text: str, now: datetime) -> str:
+    """Bump an existing ``updated_at:`` frontmatter line to *now*, inside
+    the leading ``---`` block only. A page with no frontmatter (pre-#365
+    phase 8, or hand-authored) is returned unchanged — this never adds a
+    frontmatter block to a note that doesn't already have one; that is
+    the opt-in backfill's job (`obsidian_backfill.py`), never automatic."""
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return text
+    head, tail = text[: end + 4], text[end + 4 :]
+    head, n = _UPDATED_AT_RE.subn(f"updated_at: {now.isoformat(timespec='seconds')}", head)
+    return (head + tail) if n else text
+
+
+def _append_decision_entry(page: pathlib.Path, entry: str, *, now: datetime | None = None) -> bool:
     """Append *entry* under ``## Decisions & Learnings`` in *page*.
 
     Creates the section at EOF if the heading is absent. Skips the write
-    when *entry* already appears verbatim (idempotent). Raises OSError on
-    filesystem failure — callers must handle.
+    when *entry* already appears verbatim (idempotent) — returns ``False``
+    in that case, ``True`` when something new was actually written (the
+    signal callers use to decide whether to also record the fact into the
+    persistent dedup index, #365 phase 8). Raises OSError on filesystem
+    failure — callers must handle.
     """
     text = page.read_text(encoding="utf-8") if page.is_file() else ""
     if entry in text:
-        return  # idempotent — already written
+        return False  # idempotent — already written
     if _CURATED_SECTION in text:
         sec_start = text.index(_CURATED_SECTION)
         sec_end = text.find("\n## ", sec_start + len(_CURATED_SECTION))
@@ -496,6 +578,7 @@ def _append_decision_entry(page: pathlib.Path, entry: str) -> None:
             new_text = text[:sec_end].rstrip("\n") + "\n" + entry + "\n" + text[sec_end:]
     else:
         new_text = text.rstrip("\n") + f"\n\n{_CURATED_SECTION}\n\n{_CURATED_INTRO}\n\n{entry}\n"
+    new_text = _touch_frontmatter_updated_at(new_text, now or datetime.now())
     tmp_path: pathlib.Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -516,6 +599,7 @@ def _append_decision_entry(page: pathlib.Path, entry: str) -> None:
             except OSError:
                 pass
         raise
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -698,12 +782,33 @@ def distill_session_facts(
         moc_link = ""
         if cat is not None:
             moc_rel, moc_name, moc_content = _MOC_TEMPLATES[cat]
-            _scaffold_moc(vault, moc_rel, moc_content)
+            _scaffold_moc(vault, moc_rel, moc_content, now=now)
             moc_link = f" → [[{moc_rel[:-3]}|{moc_name}]]"
 
         entry = f"- `{iso}` **{role}** — {scrubbed}{moc_link}"
-        page = _ensure_project_page(vault, project)
-        _append_decision_entry(page, entry)
+        project_id = _safe_project_id(project)
+        meta = NoteMetadata.new(
+            project_id=project_id,
+            source="distill",
+            kind="fact",
+            trust=TRUST_DISTILLED,
+            text=entry,
+            now=now,
+        )
+        entry_with_id = f"{entry} <!-- kid:{meta.knowledge_id} -->"
+        page = _ensure_project_page(vault, project, now=now)
+        wrote = _append_decision_entry(page, entry_with_id, now=now)
+        if wrote:
+            obsidian_dedup.record_write(
+                meta.knowledge_id,
+                path=str(page),
+                project_id=project_id,
+                source=meta.source,
+                kind=meta.kind,
+                content_hash=meta.content_hash,
+                created_at=meta.created_at,
+                updated_at=meta.updated_at,
+            )
         return True
     except Exception as exc:
         _distill_log.warning("distill_error project=%s role=%s: %r", project, role, exc)
