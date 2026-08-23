@@ -1431,49 +1431,61 @@ class LeadInboxMixin:
             except Exception:
                 _pane_ready_now = False
             if not account_pending_warned[0]:
-                if _pane_ready_now:
-                    # Same "ready wins" reasoning as the auth-failure check
-                    # below — a CLI genuinely stuck on its own account gate
-                    # can never reach its own ready prompt.
-                    account_pending_streak[0] = 0
-                else:
-                    # #346: checked on every poll like the prompt-block and
-                    # auth-failure checks — fails fast instead of riding out
-                    # the ordinary busy/stall path, which could take up to
-                    # BUSY_WAIT_CEILING_SEC to say anything concrete about a
-                    # pane whose provider will never clear this on its own.
-                    try:
-                        _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
-                        _account_reason = pane.session.account_pending_reason(_provider_ap)
-                        if not isinstance(_account_reason, str):
-                            # Defensive: same unconfigured-mock guard as the
-                            # auth-failure check below.
-                            _account_reason = None
-                    except Exception:
+                # (#363 regression) Deliberately does NOT gate on
+                # `_pane_ready_now` the way the auth-failure check below
+                # still does. That "ready wins" shortcut assumed
+                # `is_at_ready_prompt()` is trustworthy proof the CLI cleared
+                # its own gate — but `is_at_ready_prompt()` reads the tight
+                # `_ready_region` (6 rows), and gemini/agy's real account-
+                # pending banner plus a realistic footer chrome row pushes the
+                # banner out of that window while "? for shortcuts" alone
+                # stays inside it, so `is_at_ready_prompt()` misread READY on
+                # a pane still frozen on the banner. That falsely reset this
+                # streak to 0 every single poll, so it could never reach
+                # `_AUTH_FAILURE_CONFIRM_POLLS` and the pane never confirmed
+                # `blocked:provider-account` — the task rode the ordinary
+                # ready path down to a blind, silently-lost paste instead
+                # (issue #363). `account_pending_reason()` now scans its own
+                # wider `_BOOT_MARKER_TAIL_ROWS` window (same fix shape as
+                # #284's boot marker) and is grace-gated on
+                # `seconds_since_output()`, so it's the reliable signal here
+                # — checked on every poll like the prompt-block check above,
+                # fails fast instead of riding out the ordinary busy/stall
+                # path, which could take up to BUSY_WAIT_CEILING_SEC to say
+                # anything concrete about a pane whose provider will never
+                # clear this on its own.
+                try:
+                    _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
+                    _account_reason = pane.session.account_pending_reason(_provider_ap)
+                    if not isinstance(_account_reason, str):
+                        # Defensive: same unconfigured-mock guard as the
+                        # auth-failure check below.
                         _account_reason = None
-                    if _account_reason:
-                        account_pending_streak[0] += 1
-                    else:
-                        account_pending_streak[0] = 0
-                    if _account_reason and account_pending_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
-                        account_pending_warned[0] = True
-                        sent[0] = True
-                        _log_event(
-                            "task_deliver_account_pending",
-                            project=self._resolve_project(project),
-                            role=role_name,
-                            provider=_provider_ap,
-                            reason=_account_reason,
-                        )
-                        self._recover_account_pending_pane(
-                            role_name,
-                            project,
-                            pane,
-                            task,
-                            provider=_provider_ap,
-                            reason=_account_reason,
-                        )
-                        return
+                except Exception:
+                    _account_reason = None
+                if _account_reason:
+                    account_pending_streak[0] += 1
+                else:
+                    account_pending_streak[0] = 0
+                if _account_reason and account_pending_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
+                    account_pending_warned[0] = True
+                    sent[0] = True
+                    _log_event(
+                        "task_deliver_account_pending",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        provider=_provider_ap,
+                        reason=_account_reason,
+                    )
+                    self._recover_account_pending_pane(
+                        role_name,
+                        project,
+                        pane,
+                        task,
+                        provider=_provider_ap,
+                        reason=_account_reason,
+                    )
+                    return
             if not auth_failure_warned[0]:
                 if _pane_ready_now:
                     # A CLI genuinely stuck on auth can never reach its own

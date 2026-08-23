@@ -11,8 +11,19 @@ problem, so it must:
      `_recover_account_pending_pane` instead.
   3. Warn Lead with wording that does NOT say "log back in" (there is
      nothing to log into).
-  4. Let a ready prompt win over a lingering marker, same "screen is
-     definitive" reasoning as the auth-failure tier.
+  4. (#363 regression fix, was previously "let a ready prompt win over a
+     lingering marker") NOT let a stale/misread `is_at_ready_prompt()` verdict
+     suppress a genuine, persistent `account_pending_reason()` match — the
+     original #346 "ready wins" gate assumed `is_at_ready_prompt()` (tight
+     6-row `_ready_region`) was trustworthy proof the CLI had cleared its own
+     gate, but the real gemini/agy banner plus a realistic footer pushes it
+     out of that window while enough footer chrome remains for
+     `is_at_ready_prompt()` to misread READY — which used to reset this
+     streak to 0 every poll and let the task ride the ordinary ready path
+     down to a silent, blind-pasted loss (issue #363). Since
+     `account_pending_reason()` now scans its own wider window
+     (`_BOOT_MARKER_TAIL_ROWS`, pty_session.py) and is grace-gated on
+     `seconds_since_output()`, it is checked unconditionally every poll.
 """
 
 from __future__ import annotations
@@ -104,8 +115,12 @@ def _written_strings(session: MagicMock) -> list[str]:
     ]
 
 
-class TestReadyPromptWinsOverStaleAccountMarker:
-    def test_ready_prompt_delivers_normally_despite_marker_every_poll(
+class TestAccountPendingIgnoresStaleReadyFlicker:
+    """#363 regression: a stale/misread `is_at_ready_prompt()` must not
+    suppress a persistent `account_pending_reason()` match — see the module
+    docstring's point 4."""
+
+    def test_ready_prompt_true_every_poll_does_not_suppress_confirmation(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
         lead = _pane(_live_session())
@@ -116,14 +131,21 @@ class TestReadyPromptWinsOverStaleAccountMarker:
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
-        with patch("agent_takkub.lead_inbox._log_event"):
+        with (
+            patch.object(orch, "_recover_broken_pane") as recover_broken,
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
             orch._send_when_ready("backend", "run smoke", max_wait_ms=100_000, project="P")
 
         warnings = _written_strings(lead.session)
-        assert not any("[account-pending]" in m for m in warnings)
-        assert backend.session.write.called
+        account_warnings = [m for m in warnings if "[account-pending]" in m]
+        assert len(account_warnings) == 1
+        recover_broken.assert_called_once()
+        # Never blind-pastes, even though is_at_ready_prompt() claimed ready
+        # on every single poll — exactly the #363 misread scenario.
+        assert not backend.session.write.called
 
-    def test_ready_prompt_resets_streak_so_a_later_relapse_needs_its_own_confirmation(
+    def test_single_ready_flicker_mid_streak_does_not_reset_it(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
         lead = _pane(_live_session())
@@ -136,9 +158,6 @@ class TestReadyPromptWinsOverStaleAccountMarker:
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
         with (
-            # Mock the SHARED close+respawn mechanic, not
-            # _recover_account_pending_pane itself — that method's own body
-            # is what fires the Lead notice being asserted on below.
             patch.object(orch, "_recover_broken_pane"),
             patch("agent_takkub.lead_inbox._log_event"),
         ):
@@ -147,10 +166,11 @@ class TestReadyPromptWinsOverStaleAccountMarker:
         warnings = _written_strings(lead.session)
         account_warnings = [m for m in warnings if "[account-pending]" in m]
         assert len(account_warnings) == 1
-        assert (
-            backend.session.account_pending_reason.call_count
-            == n_before + _AUTH_FAILURE_CONFIRM_POLLS
-        )
+        # The account-pending check no longer even reads is_at_ready_prompt's
+        # verdict, so a single flicker part-way through does not add any
+        # extra polls before confirming — it fires at exactly the streak
+        # threshold regardless of where the flicker landed.
+        assert backend.session.account_pending_reason.call_count == _AUTH_FAILURE_CONFIRM_POLLS
 
 
 class TestAccountPendingRequiresConsecutivePolls:

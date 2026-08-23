@@ -12,7 +12,7 @@ from agent_takkub.provider_spec import (
     is_ready_marker_calibrated,
     uncalibrated_providers,
 )
-from agent_takkub.pty_session import _READY_TAIL_ROWS, PtySession
+from agent_takkub.pty_session import _BOOT_MARKER_TAIL_ROWS, _READY_TAIL_ROWS, PtySession
 
 
 class _FakeScreen:
@@ -132,6 +132,59 @@ class TestAccountPendingReason:
         lines = ["", "Verifying your account...", ""]
         reason = _account_pending_reason(lines, "claude", seconds_since_output=10_000)
         assert reason is None
+
+    def test_fires_when_a_realistic_footer_pushes_the_banner_past_ready_tail_rows(self) -> None:
+        # #363 regression: the original #346 fix scanned `_ready_region`
+        # (_READY_TAIL_ROWS=6 rows). The live-captured screen that shipped
+        # with #346 (test_fires_for_the_full_live_captured_banner above) had
+        # nothing below the banner but a bare ">" prompt, so it always fit.
+        # A real agy composer renders more chrome below the banner — a
+        # bordered input box plus its own status/hint row — which pushes the
+        # banner entirely out of a 6-row window while leaving just enough of
+        # that chrome inside it for `is_at_ready_prompt()` to misread READY.
+        # Proven structurally: this exact screen used to return None here
+        # (banner outside `_ready_region`) even though the pane was plainly
+        # still frozen on the banner one line further up.
+        lines = [
+            "⚠ Verifying your account...",
+            "  We're finishing verifying your account eligibility.",
+            "  This usually takes a moment. Please try again shortly.",
+            "",
+            "─" * 40,
+            "> ",
+            "─" * 40,
+            "ctx: 12% used  |  tips: ctrl+c to exit",
+            "? for shortcuts            Gemini 3.7 Flash (High)",
+        ]
+        assert len(lines) - _READY_TAIL_ROWS > 1  # sanity: banner really is out of the tight window
+        assert len(lines) - _BOOT_MARKER_TAIL_ROWS <= 0  # sanity: still inside the wider window
+        reason = _account_pending_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason == "verifying your account"
+
+    def test_fires_for_the_issue_363_quoted_capture_with_realistic_footer(self) -> None:
+        # #363's own report quotes the live banner verbatim (own wording, "└"
+        # continuation glyph, wrapped onto one description line rather than
+        # #346's two) — the raw transcript file the task pointed at
+        # (runtime/sessions/2026-08-23/agent-takkub/gemini-142209.transcript.log)
+        # had already rotated out of runtime/sessions by the time of this fix,
+        # so this fixture is built from the issue body's own quoted capture
+        # instead of re-reading that file.
+        lines = [
+            "⚠ Verifying your account...",
+            "  └ We're finishing verifying your account eligibility. This usually "
+            "takes a moment. Please try again shortly.",
+            "",
+            "─" * 40,
+            "> ",
+            "─" * 40,
+            "? for shortcuts            Gemini 3.7 Flash (High)",
+        ]
+        reason = _account_pending_reason(
+            lines, "gemini", seconds_since_output=AUTH_TRANSIENT_GRACE_SEC
+        )
+        assert reason == "verifying your account"
 
     def test_is_not_reported_as_an_auth_failure_reason(self) -> None:
         # #346: moved OUT of gemini's auth_transient_markers entirely — the
