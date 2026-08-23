@@ -6,6 +6,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **#364 lever 4 — node/MCP ต่อ pane: วัดจริงแล้วไม่ใช่ leak แต่เจอบั๊ก stale MCP variant** — วัดจาก process tree:
+  dev instance ทุก pane node/mcp = 0 MB (role policy + graft worktree-exclusion ทำงานถูก) · pane โหมด browser จริง =
+  playwright (~980 MB รวม chrome tree) + chrome-devtools (~369 MB) + graft (~182 MB) ≈ 1.6 GB **legit** และหายสะอาดเมื่อปิด pane
+  · graft-only baseline ≈ 180 MB · **บั๊กจริง**: `pane_tools_policy.save_policy()` ไม่เคย regen `shared-mcp-<role>.json`
+  (ไฟล์ที่ `--mcp-config` ของ claude spawn อ่านจริง) ต้องพึ่ง caller เรียก `regen_role_variants()` เองทุกจุด — เจอ drift คาดิสก์:
+  policy บอก context7 แต่ variant ยังเป็น graft เดิม; role ที่ถูก revoke browser MCP จะยัง spawn node/chrome ทิ้งไว้ 350 MB–1 GB+
+  ทุก pane จนกว่าจะมีอะไรมา regen → `save_policy()` regen เองที่ต้นทาง + regression test ที่ fail ก่อนแก้ · `doctor --ram`
+  เพิ่ม `check_ram_node_children` WARN เมื่อ pane ไหน node/mcp > 350 MB บอก role/project/pid · lazy-start MCP (3ข) พิสูจน์จาก
+  ข้อมูลจริงไม่ได้ (claude CLI closed binary) → flag เป็น follow-up ใน #103 ไม่ฟันธง
+  + tests: `test_pane_tools_policy.py::test_save_policy_regenerates_stale_variant` · `test_doctor_ram_live.py`
+
 - **Phase 10 ชิ้น 1b — dual-write state writers ตาม step 5 mapping จริง** (#362) — local-issues · issue-dedup ·
   autoresume · remote-sessions (`auto_issue_capture`/`issues`/`auto_resume`/`remote/session_store`) ผ่าน helper
   `dual_write.py` เดิม · **ตัดสินใจบันทึกไว้**: runtime fan-out dirs (sessions/tasks/role-memory/knowledge — step 8) **ไม่
