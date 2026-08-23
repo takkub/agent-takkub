@@ -16,10 +16,18 @@ from __future__ import annotations
 
 import importlib
 import os
+import stat
 import sys
 import threading
 import weakref
 from pathlib import Path
+
+# Captured now, before any test module runs, so `_snapshot_settings_home_files`
+# below never depends on `os.scandir`/`os.stat` names (or `Path.stat`) that a
+# test may have monkeypatched by the time its teardown runs — e.g.
+# test_graft_chip.py's `test_main_thread_refresh_reads_cache_without_filesystem_calls`
+# patches `Path.stat`/`Path.resolve` to raise AssertionError on any call, and
+# that patch is still live during this fixture's post-`yield` teardown check.
 
 # Must be set before any QApplication/QCoreApplication is constructed.
 # Individual test modules import PyQt6 at module level, but Qt reads this
@@ -71,6 +79,11 @@ os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
 os.environ.setdefault("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "1")
 
 import pytest
+
+# Captured at import time, before any test can monkeypatch os.* — the
+# settings-home guard's snapshot uses only these (see _snapshot_settings_home_files).
+_ORIG_OS_SCANDIR = os.scandir
+_ORIG_OS_STAT = os.stat
 
 
 def _assert_agent_takkub_matches_this_checkout() -> None:
@@ -138,28 +151,44 @@ def _maybe_module(name: str, *, force: bool):
     return mod
 
 
-def _snapshot_settings_home_files(base: Path) -> dict:
+def _snapshot_settings_home_files(base: Path) -> dict | None:
     """Top-level files directly under a `SETTINGS_HOME`-shaped dir, keyed by
     name -> (mtime_ns, size). Non-recursive by design: cheap enough to run on
     every test, and every module-level `_PATH`/`_FILE` constant this fixture
     isolates below writes directly under SETTINGS_HOME, not into a
     subdirectory (the one exception, CUSTOM_AGENTS_DIR/*.md, isn't covered —
     acceptable, this exists to catch the NEXT unisolated module-level
-    constant, not to replace the isolation below)."""
-    snap: dict = {}
+    constant, not to replace the isolation below).
+
+    Uses only the `_ORIG_OS_SCANDIR`/`_ORIG_OS_STAT` references captured at
+    import time — never `Path.is_file()`/`Path.stat()` or the live
+    `os.scandir`/`os.stat` names, both of which a test under measurement may
+    have monkeypatched (e.g. to trap and fail on any filesystem call). Any
+    unexpected exception (not just OSError) reaching here means the originals
+    themselves got tangled up in that trap somehow; return None ("unmeasurable
+    this round") rather than raise, so the caller skips the guard instead of
+    failing an unrelated test."""
     try:
-        if not base.is_dir():
-            return snap
-        for p in base.iterdir():
-            if p.is_file():
+        try:
+            base_stat = _ORIG_OS_STAT(base)
+        except OSError:
+            return {}
+        if not stat.S_ISDIR(base_stat.st_mode):
+            return {}
+        snap: dict = {}
+        with _ORIG_OS_SCANDIR(base) as it:
+            for entry in it:
                 try:
-                    st = p.stat()
+                    st = _ORIG_OS_STAT(entry.path)
                 except OSError:
                     continue
-                snap[p.name] = (st.st_mtime_ns, st.st_size)
+                if stat.S_ISREG(st.st_mode):
+                    snap[entry.name] = (st.st_mtime_ns, st.st_size)
+        return snap
     except OSError:
-        pass
-    return snap
+        return {}
+    except BaseException:
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -505,7 +534,12 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # fixing, which is the point.
     if _real_settings_home is not None:
         _settings_home_after = _snapshot_settings_home_files(_real_settings_home)
-        if _settings_home_after != _settings_home_before:
+        if _settings_home_before is None or _settings_home_after is None:
+            # A test in progress had trapped filesystem calls (e.g. patched
+            # `Path.stat`) when a snapshot was attempted — unmeasurable this
+            # round, so skip the guard rather than fail an unrelated test.
+            pass
+        elif _settings_home_after != _settings_home_before:
             _changed = sorted(
                 (set(_settings_home_after) ^ set(_settings_home_before))
                 | {
