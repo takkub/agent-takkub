@@ -1056,6 +1056,10 @@ class Orchestrator(
     # refresh_project(project_ns) slot instead of polling the state file, so
     # the dock repaints the instant the write it's showing actually lands.
     ledgerChanged = pyqtSignal(str)  # project_ns
+    # #365 phase 2 — a pane's "Open in Takkub" click (terminal path, or
+    # Explorer). register_pane binds project_name via closure over each
+    # pane's openInEditorRequested; main_window routes this to EditorHost.
+    openFileInEditorRequested = pyqtSignal(str, str)  # project, absolute path
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

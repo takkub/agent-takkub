@@ -18,6 +18,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   junction ที่ชี้ออกนอก root หลุดผ่าน containment เงียบๆ ถ้า gate เฉพาะ symlink-flagged → re-verify containment ทุก entry
   (พิสูจน์ด้วย junction จริงผ่าน `worktree_manager._make_link`) · keepalive/project-switch เดิมไม่เปลี่ยน
   + tests: `tests/test_project_file_index.py` · `tests/test_project_explorer.py` · `tests/test_project_tab_explorer.py`
+- **Workspace 1.2.0 เฟส 2 — Monaco read-only** (#365) — `editor_widget.py` (`EditorHost`) + `static/editor/index.html`:
+  Monaco WebView **1 ตัวทั้งแอป** ใน `QDockWidget` นอก `ProjectTab` (RAM hard rule §4 override ต่อแผนภายนอกที่ขอ 1
+  ตัวต่อโปรเจกต์) — lazy create ตอนเปิดไฟล์แรก, `deleteLater` เต็มรูปแบบเมื่อปิด tab ครบ (ไม่ใช้ = +0) · bundle Monaco
+  local ไม่มี CDN (`static/editor/vendor/` ว่างในรอบนี้ รอ devops packaging, degrade เป็น read-only `<pre>` viewer
+  ถ้ายังไม่มี bundle) · QWebChannel bridge: `requestDiff`/`openExternally`/`revealInExplorer`/`notifyTabClosed`/
+  `askAgent` (placeholder เฟส 3+) · internal Monaco tabs ในตัวเดียว + diff-vs-HEAD เป็น per-tab view toggle (ไม่ใช่
+  tab แยก) · read-only fallback ไฟล์ binary/เกิน 2MB (cap) · ทุก path ผ่าน `project_file_index.resolve_and_contain`
+  เดิม, file read + git diff รันบน worker thread เสมอ · Explorer "Open in Takkub" (เปิดใช้จากเฟส 1 placeholder) +
+  double-click → editor · terminal path-click เปลี่ยนจากเปิดด้วย OS app เป็น "Open in Takkub" (exec-extension guard
+  เดิมไม่เปลี่ยน) ผ่าน `AgentPane.openInEditorRequested` → `Orchestrator.openFileInEditorRequested` · ยังไม่เขียนไฟล์
+  (ไม่มี `saveFile` slot, Monaco `readOnly: true` ทุก model — Ctrl+S โชว์ toast แทน) เฟส 3 ค่อยเพิ่ม
+  + tests: `tests/test_editor_widget.py` (pure read/diff helpers + `EditorHost` lazy-create/single-instance/destroy
+  lifecycle ผ่าน stub `view_factory` — QWebEngineView จริงชน pytest abort บนเครื่องนี้แม้ offscreen)
 
 ## [v1.1.0] - 2026-08-23
 

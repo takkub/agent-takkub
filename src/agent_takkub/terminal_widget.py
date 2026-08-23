@@ -282,6 +282,7 @@ class TerminalWidget(QWidget):
     inputBytes = pyqtSignal(bytes)
     resized = pyqtSignal(int, int)
     fontSizeChanged = pyqtSignal(int)
+    openInEditorRequested = pyqtSignal(str)  # absolute path — #365 phase 2 "Open in Takkub"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -669,9 +670,9 @@ class TerminalWidget(QWidget):
         self._log_link_event("open_url", u)
 
     def _on_open_path(self, raw: str) -> None:
-        """Open a clicked file path with its OS default app (html→browser,
-        md→editor, png→viewer). Relative paths resolve against the pane cwd
-        first, then the cockpit repo root."""
+        """Handle a clicked file path (html→browser for exec-flagged files
+        via reveal, everything else → the built-in editor). Relative paths
+        resolve against the pane cwd first, then the cockpit repo root."""
         from .config import REPO_ROOT
 
         bases = (str(REPO_ROOT),)
@@ -690,7 +691,10 @@ class TerminalWidget(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.parent)))
             self._log_link_event("open_path_exec_revealed", str(resolved))
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+        # #365 phase 2: "Open in Takkub" — a clicked path opens in the
+        # built-in Monaco editor (routed via AgentPane → orchestrator →
+        # MainWindow's EditorHost) instead of round-tripping to an OS app.
+        self.openInEditorRequested.emit(str(resolved))
         self._log_link_event("open_path", str(resolved))
 
     def _log_link_event(self, kind: str, value: str) -> None:

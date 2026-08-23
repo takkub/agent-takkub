@@ -61,6 +61,7 @@ from .config import (
     set_active_project,
     set_open_tabs,
 )
+from .editor_widget import EditorHost
 from .limit_panel import LimitPanelMixin
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
@@ -248,6 +249,28 @@ class MainWindow(
 
         outer.addWidget(self.tabs, 1)
 
+        # ── editor dock: the ONE app-wide Monaco WebView (#365 phase 2) ──
+        # Master-plan RAM hard rule §4: exactly one Monaco WebView for the
+        # whole app, lazily created on first file open and fully destroyed
+        # once every internal tab closes — see editor_widget.py's module
+        # docstring. The QDockWidget shell always exists (same pattern as
+        # _logs_dock/_tasks_dock below); only the WebView inside it comes
+        # and goes. Built before the first ProjectTab so _wire_project_tab
+        # (called immediately below) can connect to self._editor_host.
+        self._editor_dock = QDockWidget("Editor", self)
+        self._editor_dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+        editor_container = QWidget()
+        self._editor_dock.setWidget(editor_container)
+        self._editor_dock.setMinimumWidth(480)
+        self._editor_dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._editor_dock)
+        self._editor_host = EditorHost(editor_container, parent=self)
+        self._editor_host.fileOpened.connect(self._on_editor_file_opened)
+        self._editor_host.emptied.connect(self._editor_dock.hide)
+        self.orch.openFileInEditorRequested.connect(self._editor_host.open_file)
+
         # Build the initial tab for the active project. Order matters: adding the
         # ProjectTab to the stack re-parents it; if a QWebEngineView were already
         # nested inside when that happens, Chromium's renderer crashes silently
@@ -405,12 +428,20 @@ class MainWindow(
                 role, proj, t
             )
         )
+        # Explorer double-click / "Open in Takkub" (#365 phase 2) → the one
+        # app-wide EditorHost, same destination as the terminal-path-click
+        # route wired through orch.openFileInEditorRequested above.
+        tab.openFileRequested.connect(self._editor_host.open_file)
 
     def _on_tab_pane_close_requested(self, role: str, project: str, tab: ProjectTab) -> None:
         pane = tab.teammate_panes.get(role)
         if not self.orch.confirm_manual_pane_close(pane, role, project):
             return
         self.orch.close(role, project=project)
+
+    def _on_editor_file_opened(self, _project_name: str, _path: str) -> None:
+        self._editor_dock.show()
+        self._editor_dock.raise_()
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
         if role_name == LEAD.name:

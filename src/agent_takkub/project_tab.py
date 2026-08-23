@@ -111,6 +111,10 @@ class ProjectTab(QWidget):
     # remove_teammate_tab — so there is exactly one teardown path, no race.
     paneCloseRequested = pyqtSignal(str)
 
+    # Explorer double-click or "Open in Takkub" → MainWindow routes this to
+    # the app-wide EditorHost (#365 phase 2). Carries (project_name, path).
+    openFileRequested = pyqtSignal(str, str)
+
     def __init__(
         self,
         project_name: str,
@@ -180,6 +184,9 @@ class ProjectTab(QWidget):
                 project_name,
                 exc,
             )
+        if self.explorer is not None:
+            self.explorer.fileActivated.connect(self._on_explorer_open_file)
+            self.explorer.openInTakkubRequested.connect(self._on_explorer_open_file)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -270,6 +277,9 @@ class ProjectTab(QWidget):
 
     def has_teammates(self) -> bool:
         return bool(self.teammate_panes)
+
+    def _on_explorer_open_file(self, path: str) -> None:
+        self.openFileRequested.emit(self.project_name, path)
 
     def _strip_tab_close_button(self, index: int) -> None:
         bar = self.pane_tabs.tabBar()

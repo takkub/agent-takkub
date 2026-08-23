@@ -1,4 +1,4 @@
-# ADR: Workspace Shell + Project Explorer (#365 phase 0–1)
+# ADR: Workspace Shell + Project Explorer (#365 phase 0–1, phase 2)
 
 > อ่านคู่กับ `docs/plans/2026-08-23-master-dev-plan.md` §4 และ
 > `docs/plans/workspace-1.2.0-design/` (18_MASTER_PROMPT, 02_TARGET_ARCHITECTURE,
@@ -91,3 +91,60 @@ deleting `project_explorer.py`/`project_file_index.py`, and clearing the
 `explorer/*` keys under the `agent-takkub`/`cockpit` QSettings store (harmless if left —
 they're only ever read by code that no longer exists) fully undoes phase 1 with zero data
 loss, since no other phase's code depends on these two modules yet.
+
+## Phase 2 — Monaco read-only
+
+**One Monaco WebView, not one per project.** `13_PERFORMANCE_AND_QT_RULES.md` rule 6 says
+"one Monaco Editor WebView *per project*, with internal file tabs"; the master dev plan's
+RAM hard rule (`2026-08-23-master-dev-plan.md` §4, explicitly binding "ต่อแผนภายนอก") overrides
+that to exactly **one WebView for the whole app**, lazily created on first file open and fully
+destroyed once every internal tab closes. `EditorHost` (new `editor_widget.py`) owns that
+lifecycle; `main_window.py` parks it in a `QDockWidget` outside every `ProjectTab` (same shell
+pattern as the existing `_logs_dock`/`_tasks_dock`), hidden until the first file opens.
+Switching projects switches the WebView's *content* (Monaco tabs/models), never the widget
+itself — avoids the reparent-after-paint Chromium crash the same way phase-1's per-project
+`ProjectExplorer` avoids it for its own tree.
+
+**Diff is a per-tab view toggle, not a second tab.** A file open in two places (source +
+diff-vs-HEAD) at once would need `EditorHost._open_paths` (path → project) to track two
+distinct keys for one real file, and closing either one first would be ambiguous for the
+"destroy when empty" RAM rule. Simpler: each open tab carries `viewMode: 'source' | 'diff'`
+and a lazily-fetched `diffModels` pair; a small "±" button on the tab flips between two shared
+editor instances (one `IStandaloneCodeEditor`, one `IStandaloneDiffEditor` — still just 2 DOM
+editors total, not N). `bridge.requestDiff(path)` only round-trips to Python the first time a
+tab's diff is opened; the JS-side toggle after that is free.
+
+**Monaco bundle presence is a runtime feature-detect, not a hard dependency.** No network
+access to vendor `monaco-editor` from this pane — `static/editor/vendor/` ships empty (see its
+README, left for devops packaging) and `index.html`'s AMD loader script is loaded dynamically
+with an `onerror`/timeout fallback. Missing bundle → the page still opens tabs, respects
+containment/size-cap/binary-detection, and serves a plain read-only `<pre>` view (no syntax
+highlight, no diff editor) instead of failing to load. This means phase 2 is fully testable and
+mergeable before devops's packaging step lands, and degrades the same way phase 1's
+`ProjectTab` degrades when `ProjectExplorer` construction fails (existing project convention,
+not a new pattern).
+
+**Terminal path-click now opens in the editor, not the OS default app.** `terminal_widget.py`'s
+`_on_open_path` (already gated by the M3#13 containment/exec-extension checks from phase 0's
+predecessor work) used to call `QDesktopServices.openUrl` directly; it now emits
+`openInEditorRequested` instead, forwarded through `AgentPane` → `Orchestrator.register_pane`
+(closure-binds the pane's project, mirroring how `inputBytes`/`closeRequested` are already
+wired there) → `MainWindow._editor_host.open_file`. The exec-extension guard is untouched
+(still reveals in the file manager, never hands an executable to an "open" verb); only the
+non-exec path changed destination. "Open externally" stays reachable from the Explorer's own
+context-menu action and from a button on the editor's binary/too-large placeholder tab.
+
+**Security boundary is the same containment gate, called from a new module.** `EditorHost`
+never re-implements path safety — every open/diff/reveal/open-externally call routes through
+`project_file_index.resolve_and_contain` against that project's configured roots, the identical
+gate `ProjectExplorer`'s context-menu actions already use. `project_file_index.py`'s "zero PyQt
+widget imports" contract (see that module's own docstring) is why `editor_widget.py` keeps its
+own small `_reveal_in_file_manager` copy instead of importing `ProjectExplorer._reveal` —
+promoting that helper into `project_file_index.py` would pull `QtGui`/`QtWidgets` into a module
+that's deliberately widget-free.
+
+**Known limitation (deferred, not silently dropped):** phase 2 is read-only end-to-end — there
+is no `saveFile` bridge slot, and every Monaco model is created with `readOnly: true`. Ctrl+S
+inside the editor shows a toast instead of writing. Phase 3 (`editor_service.py`,
+`file_watch_service.py`) owns atomic writes, dirty-state, and the mtime+size+sha256 conflict UI
+already speced in `04_MONACO_EDITOR_SPEC.md`.

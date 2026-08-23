@@ -33,6 +33,7 @@ class _FakeTerminalWidget(QWidget):
     inputBytes = pyqtSignal(bytes)
     resized = pyqtSignal(int, int)
     fontSizeChanged = pyqtSignal(int)
+    openInEditorRequested = pyqtSignal(str)
 
     def set_idle(self, idle: bool) -> None:
         pass
