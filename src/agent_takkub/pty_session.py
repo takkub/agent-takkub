@@ -2056,11 +2056,26 @@ class PtySession(QObject):
         only counts once the screen has been static for
         ``AUTH_TRANSIENT_GRACE_SEC`` (``seconds_since_output()``, the
         spinner-normalized clock), so an animating spinner next to this text
-        still reads as a normal cold boot, not a stuck gate."""
+        still reads as a normal cold boot, not a stuck gate.
+
+        #363 regression fix: scans `_BOOT_MARKER_TAIL_ROWS` (20 rows), NOT
+        the tight `_ready_region` (6 rows) the original #346 fix used. Same
+        bug shape as #284's boot-phase probe: gemini/agy's real account-
+        pending banner is 3 lines tall, and a realistic composer footer below
+        it (border + status/context row + the idle hint row) pushes those 3
+        lines out of a 6-row window while leaving just enough footer chrome
+        ("? for shortcuts") inside it for `is_at_ready_prompt()` to
+        misclassify the frozen pane as READY — proven against this exact
+        banner text plus one extra footer row (see
+        `tests/test_auth_failure_detection.py`). The wider window is safe for
+        the same reason #284's is: this banner is provider chrome ("Verifying
+        your account...", "...eligibility...") that ordinary conversation
+        text has no reason to quote, so it can't poison the verdict the way
+        widening the READY window itself would."""
         markers = account_pending_markers_for(provider)
         if not markers or self.seconds_since_output() < AUTH_TRANSIENT_GRACE_SEC:
             return None
-        text = _ready_region(self.display_lines())
+        text = _tail_region(self.display_lines(), _BOOT_MARKER_TAIL_ROWS)
         for marker in markers:
             if marker in text:
                 return marker

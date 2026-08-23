@@ -303,6 +303,32 @@ class TestRealTranscriptFixtures:
         result = Orchestrator._derive_display_state(None, pane, "working", True)
         assert result == "blocked:provider-account"
 
+    def test_gemini_verifying_account_with_realistic_footer_is_still_blocked(self) -> None:
+        # #363 regression: a realistic composer footer (border + status/hint
+        # row) below the banner used to push it out of the 6-row
+        # `_ready_region` window entirely, so `takkub status` never reported
+        # `blocked:provider-account` for this exact frozen screen — see the
+        # matching `test_fires_when_a_realistic_footer_pushes_the_banner_past_
+        # ready_tail_rows` regression in test_auth_failure_detection.py for
+        # the narrower unit-level proof.
+        session = _RealSignalSession(
+            [
+                "⚠ Verifying your account...",
+                "  We're finishing verifying your account eligibility.",
+                "  This usually takes a moment. Please try again shortly.",
+                "",
+                "─" * 40,
+                "> ",
+                "─" * 40,
+                "ctx: 12% used  |  tips: ctrl+c to exit",
+                "? for shortcuts            Gemini 3.7 Flash (High)",
+            ],
+            seconds_since_output=AUTH_TRANSIENT_GRACE_SEC,
+        )
+        pane = _pane("working", session=session, provider="gemini")
+        result = Orchestrator._derive_display_state(None, pane, "working", True)
+        assert result == "blocked:provider-account"
+
     def test_gemini_verifying_account_during_normal_boot_is_not_blocked_yet(self) -> None:
         session = _RealSignalSession(
             ["⚠ Verifying your account...", "  Please try again shortly.", ">"],
