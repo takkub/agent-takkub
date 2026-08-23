@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 289,
+  "module_count": 291,
   "modules": [
     {
       "module": "agent_takkub",
@@ -503,6 +503,7 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
+        "agent_takkub.preview_controller",
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_rules",
@@ -546,7 +547,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 94,
+      "fan_in": 95,
       "fan_out": 1
     },
     {
@@ -1900,9 +1901,10 @@
         "agent_takkub.core.brain.store",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.journal",
-        "agent_takkub.core.model_catalog.registry"
+        "agent_takkub.core.model_catalog.registry",
+        "agent_takkub.design_actions"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -1918,9 +1920,10 @@
         "agent_takkub.core.routing.router",
         "agent_takkub.core.storage.dual_write",
         "agent_takkub.core.storage.paths",
+        "agent_takkub.design_actions",
         "agent_takkub.doctor"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 1
     },
     {
@@ -2064,6 +2067,19 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 7,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.design_actions",
+      "imports": [
+        "agent_takkub.core.storage.jsonl_store",
+        "agent_takkub.core.storage.layout",
+        "agent_takkub.preview_controller"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
       "fan_out": 3
     },
     {
@@ -2607,6 +2623,7 @@
         "agent_takkub.core.brain.flag",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.core.conversation.flag",
+        "agent_takkub.design_actions",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
         "agent_takkub.exec_mode",
@@ -2624,6 +2641,7 @@
         "agent_takkub.performance_settings",
         "agent_takkub.pipeline_executor",
         "agent_takkub.plan_tier",
+        "agent_takkub.preview_controller",
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
@@ -2650,7 +2668,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 43
+      "fan_out": 45
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -2861,6 +2879,19 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.preview_controller",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.project_file_index"
+      ],
+      "imported_by": [
+        "agent_takkub.design_actions",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.project_explorer",
       "imports": [
         "agent_takkub.cockpit_theme",
@@ -2882,9 +2913,10 @@
         "agent_takkub.editor_widget",
         "agent_takkub.file_watch_service",
         "agent_takkub.git_changes_service",
+        "agent_takkub.preview_controller",
         "agent_takkub.project_explorer"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 0
     },
     {

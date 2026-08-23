@@ -1016,6 +1016,45 @@ class CliServer(QObject):
                     sock, ok=True, msg=f"pipeline {template_id!r} starting (async, +{pl_delay}ms)"
                 )
                 return
+            elif cmd == "preview":
+                # #365 phase 5. Not lead-only — see Orchestrator.preview_command's
+                # docstring for the trust-model rationale.
+                ok_p, msg_p, payload_p = self._orch.preview_command(
+                    req.get("action", ""),
+                    project=from_project,
+                    url=req.get("url"),
+                    path=req.get("path"),
+                    device=req.get("device"),
+                )
+                self._reply(sock, ok=ok_p, msg=msg_p, **payload_p)
+                return
+            elif cmd == "design":
+                design_action = req.get("action", "")
+                if design_action == "publish":
+                    ok_d, msg_d, payload_d = self._orch.design_publish(
+                        from_project,
+                        req.get("path", ""),
+                        req.get("title", ""),
+                        req.get("mode", ""),
+                        from_role=req.get("from"),
+                    )
+                elif design_action == "approve":
+                    ok_d, msg_d, payload_d = self._orch.design_approve(
+                        from_project, req.get("artifact_id", "")
+                    )
+                elif design_action == "revise":
+                    ok_d, msg_d, payload_d = self._orch.design_revise(
+                        from_project, req.get("artifact_id", ""), feedback=req.get("feedback", "")
+                    )
+                else:
+                    ok_d, msg_d, payload_d = False, f"unknown design action: {design_action!r}", {}
+                # Nested under "artifact" (never splatted at the top level like
+                # preview's payload above) — a design artifact record carries
+                # its own `status` field, which would collide with cli.py
+                # main()'s generic `"status" in resp` pane-status-dict printer
+                # if merged flat.
+                self._reply(sock, ok=ok_d, msg=msg_d, artifact=payload_d)
+                return
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"
         except KeyError as e:

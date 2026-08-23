@@ -111,6 +111,8 @@ _WRITE_COMMANDS_REQUIRE_CONFIRMATION = frozenset(
         "subagent-done",
         "harvest",
         "end-session",
+        "preview",
+        "design",
     }
 )
 
@@ -897,6 +899,55 @@ def cmd_goal(args: argparse.Namespace) -> dict:
             }
         )
     )
+
+
+def cmd_preview(args: argparse.Namespace) -> dict:
+    """`takkub preview open-url|open-file|close|status` (#365 phase 5) — IPC
+    to the running cockpit's per-project Live Preview state, never a second
+    UI process (`examples/PROPOSED_CLI.md`). Not lead-only — see
+    `Orchestrator.preview_command`'s docstring for the trust-model reasoning."""
+    action = args.preview_action
+    resp = _request(
+        _with_project(
+            {
+                "cmd": "preview",
+                "action": action,
+                "from": _from_role(),
+                "url": getattr(args, "url", None),
+                "path": getattr(args, "path", None),
+                "device": getattr(args, "device", None),
+            }
+        )
+    )
+    if resp.get("ok") and action == "status":
+        if resp.get("open"):
+            print(
+                f"  mode={resp.get('mode')} target={resp.get('target')} "
+                f"device={resp.get('device')} approved={resp.get('approved')}"
+            )
+        else:
+            print("  (no open preview)")
+    return resp
+
+
+def cmd_design(args: argparse.Namespace) -> dict:
+    """`takkub design publish|approve|revise` (#365 phase 5) — minimal
+    artifact registry; publish also ensures the project's Preview shows it."""
+    action = args.design_action
+    payload = _with_project({"cmd": "design", "action": action, "from": _from_role()})
+    if action == "publish":
+        payload["path"] = args.path
+        payload["title"] = args.title
+        payload["mode"] = args.mode
+    else:
+        payload["artifact_id"] = args.artifact_id
+        if action == "revise":
+            payload["feedback"] = args.feedback
+    resp = _request(payload)
+    artifact = resp.get("artifact") or {}
+    if resp.get("ok") and artifact:
+        print(f"  artifact_id={artifact.get('artifact_id')} status={artifact.get('status')}")
+    return resp
 
 
 def cmd_harvest(args: argparse.Namespace) -> dict:
@@ -2773,6 +2824,45 @@ def main(argv: list[str] | None = None) -> int:
         help="unset the current session goal",
     )
     sgoal.set_defaults(func=cmd_goal)
+
+    # #365 phase 5. examples/PROPOSED_CLI.md proposes flag-shaped
+    # `--url`/`--file`; adapted here to nested subcommands (open-url/
+    # open-file/close/status) to match this parser's own established
+    # convention for a command with several distinct actions (see task/mcp/
+    # plugins/worktree/migrate/issue/pipeline/services below).
+    spv = sub.add_parser("preview", help="control this project's Live Preview")
+    spv_sub = spv.add_subparsers(dest="preview_action", required=True)
+    spv_url = spv_sub.add_parser("open-url", help="show a loopback dev-server URL")
+    spv_url.add_argument("url")
+    spv_url.add_argument("--device", choices=("desktop", "tablet", "mobile"), default=None)
+    spv_url.set_defaults(func=cmd_preview)
+    spv_file = spv_sub.add_parser("open-file", help="show an approved local .html/.htm file")
+    spv_file.add_argument("path")
+    spv_file.add_argument("--device", choices=("desktop", "tablet", "mobile"), default=None)
+    spv_file.set_defaults(func=cmd_preview)
+    spv_close = spv_sub.add_parser("close", help="close this project's preview")
+    spv_close.set_defaults(func=cmd_preview)
+    spv_status = spv_sub.add_parser("status", help="show this project's preview state")
+    spv_status.set_defaults(func=cmd_preview)
+
+    sdz = sub.add_parser(
+        "design", help="design artifact registry — publish/approve/revise (#365 phase 5)"
+    )
+    sdz_sub = sdz.add_subparsers(dest="design_action", required=True)
+    sdz_pub = sdz_sub.add_parser("publish", help="record + preview a new design artifact")
+    sdz_pub.add_argument(
+        "--path", required=True, help="approved file path, or a loopback URL when --mode url"
+    )
+    sdz_pub.add_argument("--title", required=True)
+    sdz_pub.add_argument("--mode", choices=("html", "url", "review"), default="html")
+    sdz_pub.set_defaults(func=cmd_design)
+    sdz_appr = sdz_sub.add_parser("approve", help="mark an artifact approved + notify lead")
+    sdz_appr.add_argument("--id", dest="artifact_id", required=True)
+    sdz_appr.set_defaults(func=cmd_design)
+    sdz_rev = sdz_sub.add_parser("revise", help="request a revision + notify lead")
+    sdz_rev.add_argument("--id", dest="artifact_id", required=True)
+    sdz_rev.add_argument("--feedback", default="")
+    sdz_rev.set_defaults(func=cmd_design)
 
     sh = sub.add_parser(
         "harvest",
