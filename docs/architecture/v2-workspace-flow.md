@@ -13,12 +13,14 @@
          Boot Splash              Project Workspace          Lead Inbox / Watchdog
    +-------------------+     +----------+-----------+      (#343 nudge · #359 verify
    | provider update   |     |                      |       · #357 wait filter)
-   | AUTO-MIGRATE #361 |  Project Explorer   Workspace Tabs
+   | AUTO-MIGRATE #361 |  Sidebar+Tree(*)    Workspace Tabs
    |  gate -> apply/   |   (1.2.0 ph.1)   +----+----+----+------+-------+
    |  apply_pending()  |   file tree      |    |    |    |      |       |
    |  -> validate ->   |   git changes   Lead Agents Editor Preview Review
    |  rollback + issue |   (QTreeView,    |    |   (Monaco (1 WebView
    +-------------------+    no WebEngine) |    |    1/app)  1/app, lazy)
+                        (*) embedded under the sidebar's project card, not a
+                            separate splitter panel — user feedback 2026-08-23
                                           |    |      |       |
                    RAM rule (#364): pane = claude CLI ~540MB + WebEngine ~99MB
                    -> discard hidden renderer · subagent for short tasks · proactive cap
