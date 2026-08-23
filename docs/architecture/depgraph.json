@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 291,
+  "module_count": 292,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2080,9 +2080,10 @@
         "agent_takkub.preview_controller"
       ],
       "imported_by": [
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.preview_widget"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 3
     },
     {
@@ -2538,6 +2539,7 @@
         "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
         "agent_takkub.orchestrator",
+        "agent_takkub.preview_widget",
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
@@ -2557,7 +2559,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 24
+      "fan_out": 25
     },
     {
       "module": "agent_takkub.maintenance",
@@ -2812,11 +2814,12 @@
         "agent_takkub.agent_pane",
         "agent_takkub.core.scheduling.facade",
         "agent_takkub.orchestrator",
+        "agent_takkub.preview_widget",
         "agent_takkub.resource_governor",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 1
     },
     {
@@ -2898,10 +2901,24 @@
       ],
       "imported_by": [
         "agent_takkub.design_actions",
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.preview_widget"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.preview_widget",
+      "imports": [
+        "agent_takkub.design_actions",
+        "agent_takkub.performance_settings",
+        "agent_takkub.preview_controller"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.project_explorer",
