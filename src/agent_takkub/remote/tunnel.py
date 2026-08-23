@@ -365,6 +365,28 @@ def reap_orphan_tunnel() -> None:
         _log.exception("remote tunnel: orphan reaper failed")
 
 
+def is_tunnel_alive() -> bool:
+    """Best-effort, disk-only "is a tunnel subprocess this cockpit spawned
+    still alive right now" (#367 Remote Reports needs this from `cli.py`'s
+    `report publish`/`list`, which cannot reach the live `RemoteControl`
+    instance living inside the Qt process — no IPC round trip, just the same
+    pid file `Tunnel.start()`/`stop()`/`reap_orphan_tunnel()` already
+    maintain). Never raises: any read/parse/psutil failure reads as "not
+    alive" rather than surfacing to a caller that only wants a yes/no."""
+    try:
+        if not _PID_FILE.exists():
+            return False
+        data = json.loads(_PID_FILE.read_text(encoding="utf-8"))
+        pid = data.get("pid")
+        if not isinstance(pid, int):
+            return False
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
 def _create_kill_on_close_job() -> int | None:
     """H-E, Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
     If this process ever dies without running `Tunnel.stop()` first — a

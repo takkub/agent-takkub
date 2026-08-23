@@ -92,6 +92,12 @@ class AuthGate:
         # threshold — see `check_password`/`_record_password_result_locked`.
         self._pw_fail_count = 0
         self._pw_locked_until = 0.0
+        # #367 Remote Reports: its own counter, same rationale as the
+        # password split above — a report-token guess must never share a
+        # counter that a legitimate bearer-token holder's own successful
+        # requests keep resetting to 0.
+        self._report_fail_count = 0
+        self._report_locked_until = 0.0
         self._tickets: dict[str, tuple[float, str]] = {}
         self.last_request_ts = time.time()
         # Third auth factor (H1 fix): password success is bound to a
@@ -270,6 +276,28 @@ class AuthGate:
                 overflow = self._pw_fail_count - threshold
                 backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
                 self._pw_locked_until = time.time() + backoff
+
+    # ── report share-token (#367 Remote Reports): global counter, not
+    # per-IP — same reasoning `check_token` documents (all traffic arrives
+    # from one tunnel edge / loopback IP, so per-IP counting is a no-op).
+    # One shared counter across every report name: a wrong `?k=` guess
+    # against ANY report counts against the same budget, not a separate one
+    # per report.
+    def is_report_locked_out(self) -> bool:
+        with self._lock:
+            return time.time() < self._report_locked_until
+
+    def record_report_token_result(self, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._report_fail_count = 0
+                return
+            self._report_fail_count += 1
+            threshold = max(1, self._config.lockout_after_fails)
+            if self._report_fail_count >= threshold:
+                overflow = self._report_fail_count - threshold
+                backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
+                self._report_locked_until = time.time() + backoff
 
     # ── single-use SSE ticket (X-check 3.3): EventSource can't send an
     # Authorization header, so `/api/lead?ticket=...` substitutes a

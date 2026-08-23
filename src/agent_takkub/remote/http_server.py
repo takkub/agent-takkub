@@ -28,7 +28,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .. import config as _config
-from . import api
+from . import api, reports
 from .auth import AuthGate
 from .config import RemoteConfig
 
@@ -67,6 +67,28 @@ _CSP_HEADER = (
     "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; "
     "img-src 'self' data:; style-src 'self' 'unsafe-inline'"
 )
+
+# #367 Remote Reports (`/r/` route): a report is a standalone document —
+# `publish()`/`validate_standalone_html` already reject any external
+# <script src=http.../<link href=http.../<img src=http... reference before a
+# file is ever stored (`reports.py`), so allowing inline script/style here
+# (unlike the shell's `_CSP_HEADER` above) can never let a report reach a
+# third-party origin — everything this CSP permits is same-origin or inline.
+_REPORT_CSP_HEADER = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; "
+    "base-uri 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+)
+
+_REPORT_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".json": "application/json; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+}
 
 
 @dataclass
@@ -439,6 +461,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         elif rest == "/api/usage":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("usage", {})
+        elif rest.startswith("/r/"):
+            # #367 Remote Reports — deliberately NOT behind bearer/password
+            # auth (see `_serve_report`'s docstring): a report link is meant
+            # to be handed to someone who never gets cockpit credentials.
+            self._serve_report(rest, query)
         elif rest.startswith("/api/"):
             self._reject()
         else:
@@ -652,6 +679,52 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         project_ns = payload.get("project_ns") or "default"
         ticket = self.server.auth.issue_ticket(project_ns)
         self._send_json(200, {"ticket": ticket})
+
+    # ── Remote Reports (#367) ───────────────────────────────────────────
+    def _serve_report(self, rest: str, query: dict) -> None:
+        """`/<secret_path>/r/<project_ns>/<name>?k=<token>`. Still requires
+        the secret path (stripped by `_match_secret_path` before this runs,
+        same as every other route) but skips the bearer/password/session
+        tiers entirely — its own per-file token substitutes for all three,
+        checked with `hmac.compare_digest` inside `reports.resolve`. Wrong/
+        missing/expired token and "no such report" all answer with the
+        exact same 404 (§7.5 — never let a guess distinguish "exists" from
+        "doesn't"), and a wrong token counts against its own global lockout
+        (`AuthGate.record_report_token_result` — separate from `check_token`
+        /`check_password`'s counters so a report guesser can never be reset
+        by an unrelated successful bearer request, same H1 rationale)."""
+        parts = rest.split("/", 3)  # ["", "r", "<project_ns>", "<name>"]
+        if len(parts) != 4 or not parts[2] or not parts[3]:
+            self._reject()
+            return
+        project_ns, name = parts[2], parts[3]
+        if self.server.auth.is_report_locked_out():
+            self._reject()
+            return
+        path = reports.resolve(project_ns, name, query.get("k"))
+        self.server.auth.record_report_token_result(path is not None)
+        if path is None:
+            self._reject()
+            return
+        try:
+            data = path.read_bytes()
+        except OSError:
+            self._reject()
+            return
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            _REPORT_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+        )
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Security-Policy", _REPORT_CSP_HEADER)
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Robots-Tag", "noindex")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except OSError:
+            pass
 
     # ── static PWA shell ─────────────────────────────────────────────────
     def _serve_static(self, rest: str) -> None:
