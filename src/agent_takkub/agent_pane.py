@@ -57,6 +57,24 @@ SPINNER_FRAMES = "◐◓◑◒"
 _DONE_AUTO_CLEAR_DELAY_MS = 5_000
 _IDLE_AUTO_CLEAR_THRESHOLD_S = 600  # 10 minutes
 
+# #364 lever 1: a pane with PTY output more recent than this is considered
+# "actively streaming" and is vetoed from renderer discard even if it's been
+# hidden past the debounce window — discarding it would just force a reload
+# moments later when the next chunk of output needs to paint.
+_DISCARD_STREAMING_GUARD_S = 10
+
+
+def _env_pane_discard_override(persisted: bool) -> bool:
+    """TAKKUB_PANE_DISCARD env var wins over the persisted Settings >
+    Performance toggle when set; same disable-token vocabulary as
+    auto_issue_signals.auto_issue_enabled()."""
+    raw = os.environ.get("TAKKUB_PANE_DISCARD", "").strip().lower()
+    if raw in {"0", "off", "false", "no"}:
+        return False
+    if raw in {"1", "on", "true", "yes"}:
+        return True
+    return bool(persisted)
+
 
 class AgentPane(QFrame):
     """One agent slot. Owns its PtySession when active."""
@@ -116,10 +134,14 @@ class AgentPane(QFrame):
         # bursty write doesn't accumulate unbounded backlog.
         self._render_buf: bytearray = bytearray()
         self._visible_render_ms = max(8, int(os.environ.get("TAKKUB_VISIBLE_RENDER_MS", "16")))
-        persisted_hidden_ms = performance_settings.load().hidden_render_ms
+        _perf_settings = performance_settings.load()
+        persisted_hidden_ms = _perf_settings.hidden_render_ms
         self._hidden_render_ms = max(
             50, int(os.environ.get("TAKKUB_HIDDEN_RENDER_MS", persisted_hidden_ms))
         )
+        # #364 lever 1: discard-eligibility toggle, env wins over the
+        # persisted setting the same way TAKKUB_HIDDEN_RENDER_MS does above.
+        self._discard_enabled = _env_pane_discard_override(_perf_settings.pane_discard_enabled)
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(self._visible_render_ms)  # ≈60 fps while visible
         self._render_timer.setSingleShot(True)
@@ -274,6 +296,11 @@ class AgentPane(QFrame):
         self._terminal.openInEditorRequested.connect(self.openInEditorRequested)
         # Seed the terminal with this pane's default lock state (teammate=locked).
         self._terminal.set_input_locked(self._input_locked)
+        # #364 lever 1: this pane owns the eligibility call (role + recent PTY
+        # output) since TerminalWidget has neither; discard mechanics stay
+        # entirely inside TerminalWidget, only the go/no-go crosses the line.
+        self._terminal.set_discard_enabled(self._discard_enabled)
+        self._terminal.set_discard_guard(self._discard_eligible)
         self._stack.addWidget(self._terminal)
 
         # restore last font size for this role
@@ -919,15 +946,31 @@ class AgentPane(QFrame):
             self._pending_auto_clear = False
             self._clear_pane_view()
 
+    def _discard_eligible(self) -> bool:
+        """#364 lever 1 guard, checked by TerminalWidget only at the moment
+        its debounce timer fires. Never discard Lead — it's the user's
+        primary command surface and control-flow read on this project, not
+        background scaffolding — and never discard a pane with output newer
+        than `_DISCARD_STREAMING_GUARD_S` (still actively working)."""
+        if self.role.name == LEAD.name:
+            return False
+        last_output = self._last_output_ts
+        if last_output and time.time() - last_output < _DISCARD_STREAMING_GUARD_S:
+            return False
+        return True
+
     def apply_performance_settings(
         self, settings: performance_settings.PerformanceSettings
     ) -> None:
-        """Apply the background-paint cadence without touching pane state."""
+        """Apply the background-paint cadence + discard toggle without
+        touching pane state."""
         self._hidden_render_ms = max(
             50, int(os.environ.get("TAKKUB_HIDDEN_RENDER_MS", settings.hidden_render_ms))
         )
         if not self._keepalive_active:
             self._render_timer.setInterval(self._hidden_render_ms)
+        self._discard_enabled = _env_pane_discard_override(settings.pane_discard_enabled)
+        self._terminal.set_discard_enabled(self._discard_enabled)
 
     def _refresh_lock_button(self) -> None:
         if self._btn_lock is None:

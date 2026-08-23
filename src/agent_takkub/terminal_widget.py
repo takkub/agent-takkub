@@ -27,13 +27,16 @@ from __future__ import annotations
 import base64
 import codecs
 import json
+import os
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -41,6 +44,19 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "terminal.html"))
 
 _CLIPBOARD_KEEP = 50  # max clipboard-*.png files kept in runtime/
+
+# #364 lever 1: how long a pane must sit hidden (set_keepalive(False)) before
+# its Chromium renderer gets discarded. Long enough that a user glancing at
+# another tab for a couple seconds never pays the reattach cost; short enough
+# that a genuinely-backgrounded pane gives its RAM back promptly. Overridable
+# for tests/spikes that can't wait out a real 25s timer.
+_DISCARD_DEBOUNCE_MS_DEFAULT = 25_000
+
+# Cap on replayed scrollback text after a discard/reattach cycle. xterm.js's
+# own `scrollback: 500` setting (terminal.html) already keeps termGetBufferText()
+# well under this, but the cap is kept as an explicit belt-and-suspenders bound
+# in case that setting ever grows.
+_MAX_DISCARD_SNAPSHOT_LINES = 5_000
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +107,14 @@ def _save_clipboard_image(b64data: str, runtime_dir: Path) -> Path:
             return path
         except FileExistsError:
             suffix += 1
+
+
+def _cap_snapshot_lines(text: str, max_lines: int = _MAX_DISCARD_SNAPSHOT_LINES) -> str:
+    """Keep only the last `max_lines` lines of a discard scrollback snapshot."""
+    lines = text.split("\n")
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return "\n".join(lines)
 
 
 _TRAILING_PUNCT = ".,;:!?)]}>\"'`"
@@ -348,6 +372,30 @@ class TerminalWidget(QWidget):
         # still starts suspended.
         self._keepalive = True
 
+        # #364 lever 1 — discard the Chromium renderer of a pane that's been
+        # hidden past a debounce window, then reload+replay it on reattach.
+        # `_discard_enabled` is the on/off switch (Settings > Performance +
+        # TAKKUB_PANE_DISCARD=0, set via set_discard_enabled). `_discard_guard`
+        # is an optional callable AgentPane installs to veto a discard that's
+        # about to fire (e.g. Lead pane, or a pane with very recent PTY
+        # output) — checked only at the moment the debounce timer expires, so
+        # eligibility can change (streaming stops) without re-arming by hand.
+        self._discard_enabled = True
+        self._discard_guard: Callable[[], bool] | None = None
+        self._discarded = False
+        self._discard_snapshot: str | None = None
+        self._discard_timer = QTimer(self)
+        self._discard_timer.setSingleShot(True)
+        self._discard_timer.setInterval(
+            max(
+                200,
+                int(
+                    os.environ.get("TAKKUB_PANE_DISCARD_DEBOUNCE_MS", _DISCARD_DEBOUNCE_MS_DEFAULT)
+                ),
+            )
+        )
+        self._discard_timer.timeout.connect(self._on_discard_timeout)
+
         # Pane cwd (set by AgentPane.attach_session) so clicked relative
         # paths resolve against the project this pane is working in.
         self._cwd: str | None = None
@@ -459,8 +507,11 @@ class TerminalWidget(QWidget):
         self._pending_writes.clear()
         self._write_buf.clear()
         self._utf8_decoder.reset()
+        self._discard_snapshot = None
         if self._flush_timer.isActive():
             self._flush_timer.stop()
+        if self._discard_timer.isActive():
+            self._discard_timer.stop()
         if self._page_ready:
             try:
                 self._view.page().runJavaScript("termReset();")
@@ -484,7 +535,7 @@ class TerminalWidget(QWidget):
             self._view.removeEventFilter(self)
         except Exception:
             pass
-        for timer in (self._flush_timer, self._heartbeat):
+        for timer in (self._flush_timer, self._heartbeat, self._discard_timer):
             try:
                 if timer.isActive():
                     timer.stop()
@@ -516,7 +567,18 @@ class TerminalWidget(QWidget):
 
     def request_buffer_text(self, callback) -> None:
         """Async fetch the current visible+scrollback buffer as text.
-        `callback(str)` is invoked once the JS resolves."""
+        `callback(str)` is invoked once the JS resolves.
+
+        A discarded page has no JS context to answer runJavaScript with (the
+        spike confirmed it silently no-ops), so while discarded this answers
+        from the held pre-discard snapshot instead of hanging the caller.
+        """
+        if self._discarded:
+            try:
+                callback(self._discard_snapshot or "")
+            except Exception:
+                pass
+            return
         self._view.page().runJavaScript("termGetBufferText();", callback)
 
     def set_idle(self, idle: bool) -> None:
@@ -587,6 +649,20 @@ class TerminalWidget(QWidget):
         # before the page finished booting) the same way.
         if self._newline_seq is not None:
             self.set_newline_seq(self._newline_seq)
+        # #364 lever 1 reattach: the reload gave us a brand-new xterm.js
+        # instance with an empty buffer. Replay the pre-discard snapshot
+        # first (plain text — the one fidelity tradeoff of this lever) so
+        # scrollback continuity isn't lost, THEN flush `_pending_writes`
+        # (queued verbatim below in write_bytes() while `_page_ready` was
+        # False) — those are the *real* raw ANSI bytes that arrived during
+        # the discarded window, so that portion keeps full color fidelity.
+        if self._discard_snapshot is not None:
+            snapshot = self._discard_snapshot.replace("\n", "\r\n")
+            self._discard_snapshot = None
+            try:
+                self._view.page().runJavaScript(f"termWrite({json.dumps(snapshot)});")
+            except Exception:
+                pass
         if self._pending_writes:
             self._write_buf.extend(self._pending_writes)
             self._pending_writes.clear()
@@ -626,15 +702,28 @@ class TerminalWidget(QWidget):
         forces one repaint so the latest buffer surfaces the instant the tab
         is shown again. The PTY keeps streaming into the xterm.js buffer the
         whole time — only painting is suspended, so no output is lost.
+
+        #364 lever 1: going inactive also (re)arms a debounce timer that, if
+        the pane is still hidden when it fires, discards the renderer process
+        outright (frees real RSS, not just paused paint — see
+        `_begin_discard`). Going active cancels any pending discard, or drives
+        the reattach sequence if the renderer was already discarded.
         """
         active = bool(active)
         self._keepalive = active
         if active:
+            if self._discard_timer.isActive():
+                self._discard_timer.stop()
+            if self._discarded:
+                self._reattach()
+                return  # page is reloading; termSetKeepalive below is moot
             if self._page_ready and not self._heartbeat.isActive():
                 self._heartbeat.start()
         else:
             if self._heartbeat.isActive():
                 self._heartbeat.stop()
+            if self._discard_enabled and not self._discarded and self._page_ready:
+                self._discard_timer.start()
         if self._page_ready:
             try:
                 self._view.page().runJavaScript(
@@ -642,6 +731,98 @@ class TerminalWidget(QWidget):
                 )
             except Exception:
                 pass
+
+    def set_discard_enabled(self, enabled: bool) -> None:
+        """On/off switch for the #364 lever 1 discard behaviour (Settings >
+        Performance, TAKKUB_PANE_DISCARD=0). Disabling cancels any pending
+        discard timer but does NOT force-reattach an already-discarded page —
+        that still happens the normal way the next time this pane is shown.
+        """
+        self._discard_enabled = bool(enabled)
+        if not self._discard_enabled and self._discard_timer.isActive():
+            self._discard_timer.stop()
+
+    def set_discard_guard(self, guard: Callable[[], bool] | None) -> None:
+        """Install a callable consulted right before a discard actually
+        fires (never before — eligibility like "am I still streaming" can
+        change during the debounce wait). Returning False vetoes this
+        attempt and re-arms the timer so a pane that stays hidden gets
+        re-checked rather than pinned open forever."""
+        self._discard_guard = guard
+
+    @property
+    def is_discarded(self) -> bool:
+        return self._discarded
+
+    def _on_discard_timeout(self) -> None:
+        if self._keepalive or not self._discard_enabled or self._discarded or not self._page_ready:
+            return
+        if self._discard_guard is not None:
+            try:
+                eligible = bool(self._discard_guard())
+            except Exception:
+                eligible = False
+            if not eligible:
+                self._discard_timer.start()  # re-check after another interval
+                return
+        self._begin_discard()
+
+    def _begin_discard(self) -> None:
+        """Snapshot the buffer, mark not-ready (so writes queue instead of
+        racing the teardown), then actually discard the renderer once the
+        snapshot round-trip resolves. See `set_keepalive`'s docstring and
+        `_on_page_ready`'s reattach comment for the full data-safety story."""
+        # Any batched-but-unflushed write must land on the still-live page
+        # BEFORE we snapshot it, or that batch is lost forever (not in the
+        # snapshot, not queued — it rendered into a buffer about to be torn
+        # down). Force it out synchronously instead of waiting on the timer.
+        if self._flush_timer.isActive():
+            self._flush_timer.stop()
+        if self._write_buf:
+            self._flush_writes()
+        self._page_ready = False  # every write_bytes() from here queues, doesn't drop
+
+        def _after_snapshot(text) -> None:
+            if self._keepalive:
+                # set_keepalive(True) arrived while the snapshot round-trip
+                # was in flight (fast tab-back) — the page was never actually
+                # torn down, so undo the "not ready" gate instead of
+                # discarding a pane the user is looking at again. Mirrors
+                # `_on_page_ready`'s own pending-writes flush.
+                self._page_ready = True
+                if self._pending_writes:
+                    self._write_buf.extend(self._pending_writes)
+                    self._pending_writes.clear()
+                    self._flush_writes()
+                if not self._heartbeat.isActive():
+                    self._heartbeat.start()
+                return
+            self._discard_snapshot = _cap_snapshot_lines(text or "")
+            try:
+                self._view.page().setLifecycleState(QWebEnginePage.LifecycleState.Discarded)
+            except Exception:
+                pass
+            self._discarded = True
+
+        try:
+            self._view.page().runJavaScript("termGetBufferText();", _after_snapshot)
+        except Exception:
+            _after_snapshot("")
+
+    def _reattach(self) -> None:
+        """Bring a discarded pane back: flip LifecycleState to Active, which
+        triggers Chromium to reload the page from scratch. `_on_page_ready`
+        (the same bridge.ready() callback normal boot uses — confirmed to
+        survive discard/undiscard in the #364 spike) does the rest: replay
+        the snapshot, then flush whatever queued while hidden."""
+        if not self._discarded:
+            return
+        self._discarded = False
+        self._page_ready = False
+        try:
+            self._view.page().setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        except Exception:
+            pass
 
     def setFocus(self) -> None:
         self._view.setFocus()

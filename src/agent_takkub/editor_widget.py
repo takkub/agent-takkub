@@ -57,6 +57,7 @@ from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .project_explorer import project_roots
 from .project_file_index import PathEscapesRootsError, resolve_and_contain
 
@@ -146,7 +147,10 @@ def read_head_blob(repo_root: Path, abs_path: Path) -> str | None:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug("editor_widget: git show HEAD:%s failed: %s", rel, exc)
@@ -185,9 +189,9 @@ def _reveal_in_file_manager(path: Path) -> None:
     "zero PyQt widget imports" contract — see that module's docstring)."""
     try:
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", f"/select,{path}"])
+            subprocess.Popen(["explorer", f"/select,{path}"], creationflags=SUBPROCESS_NO_WINDOW)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", str(path)])
+            subprocess.Popen(["open", "-R", str(path)], creationflags=SUBPROCESS_NO_WINDOW)
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
     except OSError as exc:

@@ -168,3 +168,37 @@ class TestTerminalWidgetInitStructure:
         nested_defs = {n.name for n in ast.walk(init_node) if isinstance(n, ast.FunctionDef)}
         assert "focusInEvent" not in nested_defs
         assert "mousePressEvent" not in nested_defs
+
+
+# ---------------------------------------------------------------------------
+# #364 lever 1 — _cap_snapshot_lines: pure, no Qt required (unlike the rest
+# of the discard/reattach machinery, which lives inside a real
+# QWebEngineView and can only be exercised via tools/spike_pane_discard_ram.py
+# as a subprocess — see tests/test_pane_discard_spike.py).
+# ---------------------------------------------------------------------------
+
+
+class TestCapSnapshotLines:
+    def _cap(self, text: str, max_lines: int = 5_000) -> str:
+        from agent_takkub.terminal_widget import _cap_snapshot_lines
+
+        return _cap_snapshot_lines(text, max_lines)
+
+    def test_under_limit_is_unchanged(self) -> None:
+        text = "\n".join(f"line{i}" for i in range(10))
+        assert self._cap(text, max_lines=100) == text
+
+    def test_over_limit_keeps_only_the_last_n_lines(self) -> None:
+        text = "\n".join(f"line{i}" for i in range(10))
+        capped = self._cap(text, max_lines=3)
+        assert capped == "line7\nline8\nline9"
+
+    def test_default_cap_is_5000_lines(self) -> None:
+        text = "\n".join(f"line{i}" for i in range(6_000))
+        capped = self._cap(text)
+        assert capped.count("\n") == 4_999  # 5000 lines → 4999 separators
+        assert capped.splitlines()[0] == "line1000"
+        assert capped.splitlines()[-1] == "line5999"
+
+    def test_empty_text(self) -> None:
+        assert self._cap("", max_lines=10) == ""

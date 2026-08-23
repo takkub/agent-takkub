@@ -122,6 +122,10 @@ def collect_ram_report(
             "project": str(spec.get("project", "")),
             "provider": spec.get("provider"),
             "pid": spec.get("pid"),
+            # #364 lever 1: whether this pane's Chromium renderer is
+            # currently discarded (caller-supplied — this module never
+            # touches TerminalWidget/Qt itself, see the module docstring).
+            "discarded": bool(spec.get("discarded", False)),
             "cli_rss_bytes": 0,
             "node_children_rss_bytes": 0,
             "node_children_count": 0,

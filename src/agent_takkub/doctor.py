@@ -2345,7 +2345,12 @@ def format_ram_report(resp: dict | None) -> str:
             f"{'cli':>10}{'node/mcp':>10}{'qtwe':>10}{'total':>10}"
         )
         for row in sorted(panes, key=lambda r: int(r.get("total_bytes", 0)), reverse=True):
+            # #364 lever 1: flag a discarded renderer inline — its RSS
+            # columns above already read near-zero, but "why" isn't obvious
+            # from the numbers alone without this marker.
+            discard_flag = " [discarded]" if row.get("discarded") else ""
             note = f"  ({row['note']})" if row.get("note") else ""
+            note = f"{discard_flag}{note}"
             lines.append(
                 f"  {row.get('role', '')!s:<14}{row.get('project', '')!s:<16}"
                 f"{row.get('provider') or '—'!s:<10}{row.get('pid') or '—'!s:>8}"

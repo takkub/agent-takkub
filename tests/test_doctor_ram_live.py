@@ -81,6 +81,60 @@ def test_ram_report_renders_table_sorted_by_total_desc() -> None:
     assert "takkub_version=1.0.87" in text
 
 
+def test_ram_report_flags_discarded_pane() -> None:
+    """#364 lever 1: a discarded pane's row is marked so the near-zero RSS
+    reads as "reclaimed", not "broken"."""
+    resp = {
+        "ok": True,
+        "generated_at": 1_700_000_000.0,
+        "takkub_version": "1.0.87",
+        "main_process": {"pid": 100, "rss_bytes": 300_000_000},
+        "shared_qtwebengine": {"rss_bytes": 0, "process_count": 0},
+        "panes": [
+            {
+                "role": "backend",
+                "project": "proj1",
+                "provider": "claude",
+                "pid": 200,
+                "discarded": True,
+                "cli_rss_bytes": 10_000_000,
+                "node_children_rss_bytes": 0,
+                "node_children_count": 0,
+                "qtwebengine_rss_bytes": 0,
+                "total_bytes": 10_000_000,
+                "note": "",
+            },
+            {
+                "role": "lead",
+                "project": "proj1",
+                "provider": "claude",
+                "pid": 201,
+                "discarded": False,
+                "cli_rss_bytes": 300_000_000,
+                "node_children_rss_bytes": 0,
+                "node_children_count": 0,
+                "qtwebengine_rss_bytes": 60_000_000,
+                "total_bytes": 360_000_000,
+                "note": "",
+            },
+        ],
+        "total_panes_bytes": 370_000_000,
+        "total_cockpit_bytes": 670_000_000,
+        "machine_total_bytes": 16_000_000_000,
+        "machine_available_bytes": 4_000_000_000,
+        "machine_available_percent": 25.0,
+        "governor_min_available_ram_percent": 12.0,
+    }
+
+    text = format_ram_report(resp)
+    lines = text.splitlines()
+
+    backend_line = next(line for line in lines if "backend" in line)
+    lead_line = next(line for line in lines if "lead" in line)
+    assert "[discarded]" in backend_line
+    assert "[discarded]" not in lead_line
+
+
 class TestCheckRamNodeChildren:
     """#364 lever 4 — the `[ram]` node/mcp-children threshold WARN."""
 

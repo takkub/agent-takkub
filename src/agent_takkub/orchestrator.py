@@ -5998,12 +5998,17 @@ class Orchestrator(
         for project_ns, panes in self._panes_by_project.items():
             for role, pane in panes.items():
                 session = getattr(pane, "session", None)
+                # #364 lever 1: surface whether this pane's renderer is
+                # currently discarded so `doctor --ram` shows it directly
+                # instead of just a RAM number the reader has to interpret.
+                terminal = getattr(pane, "_terminal", None)
                 specs.append(
                     {
                         "role": role,
                         "project": project_ns,
                         "provider": getattr(pane, "provider_name", None),
                         "pid": getattr(session, "pid", None),
+                        "discarded": bool(getattr(terminal, "is_discarded", False)),
                     }
                 )
         return specs
