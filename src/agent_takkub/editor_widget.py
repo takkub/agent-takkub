@@ -93,6 +93,20 @@ MAX_EDITOR_FILE_BYTES = 2_000_000
 _GIT_TIMEOUT_S = 10.0
 
 
+def _js_str(value: str | None) -> str:
+    """`json.dumps` with `ensure_ascii` pinned explicitly true for every
+    string embedded in a `run_js(f"...")` call. Every `run_js` call site in
+    this module must go through this helper rather than a bare
+    `json.dumps` — not just for non-ASCII round-tripping, but because
+    U+2028/U+2029 (JS line/paragraph separators) are otherwise emitted as
+    raw UTF-8 bytes inside the f-string's JS source text, which some
+    embedded-JS parsers treat as a literal line terminator — silently
+    truncating the string literal — even though they're legal inside a JSON
+    string. `ensure_ascii=True` escapes both to `\\u2028`/`\\u2029`, which
+    is safe in both JSON and JS string literals."""
+    return json.dumps(value, ensure_ascii=True)
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers — plain functions, no Qt. Always dispatched from a worker
 # thread in production (see _OpenFileWorker/_DiffWorker below); called
@@ -602,13 +616,12 @@ class EditorHost(QObject):
         if result.binary or result.too_large:
             reason = "binary" if result.binary else "too_large"
             self._view.run_js(
-                f"editorOpenUnavailable({json.dumps(path_str)}, {json.dumps(reason)}, "
-                f"{result.size});"
+                f"editorOpenUnavailable({_js_str(path_str)}, {_js_str(reason)}, {result.size});"
             )
         else:
             self._view.run_js(
-                f"editorOpenFile({json.dumps(path_str)}, {json.dumps(result.text)}, "
-                f"{json.dumps(result.language_hint)});"
+                f"editorOpenFile({_js_str(path_str)}, {_js_str(result.text)}, "
+                f"{_js_str(result.language_hint)});"
             )
             try:
                 roots = list(project_roots(project_name).values())
@@ -668,13 +681,11 @@ class EditorHost(QObject):
             return
         path_str = str(result.path)
         if result.error:
-            self._view.run_js(
-                f"editorDiffFailed({json.dumps(path_str)}, {json.dumps(result.error)});"
-            )
+            self._view.run_js(f"editorDiffFailed({_js_str(path_str)}, {_js_str(result.error)});")
             return
         self._view.run_js(
-            f"editorShowDiff({json.dumps(path_str)}, {json.dumps(result.original_text or '')}, "
-            f"{json.dumps(result.modified_text or '')});"
+            f"editorShowDiff({_js_str(path_str)}, {_js_str(result.original_text or '')}, "
+            f"{_js_str(result.modified_text or '')});"
         )
 
     # -- open externally / reveal ------------------------------------------
@@ -733,7 +744,7 @@ class EditorHost(QObject):
     def _on_save_ok(self, path: str, state: EditorFileState) -> None:
         self._file_states[path] = state
         if self._view is not None:
-            self._view.run_js(f"editorSaveResult({json.dumps(path)}, true, null);")
+            self._view.run_js(f"editorSaveResult({_js_str(path)}, true, null);")
         project_name = self._open_paths.get(path)
         if project_name is not None:
             self.gitRefreshNeeded.emit(project_name)
@@ -751,11 +762,11 @@ class EditorHost(QObject):
         # against, so a later plain Ctrl+S (without going through
         # [Keep mine]) still correctly re-detects the same conflict instead
         # of silently overwriting on retry.
-        self._view.run_js(f"editorConflict({json.dumps(path)}, {json.dumps(disk_text)});")
+        self._view.run_js(f"editorConflict({_js_str(path)}, {_js_str(disk_text)});")
 
     def _on_save_failed(self, path: str, error: str) -> None:
         if self._view is not None:
-            self._view.run_js(f"editorSaveResult({json.dumps(path)}, false, {json.dumps(error)});")
+            self._view.run_js(f"editorSaveResult({_js_str(path)}, false, {_js_str(error)});")
 
     # -- reload from disk (phase 3) -------------------------------------------
     def _on_reload_requested(self, path: str) -> None:
@@ -779,10 +790,10 @@ class EditorHost(QObject):
         if result.binary or result.too_large:
             reason = "binary" if result.binary else "too_large"
             self._view.run_js(
-                f"editorOpenUnavailable({json.dumps(path)}, {json.dumps(reason)}, {result.size});"
+                f"editorOpenUnavailable({_js_str(path)}, {_js_str(reason)}, {result.size});"
             )
         else:
-            self._view.run_js(f"editorReloadDisk({json.dumps(path)}, {json.dumps(result.text)});")
+            self._view.run_js(f"editorReloadDisk({_js_str(path)}, {_js_str(result.text)});")
 
     # -- disk watch (phase 3, file_watch_service.py) --------------------------
     def _on_disk_changed(self, path: str, state: EditorFileState) -> None:
@@ -790,11 +801,11 @@ class EditorHost(QObject):
         if baseline is not None and not _states_differ(baseline, state):
             return  # matches our own last open/save — the watcher just echoed it back
         if self._view is not None:
-            self._view.run_js(f"editorDiskChanged({json.dumps(path)});")
+            self._view.run_js(f"editorDiskChanged({_js_str(path)});")
         project_name = self._open_paths.get(path)
         if project_name is not None:
             self.gitRefreshNeeded.emit(project_name)
 
     def _on_disk_removed(self, path: str) -> None:
         if self._view is not None:
-            self._view.run_js(f"editorDiskRemoved({json.dumps(path)});")
+            self._view.run_js(f"editorDiskRemoved({_js_str(path)});")

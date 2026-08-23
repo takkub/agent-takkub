@@ -218,6 +218,65 @@ class TestSaveAtomicConflicts:
         assert result.error is not None
 
 
+class TestSaveAtomicSizeCap:
+    def test_at_cap_saves(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.txt"
+        f.write_text("old\n", encoding="utf-8")
+        expected = read_for_edit(f, [root])
+        text = "a" * 50
+
+        result = save_atomic(f, text, expected, [root], max_bytes=50)
+
+        assert result.ok is True
+        assert result.error is None
+        assert f.read_text(encoding="utf-8") == text
+
+    def test_over_cap_rejected_and_file_untouched(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.txt"
+        f.write_text("old\n", encoding="utf-8")
+        expected = read_for_edit(f, [root])
+
+        result = save_atomic(f, "a" * 51, expected, [root], max_bytes=50)
+
+        assert result.ok is False
+        assert result.conflict is None
+        assert result.error is not None
+        assert f.read_text(encoding="utf-8") == "old\n"
+
+    def test_over_cap_new_file_not_created(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "brand_new.txt"
+
+        result = save_atomic(f, "a" * 51, None, [root], max_bytes=50)
+
+        assert result.ok is False
+        assert result.conflict is None
+        assert result.error is not None
+        assert not f.exists()
+
+    def test_cap_measured_in_encoded_bytes_not_chars(self, tmp_path: Path) -> None:
+        """3-byte-per-char Thai text: char count stays under the cap while
+        the encoded byte count — what's actually being rejected — exceeds
+        it, so a char-length check would wrongly let this through."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.txt"
+        f.write_text("old\n", encoding="utf-8")
+        expected = read_for_edit(f, [root])
+        text = "ก" * 20
+        assert len(text) < 50 <= len(text.encode("utf-8"))
+
+        result = save_atomic(f, text, expected, [root], max_bytes=50)
+
+        assert result.ok is False
+        assert f.read_text(encoding="utf-8") == "old\n"
+
+
 # ── save_atomic: atomicity / containment / encoding ─────────────────────
 
 

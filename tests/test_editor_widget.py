@@ -30,6 +30,7 @@ from agent_takkub import editor_widget as ew
 from agent_takkub.editor_widget import (
     MAX_EDITOR_FILE_BYTES,
     EditorHost,
+    _js_str,
     build_diff_result,
     read_file_for_editor,
     read_head_blob,
@@ -474,6 +475,21 @@ class TestBridgeRouting:
 
 def test_max_editor_file_bytes_is_a_sane_positive_bound() -> None:
     assert 0 < MAX_EDITOR_FILE_BYTES <= 10_000_000
+
+
+def test_js_str_escapes_line_and_paragraph_separators() -> None:
+    """U+2028/U+2029 are legal JSON string content but some JS parsers treat
+    a raw (unescaped) occurrence as a literal line terminator even inside a
+    string literal -- _js_str must always escape them, not just rely on
+    json.dumps's ensure_ascii default staying True."""
+    raw = "line1" + chr(0x2028) + "line2" + chr(0x2029) + "line3"
+
+    payload = _js_str(raw)
+
+    assert chr(0x2028) not in payload
+    assert chr(0x2029) not in payload
+    assert "\\u2028" in payload
+    assert "\\u2029" in payload
 
 
 # ── save / conflict / reload / disk-watch (#365 phase 3) ────────────────────
