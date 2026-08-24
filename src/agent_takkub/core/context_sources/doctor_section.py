@@ -58,6 +58,12 @@ def build_findings() -> list[FindingRow]:
         )
         if task_size is not None:
             detail += f" size={task_size}"
+        score = trace.get("score")
+        if score is not None:
+            detail += f" score={score} confidence={trace.get('confidence')}"
+        risk_flags = trace.get("risk_flags")
+        if risk_flags:
+            detail += f" risk={risk_flags}"
         if inefficient:
             detail += " ⚠ inefficient (small task over 15k tokens)"
         findings.append(

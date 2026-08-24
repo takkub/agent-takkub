@@ -34,13 +34,20 @@ def save_last_trace(
     role: str,
     task_size: str | None = None,
     inefficient: bool = False,
+    complexity=None,
 ) -> None:
     """Never raises — a failed trace write must not turn a successful
     context build into a failed `assign`. `task_size`/`inefficient` are the
     Context Gate's own additions (closeout #C, `03_CONTEXT_TOKEN_
     EFFICIENCY.md`) — both optional so a pre-gate caller (or the gate
     disabled via `TAKKUB_CONTEXT_GATE=0`) still writes the exact same
-    payload shape as before."""
+    payload shape as before. `complexity` is Classifier v2's `TaskComplexity`
+    (`core.brain.task_complexity`, `02_CLASSIFIER_V2.md`) — also optional
+    (duck-typed rather than imported, so this leaf module doesn't have to
+    depend on `core.brain`) and only adds fields when present, for the
+    Explainable Trace (`07_EXPLAINABLE_TRACE.md`); `doctor`'s `[context]`
+    reader already uses `.get()` for every field so an older trace file
+    without them still loads fine."""
     try:
         path = _trace_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +78,13 @@ def save_last_trace(
         if task_size is not None:
             payload["task_size"] = task_size
             payload["inefficient"] = inefficient
+        if complexity is not None:
+            payload["score"] = complexity.score
+            payload["confidence"] = complexity.confidence
+            payload["reasons"] = list(complexity.reasons)
+            payload["risk_flags"] = list(complexity.risk_flags)
+            payload["estimated_files"] = complexity.estimated_files
+            payload["estimated_modules"] = complexity.estimated_modules
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, path)
