@@ -53,6 +53,36 @@ class TestIsInstalled:
         assert installer.is_installed() is True
 
 
+class TestCreateVenvClear:
+    """Real `python -m venv` semantics — `_run` is NOT mocked here on
+    purpose (MEDIUM finding, docs/audit/2026-08-24-openviking-managed-
+    review.md: the existing mocked-`_run` tests give false confidence that
+    `repair` recreates the venv, when plain `python -m venv <existing dir>`
+    actually leaves unrelated pre-existing files untouched). No network —
+    `venv` creation is stdlib-only."""
+
+    def test_clear_false_leaves_stale_files_in_an_existing_venv_dir(self, tmp_path) -> None:
+        venv_dir = tmp_path / "venv"
+        stale = venv_dir / "lib" / "stale_leftover.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("leftover from a broken install", encoding="utf-8")
+
+        installer._create_venv(venv_dir, clear=False)
+
+        assert stale.exists()
+
+    def test_clear_true_removes_stale_files_from_an_existing_venv_dir(self, tmp_path) -> None:
+        venv_dir = tmp_path / "venv"
+        stale = venv_dir / "lib" / "stale_leftover.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("leftover from a broken install", encoding="utf-8")
+
+        installer._create_venv(venv_dir, clear=True)
+
+        assert not stale.exists()
+        assert (venv_dir / "pyvenv.cfg").is_file()
+
+
 class TestEnsureInstalled:
     def test_skips_all_work_when_already_installed(self, monkeypatch):
         exe = installer.server_executable()

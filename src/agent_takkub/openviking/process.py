@@ -31,7 +31,9 @@ import uuid
 from pathlib import Path
 
 from .._win_console import SUBPROCESS_NO_WINDOW
+from ..core.secrets.redact import redact
 from ..pty_session import _tree_kill
+from . import credentials
 from .installer import OPENVIKING_HOME, server_executable
 
 _log = logging.getLogger(__name__)
@@ -126,13 +128,14 @@ def _assign_to_job(job: int, pid: int) -> bool:
         return False
 
 
-def _spawn(argv: list[str]) -> subprocess.Popen:
+def _spawn(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.Popen:
     if sys.platform == "win32":
         return subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             creationflags=SUBPROCESS_NO_WINDOW,
+            env=env,
         )
     return subprocess.Popen(
         argv,
@@ -140,6 +143,7 @@ def _spawn(argv: list[str]) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         start_new_session=True,  # own process group, mirrors tunnel.py's 5.2
         creationflags=SUBPROCESS_NO_WINDOW,
+        env=env,
     )
 
 
@@ -276,7 +280,7 @@ class OpenVikingProcess:
             raise ProcessError(f"openviking-server executable not found: {exe}")
         argv = [str(exe), "--config", str(self._config_path), "--port", str(self._port)]
         self._rotate_log_if_large()
-        self._proc = _spawn(argv)
+        self._proc = _spawn(argv, env=credentials.subprocess_env())
         self._own_job_if_windows()
         self._drain_output()
         self._verify_started()
@@ -299,8 +303,13 @@ class OpenVikingProcess:
         blocks it — only the last `_MAX_DRAINED_LINES` are kept in memory
         for a same-process startup failure report, but every line is also
         appended to `LOG_FILE` so "View Logs" has something after a
-        restart. A log-file write failure never stops the drain (best-effort,
-        stdout draining itself must keep going regardless)."""
+        restart. Every line passes through `redact()` before either sink —
+        `openviking-server` echoing its own loaded config at startup would
+        otherwise put the API key straight into `_last_output`'s failure
+        report and `LOG_FILE`/"View Logs" in plaintext (the HIGH finding in
+        `docs/audit/2026-08-24-openviking-managed-review.md`). A log-file
+        write failure never stops the drain (best-effort, stdout draining
+        itself must keep going regardless)."""
 
         def _drain() -> None:
             proc = self._proc
@@ -314,7 +323,7 @@ class OpenVikingProcess:
                 log_fh = None
             try:
                 for line in proc.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
+                    text = redact(line.decode("utf-8", errors="replace").rstrip())
                     self._last_output.append(text)
                     del self._last_output[:-_MAX_DRAINED_LINES]
                     if log_fh is not None:

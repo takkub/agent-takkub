@@ -444,6 +444,23 @@ class TestOpenVikingManagedRuntimeView:
         dlg._on_kd_ov_view_logs_clicked()  # must not raise / block
         dlg.deleteLater()
 
+    def test_view_logs_redacts_api_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ov_process.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ov_process.LOG_FILE.write_text(
+            'startup config: {"api_key": "sk-ant-abcdefghijklmnopqrstuv"}\n', encoding="utf-8"
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(
+            dlg, "_kd_ctx_show_text_dialog", lambda title, text: captured.update(text=text)
+        )
+
+        dlg._on_kd_ov_view_logs_clicked()
+
+        assert "sk-ant-abcdefghijklmnopqrstuv" not in captured["text"]
+        assert "REDACTED" in captured["text"]
+        dlg.deleteLater()
+
     def test_auto_start_toggle_persists(self) -> None:
         exe = ov_installer.server_executable()
         exe.parent.mkdir(parents=True, exist_ok=True)

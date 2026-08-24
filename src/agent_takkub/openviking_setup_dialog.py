@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 from . import cockpit_theme, config, openviking_settings
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .core.context_sources import openviking_adapter
+from .openviking import credentials as ov_credentials
 from .openviking import installer
 from .openviking import manager as ov_manager
 from .openviking import port as ov_port
@@ -99,18 +100,26 @@ def build_ov_conf(
     reused for both `embedding.dense` and `vlm` (the wizard's own form only
     collects one API Base/API Key pair, per `07_SETUP_WIZARD.md`'s
     wireframe — a real, still-correct value under the real schema, not an
-    invented field)."""
+    invented field).
+
+    The API key itself is never written into the returned dict — only the
+    literal `${OPENVIKING_API_KEY}` env-var placeholder upstream's config
+    format already supports for `api_key` fields (`openviking.credentials`
+    module docstring). `write_ov_conf` is the caller responsible for
+    actually persisting the real value, into `SecretManager` rather than
+    this file (HIGH finding, `docs/audit/2026-08-24-openviking-managed-
+    review.md`)."""
     dense: dict = {"provider": embedding_provider, "model": embedding_model}
     if embedding_api_base:
         dense["api_base"] = embedding_api_base
     if embedding_api_key:
-        dense["api_key"] = embedding_api_key
+        dense["api_key"] = ov_credentials.API_KEY_PLACEHOLDER
 
     vlm: dict = {"provider": vlm_provider, "model": vlm_model}
     if embedding_api_base:
         vlm["api_base"] = embedding_api_base
     if embedding_api_key:
-        vlm["api_key"] = embedding_api_key
+        vlm["api_key"] = ov_credentials.API_KEY_PLACEHOLDER
 
     return {
         "embedding": {"dense": dense},
@@ -124,12 +133,19 @@ def build_ov_conf(
     }
 
 
-def write_ov_conf(data: dict) -> None:
+def write_ov_conf(data: dict, *, api_key: str | None = None) -> None:
     """Blocking file I/O — off the Qt thread only. `installer.py`'s own
     docstring calls ov.conf's content "the Setup Wizard's job" — this is
-    that job; `installer.py` only ever owns the path."""
+    that job; `installer.py` only ever owns the path.
+
+    *api_key*, when given, is the real secret `build_ov_conf` replaced
+    with `${OPENVIKING_API_KEY}` in *data* — persisted separately into
+    `SecretManager` so it never lands in `ov.conf` at rest (HIGH finding,
+    `docs/audit/2026-08-24-openviking-managed-review.md`)."""
     installer.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config._write_json_atomic(installer.CONFIG_FILE, data)
+    if api_key:
+        ov_credentials.save_api_key(api_key)
 
 
 def run_doctor(config_path) -> str:
@@ -149,6 +165,7 @@ def run_doctor(config_path) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=ov_credentials.subprocess_env(),
     )
     return proc.stdout or f"(no output, exit code {proc.returncode})"
 
@@ -171,14 +188,15 @@ class _InstallThread(QThread):
     stepChanged: pyqtSignal = pyqtSignal(str)
     resultReady: pyqtSignal = pyqtSignal(object)
 
-    def __init__(self, conf: dict, parent: QWidget | None = None) -> None:
+    def __init__(self, conf: dict, api_key: str | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._conf = conf
+        self._api_key = api_key
 
     def run(self) -> None:
         try:
             self.stepChanged.emit("กำลังบันทึก configuration…")
-            write_ov_conf(self._conf)
+            write_ov_conf(self._conf, api_key=self._api_key)
             self.stepChanged.emit("กำลังติดตั้ง OpenViking (อาจใช้เวลาสักครู่)…")
             if not ov_manager.get_manager().ensure_installed():
                 self.resultReady.emit(RuntimeError("ติดตั้งไม่สำเร็จ — ดู log ของ pip install"))
@@ -285,6 +303,9 @@ class OpenVikingSetupDialog(QDialog):
             port=ov_port.DEFAULT_PORT,
         )
 
+    def _current_api_key(self) -> str | None:
+        return self._embed_api_key_edit.text().strip() or None
+
     def _set_buttons_enabled(self, enabled: bool) -> None:
         self._test_btn.setEnabled(enabled)
         self._install_btn.setEnabled(enabled)
@@ -293,7 +314,7 @@ class OpenVikingSetupDialog(QDialog):
         self._set_buttons_enabled(False)
         self._result_box.setPlainText("กำลังทดสอบ…")
         try:
-            write_ov_conf(self._current_conf())
+            write_ov_conf(self._current_conf(), api_key=self._current_api_key())
         except Exception as e:
             self._set_buttons_enabled(True)
             self._result_box.setPlainText(f"บันทึก config ไม่สำเร็จ: {e}")
@@ -318,7 +339,7 @@ class OpenVikingSetupDialog(QDialog):
         self._set_buttons_enabled(False)
         self._progress_lbl.setText("เริ่มติดตั้ง…")
         self._result_box.setPlainText("")
-        thread = _InstallThread(self._current_conf(), self)
+        thread = _InstallThread(self._current_conf(), self._current_api_key(), self)
         thread.stepChanged.connect(self._progress_lbl.setText)
         thread.resultReady.connect(self._on_install_ready)
         self._install_thread = thread

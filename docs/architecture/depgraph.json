@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 321,
+  "module_count": 322,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2022,9 +2022,10 @@
         "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.core.secrets.backends.wincred_backend",
         "agent_takkub.core.secrets.manager",
-        "agent_takkub.doctor"
+        "agent_takkub.doctor",
+        "agent_takkub.openviking.credentials"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -2073,18 +2074,21 @@
         "agent_takkub.cli",
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.doctor",
+        "agent_takkub.openviking.credentials",
         "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 5
     },
     {
       "module": "agent_takkub.core.secrets.redact",
       "imports": [],
       "imported_by": [
-        "agent_takkub.core.conversation.store"
+        "agent_takkub.core.conversation.store",
+        "agent_takkub.openviking.process",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 1,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -2965,9 +2969,24 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.openviking.credentials",
+      "imports": [
+        "agent_takkub.core.secrets.backends",
+        "agent_takkub.core.secrets.manager"
+      ],
+      "imported_by": [
+        "agent_takkub.openviking.installer",
+        "agent_takkub.openviking.process",
+        "agent_takkub.openviking_setup_dialog"
+      ],
+      "fan_in": 3,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.openviking.installer",
       "imports": [
-        "agent_takkub._win_console"
+        "agent_takkub._win_console",
+        "agent_takkub.openviking.credentials"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -2977,7 +2996,7 @@
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 5,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.openviking.manager",
@@ -3013,6 +3032,8 @@
       "module": "agent_takkub.openviking.process",
       "imports": [
         "agent_takkub._win_console",
+        "agent_takkub.core.secrets.redact",
+        "agent_takkub.openviking.credentials",
         "agent_takkub.openviking.installer",
         "agent_takkub.pty_session"
       ],
@@ -3021,7 +3042,7 @@
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.openviking_settings",
@@ -3044,6 +3065,7 @@
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.openviking.credentials",
         "agent_takkub.openviking.installer",
         "agent_takkub.openviking.manager",
         "agent_takkub.openviking.port",
@@ -3053,7 +3075,7 @@
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.orchestrator",
@@ -4055,6 +4077,7 @@
         "agent_takkub.core.context_sources.openviking_adapter",
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.secrets.manager",
+        "agent_takkub.core.secrets.redact",
         "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.openviking.installer",
@@ -4069,7 +4092,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 1,
-      "fan_out": 17
+      "fan_out": 18
     },
     {
       "module": "agent_takkub.settings_management",

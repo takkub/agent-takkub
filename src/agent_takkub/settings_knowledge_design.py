@@ -583,11 +583,17 @@ class KnowledgeDesignSettingsMixin:
         self._kd_ov_run_service_action(lambda: ov_manager.get_manager().restart(), "กำลัง restart")
 
     def _on_kd_ov_view_logs_clicked(self) -> None:
+        from .core.secrets.redact import redact
+
         try:
             text = ov_process.LOG_FILE.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = "(ยังไม่มี log)"
-        self._kd_ctx_show_text_dialog("OpenViking — Logs", text[-20000:])
+        # `process._drain_output` already redacts every line before it hits
+        # LOG_FILE — redacting again here is defense-in-depth against a log
+        # file written before this fix, or any future writer that forgets
+        # to (HIGH finding, docs/audit/2026-08-24-openviking-managed-review.md).
+        self._kd_ctx_show_text_dialog("OpenViking — Logs", redact(text)[-20000:])
 
     def _on_kd_ov_auto_start_toggled(self, checked: bool) -> None:
         cfg = openviking_settings.load()

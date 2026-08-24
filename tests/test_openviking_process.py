@@ -10,7 +10,8 @@ import os
 import psutil
 import pytest
 
-from agent_takkub.openviking import process
+from agent_takkub import config
+from agent_takkub.openviking import credentials, process
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +19,10 @@ def _isolate_pid_file(monkeypatch, tmp_path):
     monkeypatch.setattr(process, "PID_FILE", tmp_path / "openviking_pid.json")
     monkeypatch.setattr(process, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(process, "LOG_FILE", tmp_path / "logs" / "openviking.log")
+    # `start()` now resolves `credentials.subprocess_env()` via SecretManager
+    # on every call — isolate its backing file so tests never touch (or get
+    # confused by) a real machine's own OpenViking secret.
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path / "settings")
 
 
 class _FakeProc:
@@ -56,7 +61,7 @@ class TestStartStop:
         proc = _FakeProc(pid=54321, returncode=None)
         captured = {}
 
-        def _fake_spawn(argv):
+        def _fake_spawn(argv, **kw):
             captured["argv"] = argv
             return proc
 
@@ -87,7 +92,7 @@ class TestStartStop:
         exe.parent.mkdir(parents=True)
         exe.write_text("", encoding="utf-8")
         monkeypatch.setattr(process, "server_executable", lambda: exe)
-        monkeypatch.setattr(process, "_spawn", lambda argv: proc)
+        monkeypatch.setattr(process, "_spawn", lambda argv, **kw: proc)
         monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
         monkeypatch.setattr(process.time, "sleep", lambda s: None)
 
@@ -120,7 +125,7 @@ class TestStartStop:
         exe.parent.mkdir(parents=True)
         exe.write_text("", encoding="utf-8")
         monkeypatch.setattr(process, "server_executable", lambda: exe)
-        monkeypatch.setattr(process, "_spawn", lambda argv: proc)
+        monkeypatch.setattr(process, "_spawn", lambda argv, **kw: proc)
         monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
         monkeypatch.setattr(process.time, "sleep", lambda s: None)
 
@@ -131,6 +136,71 @@ class TestStartStop:
         text = process.LOG_FILE.read_text(encoding="utf-8")
         assert "hello" in text
         assert "world" in text
+
+    def test_start_redacts_secrets_before_log_file_and_last_output(self, monkeypatch, tmp_path):
+        proc = _FakeProc(
+            pid=1,
+            lines=[b'startup config: {"api_key": "sk-ant-abcdefghijklmnopqrstuv"}\n'],
+            returncode=None,
+        )
+        exe = tmp_path / "venv" / "bin" / "openviking-server"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(process, "server_executable", lambda: exe)
+        monkeypatch.setattr(process, "_spawn", lambda argv, **kw: proc)
+        monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(process.time, "sleep", lambda s: None)
+
+        p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)
+        p.start()
+        p._reader.join(timeout=2)
+
+        assert "sk-ant-abcdefghijklmnopqrstuv" not in process.LOG_FILE.read_text(encoding="utf-8")
+        assert "REDACTED" in process.LOG_FILE.read_text(encoding="utf-8")
+        assert "sk-ant-abcdefghijklmnopqrstuv" not in p.last_output
+
+    def test_start_injects_stored_api_key_as_spawn_env_var(self, monkeypatch, tmp_path):
+        credentials.save_api_key("sk-stored-secret-value")
+        proc = _FakeProc(pid=1, returncode=None)
+        captured = {}
+
+        def _fake_spawn(argv, **kw):
+            captured["env"] = kw.get("env")
+            return proc
+
+        exe = tmp_path / "venv" / "bin" / "openviking-server"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(process, "server_executable", lambda: exe)
+        monkeypatch.setattr(process, "_spawn", _fake_spawn)
+        monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(process.time, "sleep", lambda s: None)
+
+        p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)
+        p.start()
+
+        assert captured["env"][credentials.API_KEY_ENV_VAR] == "sk-stored-secret-value"
+
+    def test_start_passes_no_env_override_when_no_key_stored(self, monkeypatch, tmp_path):
+        proc = _FakeProc(pid=1, returncode=None)
+        captured = {}
+
+        def _fake_spawn(argv, **kw):
+            captured["env"] = kw.get("env")
+            return proc
+
+        exe = tmp_path / "venv" / "bin" / "openviking-server"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(process, "server_executable", lambda: exe)
+        monkeypatch.setattr(process, "_spawn", _fake_spawn)
+        monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(process.time, "sleep", lambda s: None)
+
+        p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)
+        p.start()
+
+        assert captured["env"] is None
 
     def test_rotate_log_if_large_clears_oversized_file(self):
         process.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
