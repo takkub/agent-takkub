@@ -74,6 +74,7 @@ def default_backends() -> dict[str, SecretBackend]:
         "reference-21st": FileSecretBackend(secrets_dir / "reference-21st.json"),
         "figma": FileSecretBackend(secrets_dir / "figma.json"),
         "penpot": FileSecretBackend(secrets_dir / "penpot.json"),
+        "openviking": FileSecretBackend(secrets_dir / "openviking.json"),
     }
     return backends
 

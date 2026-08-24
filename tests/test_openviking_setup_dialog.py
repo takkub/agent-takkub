@@ -13,6 +13,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import config, openviking_settings
 from agent_takkub import openviking_setup_dialog as dlg_mod
+from agent_takkub.openviking import credentials as ov_credentials
 from agent_takkub.openviking import installer
 
 
@@ -64,15 +65,39 @@ class TestBuildOvConf:
             port=1933,
         )
         assert conf["embedding"]["dense"]["api_base"] == "https://ark.example/api/v3"
-        assert conf["embedding"]["dense"]["api_key"] == "secret-123"
         assert conf["vlm"]["api_base"] == "https://ark.example/api/v3"
-        assert conf["vlm"]["api_key"] == "secret-123"
+        # The real key is never written to ov.conf — only the `${VAR}` env
+        # placeholder upstream's config format resolves at load time
+        # (HIGH finding, docs/audit/2026-08-24-openviking-managed-review.md).
+        assert conf["embedding"]["dense"]["api_key"] == ov_credentials.API_KEY_PLACEHOLDER
+        assert conf["vlm"]["api_key"] == ov_credentials.API_KEY_PLACEHOLDER
+        assert "secret-123" not in json.dumps(conf)
 
 
 class TestWriteOvConf:
     def test_writes_json_to_config_file(self) -> None:
         dlg_mod.write_ov_conf({"a": 1})
         assert json.loads(installer.CONFIG_FILE.read_text(encoding="utf-8")) == {"a": 1}
+
+    def test_no_api_key_never_touches_secret_manager(self) -> None:
+        dlg_mod.write_ov_conf({"a": 1})
+        assert ov_credentials.load_api_key() is None
+
+    def test_api_key_persists_via_secret_manager_not_the_config_file(self) -> None:
+        conf = dlg_mod.build_ov_conf(
+            embedding_provider="openai",
+            embedding_api_base="",
+            embedding_api_key="sk-real-secret-value",
+            embedding_model="text-embedding-3-small",
+            vlm_provider="openai",
+            vlm_model="gpt-4o",
+            workspace_dir="/data",
+            port=1933,
+        )
+        dlg_mod.write_ov_conf(conf, api_key="sk-real-secret-value")
+
+        assert ov_credentials.load_api_key() == "sk-real-secret-value"
+        assert "sk-real-secret-value" not in installer.CONFIG_FILE.read_text(encoding="utf-8")
 
 
 class TestRunDoctor:
@@ -114,6 +139,29 @@ class TestDialogWidget:
         assert "healthy" in dlg._result_box.toPlainText()
         written = json.loads(installer.CONFIG_FILE.read_text(encoding="utf-8"))
         assert written["embedding"]["dense"]["model"] == "my-embed-model"
+        dlg.deleteLater()
+
+    def test_install_saves_api_key_via_secret_manager_not_config_file(self, monkeypatch) -> None:
+        class _FakeManager:
+            def ensure_installed(self):
+                return True
+
+            def start(self):
+                return dlg_mod.ov_manager.ManagerStatus(
+                    True, True, True, "http://127.0.0.1:1933", True
+                )
+
+        monkeypatch.setattr(dlg_mod.ov_manager, "get_manager", lambda: _FakeManager())
+
+        dlg = dlg_mod.OpenVikingSetupDialog()
+        dlg._embed_api_key_edit.setText("sk-typed-in-wizard")
+        dlg._on_install_clicked()
+        _wait(dlg._install_thread)
+
+        assert ov_credentials.load_api_key() == "sk-typed-in-wizard"
+        written = installer.CONFIG_FILE.read_text(encoding="utf-8")
+        assert "sk-typed-in-wizard" not in written
+        assert ov_credentials.API_KEY_PLACEHOLDER in written
         dlg.deleteLater()
 
     def test_install_start_success_marks_enabled_and_saves_settings(self, monkeypatch) -> None:

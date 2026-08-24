@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .._win_console import SUBPROCESS_NO_WINDOW
+from . import credentials
 
 _log = logging.getLogger(__name__)
 
@@ -73,7 +74,9 @@ def is_installed() -> bool:
     return server_executable().is_file()
 
 
-def _run(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess:
+def _run(
+    argv: list[str], *, timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
         stdout=subprocess.PIPE,
@@ -83,12 +86,23 @@ def _run(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
 
 
-def _create_venv(venv: Path) -> None:
+def _create_venv(venv: Path, *, clear: bool = False) -> None:
+    """`clear=True` (repair) passes `venv`'s own `--clear` flag, which
+    deletes the target directory's contents before creating the
+    environment — plain `python -m venv <existing non-empty dir>` returns
+    0 but leaves unrelated pre-existing files (a corrupted/partial
+    package, a stale `.dist-info`) untouched, so a "repair" that never
+    recreates the venv doesn't actually fix anything (MEDIUM finding in
+    `docs/audit/2026-08-24-openviking-managed-review.md`)."""
     venv.parent.mkdir(parents=True, exist_ok=True)
-    proc = _run([sys.executable, "-m", "venv", str(venv)], timeout=_VENV_TIMEOUT_S)
+    argv = [sys.executable, "-m", "venv", str(venv)]
+    if clear:
+        argv.append("--clear")
+    proc = _run(argv, timeout=_VENV_TIMEOUT_S)
     if proc.returncode != 0:
         raise InstallerError(f"failed to create OpenViking venv: {proc.stdout}")
 
@@ -129,7 +143,7 @@ def _verify(venv: Path) -> str | None:
     if not exe.is_file():
         raise InstallerError(f"openviking-server executable not found after install: {exe}")
     try:
-        _run([str(exe), "doctor"], timeout=_DOCTOR_TIMEOUT_S)
+        _run([str(exe), "doctor"], timeout=_DOCTOR_TIMEOUT_S, env=credentials.subprocess_env())
     except subprocess.TimeoutExpired as exc:
         raise InstallerError(f"openviking-server doctor timed out: {exc}") from exc
     return _installed_version(venv)
@@ -164,7 +178,7 @@ def ensure_installed(*, force: bool = False) -> bool:
     if is_installed() and not force:
         return True
     try:
-        _create_venv(VENV_DIR)
+        _create_venv(VENV_DIR, clear=force)
         _pip_install(VENV_DIR)
         version = _verify(VENV_DIR)
     except subprocess.TimeoutExpired as exc:
@@ -183,7 +197,9 @@ def run_doctor() -> tuple[bool, str]:
     if not exe.is_file():
         return False, "openviking-server is not installed (run `takkub ov managed install`)"
     try:
-        proc = _run([str(exe), "doctor"], timeout=_DOCTOR_TIMEOUT_S)
+        proc = _run(
+            [str(exe), "doctor"], timeout=_DOCTOR_TIMEOUT_S, env=credentials.subprocess_env()
+        )
     except subprocess.TimeoutExpired:
         return False, "openviking-server doctor timed out"
     return proc.returncode == 0, proc.stdout
