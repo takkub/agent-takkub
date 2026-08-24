@@ -1,0 +1,33 @@
+{
+  "name": "Takkub Final Closeout After 1.3.0",
+  "prepared_date": "2026-08-24",
+  "latest_observed_main": "72c9bc4f014246ab2cb5e195fb67afa23640287c",
+  "scope": [
+    "issue_376_validation",
+    "openviking_project_isolation",
+    "context_token_gating",
+    "settings_ui",
+    "context_debug",
+    "real_integrations",
+    "real_gui_acceptance",
+    "rollback_drill",
+    "observability",
+    "release_stop_rule"
+  ],
+  "files": [
+    "00_FINAL_SUMMARY_TH.md",
+    "01_REMAINING_WORK_PRIORITY.md",
+    "02_OPENVIKING_STRICT_SCOPE.md",
+    "03_CONTEXT_TOKEN_EFFICIENCY.md",
+    "04_SETTINGS_UI_FINAL.md",
+    "05_UI_EXAMPLES.md",
+    "06_REAL_VALIDATION_PLAN.md",
+    "07_ROLLBACK_AND_FAILURE_DRILL.md",
+    "08_OBSERVABILITY_FINAL.md",
+    "09_RELEASE_AND_STOP_RULE.md",
+    "10_ACCEPTANCE_FINAL.md",
+    "11_MASTER_PROMPT_FOR_LEAD.md",
+    "12_WHAT_TAKKUB_IS_AFTER_CLOSEOUT.md",
+    "README.md"
+  ]
+}

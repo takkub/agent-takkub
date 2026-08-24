@@ -1,0 +1,22 @@
+# Final Acceptance Checklist
+
+- [ ] #376 fixed and validated
+- [ ] OpenViking hard project isolation
+- [ ] wrong-project resource regression tests
+- [ ] Context Gate small/medium/large tasks
+- [ ] token/source trace visible
+- [ ] Knowledge Settings UI
+- [ ] OpenViking Settings UI
+- [ ] Design Tools Settings UI
+- [ ] Context Debug UI
+- [ ] secrets masked
+- [ ] real 21st test
+- [ ] real Figma test
+- [ ] real Penpot test
+- [ ] real OpenViking test
+- [ ] real GUI acceptance
+- [ ] rollback/failure drill
+- [ ] full CI green
+- [ ] WebEngine soak green
+- [ ] #362/Phase 10 untouched
+- [ ] final field-soak period begins
