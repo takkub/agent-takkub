@@ -123,6 +123,15 @@ def index_vault(project: str | None) -> IndexResult:
     return IndexResult(ok=True, added=added, skipped=skipped, failed=failed, total=len(state))
 
 
+def reset_state(project: str | None) -> None:
+    """Drop the incremental `{rel_path: content_hash}` cache for *project* so
+    the next `index_vault` re-pushes every allowlisted doc, even ones whose
+    hash hasn't changed — the Settings UI's "Re-index" action (as opposed to
+    "Sync", which stays incremental) for when the sidecar's own knowledge
+    base was reset externally and drifted from this cache."""
+    _save_state(project, {})
+
+
 def index_status(project: str | None) -> dict:
     state = _load_state(project)
     h = adapter.health()
@@ -137,4 +146,4 @@ def index_status(project: str | None) -> dict:
     }
 
 
-__all__ = ["IndexResult", "index_status", "index_vault"]
+__all__ = ["IndexResult", "index_status", "index_vault", "reset_state"]

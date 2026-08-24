@@ -130,6 +130,7 @@ from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 from .lead_context import _allowed_project_roots
 from .settings_core_v2 import CoreV2SettingsMixin
+from .settings_knowledge_design import KnowledgeDesignSettingsMixin
 
 # ── view indices (QStackedWidget page order) ────────────────────
 # Order is stable for indices 0–7 (external callers/tests reference these
@@ -159,6 +160,13 @@ VIEW_CORE_V2_ROUTING = 13
 VIEW_CORE_V2_BRAIN = 14
 VIEW_CORE_V2_SCHEDULER = 15
 VIEW_CORE_V2_MIGRATION = 16
+# Knowledge & Design (final closeout pack 2 — 04_SETTINGS_UI_FINAL.md) —
+# appended after Core V2 rather than inserted, same "append, never renumber"
+# rule as every prior addition above.
+VIEW_KNOWLEDGE = 17
+VIEW_OPENVIKING = 18
+VIEW_DESIGN_TOOLS = 19
+VIEW_CONTEXT_DEBUG = 20
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -183,6 +191,10 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_CORE_V2_BRAIN, "Brain", "CORE V2"),
     (VIEW_CORE_V2_SCHEDULER, "Scheduler", "CORE V2"),
     (VIEW_CORE_V2_MIGRATION, "Migration", "CORE V2"),
+    (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE & DESIGN"),
+    (VIEW_OPENVIKING, "OpenViking", "KNOWLEDGE & DESIGN"),
+    (VIEW_DESIGN_TOOLS, "Design Tools", "KNOWLEDGE & DESIGN"),
+    (VIEW_CONTEXT_DEBUG, "Context Debug", "KNOWLEDGE & DESIGN"),
 )
 
 # Core V2 pages each save through their own dedicated button (Overview's
@@ -195,6 +207,15 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
 _CORE_V2_VIEWS: frozenset[int] = frozenset(
     view_idx for view_idx, _label, section in _NAV_VIEWS if section == "CORE V2"
 )
+
+# Same "own dedicated save button, never the footer transaction" shape as
+# Core V2 above — Knowledge/Context Debug are read-only, OpenViking has its
+# own "Save settings" button, Design Tools writes each credential through
+# immediately (`settings_knowledge_design`'s own module docstring).
+_KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset(
+    view_idx for view_idx, _label, section in _NAV_VIEWS if section == "KNOWLEDGE & DESIGN"
+)
+_NO_FOOTER_SAVE_VIEWS: frozenset[int] = _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
 # (⌘ ◇ ◉ ⊞ ✦ ♙) were ported 1:1 from the web mockup but IBM Plex Sans/Mono
@@ -223,6 +244,10 @@ _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_CORE_V2_BRAIN: "star",
     VIEW_CORE_V2_SCHEDULER: "grid",
     VIEW_CORE_V2_MIGRATION: "diamond",
+    VIEW_KNOWLEDGE: "star",
+    VIEW_OPENVIKING: "grid",
+    VIEW_DESIGN_TOOLS: "diamond",
+    VIEW_CONTEXT_DEBUG: "target",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
 
@@ -286,6 +311,22 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_CORE_V2_MIGRATION: (
         "Core V2 — Migration",
         "inspect/plan/dry-run เท่านั้น — apply ทำผ่าน CLI",
+    ),
+    VIEW_KNOWLEDGE: (
+        "Knowledge",
+        "สถานะ Brain / Obsidian / Graft / OpenViking รวมในที่เดียว",
+    ),
+    VIEW_OPENVIKING: (
+        "OpenViking",
+        "mode/strict-scope/limit/timeout + Test / Sync Active Project / Re-index",
+    ),
+    VIEW_DESIGN_TOOLS: (
+        "Design Tools",
+        "Storybook detection + Figma/Penpot/21st.dev credential + role permissions",
+    ),
+    VIEW_CONTEXT_DEBUG: (
+        "Context Debug",
+        "trace ของ context build ล่าสุด — token/latency ต่อ source, dedup, scope rejects",
     ),
 }
 
@@ -684,7 +725,7 @@ class _AutoskillsConfirmDialog(QDialog):
         return [cand.name for cand, chk in self._checks if chk.isChecked()]
 
 
-class SettingsWindow(QDialog, CoreV2SettingsMixin):
+class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin):
     """The unified Settings window. One instance per open — construct fresh
     each time (mirrors the old, now-removed ``PaneToolsDialog``/
     ``PipelineSettingsDialog``'s no-singleton/no-caching pattern), so it
@@ -947,6 +988,10 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_migration_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_knowledge_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_openviking_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_design_tools_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_context_debug_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -1029,16 +1074,17 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin):
         the footer's unsaved-dot/label + Save & Apply enabled state.
 
         Also disables Save & Apply / Revert unsaved changes outright while a
-        Core V2 page is showing (`_CORE_V2_VIEWS`) — those pages save through
-        their own dedicated button and never stage into `_dirty_views`, so
+        Core V2 or Knowledge & Design page is showing (`_NO_FOOTER_SAVE_
+        VIEWS`) — those pages save through their own dedicated button (or
+        write through immediately) and never stage into `_dirty_views`, so
         the footer pair would otherwise sit there gold/clickable while doing
         nothing for the visible page (design critic should #1)."""
         self._dirty = bool(self._dirty_views)
         self._unsaved_dot.setVisible(self._dirty)
         self._unsaved_label.setVisible(self._dirty)
-        on_core_v2 = self._stack.currentIndex() in _CORE_V2_VIEWS
-        self._save_btn.setEnabled(self._dirty and not on_core_v2)
-        self._reset_btn.setEnabled(not on_core_v2)
+        on_self_saving_view = self._stack.currentIndex() in _NO_FOOTER_SAVE_VIEWS
+        self._save_btn.setEnabled(self._dirty and not on_self_saving_view)
+        self._reset_btn.setEnabled(not on_self_saving_view)
 
     def _on_reset_clicked(self) -> None:
         """Revert the currently-visible view's editable fields back to the
