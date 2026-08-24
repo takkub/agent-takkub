@@ -2,6 +2,22 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.3.1] - 2026-08-24
+
+### Fixed (แก้)
+
+- **Delivery paste ทับ account-pending banner / trust modal ของ provider** (#376, severity high — เจอจริงกับ agy ใน wash-locker) —
+  อาการ: spawn pane → ~7s ต่อมา task ถูก paste ลงหน้าจอ "Verifying your account…" (หรือ trust-folder modal ของ worktree ใหม่) → prompt หาย
+  pane นั่งว่างที่ `>` และ `task_delivery_accepted` ถูก emit ทั้งที่ CLI ไม่เคยได้รับ → root cause: ready-gate เชื่อ `is_at_ready_prompt()`
+  (footer chrome `>` + `? for shortcuts` ใน 6 แถว) อย่างเดียว ส่วน `account_pending_reason()` gate ด้วย grace 45s + streak 5 (ตอบคำถาม
+  "ค้างถาวรไหม" ไม่ใช่ "ส่งได้ไหมตอนนี้") และ `_prompt_block_reason` แค่ warn Lead ครั้งเดียวไม่กั้น submit → แก้: `PtySession.
+  shows_account_pending_marker(provider)` ungated (20 แถว, provider ไม่มี marker = no-op) + module ใหม่ `delivery_readiness.can_accept_input
+  (is_ready, account_pending, prompt_blocked)` เป็น predicate เดียวก่อน submit ทุก path ใน `lead_inbox` (ready-streak reset ขณะ banner/modal
+  อยู่ · `_delayed_enter_verified` ไม่ resend/repaste ทับ · blind-paste fallback defer เหมือน trust modal · `accepted` ไม่ผ่านถ้ายังเห็น
+  banner/prompt) · `_prompt_block_reason` guard ชนิดค่าจริง (bool/str) กัน mock truthy · ทุก provider (pure text scan) ทั้ง Windows/macOS
+  + tests `test_delivery_account_pending.py`, `test_delivery_prompt_blocked.py`, `test_auth_failure_detection.py` (+ fixture ใน
+  `test_delivery_blocked_prompt.py` ให้ modal เคลียร์เอง) · gap: busy-marker จริงต่อ provider สำหรับ `accepted` → #103
+
 ## [v1.3.0] - 2026-08-24
 
 Master Upgrade batch — roadmap `docs/plans/workspace-master-upgrade-2026-08-24/` (Phase 0 re-audit
