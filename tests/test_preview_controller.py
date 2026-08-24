@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QUrl
 
 from agent_takkub.preview_controller import (
     DEVICE_PRESETS,
@@ -330,3 +330,95 @@ class TestNavigationAllowed:
         other = str((tmp_path / "other.html").resolve())
         state = PreviewState(project="demo", mode="file", target=target)
         assert navigation_allowed(state, other) is False
+
+
+# ── navigation_allowed: file:// URL comparison (#369 BUG-001) ────────────
+#
+# The widget reports a navigation target as a `file://` URL (via
+# `QUrl.fromLocalFile`/`acceptNavigationRequest`), never as the bare path
+# string `PreviewState.target` stores — the old code compared those two
+# representations directly and could never match, even for the exact same
+# file.
+
+
+class TestNavigationAllowedFileUrlComparison:
+    def test_file_url_for_the_same_path_is_allowed(self, tmp_path: Path) -> None:
+        target = tmp_path / "index.html"
+        state = PreviewState(project="demo", mode="file", target=str(target.resolve()))
+
+        nav_url = QUrl.fromLocalFile(str(target)).toString()
+
+        assert navigation_allowed(state, nav_url) is True
+
+    def test_file_url_for_a_different_path_is_denied(self, tmp_path: Path) -> None:
+        target = tmp_path / "index.html"
+        other = tmp_path / "other.html"
+        state = PreviewState(project="demo", mode="file", target=str(target.resolve()))
+
+        nav_url = QUrl.fromLocalFile(str(other)).toString()
+
+        assert navigation_allowed(state, nav_url) is False
+
+    def test_anchor_only_navigation_on_the_same_file_url_is_allowed(self, tmp_path: Path) -> None:
+        target = tmp_path / "index.html"
+        state = PreviewState(project="demo", mode="file", target=str(target.resolve()))
+
+        nav_url = QUrl.fromLocalFile(str(target)).toString() + "#section"
+
+        assert navigation_allowed(state, nav_url) is True
+
+    def test_windows_drive_letter_path_round_trips_through_file_url(self) -> None:
+        # QUrl("C:/proj/index.html").scheme() returns "c" — RFC 3986 treats a
+        # drive letter + ":" as a syntactically valid one-letter scheme, so a
+        # naive scheme() check would misclassify every Windows path. This
+        # pins the actual fix (a "://" substring check) against exactly the
+        # string shape a Windows path has, independent of the host OS the
+        # test suite happens to run on.
+        target = r"C:\Users\demo\proj\index.html"
+        state = PreviewState(project="demo", mode="file", target=target)
+
+        nav_url = QUrl.fromLocalFile(target).toString()
+        assert nav_url.startswith("file:///C:")
+
+        assert navigation_allowed(state, nav_url) is True
+        other_url = QUrl.fromLocalFile(r"C:\Users\demo\proj\other.html").toString()
+        assert navigation_allowed(state, other_url) is False
+
+    def test_unicode_path_round_trips_through_file_url(self, tmp_path: Path) -> None:
+        target = tmp_path / "โปรเจกต์" / "ไฟล์.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        state = PreviewState(project="demo", mode="file", target=str(target.resolve()))
+
+        nav_url = QUrl.fromLocalFile(str(target)).toString()
+
+        assert navigation_allowed(state, nav_url) is True
+
+    def test_http_target_is_never_treated_as_a_local_file_match(self) -> None:
+        state = PreviewState(project="demo", mode="file", target="http://127.0.0.1:3000/")
+        assert navigation_allowed(state, "http://127.0.0.1:3000/") is True  # exact-string fallback
+        assert navigation_allowed(state, "http://127.0.0.1:3000/about") is False
+
+
+# ── PreviewController.close: nav_block_counts cleanup (#369 BUG-003) ─────
+
+
+class TestCloseClearsNavBlockCounts:
+    def test_close_pops_the_project_nav_block_counter(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("demo", "http://127.0.0.1:3000")
+        controller.check_navigation("demo", "http://evil.example.com/")
+        assert controller.nav_block_counts() == {"demo": 1}
+
+        controller.close("demo")
+
+        assert controller.nav_block_counts() == {}
+
+    def test_reopening_after_close_starts_the_counter_fresh(self, qapp: QCoreApplication) -> None:
+        controller = PreviewController()
+        controller.open_url("demo", "http://127.0.0.1:3000")
+        controller.check_navigation("demo", "http://evil.example.com/")
+        controller.close("demo")
+
+        controller.open_url("demo", "http://127.0.0.1:4000")
+
+        assert controller.nav_block_counts() == {}
