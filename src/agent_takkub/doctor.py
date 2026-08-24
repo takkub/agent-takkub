@@ -1431,13 +1431,20 @@ def check_capability_skill_store() -> list[Finding]:
 def check_design_integrations() -> list[Finding]:
     """[design-integrations] — Storybook detection (real, filesystem-only —
     no network call) per configured project, plus which of the opt-in-only
-    21st.dev/Figma/Penpot MCPs (default OFF, `core.capabilities.
+    21st.dev/Figma/Penpot integrations (default OFF, `core.capabilities.
     design_integrations.OPTIONAL_DESIGN_MCPS`) any role has actually been
-    granted via a `pane_tools_policy` override. Never lists a project/role
-    that has none of these — silence is the expected default, not a WARN."""
+    granted via a `pane_tools_policy` override, and — #373 — whether each
+    granted one actually has a stored credential yet
+    (`integration_config_status`, itself no network call, same contract).
+    Never lists a project/role that has none of these — silence is the
+    expected default, not a WARN."""
     from . import pane_tools_policy
     from .config import load_projects
-    from .core.capabilities.design_integrations import OPTIONAL_DESIGN_MCPS, detect_storybook
+    from .core.capabilities.design_integrations import (
+        OPTIONAL_DESIGN_MCPS,
+        detect_storybook,
+        integration_config_status,
+    )
 
     findings: list[Finding] = []
     try:
@@ -1486,14 +1493,25 @@ def check_design_integrations() -> list[Finding]:
                     f"enabled for role(s): {', '.join(roles)}",
                 )
             )
+            configured, config_detail = integration_config_status(mcp.id)
+            if not configured:
+                findings.append(
+                    Finding(
+                        "design-integrations",
+                        f"{mcp.id}-credential",
+                        Status.WARN,
+                        f"{config_detail} — client will refuse until "
+                        f"'takkub design integrations enable --role <role> --token <token> {mcp.id}'",
+                    )
+                )
         else:
             findings.append(
                 Finding(
                     "design-integrations",
                     mcp.id,
                     Status.INFO,
-                    "opt-in, off for every role — takkub mcp add <config> --force, then "
-                    f"takkub mcp allow --role <role> {mcp.id}",
+                    "opt-in, off for every role — "
+                    f"'takkub design integrations enable --role <role> --token <token> {mcp.id}'",
                 )
             )
     return findings

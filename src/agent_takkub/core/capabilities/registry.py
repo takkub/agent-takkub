@@ -23,7 +23,11 @@ from pathlib import Path
 from agent_takkub import mcp_bridge, pane_tools_policy, skill_policy, skill_scan
 from agent_takkub.core.models.capability import CapabilityScope, Skill
 
-from .design_integrations import DesignIntegrationsSnapshot, resolve_design_integrations
+from .design_integrations import (
+    DesignIntegrationsSnapshot,
+    build_client,
+    resolve_design_integrations,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,16 @@ class CapabilityRegistry:
         `design_integrations.resolve_design_integrations`; see that
         module for why the optional MCPs stay stubs here."""
         return resolve_design_integrations(role, roots)
+
+    def design_integration_client(self, role: str, integration_id: str) -> object:
+        """#373 — construct a live 21st.dev/Figma/Penpot client for `role`,
+        enforcing PermissionEngine + a stored credential (see
+        `design_integrations.build_client`, the only place any of those
+        classes is constructed). Raises the same errors that function
+        raises (`IntegrationDeniedError`/`IntegrationNotConfiguredError`/
+        `ValueError`) — never returns a client the checks didn't pass, and
+        never swallows the denial into a falsy value."""
+        return build_client(integration_id, role)
 
     def mcp_argv_for_provider(
         self,
