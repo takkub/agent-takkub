@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 312,
+  "module_count": 314,
   "modules": [
     {
       "module": "agent_takkub",
@@ -400,6 +400,7 @@
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.settings_core_v2",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.pages.mcp_page",
         "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
@@ -420,7 +421,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 29,
+      "fan_in": 30,
       "fan_out": 0
     },
     {
@@ -506,6 +507,7 @@
         "agent_takkub.maintenance",
         "agent_takkub.mcp_fallback",
         "agent_takkub.opencode_helper",
+        "agent_takkub.openviking_settings",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
@@ -562,7 +564,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 100,
+      "fan_in": 101,
       "fan_out": 2
     },
     {
@@ -872,9 +874,10 @@
         "agent_takkub.core.brain.facade",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval",
-        "agent_takkub.settings_core_v2"
+        "agent_takkub.settings_core_v2",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 3
     },
     {
@@ -900,9 +903,10 @@
       "module": "agent_takkub.core.capabilities.design_clients",
       "imports": [],
       "imported_by": [
-        "agent_takkub.core.capabilities.design_integrations"
+        "agent_takkub.core.capabilities.design_integrations",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -919,9 +923,10 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.core.capabilities.registry",
-        "agent_takkub.doctor"
+        "agent_takkub.doctor",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 7
     },
     {
@@ -1045,9 +1050,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.core.context_sources.doctor_section"
+        "agent_takkub.core.context_sources.doctor_section",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 5
     },
     {
@@ -1060,9 +1066,11 @@
         "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.context_sources.doctor_section",
         "agent_takkub.core.context_sources.indexing",
-        "agent_takkub.core.context_sources.openviking_source"
+        "agent_takkub.core.context_sources.openviking_source",
+        "agent_takkub.openviking_settings",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
@@ -1099,9 +1107,10 @@
       ],
       "imported_by": [
         "agent_takkub.core.brain.facade",
-        "agent_takkub.core.context_sources.doctor_section"
+        "agent_takkub.core.context_sources.doctor_section",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {
@@ -2032,9 +2041,10 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.core.capabilities.design_integrations",
-        "agent_takkub.doctor"
+        "agent_takkub.doctor",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 5
     },
     {
@@ -2396,9 +2406,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 30
     },
     {
@@ -2647,11 +2658,12 @@
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.pane_tools_policy",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 11
     },
     {
@@ -2911,6 +2923,18 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.openviking_settings",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.context_sources.openviking_adapter"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_knowledge_design"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
@@ -3070,6 +3094,7 @@
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.repositories.mcps",
         "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_management.repositories.roles",
@@ -3079,7 +3104,7 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 17,
+      "fan_in": 18,
       "fan_out": 7
     },
     {
@@ -3894,6 +3919,29 @@
       "fan_out": 20
     },
     {
+      "module": "agent_takkub.settings_knowledge_design",
+      "imports": [
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.core.brain.store",
+        "agent_takkub.core.capabilities.design_clients",
+        "agent_takkub.core.capabilities.design_integrations",
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.core.context_sources.trace_store",
+        "agent_takkub.core.secrets.manager",
+        "agent_takkub.doctor",
+        "agent_takkub.lead_context",
+        "agent_takkub.openviking_settings",
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.settings_window"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 13
+    },
+    {
       "module": "agent_takkub.settings_management",
       "imports": [],
       "imported_by": [],
@@ -4358,6 +4406,7 @@
         "agent_takkub.role_models",
         "agent_takkub.roles",
         "agent_takkub.settings_core_v2",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
         "agent_takkub.skill_policy",
@@ -4365,11 +4414,12 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.__main__",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 2,
-      "fan_out": 26
+      "fan_in": 3,
+      "fan_out": 27
     },
     {
       "module": "agent_takkub.shared_dev_tools",

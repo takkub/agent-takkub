@@ -76,11 +76,12 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_seventeen_stacked_views(self) -> None:
+    def test_has_twenty_one_stacked_views(self) -> None:
         # 10 stable views + Performance (10) + 6 Core V2 views (11-16,
-        # epic #309 Phase 9).
+        # epic #309 Phase 9) + 4 Knowledge & Design views (17-20, final
+        # closeout pack 2).
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 17
+        assert dlg._stack.count() == 21
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
