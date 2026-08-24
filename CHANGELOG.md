@@ -2,6 +2,19 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.4.1] - 2026-08-24
+
+### Fixed (แก้)
+
+- **OpenViking read/hybrid mode ค้นข้อมูลไม่เจอเลยจริง — search hit `uri` ไม่ตรงกับ local registry key เสมอ** (#377, follow-up จาก 1.4.0)
+  — root cause ยืนยันจาก OpenViking API จริง (`docs/en/concepts/04-viking-uri.md`, `docs/en/api/02-resources.md`): ingest คืน
+  `result.root_uri` (`viking://resources/...`) แต่โค้ดเดิม key local registry ด้วย path ในเครื่อง (`str(path)`) คนละ namespace กันสิ้นเชิง
+  → `apply_scope_and_trust` reject ทุก hit จริงเป็น "missing project metadata" ตลอด (ปลอดภัย ไม่รั่วข้าม project แต่ใช้งานไม่ได้เลย)
+  · แก้: `openviking_adapter.add_resource()` คืน `root_uri` ที่ sidecar ยืนยันจริง (ไม่ใช่ bool อีกต่อไป) แทนที่จะเดา · `indexing.py`
+  ขอ uri แบบ deterministic ผ่าน `to=` (`viking://resources/<workspace>/<project>/<rel path>`, idempotent ต่อการ re-ingest) แต่ยึด
+  `root_uri` จริงที่ sidecar คืนมาเป็น key เสมอถ้าไม่ตรงกับที่ขอ (log warning) · เทสเขียนใหม่ให้ mock ตาม response shape จริง
+  (`root_uri` ต่างจาก local path) แทน pattern เดิมที่ doctor uri ให้ตรง key โดยบังเอิญ
+
 ## [v1.4.0] - 2026-08-24
 
 Final closeout pack (after 1.3.0) — roadmap `docs/plans/final-closeout-after-1.3.0/` · reviewer `docs/audit/2026-08-24-closeout-review.md`
