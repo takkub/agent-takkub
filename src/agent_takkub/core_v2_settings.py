@@ -70,6 +70,14 @@ FLAG_NAMES: tuple[str, ...] = (
 _DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES if name != "v2_authority"}
 _DEFAULT_FLAGS["v2_authority"] = False
 
+# Context Strategy (v2-hardening C, `13_SIMPLE_UX.md`) — Fast/Automatic/Deep
+# UX switch for the Context Gate/Classifier v2 stack. A plain string rather
+# than another `FLAG_NAMES` boolean since it's a 3-way choice, not on/off;
+# read back via `core.brain.flag.context_strategy` (env `TAKKUB_CONTEXT_
+# STRATEGY` wins over this, same precedence shape the boolean flags use).
+_CONTEXT_STRATEGIES: tuple[str, ...] = ("fast", "automatic", "deep")
+_DEFAULT_CONTEXT_STRATEGY = "automatic"
+
 
 @dataclass(frozen=True, slots=True)
 class SchedulerPolicyConfig:
@@ -96,6 +104,7 @@ def _default_payload() -> dict:
         "schema_version": SCHEMA_VERSION,
         "flags": dict(_DEFAULT_FLAGS),
         "scheduler_policy": asdict(SchedulerPolicyConfig()),
+        "context_strategy": _DEFAULT_CONTEXT_STRATEGY,
     }
 
 
@@ -154,6 +163,9 @@ def load() -> dict:
                 merged["scheduler_policy"].update(
                     {k: v for k, v in policy.items() if k in merged["scheduler_policy"]}
                 )
+            strategy = payload.get("context_strategy")
+            if isinstance(strategy, str) and strategy in _CONTEXT_STRATEGIES:
+                merged["context_strategy"] = strategy
         except (OSError, ValueError, json.JSONDecodeError):
             merged = _default_payload()
 
@@ -198,4 +210,16 @@ def load_scheduler_policy() -> SchedulerPolicyConfig:
 def save_scheduler_policy(policy: SchedulerPolicyConfig) -> bool:
     payload = load()
     payload["scheduler_policy"] = asdict(policy)
+    return save(payload)
+
+
+def load_context_strategy() -> str:
+    return load().get("context_strategy", _DEFAULT_CONTEXT_STRATEGY)
+
+
+def save_context_strategy(value: str) -> bool:
+    if value not in _CONTEXT_STRATEGIES:
+        raise ValueError(f"unknown context strategy: {value!r}")
+    payload = load()
+    payload["context_strategy"] = value
     return save(payload)

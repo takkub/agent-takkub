@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 317,
+  "module_count": 318,
   "modules": [
     {
       "module": "agent_takkub",
@@ -736,11 +736,24 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.core.brain.escalation",
+      "imports": [
+        "agent_takkub.core.brain.task_complexity"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.core.brain.facade",
       "imports": [
         "agent_takkub.core.brain.candidate",
         "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.context_gate",
+        "agent_takkub.core.brain.escalation",
         "agent_takkub.core.brain.flag",
         "agent_takkub.core.brain.pipeline",
         "agent_takkub.core.brain.retrieval",
@@ -750,6 +763,7 @@
         "agent_takkub.core.brain.task_complexity",
         "agent_takkub.core.context_sources.base",
         "agent_takkub.core.context_sources.trace_store",
+        "agent_takkub.core.conversation.flag",
         "agent_takkub.core.models.memory",
         "agent_takkub.core.resilience.circuit_breaker"
       ],
@@ -758,7 +772,7 @@
         "agent_takkub.settings_core_v2"
       ],
       "fan_in": 2,
-      "fan_out": 14
+      "fan_out": 16
     },
     {
       "module": "agent_takkub.core.brain.flag",
@@ -894,9 +908,10 @@
         "agent_takkub.core.brain.context_gate"
       ],
       "imported_by": [
+        "agent_takkub.core.brain.escalation",
         "agent_takkub.core.brain.facade"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -1213,11 +1228,12 @@
       ],
       "imported_by": [
         "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.brain.facade",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.notify"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
@@ -2950,6 +2966,7 @@
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.core.brain.escalation",
         "agent_takkub.core.brain.facade",
         "agent_takkub.core.brain.flag",
         "agent_takkub.core.context_sources.trace_store",
@@ -3000,7 +3017,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 46
+      "fan_out": 47
     },
     {
       "module": "agent_takkub.orchestrator_text",

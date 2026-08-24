@@ -24,6 +24,11 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
     monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "0")
     monkeypatch.delenv("TAKKUB_CONTEXT_GATE", raising=False)
+    # v2-hardening C: Context Strategy falls back to the real machine's
+    # persisted core-v2-settings.json (SETTINGS_HOME isn't redirected here)
+    # whenever unset — pin it explicitly so these tests never depend on
+    # whatever a real dev machine's settings file happens to say.
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "automatic")
     return tmp_path
 
 
@@ -129,3 +134,118 @@ def test_gate_disabled_writes_no_trace(runtime, monkeypatch):
     BrainStore("proj").append_event(_rec(id="a", content="some fact"))
     facade.build_context_for_assign("proj", "backend", "fix spacing")
     assert load_last_trace() is None
+
+
+# ── v2-hardening C: default automatic/no-retry matches Wave 1 exactly ─────
+
+
+def test_default_strategy_and_retry_match_classifier_v2_exactly(runtime):
+    """No `--context` override, `retry_count=0` (the default), strategy
+    unset (falls back to "automatic") — the trace's size/score/confidence/
+    reasons must equal calling Classifier v2 directly, with no escalation
+    or strategy-forcing reason appended (equality test, item #5)."""
+    import agent_takkub.core.brain.facade as facade
+    from agent_takkub.core.brain.task_complexity import classify_task_complexity
+
+    task = "refactor the checkout flow across multiple files"
+    facade.build_context_for_assign("proj", "backend", task)
+    trace = load_last_trace()
+    expected = classify_task_complexity(task, "backend", None)
+
+    assert trace["task_size"] == expected.size
+    assert trace["score"] == expected.score
+    assert trace["confidence"] == expected.confidence
+    assert trace["reasons"] == list(expected.reasons)
+    assert trace["strategy"] == "automatic"
+    assert "escalation_reason" not in trace
+    assert trace.get("retry_count", 0) == 0
+
+
+# ── v2-hardening C: adaptive escalation (retry_count) ──────────────────────
+
+
+def test_retry_count_escalates_size_by_one_bucket_in_trace(runtime):
+    import agent_takkub.core.brain.facade as facade
+
+    facade.build_context_for_assign("proj", "backend", "fix spacing", retry_count=1)
+    trace = load_last_trace()
+    assert trace["initial_size"] == "small"
+    assert trace["final_size"] == "medium"
+    assert trace["task_size"] == "medium"
+    assert trace["retry_count"] == 1
+    assert trace["escalated"] is True
+    assert "retry 1 of same task" in trace["escalation_reason"]
+
+
+def test_retry_count_zero_writes_no_escalation_reason(runtime):
+    import agent_takkub.core.brain.facade as facade
+
+    facade.build_context_for_assign("proj", "backend", "fix spacing", retry_count=0)
+    trace = load_last_trace()
+    assert trace["initial_size"] == "small"
+    assert trace["final_size"] == "small"
+    assert "escalation_reason" not in trace
+
+
+# ── v2-hardening C/G: Context Strategy (Fast/Automatic/Deep) ───────────────
+
+
+def test_strategy_fast_forces_small_absent_risk(runtime, monkeypatch):
+    import agent_takkub.core.brain.facade as facade
+
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "fast")
+    facade.build_context_for_assign("proj", "backend", "refactor cross-module feature")
+    trace = load_last_trace()
+    assert trace["task_size"] == "small"
+
+
+def test_strategy_deep_forces_large(runtime, monkeypatch):
+    import agent_takkub.core.brain.facade as facade
+
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "deep")
+    facade.build_context_for_assign("proj", "backend", "fix spacing")
+    trace = load_last_trace()
+    assert trace["task_size"] == "large"
+    assert trace["budget_tokens"] > 4000
+
+
+def test_strategy_fast_floors_at_medium_for_risk_domain(runtime, monkeypatch):
+    import agent_takkub.core.brain.facade as facade
+
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "fast")
+    facade.build_context_for_assign("proj", "backend", "fix login auth spacing")
+    trace = load_last_trace()
+    assert trace["task_size"] == "medium"
+    assert "auth" in trace["risk_flags"]
+
+
+def test_explicit_context_flag_overrides_strategy(runtime, monkeypatch):
+    import agent_takkub.core.brain.facade as facade
+
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "deep")
+    facade.build_context_for_assign("proj", "backend", "fix spacing", flags={"context": "small"})
+    trace = load_last_trace()
+    assert trace["task_size"] == "small"
+
+
+# ── v2-hardening E: explainable skipped-source trace ────────────────────
+
+
+def test_skipped_sources_recorded_for_small_task(runtime):
+    import agent_takkub.core.brain.facade as facade
+
+    facade.build_context_for_assign("proj", "backend", "fix spacing")
+    trace = load_last_trace()
+    skipped = {s["name"]: s["reason"] for s in trace["skipped"]}
+    assert "reference_sources" in skipped
+    # TAKKUB_V2_CONVERSATION=0 in this fixture's own `runtime` setup.
+    assert "conversation_summary" in skipped
+
+
+def test_skipped_sources_empty_for_medium_task_with_conversation_on(runtime, monkeypatch):
+    import agent_takkub.core.brain.facade as facade
+
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "1")
+    facade.build_context_for_assign("proj", "backend", "refactor cross-module feature")
+    trace = load_last_trace()
+    assert trace.get("skipped", []) == []

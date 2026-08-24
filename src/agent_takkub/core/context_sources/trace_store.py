@@ -35,6 +35,9 @@ def save_last_trace(
     task_size: str | None = None,
     inefficient: bool = False,
     complexity=None,
+    escalation=None,
+    strategy: str | None = None,
+    skipped=None,
 ) -> None:
     """Never raises — a failed trace write must not turn a successful
     context build into a failed `assign`. `task_size`/`inefficient` are the
@@ -47,7 +50,10 @@ def save_last_trace(
     depend on `core.brain`) and only adds fields when present, for the
     Explainable Trace (`07_EXPLAINABLE_TRACE.md`); `doctor`'s `[context]`
     reader already uses `.get()` for every field so an older trace file
-    without them still loads fine."""
+    without them still loads fine. `escalation` (v2-hardening C,
+    `core.brain.escalation.EscalationResult`) and `strategy`/`skipped`
+    (v2-hardening C/E, `13_SIMPLE_UX.md`/`07_EXPLAINABLE_TRACE.md`) are the
+    same kind of optional, duck-typed addition."""
     try:
         path = _trace_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +91,17 @@ def save_last_trace(
             payload["risk_flags"] = list(complexity.risk_flags)
             payload["estimated_files"] = complexity.estimated_files
             payload["estimated_modules"] = complexity.estimated_modules
+        if escalation is not None:
+            payload["initial_size"] = escalation.initial.size
+            payload["final_size"] = escalation.final.size
+            payload["retry_count"] = escalation.retry_count
+            payload["escalated"] = escalation.escalated
+            if escalation.reason:
+                payload["escalation_reason"] = escalation.reason
+        if strategy is not None:
+            payload["strategy"] = strategy
+        if skipped:
+            payload["skipped"] = list(skipped)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, path)

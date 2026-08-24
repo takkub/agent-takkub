@@ -24,6 +24,10 @@ def runtime(tmp_path, monkeypatch):
     # Explicitly OFF, not merely unset: the shipped default is ON since
     # 1.0.84, so "no env var" no longer means "feature disabled".
     monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "0")
+    # v2-hardening C: pin Context Strategy so these tests never depend on a
+    # real dev machine's persisted core-v2-settings.json (see the identical
+    # note in test_core_brain_context_gate_facade.py's own `runtime` fixture).
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "automatic")
     return tmp_path
 
 

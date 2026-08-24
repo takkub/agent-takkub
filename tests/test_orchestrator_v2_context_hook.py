@@ -26,6 +26,10 @@ def _isolate_data_home(tmp_path, monkeypatch):
     import agent_takkub.config as config
 
     monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
+    # v2-hardening C: same real-SETTINGS_HOME fallback risk the module
+    # docstring above already flags for TAKKUB_V2_CONTEXT — Context Strategy
+    # has the same fallback, so pin it too.
+    monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "automatic")
 
 
 def test_flag_off_returns_task_unchanged(monkeypatch):
@@ -111,3 +115,36 @@ def test_flag_on_passes_provider_file_read_support_through(monkeypatch):
     monkeypatch.setattr(facade, "build_context_for_assign", spy)
     _inject_v2_context(_TASK, "proj", "backend", "backend", "codex")
     assert seen["file_read_supported"] == PROVIDER_REGISTRY["codex"].supports_agent_file_read
+
+
+# ── v2-hardening C: retry_count passthrough (Adaptive Escalation) ─────────
+
+
+def test_retry_count_defaults_to_zero(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
+    import agent_takkub.core.brain.facade as facade
+
+    seen: dict = {}
+
+    def spy(project, role, task_text, *, retry_count=0, **kw):
+        seen["retry_count"] = retry_count
+        return ""
+
+    monkeypatch.setattr(facade, "build_context_for_assign", spy)
+    _inject_v2_context(_TASK, "proj", "backend", "backend", "claude")
+    assert seen["retry_count"] == 0
+
+
+def test_retry_count_forwarded_to_facade(monkeypatch):
+    monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
+    import agent_takkub.core.brain.facade as facade
+
+    seen: dict = {}
+
+    def spy(project, role, task_text, *, retry_count=0, **kw):
+        seen["retry_count"] = retry_count
+        return ""
+
+    monkeypatch.setattr(facade, "build_context_for_assign", spy)
+    _inject_v2_context(_TASK, "proj", "backend", "backend", "claude", retry_count=3)
+    assert seen["retry_count"] == 3

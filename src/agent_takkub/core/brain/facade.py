@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from dataclasses import replace
 
 from agent_takkub.core.models.memory import MemoryRecord, Scope
 from agent_takkub.core.resilience.circuit_breaker import get_breaker
 
 from . import context_builder, context_gate
 from .candidate import MemoryCandidate
+from .escalation import EscalationResult, escalate_for_retry
+from .flag import context_strategy as _active_context_strategy
 from .flag import v2_brain_enabled, v2_context_enabled
 from .pipeline import MemoryManager, SubmitResult
 from .retrieval import RetrievalEngine
@@ -105,6 +108,7 @@ def build_context_for_assign(
     context_window: int | None = None,
     file_read_supported: bool = True,
     flags: Mapping[str, object] | None = None,
+    retry_count: int = 0,
 ) -> str:
     """Context-Injection hook (#309 Phase 7c) — `orchestrator._assign_
     dispatch`'s call site. Meant to run inside a timeout-bounded background
@@ -124,18 +128,46 @@ def build_context_for_assign(
     internally (as one input signal / the empty-text fallback), so budget
     policy (`context_gate.policy_for`/`gate_budget`, keyed by `TaskSize`)
     is unaffected by the extra scoring.
+
+    v2-hardening C layers on top of that classifier result, in order:
+    1. Context Strategy (`13_SIMPLE_UX.md`) — read BEFORE touching the
+       classifier's size, but skipped entirely when `flags` already carries
+       an explicit `--context` override (narrowest choice always wins).
+       `automatic` (the shipped default) is a no-op, so a caller that never
+       sets a strategy reproduces Wave 1's classification exactly.
+    2. Adaptive Escalation (`03_ADAPTIVE_ESCALATION.md`) — `retry_count`
+       (from `orchestrator._assign_dispatch`'s own live-pane-reassign
+       tracking) escalates by one bucket on top of whatever size step 1
+       left, never de-escalates. `retry_count=0` (the default) is a no-op
+       for the same reason.
+    The Dynamic Token Controller's own retry input (`05_TOKEN_CONTROLLER.
+    md`) is `context_gate.gate_budget`'s `retry_count` kwarg, applied AFTER
+    both steps above have settled on a final size.
     """
     if not v2_context_enabled():
         return ""
     gate_on = context_gate.gate_enabled()
     complexity: TaskComplexity | None = None
+    escalation: EscalationResult | None = None
+    strategy = "automatic"
     try:
         base_budget = context_builder.budget_tokens_for(
             context_window, file_read_supported=file_read_supported
         )
         if gate_on:
             complexity = classify_task_complexity(task_text, role, flags)
-            budget = context_gate.gate_budget(complexity.size, base_budget)
+            if not context_gate.has_explicit_override(flags):
+                strategy = _active_context_strategy()
+                forced_size, reason = context_gate.strategy_forced_size(
+                    strategy, complexity.size, complexity.risk_flags
+                )
+                if reason is not None:
+                    complexity = replace(
+                        complexity, size=forced_size, reasons=(*complexity.reasons, reason)
+                    )
+            escalation = escalate_for_retry(complexity, retry_count)
+            complexity = escalation.final
+            budget = context_gate.gate_budget(complexity.size, base_budget, retry_count=retry_count)
         else:
             budget = base_budget
         text = context_builder.build_context(project, role, task_text, budget)
@@ -147,7 +179,15 @@ def build_context_for_assign(
         )
         return ""
     if gate_on:
-        _save_gate_trace(text, complexity=complexity, budget=budget, project=project, role=role)
+        _save_gate_trace(
+            text,
+            complexity=complexity,
+            budget=budget,
+            project=project,
+            role=role,
+            escalation=escalation,
+            strategy=strategy,
+        )
     return text
 
 
@@ -158,6 +198,8 @@ def _save_gate_trace(
     budget: int,
     project: str | None,
     role: str,
+    escalation: EscalationResult | None = None,
+    strategy: str = "automatic",
 ) -> None:
     """Persist a Context Gate trace whenever the gate is on, so `doctor`'s
     `[context]` section sees the task-size decision and total tokens for
@@ -166,7 +208,8 @@ def _save_gate_trace(
     Classifier v2's score/confidence/reasons/risk_flags through to the
     Explainable Trace (`07_EXPLAINABLE_TRACE.md`) — `trace_store` treats
     them as optional so a pre-Stage-2 reader (or `TAKKUB_CONTEXT_GATE=0`)
-    still sees the exact same payload shape as before."""
+    still sees the exact same payload shape as before. `escalation`/
+    `strategy` are v2-hardening C's own additions, same optional shape."""
     try:
         from agent_takkub.core.context_sources.base import estimate_tokens
         from agent_takkub.core.context_sources.trace_store import save_last_trace
@@ -182,6 +225,7 @@ def _save_gate_trace(
             latency_ms=0.0,
         )
         inefficient = task_size == "small" and total_tokens > _INEFFICIENT_SMALL_TOKENS
+        skipped = _skipped_sources(complexity) if complexity is not None else None
         save_last_trace(
             trace,
             project=project,
@@ -189,9 +233,36 @@ def _save_gate_trace(
             task_size=task_size,
             inefficient=inefficient,
             complexity=complexity,
+            escalation=escalation,
+            strategy=strategy,
+            skipped=skipped,
         )
     except Exception:
         _log.debug("core.brain.facade: gate trace save failed (best-effort)", exc_info=True)
+
+
+def _skipped_sources(complexity: TaskComplexity) -> list[dict[str, str]]:
+    """Explainable Trace (`07_EXPLAINABLE_TRACE.md`) — every source this
+    build did NOT call, and why. `context_gate.skipped_sources` covers the
+    size-gated reference-source policy; conversation summary has its own
+    separate flag (`core.conversation.flag`) that `context_builder.py`
+    already checks internally, so this is the one other place worth
+    surfacing it from without `context_gate.py` taking on a dependency it
+    doesn't otherwise need."""
+    skipped = context_gate.skipped_sources(complexity.size)
+    try:
+        from agent_takkub.core.conversation.flag import v2_conversation_enabled
+
+        if not v2_conversation_enabled():
+            skipped.append(
+                {
+                    "name": "conversation_summary",
+                    "reason": "conversation V2 disabled (TAKKUB_V2_CONVERSATION=0)",
+                }
+            )
+    except Exception:
+        pass
+    return skipped
 
 
 def on_pane_done(

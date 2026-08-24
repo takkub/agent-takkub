@@ -105,6 +105,99 @@ def test_gate_budget_zero_or_negative_passthrough():
     assert context_gate.gate_budget("medium", -1) == -1
 
 
+# ── gate_budget retry_count staging (v2-hardening C, token controller) ────
+
+
+def test_gate_budget_retry_count_zero_matches_no_retry_ceiling():
+    assert context_gate.gate_budget("small", 100_000, retry_count=0) == 4000
+
+
+def test_gate_budget_retry_count_raises_the_ceiling_in_stages():
+    no_retry = context_gate.gate_budget("small", 100_000, retry_count=0)
+    one_retry = context_gate.gate_budget("small", 100_000, retry_count=1)
+    two_retries = context_gate.gate_budget("small", 100_000, retry_count=2)
+    assert no_retry < one_retry < two_retries
+
+
+def test_gate_budget_retry_ceiling_capped_at_2x():
+    huge_retry = context_gate.gate_budget("small", 1_000_000, retry_count=50)
+    assert huge_retry == 4000 * 2
+
+
+def test_gate_budget_retry_never_exceeds_base_budget():
+    # a tiny model window's base budget still wins even with retries.
+    assert context_gate.gate_budget("large", 500, retry_count=5) == 500
+
+
+# ── has_explicit_override ──────────────────────────────────────────────
+
+
+def test_has_explicit_override_true_for_valid_context_flag():
+    assert context_gate.has_explicit_override({"context": "large"}) is True
+
+
+@pytest.mark.parametrize("flags", [None, {}, {"context": "huge"}, {"other": "x"}])
+def test_has_explicit_override_false_otherwise(flags):
+    assert context_gate.has_explicit_override(flags) is False
+
+
+# ── strategy_forced_size ────────────────────────────────────────────────
+
+
+def test_strategy_automatic_never_overrides():
+    size, reason = context_gate.strategy_forced_size("automatic", "large")
+    assert size == "large"
+    assert reason is None
+
+
+def test_strategy_deep_forces_large():
+    size, reason = context_gate.strategy_forced_size("deep", "small")
+    assert size == "large"
+    assert reason is not None
+
+
+def test_strategy_deep_no_reason_when_already_large():
+    size, reason = context_gate.strategy_forced_size("deep", "large")
+    assert size == "large"
+    assert reason is None
+
+
+def test_strategy_fast_forces_small_with_no_risk():
+    size, reason = context_gate.strategy_forced_size("fast", "large")
+    assert size == "small"
+    assert reason is not None
+
+
+def test_strategy_fast_floors_at_medium_for_risk_domains():
+    size, reason = context_gate.strategy_forced_size("fast", "large", risk_flags=("auth",))
+    assert size == "medium"
+    assert reason is not None
+
+
+def test_strategy_fast_no_reason_when_already_at_floor():
+    size, reason = context_gate.strategy_forced_size("fast", "small")
+    assert size == "small"
+    assert reason is None
+
+
+# ── skipped_sources ──────────────────────────────────────────────────────
+
+
+def test_skipped_sources_small_reports_reference_sources_skipped():
+    skipped = context_gate.skipped_sources("small")
+    assert skipped == [
+        {
+            "name": "reference_sources",
+            "reason": "task_size=small — no design/reference signal required",
+        }
+    ]
+
+
+@pytest.mark.parametrize("size", ["medium", "large"])
+def test_skipped_sources_medium_large_none_skipped(size):
+    assert context_gate.skipped_sources(size) == []
+
+
 # ── gate_enabled() env flag ─────────────────────────────────────────────
 
 

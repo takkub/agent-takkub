@@ -952,7 +952,13 @@ def _restart_reason_suffix(restart_info: dict) -> str:
 
 
 def _inject_v2_context(
-    task: str, project_ns: str | None, role_name: str, base_role_a: str, effective_provider: str
+    task: str,
+    project_ns: str | None,
+    role_name: str,
+    base_role_a: str,
+    effective_provider: str,
+    *,
+    retry_count: int = 0,
 ) -> str:
     """Core V2 Context Builder hook (#309 Phase 7c) —
     `_assign_dispatch`'s call site. Flag OFF (`TAKKUB_V2_CONTEXT=0`)
@@ -961,7 +967,12 @@ def _inject_v2_context(
     (fail-open), including a `core.brain.facade.build_context_for_assign`
     call that doesn't return within 300ms — a stuck/slow recall must never
     delay a spawn, so it runs in a background thread with a hard timeout
-    rather than inline on this (the caller's) thread."""
+    rather than inline on this (the caller's) thread.
+
+    `retry_count` (v2-hardening C, `core.brain.escalation`) is
+    `_assign_dispatch`'s own live-pane-reassign counter — plumbed straight
+    through to `build_context_for_assign`'s Adaptive Escalation step;
+    default 0 (no escalation) keeps every existing caller byte-identical."""
     try:
         from .core.brain.flag import v2_context_enabled
 
@@ -982,6 +993,7 @@ def _inject_v2_context(
                 base_role_a,
                 task,
                 file_read_supported=supports_file_read,
+                retry_count=retry_count,
             )
             try:
                 context_block = future.result(timeout=0.3)
@@ -2358,7 +2370,22 @@ class Orchestrator(
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
-        task = _inject_v2_context(task, project_ns, role_name, base_role_a, effective_provider)
+        # v2-hardening C (Adaptive Escalation) — a NEW task dispatched to a
+        # role whose pane is still alive (pane_is_running, computed above)
+        # is being reassigned before its previous task ever closed out: the
+        # fix-loop/re-assign signal `03_ADAPTIVE_ESCALATION.md` describes.
+        # A fresh spawn resets the count to 0 (see `next_retry_count`).
+        if not hasattr(self, "_role_retry_counts"):
+            self._role_retry_counts: dict[str, int] = {}
+        from .core.brain.escalation import next_retry_count
+
+        retry_count = next_retry_count(
+            self._role_retry_counts.get(key, 0), pane_is_running=pane_is_running
+        )
+        self._role_retry_counts[key] = retry_count
+        task = _inject_v2_context(
+            task, project_ns, role_name, base_role_a, effective_provider, retry_count=retry_count
+        )
 
         plan_file = None
         delivery_task = task
