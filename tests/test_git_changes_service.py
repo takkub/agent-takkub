@@ -19,10 +19,14 @@ from PyQt6.QtWidgets import QApplication
 from agent_takkub.git_changes_service import (
     MAX_DIFF_FILE_BYTES,
     GitChangesService,
+    RepoDiscoveryService,
     changes_sync,
     diff_sync,
+    discover_repo_roots,
+    find_rename_old_path,
     parse_status_v2,
     read_head_blob,
+    resolve_repo_root,
 )
 
 
@@ -86,6 +90,8 @@ class TestParseStatusV2:
         assert len(out) == 1
         assert out[0].path == "src/app.py"
         assert out[0].status == "M"
+        assert out[0].old_path is None
+        assert out[0].repo_root is None  # stamped by changes_sync, not the pure parser
 
     def test_added_index_entry(self) -> None:
         record = "1 A. N... 000000 100644 100644 000000 abc123 src/new.py"
@@ -123,6 +129,7 @@ class TestParseStatusV2:
         assert len(out) == 2
         assert out[0].path == "new_name.py"
         assert out[0].status == "R"
+        assert out[0].old_path == "old_name.py"
         assert out[1].path == "extra.txt"
         assert out[1].status == "A"
 
@@ -176,7 +183,19 @@ class TestChangesSync:
 
         result = changes_sync(repo)
 
-        assert any(c.path == "new.py" and c.status == "R" for c in result)
+        renamed = next(c for c in result if c.path == "new.py" and c.status == "R")
+        assert renamed.old_path == "old.py"
+
+    def test_repo_root_stamped_on_every_row(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "a.py", "x\n")
+        (repo / "a.py").write_text("changed\n", encoding="utf-8")
+
+        result = changes_sync(repo)
+
+        assert result and all(c.repo_root == repo for c in result)
 
     def test_not_a_git_repo_returns_empty(self, tmp_path: Path) -> None:
         plain = tmp_path / "plain"
@@ -285,6 +304,29 @@ class TestDiffSync:
 
         assert result.error == "binary"
 
+    def test_renamed_file_diffs_against_old_path_head_blob(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        # #375 BUG-008: reading HEAD at the *new* path always misses for a
+        # rename (git has no blob there until commit) — without the
+        # find_rename_old_path fallback this used to show the whole file as
+        # freshly added instead of a real diff against its old content.
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "old_name.py", "line one\nline two\n")
+        _git(repo, "mv", "old_name.py", "new_name.py")
+
+        result = diff_sync(repo, [repo], repo / "new_name.py")
+
+        # difflib.unified_diff emits nothing at all (not even headers) when
+        # the two sides are identical — an empty string here IS the proof
+        # the rename resolved against its real old content, not "".join()
+        # over an empty diff of old=None vs modified (which would instead
+        # show every line as a spurious "+").
+        assert result.error is None
+        assert result.unified == ""
+
 
 class TestReadHeadBlob:
     def test_not_a_git_repo_returns_none(self, tmp_path: Path) -> None:
@@ -292,6 +334,110 @@ class TestReadHeadBlob:
         plain.mkdir()
 
         assert read_head_blob(plain, "a.py") is None
+
+
+# ── find_rename_old_path ──────────────────────────────────────────────────
+
+
+class TestFindRenameOldPath:
+    def test_finds_source_path_for_pending_rename(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "old.py", "content\n" * 20)
+        _git(repo, "mv", "old.py", "new.py")
+
+        assert find_rename_old_path(repo, "new.py") == "old.py"
+
+    def test_genuinely_new_file_returns_none(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "base.py", "x\n")
+        (repo / "fresh.py").write_text("brand new\n", encoding="utf-8")
+
+        assert find_rename_old_path(repo, "fresh.py") is None
+
+    def test_not_a_git_repo_returns_none(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        assert find_rename_old_path(plain, "a.py") is None
+
+
+# ── resolve_repo_root / discover_repo_roots (#375 GAP-009) ────────────────
+
+
+class TestResolveRepoRoot:
+    def test_returns_toplevel_for_a_subdirectory(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "sub/a.py", "x\n")
+
+        assert resolve_repo_root(repo / "sub") == repo.resolve()
+
+    def test_not_a_git_repo_returns_none(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        assert resolve_repo_root(plain) is None
+
+
+class TestDiscoverRepoRoots:
+    def test_two_roots_in_the_same_repo_map_to_one_toplevel(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "web/a.py", "x\n")
+        (repo / "api").mkdir()
+        (repo / "api" / "b.py").write_text("y\n", encoding="utf-8")
+        _git(repo, "add", "api/b.py")
+        _git(repo, "commit", "-q", "-m", "api")
+
+        mapping = discover_repo_roots([repo / "web", repo / "api"])
+
+        assert mapping[(repo / "web").resolve()] == repo.resolve()
+        assert mapping[(repo / "api").resolve()] == repo.resolve()
+
+    def test_two_distinct_repos_map_to_two_toplevels(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo_a = tmp_path / "repo_a"
+        repo_b = tmp_path / "repo_b"
+        _init_repo_with_commit(repo_a, "a.py", "x\n")
+        _init_repo_with_commit(repo_b, "b.py", "y\n")
+
+        mapping = discover_repo_roots([repo_a, repo_b])
+
+        assert mapping[repo_a.resolve()] == repo_a.resolve()
+        assert mapping[repo_b.resolve()] == repo_b.resolve()
+
+    def test_non_repo_root_omitted(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        assert discover_repo_roots([plain]) == {}
+
+
+class TestRepoDiscoveryService:
+    def test_discover_emits_mapping_in_background(
+        self, qapp, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "a.py", "x\n")
+        svc = RepoDiscoveryService([repo])
+        received: list[dict] = []
+        svc.discovered.connect(received.append)
+
+        svc.discover()
+
+        assert _wait_until(lambda: len(received) == 1)
+        assert received[0][repo.resolve()] == repo.resolve()
 
 
 # ── GitChangesService: debounce ──────────────────────────────────────────

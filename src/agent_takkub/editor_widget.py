@@ -79,6 +79,7 @@ from PyQt6.QtWidgets import QVBoxLayout, QWidget
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .editor_service import Conflict, EditorFileState, save_atomic, stat_snapshot
 from .file_watch_service import FileWatchService
+from .git_changes_service import find_rename_old_path
 from .project_explorer import project_roots
 from .project_file_index import PathEscapesRootsError, resolve_and_contain
 
@@ -204,19 +205,39 @@ def build_diff_result(
     abs_path: Path,
     max_bytes: int = MAX_EDITOR_FILE_BYTES,
 ) -> DiffResult:
+    """Same per-status rules as `git_changes_service.diff_sync` (#375):
+    a deleted file (`D`) is never stat'd/opened — `resolved.exists()` is
+    checked first, so a diff-open on a git-deleted row reports the removal
+    instead of crashing `stat_snapshot` on a missing path. A rename (`R`)
+    falls back to `find_rename_old_path` once the direct HEAD:new_path
+    lookup misses, the same way `diff_sync` does."""
     try:
         resolved = resolve_and_contain(abs_path, roots)
     except PathEscapesRootsError as exc:
         return DiffResult(
             path=Path(abs_path), original_text=None, modified_text=None, error=str(exc)
         )
-    current = read_file_for_editor(resolved, roots, max_bytes)
-    if current.binary or current.too_large or current.encoding_unsupported:
-        return DiffResult(
-            path=resolved, original_text=None, modified_text=None, error="binary_or_too_large"
-        )
+    current_text: str | None = None
+    if resolved.exists():
+        current = read_file_for_editor(resolved, roots, max_bytes)
+        if current.binary or current.too_large or current.encoding_unsupported:
+            return DiffResult(
+                path=resolved, original_text=None, modified_text=None, error="binary_or_too_large"
+            )
+        current_text = current.text
     original = read_head_blob(repo_root, resolved)
-    return DiffResult(path=resolved, original_text=original, modified_text=current.text, error=None)
+    if original is None and current_text is not None:
+        try:
+            rel = resolved.relative_to(Path(repo_root).resolve()).as_posix()
+        except ValueError:
+            rel = None
+        if rel is not None:
+            old_rel = find_rename_old_path(repo_root, rel)
+            if old_rel is not None:
+                original = read_head_blob(repo_root, Path(repo_root) / old_rel)
+    if original is None and current_text is None:
+        return DiffResult(path=resolved, original_text=None, modified_text=None, error="no_content")
+    return DiffResult(path=resolved, original_text=original, modified_text=current_text, error=None)
 
 
 def _states_differ(a: EditorFileState | None, b: EditorFileState | None) -> bool:

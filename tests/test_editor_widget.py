@@ -244,6 +244,55 @@ class TestBuildDiffResult:
 
         assert result.error == "binary_or_too_large"
 
+    def test_deleted_file_does_not_crash_and_diffs_against_head(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        # #375 BUG-007: `resolved.stat()` inside `read_file_for_editor` used
+        # to raise FileNotFoundError unguarded here for a git-deleted file
+        # (the CHANGES panel's "D" rows open through this exact path) —
+        # `diff_sync` already checked `resolved.exists()` first; this mirrors
+        # that rule instead of stat'ing/opening a path that isn't there.
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "gone.py", "was here\n")
+        (repo / "gone.py").unlink()
+
+        result = build_diff_result(repo, [repo], repo / "gone.py")
+
+        assert result.error is None
+        assert result.original_text == "was here\n"
+        assert result.modified_text is None
+
+    def test_renamed_file_diffs_against_old_path_head_blob(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        # #375 BUG-008: HEAD has no blob at the *new* name yet, so the direct
+        # read_head_blob lookup always misses for a rename — must fall back
+        # to find_rename_old_path the same way git_changes_service.diff_sync
+        # does, or a renamed-but-unchanged file shows as "entirely new".
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "old_name.py", "unchanged content\n")
+        _git(repo, "mv", "old_name.py", "new_name.py")
+
+        result = build_diff_result(repo, [repo], repo / "new_name.py")
+
+        assert result.error is None
+        assert result.original_text == "unchanged content\n"
+        assert result.modified_text == "unchanged content\n"
+
+    def test_path_never_existed_yields_no_content(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "base.py", "x\n")
+
+        result = build_diff_result(repo, [repo], repo / "never_existed.py")
+
+        assert result.error == "no_content"
+
     def test_invalid_utf8_current_file_yields_error(self, tmp_path: Path, git_available) -> None:
         if not git_available:
             pytest.skip("git not on PATH")

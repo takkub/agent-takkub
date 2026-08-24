@@ -18,9 +18,15 @@ emits `changeActivated` — `ProjectTab`/`MainWindow` route that to
 `EditorHost.open_file(..., show_diff=True)`, which opens the file and
 immediately requests its git-HEAD diff, so this panel never needs its own
 diff round-trip or a second Monaco surface. Attribution is deliberately
-absent: `FileChange` carries only path + status letter, never a guessed
-author/role (05_GIT_DIFF_AND_AGENT_CHANGES.md — "never guess agent
-attribution from git alone").
+absent: `FileChange` carries only path + status letter (+ `old_path` for a
+rename, #375), never a guessed author/role (05_GIT_DIFF_AND_AGENT_CHANGES.md
+— "never guess agent attribution from git alone").
+
+Multi-root / multi-repo (#375 GAP-009): `RepoDiscoveryService` resolves every
+configured root to its real git top-level in the background. A project whose
+roots span more than one distinct repo groups CHANGES rows under one header
+per repo; a single repo (still the common case) renders the same flat list
+as before.
 
 Not wired up here (later phase, left as a disabled menu placeholder):
   * per-row "Ask Agent" from the context menu — the editor tab's own Ask
@@ -51,7 +57,7 @@ from PyQt6.QtWidgets import (
 from . import cockpit_theme
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
-from .git_changes_service import FileChange, GitChangesService
+from .git_changes_service import FileChange, GitChangesService, RepoDiscoveryService
 from .project_file_index import (
     FileEntry,
     GitStatusService,
@@ -71,6 +77,7 @@ _LOADED_ROLE = 0x0102
 _PLACEHOLDER_ROLE = 0x0103
 _CHANGES_HEADER_ROLE = 0x0104
 _CHANGE_ROW_ROLE = 0x0105
+_CHANGES_GROUP_ROLE = 0x0106  # per-repo subgroup header, multi-repo projects only (#375)
 
 _GIT_STATUS_COLORS = {
     "M": cockpit_theme.STATE_WARN_BRIGHT,
@@ -134,20 +141,34 @@ class ProjectExplorer(QWidget):
         self.index.dirListFailed.connect(self._on_dir_list_failed)
         self._pending: dict[str, list[QTreeWidgetItem]] = {}
 
-        # One project can list several roots (web/api/... per _ROLE_PATH_PREFS);
-        # git status badges + the CHANGES panel key off whichever root comes
-        # first — good enough for the common single-repo project, and a
-        # no-op for paths outside that root. A project spanning several
-        # independent repos only gets badges/changes under that one root.
+        # git status badges key off whichever configured root comes first —
+        # fine for the common single-repo project, a no-op for paths outside
+        # that root. The CHANGES panel used to make the same simplification
+        # for `GitChangesService.repo_root`, silently dropping every row for
+        # a project whose first root is a *subdirectory* of its repo (git
+        # reports status paths relative to the real top-level, not to that
+        # root) and never seeing a second, independent repo at all (#375
+        # GAP-009) — `self.git_changes` (first root, sync) stays as the
+        # immediate/compact-view default; `_repo_discovery` corrects its
+        # `repo_root` and spins up one more `GitChangesService` per extra
+        # distinct repo, once the background `git rev-parse --show-toplevel`
+        # round trip for every root comes back.
         self.git_status: GitStatusService | None = None
         self.git_changes: GitChangesService | None = None
+        self._extra_git_changes: dict[Path, GitChangesService] = {}
+        self._changes_by_repo: dict[Path, list[FileChange]] = {}
+        self._repo_labels: dict[Path, list[str]] = {}
         self._git_status_map: dict[str, str] = {}
+        self._repo_discovery: RepoDiscoveryService | None = None
+        self._repo_discovery_started = False
         if self.roots:
             first_root = next(iter(self.roots.values()))
             self.git_status = GitStatusService(first_root, parent=self)
             self.git_status.statusChanged.connect(self._on_git_status_changed)
             self.git_changes = GitChangesService(first_root, list(self.roots.values()), parent=self)
             self.git_changes.changesChanged.connect(self._on_changes_changed)
+            self._repo_discovery = RepoDiscoveryService(list(self.roots.values()), parent=self)
+            self._repo_discovery.discovered.connect(self._on_repos_discovered)
 
         self._dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self._file_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
@@ -262,38 +283,123 @@ class ProjectExplorer(QWidget):
 
     # ------------------------------------------------------------------
     # CHANGES panel (M/A/D/R vs HEAD — background + debounced,
-    # see GitChangesService; #365 phase 4)
+    # see GitChangesService; #365 phase 4, multi-repo #375)
     # ------------------------------------------------------------------
     def refresh_changes(self) -> None:
-        """Ask both git services to re-check. Called after a directory
+        """Ask every git service to re-check. Called after a directory
         listing, and by `MainWindow` after an editor save or an external
-        disk-change notification (`EditorHost.gitRefreshNeeded`)."""
+        disk-change notification (`EditorHost.gitRefreshNeeded`).
+
+        `_repo_discovery` only starts here, on the first call — not eagerly
+        at construction — matching the rest of this module's lazy-tree
+        philosophy (module docstring): a tab that's opened but never
+        expanded/refreshed shouldn't fire a background `git` subprocess for
+        every one of its configured roots for nothing.
+        """
+        if not self._repo_discovery_started and self._repo_discovery is not None:
+            self._repo_discovery_started = True
+            self._repo_discovery.discover()
         if self.git_status is not None:
             self.git_status.request_refresh()
         if self.git_changes is not None:
             self.git_changes.request_refresh()
+        for svc in self._extra_git_changes.values():
+            svc.request_refresh()
+
+    def _on_repos_discovered(self, mapping: dict[Path, Path]) -> None:
+        """`RepoDiscoveryService.discovered` result — `{configured_root:
+        toplevel}`, omitting any root that isn't inside a repo. Groups the
+        configured roots by distinct repo, corrects `self.git_changes` if
+        its root was actually a subdirectory of the real top-level, and
+        starts one more `GitChangesService` per additional distinct repo
+        the project spans (#375 GAP-009)."""
+        if self.git_changes is None:
+            return
+        by_repo: dict[Path, list[str]] = {}
+        for label, root in self.roots.items():
+            resolved_root = Path(root).resolve()
+            toplevel = mapping.get(resolved_root, resolved_root)
+            by_repo.setdefault(toplevel, []).append(label)
+        self._repo_labels = by_repo
+
+        primary_root = Path(next(iter(self.roots.values()))).resolve()
+        primary_toplevel = mapping.get(primary_root, primary_root)
+        if primary_toplevel != self.git_changes.repo_root:
+            self.git_changes.changesChanged.disconnect(self._on_changes_changed)
+            self._changes_by_repo.pop(self.git_changes.repo_root, None)
+            self.git_changes.deleteLater()
+            self.git_changes = GitChangesService(
+                primary_toplevel, list(self.roots.values()), parent=self
+            )
+            self.git_changes.changesChanged.connect(self._on_changes_changed)
+            self.git_changes.request_refresh()
+
+        for toplevel in by_repo:
+            if toplevel == primary_toplevel or toplevel in self._extra_git_changes:
+                continue
+            svc = GitChangesService(toplevel, list(self.roots.values()), parent=self)
+            svc.changesChanged.connect(
+                lambda changes, tl=toplevel: self._on_repo_changes_changed(tl, changes)
+            )
+            self._extra_git_changes[toplevel] = svc
+            svc.request_refresh()
+        self._render_changes()
 
     def _on_changes_changed(self, changes: list[FileChange]) -> None:
         if self.git_changes is None:
             return
+        self._changes_by_repo[self.git_changes.repo_root] = changes
+        self._render_changes()
+
+    def _on_repo_changes_changed(self, repo_root: Path, changes: list[FileChange]) -> None:
+        self._changes_by_repo[repo_root] = changes
+        self._render_changes()
+
+    def _render_changes(self) -> None:
+        """Rebuild the CHANGES section from `_changes_by_repo`. A single
+        repo (the common case, and every project until `_repo_discovery`
+        resolves) renders the flat list `_on_changes_changed` always has —
+        unchanged from before #375. More than one distinct repo groups rows
+        under one header per repo, labelled with whichever configured root
+        label(s) map to it and that repo's own change count."""
         self._changes_item.takeChildren()
-        self._changes_item.setText(0, f"CHANGES ({len(changes)})")
-        self._changes_item.setHidden(len(changes) == 0)
-        repo_root = self.git_changes.repo_root
+        total = sum(len(v) for v in self._changes_by_repo.values())
+        self._changes_item.setText(0, f"CHANGES ({total})")
+        self._changes_item.setHidden(total == 0)
+        if len(self._repo_labels) <= 1:
+            for repo_root, changes in self._changes_by_repo.items():
+                self._add_change_rows(self._changes_item, repo_root, changes)
+        else:
+            for repo_root, labels in self._repo_labels.items():
+                changes = self._changes_by_repo.get(repo_root, [])
+                group = QTreeWidgetItem(
+                    self._changes_item, [f"{', '.join(labels)} ({len(changes)})"]
+                )
+                group.setData(0, _CHANGES_GROUP_ROLE, True)
+                self._add_change_rows(group, repo_root, changes)
+                if changes:
+                    group.setExpanded(True)
+        if total:
+            self._changes_item.setExpanded(True)
+
+    def _add_change_rows(
+        self, parent_item: QTreeWidgetItem, repo_root: Path, changes: list[FileChange]
+    ) -> None:
         for change in changes:
             try:
                 resolved = resolve_and_contain(repo_root / change.path, list(self.roots.values()))
             except PathEscapesRootsError:
                 continue  # shouldn't happen for a well-formed git status line — refuse, don't crash
-            row = QTreeWidgetItem(self._changes_item, [f"{change.status}  {change.path}"])
+            label = f"{change.status}  {change.path}"
+            if change.status == "R" and change.old_path:
+                label = f"R  {change.old_path} -> {change.path}"
+            row = QTreeWidgetItem(parent_item, [label])
             row.setIcon(0, self._file_icon)
             row.setData(0, _PATH_ROLE, str(resolved))
             row.setData(0, _IS_DIR_ROLE, False)
             row.setData(0, _CHANGE_ROW_ROLE, True)
             color = _GIT_CHANGE_COLORS.get(change.status)
             row.setForeground(0, QColor(color) if color else QColor(cockpit_theme.TEXT_SECONDARY))
-        if changes:
-            self._changes_item.setExpanded(True)
 
     def _apply_badge(self, item: QTreeWidgetItem) -> None:
         if self.git_status is None or not self._git_status_map:
