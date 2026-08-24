@@ -241,22 +241,12 @@ def build_context(project: str | None, role: str, task_text: str, budget_tokens:
     return "\n".join(parts)
 
 
-# ── OpenViking hybrid merge (issue #372, GAP-013/017/018) ──────────────────
+# ── trace types ──────────────────────────────────────────────────────────
 #
-# Everything below is ADDITIVE and never called by `build_context` above,
-# which stays exactly as it was (the legacy Brain+Conversation assembly
-# `facade.build_context_for_assign` already calls first). `facade` feeds
-# that result through `merge_openviking_traced` as a SEPARATE step — when
-# OpenViking is disabled (default: `TAKKUB_OPENVIKING_ENABLED=0`) that step
-# returns its input completely unchanged before touching anything else, so
-# the pre-#372 output stays byte-for-byte identical by construction rather
-# than by re-testing the whole assembly path again.
-#
-# This is also where "Context Builder = ONLY merge/budget/dedup/provenance
-# policy" (`15_CONTEXT_SOURCE_ARCHITECTURE.md`) actually lives: the
-# RETRIEVAL itself is `core.context_sources.*`'s job (imported lazily below
-# to avoid a module-load-time dependency a disabled feature shouldn't pay
-# for).
+# Doctor/debug-facing summary shapes (`15_CONTEXT_SOURCE_ARCHITECTURE.md`'s
+# suggested trace format) — populated by the Context Gate's own trace save
+# (`facade._save_gate_trace`) and persisted via `trace_store.save_last_
+# trace` for `doctor`'s `[context]` section to read back.
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,24 +256,17 @@ class SourceTrace:
     unit: str
     tokens: int
     # `08_OBSERVABILITY_FINAL.md` — per-source reject counts from that
-    # source's own layer-b scope/trust gate (`base.apply_scope_and_trust`
-    # called inside `openviking_source.py`/`resource_source.py`).
+    # source's own scope/trust gate (`base.apply_scope_and_trust`).
     scope_rejects: int = 0
     trust_rejects: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ContextTrace:
-    """Doctor/debug-facing summary of one `merge_openviking_traced` call —
-    shape matches `15_CONTEXT_SOURCE_ARCHITECTURE.md`'s suggested trace
-    format (`.render()`).
-
-    `scope_rejects`/`trust_rejects` (issue #372 follow-up, `02_OPENVIKING_
-    STRICT_SCOPE.md`) are the GRAND total across every layer — each
-    source's own layer-b gate plus this function's own layer-c re-check —
-    never just one of the two, so a bug in either layer still shows up
-    here. `rejected_examples` are a handful of `apply_scope_and_trust`'s
-    own "REJECTED ... reason=..." lines from the layer-c pass, for
+    """`scope_rejects`/`trust_rejects` (issue #372 follow-up, `02_
+    OPENVIKING_STRICT_SCOPE.md`) are the total across every reference
+    source's own scope/trust gate. `rejected_examples` are a handful of
+    `apply_scope_and_trust`'s own "REJECTED ... reason=..." lines, for
     doctor/debug (`08_OBSERVABILITY_FINAL.md`)."""
 
     mode: str
@@ -310,155 +293,9 @@ class ContextTrace:
         return "\n".join(lines)
 
 
-# `16_CONTEXT_MERGE_POLICY.md` priority ordering, expressed as a trust
-# weight for the injected-section sort: curated local Obsidian docs first,
-# then external OpenViking resources — "exact project scope wins over
-# global" / "explicit/user-confirmed trust outranks inferred".
-_TRUST_WEIGHT: dict[str, int] = {"curated": 3, "distilled": 2, "external": 1, "auto": 0}
-
-
-def _trust_weight(trust: str) -> int:
-    return _TRUST_WEIGHT.get(trust, 0)
-
-
-def merge_openviking(
-    base_text: str,
-    *,
-    project: str | None,
-    role: str,
-    task_text: str,
-    budget_tokens: int,
-) -> str:
-    """`base_text` is `build_context(...)`'s own output — this only ever
-    APPENDS to it, never rewrites it. NOT itself a fail-open boundary: an
-    error talking to the sidecar or scanning the vault propagates to the
-    caller — `facade.build_context_for_assign` is where that's caught, so a
-    bug HERE falls back to the `base_text` already computed rather than
-    discarding a working Brain/Conversation build."""
-    text, _trace = merge_openviking_traced(
-        base_text, project=project, role=role, task_text=task_text, budget_tokens=budget_tokens
-    )
-    return text
-
-
-def merge_openviking_traced(
-    base_text: str,
-    *,
-    project: str | None,
-    role: str,
-    task_text: str,
-    budget_tokens: int,
-) -> tuple[str, ContextTrace | None]:
-    """Same as `merge_openviking`, plus the `ContextTrace` `facade` persists
-    for `doctor`/debug (`trace_store.save_last_trace`). Returns
-    `(base_text, None)` untouched whenever OpenViking is disabled — the
-    `None` trace is the caller's signal that nothing ran, not an error."""
-    import time as _time
-
-    from agent_takkub.core.context_sources import openviking_adapter
-    from agent_takkub.core.context_sources.base import (
-        apply_scope_and_trust,
-        collapse_near_duplicates,
-    )
-    from agent_takkub.core.context_sources.openviking_source import OpenVikingSource
-    from agent_takkub.core.context_sources.resource_source import ResourceSource
-    from agent_takkub.project_identity import resolve_project_id
-
-    if not openviking_adapter.enabled():
-        return base_text, None
-
-    started = _time.monotonic()
-    ov_mode = openviking_adapter.mode()
-    base_tokens = _token_cost(base_text) if base_text else 0
-    remaining = max(0, budget_tokens - base_tokens)
-
-    try:
-        allowed_project_id = resolve_project_id(project) if project else None
-    except ValueError:
-        allowed_project_id = None
-
-    ov_source = OpenVikingSource()
-    ov_items = ov_source.retrieve(task_text, project=project, role=role, budget_tokens=remaining)
-    resource_source = ResourceSource()
-    resource_items = (
-        resource_source.retrieve(task_text, project=project, role=role, budget_tokens=remaining)
-        if ov_mode == "hybrid"
-        else []
-    )
-
-    # Layer c (`02_OPENVIKING_STRICT_SCOPE.md` defense in depth): re-check
-    # the merged pool right before injection, independent of whatever each
-    # source's own layer-b gate already did — a bug in one layer must not
-    # be the only thing standing between a pane and another project's
-    # content.
-    pool, final_rejects = apply_scope_and_trust(
-        resource_items + ov_items, allowed_project_id=allowed_project_id
-    )
-    pool, dedup_count = collapse_near_duplicates(pool)
-    pool.sort(key=lambda item: (_trust_weight(item.trust), item.score), reverse=True)
-
-    injected = []
-    used = 0
-    for item in pool:
-        if injected and used + item.tokens > remaining:
-            continue
-        injected.append(item)
-        used += item.tokens
-
-    sources = [
-        SourceTrace(
-            "OpenViking",
-            len(ov_items),
-            "resources",
-            sum(i.tokens for i in ov_items),
-            scope_rejects=ov_source.last_scope_rejects,
-            trust_rejects=ov_source.last_trust_rejects,
-        )
-    ]
-    if ov_mode == "hybrid":
-        sources.append(
-            SourceTrace(
-                "Resource",
-                len(resource_items),
-                "docs",
-                sum(i.tokens for i in resource_items),
-                scope_rejects=resource_source.last_scope_rejects,
-                trust_rejects=resource_source.last_trust_rejects,
-            )
-        )
-
-    trace = ContextTrace(
-        mode=ov_mode,
-        sources=tuple(sources),
-        total_tokens=base_tokens + sum(i.tokens for i in injected),
-        budget_tokens=budget_tokens,
-        dedup_count=dedup_count,
-        latency_ms=(_time.monotonic() - started) * 1000,
-        scope_rejects=(
-            final_rejects.scope + ov_source.last_scope_rejects + resource_source.last_scope_rejects
-        ),
-        trust_rejects=(
-            final_rejects.trust + ov_source.last_trust_rejects + resource_source.last_trust_rejects
-        ),
-        rejected_examples=final_rejects.examples,
-    )
-
-    # shadow: retrieve + trace, never inject (`14_OPENVIKING_INTEGRATION.md`
-    # rollout stage B). Also the natural fallback when nothing was found.
-    if ov_mode == "shadow" or not injected:
-        return base_text, trace
-
-    parts = [base_text] if base_text else [_HEADER]
-    parts.append("### Knowledge (OpenViking)")
-    parts.extend(f"- ({item.trust}) {item.text} [source: {item.provenance}]" for item in injected)
-    return "\n".join(parts), trace
-
-
 __all__ = [
     "ContextTrace",
     "SourceTrace",
     "budget_tokens_for",
     "build_context",
-    "merge_openviking",
-    "merge_openviking_traced",
 ]

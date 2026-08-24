@@ -4,12 +4,9 @@ default-deny allowlist `obsidian_boundary.is_indexable()` already enforces
 docstring), so this never surfaces `99-Logs`/`.obsidian`/raw transcripts
 just because they happen to sit in the vault.
 
-Independent of the OpenViking sidecar: this source works with no sidecar
-configured at all (local files, local BM25 ranking via the same hand-rolled
-ranker `bm25_search.py` already uses for `takkub search`). `takkub ov
-index` (see `indexing.py`) is a SEPARATE, opt-in step that additionally
-pushes these same allowlisted docs into the sidecar so `openviking_source`
-can retrieve them too — this module never talks to the network.
+Local-only: reads the vault directly off disk and ranks it with the same
+hand-rolled ranker `bm25_search.py` already uses for `takkub search` — no
+network, no external service.
 """
 
 from __future__ import annotations
@@ -81,9 +78,7 @@ def resolve_vault_project_id(rel: str) -> str | None:
     `01-Projects` belongs to the project named by its first path segment,
     whether that's the flat `01-Projects/<project>.md` page
     `vault_mirror._ensure_project_page` writes, or a
-    `01-Projects/<project>/...` subtree. `indexing.py` reuses this so a
-    doc's registry-tagged scope always agrees with what this source
-    computes for the same path."""
+    `01-Projects/<project>/...` subtree."""
     parts = rel.split("/")
     if not parts:
         return None
@@ -159,10 +154,10 @@ class ResourceSource:
                     workspace_id=WORKSPACE_ID,
                 )
             )
-        # Defense in depth (`02_OPENVIKING_STRICT_SCOPE.md`): the loop
-        # above already filtered by path, this re-checks the constructed
-        # items through the same gate `openviking_source`/`context_builder`
-        # use, so a future edit to that loop can't silently regress scope.
+        # Defense in depth: the loop above already filtered by path, this
+        # re-checks the constructed items through the same gate
+        # `context_builder` uses, so a future edit to that loop can't
+        # silently regress scope.
         items, rejects = apply_scope_and_trust(items, allowed_project_id=allowed_project_id)
         self.last_scope_rejects += rejects.scope
         self.last_trust_rejects += rejects.trust

@@ -16,11 +16,10 @@ def runtime(tmp_path, monkeypatch):
     import agent_takkub.config as config
 
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path)
-    # The Context Gate (closeout #C) now writes a trace on every gated
-    # `build_context_for_assign` call, not only when OpenViking is on —
-    # DATA_HOME must be redirected too or these tests write a real
-    # `openviking/last_context_trace.json` next to this dev checkout
-    # (`config.DATA_HOME == REPO_ROOT` on a dev checkout).
+    # The Context Gate (closeout #C) writes a trace on every gated
+    # `build_context_for_assign` call — DATA_HOME must be redirected too or
+    # these tests write a real `context/last_context_trace.json` next to
+    # this dev checkout (`config.DATA_HOME == REPO_ROOT` on a dev checkout).
     monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
     # Explicitly OFF, not merely unset: the shipped default is ON since
     # 1.0.84, so "no env var" no longer means "feature disabled".
