@@ -45,6 +45,7 @@ from PyQt6.QtCore import QProcess, QTimer
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
 from .config import ensure_runtime as _ensure_runtime_default
+from .delivery_readiness import can_accept_input
 from .digest_facts import DigestFacts, format_digest_fact_line
 from .lead_draft_state import (
     LeadDraftState,
@@ -627,6 +628,7 @@ def _delayed_enter_verified(
     session_generation: int | None = None,
     expires_at: float | None = None,
     validator: Callable[[], bool] | None = None,
+    provider: str | None = None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
@@ -681,6 +683,15 @@ def _delayed_enter_verified(
     of which call site attached it, so passing the SAME validator through
     here closes that gap without the writer needing to know anything about
     delivery IDs itself.
+
+    ``provider`` (#376): when given, every verify tick refuses to resend the
+    CR or repaste the payload while `session.shows_account_pending_marker`
+    reads True — settling instead, same as a genuine not-ready read. Between
+    the initial write and a later verify tick the pane can transition onto
+    its own account-pending banner; retrying into it would risk stacking a
+    second paste on top of one the CLI is refusing to process. ``None``
+    (the default) skips the check entirely — unchanged behaviour for any
+    caller that hasn't been taught its pane's provider.
     """
 
     def _settled() -> None:
@@ -733,6 +744,26 @@ def _delayed_enter_verified(
                     lambda: _verify(render_waits, stall_grace - 1),
                 )
                 return
+            # (#376) The pane can transition onto its provider's own
+            # account-pending banner between the original write and this
+            # verify tick. `is_at_ready_prompt()` below can still misread
+            # READY on that exact screen (the #363 narrow-window bug), which
+            # would otherwise fall through to the resend/repaste branches
+            # and stack another write onto a pane the CLI is refusing to
+            # process. Settle instead — same as a genuine not-ready read —
+            # rather than retry into it. `provider=None` (a caller that
+            # hasn't been taught its pane's provider) skips this and keeps
+            # the prior behaviour.
+            if provider is not None:
+                try:
+                    _pending_mid_verify = session.shows_account_pending_marker(provider)
+                    if not isinstance(_pending_mid_verify, bool):
+                        _pending_mid_verify = False
+                except Exception:
+                    _pending_mid_verify = False
+                if _pending_mid_verify:
+                    _settled()
+                    return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
             # But "not ready" is ambiguous: it's ALSO what a busy marker
             # UNRELATED to this submit looks like — e.g. codex auto-booting its
@@ -1137,27 +1168,49 @@ class LeadInboxMixin:
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
                 return
-            if (
-                unconfirmed
-                and pane.session is not None
-                and pane.session.is_alive
-                and _prompt_block_reason(pane.session)
-            ):
-                # Never blind-paste into an active prompt — the bytes land as
-                # keystrokes on the modal itself, not the composer, so the
-                # task is lost outright rather than merely unconfirmed (#186).
-                # Give the auto-trust responder (or a human) a further
-                # bounded grace to clear it before falling through to the
-                # ordinary best-effort blind paste below.
-                prompt_defer_elapsed[0] += _READY_POLL_INTERVAL_MS
-                if prompt_defer_elapsed[0] < _PROMPT_BLOCK_DEFER_CEILING_MS:
-                    QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
-                    return
-                _log_event(
-                    "task_deliver_prompt_defer_ceiling",
-                    project=self._resolve_project(project),
-                    role=role_name,
-                )
+            try:
+                _provider_deliver = getattr(pane.model, "provider_name", None) or "claude"
+            except Exception:
+                _provider_deliver = "claude"
+            if unconfirmed and pane.session is not None and pane.session.is_alive:
+                _blind_paste_reason = _prompt_block_reason(pane.session)
+                if _blind_paste_reason is None:
+                    # (#376) The last-resort BLIND paste is exactly the wrong
+                    # place to skip this check — a pane frozen on its
+                    # provider's own account-pending banner is, by
+                    # definition, one `is_at_ready_prompt()`/busy-wait
+                    # already failed to resolve normally, which is how
+                    # delivery reaches this fallback in the first place.
+                    try:
+                        _pending_blind = pane.session.shows_account_pending_marker(
+                            _provider_deliver
+                        )
+                        if not isinstance(_pending_blind, bool):
+                            # Defensive: unconfigured mock / test double
+                            # guard, same as every other marker read here.
+                            _pending_blind = False
+                    except Exception:
+                        _pending_blind = False
+                    if _pending_blind:
+                        _blind_paste_reason = "account_pending"
+                if _blind_paste_reason is not None:
+                    # Never blind-paste into an active prompt OR a pane
+                    # showing its provider's own account-pending gate — the
+                    # bytes land as keystrokes on the modal, or are refused
+                    # outright by the gate, either way the task is lost
+                    # outright rather than merely unconfirmed (#186, #376).
+                    # Give the auto-trust responder (or the gate itself) a
+                    # further bounded grace to clear before falling through
+                    # to the ordinary best-effort blind paste below.
+                    prompt_defer_elapsed[0] += _READY_POLL_INTERVAL_MS
+                    if prompt_defer_elapsed[0] < _PROMPT_BLOCK_DEFER_CEILING_MS:
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
+                    _log_event(
+                        "task_deliver_prompt_defer_ceiling",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                    )
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
@@ -1254,6 +1307,31 @@ class LeadInboxMixin:
                     except Exception:
                         pass
                 if accepted:
+                    # (#376) A not-ready read alone is not proof the CLI is
+                    # actually processing the task — it is exactly what a
+                    # pane frozen on its provider's own account-pending
+                    # banner can ALSO look like once the banner has pushed
+                    # the composer's idle markers out of `is_at_ready_
+                    # prompt()`'s scan window (see the ready-gate above and
+                    # `shows_account_pending_marker`'s docstring). Confirming
+                    # this specific gate before trusting "accepted" closes
+                    # the gap for the one provider state this incident is
+                    # actually calibrated for; a general per-provider "real
+                    # busy marker" beyond account-pending remains open (#103).
+                    try:
+                        _pending_settled = _task_sess.shows_account_pending_marker(
+                            _provider_deliver
+                        )
+                        if isinstance(_pending_settled, bool) and _pending_settled:
+                            # Defensive: an unconfigured mock / test double
+                            # returns a truthy Mock object by default — never
+                            # treat that as a genuine account-pending hit,
+                            # same guard as every other marker read in this
+                            # module.
+                            accepted = False
+                    except Exception:
+                        pass
+                if accepted:
                     manager.mark_accepted(delivery.delivery_id)
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
@@ -1285,6 +1363,7 @@ class LeadInboxMixin:
                 validator=lambda d=delivery.delivery_id, g=generation: manager.validate_for_write(
                     d, g
                 ),
+                provider=_provider_deliver,
             )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
@@ -1430,6 +1509,29 @@ class LeadInboxMixin:
                 _pane_ready_now = pane.session.is_at_ready_prompt()
             except Exception:
                 _pane_ready_now = False
+            try:
+                _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
+            except Exception:
+                _provider_ap = "claude"
+            # (#376) Ungated — unlike `account_pending_reason()` below, which
+            # is deliberately gated on `AUTH_TRANSIENT_GRACE_SEC` +
+            # `_AUTH_FAILURE_CONFIRM_POLLS` to answer "has this been stuck
+            # long enough to escalate to Lead". This checks a different
+            # question every single poll, with no grace period: "is it safe
+            # to submit into this pane RIGHT NOW". A live incident proved
+            # the two must not be conflated — a task was pasted straight
+            # onto agy's account-pending banner ~7s after spawn, long before
+            # either gate above ever got a chance to fire. See
+            # `PtySession.shows_account_pending_marker`'s docstring.
+            try:
+                _account_pending_now = pane.session.shows_account_pending_marker(_provider_ap)
+                if not isinstance(_account_pending_now, bool):
+                    # Defensive: same unconfigured-mock guard as
+                    # `_still_booting` above — a test double / unconfigured
+                    # mock session returns a truthy Mock object by default.
+                    _account_pending_now = False
+            except Exception:
+                _account_pending_now = False
             if not account_pending_warned[0]:
                 # (#363 regression) Deliberately does NOT gate on
                 # `_pane_ready_now` the way the auth-failure check below
@@ -1455,7 +1557,6 @@ class LeadInboxMixin:
                 # anything concrete about a pane whose provider will never
                 # clear this on its own.
                 try:
-                    _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
                     _account_reason = pane.session.account_pending_reason(_provider_ap)
                     if not isinstance(_account_reason, str):
                         # Defensive: same unconfigured-mock guard as the
@@ -1603,7 +1704,17 @@ class LeadInboxMixin:
             # on where the composer happens to end. Treated as "not ready yet"
             # rather than as a blocker so every existing timeout/ceiling path
             # keeps behaving exactly as before.
-            if _pane_ready_now and not _still_booting:
+            #
+            # (#376) `can_accept_input()` folds in `_account_pending_now` on
+            # top of the plain ready read — same "not ready yet, keep
+            # polling" treatment as `_still_booting`, via the SAME `else:
+            # ready_streak[0] = 0` branch below, so a pane frozen on its
+            # provider's account-pending banner never accumulates a ready
+            # streak no matter how idle its footer looks.
+            if (
+                can_accept_input(is_ready=_pane_ready_now, account_pending=_account_pending_now)
+                and not _still_booting
+            ):
                 ready_streak[0] += 1
                 # Wait for consecutive ready state before delivering (approx 1.0s / 7 polls of 150ms)
                 # to ensure the CLI has stabilized and prevent single-frame flicker.
