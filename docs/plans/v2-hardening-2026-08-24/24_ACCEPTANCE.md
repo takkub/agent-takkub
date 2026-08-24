@@ -1,0 +1,21 @@
+# Acceptance
+
+- classifier structural refinement
+- risk domains never false-small
+- confidence/reason trace
+- adaptive escalation
+- incremental enrichment
+- dynamic source budgets
+- source token/rework tracking
+- app-wide resource governor
+- circuit breakers
+- centralized fail-open
+- Fast/Automatic/Deep UX
+- retrieval prompt-injection defenses
+- managed local OpenViking or explicit defer
+- fixed benchmark suite
+- tokens per accepted task measured
+- classifier labeled evaluation
+- chaos tests
+- field soak
+- #362 untouched
