@@ -4,6 +4,7 @@ the navigation policy a future widget must consult)."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -397,6 +398,21 @@ class TestNavigationAllowedFileUrlComparison:
         state = PreviewState(project="demo", mode="file", target="http://127.0.0.1:3000/")
         assert navigation_allowed(state, "http://127.0.0.1:3000/") is True  # exact-string fallback
         assert navigation_allowed(state, "http://127.0.0.1:3000/about") is False
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="case-insensitive path comparison is a Windows-only concern"
+    )
+    def test_case_only_difference_is_treated_as_the_same_file(self) -> None:
+        # #369 follow-up (reviewer finding #2+#3): both sides of this
+        # comparison now resolve through project_file_index._safe_resolve
+        # (RESOLVE_LOCK) instead of a bare Path.resolve() — this pins that
+        # the os.path.normcase comparison in navigation_allowed still treats
+        # a drive-letter-and-name case difference as the same file afterward.
+        state = PreviewState(project="demo", mode="file", target=r"c:\x\INDEX.HTML")
+
+        nav_url = QUrl.fromLocalFile(r"C:\x\index.html").toString()
+
+        assert navigation_allowed(state, nav_url) is True
 
 
 # ── PreviewController.close: nav_block_counts cleanup (#369 BUG-003) ─────

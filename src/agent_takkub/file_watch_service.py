@@ -27,7 +27,7 @@ from pathlib import Path
 from PyQt6.QtCore import QFileSystemWatcher, QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from .editor_service import MAX_EDIT_FILE_BYTES, EditorFileState, _log_event, stat_snapshot
-from .project_file_index import PathEscapesRootsError, resolve_and_contain
+from .project_file_index import PathEscapesRootsError, _safe_resolve, resolve_and_contain
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class FileWatchService(QObject):
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self.roots = [Path(r).resolve() for r in roots]
+        self.roots = [_safe_resolve(Path(r)) for r in roots]
         self._max_bytes = max_bytes
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_file_changed)
@@ -102,7 +102,7 @@ class FileWatchService(QObject):
         so its roots accumulate as each project's files get opened rather
         than being fixed at construction."""
         for r in roots:
-            resolved = Path(r).resolve()
+            resolved = _safe_resolve(Path(r))
             if resolved not in self.roots:
                 self.roots.append(resolved)
 
@@ -116,7 +116,7 @@ class FileWatchService(QObject):
             self._watcher.addPath(key)
 
     def unwatch(self, path: Path) -> None:
-        key = str(Path(path).resolve())
+        key = str(_safe_resolve(Path(path)))
         if key in self._watcher.files():
             self._watcher.removePath(key)
         self._pending.discard(key)
