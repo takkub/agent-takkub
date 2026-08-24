@@ -1,5 +1,12 @@
-"""Core V2 Settings views — epic #309 Phase 9 (`CORE V2` sidebar section:
-Overview / Accounts & Pools / Routing / Brain / Scheduler / Migration).
+"""Core V2 Settings views — epic #309 Phase 9 (`ADVANCED` sidebar section,
+folded by default: Accounts & Pools / Routing / Brain / Scheduler — Overview
+and Migration were removed in the settings-nav declutter: Overview duplicated
+`takkub doctor`'s own status view and its flags default-on since 1.0.84 per
+`core_v2_settings._DEFAULT_FLAGS`; Migration's inspect/plan/dry-run duplicated
+the `takkub migrate` CLI and boot already runs `auto_migrate_boot` (#361) —
+apply on prod completed 2026-08-23. `v2_authority`'s eventual default flip
+(#362 Phase 10) is an env-flag decision, not something driven by a Settings
+page).
 
 A mixin (`CoreV2SettingsMixin`) mixed into `settings_window.SettingsWindow`
 — same "UI-layer mixin" shape as `user_actions.UserActionsMixin`/
@@ -12,22 +19,17 @@ Window` imports this mixin — importing back would cycle).
 Every view here is read-mostly and deliberately NOT wired into
 `SettingsWindow`'s existing footer Save & Apply / dirty-tracking transaction
 (`_on_save_apply_clicked`'s multi-store snapshot+rollback) — that transaction
-already spans 7+ unrelated stores and entangling 6 more (with very different
-shapes: append-only JSONL registries, thread-driven read-only reports, a
-flag toggle set) would make an already-large rollback surface harder to
-reason about for no real benefit. Instead each view either writes through
-immediately on its own explicit action (Accounts & Pools' add/edit/remove,
-mirroring Templates' Duplicate/Delete-writes-immediately precedent) or has
-its own dedicated Save button scoped to just that view's fields (Overview's
-flags, Scheduler's SlotPolicy) — never routed through the shared footer.
-
-No UI here ever offers a migration **apply** — inspect/plan/dry-run only,
-per the task spec ("ห้ามมีปุ่ม apply ใน UI รอบนี้").
+already spans 7+ unrelated stores and entangling more (with very different
+shapes: append-only JSONL registries, thread-driven read-only reports) would
+make an already-large rollback surface harder to reason about for no real
+benefit. Instead each view either writes through immediately on its own
+explicit action (Accounts & Pools' add/edit/remove, mirroring Templates'
+Duplicate/Delete-writes-immediately precedent) or has its own dedicated Save
+button scoped to just that view's fields (Scheduler's SlotPolicy) — never
+routed through the shared footer.
 """
 
 from __future__ import annotations
-
-import json
 
 import psutil
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -55,8 +57,6 @@ from .core.accounts.registry import AccountPoolRegistry, AccountRegistry
 from .core.accounts.selector import selector_for
 from .core.brain.flag import v2_brain_enabled
 from .core.brain.store import BrainStore
-from .core.migration.engine import MigrationEngine
-from .core.migration.report import StepReport
 from .core.models.account import (
     AccountPool,
     AccountStatus,
@@ -70,54 +70,15 @@ from .core.scheduling.backpressure import BackpressureSignal, classify
 from .core.scheduling.backpressure import admits as backpressure_admits
 from .core.scheduling.flag import v2_scheduler_enabled
 from .core.scheduling.models import Priority
-from .core.versioning.store import read_version_doc
-
-_FLAG_ROWS: tuple[tuple[str, str, str, bool], ...] = (
-    # (config key, TAKKUB_V2_* env name, short description, wired-in-core)
-    ("router", "TAKKUB_V2_ROUTER", "Router — quota/cooldown/health-aware provider routing", True),
-    (
-        "conversation",
-        "TAKKUB_V2_CONVERSATION",
-        "Conversation — checkpoint/resume/summary store",
-        True,
-    ),
-    (
-        "context",
-        "TAKKUB_V2_CONTEXT",
-        "Context Builder — inject memory เข้า task ตอน assign (ต้องเปิด BRAIN คู่กัน)",
-        True,
-    ),
-    ("brain", "TAKKUB_V2_BRAIN", "Second Brain — memory candidate pipeline + retrieval", True),
-    (
-        "scheduler",
-        "TAKKUB_V2_SCHEDULER",
-        "Scheduler — provider/account/project slot limits + backpressure",
-        True,
-    ),
-    (
-        "auto_migrate",
-        "TAKKUB_AUTO_MIGRATE",
-        "Auto migrate storage layout ตอน boot — v1 -> mixed ครั้งเดียว, validate + auto-rollback ในตัว (#361)",
-        True,
-    ),
-    (
-        "v2_authority",
-        "TAKKUB_V2_AUTHORITY",
-        "V2 authority — สลับ reader ทุก domain (models/routing/capabilities/roles/projects/state) "
-        "ไปอ่าน v2/ เป็นหลัก แทน V1, fail-open กลับ V1 ถ้า v2/ ยังไม่มี/พัง (#362 Phase 10 wave 2, default ปิด)",
-        True,
-    ),
-)
 
 _PRIORITY_NAMES: tuple[str, ...] = tuple(p.name for p in Priority)
 
 
 # ──────────────────────────────────────────────────────────────
 # worker threads — every genuinely blocking Core V2 call (Brain
-# recall/reindex scans the whole store + runs BM25 over it; Migration's
-# engine calls do backup/journal disk I/O) runs off the Qt main thread,
-# same `QThread` + `resultReady` signal shape as settings_window's own
-# `_AutoskillsPreviewThread`.
+# recall/reindex scans the whole store + runs BM25 over it) runs off the Qt
+# main thread, same `QThread` + `resultReady` signal shape as
+# settings_window's own `_AutoskillsPreviewThread`.
 # ──────────────────────────────────────────────────────────────
 
 
@@ -158,22 +119,6 @@ class _BrainReindexThread(QThread):
             self.resultReady.emit(e)
 
 
-class _MigrationReportThread(QThread):
-    resultReady: pyqtSignal = pyqtSignal(object)  # dict[str, list[StepReport]] | Exception
-
-    def __init__(self, stages: tuple[str, ...], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._stages = stages
-
-    def run(self) -> None:
-        try:
-            engine = MigrationEngine()
-            dispatch = {"inspect": engine.inspect, "plan": engine.plan, "dry_run": engine.dry_run}
-            self.resultReady.emit({stage: dispatch[stage]() for stage in self._stages})
-        except Exception as e:  # pragma: no cover
-            self.resultReady.emit(e)
-
-
 def _brain_counts(project: str | None) -> dict[str, dict[str, int]]:
     """Active-record counts by scope + by trust, over the project's own
     store plus the `_global` bucket (`Scope.GLOBAL`/`Scope.USER` records —
@@ -190,20 +135,6 @@ def _brain_counts(project: str | None) -> dict[str, dict[str, int]]:
             by_trust[record.trust.value] = by_trust.get(record.trust.value, 0) + 1
             total += 1
     return {"by_scope": by_scope, "by_trust": by_trust, "total": total}
-
-
-def _step_report_text(stage: str, reports: list[StepReport]) -> str:
-    if not reports:
-        return f"[{stage}] (no steps registered)"
-    lines = [f"[{stage}]"]
-    for r in reports:
-        status = "OK" if r.ok else "FAILED"
-        lines.append(f"  {r.step_id}: {status} — {r.summary}")
-        if r.unknown_fields:
-            lines.append(f"    unknown_fields: {', '.join(r.unknown_fields)}")
-        if r.detail:
-            lines.append(f"    detail: {json.dumps(r.detail, ensure_ascii=False, default=str)}")
-    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -361,119 +292,6 @@ class CoreV2SettingsMixin:
     attributes `SettingsWindow.__init__` sets (`_project`, `_fonts`, …) plus
     the QSS-driven helpers (`_build_card_header`) that class already
     defines."""
-
-    # ──────────────────────────────────────────────────────────
-    # view: Core V2 Overview
-    # ──────────────────────────────────────────────────────────
-
-    def _build_core_v2_overview_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QVBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(14)
-
-        banner = QLabel(
-            "flag เหล่านี้คุมว่า core V2 subsystem แต่ละตัวถูกเรียกจริงหรือไม่ — ปิดทุกตัว = "
-            "พฤติกรรมเดิมเป๊ะ (fail-open ทุกจุด) ค่า ENV var (TAKKUB_V2_*) ชนะค่าที่บันทึกไว้ที่นี่เสมอ",
-            view,
-        )
-        banner.setObjectName("infoBanner")
-        banner.setWordWrap(True)
-        lay.addWidget(banner)
-
-        flags_panel = QWidget(view)
-        flags_panel.setObjectName("panel")
-        fp_lay = QVBoxLayout(flags_panel)
-        fp_lay.setContentsMargins(14, 12, 14, 12)
-        fp_lay.setSpacing(10)
-        stored = core_v2_settings.load()["flags"]
-        fp_lay.addWidget(
-            self._build_card_header(
-                "CORE V2", "Feature flags", f"{sum(stored.values())}/{len(stored)} on", flags_panel
-            )
-        )
-
-        self._cv2_flag_toggles: dict[str, cockpit_theme.ToggleSwitch] = {}
-        for key, env_name, desc, wired in _FLAG_ROWS:
-            row = QWidget(flags_panel)
-            row.setObjectName("providerRow")
-            row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(10, 8, 10, 8)
-            row_lay.setSpacing(10)
-
-            label = QLabel(env_name, row)
-            label.setStyleSheet(
-                f'font-family: "{self._fonts["mono"]}"; font-weight: 600; color: {cockpit_theme.TEXT_PRIMARY};'
-            )
-            label.setFixedWidth(180)
-            row_lay.addWidget(label)
-
-            desc_lbl = QLabel(desc, row)
-            desc_lbl.setObjectName("panelHint")
-            desc_lbl.setWordWrap(True)
-            row_lay.addWidget(desc_lbl, 1)
-
-            toggle = cockpit_theme.ToggleSwitch(row, checked=stored.get(key, False))
-            toggle.setAccessibleName(f"{env_name} toggle")
-            toggle.setEnabled(wired)
-            if not wired:
-                toggle.setToolTip("ยังไม่มี core module ให้ toggle นี้เชื่อมถึง")
-            row_lay.addWidget(toggle)
-            self._cv2_flag_toggles[key] = toggle
-            fp_lay.addWidget(row)
-        lay.addWidget(flags_panel)
-
-        save_row = QHBoxLayout()
-        self._cv2_flags_save_btn = cockpit_theme.gold_button("Save flags", flags_panel)
-        self._cv2_flags_save_btn.clicked.connect(self._on_cv2_save_flags_clicked)
-        save_row.addWidget(self._cv2_flags_save_btn)
-        self._cv2_flags_status = QLabel("", flags_panel)
-        self._cv2_flags_status.setObjectName("panelHint")
-        save_row.addWidget(self._cv2_flags_status)
-        save_row.addStretch(1)
-        lay.addLayout(save_row)
-        save_scope_hint = QLabel("บันทึกทันทีที่นี่ — แยกจากปุ่ม Save & Apply ด้านล่าง", flags_panel)
-        save_scope_hint.setObjectName("panelHint")
-        lay.addWidget(save_scope_hint)
-
-        version_panel = QWidget(view)
-        version_panel.setObjectName("panel")
-        vp_lay = QVBoxLayout(version_panel)
-        vp_lay.setContentsMargins(14, 12, 14, 12)
-        vp_lay.setSpacing(8)
-        vp_lay.addWidget(self._build_card_header("STORAGE", "version.json", "", version_panel))
-        try:
-            components = read_version_doc()
-        except Exception:
-            components = []
-        if not components:
-            empty = QLabel("ยังไม่มี version.json record — core store ยังไม่ถูกเขียนครั้งแรก", version_panel)
-            empty.setObjectName("panelHint")
-            vp_lay.addWidget(empty)
-        else:
-            for cv in components:
-                row = QLabel(
-                    f"{cv.component}: {cv.version}"
-                    + (f" (id={cv.id})" if cv.id and cv.id != cv.component else ""),
-                    version_panel,
-                )
-                row.setStyleSheet(f'font-family: "{self._fonts["mono"]}"; font-size: 12px;')
-                vp_lay.addWidget(row)
-        lay.addWidget(version_panel)
-        lay.addStretch(1)
-        return view
-
-    def _on_cv2_save_flags_clicked(self) -> None:
-        try:
-            payload = core_v2_settings.load()
-            for key, toggle in self._cv2_flag_toggles.items():
-                payload["flags"][key] = toggle.isChecked()
-            if not core_v2_settings.save(payload):
-                raise OSError("write failed")
-        except OSError as e:
-            self._cv2_flags_status.setText(f"บันทึกไม่สำเร็จ: {e}")
-            return
-        self._cv2_flags_status.setText("บันทึกแล้ว — ใช้ผลตั้งแต่ pane ถัดไปที่ spawn")
 
     # ──────────────────────────────────────────────────────────
     # view: Accounts & Pools
@@ -1098,70 +916,3 @@ class CoreV2SettingsMixin:
             self._cv2_scheduler_status.setText(f"บันทึกไม่สำเร็จ: {e}")
             return
         self._cv2_scheduler_status.setText("บันทึกแล้ว")
-
-    # ──────────────────────────────────────────────────────────
-    # view: Migration
-    # ──────────────────────────────────────────────────────────
-
-    def _build_core_v2_migration_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QVBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(14)
-
-        banner = QLabel(
-            "inspect/plan/dry-run เท่านั้น — apply ทำผ่าน CLI (`takkub migrate apply`) เท่านั้น ไม่มีปุ่มนี้ใน UI",
-            view,
-        )
-        banner.setObjectName("infoBanner")
-        banner.setWordWrap(True)
-        lay.addWidget(banner)
-
-        btn_row = QHBoxLayout()
-        self._cv2_migration_refresh_btn = cockpit_theme.secondary_button(
-            "Refresh (inspect + plan)", view
-        )
-        self._cv2_migration_refresh_btn.clicked.connect(self._on_cv2_migration_refresh_clicked)
-        btn_row.addWidget(self._cv2_migration_refresh_btn)
-        self._cv2_migration_dry_run_btn = cockpit_theme.secondary_button("Dry-run", view)
-        self._cv2_migration_dry_run_btn.clicked.connect(self._on_cv2_migration_dry_run_clicked)
-        btn_row.addWidget(self._cv2_migration_dry_run_btn)
-        btn_row.addStretch(1)
-        lay.addLayout(btn_row)
-
-        self._cv2_migration_report = QPlainTextEdit(view)
-        self._cv2_migration_report.setReadOnly(True)
-        self._cv2_migration_report.setStyleSheet(
-            f'font-family: "{self._fonts["mono"]}"; font-size: 12px;'
-        )
-        lay.addWidget(self._cv2_migration_report, 1)
-
-        self._cv2_migration_thread: _MigrationReportThread | None = None
-        # Not fetched eagerly, same reasoning as Brain's counts above — loads
-        # on first "Refresh" press instead of on every SettingsWindow() build.
-        self._cv2_migration_report.setPlainText("กด “Refresh (inspect + plan)” เพื่อโหลด report")
-        return view
-
-    def _cv2_run_migration_stages(self, stages: tuple[str, ...]) -> None:
-        self._cv2_migration_refresh_btn.setEnabled(False)
-        self._cv2_migration_dry_run_btn.setEnabled(False)
-        self._cv2_migration_report.setPlainText("กำลังรัน…")
-        thread = _MigrationReportThread(stages, self)
-        thread.resultReady.connect(self._on_cv2_migration_report_ready)
-        self._cv2_migration_thread = thread
-        thread.start()
-
-    def _on_cv2_migration_refresh_clicked(self) -> None:
-        self._cv2_run_migration_stages(("inspect", "plan"))
-
-    def _on_cv2_migration_dry_run_clicked(self) -> None:
-        self._cv2_run_migration_stages(("dry_run",))
-
-    def _on_cv2_migration_report_ready(self, result: object) -> None:
-        self._cv2_migration_refresh_btn.setEnabled(True)
-        self._cv2_migration_dry_run_btn.setEnabled(True)
-        if isinstance(result, Exception):
-            self._cv2_migration_report.setPlainText(f"รันไม่สำเร็จ: {result}")
-            return
-        blocks = [_step_report_text(stage, reports) for stage, reports in result.items()]
-        self._cv2_migration_report.setPlainText("\n\n".join(blocks))

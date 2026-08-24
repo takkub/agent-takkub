@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
@@ -68,6 +68,19 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # isolation pattern test_core_brain_adapter.py uses for RUNTIME_DIR.
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
+    # Sidebar's ADVANCED section fold state (`_build_sidebar`) uses
+    # `QSettings("agent-takkub", "cockpit")` — same org/app pair MainWindow
+    # uses for window geometry and `project_nav` uses for the explorer's
+    # expanded flag (see that module's own `isolated_nav_qsettings` fixture).
+    # Redirect to a throwaway per-test INI so tests never read/write the
+    # real machine's registry/INI store, and one test's fold-toggle can't
+    # leak into another's default-collapsed assumption.
+    ini_path = str(tmp_path / "cockpit_settings.ini")
+    monkeypatch.setattr(
+        settings_window,
+        "QSettings",
+        lambda *_a, **_kw: QSettings(ini_path, QSettings.Format.IniFormat),
+    )
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -76,12 +89,17 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_twenty_one_stacked_views(self) -> None:
-        # 10 stable views + Performance (10) + 6 Core V2 views (11-16,
-        # epic #309 Phase 9) + 4 Knowledge & Design views (17-20, final
-        # closeout pack 2).
+    def test_has_fifteen_stacked_views(self) -> None:
+        # Settings-nav declutter (2026-08-24): 9 nav-visible views (Pipeline
+        # Builder/Templates/Providers & Roles/MCP Matrix/Plugins Matrix/
+        # Skill Catalog/Skill Matrix/Users/Knowledge) + New Role (reached via
+        # its own button, not the nav list) + 5 ADVANCED-section views
+        # (Accounts & Pools/Routing/Brain/Scheduler/Performance) = 15. Down
+        # from 21 — Role Overlap, Core V2 Overview, Core V2 Migration, and
+        # OpenViking were removed outright; Knowledge/Design Tools/Context
+        # Debug collapsed into one tabbed page.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 21
+        assert dlg._stack.count() == 15
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -122,6 +140,51 @@ class TestSettingsWindowStructure:
         saved = performance_settings.load()
         assert saved.mode == "safe"
         assert saved.max_heavy_global == 2
+
+
+class TestAdvancedSectionFold:
+    """Sidebar ADVANCED section (Accounts & Pools/Routing/Brain/Scheduler/
+    Performance) — folded by default (`13_SIMPLE_UX.md` "hide internal
+    knobs under Advanced"), toggle persists across a fresh SettingsWindow()
+    the way `project_nav`'s explorer expand/collapse already does."""
+
+    def test_advanced_section_starts_folded(self) -> None:
+        dlg = settings_window.SettingsWindow()
+        toggle = dlg._nav_section_toggles["ADVANCED"]
+        assert toggle.isChecked() is False
+        # Offscreen tests never `.show()` the dialog, so `isVisible()` always
+        # reads False regardless of state — `isHidden()` reflects the
+        # widget's own `setVisible()` call (same pattern used throughout
+        # this file, e.g. `test_lead_warning_hidden_by_default`).
+        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is True
+        # A row inside the folded section still exists and is reachable —
+        # only the sidebar row is hidden, not the underlying page.
+        assert dlg._nav_buttons[settings_window.VIEW_CORE_V2_ACCOUNTS] is not None
+        dlg.deleteLater()
+
+    def test_toggling_expands_section_and_persists_across_reopen(self) -> None:
+        dlg = settings_window.SettingsWindow()
+        toggle = dlg._nav_section_toggles["ADVANCED"]
+        toggle.setChecked(True)
+        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is False
+        dlg.deleteLater()
+
+        # A fresh window (same isolated QSettings store, per this file's own
+        # `_isolate_settings_paths` fixture) must reopen already expanded.
+        reopened = settings_window.SettingsWindow()
+        assert reopened._nav_section_toggles["ADVANCED"].isChecked() is True
+        assert reopened._nav_section_bodies["ADVANCED"].isHidden() is False
+        reopened.deleteLater()
+
+    def test_goto_view_inside_folded_section_auto_expands_it(self) -> None:
+        """Jumping straight to an ADVANCED-section view (e.g. `initial_view`)
+        must not leave its own highlighted nav row hidden behind a still-
+        collapsed header."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_SCHEDULER)
+        assert dlg._nav_section_toggles["ADVANCED"].isChecked() is True
+        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is False
+        assert dlg._stack.currentIndex() == settings_window.VIEW_CORE_V2_SCHEDULER
+        dlg.deleteLater()
 
 
 class TestNewRoleView:
@@ -814,29 +877,6 @@ class TestSkillMatrixView:
         dlg._on_reset_clicked()
         assert dlg._skill_toggles["backend"]["debug-mantra"].isChecked() is False
         assert skill_policy.effective_skills("backend") == []
-        dlg.deleteLater()
-
-
-class TestRoleOverlapView:
-    """The renamed old "Skill Catalog" — a ROLE-scope TF-IDF overlap audit,
-    not a skill browser (2026-07-11 rename)."""
-
-    def test_selecting_role_updates_detail_and_overlap_badge(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        docs = {"backend": "database schema api endpoint", "frontend": "react component css"}
-        monkeypatch.setattr(settings_window.skill_audit, "load_all_role_docs", lambda: docs)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_ROLE_OVERLAP)
-        assert dlg._overlap_list.count() == 2
-
-        row = next(
-            i
-            for i in range(dlg._overlap_list.count())
-            if dlg._overlap_list.item(i).data(Qt.ItemDataRole.UserRole) == "backend"
-        )
-        dlg._overlap_list.setCurrentRow(row)
-        assert dlg._overlap_detail_text.toPlainText() == docs["backend"]
-        assert dlg._overlap_badge.text().startswith("OK:")
         dlg.deleteLater()
 
 

@@ -457,6 +457,20 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         letter-spacing: 1.5px;
         padding: 12px 14px 4px 14px;
     }}
+    QPushButton#sidebarSectionToggle {{
+        font-family: "{mono_family}";
+        color: {TEXT_FAINT};
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 1.5px;
+        text-align: left;
+        padding: 12px 14px 4px 14px;
+        border: none;
+        background: transparent;
+    }}
+    QPushButton#sidebarSectionToggle:hover {{
+        color: {TEXT_SECONDARY};
+    }}
     QPushButton#navButton {{
         text-align: left;
         padding: 8px 12px 8px 10px;
