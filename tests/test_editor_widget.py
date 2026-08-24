@@ -147,6 +147,22 @@ class TestReadFileForEditor:
         assert result.too_large is False
         assert result.text == "a" * 50
 
+    def test_invalid_utf8_flagged_no_text(self, tmp_path: Path) -> None:
+        """BUG-005: a text-shaped file with invalid UTF-8 bytes must never
+        reach Monaco as a lossily-decoded (errors="replace") string — no
+        text at all, same as binary/too-large."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "latin1.txt"
+        f.write_bytes(b"caf\xe9 con leche\n")
+
+        result = read_file_for_editor(f, [root])
+
+        assert result.encoding_unsupported is True
+        assert result.text is None
+        assert result.binary is False
+        assert result.too_large is False
+
 
 # ── git-HEAD diff ────────────────────────────────────────────────────────
 
@@ -227,6 +243,18 @@ class TestBuildDiffResult:
         result = build_diff_result(repo, [repo], repo / "a.bin")
 
         assert result.error == "binary_or_too_large"
+
+    def test_invalid_utf8_current_file_yields_error(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        _init_repo_with_commit(repo, "a.txt", "placeholder")
+        (repo / "a.txt").write_bytes(b"caf\xe9 con leche\n")
+
+        result = build_diff_result(repo, [repo], repo / "a.txt")
+
+        assert result.error == "binary_or_too_large"
+        assert result.modified_text is None
 
 
 # ── EditorHost: lazy create / single instance / destroy on empty ───────────
@@ -348,6 +376,24 @@ class TestLazyCreateAndSingleInstance:
 
         view = stub_factory.created[0]
         assert any("editorOpenUnavailable" in call for call in view.run_js_calls)
+        assert not any("editorOpenFile" in call for call in view.run_js_calls)
+
+    def test_invalid_utf8_file_sends_unavailable_not_open(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        """BUG-005: same read-only placeholder route as binary/too-large —
+        no editable Monaco model means Ctrl+S has nothing to act on."""
+        f = tmp_path / "latin1.txt"
+        f.write_bytes(b"caf\xe9 con leche\n")
+        host = EditorHost(container, view_factory=stub_factory)
+
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+
+        view = stub_factory.created[0]
+        unavailable_calls = [c for c in view.run_js_calls if "editorOpenUnavailable" in c]
+        assert unavailable_calls
+        assert "encoding_unsupported" in unavailable_calls[0]
         assert not any("editorOpenFile" in call for call in view.run_js_calls)
 
     def test_path_escaping_roots_emits_fileOpenFailed(

@@ -44,6 +44,10 @@
         "string",
         "null"
       ]
+    },
+    "encoding_unsupported": {
+      "type": "boolean",
+      "description": "True when the file is text-shaped but its bytes fail strict UTF-8 decoding (BUG-005) — opened read-only, save rejected."
     }
   },
   "additionalProperties": false

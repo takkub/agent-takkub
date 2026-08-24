@@ -21,7 +21,7 @@ hard-aborts pytest even under `QT_QPA_PLATFORM=offscreen` — see
 Wiring (mirrors `terminal_widget.py`'s Python↔JS split):
   Python → JS (via `EditorHost.run_js` → `page.runJavaScript`):
     editorOpenFile(path, text, languageHint)
-    editorOpenUnavailable(path, reason, size)   — binary / too-large fallback
+    editorOpenUnavailable(path, reason, size)   — binary / too-large / encoding_unsupported (BUG-005) fallback
     editorShowDiff(path, originalText, modifiedText)
     editorDiffFailed(path, reason)
     editorSaveResult(path, ok, error)           — phase 3
@@ -118,10 +118,11 @@ def _js_str(value: str | None) -> str:
 @dataclass(frozen=True)
 class OpenFileResult:
     path: Path
-    text: str | None  # None when binary or too large
+    text: str | None  # None when binary, too large, or encoding_unsupported
     language_hint: str
     binary: bool
     too_large: bool
+    encoding_unsupported: bool  # BUG-005 — text-shaped but not valid UTF-8
     size: int
     state: EditorFileState  # versioned snapshot — the save-conflict baseline
 
@@ -132,26 +133,30 @@ def read_file_for_editor(
     """Containment-checked, size-capped, binary-sniffed file read.
 
     Raises `PathEscapesRootsError` if `path` doesn't resolve under any of
-    `roots`. Never raises for a binary/too-large file — those come back as
-    `text=None` with the corresponding flag set, so the caller can render a
-    placeholder instead of dumping raw bytes into a text editor.
+    `roots`. Never raises for a binary/too-large/encoding_unsupported file —
+    those come back as `text=None` with the corresponding flag set, so the
+    caller can render a placeholder instead of dumping raw bytes (or a
+    silently-corrupted `errors="replace"` decode, BUG-005) into a text
+    editor.
 
-    Metadata (binary/too_large/size + the mtime_ns/sha256 conflict baseline)
-    comes from `editor_service.stat_snapshot` — the same snapshot phase 3's
-    save path checks disk against — so "what the editor thinks it opened"
-    and "what a later Ctrl+S compares to" can never drift apart.
+    Metadata (binary/too_large/encoding_unsupported/size + the
+    mtime_ns/sha256 conflict baseline) comes from
+    `editor_service.stat_snapshot` — the same snapshot phase 3's save path
+    checks disk against — so "what the editor thinks it opened" and "what a
+    later Ctrl+S compares to" can never drift apart.
     """
     resolved = resolve_and_contain(path, roots)
     state = stat_snapshot(resolved, max_bytes)
     text = None
-    if not state.binary and not state.too_large:
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+    if not state.binary and not state.too_large and not state.encoding_unsupported:
+        text = resolved.read_text(encoding="utf-8")
     return OpenFileResult(
         path=resolved,
         text=text,
         language_hint=resolved.suffix.lstrip(".").lower(),
         binary=state.binary,
         too_large=state.too_large,
+        encoding_unsupported=state.encoding_unsupported,
         size=state.size,
         state=state,
     )
@@ -206,7 +211,7 @@ def build_diff_result(
             path=Path(abs_path), original_text=None, modified_text=None, error=str(exc)
         )
     current = read_file_for_editor(resolved, roots, max_bytes)
-    if current.binary or current.too_large:
+    if current.binary or current.too_large or current.encoding_unsupported:
         return DiffResult(
             path=resolved, original_text=None, modified_text=None, error="binary_or_too_large"
         )
@@ -639,8 +644,18 @@ class EditorHost(QObject):
         path_str = str(result.path)
         self._open_paths[path_str] = project_name
         self._file_states[path_str] = result.state
-        if result.binary or result.too_large:
-            reason = "binary" if result.binary else "too_large"
+        unavailable = result.binary or result.too_large or result.encoding_unsupported
+        if unavailable:
+            # encoding_unsupported (BUG-005): same read-only placeholder tab
+            # as binary/too-large — there is no safe decoded text to hand
+            # Monaco, so there is no editable buffer for Ctrl+S to act on.
+            reason = (
+                "binary"
+                if result.binary
+                else "too_large"
+                if result.too_large
+                else "encoding_unsupported"
+            )
             self._view.run_js(
                 f"editorOpenUnavailable({_js_str(path_str)}, {_js_str(reason)}, {result.size});"
             )
@@ -657,7 +672,7 @@ class EditorHost(QObject):
             self._file_watch.watch(result.path)
             self.focus()
         self.fileOpened.emit(project_name, path_str)
-        if show_diff and not (result.binary or result.too_large):
+        if show_diff and not unavailable:
             self._on_diff_requested(path_str)
 
     def _on_file_failed(self, path: str, error: str) -> None:
@@ -782,7 +797,12 @@ class EditorHost(QObject):
         if self._view is None:
             return
         disk_text = None
-        if disk_read is not None and not disk_read.binary and not disk_read.too_large:
+        if (
+            disk_read is not None
+            and not disk_read.binary
+            and not disk_read.too_large
+            and not disk_read.encoding_unsupported
+        ):
             disk_text = disk_read.text
         # Deliberately NOT updating self._file_states here — the baseline
         # stays the stale snapshot the buffer was actually opened/saved
@@ -814,8 +834,14 @@ class EditorHost(QObject):
         if self._view is None:
             return
         self._file_states[path] = result.state
-        if result.binary or result.too_large:
-            reason = "binary" if result.binary else "too_large"
+        if result.binary or result.too_large or result.encoding_unsupported:
+            reason = (
+                "binary"
+                if result.binary
+                else "too_large"
+                if result.too_large
+                else "encoding_unsupported"
+            )
             self._view.run_js(
                 f"editorOpenUnavailable({_js_str(path)}, {_js_str(reason)}, {result.size});"
             )
