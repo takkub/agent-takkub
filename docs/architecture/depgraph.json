@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 315,
+  "module_count": 320,
   "modules": [
     {
       "module": "agent_takkub",
@@ -76,6 +76,8 @@
         "agent_takkub.maintenance",
         "agent_takkub.mcp_bridge",
         "agent_takkub.opencode_helper",
+        "agent_takkub.openviking.installer",
+        "agent_takkub.openviking.process",
         "agent_takkub.pane_env",
         "agent_takkub.plugin_installer",
         "agent_takkub.project_explorer",
@@ -100,7 +102,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 40,
+      "fan_in": 42,
       "fan_out": 0
     },
     {
@@ -1084,10 +1086,11 @@
         "agent_takkub.core.context_sources.doctor_section",
         "agent_takkub.core.context_sources.indexing",
         "agent_takkub.core.context_sources.openviking_source",
+        "agent_takkub.openviking.manager",
         "agent_takkub.openviking_settings",
         "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 2
     },
     {
@@ -2945,6 +2948,63 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.openviking",
+      "imports": [
+        "agent_takkub.openviking.manager"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.openviking.installer",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.openviking.manager",
+        "agent_takkub.openviking.process"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.openviking.manager",
+      "imports": [
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.openviking.installer",
+        "agent_takkub.openviking.port",
+        "agent_takkub.openviking.process"
+      ],
+      "imported_by": [
+        "agent_takkub.openviking"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.openviking.port",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.openviking.manager"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.openviking.process",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.openviking.installer",
+        "agent_takkub.pty_session"
+      ],
+      "imported_by": [
+        "agent_takkub.openviking.manager"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.openviking_settings",
       "imports": [
         "agent_takkub.config",
@@ -3581,11 +3641,12 @@
         "agent_takkub.doctor",
         "agent_takkub.headless_pane",
         "agent_takkub.lead_inbox",
+        "agent_takkub.openviking.process",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.tunnel",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 4
     },
     {
