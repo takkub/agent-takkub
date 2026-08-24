@@ -2081,6 +2081,37 @@ class PtySession(QObject):
                 return marker
         return None
 
+    def shows_account_pending_marker(self, provider: str) -> bool:
+        """True the instant `provider`'s own account/eligibility-gate banner
+        is on screen — UNGATED, unlike ``account_pending_reason()`` (#376).
+
+        ``account_pending_reason()`` exists to answer "has this pane been
+        stuck long enough to escalate to Lead", which is deliberately gated
+        on ``AUTH_TRANSIENT_GRACE_SEC`` (45s) so a normal cold-boot flash of
+        the same text doesn't convict a pane about to clear it on its own —
+        and delivery's own `_AUTH_FAILURE_CONFIRM_POLLS` streak on top of
+        that. Delivery's "may I paste a task into this pane RIGHT NOW"
+        question is different: a banner that appeared this very frame is
+        exactly as unsafe to paste over as one that has been up for 45s. The
+        #376 incident was a task pasted ~7s after spawn, straight onto a
+        fresh banner — well before either gate ever got a chance to run,
+        because both of them answer the escalate question, not this one.
+
+        Same `_BOOT_MARKER_TAIL_ROWS` (20-row) window as
+        ``account_pending_reason()``, for the same #363 reason: the real
+        banner plus realistic composer footer chrome does not fit inside the
+        tight `_ready_region` (6 rows) that `is_at_ready_prompt()` scans, so
+        a pane frozen on the banner still reads READY there.
+
+        Empty marker tuple (a provider with none confirmed) → always False —
+        a no-op for that provider, same as every other marker-table lookup
+        in this module."""
+        markers = account_pending_markers_for(provider)
+        if not markers:
+            return False
+        text = _tail_region(self.display_lines(), _BOOT_MARKER_TAIL_ROWS)
+        return any(marker in text for marker in markers)
+
     def is_hard_blocked_for(self, provider: str) -> bool:
         """True when `provider`'s own `ready_hard_blockers` currently match
         this pane's footer region — i.e. the screen shows an active

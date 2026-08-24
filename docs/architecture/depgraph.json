@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 311,
+  "module_count": 312,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2291,6 +2291,15 @@
       "fan_out": 4
     },
     {
+      "module": "agent_takkub.delivery_readiness",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.lead_inbox"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.design_actions",
       "imports": [
         "agent_takkub.core.storage.jsonl_store",
@@ -2660,6 +2669,7 @@
       "imports": [
         "agent_takkub.agent_pane",
         "agent_takkub.config",
+        "agent_takkub.delivery_readiness",
         "agent_takkub.digest_facts",
         "agent_takkub.lead_draft_state",
         "agent_takkub.orchestrator_text",
@@ -2677,7 +2687,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.lead_wait",

@@ -97,6 +97,18 @@ def _marker_for(n: int, marker: str):
     return _fn
 
 
+def _true_then_false(n: int):
+    """side_effect callable: True for the first *n* calls, False forever
+    after — for boolean marker predicates (shows_account_pending_marker)."""
+    calls = {"n": 0}
+
+    def _fn(_provider: str) -> bool:
+        calls["n"] += 1
+        return calls["n"] <= n
+
+    return _fn
+
+
 @pytest.fixture
 def orch(qapp, monkeypatch) -> Orchestrator:
     o = Orchestrator.__new__(Orchestrator)
@@ -234,3 +246,116 @@ class TestAccountPendingRequiresConsecutivePolls:
         assert call.kwargs["degrade"] is True
         assert call.kwargs["kind"] == "account_pending"
         assert not backend.session.write.called
+
+
+class TestUngatedMarkerHoldsTheReadyStreak:
+    """(#376) `PtySession.shows_account_pending_marker` — UNGATED, unlike
+    `account_pending_reason` above — must hold the ready-streak at 0 on its
+    own, independent of `AUTH_TRANSIENT_GRACE_SEC`/`_AUTH_FAILURE_CONFIRM_POLLS`.
+    Reproduces the exact #376 incident: `is_at_ready_prompt()` pinned True
+    (the #363 misread footer) and `seconds_since_output()` pinned to 0.0
+    (long before the 45s grace) — nothing but the new ungated check could be
+    holding delivery back here; the pre-#376 code delivered onto this exact
+    screen shape within ~7s of spawn."""
+
+    def test_ready_streak_never_advances_while_banner_shows(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        lead = _pane(_live_session())
+        agy = _pane(_live_session())
+        agy.session.is_at_ready_prompt.return_value = True
+        agy.session.shows_account_pending_marker.side_effect = _true_then_false(10)
+        agy.session.account_pending_reason.return_value = None
+        agy.session.seconds_since_output.return_value = 0.0
+        orch._panes_by_project["P"] = {"lead": lead, "agy": agy}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("agy", "run smoke", max_wait_ms=100_000, project="P")
+
+        assert agy.session.write.called
+        # Delivery can only happen once 7 CONSECUTIVE clear polls piled up
+        # AFTER the banner's own 10-poll block (required_polls for
+        # max_wait_ms=100_000 is 7) — i.e. no sooner than poll 16 — proving
+        # the gate, not luck, held the streak at 0 the whole time the banner
+        # showed. Pre-#376 code ignored the banner entirely and could
+        # deliver as early as poll 7.
+        assert agy.session.shows_account_pending_marker.call_count >= 16
+
+    def test_provider_with_no_marker_confirmed_is_unaffected(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        # shows_account_pending_marker() is a no-op (always False) for a
+        # provider with no confirmed markers (e.g. claude) — delivery must
+        # behave exactly as before #376 for it.
+        lead = _pane(_live_session())
+        backend = _pane(_live_session())
+        backend.model = MagicMock(provider_name="claude")
+        backend.session.is_at_ready_prompt.return_value = True
+        backend.session.shows_account_pending_marker.return_value = False
+        backend.session.seconds_since_output.return_value = 0.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("backend", "run smoke", max_wait_ms=1000, project="P")
+
+        assert backend.session.write.called
+
+
+class TestNeverBlindPasteIntoAccountPendingBanner:
+    """(#376) The last-resort blind paste at the hard delivery timeout must
+    not fire while a pane is frozen on its provider's own account-pending
+    banner — same defer-then-force-paste contract `_deliver()` already
+    applies to a trust/tty prompt (see test_delivery_blocked_prompt.py's
+    TestNeverBlindPasteIntoModal, which this mirrors)."""
+
+    def test_defers_blind_paste_while_banner_persists(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        import agent_takkub.lead_inbox as li
+
+        # Small defer ceiling, same technique as the trust-modal test this
+        # mirrors — the synchronous singleShot stub recurses instead of
+        # returning to an event loop.
+        monkeypatch.setattr(li, "_PROMPT_BLOCK_DEFER_CEILING_MS", 300)
+        lead = _pane(_live_session())
+        agy = _pane(_live_session())
+        agy.session.is_at_ready_prompt.return_value = False  # never reaches the ready path
+        agy.session.shows_account_pending_marker.return_value = True  # never clears
+        agy.session.account_pending_reason.return_value = None  # escalation stays disarmed
+        agy.session.seconds_since_output.return_value = float("inf")  # "stuck" path
+        orch._panes_by_project["P"] = {"lead": lead, "agy": agy}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("agy", "run smoke", max_wait_ms=300, project="P")
+
+        assert any(
+            c.args and c.args[0] == "task_deliver_prompt_defer_ceiling" for c in log.call_args_list
+        )
+        # Still eventually pastes (last-resort, unchanged contract) once the
+        # defer ceiling itself is exhausted — same guarantee the trust-modal
+        # case already has.
+        assert agy.session.write.called
+
+    def test_delivers_normally_once_banner_clears_before_defer_ceiling(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """The common case: the gate clears well inside the defer ceiling —
+        delivery proceeds normally, not via a blind paste at all."""
+        lead = _pane(_live_session())
+        agy = _pane(_live_session())
+        agy.session.is_at_ready_prompt.side_effect = _ready_after(3)
+        agy.session.shows_account_pending_marker.side_effect = _true_then_false(3)
+        agy.session.account_pending_reason.return_value = None
+        agy.session.seconds_since_output.return_value = 1.0
+        orch._panes_by_project["P"] = {"lead": lead, "agy": agy}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("agy", "run smoke", max_wait_ms=100_000, project="P")
+
+        assert agy.session.write.called
+        warnings = _written_strings(lead.session)
+        assert not any("[delivery-unconfirmed]" in m for m in warnings)

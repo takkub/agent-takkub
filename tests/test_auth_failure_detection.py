@@ -198,6 +198,59 @@ class TestAccountPendingReason:
         assert reason is None
 
 
+def _shows_account_pending_marker(
+    lines: list[str], provider: str, seconds_since_output: float = 100.0
+):
+    return PtySession.shows_account_pending_marker(
+        _FakeScreen(lines, seconds_since_output=seconds_since_output), provider
+    )
+
+
+class TestShowsAccountPendingMarker:
+    """`PtySession.shows_account_pending_marker` (#376) — the UNGATED sibling
+    of `account_pending_reason()` above. #376's own live incident: a task got
+    pasted onto agy's account-pending banner ~7s after spawn, well before
+    `AUTH_TRANSIENT_GRACE_SEC` (45s) or delivery's own confirm-poll streak
+    ever got a chance to run — because both of those answer "has this been
+    stuck long enough to escalate", not "is it safe to paste right now".
+    This predicate answers the second question, with zero grace."""
+
+    def test_fires_with_zero_seconds_since_output(self) -> None:
+        # The defining difference from `account_pending_reason()`: fires
+        # even on the very first frame the banner appears.
+        lines = ["", "Verifying your account...", ""]
+        assert _shows_account_pending_marker(lines, "gemini", seconds_since_output=0.0) is True
+
+    def test_no_marker_returns_false(self) -> None:
+        lines = ["> ", "welcome back", "? for shortcuts"]
+        assert _shows_account_pending_marker(lines, "gemini", seconds_since_output=0.0) is False
+
+    def test_never_fires_for_a_provider_with_none_confirmed(self) -> None:
+        lines = ["", "Verifying your account...", ""]
+        assert _shows_account_pending_marker(lines, "claude", seconds_since_output=0.0) is False
+
+    def test_fires_for_the_live_captured_banner_with_realistic_footer_and_zero_grace(self) -> None:
+        # Same live-captured screen as TestAccountPendingReason's #363
+        # regression fixture (banner pushed past `_READY_TAIL_ROWS` by
+        # realistic composer chrome, but still inside `_BOOT_MARKER_TAIL_ROWS`)
+        # — proves BOTH the wide-window fix AND the zero-grace behaviour hold
+        # together on the exact screen shape #376 was reported against.
+        lines = [
+            "⚠ Verifying your account...",
+            "  We're finishing verifying your account eligibility.",
+            "  This usually takes a moment. Please try again shortly.",
+            "",
+            "─" * 40,
+            "> ",
+            "─" * 40,
+            "ctx: 12% used  |  tips: ctrl+c to exit",
+            "? for shortcuts            Gemini 3.7 Flash (High)",
+        ]
+        assert len(lines) - _READY_TAIL_ROWS > 1  # sanity: banner outside the tight window
+        assert len(lines) - _BOOT_MARKER_TAIL_ROWS <= 0  # sanity: inside the wide window
+        assert _shows_account_pending_marker(lines, "gemini", seconds_since_output=0.0) is True
+
+
 class TestNarrowedGenericMarkers:
     """The round-2 follow-up dropped several phrases that are ordinary
     HTTP/test-framework vocabulary, not CLI chrome — a backend pane running
