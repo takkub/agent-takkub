@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 from PyQt6.QtCore import QObject, QUrl, pyqtSignal
 
 from . import config
-from .project_file_index import resolve_and_contain
+from .project_file_index import _safe_resolve, resolve_and_contain
 
 _LOOPBACK_LITERAL_HOSTS = frozenset({"localhost"})
 ALLOWED_PREVIEW_FILE_EXTENSIONS = frozenset({".html", ".htm"})
@@ -78,7 +78,7 @@ def _project_source_roots(project_ns: str) -> list[Path]:
     pure controller module has no reason to depend on."""
     data = config.load_projects()
     proj = (data.get("projects") or {}).get(project_ns) or {}
-    return [Path(p).resolve() for p in (proj.get("paths") or {}).values()]
+    return [_safe_resolve(Path(p)) for p in (proj.get("paths") or {}).values()]
 
 
 def approved_artifact_roots(project_ns: str) -> list[Path]:
@@ -145,7 +145,7 @@ def _local_file_path(value: str) -> Path | None:
     if not raw:
         return None
     try:
-        return Path(raw).resolve()
+        return _safe_resolve(Path(raw))
     except (OSError, ValueError):
         return None
 

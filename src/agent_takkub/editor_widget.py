@@ -81,7 +81,7 @@ from .editor_service import Conflict, EditorFileState, save_atomic, stat_snapsho
 from .file_watch_service import FileWatchService
 from .git_changes_service import find_rename_old_path
 from .project_explorer import project_roots
-from .project_file_index import PathEscapesRootsError, resolve_and_contain
+from .project_file_index import PathEscapesRootsError, _safe_resolve, resolve_and_contain
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ def read_head_blob(repo_root: Path, abs_path: Path) -> str | None:
     git not on PATH, ...). Mirrors project_file_index.py's GitStatusService
     subprocess pattern (timeout, swallow OSError)."""
     try:
-        rel = abs_path.resolve().relative_to(Path(repo_root).resolve()).as_posix()
+        rel = _safe_resolve(abs_path).relative_to(_safe_resolve(Path(repo_root))).as_posix()
     except ValueError:
         return None
     try:
@@ -228,7 +228,7 @@ def build_diff_result(
     original = read_head_blob(repo_root, resolved)
     if original is None and current_text is not None:
         try:
-            rel = resolved.relative_to(Path(repo_root).resolve()).as_posix()
+            rel = resolved.relative_to(_safe_resolve(Path(repo_root))).as_posix()
         except ValueError:
             rel = None
         if rel is not None:
