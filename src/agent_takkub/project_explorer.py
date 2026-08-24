@@ -63,6 +63,7 @@ from .project_file_index import (
     GitStatusService,
     PathEscapesRootsError,
     ProjectFileIndex,
+    _safe_resolve,
     resolve_and_contain,
 )
 
@@ -117,7 +118,7 @@ def project_roots(project_name: str) -> dict[str, Path]:
     heavier, Lead-spawn-focused module just for a label->path dict)."""
     data = load_projects()
     proj = (data.get("projects") or {}).get(project_name) or {}
-    return {label: Path(p).resolve() for label, p in (proj.get("paths") or {}).items()}
+    return {label: _safe_resolve(Path(p)) for label, p in (proj.get("paths") or {}).items()}
 
 
 class ProjectExplorer(QWidget):
@@ -317,12 +318,12 @@ class ProjectExplorer(QWidget):
             return
         by_repo: dict[Path, list[str]] = {}
         for label, root in self.roots.items():
-            resolved_root = Path(root).resolve()
+            resolved_root = _safe_resolve(Path(root))
             toplevel = mapping.get(resolved_root, resolved_root)
             by_repo.setdefault(toplevel, []).append(label)
         self._repo_labels = by_repo
 
-        primary_root = Path(next(iter(self.roots.values()))).resolve()
+        primary_root = _safe_resolve(Path(next(iter(self.roots.values()))))
         primary_toplevel = mapping.get(primary_root, primary_root)
         if primary_toplevel != self.git_changes.repo_root:
             self.git_changes.changesChanged.disconnect(self._on_changes_changed)
@@ -408,7 +409,7 @@ class ProjectExplorer(QWidget):
         if not path_str:
             return
         try:
-            rel = Path(path_str).resolve().relative_to(self.git_status.repo_root).as_posix()
+            rel = _safe_resolve(Path(path_str)).relative_to(self.git_status.repo_root).as_posix()
         except ValueError:
             return
         color = _GIT_STATUS_COLORS.get(self._git_status_map.get(rel, ""))

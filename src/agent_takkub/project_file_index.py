@@ -24,6 +24,7 @@ import fnmatch
 import logging
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,6 +35,34 @@ from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from ._win_console import SUBPROCESS_NO_WINDOW
 
 logger = logging.getLogger(__name__)
+
+# #375 regression (native access violation, reproduced via faulthandler
+# inside both `subprocess._execute_child` and `ntpath.realpath`): calling
+# `Path.resolve()` or `subprocess.run()` concurrently from more than one
+# thread is not safe on this platform/Python combination. This module and
+# git_changes_service.py each run several independent QRunnable workers —
+# `_ListDirWorker`/`_GitStatusWorker` here on `QThreadPool.globalInstance()`,
+# `_StatusWorker`/`_DiffWorker`/`_RepoDiscoveryWorker` there on that same
+# global pool plus a dedicated one-thread pool — so no single per-pool cap
+# is enough. Two separate locks, not one: `RESOLVE_LOCK` guards every
+# `Path.resolve()` call, including ones made on the Qt *main* thread
+# (`ProjectExplorer`/service constructors resolving configured roots), so it
+# must only ever be held for one fast stat syscall — never share it with a
+# `subprocess.run()` call, which can block for its full multi-second
+# timeout and would freeze the UI if the main thread ever waited on it.
+# `SUBPROCESS_LOCK` guards `subprocess.run()` instead, and is only ever
+# taken from background QRunnable workers in this module and
+# git_changes_service.py (never the main thread), so holding it for a whole
+# git invocation is fine. git_changes_service.py imports both rather than
+# keeping its own.
+RESOLVE_LOCK = threading.Lock()
+SUBPROCESS_LOCK = threading.Lock()
+
+
+def _safe_resolve(path: Path) -> Path:
+    with RESOLVE_LOCK:
+        return path.resolve()
+
 
 # Always hidden regardless of .gitignore — matches 03_PROJECT_EXPLORER_SPEC.md.
 IGNORED_NAMES = frozenset(
@@ -72,7 +101,7 @@ def resolve_and_contain(path: Path, roots: Sequence[Path]) -> Path:
     `PathEscapesRootsError` otherwise. The one containment check every
     filesystem-touching call in the Explorer goes through — directory
     listing, "open externally", "reveal", and "copy path" alike."""
-    resolved = Path(path).resolve()
+    resolved = _safe_resolve(Path(path))
     for root in roots:
         if resolved == root or root in resolved.parents:
             return resolved
@@ -139,7 +168,7 @@ def list_dir_sync(directory: Path, roots: Sequence[Path]) -> list[FileEntry]:
     """The actual (blocking) directory listing. Only ever call this from a
     worker thread (`_ListDirWorker.run`) or directly from a test — never
     from the Qt main thread. Lists exactly one level, never recurses."""
-    roots = [Path(r).resolve() for r in roots]
+    roots = [_safe_resolve(Path(r)) for r in roots]
     directory = resolve_and_contain(Path(directory), roots)
     root = next((r for r in roots if directory == r or r in directory.parents), None)
     patterns = _gitignore_chain(directory, root)
@@ -235,7 +264,7 @@ class ProjectFileIndex(QObject):
 
     def __init__(self, roots: Sequence[Path], parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.roots = [Path(r).resolve() for r in roots]
+        self.roots = [_safe_resolve(Path(r)) for r in roots]
         # #365 phase 10 diagnostics (13_PERFORMANCE_AND_QT_RULES.md rule 10,
         # "tree scan time") — last completed scan only, not a history; cheap
         # attributes updated from `_on_worker_timed` (main thread, trivial).
@@ -290,16 +319,17 @@ class _GitStatusWorker(QRunnable):
     def run(self) -> None:  # called by QThreadPool
         result: dict[str, str] = {}
         try:
-            proc = subprocess.run(
-                ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
-                cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_GIT_STATUS_TIMEOUT_S,
-                creationflags=SUBPROCESS_NO_WINDOW,
-            )
+            with SUBPROCESS_LOCK:
+                proc = subprocess.run(
+                    ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+                    cwd=str(self.repo_root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_GIT_STATUS_TIMEOUT_S,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
             if proc.returncode == 0:
                 for line in proc.stdout.splitlines():
                     if len(line) < 4:
