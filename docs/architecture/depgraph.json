@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 312,
+  "module_count": 313,
   "modules": [
     {
       "module": "agent_takkub",
@@ -728,9 +728,10 @@
       "module": "agent_takkub.core.brain.context_gate",
       "imports": [],
       "imported_by": [
-        "agent_takkub.core.brain.facade"
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.brain.task_complexity"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -745,6 +746,7 @@
         "agent_takkub.core.brain.sources.digest_facts_source",
         "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.brain.store",
+        "agent_takkub.core.brain.task_complexity",
         "agent_takkub.core.context_sources.base",
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.models.memory"
@@ -754,7 +756,7 @@
         "agent_takkub.settings_core_v2"
       ],
       "fan_in": 2,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.core.brain.flag",
@@ -883,6 +885,17 @@
       ],
       "fan_in": 7,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.brain.task_complexity",
+      "imports": [
+        "agent_takkub.core.brain.context_gate"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.core.capabilities",

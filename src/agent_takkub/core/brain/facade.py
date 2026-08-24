@@ -30,6 +30,7 @@ from .flag import v2_brain_enabled, v2_context_enabled
 from .pipeline import MemoryManager, SubmitResult
 from .retrieval import RetrievalEngine
 from .store import BrainStore
+from .task_complexity import TaskComplexity, classify_task_complexity
 
 _log = logging.getLogger(__name__)
 
@@ -92,18 +93,25 @@ def build_context_for_assign(
     pre-gate path byte-for-byte (unclamped budget) — `flags` (an explicit
     `{"context": "small"|"medium"|"large"}` override) is only ever
     consulted when the gate is on.
+
+    The size decision itself comes from `task_complexity.classify_task_
+    complexity` (Classifier v2, `02_CLASSIFIER_V2.md`) rather than Stage 1's
+    `context_gate.classify_task_size` directly — Stage 2 still calls Stage 1
+    internally (as one input signal / the empty-text fallback), so budget
+    policy (`context_gate.policy_for`/`gate_budget`, keyed by `TaskSize`)
+    is unaffected by the extra scoring.
     """
     if not v2_context_enabled():
         return ""
     gate_on = context_gate.gate_enabled()
-    task_size: context_gate.TaskSize | None = None
+    complexity: TaskComplexity | None = None
     try:
         base_budget = context_builder.budget_tokens_for(
             context_window, file_read_supported=file_read_supported
         )
         if gate_on:
-            task_size = context_gate.classify_task_size(task_text, role, flags)
-            budget = context_gate.gate_budget(task_size, base_budget)
+            complexity = classify_task_complexity(task_text, role, flags)
+            budget = context_gate.gate_budget(complexity.size, base_budget)
         else:
             budget = base_budget
         text = context_builder.build_context(project, role, task_text, budget)
@@ -115,14 +123,14 @@ def build_context_for_assign(
         )
         return ""
     if gate_on:
-        _save_gate_trace(text, task_size=task_size, budget=budget, project=project, role=role)
+        _save_gate_trace(text, complexity=complexity, budget=budget, project=project, role=role)
     return text
 
 
 def _save_gate_trace(
     text: str,
     *,
-    task_size: context_gate.TaskSize | None,
+    complexity: TaskComplexity | None,
     budget: int,
     project: str | None,
     role: str,
@@ -130,11 +138,16 @@ def _save_gate_trace(
     """Persist a Context Gate trace whenever the gate is on, so `doctor`'s
     `[context]` section sees the task-size decision and total tokens for
     every gated build. Best-effort: never raises into the caller, same
-    contract `trace_store.save_last_trace` already has."""
+    contract `trace_store.save_last_trace` already has. `complexity` carries
+    Classifier v2's score/confidence/reasons/risk_flags through to the
+    Explainable Trace (`07_EXPLAINABLE_TRACE.md`) — `trace_store` treats
+    them as optional so a pre-Stage-2 reader (or `TAKKUB_CONTEXT_GATE=0`)
+    still sees the exact same payload shape as before."""
     try:
         from agent_takkub.core.context_sources.base import estimate_tokens
         from agent_takkub.core.context_sources.trace_store import save_last_trace
 
+        task_size = complexity.size if complexity is not None else None
         total_tokens = estimate_tokens(text) if text else 0
         trace = context_builder.ContextTrace(
             mode=f"gated:{task_size}",
@@ -146,7 +159,12 @@ def _save_gate_trace(
         )
         inefficient = task_size == "small" and total_tokens > _INEFFICIENT_SMALL_TOKENS
         save_last_trace(
-            trace, project=project, role=role, task_size=task_size, inefficient=inefficient
+            trace,
+            project=project,
+            role=role,
+            task_size=task_size,
+            inefficient=inefficient,
+            complexity=complexity,
         )
     except Exception:
         _log.debug("core.brain.facade: gate trace save failed (best-effort)", exc_info=True)
