@@ -26,7 +26,6 @@ import dataclasses
 import difflib
 import logging
 import subprocess
-import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -35,7 +34,8 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from ._win_console import SUBPROCESS_NO_WINDOW
-from .project_file_index import PathEscapesRootsError, resolve_and_contain
+from .project_file_index import SUBPROCESS_LOCK as _SUBPROCESS_LOCK
+from .project_file_index import PathEscapesRootsError, _safe_resolve, resolve_and_contain
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +46,23 @@ _BINARY_SNIFF_BYTES = 8192
 # Every `git` subprocess this module spawns goes through this lock (#375):
 # `RepoDiscoveryService` added one more subprocess-calling QThreadPool
 # worker per `ProjectExplorer`, and with several of those plus status/diff
-# workers landing on the pool at once, concurrent `subprocess.run()` calls
-# from separate threads reproducibly crashed the interpreter with a
-# Windows access violation inside CreateProcess (observed via faulthandler
-# during `takkub qa-gate`, not test flakiness — see #349's note on
-# unrelated native-abort noise for the different issue that isn't this).
-# Still entirely off the Qt main thread; a `git` call is fast enough that
-# serializing them has no user-visible effect.
-_SUBPROCESS_LOCK = threading.Lock()
+# workers landing on the (global, or the dedicated one-thread discovery)
+# pool at once, concurrent `subprocess.run()` calls from separate threads
+# reproducibly crashed the interpreter with a Windows access violation
+# inside `CreateProcess` (observed via faulthandler during `takkub
+# qa-gate`, not test flakiness — see #349's note on unrelated native-abort
+# noise for the different issue that isn't this). Imported as
+# `project_file_index.SUBPROCESS_LOCK` (aliased here to the name every call
+# site below already reads) so `_GitStatusWorker`'s own `subprocess.run()`
+# there can never race one of these either — both are background-worker-only,
+# never the Qt main thread, so holding it for a whole `git` call is fine.
+#
+# `Path.resolve()` turned out to be the *other* half of the same
+# thread-safety issue (crashes observed inside `ntpath.realpath` too, not
+# just `CreateProcess`) but it is guarded by a separate, always-fast lock —
+# `project_file_index._safe_resolve` / `RESOLVE_LOCK` — because resolve()
+# calls also happen on the Qt main thread (service constructors resolving
+# configured roots) and must never wait behind a multi-second `git` call.
 
 
 def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -214,7 +223,7 @@ def resolve_repo_root(path: Path) -> Path | None:
     if proc.returncode != 0:
         return None
     out = proc.stdout.strip()
-    return Path(out).resolve() if out else None
+    return _safe_resolve(Path(out)) if out else None
 
 
 def discover_repo_roots(roots: Sequence[Path]) -> dict[Path, Path]:
@@ -226,7 +235,7 @@ def discover_repo_roots(roots: Sequence[Path]) -> dict[Path, Path]:
     """
     result: dict[Path, Path] = {}
     for root in roots:
-        resolved = Path(root).resolve()
+        resolved = _safe_resolve(Path(root))
         top = resolve_repo_root(resolved)
         if top is not None:
             result[resolved] = top
@@ -321,7 +330,7 @@ def diff_sync(
     except PathEscapesRootsError as exc:
         return DiffResult(path=Path(abs_path), unified=None, error=str(exc))
     try:
-        rel = resolved.relative_to(Path(repo_root).resolve()).as_posix()
+        rel = resolved.relative_to(_safe_resolve(Path(repo_root))).as_posix()
     except ValueError as exc:
         return DiffResult(path=resolved, unified=None, error=str(exc))
 
@@ -441,12 +450,28 @@ class RepoDiscoveryService(QObject):
 
     def __init__(self, roots: Sequence[Path], parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.roots = [Path(r).resolve() for r in roots]
+        self.roots = [_safe_resolve(Path(r)) for r in roots]
 
     def discover(self) -> None:
         worker = _RepoDiscoveryWorker(self.roots)
-        worker.signals.finished.connect(self.discovered.emit)
+        # #375 regression: this queued cross-thread connection must target a
+        # plain bound method of `self` (a QObject), never `self.discovered.emit`
+        # directly — a bound signal's `.emit` isn't the QObject itself, so
+        # PyQt's auto-disconnect-on-destroy can't tie the connection to
+        # `self`'s lifetime. When `self` (and its owning `ProjectExplorer`)
+        # was destroyed while this worker was still running — e.g. a test
+        # widget falling out of scope right after dispatching `discover()` —
+        # the stale connection stayed live and later delivery of the queued
+        # signal into the by-then-dead receiver crashed the interpreter with
+        # a Windows access violation (reproduced via faulthandler; every
+        # other worker in this file and project_file_index.py already
+        # connects to a plain method for this reason, `discover()` was the
+        # one exception).
+        worker.signals.finished.connect(self._on_discovered)
         _REPO_DISCOVERY_POOL.start(worker)
+
+    def _on_discovered(self, mapping: dict) -> None:
+        self.discovered.emit(mapping)
 
 
 # ── GitChangesService — the app-facing QObject ───────────────────────────
@@ -471,7 +496,7 @@ class GitChangesService(QObject):
     ) -> None:
         super().__init__(parent)
         self.repo_root = Path(repo_root)
-        self.roots = [Path(r).resolve() for r in roots]
+        self.roots = [_safe_resolve(Path(r)) for r in roots]
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(debounce_ms)
