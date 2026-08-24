@@ -1,0 +1,21 @@
+{
+  "baseline_version": "1.5.0",
+  "baseline_sha": "250982b1d52816d9eb7d8041bf1fafba978a46d8",
+  "decision": "remove_openviking",
+  "files": [
+    "00_SUMMARY_TH.md",
+    "01_CURRENT_V1_5_0_AUDIT.md",
+    "02_TARGET_ARCHITECTURE.md",
+    "03_DELETE_RUNTIME.md",
+    "04_CONTEXT_CLEANUP.md",
+    "05_UI_BOOT_CLI.md",
+    "06_CONFIG_SECRETS.md",
+    "07_RUNTIME_DATA_MIGRATION.md",
+    "08_TESTS.md",
+    "09_DOCS_DEAD_CODE.md",
+    "10_PERFORMANCE.md",
+    "11_ACCEPTANCE.md",
+    "12_MASTER_PROMPT_FOR_LEAD.md",
+    "README.md"
+  ]
+}

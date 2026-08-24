@@ -1,0 +1,16 @@
+# Acceptance
+- [ ] current main re-audited
+- [ ] runtime package removed
+- [ ] adapter/source/context merge removed
+- [ ] local Resource/Obsidian preserved
+- [ ] context/token gate preserved
+- [ ] Settings/wizard removed
+- [ ] boot/shutdown wiring removed
+- [ ] CLI/doctor removed
+- [ ] secrets/config/env reads removed
+- [ ] no network/process activity
+- [ ] stale v1.5.0 runtime safely ignored/cleanable
+- [ ] tests + CI green
+- [ ] depgraph regenerated
+- [ ] startup/RAM benchmark
+- [ ] #362 untouched
