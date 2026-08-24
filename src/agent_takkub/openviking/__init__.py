@@ -9,6 +9,6 @@ OpenViking's (AGPL) source into this (MIT) repo.
 
 from __future__ import annotations
 
-from .manager import ManagerStatus, OpenVikingManager
+from .manager import ManagerStatus, OpenVikingManager, boot_wiring, get_manager
 
-__all__ = ["ManagerStatus", "OpenVikingManager"]
+__all__ = ["ManagerStatus", "OpenVikingManager", "boot_wiring", "get_manager"]

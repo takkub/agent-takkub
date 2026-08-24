@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
-from PyQt6.QtWidgets import QLineEdit
+from PyQt6.QtWidgets import QLineEdit, QMessageBox
 
 from agent_takkub import (
     config,
@@ -31,6 +31,9 @@ from agent_takkub import roles as roles_mod
 from agent_takkub.core.capabilities import design_integrations
 from agent_takkub.core.context_sources import openviking_adapter
 from agent_takkub.core.secrets.manager import SecretManager
+from agent_takkub.openviking import installer as ov_installer
+from agent_takkub.openviking import manager as ov_manager
+from agent_takkub.openviking import process as ov_process
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +47,19 @@ def _isolate_kd_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield
     roles_mod._CUSTOM.clear()
     roles_mod._CUSTOM.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_openviking_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "ov-home"
+    monkeypatch.setattr(ov_installer, "OPENVIKING_HOME", home)
+    monkeypatch.setattr(ov_installer, "VENV_DIR", home / "venv")
+    monkeypatch.setattr(ov_installer, "CONFIG_DIR", home / "config")
+    monkeypatch.setattr(ov_installer, "CONFIG_FILE", home / "config" / "ov.conf")
+    monkeypatch.setattr(ov_installer, "STATE_FILE", home / "state.json")
+    monkeypatch.setattr(ov_installer, "DATA_DIR", home / "data")
+    monkeypatch.setattr(ov_process, "LOG_FILE", home / "logs" / "openviking.log")
+    monkeypatch.setattr(ov_manager, "_instance", None)
 
 
 def _wait(thread) -> None:
@@ -175,6 +191,184 @@ class TestDesignToolsView:
         assert dlg._kd_design_token_edit.text() == ""  # never echoed back
         assert SecretManager().get_secret("secret://figma/default") == "sekret-token-123"
         assert "figma" in dlg._kd_design_cred_status.text()
+        dlg.deleteLater()
+
+
+class _FakeManagerHandle:
+    """Stand-in for `openviking.manager.OpenVikingManager` — no real
+    install/spawn ever runs (`start`/`stop`/`restart`/`ensure_installed` are
+    all recorded calls returning a canned `ManagerStatus`)."""
+
+    def __init__(self, status: ov_manager.ManagerStatus) -> None:
+        self._status = status
+        self.start_called = False
+        self.stop_called = False
+        self.restart_called = False
+        self.ensure_installed_calls: list[bool] = []
+
+    def status(self) -> ov_manager.ManagerStatus:
+        return self._status
+
+    def start(self) -> ov_manager.ManagerStatus:
+        self.start_called = True
+        return self._status
+
+    def stop(self) -> None:
+        self.stop_called = True
+
+    def restart(self) -> ov_manager.ManagerStatus:
+        self.restart_called = True
+        return self._status
+
+    def ensure_installed(self, *, force: bool = False) -> bool:
+        self.ensure_installed_calls.append(force)
+        return True
+
+
+class TestOpenVikingManagedRuntimeView:
+    def test_not_installed_shows_install_enable_and_hides_detail(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+
+        assert dlg._kd_ov_install_enable_btn.isHidden() is False
+        assert dlg._kd_ov_managed_detail_host.isHidden() is True
+        assert dlg._kd_ov_auto_start_check.isHidden() is True
+        dlg.deleteLater()
+
+    def test_installed_hides_install_enable_and_shows_detail(self) -> None:
+        exe = ov_installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+
+        assert dlg._kd_ov_install_enable_btn.isHidden() is True
+        assert dlg._kd_ov_managed_detail_host.isHidden() is False
+        assert dlg._kd_ov_auto_start_check.isHidden() is False
+        dlg.deleteLater()
+
+    def test_refresh_updates_status_labels(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_status = ov_manager.ManagerStatus(True, True, True, "http://127.0.0.1:1933", True)
+        fake = _FakeManagerHandle(fake_status)
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_managed_refresh_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert "Running" in dlg._kd_ov_managed_status_lbl.text()
+        assert dlg._kd_ov_managed_address_lbl.text() == "http://127.0.0.1:1933"
+        assert dlg._kd_ov_managed_runtime_lbl.text() == "Managed by Takkub"
+        assert dlg._kd_ov_managed_install_lbl.text() == "Healthy"
+        # a healthy result flips visibility to the installed layout even
+        # though the on-disk executable check at construction time saw none
+        assert dlg._kd_ov_install_enable_btn.isHidden() is True
+        dlg.deleteLater()
+
+    def test_repair_calls_ensure_installed_with_force(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_repair_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert fake.ensure_installed_calls == [True]
+        dlg.deleteLater()
+
+    def test_remove_confirmed_stops_and_uninstalls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(False, False, False, None, False))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes
+        )
+        uninstall_calls: list[dict] = []
+        monkeypatch.setattr(ov_installer, "uninstall", lambda **kw: uninstall_calls.append(kw))
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_remove_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert fake.stop_called is True
+        assert uninstall_calls == [{"remove_data": True}]
+        dlg.deleteLater()
+
+    def test_remove_cancelled_touches_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(False, False, False, None, False))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.No)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_remove_clicked()
+
+        assert fake.stop_called is False
+        dlg.deleteLater()
+
+    def test_service_buttons_call_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+
+        dlg._on_kd_ov_service_start_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+        assert fake.start_called is True
+
+        dlg._on_kd_ov_service_stop_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+        assert fake.stop_called is True
+
+        dlg._on_kd_ov_service_restart_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+        assert fake.restart_called is True
+        dlg.deleteLater()
+
+    def test_view_logs_shows_log_file_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("PyQt6.QtWidgets.QDialog.exec", lambda self: 0)
+        ov_process.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ov_process.LOG_FILE.write_text("hello from openviking\n", encoding="utf-8")
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_view_logs_clicked()  # must not raise / block
+        dlg.deleteLater()
+
+    def test_view_logs_with_no_file_shows_placeholder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("PyQt6.QtWidgets.QDialog.exec", lambda self: 0)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_view_logs_clicked()  # must not raise / block
+        dlg.deleteLater()
+
+    def test_auto_start_toggle_persists(self) -> None:
+        exe = ov_installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        assert openviking_settings.load().start_automatically is False
+
+        dlg._kd_ov_auto_start_check.setChecked(True)
+
+        assert openviking_settings.load().start_automatically is True
+        dlg.deleteLater()
+
+    def test_install_enable_opens_wizard_and_refreshes_on_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.openviking_setup_dialog as ov_dialog_mod
+
+        monkeypatch.setattr(ov_dialog_mod.OpenVikingSetupDialog, "exec", lambda self: 0)
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_install_enable_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert dlg._kd_ov_managed_status_lbl.text() == "● Running"
         dlg.deleteLater()
 
     def test_save_credential_encodes_penpot_as_json_with_base_url(self) -> None:

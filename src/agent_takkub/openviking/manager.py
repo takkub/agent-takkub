@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 
+from .. import openviking_settings
 from ..core.context_sources import openviking_adapter
 from . import installer, port
-from .process import OpenVikingProcess, ProcessError
+from .process import OpenVikingProcess, ProcessError, reap_orphan_process
 
 _log = logging.getLogger(__name__)
 
@@ -79,9 +81,9 @@ class OpenVikingManager:
             True, healthy, self._owned, url if healthy else None, installer.is_installed()
         )
 
-    def ensure_installed(self) -> bool:
+    def ensure_installed(self, *, force: bool = False) -> bool:
         try:
-            return installer.ensure_installed()
+            return installer.ensure_installed(force=force)
         except installer.InstallerError as exc:
             _log.warning("openviking installer failed: %s", exc)
             return False
@@ -200,3 +202,58 @@ class OpenVikingManager:
         if result.healthy:
             self._restart_attempts = 0
         return result
+
+
+_instance: OpenVikingManager | None = None
+
+
+def get_manager() -> OpenVikingManager:
+    """One shared instance per cockpit process (module docstring) — Settings
+    UI, the Setup Wizard, and boot wiring all need to observe the SAME
+    `owned`/`_process` state, not three independent managers each thinking
+    nothing is running."""
+    global _instance
+    if _instance is None:
+        _instance = OpenVikingManager()
+    return _instance
+
+
+def boot_wiring() -> None:
+    """Called once from `MainWindow._boot()` (`12_PERFORMANCE.md`: render UI
+    first, never block boot, install never happens automatically on boot).
+    Mirrors `remote.tunnel.reap_orphan_tunnel`'s boot-time call site (#197
+    pattern): unconditionally reap a process orphaned by a previous session
+    that crashed before calling `stop()`, then — only when the user has
+    both enabled OpenViking AND opted into "Start automatically with
+    Cockpit" (Settings UI, `08_SETTINGS_UI.md`) — start it on a background
+    thread. `start()` itself already refuses to spawn anything when nothing
+    is installed, so this can never trigger an install on its own."""
+    try:
+        reap_orphan_process()
+    except Exception:
+        _log.exception("openviking: boot-time orphan reap failed")
+
+    try:
+        cfg = openviking_settings.load()
+    except Exception:
+        _log.exception("openviking: boot-time settings load failed")
+        return
+
+    if cfg.enabled:
+        # `setdefault`, never an unconditional set: an explicit
+        # TAKKUB_OPENVIKING_ENABLED the user set in their own shell before
+        # launching Cockpit always wins over this persisted preference
+        # (same contract `openviking_adapter.base_url()` already applies to
+        # TAKKUB_OPENVIKING_URL vs. `set_runtime_url`).
+        os.environ.setdefault(openviking_adapter._ENV_ENABLED, "1")
+
+    if not (cfg.enabled and cfg.start_automatically):
+        return
+
+    def _run() -> None:
+        try:
+            get_manager().start()
+        except Exception:
+            _log.exception("openviking: background boot-time start failed")
+
+    threading.Thread(target=_run, daemon=True, name="openviking-boot-start").start()

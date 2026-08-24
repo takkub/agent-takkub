@@ -22,6 +22,7 @@ def _isolate_home(monkeypatch, tmp_path):
     monkeypatch.setattr(installer, "CONFIG_DIR", home / "config")
     monkeypatch.setattr(installer, "CONFIG_FILE", home / "config" / "ov.conf")
     monkeypatch.setattr(installer, "STATE_FILE", home / "state.json")
+    monkeypatch.setattr(installer, "DATA_DIR", home / "data")
 
 
 def _completed(returncode=0, stdout=""):
@@ -130,6 +131,44 @@ class TestEnsureInstalled:
         monkeypatch.setattr(installer, "_run", _fake_run)
         with pytest.raises(installer.InstallerError, match="timed out"):
             installer.ensure_installed()
+
+
+class TestUninstall:
+    def _make_installed(self) -> None:
+        exe = installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+        installer.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        installer.STATE_FILE.write_text('{"version": "0.1.0"}', encoding="utf-8")
+        installer.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        (installer.CONFIG_DIR / "ov.conf").write_text("{}", encoding="utf-8")
+        installer.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (installer.DATA_DIR / "index.bin").write_text("x", encoding="utf-8")
+
+    def test_default_keeps_config_and_data(self):
+        self._make_installed()
+
+        installer.uninstall()
+
+        assert not installer.VENV_DIR.exists()
+        assert not installer.STATE_FILE.exists()
+        assert installer.CONFIG_DIR.exists()
+        assert installer.DATA_DIR.exists()
+        assert installer.is_installed() is False
+
+    def test_remove_data_also_deletes_config_and_data(self):
+        self._make_installed()
+
+        installer.uninstall(remove_data=True)
+
+        assert not installer.VENV_DIR.exists()
+        assert not installer.STATE_FILE.exists()
+        assert not installer.CONFIG_DIR.exists()
+        assert not installer.DATA_DIR.exists()
+
+    def test_uninstall_when_nothing_installed_does_not_raise(self):
+        installer.uninstall()
+        installer.uninstall(remove_data=True)
 
 
 class TestReadState:
