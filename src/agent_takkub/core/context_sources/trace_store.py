@@ -27,9 +27,20 @@ def _trace_path():
     return config.DATA_HOME / "openviking" / "last_context_trace.json"
 
 
-def save_last_trace(trace, *, project: str | None, role: str) -> None:
+def save_last_trace(
+    trace,
+    *,
+    project: str | None,
+    role: str,
+    task_size: str | None = None,
+    inefficient: bool = False,
+) -> None:
     """Never raises — a failed trace write must not turn a successful
-    context build into a failed `assign`."""
+    context build into a failed `assign`. `task_size`/`inefficient` are the
+    Context Gate's own additions (closeout #C, `03_CONTEXT_TOKEN_
+    EFFICIENCY.md`) — both optional so a pre-gate caller (or the gate
+    disabled via `TAKKUB_CONTEXT_GATE=0`) still writes the exact same
+    payload shape as before."""
     try:
         path = _trace_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +58,9 @@ def save_last_trace(trace, *, project: str | None, role: str) -> None:
             "dedup_count": trace.dedup_count,
             "latency_ms": trace.latency_ms,
         }
+        if task_size is not None:
+            payload["task_size"] = task_size
+            payload["inefficient"] = inefficient
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, path)

@@ -988,6 +988,8 @@ def _inject_v2_context(
             except concurrent.futures.TimeoutError:
                 context_block = ""
                 _log_event("context_builder_timeout", role=role_name, project=project_ns)
+            else:
+                _log_context_gate_inefficient(role_name, project_ns)
         finally:
             # wait=False: a still-running worker must never block this
             # (already-timed-out) call — see the docstring above.
@@ -996,6 +998,29 @@ def _inject_v2_context(
     except Exception:
         _log_event("context_builder_hook_error", role=role_name, project=project_ns)
         return task
+
+
+def _log_context_gate_inefficient(role_name: str, project_ns: str | None) -> None:
+    """Closeout #C — surfaces `facade._save_gate_trace`'s "small task over
+    15k tokens" flag as an event (`19_DIAGNOSTICS_OBSERVABILITY.md`'s
+    trace fields already land in `doctor`'s `[context]` section via
+    `trace_store`; this is the event-log half). Best-effort: a trace-read
+    hiccup must never affect the assign that just succeeded."""
+    try:
+        from .core.context_sources.trace_store import load_last_trace
+
+        trace = load_last_trace()
+        if trace and trace.get("inefficient"):
+            _log_event(
+                "context_gate_inefficient",
+                role=role_name,
+                project=project_ns,
+                task_size=trace.get("task_size"),
+                total_tokens=trace.get("total_tokens"),
+                budget_tokens=trace.get("budget_tokens"),
+            )
+    except Exception:
+        pass
 
 
 #: Roles that routinely need a different model/provider than the Lead's own

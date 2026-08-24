@@ -6,9 +6,26 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from agent_takkub.orchestrator import _inject_v2_context
 
 _TASK = "original task text, unchanged unless the hook injects something"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data_home(tmp_path, monkeypatch):
+    """None of these tests redirect `TAKKUB_V2_CONTEXT`'s OWN fallback
+    (`core_v2_settings.flag_enabled("context")`, consulted whenever the env
+    var is merely deleted rather than explicitly `=0`) — so a real machine
+    with Core V2 context enabled in its persisted settings runs the REAL
+    `build_context_for_assign` for `test_flag_off_returns_task_unchanged`
+    too. That real call now always writes a Context Gate trace (closeout
+    #C), which would otherwise land in this dev checkout's own
+    `config.DATA_HOME == REPO_ROOT` fallback instead of a throwaway dir."""
+    import agent_takkub.config as config
+
+    monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
 
 
 def test_flag_off_returns_task_unchanged(monkeypatch):
