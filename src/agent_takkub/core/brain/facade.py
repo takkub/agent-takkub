@@ -23,6 +23,7 @@ import logging
 from collections.abc import Mapping
 
 from agent_takkub.core.models.memory import MemoryRecord, Scope
+from agent_takkub.core.resilience.circuit_breaker import get_breaker
 
 from . import context_builder, context_gate
 from .candidate import MemoryCandidate
@@ -38,16 +39,37 @@ _log = logging.getLogger(__name__)
 # (medium/large tasks are meant to spend more).
 _INEFFICIENT_SMALL_TOKENS = 15_000
 
+# `recall()` reads a local disk store (`BrainStore`/`RetrievalEngine`), not a
+# remote service — a single failure there is far more likely to be
+# transient (a momentary file lock, one corrupt record skipped mid-scan)
+# than "the dependency is down". `design_clients`' network clients open
+# after 3 failures/60s (v2-hardening D/F default); this uses a much higher
+# threshold and a shorter cooldown so a couple of unlucky reads never
+# silences local recall — a real feature other panes reading the SAME
+# project rely on — for a full minute over what was likely a blip.
+_BRAIN_READ_BREAKER_NAME = "brain_read"
+_BRAIN_READ_FAILURE_THRESHOLD = 10
+_BRAIN_READ_COOLDOWN_S = 20.0
+
 
 def recall(
     query: str, *, scope: Scope = Scope.PROJECT, project: str | None = None, limit: int = 10
 ) -> list[MemoryRecord]:
     if not v2_brain_enabled():
         return []
+    breaker = get_breaker(
+        _BRAIN_READ_BREAKER_NAME,
+        failure_threshold=_BRAIN_READ_FAILURE_THRESHOLD,
+        cooldown_s=_BRAIN_READ_COOLDOWN_S,
+    )
+    if not breaker.allow_call():
+        _log.info("core.brain.facade.recall: circuit open — skipping (fail-open)")
+        return []
     try:
         engine = RetrievalEngine(BrainStore(project))
-        return list(engine.recall(query, scope=scope)[:limit])
+        result = list(engine.recall(query, scope=scope)[:limit])
     except Exception:
+        breaker.record_failure()
         _log.exception(
             "core.brain.facade.recall failed query=%r scope=%r project=%r (fail-open)",
             query,
@@ -55,6 +77,8 @@ def recall(
             project,
         )
         return []
+    breaker.record_success()
+    return result
 
 
 def submit(candidate: MemoryCandidate, *, project: str | None = None) -> SubmitResult | None:

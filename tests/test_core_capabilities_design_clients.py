@@ -16,6 +16,7 @@ from agent_takkub.core.capabilities.design_clients import (
     PenpotClient,
     TwentyFirstClient,
 )
+from agent_takkub.core.resilience.circuit_breaker import CircuitBreaker, CircuitState, get_breaker
 
 
 def _json_transport(payload: object):
@@ -243,3 +244,98 @@ class TestPenpotClient:
         client.get_profile()
 
         assert seen["headers"]["Authorization"] == "Token secret-tok"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_breaker_state(tmp_path, monkeypatch):
+    """`CircuitBreaker.record_success`/`record_failure` best-effort-persist
+    to `DATA_HOME/resilience/state.json` on every transition — redirect
+    `DATA_HOME` so `TestCircuitBreakerWiring` never writes into this repo's
+    own working tree (this module's own dev checkout has no
+    `AGENT_TAKKUB_HOME` set, so unpatched `DATA_HOME` resolves to the repo
+    root itself)."""
+    from agent_takkub import config
+
+    monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
+
+
+class _CountingTransport:
+    """Fake transport that counts invocations and raises on demand — used to
+    prove a breaker actually skips the real call, not just returns `None`
+    for some other reason."""
+
+    def __init__(self, *, fail: bool = True, payload: bytes = b"") -> None:
+        self.calls = 0
+        self._fail = fail
+        self._payload = payload
+
+    def __call__(self, method, url, headers, body, timeout):
+        self.calls += 1
+        if self._fail:
+            raise TimeoutError("simulated down")
+        return self._payload
+
+
+class TestCircuitBreakerWiring:
+    """design_clients — v2-hardening D/F: every client call routes through
+    `core.resilience.circuit_breaker`. Each test injects its own `breaker=`
+    so it never touches the shared process-wide registry other tests (or
+    other modules) might also be using."""
+
+    def test_repeated_failures_open_breaker_then_transport_stops_being_called(self) -> None:
+        breaker = CircuitBreaker("test-21st", failure_threshold=3, cooldown_s=60.0)
+        transport = _CountingTransport(fail=True)
+        client = TwentyFirstClient(
+            api_key="k", base_url="https://example.test/api", transport=transport, breaker=breaker
+        )
+
+        for _ in range(3):
+            assert client.search("x") is None
+        assert transport.calls == 3
+        assert breaker.snapshot().state == CircuitState.OPEN
+
+        # Circuit now open — further calls must not reach the transport at all.
+        for _ in range(5):
+            assert client.search("x") is None
+        assert transport.calls == 3
+
+    def test_success_keeps_breaker_closed_across_many_calls(self) -> None:
+        breaker = CircuitBreaker("test-figma", failure_threshold=3, cooldown_s=60.0)
+        payload = json.dumps({"name": "f", "lastModified": None, "version": None}).encode("utf-8")
+        transport = _CountingTransport(fail=False, payload=payload)
+        client = FigmaClient(token="tok", transport=transport, breaker=breaker)
+
+        for _ in range(10):
+            assert client.get_file_summary("abc") is not None
+        assert transport.calls == 10
+        assert breaker.snapshot().state == CircuitState.CLOSED
+
+    def test_half_open_probe_recovers_penpot_client_after_cooldown(self) -> None:
+        class _Clock:
+            now = 0.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        clock = _Clock()
+        breaker = CircuitBreaker("test-penpot", failure_threshold=1, cooldown_s=30.0, clock=clock)
+        failing = _CountingTransport(fail=True)
+        client = PenpotClient(
+            base_url="https://design.example.test", token="tok", transport=failing, breaker=breaker
+        )
+
+        assert client.get_profile() is None  # one failure trips the breaker
+        assert breaker.snapshot().state == CircuitState.OPEN
+
+        clock.now = 30.0
+        payload = json.dumps({"id": "u1", "fullname": "x", "email": "x@x"}).encode("utf-8")
+        client._transport = _CountingTransport(fail=False, payload=payload)  # service recovered
+
+        profile = client.get_profile()  # the half-open probe
+
+        assert profile is not None
+        assert breaker.snapshot().state == CircuitState.CLOSED
+
+    def test_default_breaker_is_shared_per_source_when_none_injected(self) -> None:
+        client = FigmaClient(token="tok")
+        assert client._breaker is get_breaker(FigmaClient.SOURCE)

@@ -13,6 +13,13 @@ Every client here:
     module reads a secret store or a permission policy itself, so it can
     never be reached by accident with an unauthorized role attached (see
     `design_integrations.build_client`, the only constructor call site).
+  - routes every real transport call through `core.resilience.circuit_
+    breaker` (v2-hardening D/F), keyed by `SOURCE` ("21st.dev"/"figma"/
+    "penpot") — after `DEFAULT_FAILURE_THRESHOLD` consecutive failures the
+    breaker opens and every further call on that source returns `None`
+    immediately, without ever calling `transport`, until the cooldown
+    elapses. A caller may inject its own `breaker=` (tests do); production
+    code gets one shared per-source breaker from the registry for free.
   - never raises for a network/shape failure: every public method returns
     `None` (or an empty tuple) on ANY of timeout / connection / non-2xx /
     JSON-decode / unexpected-shape, and logs at WARNING once — the same
@@ -77,6 +84,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from agent_takkub.core.resilience.circuit_breaker import CircuitBreaker, get_breaker
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 8.0
@@ -105,19 +114,37 @@ def _safe_call(
     timeout: float,
     *,
     what: str,
+    breaker: CircuitBreaker | None = None,
 ) -> bytes | None:
     """Run *transport*, collapsing every failure mode (timeout, connection,
     non-2xx, unexpected transport-level error) to `None` + one WARNING log
     line. Never raises — the fail-open contract every client method here
-    relies on."""
+    relies on.
+
+    The one choke point every client method routes through, which is why
+    *breaker* lives here rather than being threaded through each client
+    method individually (v2-hardening D/F, `11_CIRCUIT_BREAKER.md`): when
+    the breaker is open, this returns `None` WITHOUT ever calling *transport*
+    — no socket, no timeout — instead of paying a full `DEFAULT_TIMEOUT`
+    on every call to a service that is already known to be down."""
+    if breaker is not None and not breaker.allow_call():
+        logger.info("%s: circuit open for %r — skipping call", what, breaker.name)
+        return None
     try:
-        return transport(method, url, headers, body, timeout)
+        result = transport(method, url, headers, body, timeout)
     except urllib.error.HTTPError as e:
         logger.warning("%s: HTTP %s", what, e.code)
+        if breaker is not None:
+            breaker.record_failure()
         return None
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:
         logger.warning("%s: transport failed: %s", what, e)
+        if breaker is not None:
+            breaker.record_failure()
         return None
+    if breaker is not None:
+        breaker.record_success()
+    return result
 
 
 def _utc_now_iso() -> str:
@@ -242,11 +269,13 @@ class TwentyFirstClient:
         base_url: str | None = None,
         transport: Transport = _default_transport,
         timeout: float = DEFAULT_TIMEOUT,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/") if base_url else None
         self._transport = transport
         self._timeout = timeout
+        self._breaker = breaker if breaker is not None else get_breaker(self.SOURCE)
 
     def _headers(self) -> dict[str, str]:
         return {"Accept": "application/json", "Authorization": f"Bearer {self._api_key}"}
@@ -269,6 +298,7 @@ class TwentyFirstClient:
             None,
             self._timeout,
             what="21st.dev search",
+            breaker=self._breaker,
         )
         if raw is None:
             return None
@@ -290,6 +320,7 @@ class TwentyFirstClient:
             None,
             self._timeout,
             what="21st.dev get_inspiration",
+            breaker=self._breaker,
         )
         if raw is None:
             return None
@@ -311,16 +342,25 @@ class FigmaClient:
         token: str,
         transport: Transport = _default_transport,
         timeout: float = DEFAULT_TIMEOUT,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._token = token
         self._transport = transport
         self._timeout = timeout
+        self._breaker = breaker if breaker is not None else get_breaker(self.SOURCE)
 
     def _get(self, path: str) -> dict | None:
         url = f"{self.BASE_URL}{path}"
         headers = {"Accept": "application/json", "X-Figma-Token": self._token}
         raw = _safe_call(
-            self._transport, "GET", url, headers, None, self._timeout, what=f"figma {path}"
+            self._transport,
+            "GET",
+            url,
+            headers,
+            None,
+            self._timeout,
+            what=f"figma {path}",
+            breaker=self._breaker,
         )
         if raw is None:
             return None
@@ -439,11 +479,13 @@ class PenpotClient:
         token: str,
         transport: Transport = _default_transport,
         timeout: float = DEFAULT_TIMEOUT,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._transport = transport
         self._timeout = timeout
+        self._breaker = breaker if breaker is not None else get_breaker(self.SOURCE)
 
     def _rpc(self, command: str, params: dict | None = None) -> dict | None:
         url = f"{self._base_url}/api/rpc/command/{command}"
@@ -455,7 +497,14 @@ class PenpotClient:
             body = json.dumps(params).encode("utf-8")
             method = "POST"
         raw = _safe_call(
-            self._transport, method, url, headers, body, self._timeout, what=f"penpot {command}"
+            self._transport,
+            method,
+            url,
+            headers,
+            body,
+            self._timeout,
+            what=f"penpot {command}",
+            breaker=self._breaker,
         )
         if raw is None:
             return None
