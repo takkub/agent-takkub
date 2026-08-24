@@ -25,6 +25,11 @@ runtime/
 # (the whole Core V2 plan/report set), so `git add docs/v2/<anything>` failed and a
 # `git add -A` skipped new V2 docs silently.
 /v2/
+# Context Gate trace (closeout #C, `core.context_sources.trace_store`) —
+# DATA_HOME/openviking/last_context_trace.json. On a dev checkout DATA_HOME
+# is the repo root, so a real (or test-triggered) `assign` lands this here —
+# same "runtime state, per-machine, never source" reasoning as `/v2/` above.
+/openviking/
 *.log
 # Local issue-store fallback (written only when gh is unavailable). With
 # issues now defaulting to the agent-takkub repo, this can land at repo root.

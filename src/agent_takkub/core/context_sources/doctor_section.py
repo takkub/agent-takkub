@@ -86,16 +86,23 @@ def build_findings(project: str | None = None) -> list[FindingRow]:
             )
             for s in trace.get("sources", [])
         )
+        task_size = trace.get("task_size")
+        inefficient = bool(trace.get("inefficient"))
+        detail = (
+            f"mode={trace.get('mode')} {src_summary} total={trace.get('total_tokens')}/"
+            f"{trace.get('budget_tokens')} dedup={trace.get('dedup_count')} "
+            f"latency={trace.get('latency_ms', 0):.0f}ms"
+        )
+        if task_size is not None:
+            detail += f" size={task_size}"
+        if inefficient:
+            detail += " ⚠ inefficient (small task over 15k tokens)"
         findings.append(
             FindingRow(
                 "context",
                 "last-trace",
-                "info",
-                f"mode={trace.get('mode')} {src_summary} total={trace.get('total_tokens')}/"
-                f"{trace.get('budget_tokens')} dedup={trace.get('dedup_count')} "
-                f"scope_rejects={trace.get('scope_rejects', 0)} "
-                f"trust_rejects={trace.get('trust_rejects', 0)} "
-                f"latency={trace.get('latency_ms', 0):.0f}ms",
+                "warn" if inefficient else "info",
+                detail,
             )
         )
 
