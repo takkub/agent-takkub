@@ -1089,7 +1089,8 @@
     {
       "module": "agent_takkub.core.context_sources.trace_store",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.secrets.redact"
       ],
       "imported_by": [
         "agent_takkub.core.brain.facade",
@@ -1098,7 +1099,7 @@
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 4,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core.contracts",
@@ -2077,9 +2078,10 @@
       "module": "agent_takkub.core.secrets.redact",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.conversation.store"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {

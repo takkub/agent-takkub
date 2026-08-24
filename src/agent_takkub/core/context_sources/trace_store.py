@@ -9,6 +9,14 @@ in-memory state a separate process could never reach.
 Single "last" record, not a history: matches the diagnostics doc's own
 singular framing, and keeps this a fixed-size file regardless of how many
 `assign`s a project has run.
+
+v2-hardening H (`14_SECURITY_RETRIEVAL.md`, "Redact secret-like values from
+traces"): every free-text field that could echo task text or a retrieved
+doc's content (`mode`, `reasons`, `escalation_reason`, `skipped[].reason`,
+`rejected_examples`) is passed through `core.secrets.redact` before it hits
+disk — best-effort, same as everything else in `save_last_trace`: a redact
+failure is caught by the function's own outer try/except, never blocking the
+trace write.
 """
 
 from __future__ import annotations
@@ -18,7 +26,13 @@ import logging
 import os
 import time
 
+from agent_takkub.core.secrets.redact import redact
+
 _log = logging.getLogger(__name__)
+
+
+def _redact_all(values: list[str]) -> list[str]:
+    return [redact(v) for v in values]
 
 
 def _trace_path():
@@ -61,7 +75,7 @@ def save_last_trace(
             "ts": time.time(),
             "project": project,
             "role": role,
-            "mode": trace.mode,
+            "mode": redact(trace.mode),
             "sources": [
                 {
                     "name": s.name,
@@ -79,7 +93,7 @@ def save_last_trace(
             "latency_ms": trace.latency_ms,
             "scope_rejects": trace.scope_rejects,
             "trust_rejects": trace.trust_rejects,
-            "rejected_examples": list(trace.rejected_examples),
+            "rejected_examples": _redact_all(list(trace.rejected_examples)),
         }
         if task_size is not None:
             payload["task_size"] = task_size
@@ -87,7 +101,7 @@ def save_last_trace(
         if complexity is not None:
             payload["score"] = complexity.score
             payload["confidence"] = complexity.confidence
-            payload["reasons"] = list(complexity.reasons)
+            payload["reasons"] = _redact_all(list(complexity.reasons))
             payload["risk_flags"] = list(complexity.risk_flags)
             payload["estimated_files"] = complexity.estimated_files
             payload["estimated_modules"] = complexity.estimated_modules
@@ -97,11 +111,13 @@ def save_last_trace(
             payload["retry_count"] = escalation.retry_count
             payload["escalated"] = escalation.escalated
             if escalation.reason:
-                payload["escalation_reason"] = escalation.reason
+                payload["escalation_reason"] = redact(escalation.reason)
         if strategy is not None:
             payload["strategy"] = strategy
         if skipped:
-            payload["skipped"] = list(skipped)
+            payload["skipped"] = [
+                {**s, "reason": redact(s["reason"])} if "reason" in s else dict(s) for s in skipped
+            ]
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, path)
