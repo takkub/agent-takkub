@@ -13,12 +13,63 @@ Context Builder's merge step — it never injects into a pane directly.
 
 ## Prerequisites
 
-- A running OpenViking sidecar reachable over HTTP (its own install docs:
-  <https://github.com/volcengine/OpenViking>). Nothing in this repo starts
-  or manages that process — point Takkub at wherever you already run it.
+- Either a **managed local install** (recommended — see below, no Docker or
+  terminal needed) or a sidecar you already run yourself, reachable over
+  HTTP (its own install docs: <https://github.com/volcengine/OpenViking>).
 - An Obsidian vault configured via `TAKKUB_VAULT_DIR` (see `docs/guides/
   2026-06-22-vault-second-brain.md`) if you want local resource indexing —
   optional, the sidecar can also be used with zero vault content.
+
+## Managed local (แนะนำ)
+
+Takkub can install and run its own OpenViking instance for you — a
+dedicated Python venv under `~/.agent-takkub/services/openviking/` (`pip
+install openviking`, no Docker), spawned/stopped/health-polled by Takkub
+itself and never touched by anything else. This is the easiest path for
+most people: no separate server to set up or keep alive.
+
+**Settings UI (recommended for most people):** Settings → **Knowledge &
+Design** → OpenViking panel → **Install & Enable**. From there:
+
+- **Start** / **Stop** / **Restart** control the managed process directly.
+- **Repair** recreates the venv from scratch while keeping your config and
+  indexed data.
+- **Remove** stops and deletes the managed venv; you're asked separately
+  whether to also delete config/indexed data (kept by default).
+- **Start automatically with Cockpit** boots the managed server whenever
+  Takkub starts, instead of requiring a manual Start each time.
+- **View Logs** shows the managed process's own stdout.
+
+**CLI (debugging/automation — normal users use the UI above):**
+
+```bash
+takkub ov managed status    # installed/version/running/owned/address/health
+takkub ov managed install   # create the venv + pip install openviking
+takkub ov managed start
+takkub ov managed stop
+takkub ov managed restart
+takkub ov managed doctor    # runs openviking-server's own `doctor` self-check
+takkub ov managed update    # explicit-only: pip install --upgrade in the
+                             # managed venv; warns (never blocks) on a major
+                             # version jump from what was previously installed
+takkub ov managed repair    # recreate the venv, config/data preserved
+takkub ov managed remove [--purge-data] [--yes]
+takkub ov managed studio    # opens the running server's Web Studio (/studio)
+                             # in your browser; never auto-starts the server
+```
+
+Ownership rules that hold regardless of UI vs. CLI: Takkub only ever kills
+a process it itself spawned — an OpenViking you're already running
+yourself (or another cockpit session's managed instance) is never touched.
+Nothing here auto-installs or auto-starts on boot unless you've explicitly
+turned on "Start automatically with Cockpit".
+
+## External server (still supported)
+
+Point Takkub at any OpenViking instance you run yourself instead of the
+managed local one — set `TAKKUB_OPENVIKING_URL`, and the managed-runtime
+code paths above are skipped entirely (an explicit URL override always
+wins, the same way it did before managed-local existed).
 
 ## Config
 
@@ -84,6 +135,12 @@ includes a `[knowledge]`/`[context]` section: whether the sidecar is
 enabled, reachable, its reported version against this adapter's pinned
 compatible range, indexed-doc count, and the most recent Context Builder
 merge trace (per-source item/token counts, dedup count, latency).
+
+A separate `[openviking]` `managed-runtime` row (same info `takkub ov
+managed status` prints) reports the managed local install specifically:
+installed/version/running/owned/health — independent of whether the mode
+above is even enabled, so an installed-but-not-started managed runtime
+still shows up.
 
 ## Rollback
 

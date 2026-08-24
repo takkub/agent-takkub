@@ -24,6 +24,7 @@ from agent_takkub.doctor import (
     check_mcps,
     check_mini_browser,
     check_npm_registry,
+    check_openviking_managed,
     check_pane_mcp_handshake,
     check_plugins,
     check_projects,
@@ -1364,6 +1365,65 @@ class TestCheckEditableInstall:
 
 
 # ---------------------------------------------------------------------------
+# check_openviking_managed
+# ---------------------------------------------------------------------------
+
+
+class TestCheckOpenvikingManaged:
+    @staticmethod
+    def _report(**overrides):
+        from agent_takkub.openviking.manager import ManagedRuntimeReport
+
+        defaults = dict(
+            installed=True,
+            version="0.4.2",
+            running=True,
+            owned=True,
+            address="http://127.0.0.1:1933",
+            healthy=True,
+            error=None,
+        )
+        defaults.update(overrides)
+        return ManagedRuntimeReport(**defaults)
+
+    def test_not_installed_is_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.openviking.manager.managed_runtime_report",
+            lambda: self._report(installed=False, version=None, running=False, healthy=False),
+        )
+        findings = check_openviking_managed()
+        assert len(findings) == 1
+        assert findings[0].status == Status.SKIP
+        assert findings[0].category == "openviking"
+
+    def test_healthy_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.openviking.manager.managed_runtime_report",
+            lambda: self._report(),
+        )
+        findings = check_openviking_managed()
+        assert findings[0].status == Status.OK
+        assert "version=0.4.2" in findings[0].detail
+
+    def test_running_but_unhealthy_is_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.openviking.manager.managed_runtime_report",
+            lambda: self._report(healthy=False, error="did not respond"),
+        )
+        findings = check_openviking_managed()
+        assert findings[0].status == Status.WARN
+        assert "error=did not respond" in findings[0].detail
+
+    def test_installed_but_not_running_is_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.openviking.manager.managed_runtime_report",
+            lambda: self._report(running=False, healthy=False, owned=False, address=None),
+        )
+        findings = check_openviking_managed()
+        assert findings[0].status == Status.INFO
+
+
+# ---------------------------------------------------------------------------
 # run_all_checks
 # ---------------------------------------------------------------------------
 
@@ -1396,6 +1456,7 @@ class TestRunAllChecks:
             "check_hook_wiring",
             "check_ready_markers",
             "check_knowledge_context",
+            "check_openviking_managed",
             "check_version",
             "check_editable_install",
         )

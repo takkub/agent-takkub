@@ -7,6 +7,7 @@ No real `pip install` runs here — every `subprocess.run` call is stubbed via
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -179,3 +180,124 @@ class TestReadState:
         installer.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         installer.STATE_FILE.write_text("{not json", encoding="utf-8")
         assert installer.read_state() == {}
+
+
+class TestRunDoctor:
+    def test_not_installed_returns_false_without_spawning(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(installer, "_run", lambda *a, **kw: calls.append(a) or _completed())
+
+        ok, output = installer.run_doctor()
+
+        assert ok is False
+        assert "not installed" in output
+        assert calls == []
+
+    def test_installed_runs_doctor_and_returns_output_verbatim(self, monkeypatch):
+        exe = installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            installer, "_run", lambda argv, **kw: _completed(returncode=0, stdout="all good\n")
+        )
+
+        ok, output = installer.run_doctor()
+
+        assert ok is True
+        assert output == "all good\n"
+
+    def test_doctor_nonzero_exit_reports_not_ok(self, monkeypatch):
+        exe = installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            installer, "_run", lambda argv, **kw: _completed(returncode=1, stdout="missing config")
+        )
+
+        ok, output = installer.run_doctor()
+
+        assert ok is False
+        assert output == "missing config"
+
+    def test_timeout_reports_not_ok(self, monkeypatch):
+        exe = installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+
+        def _raise(argv, **kw):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
+
+        monkeypatch.setattr(installer, "_run", _raise)
+
+        ok, output = installer.run_doctor()
+
+        assert ok is False
+        assert "timed out" in output
+
+
+class TestUpdate:
+    def _make_installed(self, *, version: str = "0.4.2") -> None:
+        exe = installer.server_executable()
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+        installer.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        installer.STATE_FILE.write_text(json.dumps({"version": version}), encoding="utf-8")
+
+    def test_not_installed_raises(self):
+        with pytest.raises(installer.InstallerError, match="not installed"):
+            installer.update()
+
+    def test_same_major_version_updates_without_warning(self, monkeypatch):
+        self._make_installed(version="0.4.2")
+
+        def _fake_run(argv, **kw):
+            if "-c" in argv:
+                return _completed(stdout="0.4.9\n")
+            return _completed()
+
+        monkeypatch.setattr(installer, "_run", _fake_run)
+
+        result = installer.update()
+
+        assert result.previous_version == "0.4.2"
+        assert result.new_version == "0.4.9"
+        assert result.warning is None
+        state = installer.read_state()
+        assert state["version"] == "0.4.9"
+        assert state["previous_version"] == "0.4.2"
+
+    def test_major_version_jump_warns_but_still_updates(self, monkeypatch):
+        self._make_installed(version="0.4.2")
+
+        def _fake_run(argv, **kw):
+            if "-c" in argv:
+                return _completed(stdout="1.0.0\n")
+            return _completed()
+
+        monkeypatch.setattr(installer, "_run", _fake_run)
+
+        result = installer.update()
+
+        assert result.new_version == "1.0.0"
+        assert result.warning is not None
+        assert "0.4.2" in result.warning and "1.0.0" in result.warning
+
+    def test_pip_install_failure_raises(self, monkeypatch):
+        self._make_installed()
+        monkeypatch.setattr(
+            installer, "_run", lambda argv, **kw: _completed(returncode=1, stdout="network down")
+        )
+
+        with pytest.raises(installer.InstallerError, match="pip install"):
+            installer.update()
+
+    def test_timeout_raises_installer_error(self, monkeypatch):
+        self._make_installed()
+
+        def _raise(argv, **kw):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
+
+        monkeypatch.setattr(installer, "_run", _raise)
+
+        with pytest.raises(installer.InstallerError, match="timed out"):
+            installer.update()
