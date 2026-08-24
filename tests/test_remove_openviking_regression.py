@@ -104,7 +104,10 @@ def test_doctor_run_all_checks_survives_legacy_env_and_leftover_dir(monkeypatch,
 
     findings = doctor.run_all_checks()
     assert isinstance(findings, list)
-    assert all(f.status != doctor.Status.FAIL or f.category == "doctor" for f in findings)
+    assert findings, "run_all_checks() must not return empty on legacy env + leftover dir"
+    for f in findings:
+        haystack = f"{f.name} {f.category} {f.detail}".lower()
+        assert "openviking" not in haystack, f"stale openviking finding: {f!r}"
 
 
 def test_openviking_cleanup_handles_a_v1_5_0_leftover_directory(monkeypatch, tmp_path):
