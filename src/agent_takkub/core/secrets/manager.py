@@ -15,6 +15,17 @@ cursor — see `doctor.check_provider_auth`'s "unknown" INFO finding and
 `config.PROVIDER_ISOLATION_GAPS`) have no backend registered here; asking
 for one of those raises `SecretUnavailableError` with a clear reason rather
 than guessing a path.
+
+The three optional design-tool integrations (#373 — `core.capabilities.
+design_integrations.OPTIONAL_DESIGN_MCPS`: `reference-21st`/`figma`/
+`penpot`) are registered here too, each behind its own `FileSecretBackend`
+under `SETTINGS_HOME/secrets/` — a cockpit-owned file, never `projects.json`
+or any other world-readable project file. `design_integrations.build_client`
+is the only caller; the whole file's text is the secret (a bare token for
+figma, a small JSON blob of `{token, base_url}`/`{api_key, base_url}` for
+penpot/reference-21st — same "backend doesn't know the schema" contract
+`FileSecretBackend`'s own docstring already states for provider credential
+files).
 """
 
 from __future__ import annotations
@@ -54,11 +65,15 @@ def default_backends() -> dict[str, SecretBackend]:
     `doctor._codex_auth_finding`, the existing source of truth for these
     paths."""
     claude_file = FileSecretBackend(config.default_claude_config_dir() / ".credentials.json")
+    secrets_dir = config.SETTINGS_HOME / "secrets"
     backends: dict[str, SecretBackend] = {
         "claude": (
             KeychainBackend(_CLAUDE_KEYCHAIN_SERVICE) if sys.platform == "darwin" else claude_file
         ),
         "codex": FileSecretBackend(codex_helper.codex_home() / "auth.json"),
+        "reference-21st": FileSecretBackend(secrets_dir / "reference-21st.json"),
+        "figma": FileSecretBackend(secrets_dir / "figma.json"),
+        "penpot": FileSecretBackend(secrets_dir / "penpot.json"),
     }
     return backends
 

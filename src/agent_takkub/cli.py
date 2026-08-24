@@ -936,10 +936,109 @@ def cmd_preview(args: argparse.Namespace) -> dict:
     return resp
 
 
+def cmd_design_integrations(args: argparse.Namespace) -> dict:
+    """`takkub design integrations status|enable|disable|doctor` (#373,
+    GAP-014/015/016) — local command, no orchestrator IPC round-trip, same
+    shape as `cmd_mcp`: `status` is read-only for everyone, `enable`/
+    `disable` require Lead (same `_require_lead_for_pane_tools` gate `mcp
+    allow`/`deny` already use — a design integration grant is a
+    `pane_tools_policy` MCP-allowlist entry underneath, so it gets the same
+    policy-change gate). A credential is stored via `SecretManager`
+    (`core.secrets.manager`), never written to `projects.json` or any
+    other project file."""
+    from . import pane_tools_policy as ptp
+    from .core.capabilities.design_integrations import (
+        OPTIONAL_DESIGN_MCPS,
+        integration_config_status,
+        optional_design_mcp_status,
+    )
+
+    sub = args.integrations_action
+    ids = {m.id for m in OPTIONAL_DESIGN_MCPS}
+
+    if sub in ("enable", "disable"):
+        gate_err = _require_lead_for_pane_tools(f"design integrations {sub}")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        if args.role not in ptp.known_roles():
+            return {"ok": False, "msg": f"unknown role {args.role!r}"}
+        if args.integration_id not in ids:
+            return {
+                "ok": False,
+                "msg": f"unknown integration {args.integration_id!r}. known: {', '.join(sorted(ids))}",
+            }
+        if sub == "enable" and args.integration_id == "penpot" and args.token and not args.base_url:
+            # Validated BEFORE the policy mutation below — a rejected `enable`
+            # must never leave the role granted with no way to build a client.
+            return {"ok": False, "msg": "penpot requires --base-url together with --token"}
+
+        fn = ptp.allow_item if sub == "enable" else ptp.deny_item
+        if not fn(args.role, "mcps", args.integration_id):
+            return {"ok": False, "msg": f"could not {sub} {args.integration_id!r} for {args.role}"}
+
+        extra_msg = ""
+        if sub == "enable" and args.token:
+            from .core.secrets.manager import SecretManager
+
+            if args.integration_id == "figma":
+                secret_value = args.token
+            elif args.integration_id == "penpot":
+                secret_value = json.dumps({"token": args.token, "base_url": args.base_url})
+            else:  # reference-21st
+                secret_value = json.dumps({"api_key": args.token, "base_url": args.base_url})
+            SecretManager().set_secret(f"secret://{args.integration_id}/default", secret_value)
+
+        if sub == "enable" and args.integration_id == "reference-21st":
+            from .core.capabilities.design_integrations import register_twentyfirst_mcp
+
+            if register_twentyfirst_mcp():
+                extra_msg = " (registered @21st-dev/magic MCP server)"
+
+        from . import shared_dev_tools as sdt
+
+        sdt.regen_role_variants()
+        return {"ok": True, "msg": f"{sub}d {args.integration_id!r} for {args.role}{extra_msg}"}
+
+    if sub == "status":
+        if args.integration_id is not None and args.integration_id not in ids:
+            return {
+                "ok": False,
+                "msg": f"unknown integration {args.integration_id!r}. known: {', '.join(sorted(ids))}",
+            }
+        rows = optional_design_mcp_status(args.role) if args.role else OPTIONAL_DESIGN_MCPS
+        for mcp in rows:
+            if args.integration_id and mcp.id != args.integration_id:
+                continue
+            configured, detail = integration_config_status(mcp.id)
+            enabled_str = (
+                str(mcp.enabled_for_role) if args.role is not None else "n/a (pass --role)"
+            )
+            _utf8_print(
+                f"{mcp.id:<16} enabled={enabled_str:<20} configured={configured!s:<6} {detail}"
+            )
+        # "design" is in _WRITE_COMMANDS_REQUIRE_CONFIRMATION (publish/approve/
+        # revise need a real confirmation msg from the orchestrator) — this
+        # subaction is a local read with nothing to confirm, so opt out via
+        # quiet rather than fabricate a msg string nothing needs.
+        return {"ok": True, "msg": "", "quiet": True}
+
+    if sub == "doctor":
+        from .doctor import check_design_integrations, format_report
+
+        _utf8_print(format_report(check_design_integrations()))
+        return {"ok": True, "msg": "", "quiet": True}
+
+    return {"ok": False, "msg": f"unknown design integrations subcommand: {sub}"}
+
+
 def cmd_design(args: argparse.Namespace) -> dict:
     """`takkub design publish|approve|revise` (#365 phase 5) — minimal
-    artifact registry; publish also ensures the project's Preview shows it."""
+    artifact registry; publish also ensures the project's Preview shows it.
+    `takkub design integrations ...` (#373) is a separate, local (non-IPC)
+    action handled by `cmd_design_integrations`."""
     action = args.design_action
+    if action == "integrations":
+        return cmd_design_integrations(args)
     payload = _with_project({"cmd": "design", "action": action, "from": _from_role()})
     if action == "publish":
         payload["path"] = args.path
@@ -3004,6 +3103,52 @@ def main(argv: list[str] | None = None) -> int:
     sdz_rev.add_argument("--id", dest="artifact_id", required=True)
     sdz_rev.add_argument("--feedback", default="")
     sdz_rev.set_defaults(func=cmd_design)
+
+    sdz_int = sdz_sub.add_parser(
+        "integrations",
+        help="21st.dev/Figma/Penpot design-tool integrations — status/enable/disable/doctor (#373)",
+    )
+    sdz_int_sub = sdz_int.add_subparsers(dest="integrations_action", required=True)
+    sdz_int_status = sdz_int_sub.add_parser(
+        "status", help="show configured/enabled status (read-only)"
+    )
+    sdz_int_status.add_argument(
+        "integration_id",
+        nargs="?",
+        default=None,
+        metavar="ID",
+        help="e.g. figma, penpot, reference-21st",
+    )
+    sdz_int_status.add_argument(
+        "--role", default=None, help="also show enabled/disabled for this role"
+    )
+    sdz_int_status.set_defaults(func=cmd_design)
+    sdz_int_enable = sdz_int_sub.add_parser(
+        "enable", help="enable an integration for a role (lead only)"
+    )
+    sdz_int_enable.add_argument("integration_id", metavar="ID")
+    sdz_int_enable.add_argument("--role", required=True)
+    sdz_int_enable.add_argument(
+        "--token",
+        default=None,
+        help="credential — stored via SecretManager, never written to projects.json",
+    )
+    sdz_int_enable.add_argument(
+        "--base-url",
+        default=None,
+        help="required with --token for penpot; optional for reference-21st",
+    )
+    sdz_int_enable.set_defaults(func=cmd_design)
+    sdz_int_disable = sdz_int_sub.add_parser(
+        "disable", help="disable an integration for a role (lead only)"
+    )
+    sdz_int_disable.add_argument("integration_id", metavar="ID")
+    sdz_int_disable.add_argument("--role", required=True)
+    sdz_int_disable.set_defaults(func=cmd_design)
+    sdz_int_doctor = sdz_int_sub.add_parser(
+        "doctor", help="print design-integrations doctor findings"
+    )
+    sdz_int_doctor.set_defaults(func=cmd_design)
 
     # #367 Remote Reports — share a standalone file on the cockpit's own
     # tunnel domain via a per-file token, instead of a Claude Artifact URL.
