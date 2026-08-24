@@ -901,4 +901,28 @@ def test_mouse_press_and_focus_in_forward_focus_to_view_and_monaco(qapp) -> None
         assert "view.setFocus" in calls, "focusInEvent did not forward Qt focus"
     finally:
         view.destroy()
+
+
+class TestPlaceholderReasonText:
+    """`renderPlaceholder`'s reason branching in static/editor/index.html —
+    plain embedded JS, no test harness for it exists, so this is a direct
+    content assertion on the shipped file (same convention as reading the
+    file any other way; the function itself only runs inside the real
+    QWebEngineView)."""
+
+    def test_encoding_unsupported_gets_its_own_message_not_the_too_large_one(self) -> None:
+        html = (ew._STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+        assert "tab.reason === 'encoding_unsupported'" in html
+        idx = html.index("tab.reason === 'encoding_unsupported'")
+        branch = html[idx : idx + 200]
+        assert "not valid UTF-8" in branch
+        assert "read-only" in branch
+        assert "save disabled" in branch
+
+    def test_binary_and_default_branches_are_still_present(self) -> None:
+        html = (ew._STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+        assert "'Binary file'" in html
+        assert "'File too large to preview'" in html
         QTest.qWait(50)

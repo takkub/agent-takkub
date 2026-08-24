@@ -88,6 +88,23 @@ _BOOT_LEAD_POLL_MS = 50  # ms between debounce turns
 _BOOT_LEAD_QUIET_N = 3  # consecutive clear turns required (~150-250 ms total)
 
 
+def _relative_project_path(project_name: str, path: str) -> str:
+    """Best-effort `path` relative to whichever configured root of
+    `project_name` contains it — shared by the editor's Ask Agent (#365
+    phase 3) and the Explorer's (#374 GAP-010). Falls back to `path`
+    unchanged for a malformed projects.json entry or a path outside every
+    configured root."""
+    try:
+        for root in project_roots(project_name).values():
+            try:
+                return str(Path(path).resolve().relative_to(root))
+            except ValueError:
+                continue
+    except Exception:  # defensive — malformed projects.json entry
+        pass
+    return path
+
+
 def _handle_cli_bind_error(error_msg: str) -> None:
     """Called when CliServer.listen() fails. Logs, shows a critical dialog,
     then exits the application. The cockpit cannot function without the CLI
@@ -481,6 +498,8 @@ class MainWindow(
         tab.openDiffRequested.connect(
             lambda proj, path: self._editor_host.open_file(proj, path, show_diff=True)
         )
+        # Explorer context menu "Ask Agent" (#374 GAP-010).
+        tab.askAgentRequested.connect(self._on_explorer_ask_agent)
         # #365 phase 10: register this project's live explorer index (tree
         # scan time) with the orchestrator for `takkub doctor --workspace`.
         # `tab.explorer` can be None (degrades gracefully on a malformed
@@ -590,16 +609,7 @@ class MainWindow(
         `takkub send` uses. Never the whole file (05_GIT_DIFF_AND_AGENT_
         CHANGES.md); `selected_text` is already client-bounded (4000 chars,
         static/editor/index.html), bounded again here defensively."""
-        rel = path
-        try:
-            for root in project_roots(project_name).values():
-                try:
-                    rel = str(Path(path).resolve().relative_to(root))
-                    break
-                except ValueError:
-                    continue
-        except Exception:  # defensive — malformed projects.json entry
-            pass
+        rel = _relative_project_path(project_name, path)
         bounded_text = (selected_text or "")[:4000]
         location = f"L{start_line}-{end_line}" if start_line and end_line else "no selection"
         msg = f"[Ask Agent] {project_name}/{rel} ({location})\n{request}"
@@ -608,6 +618,40 @@ class MainWindow(
         ok, err = self.orch.send(LEAD.name, msg, from_role="editor", project=project_name)
         if not ok:
             _log_event("editor_ask_agent_send_failed", project=project_name, path=path, error=err)
+
+    def _on_explorer_ask_agent(self, project_name: str, path: str) -> None:
+        """Explorer context menu "Ask Agent" (#374 GAP-010) — file or
+        directory row. Picks any currently-live role in the project (every
+        provider: `Orchestrator._live_roles` keys off `pane.session.
+        is_alive`, no claude-specific filter — multi-provider directive)
+        and routes a structured path + question through the same
+        `Orchestrator.send` `_on_editor_ask_agent` uses. Never the file
+        contents — path is enough; the agent can open it itself."""
+        project_ns = self.orch._resolve_project(project_name)
+        live_roles = sorted(self.orch._live_roles(project_ns))
+        if not live_roles:
+            self._status.showMessage("Ask Agent: no live agent to ask in this project", 5_000)
+            return
+        role, ok = QInputDialog.getItem(self, "Ask Agent", "Ask which agent:", live_roles, 0, False)
+        if not ok or not role:
+            return
+        question, ok = QInputDialog.getMultiLineText(self, "Ask Agent", f"Question for {role}:")
+        question = (question or "").strip()
+        if not ok or not question:
+            return
+        rel = _relative_project_path(project_name, path)
+        kind = "directory" if Path(path).is_dir() else "file"
+        msg = f"[Ask Agent] {project_name}/{rel} ({kind})\n{question}"
+        ok_send, err = self.orch.send(role, msg, from_role="explorer", project=project_name)
+        if not ok_send:
+            self._status.showMessage(f"Ask Agent failed: {err}", 6_000)
+            _log_event(
+                "explorer_ask_agent_send_failed",
+                project=project_name,
+                path=path,
+                role=role,
+                error=err,
+            )
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
         if role_name == LEAD.name:

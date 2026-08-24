@@ -113,6 +113,10 @@ class ProjectTab(QWidget):
     # A CHANGES-row click (#365 phase 4) → MainWindow opens the file AND
     # immediately shows its git-HEAD diff. Carries (project_name, path).
     openDiffRequested = pyqtSignal(str, str)
+    # Explorer context menu "Ask Agent" (#374 GAP-010) → MainWindow opens
+    # the live-role picker and routes through Orchestrator.send. Carries
+    # (project_name, path).
+    askAgentRequested = pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -179,6 +183,7 @@ class ProjectTab(QWidget):
             self.explorer.fileActivated.connect(self._on_explorer_open_file)
             self.explorer.openInTakkubRequested.connect(self._on_explorer_open_file)
             self.explorer.changeActivated.connect(self._on_explorer_change_activated)
+            self.explorer.askAgentRequested.connect(self._on_explorer_ask_agent)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -253,6 +258,9 @@ class ProjectTab(QWidget):
 
     def _on_explorer_change_activated(self, path: str) -> None:
         self.openDiffRequested.emit(self.project_name, path)
+
+    def _on_explorer_ask_agent(self, path: str) -> None:
+        self.askAgentRequested.emit(self.project_name, path)
 
     def _strip_tab_close_button(self, index: int) -> None:
         bar = self.pane_tabs.tabBar()

@@ -28,10 +28,14 @@ roots span more than one distinct repo groups CHANGES rows under one header
 per repo; a single repo (still the common case) renders the same flat list
 as before.
 
-Not wired up here (later phase, left as a disabled menu placeholder):
-  * per-row "Ask Agent" from the context menu — the editor tab's own Ask
-    Agent (Monaco context menu / "?" tab button) covers the phase 3+4 scope
-    with a bounded selection; a file-level variant here is future work.
+Ask Agent (#374 GAP-010): the context menu's "Ask Agent" action (file or
+directory row) emits `askAgentRequested(path)` — a plain, view-only signal,
+same shape as `fileActivated`/`openInTakkubRequested`. This module never
+picks a role or talks to the orchestrator itself (it has neither); the
+picker (which live teammate to ask) and the actual `Orchestrator.send` live
+in `main_window._on_explorer_ask_agent`, reached via `ProjectTab`'s
+`askAgentRequested(project_name, path)` re-emit — the same routing shape as
+`openFileRequested`/`openDiffRequested`.
 """
 
 from __future__ import annotations
@@ -130,6 +134,8 @@ class ProjectExplorer(QWidget):
     # connect, not re-plumb the menu. Never emitted today: the menu action
     # is disabled below.
     openInTakkubRequested = pyqtSignal(str)
+    # Context menu "Ask Agent" (#374 GAP-010) — file or directory row,
+    # absolute path. See module docstring for the routing chain.
     askAgentRequested = pyqtSignal(str)
 
     def __init__(self, project_name: str, parent: QWidget | None = None) -> None:
@@ -454,8 +460,7 @@ class ProjectExplorer(QWidget):
         else:
             act_open_takkub.triggered.connect(lambda: self.openInTakkubRequested.emit(str(path)))
         act_ask_agent = menu.addAction("Ask Agent")
-        act_ask_agent.setEnabled(False)
-        act_ask_agent.setToolTip("Coming in a later phase")
+        act_ask_agent.triggered.connect(lambda: self.askAgentRequested.emit(str(path)))
         return menu
 
     @staticmethod

@@ -108,3 +108,12 @@ class TestExplorerSignalForwarding:
         tab.explorer.fileActivated.emit("/abs/path/b.py")
 
         assert received == [("proj-files", "/abs/path/b.py")]
+
+    def test_ask_agent_requested_forwards_project_name_and_path(self, qapp) -> None:
+        tab = ProjectTab("proj-ask")
+        received: list[tuple[str, str]] = []
+        tab.askAgentRequested.connect(lambda proj, path: received.append((proj, path)))
+
+        tab.explorer.askAgentRequested.emit("/abs/path/c.py")
+
+        assert received == [("proj-ask", "/abs/path/c.py")]

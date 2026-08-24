@@ -151,6 +151,41 @@ class TestParseStatusV2:
         assert out[0].path == "ไฟล์ใหม่.txt"
 
 
+# ── _run_git: shared locked subprocess entry point ────────────────────────
+# `project_file_index._git_check_ignore_batch` (#374 GAP-011) reuses this
+# via a lazy import instead of calling `subprocess.run` directly, to share
+# `_SUBPROCESS_LOCK` — this pins the `stdin_input` piping that reuse needs.
+
+
+class TestRunGitStdinInput:
+    def test_stdin_input_is_piped_to_the_process(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        from agent_takkub.git_changes_service import _run_git
+
+        tmp_path.mkdir(exist_ok=True)
+        # No embedded "\n" in the payload — Windows' text-mode subprocess
+        # stdin write translates "\n" to "\r\n", which would silently change
+        # which bytes git actually hashes and make this assertion platform-
+        # dependent for no reason relevant to what's being tested.
+        proc = _run_git(["git", "hash-object", "--stdin"], cwd=tmp_path, stdin_input="hello")
+
+        assert proc.returncode == 0
+        # git's own hash for the one-line blob "hello" (verified against a
+        # real `git hash-object` run) — proves the text actually reached
+        # the subprocess's stdin, not just that the call didn't crash.
+        assert proc.stdout.strip() == "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+
+    def test_omitted_stdin_input_behaves_like_before(self, tmp_path: Path, git_available) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        from agent_takkub.git_changes_service import _run_git
+
+        proc = _run_git(["git", "rev-parse", "--show-toplevel"], cwd=tmp_path)
+
+        assert proc.returncode != 0  # tmp_path isn't a repo — same as always
+
+
 # ── changes_sync: real git subprocess ────────────────────────────────────
 
 

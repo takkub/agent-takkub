@@ -73,3 +73,144 @@ class TestAskAgentServerSideBound:
         mw.MainWindow._on_editor_ask_agent(fake_self, "demo", "/proj/x.py", 1, 2, "sel", "explain")
 
         assert logged and logged[0]["project"] == "demo"
+
+
+class _FakeInputDialog:
+    """Stand-in for `QInputDialog` — no `QApplication`/event loop needed,
+    same headless `Mock(self)` shape as the rest of this file. Configure
+    `item_result`/`text_result` per test; `calls` records which static
+    method ran, so a cancel-at-the-picker test can assert the text dialog
+    never opened."""
+
+    item_result: tuple[str, bool] = ("", False)
+    text_result: tuple[str, bool] = ("", False)
+    calls: list[str]
+
+    @classmethod
+    def getItem(cls, *args, **kwargs):
+        cls.calls.append("getItem")
+        return cls.item_result
+
+    @classmethod
+    def getMultiLineText(cls, *args, **kwargs):
+        cls.calls.append("getMultiLineText")
+        return cls.text_result
+
+
+def _explorer_ask_agent(
+    monkeypatch,
+    *,
+    project_roots: dict | None = None,
+    live_roles=(),
+    item_result: tuple[str, bool] = ("", False),
+    text_result: tuple[str, bool] = ("", False),
+    path: str = "/proj/src/x.py",
+    project_name: str = "demo",
+):
+    monkeypatch.setattr(mw, "project_roots", lambda _name: project_roots or {})
+    fake_dialog = type("FakeInputDialog", (_FakeInputDialog,), {"calls": []})
+    fake_dialog.item_result = item_result
+    fake_dialog.text_result = text_result
+    monkeypatch.setattr(mw, "QInputDialog", fake_dialog)
+
+    fake_self = Mock()
+    fake_self.orch._resolve_project.return_value = project_name
+    fake_self.orch._live_roles.return_value = frozenset(live_roles)
+    fake_self.orch.send.return_value = (True, None)
+
+    mw.MainWindow._on_explorer_ask_agent(fake_self, project_name, path)
+    return fake_self, fake_dialog
+
+
+class TestExplorerAskAgent:
+    def test_no_live_roles_shows_status_and_never_opens_a_dialog(self, monkeypatch) -> None:
+        fake_self, fake_dialog = _explorer_ask_agent(monkeypatch, live_roles=())
+
+        assert fake_dialog.calls == []
+        fake_self.orch.send.assert_not_called()
+        assert fake_self._status.showMessage.called
+
+    def test_role_picker_cancelled_never_opens_the_question_dialog(self, monkeypatch) -> None:
+        fake_self, fake_dialog = _explorer_ask_agent(
+            monkeypatch, live_roles=["backend"], item_result=("backend", False)
+        )
+
+        assert fake_dialog.calls == ["getItem"]
+        fake_self.orch.send.assert_not_called()
+
+    def test_empty_question_aborts_before_send(self, monkeypatch) -> None:
+        fake_self, fake_dialog = _explorer_ask_agent(
+            monkeypatch,
+            live_roles=["backend"],
+            item_result=("backend", True),
+            text_result=("   ", True),
+        )
+
+        assert fake_dialog.calls == ["getItem", "getMultiLineText"]
+        fake_self.orch.send.assert_not_called()
+
+    def test_successful_flow_sends_to_the_picked_role_from_explorer(self, monkeypatch) -> None:
+        fake_self, _fake_dialog = _explorer_ask_agent(
+            monkeypatch,
+            live_roles=["backend", "qa"],
+            item_result=("backend", True),
+            text_result=("what does this do?", True),
+            path="/proj/src/x.py",
+        )
+
+        args, kwargs = fake_self.orch.send.call_args
+        assert args[0] == "backend"
+        assert "src/x.py" in args[1] or "src\\x.py" in args[1]
+        assert "what does this do?" in args[1]
+        assert kwargs == {"from_role": "explorer", "project": "demo"}
+
+    def test_directory_path_labels_the_message_as_a_directory(self, monkeypatch, tmp_path) -> None:
+        fake_self, _fake_dialog = _explorer_ask_agent(
+            monkeypatch,
+            live_roles=["backend"],
+            item_result=("backend", True),
+            text_result=("what is this for?", True),
+            path=str(tmp_path),
+        )
+
+        _args, msg = fake_self.orch.send.call_args[0]
+        assert "(directory)" in msg
+
+    def test_file_path_labels_the_message_as_a_file(self, monkeypatch, tmp_path) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("x")
+        fake_self, _fake_dialog = _explorer_ask_agent(
+            monkeypatch,
+            live_roles=["backend"],
+            item_result=("backend", True),
+            text_result=("what is this for?", True),
+            path=str(f),
+        )
+
+        _args, msg = fake_self.orch.send.call_args[0]
+        assert "(file)" in msg
+
+    def test_send_failure_shows_status_and_logs(self, monkeypatch) -> None:
+        monkeypatch.setattr(mw, "project_roots", lambda _name: {})
+        fake_dialog = type(
+            "FakeInputDialog",
+            (_FakeInputDialog,),
+            {
+                "calls": [],
+                "item_result": ("backend", True),
+                "text_result": ("explain", True),
+            },
+        )
+        monkeypatch.setattr(mw, "QInputDialog", fake_dialog)
+        logged: list[dict] = []
+        monkeypatch.setattr(mw, "_log_event", lambda event, **details: logged.append(details))
+
+        fake_self = Mock()
+        fake_self.orch._resolve_project.return_value = "demo"
+        fake_self.orch._live_roles.return_value = frozenset(["backend"])
+        fake_self.orch.send.return_value = (False, "pane not found")
+
+        mw.MainWindow._on_explorer_ask_agent(fake_self, "demo", "/proj/x.py")
+
+        assert fake_self._status.showMessage.called
+        assert logged and logged[0]["project"] == "demo" and logged[0]["role"] == "backend"

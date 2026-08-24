@@ -8,12 +8,14 @@ worker thread (see `_ListDirWorker.run`), never the Qt main thread.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
+from agent_takkub import git_changes_service
 from agent_takkub.project_file_index import (
     IGNORED_NAMES,
     GitStatusService,
@@ -172,6 +174,123 @@ class TestListDirSync:
         names = {e.name for e in list_dir_sync(root, [root])}
         assert "escape_link" not in names
         assert "src" in names
+
+
+# ── list_dir_sync: git-native ignore parity (#374 GAP-011) ─────────────
+# `_git` / `git_available` mirror test_git_changes_service.py's own helpers
+# (kept local — this file already avoided importing that module's internals).
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+
+
+@pytest.fixture
+def git_available() -> bool:
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, timeout=5)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class TestGitNativeIgnoreParity:
+    def test_non_repo_directory_falls_back_to_handwritten_chain(self, tmp_path: Path) -> None:
+        # tmp_path is never a git repo — every TestListDirSync test above
+        # already exercises this path implicitly; this test just names it.
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / ".gitignore").write_text("*.log\n")
+        (root / "debug.log").write_text("x")
+        (root / "keep.txt").write_text("x")
+
+        names = {e.name for e in list_dir_sync(root, [root])}
+        assert "debug.log" not in names
+        assert "keep.txt" in names
+
+    def test_git_check_ignore_hides_a_doublestar_pattern_the_handwritten_chain_cannot(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        root = tmp_path / "proj"
+        root.mkdir()
+        _git(root, "init", "-q")
+        # `**/build` — the handwritten `_parse_gitignore`/`_gitignore_hides`
+        # chain has no `**` support (see its own docstring) and would fnmatch
+        # this literally, never matching a plain top-level "build" — real git
+        # does. Proves the git-native path is actually being consulted, not
+        # just silently falling back.
+        (root / ".gitignore").write_text("**/build\n")
+        (root / "build").mkdir()
+        (root / "keep.txt").write_text("x")
+
+        names = {e.name for e in list_dir_sync(root, [root])}
+        assert "build" not in names
+        assert "keep.txt" in names
+
+    def test_ignored_names_stay_hidden_even_inside_a_real_repo(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        root = tmp_path / "proj"
+        root.mkdir()
+        _git(root, "init", "-q")
+        (root / "node_modules").mkdir()
+        (root / "src").mkdir()
+
+        names = {e.name for e in list_dir_sync(root, [root])}
+        assert names == {"src"}
+
+    def test_one_directory_listing_makes_exactly_one_git_call_not_one_per_file(
+        self, tmp_path: Path, git_available, monkeypatch
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        root = tmp_path / "proj"
+        root.mkdir()
+        _git(root, "init", "-q")
+        for i in range(5):
+            (root / f"file{i}.txt").write_text("x")
+
+        calls: list[list[str]] = []
+        real_run_git = git_changes_service._run_git
+
+        def _counting_run_git(args, **kwargs):
+            calls.append(args)
+            return real_run_git(args, **kwargs)
+
+        monkeypatch.setattr(git_changes_service, "_run_git", _counting_run_git)
+
+        list_dir_sync(root, [root])
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["git", "check-ignore", "--stdin"]
+
+    def test_git_unavailable_still_falls_back_correctly_inside_a_real_repo(
+        self, tmp_path: Path, git_available, monkeypatch
+    ) -> None:
+        """Even inside a real repo, a git failure (missing binary, timeout,
+        ...) must not lose ignore coverage — `_git_check_ignore_batch`
+        returning None is the documented fallback signal, forced here
+        directly rather than relying on git actually being absent."""
+        if not git_available:
+            pytest.skip("git not on PATH")
+        root = tmp_path / "proj"
+        root.mkdir()
+        _git(root, "init", "-q")
+        (root / ".gitignore").write_text("*.log\n")
+        (root / "debug.log").write_text("x")
+        (root / "keep.txt").write_text("x")
+
+        from agent_takkub import project_file_index as pfi
+
+        monkeypatch.setattr(pfi, "_git_check_ignore_batch", lambda directory, candidates: None)
+
+        names = {e.name for e in list_dir_sync(root, [root])}
+        assert "debug.log" not in names
+        assert "keep.txt" in names
 
 
 # ── GitStatusService: debounce ──────────────────────────────────────────
