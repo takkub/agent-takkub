@@ -7,6 +7,8 @@ tests call them synchronously).
 
 from __future__ import annotations
 
+import stat
+import sys
 import time
 from pathlib import Path
 
@@ -110,6 +112,86 @@ class TestStatSnapshot:
 
         assert via_read.sha256 == via_stat.sha256
         assert via_read.mtime_ns == via_stat.mtime_ns
+
+
+class TestEncodingUnsupported:
+    """BUG-005: strict UTF-8 decoding — a text-shaped file with invalid
+    UTF-8 bytes must never be silently mangled via errors="replace"."""
+
+    def test_invalid_utf8_is_flagged(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "latin1.txt"
+        f.write_bytes(b"caf\xe9 con leche\n")  # "café" in Latin-1, not valid UTF-8
+
+        state = read_for_edit(f, [root])
+
+        assert state.encoding_unsupported is True
+        assert state.binary is False
+        assert state.too_large is False
+
+    def test_invalid_utf8_still_hashed_and_newline_detected(self, tmp_path: Path) -> None:
+        """sha256/newline must still come from the raw bytes even though
+        decoding failed — a disk-change/conflict check still needs them."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "latin1.txt"
+        raw = b"caf\xe9\r\ncon leche\r\n"
+        f.write_bytes(raw)
+
+        state = read_for_edit(f, [root])
+
+        assert state.sha256 is not None
+        assert state.newline == "\r\n"
+
+    def test_valid_utf8_not_flagged(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "ok.txt"
+        f.write_text("café con leche\n", encoding="utf-8")
+
+        state = read_for_edit(f, [root])
+
+        assert state.encoding_unsupported is False
+
+    def test_utf8_bom_not_flagged(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "bom.txt"
+        f.write_bytes(b"\xef\xbb\xbfhello\n")
+
+        state = read_for_edit(f, [root])
+
+        assert state.encoding_unsupported is False
+        assert state.bom is True
+
+    def test_binary_file_not_flagged_encoding_unsupported(self, tmp_path: Path) -> None:
+        """binary is its own, older category (BUG-005 is about text-shaped
+        files only) — must not double-flag."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "img.bin"
+        f.write_bytes(b"\x89PNG\x00\x01\x02")
+
+        state = read_for_edit(f, [root])
+
+        assert state.encoding_unsupported is False
+
+    def test_save_rejected_when_expected_is_encoding_unsupported(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "latin1.txt"
+        raw = b"caf\xe9\n"
+        f.write_bytes(raw)
+        expected = read_for_edit(f, [root])
+        assert expected.encoding_unsupported is True
+
+        result = save_atomic(f, "new text\n", expected, [root])
+
+        assert result.ok is False
+        assert result.conflict is None
+        assert result.error is not None
+        assert f.read_bytes() == raw  # never overwritten
 
 
 # ── save_atomic: conflict detection ─────────────────────────────────────
@@ -357,3 +439,72 @@ class TestSaveAtomicWriteBehavior:
 
 def test_max_edit_file_bytes_is_a_sane_positive_bound() -> None:
     assert 0 < MAX_EDIT_FILE_BYTES <= 10_000_000
+
+
+# ── save_atomic: POSIX file mode preservation (BUG-004) ─────────────────
+
+
+class TestWriteAtomicModePreservation:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode has no meaning on Windows")
+    def test_preserves_existing_mode_on_save(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "deploy.sh"
+        f.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+        f.chmod(0o755)
+        expected = read_for_edit(f, [root])
+
+        result = save_atomic(f, "#!/bin/sh\necho new\n", expected, [root])
+
+        assert result.ok is True
+        assert stat.S_IMODE(f.stat().st_mode) == 0o755
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode has no meaning on Windows")
+    def test_preserves_narrow_mode_on_save(self, tmp_path: Path) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "secret.env"
+        f.write_text("OLD=1\n", encoding="utf-8")
+        f.chmod(0o600)
+        expected = read_for_edit(f, [root])
+
+        save_atomic(f, "NEW=1\n", expected, [root])
+
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600
+
+    def test_windows_never_calls_chmod(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Force the win32 branch regardless of the host OS running this
+        test, and assert the chmod path is never exercised there."""
+        import agent_takkub.editor_service as editor_service_module
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "a.py"
+        f.write_text("old\n", encoding="utf-8")
+        expected = read_for_edit(f, [root])
+
+        monkeypatch.setattr(editor_service_module.sys, "platform", "win32")
+        chmod_calls: list[tuple] = []
+        monkeypatch.setattr(
+            editor_service_module.os, "chmod", lambda *a, **kw: chmod_calls.append(a)
+        )
+
+        result = save_atomic(f, "new\n", expected, [root])
+
+        assert result.ok is True
+        assert chmod_calls == []
+
+    def test_new_file_with_no_prior_mode_still_saves(self, tmp_path: Path) -> None:
+        """No `expected` (brand-new file) means nothing to read a mode
+        from — falls through to the process default umask, same as any
+        normal file creation, on every platform."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "brand_new.py"
+
+        result = save_atomic(f, "hello\n", None, [root])
+
+        assert result.ok is True
+        assert f.read_text(encoding="utf-8") == "hello\n"
