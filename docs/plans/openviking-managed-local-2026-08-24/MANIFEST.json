@@ -1,0 +1,28 @@
+{
+  "name": "Takkub OpenViking Managed Local Plan",
+  "prepared_date": "2026-08-24",
+  "local_only": true,
+  "docker_required": false,
+  "files": [
+    "00_CURRENT_STATE.md",
+    "01_TARGET_UX.md",
+    "02_ARCHITECTURE.md",
+    "03_REUSE_REMOTE_PATTERN.md",
+    "04_NO_DOCKER_INSTALL.md",
+    "05_PROCESS_LIFECYCLE.md",
+    "06_SECURITY_PORT.md",
+    "07_SETUP_WIZARD.md",
+    "08_SETTINGS_UI.md",
+    "09_WEB_STUDIO.md",
+    "10_CLI.md",
+    "11_UPDATE_REPAIR.md",
+    "12_PERFORMANCE.md",
+    "13_FRIEND_FLOW.md",
+    "14_FAILURE_TESTS.md",
+    "15_TEST_PLAN.md",
+    "16_PHASES.md",
+    "17_MASTER_PROMPT.md",
+    "18_ACCEPTANCE.md",
+    "README.md"
+  ]
+}

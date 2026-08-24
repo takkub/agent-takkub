@@ -1,0 +1,21 @@
+# Acceptance
+
+- [ ] no Docker
+- [ ] optional OpenViking
+- [ ] managed isolated runtime
+- [ ] one-click install
+- [ ] auto-start
+- [ ] owned auto-stop
+- [ ] external process never killed
+- [ ] localhost only
+- [ ] port conflict handling
+- [ ] setup UI
+- [ ] masked secrets
+- [ ] health/doctor
+- [ ] Open Studio
+- [ ] strict project isolation preserved
+- [ ] fail-open
+- [ ] update/repair/remove
+- [ ] Windows/macOS tests
+- [ ] CI green
+- [ ] #362 untouched
