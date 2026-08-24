@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QSettings
 
 from agent_takkub import config, core_v2_settings, custom_roles, settings_window
 from agent_takkub import roles as roles_mod
@@ -26,6 +26,15 @@ def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
+    # Sidebar's ADVANCED section fold state — see
+    # test_settings_window.py's own `_isolate_settings_paths` fixture for why
+    # this must be redirected off the real machine registry/INI store.
+    ini_path = str(tmp_path / "cockpit_settings.ini")
+    monkeypatch.setattr(
+        settings_window,
+        "QSettings",
+        lambda *_a, **_kw: QSettings(ini_path, QSettings.Format.IniFormat),
+    )
     core_v2_settings._reset_cache()
     saved = dict(roles_mod._CUSTOM)
     yield
@@ -207,42 +216,21 @@ class TestFlagConfigFallback:
 
 
 class TestCoreV2Views:
-    def test_all_six_views_build_with_empty_stores(self) -> None:
-        """Every Core V2 view must open cleanly with flags off and every
-        core store empty (task spec: "ทุกหน้าต้องเปิดได้แม้ core store
-        ว่าง/flag ปิด")."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_OVERVIEW)
+    def test_all_four_views_build_with_empty_stores(self) -> None:
+        """Every Core V2 (now ADVANCED-section) view must open cleanly with
+        flags off and every core store empty (task spec: "ทุกหน้าต้องเปิดได้
+        แม้ core store ว่าง/flag ปิด"). Overview and Migration were removed
+        in the settings-nav declutter (2026-08-24) — see `settings_window`'s
+        VIEW_* block for why."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
         for view in (
-            settings_window.VIEW_CORE_V2_OVERVIEW,
             settings_window.VIEW_CORE_V2_ACCOUNTS,
             settings_window.VIEW_CORE_V2_ROUTING,
             settings_window.VIEW_CORE_V2_BRAIN,
             settings_window.VIEW_CORE_V2_SCHEDULER,
-            settings_window.VIEW_CORE_V2_MIGRATION,
         ):
             dlg._goto_view(view)
             assert dlg._stack.currentIndex() == view
-        dlg.deleteLater()
-
-    def test_overview_flag_toggles_seeded_from_disk(self) -> None:
-        core_v2_settings.set_flag("brain", False)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_OVERVIEW)
-        assert dlg._cv2_flag_toggles["brain"].isChecked() is False
-        assert dlg._cv2_flag_toggles["router"].isChecked() is True  # shipped default
-        # Every flag in _FLAG_ROWS now has a wired core module — "context"
-        # included (Phase 7c: core/brain/context_builder.py, called from
-        # orchestrator._assign_dispatch's Context-Injection hook), so no row
-        # may ship disabled. Guards the stale `wired=False` this row carried
-        # after 7c landed, which left the toggle greyed out in Settings.
-        for key in core_v2_settings.FLAG_NAMES:
-            assert dlg._cv2_flag_toggles[key].isEnabled() is True, key
-        dlg.deleteLater()
-
-    def test_overview_save_flags_persists(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_OVERVIEW)
-        dlg._cv2_flag_toggles["scheduler"].setChecked(True)
-        dlg._on_cv2_save_flags_clicked()
-        assert core_v2_settings.flag_enabled("scheduler") is True
         dlg.deleteLater()
 
     def test_accounts_view_empty_state(self) -> None:
@@ -301,25 +289,4 @@ class TestCoreV2Views:
         reloaded = core_v2_settings.load_scheduler_policy()
         assert reloaded.max_agents_global == 3
         assert reloaded.provider_max_concurrent == {"codex": 2}
-        dlg.deleteLater()
-
-    def test_migration_view_refresh_populates_report(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_MIGRATION)
-        dlg._on_cv2_migration_refresh_clicked()
-        thread = dlg._cv2_migration_thread
-        assert thread is not None
-        thread.wait(5000)
-        QCoreApplication.processEvents()  # deliver the queued resultReady signal
-        text = dlg._cv2_migration_report.toPlainText()
-        assert "[inspect]" in text and "[plan]" in text
-        dlg.deleteLater()
-
-    def test_migration_view_has_no_apply_button(self) -> None:
-        """Task spec: "ห้ามมีปุ่ม apply ใน UI รอบนี้" — never offer it. Scoped
-        to the Migration page itself, not the whole dialog (the shared
-        footer's own "Save && Apply" button is unrelated)."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_MIGRATION)
-        page = dlg._stack.widget(settings_window.VIEW_CORE_V2_MIGRATION)
-        labels = {b.text().lower() for b in page.findChildren(type(dlg._cv2_migration_dry_run_btn))}
-        assert not any("apply" in label for label in labels)
         dlg.deleteLater()

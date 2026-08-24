@@ -25,11 +25,13 @@ remaining five:
   backed by :mod:`skill_audit` (``load_all_role_docs`` + ``audit_existing_
   role`` — "✓ won't overlap" for the selected role). This is a ROLE-scope
   audit (TF-IDF), *not* a skill browser — it was mislabeled "Skill Catalog"
-  before 2026-07-11.
+  before 2026-07-11. Removed 2026-08-24 in the settings-nav declutter (see
+  the ``VIEW_*`` block's own comment) — a pure diagnostic that added nothing
+  ``takkub doctor`` didn't already surface.
 * **Skill Catalog** (SKILL section) — the real skill browser: lists
   ``.claude/skills/*/SKILL.md`` via :mod:`skill_scan` (the scanner the New
   Role picker uses) with each skill's description + which role docs mention
-  it. Read-only browse, like Role Overlap.
+  it. Read-only browse.
 * **Skill Matrix** (SKILL section, 2026-07-11 — #103 phase 4) — role × skill
   toggle grid backed by :mod:`skill_policy` (mirrors :mod:`pane_tools_policy`'s
   on-disk shape, a separate store/concern: which skills get PROACTIVELY
@@ -76,7 +78,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PyQt6.QtCore import QLocale, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QLocale, QSettings, QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QGuiApplication, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -133,88 +135,100 @@ from .settings_core_v2 import CoreV2SettingsMixin
 from .settings_knowledge_design import KnowledgeDesignSettingsMixin
 
 # ── view indices (QStackedWidget page order) ────────────────────
-# Order is stable for indices 0–7 (external callers/tests reference these
-# constants); the real Skill Catalog was appended as index 8 and Skill Matrix
-# as index 9 rather than renumbering. VIEW_ROLE_OVERLAP (5) is the old "Skill
-# Catalog" page — it was never a skill browser, it audits ROLE-doc scope
-# overlap (TF-IDF), so it was renamed to say what it does. VIEW_SKILL_CATALOG
-# (8) is the real skill browser backed by `skill_scan` (the same scanner the
-# New Role picker uses); VIEW_SKILL_MATRIX (9) is the role×skill policy grid
-# backed by `skill_policy`.
+# Settings-nav declutter (2026-08-24, `docs/plans/v2-hardening-2026-08-24/
+# 13_SIMPLE_UX.md`) renumbered this block from scratch — the prior "append,
+# never renumber" discipline existed to keep numeric indices stable across
+# incremental additions, but this pass is an intentional behavior change
+# (21 pages -> ~10 visible) so the old numbering carried no value to
+# preserve; external test references were updated alongside this file.
+# Removed outright: Role Overlap (pure `skill_audit` diagnostic, duplicated
+# nowhere else but added nothing `takkub doctor` doesn't already surface),
+# Core V2 Overview (flag-status view — flags default-on since 1.0.84 per
+# `core_v2_settings._DEFAULT_FLAGS`, `takkub doctor` shows the same state),
+# Core V2 Migration (inspect/plan/dry-run only — boot already runs
+# `auto_migrate_boot` (#361) and `takkub migrate` CLI covers the same
+# inspect/plan), and the OpenViking page (product withdrew OpenViking
+# entirely, not just this UI — see `settings_knowledge_design`'s own
+# docstring). Knowledge/OpenViking/Design Tools/Context Debug collapsed into
+# one "Knowledge" page with tabs (OpenViking tab dropped, not carried over).
 VIEW_PIPELINE_BUILDER = 0
 VIEW_TEMPLATES = 1
 VIEW_PROVIDERS_ROLES = 2
 VIEW_MCP_MATRIX = 3
 VIEW_PLUGINS_MATRIX = 4
-VIEW_ROLE_OVERLAP = 5
-VIEW_NEW_ROLE = 6
-VIEW_USERS = 7
-VIEW_SKILL_CATALOG = 8
-VIEW_SKILL_MATRIX = 9
-VIEW_PERFORMANCE = 10
-# Core V2 (epic #309 Phase 9) — appended after Performance rather than
-# inserted, same "append, never renumber" rule as Skill Catalog/Matrix above.
-VIEW_CORE_V2_OVERVIEW = 11
-VIEW_CORE_V2_ACCOUNTS = 12
-VIEW_CORE_V2_ROUTING = 13
-VIEW_CORE_V2_BRAIN = 14
-VIEW_CORE_V2_SCHEDULER = 15
-VIEW_CORE_V2_MIGRATION = 16
-# Knowledge & Design (final closeout pack 2 — 04_SETTINGS_UI_FINAL.md) —
-# appended after Core V2 rather than inserted, same "append, never renumber"
-# rule as every prior addition above.
-VIEW_KNOWLEDGE = 17
-VIEW_OPENVIKING = 18
-VIEW_DESIGN_TOOLS = 19
-VIEW_CONTEXT_DEBUG = 20
+VIEW_NEW_ROLE = 5
+VIEW_USERS = 6
+VIEW_SKILL_CATALOG = 7
+VIEW_SKILL_MATRIX = 8
+VIEW_KNOWLEDGE = 9
+# ADVANCED section (folded by default, `_ADVANCED_SECTION` below) — Core V2
+# epic #309 Phase 9's remaining 4 pages plus Performance, none of which a
+# typical operator needs day-to-day (`13_SIMPLE_UX.md` "hide internal knobs
+# under Advanced").
+VIEW_CORE_V2_ACCOUNTS = 10
+VIEW_CORE_V2_ROUTING = 11
+VIEW_CORE_V2_BRAIN = 12
+VIEW_CORE_V2_SCHEDULER = 13
+VIEW_PERFORMANCE = 14
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
-# Sections keep the two orthogonal concepts apart: ROLE = team seats (who),
+# Sections keep the orthogonal concepts apart: ROLE = team seats (who),
 # TOOLS = per-role MCP/plugin policy, SKILL = reusable knowledge files (what a
-# role can *read*). "Skill Catalog" lives under its own SKILL section, NOT
-# mixed in with role/policy views.
+# role can *read*). The "ADVANCED" section is rendered folded by default
+# (`_ADVANCED_SECTION`/`_build_sidebar`) — everything in it is a real, still-
+# live control, just not one most operators touch often.
 _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "PIPELINE"),
     (VIEW_TEMPLATES, "Templates", "PIPELINE"),
     (VIEW_PROVIDERS_ROLES, "Providers & Roles", "ROLE"),
-    (VIEW_ROLE_OVERLAP, "Role Overlap", "ROLE"),
     (VIEW_MCP_MATRIX, "MCP Matrix", "TOOLS"),
     (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
-    (VIEW_PERFORMANCE, "Performance", "SYSTEM"),
     (VIEW_USERS, "Users", "ACCOUNT"),
-    (VIEW_CORE_V2_OVERVIEW, "Overview", "CORE V2"),
-    (VIEW_CORE_V2_ACCOUNTS, "Accounts & Pools", "CORE V2"),
-    (VIEW_CORE_V2_ROUTING, "Routing", "CORE V2"),
-    (VIEW_CORE_V2_BRAIN, "Brain", "CORE V2"),
-    (VIEW_CORE_V2_SCHEDULER, "Scheduler", "CORE V2"),
-    (VIEW_CORE_V2_MIGRATION, "Migration", "CORE V2"),
-    (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE & DESIGN"),
-    (VIEW_OPENVIKING, "OpenViking", "KNOWLEDGE & DESIGN"),
-    (VIEW_DESIGN_TOOLS, "Design Tools", "KNOWLEDGE & DESIGN"),
-    (VIEW_CONTEXT_DEBUG, "Context Debug", "KNOWLEDGE & DESIGN"),
+    (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE"),
+    (VIEW_CORE_V2_ACCOUNTS, "Accounts & Pools", "ADVANCED"),
+    (VIEW_CORE_V2_ROUTING, "Routing", "ADVANCED"),
+    (VIEW_CORE_V2_BRAIN, "Brain", "ADVANCED"),
+    (VIEW_CORE_V2_SCHEDULER, "Scheduler", "ADVANCED"),
+    (VIEW_PERFORMANCE, "Performance", "ADVANCED"),
 )
 
-# Core V2 pages each save through their own dedicated button (Overview's
-# "Save flags", Scheduler's "Save policy", Accounts & Pools' immediate
-# add/edit/remove) and never join the footer's dirty-tracking transaction
-# (`settings_core_v2`'s own module docstring) — the footer "Save & Apply" /
-# "Revert unsaved changes" pair is disabled whenever the sidebar is on one
-# of these views so it can't be mistaken for controlling them (design critic
-# should #1, `docs/v2/phase9-critic-review.md`).
+# Sidebar section names rendered as a foldable group rather than a plain
+# header — currently just one, but a set (not a single constant) so a future
+# second folded section is a one-line change in `_build_sidebar`.
+_FOLDABLE_SECTIONS: frozenset[str] = frozenset({"ADVANCED"})
+
+_NAV_VIEW_SECTION: dict[int, str] = {view_idx: section for view_idx, _label, section in _NAV_VIEWS}
+
+# Same org/app pair `project_nav`'s explorer-expanded persistence already
+# uses for MainWindow's own QSettings-backed per-user UI state — one shared
+# settings file, namespaced by key, rather than a second small JSON store
+# just for this one bool.
+_SIDEBAR_SETTINGS_ORG = "agent-takkub"
+_SIDEBAR_SETTINGS_APP = "cockpit"
+
+# Core V2 pages each save through their own dedicated button (Scheduler's
+# "Save policy", Accounts & Pools' immediate add/edit/remove) and never join
+# the footer's dirty-tracking transaction (`settings_core_v2`'s own module
+# docstring) — the footer "Save & Apply" / "Revert unsaved changes" pair is
+# disabled whenever the sidebar is on one of these views so it can't be
+# mistaken for controlling them (design critic should #1, `docs/v2/
+# phase9-critic-review.md`). VIEW_PERFORMANCE is NOT in this set — despite
+# moving into the ADVANCED nav group it still saves through the shared
+# footer transaction exactly as before (`_on_save_apply_clicked`'s
+# `VIEW_PERFORMANCE in self._dirty_views` branch), only its sidebar position
+# changed.
 _CORE_V2_VIEWS: frozenset[int] = frozenset(
-    view_idx for view_idx, _label, section in _NAV_VIEWS if section == "CORE V2"
+    {VIEW_CORE_V2_ACCOUNTS, VIEW_CORE_V2_ROUTING, VIEW_CORE_V2_BRAIN, VIEW_CORE_V2_SCHEDULER}
 )
 
 # Same "own dedicated save button, never the footer transaction" shape as
-# Core V2 above — Knowledge/Context Debug are read-only, OpenViking has its
-# own "Save settings" button, Design Tools writes each credential through
-# immediately (`settings_knowledge_design`'s own module docstring).
-_KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset(
-    view_idx for view_idx, _label, section in _NAV_VIEWS if section == "KNOWLEDGE & DESIGN"
-)
+# Core V2 above — Knowledge/Context Debug (tabs on this page) are read-only,
+# Design Tools (the third tab) writes each credential through immediately
+# (`settings_knowledge_design`'s own module docstring).
+_KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset({VIEW_KNOWLEDGE})
 _NO_FOOTER_SAVE_VIEWS: frozenset[int] = _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
@@ -229,25 +243,19 @@ _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_PIPELINE_BUILDER: "pipeline",
     VIEW_TEMPLATES: "diamond",
     VIEW_PROVIDERS_ROLES: "target",
-    VIEW_ROLE_OVERLAP: "diamond",
     VIEW_MCP_MATRIX: "grid",
     VIEW_PLUGINS_MATRIX: "grid",
     VIEW_SKILL_CATALOG: "star",
     VIEW_SKILL_MATRIX: "star",
-    VIEW_PERFORMANCE: "grid",
     VIEW_USERS: "user",
     # Icon set is fixed at 6 names (diamond/grid/pipeline/star/target/user,
     # see static/icons/nav/) — reused rather than adding new SVG assets.
-    VIEW_CORE_V2_OVERVIEW: "target",
+    VIEW_KNOWLEDGE: "star",
     VIEW_CORE_V2_ACCOUNTS: "user",
     VIEW_CORE_V2_ROUTING: "pipeline",
     VIEW_CORE_V2_BRAIN: "star",
     VIEW_CORE_V2_SCHEDULER: "grid",
-    VIEW_CORE_V2_MIGRATION: "diamond",
-    VIEW_KNOWLEDGE: "star",
-    VIEW_OPENVIKING: "grid",
-    VIEW_DESIGN_TOOLS: "diamond",
-    VIEW_CONTEXT_DEBUG: "target",
+    VIEW_PERFORMANCE: "grid",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
 
@@ -267,10 +275,6 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_MCP_MATRIX: ("MCP Matrix", "role × MCP server policy"),
     VIEW_PLUGINS_MATRIX: ("Plugins Matrix", "role × plugin policy"),
-    VIEW_ROLE_OVERLAP: (
-        "Role Overlap",
-        "ตรวจว่า scope (instructions) ของแต่ละ role ทับกันแค่ไหน — TF-IDF ไม่ใช่ skill browser",
-    ),
     VIEW_NEW_ROLE: ("New Role", "สร้าง custom role ใหม่"),
     VIEW_USERS: (
         "Users",
@@ -288,10 +292,6 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
         "Performance",
         "กำหนดเพดานงานหนัก, จุดพัก CPU/RAM และ cadence การ render เบื้องหลัง",
     ),
-    VIEW_CORE_V2_OVERVIEW: (
-        "Core V2 — Overview",
-        "สถานะ feature flag ทั้ง 5 ตัว (router/conversation/context/brain/scheduler) + version.json",
-    ),
     VIEW_CORE_V2_ACCOUNTS: (
         "Core V2 — Accounts & Pools",
         "ProviderAccount + AccountPool registry (secretRef เท่านั้น ไม่มี credential)",
@@ -308,25 +308,9 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
         "Core V2 — Scheduler",
         "SlotPolicy (global/provider/account/project) + priority default + backpressure estimate",
     ),
-    VIEW_CORE_V2_MIGRATION: (
-        "Core V2 — Migration",
-        "inspect/plan/dry-run เท่านั้น — apply ทำผ่าน CLI",
-    ),
     VIEW_KNOWLEDGE: (
         "Knowledge",
-        "สถานะ Brain / Obsidian / Graft / OpenViking รวมในที่เดียว",
-    ),
-    VIEW_OPENVIKING: (
-        "OpenViking",
-        "mode/strict-scope/limit/timeout + Test / Sync Active Project / Re-index",
-    ),
-    VIEW_DESIGN_TOOLS: (
-        "Design Tools",
-        "Storybook detection + Figma/Penpot/21st.dev credential + role permissions",
-    ),
-    VIEW_CONTEXT_DEBUG: (
-        "Context Debug",
-        "trace ของ context build ล่าสุด — token/latency ต่อ source, dedup, scope rejects",
+        "สถานะ Brain / Obsidian / Graft, credential เครื่องมือ design, และ context build trace — 3 tab",
     ),
 }
 
@@ -878,12 +862,51 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
 
         self._nav_buttons: dict[int, QPushButton] = {}
         self._nav_indicators: dict[int, QFrame] = {}
+        # Foldable sections (ADVANCED) route their nav rows into a per-
+        # section body widget instead of `lay` directly, so the whole group
+        # can be hidden/shown as a unit — see `_on_nav_section_toggled`.
+        self._nav_section_bodies: dict[str, QWidget] = {}
+        self._nav_section_toggles: dict[str, QPushButton] = {}
+        nav_settings = QSettings(_SIDEBAR_SETTINGS_ORG, _SIDEBAR_SETTINGS_APP)
+
         last_section: str | None = None
+        target_lay: QVBoxLayout = lay
         for view_idx, label, section in _NAV_VIEWS:
             if section != last_section:
-                sec_lbl = QLabel(section, sidebar)
-                sec_lbl.setObjectName("sidebarSection")
-                lay.addWidget(sec_lbl)
+                if section in _FOLDABLE_SECTIONS:
+                    # Folded by default (`13_SIMPLE_UX.md` "hide internal
+                    # knobs under Advanced") — a viewer who never expanded it
+                    # gets the collapsed default every time; only an explicit
+                    # prior expand sticks.
+                    expanded = bool(
+                        nav_settings.value(f"settingsNav/{section}/expanded", False, type=bool)
+                    )
+                    toggle_btn = QPushButton(sidebar)
+                    toggle_btn.setObjectName("sidebarSectionToggle")
+                    toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    toggle_btn.setCheckable(True)
+                    toggle_btn.setChecked(expanded)
+                    toggle_btn.setText(f"{'▾' if expanded else '▸'} {section}")
+                    lay.addWidget(toggle_btn)
+
+                    body = QWidget(sidebar)
+                    body_lay = QVBoxLayout(body)
+                    body_lay.setContentsMargins(0, 0, 0, 0)
+                    body_lay.setSpacing(0)
+                    body.setVisible(expanded)
+                    lay.addWidget(body)
+
+                    toggle_btn.toggled.connect(
+                        lambda checked, s=section: self._on_nav_section_toggled(s, checked)
+                    )
+                    self._nav_section_bodies[section] = body
+                    self._nav_section_toggles[section] = toggle_btn
+                    target_lay = body_lay
+                else:
+                    sec_lbl = QLabel(section, sidebar)
+                    sec_lbl.setObjectName("sidebarSection")
+                    lay.addWidget(sec_lbl)
+                    target_lay = lay
                 last_section = section
             # QPushButton treats a lone "&" as a mnemonic escape (swallows the
             # next char) — "Providers & Roles" would render as "Providers
@@ -909,7 +932,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
             indicator.setVisible(False)
             nav_row_lay.addWidget(indicator)
             nav_row_lay.addWidget(btn, 1)
-            lay.addWidget(nav_row)
+            target_lay.addWidget(nav_row)
 
             self._nav_buttons[view_idx] = btn
             self._nav_indicators[view_idx] = indicator
@@ -924,7 +947,30 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
 
         return sidebar
 
+    def _on_nav_section_toggled(self, section: str, expanded: bool) -> None:
+        body = self._nav_section_bodies.get(section)
+        toggle_btn = self._nav_section_toggles.get(section)
+        if body is not None:
+            body.setVisible(expanded)
+        if toggle_btn is not None:
+            toggle_btn.setText(f"{'▾' if expanded else '▸'} {section}")
+        try:
+            QSettings(_SIDEBAR_SETTINGS_ORG, _SIDEBAR_SETTINGS_APP).setValue(
+                f"settingsNav/{section}/expanded", expanded
+            )
+        except Exception:
+            pass
+
     def _goto_view(self, view_idx: int) -> None:
+        # Jumping straight to a view inside a folded section (initial_view,
+        # or the caller passing a VIEW_* constant directly) must still land
+        # on a visible, reachable nav row — expand its section first so the
+        # highlighted button isn't hidden behind a collapsed header.
+        section = _NAV_VIEW_SECTION.get(view_idx)
+        if section in _FOLDABLE_SECTIONS:
+            toggle_btn = self._nav_section_toggles.get(section)
+            if toggle_btn is not None and not toggle_btn.isChecked():
+                toggle_btn.setChecked(True)
         for idx, btn in self._nav_buttons.items():
             is_active = idx == view_idx
             btn.setProperty("active", is_active)
@@ -968,30 +1014,24 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         hb_lay.addSpacing(8)
 
         self._stack = QStackedWidget(header_body)
-        # Index order MUST match the VIEW_* constants above (0–7 unchanged;
-        # Skill Catalog is index 8, Skill Matrix is index 9 — both appended
-        # last rather than renumbering existing indices).
+        # Index order MUST match the VIEW_* constants above — renumbered
+        # from scratch in the settings-nav declutter (see that block's own
+        # comment for what was removed/merged).
         self._stack.addWidget(self._wrap_scroll(self._build_pipeline_builder_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_templates_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_providers_roles_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_mcp_matrix_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_plugins_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_role_overlap_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_new_role_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_users_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_overview_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_knowledge_tabbed_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_accounts_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_routing_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_migration_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_knowledge_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_openviking_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_design_tools_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_context_debug_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -1089,10 +1129,9 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
     def _on_reset_clicked(self) -> None:
         """Revert the currently-visible view's editable fields back to the
         on-disk state, clearing only THIS view's dirty flag — a different
-        view's still-staged edits (#6) must survive. Templates/Role Overlap/
-        Skill Catalog have nothing staged to reset (structural template edits
-        write immediately; the audit and catalog are read-only), so they
-        no-op."""
+        view's still-staged edits (#6) must survive. Templates/Skill Catalog
+        have nothing staged to reset (structural template edits write
+        immediately; the catalog is read-only), so they no-op."""
         idx = self._stack.currentIndex()
         if idx == VIEW_PROVIDERS_ROLES:
             self._reset_providers_roles_view()
@@ -3125,70 +3164,6 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         self._plugins_matrix_panel.setVisible(bool(items))
 
     # ──────────────────────────────────────────────────────────
-    # view: Role Overlap (real — ROLE section)
-    #
-    # NOT a skill browser: it audits how much each ROLE's instruction doc
-    # overlaps every other role's scope (TF-IDF cosine on `.claude/agents/*`),
-    # so an operator can see whether a role duplicates territory. Historically
-    # mislabeled "Skill Catalog"; renamed 2026-07-11 to say what it does. The
-    # real skill browser is `_build_skill_catalog_view` (SKILL section) below.
-    # ──────────────────────────────────────────────────────────
-
-    def _build_role_overlap_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QHBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(12)
-
-        self._overlap_docs = skill_audit.load_all_role_docs()
-
-        list_panel = QWidget(view)
-        list_panel.setObjectName("panel")
-        list_panel.setFixedWidth(200)
-        list_lay = QVBoxLayout(list_panel)
-        list_lay.setContentsMargins(6, 6, 6, 6)
-        self._overlap_list = QListWidget(list_panel)
-        self._overlap_list.setFrameShape(QFrame.Shape.NoFrame)
-        for name in sorted(self._overlap_docs):
-            r = roles_mod.by_name(name)
-            item = QListWidgetItem(r.label if r else name.capitalize(), self._overlap_list)
-            item.setData(Qt.ItemDataRole.UserRole, name)
-        self._overlap_list.currentItemChanged.connect(self._on_overlap_role_selected)
-        list_lay.addWidget(self._overlap_list)
-        lay.addWidget(list_panel)
-
-        detail_panel = QWidget(view)
-        detail_panel.setObjectName("panel")
-        detail_lay = QVBoxLayout(detail_panel)
-        detail_lay.setContentsMargins(14, 12, 14, 12)
-        detail_lay.setSpacing(8)
-        self._overlap_badge = QLabel("", detail_panel)
-        self._overlap_badge.setObjectName("panelHint")
-        self._overlap_badge.setWordWrap(True)
-        detail_lay.addWidget(self._overlap_badge)
-        self._overlap_detail_text = QPlainTextEdit(detail_panel)
-        self._overlap_detail_text.setReadOnly(True)
-        self._overlap_detail_text.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
-        detail_lay.addWidget(self._overlap_detail_text, 1)
-        lay.addWidget(detail_panel, 1)
-
-        if self._overlap_list.count():
-            self._overlap_list.setCurrentRow(0)
-        return view
-
-    def _on_overlap_role_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
-        if current is None:
-            return
-        role = current.data(Qt.ItemDataRole.UserRole)
-        self._overlap_detail_text.setPlainText(self._overlap_docs.get(role, ""))
-        overlaps = skill_audit.audit_existing_role(role, self._overlap_docs)
-        if overlaps:
-            names = ", ".join(f"{other} ({sim:.2f})" for other, sim in overlaps)
-            self._overlap_badge.setText(f"! overlap กับ scope role อื่น: {names}")
-        else:
-            self._overlap_badge.setText("OK: won't overlap — ไม่ทับ scope role อื่น")
-
-    # ──────────────────────────────────────────────────────────
     # view: Skill Catalog (real — SKILL section)
     #
     # The genuine skill browser: lists real Claude Code skills scanned from
@@ -3197,7 +3172,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
     # skill it shows name + description + which ROLE instruction docs mention
     # it (substring match on the skill name over `skill_audit.load_all_role_
     # docs()`), so an operator sees who already relies on a given skill.
-    # Read-only browse — no dirty-tracking / Save (mirrors Role Overlap).
+    # Read-only browse — no dirty-tracking / Save.
     # ──────────────────────────────────────────────────────────
 
     def _build_skill_catalog_view(self) -> QWidget:
