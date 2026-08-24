@@ -18,6 +18,9 @@ handful judged most stable:
   schema-drift guard has to reason about.
 - ``POST /api/v1/resources`` — add-resource ingest, used only by `takkub ov
   index` (see ``indexing.py``), never by the context-retrieval hot path.
+  Returns the sidecar's own ``result.root_uri`` (issue #377) so the caller
+  can key its local registry off the SAME identifier `/search/find` will
+  later echo back on a hit — the request's own ``to=`` is advisory only.
 
 Auth: ``X-API-Key: <key>`` header (upstream docs also allow a Bearer token;
 this adapter only implements the one header form).
@@ -211,21 +214,35 @@ def search_resources(query: str, *, limit: int = 8, timeout: float = _TIMEOUT_S)
     return hits
 
 
-def add_resource(path: Path, *, to: str | None = None, timeout: float = _INDEX_TIMEOUT_S) -> bool:
+def add_resource(
+    path: Path, *, to: str | None = None, timeout: float = _INDEX_TIMEOUT_S
+) -> str | None:
     """``POST /api/v1/resources`` — best-effort ingest of one local file
     into the sidecar's own knowledge base. Only `indexing.index_vault`
     calls this; never part of the context-retrieval hot path (it's a
-    slower, write-side call — OpenViking may chunk/embed synchronously)."""
+    slower, write-side call — OpenViking may chunk/embed synchronously).
+
+    Returns the ``result.root_uri`` the sidecar actually assigned this
+    resource (the SAME identifier a later ``/search/find`` hit's ``uri``
+    will carry — see `docs/en/concepts/04-viking-uri.md`), or ``None`` on
+    any failure. ``to`` is a request, not a guarantee (upstream docs: when
+    omitted the server auto-resolves ``root_uri`` itself, and nothing in
+    the spec promises it is honoured when present either) — callers MUST
+    key off the returned value, never off ``to``, to stay correlated with
+    what `/search/find` will actually echo back later (issue #377)."""
     if not enabled():
-        return False
+        return None
     payload: dict = {"path": str(path), "wait": True}
     if to:
         payload["to"] = to
     resp = _request("POST", "/api/v1/resources", payload, timeout)
     if not isinstance(resp, dict):
-        return False
+        return None
     result = resp.get("result")
-    return isinstance(result, dict) and result.get("status") == "success"
+    if not isinstance(result, dict) or result.get("status") != "success":
+        return None
+    root_uri = result.get("root_uri")
+    return root_uri if isinstance(root_uri, str) and root_uri else None
 
 
 __all__ = [

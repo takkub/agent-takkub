@@ -244,17 +244,24 @@ def test_openviking_source_project_a_cannot_retrieve_project_b(runtime, monkeypa
     from agent_takkub.core.context_sources import indexing, openviking_adapter
 
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    # Real API (`POST /api/v1/resources`): the sidecar confirms whatever
+    # `to=` it was given back as `result.root_uri` — simulate a server
+    # that honors the request, same as `add_resource`'s real return value.
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: to)
     doc = vault / "01-Projects" / "demo" / "auth.md"
     doc.write_text("JWT session auth for project demo", encoding="utf-8")
     indexing.index_vault("demo")
 
+    # A search hit's `uri` is whatever the sidecar confirmed at ingest time
+    # (`add_resource`'s `root_uri`) — NOT the on-disk `path`, which lives in
+    # a completely different namespace (issue #377).
+    confirmed_uri = indexing._resource_uri("demo", "01-Projects/demo/auth.md")
     monkeypatch.setattr(
         openviking_adapter,
         "search_resources",
         lambda query, limit=8: [
             openviking_adapter.SearchHit(
-                uri=str(doc),
+                uri=confirmed_uri,
                 text="JWT session auth for project demo",
                 score=0.9,
                 category="resource",
@@ -279,18 +286,25 @@ def test_openviking_source_project_b_cannot_retrieve_project_a(runtime, monkeypa
     from agent_takkub.core.context_sources import indexing, openviking_adapter
 
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    # Real API (`POST /api/v1/resources`): the sidecar confirms whatever
+    # `to=` it was given back as `result.root_uri` — simulate a server
+    # that honors the request, same as `add_resource`'s real return value.
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: to)
     (vault / "01-Projects" / "other").mkdir(parents=True)
     doc = vault / "01-Projects" / "other" / "secret.md"
     doc.write_text("secret notes for project other", encoding="utf-8")
     indexing.index_vault("other")
 
+    confirmed_uri = indexing._resource_uri("other", "01-Projects/other/secret.md")
     monkeypatch.setattr(
         openviking_adapter,
         "search_resources",
         lambda query, limit=8: [
             openviking_adapter.SearchHit(
-                uri=str(doc), text="secret notes for project other", score=0.9, category="resource"
+                uri=confirmed_uri,
+                text="secret notes for project other",
+                score=0.9,
+                category="resource",
             )
         ],
     )
@@ -308,20 +322,25 @@ def test_openviking_source_project_b_cannot_retrieve_project_a(runtime, monkeypa
 
 def test_openviking_source_global_visible_to_any_project(runtime, monkeypatch, vault):
     from agent_takkub.core.context_sources import indexing, openviking_adapter
+    from agent_takkub.core.context_sources.base import GLOBAL_PROJECT_ID
 
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    # Real API (`POST /api/v1/resources`): the sidecar confirms whatever
+    # `to=` it was given back as `result.root_uri` — simulate a server
+    # that honors the request, same as `add_resource`'s real return value.
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: to)
     (vault / "02-Areas").mkdir(parents=True)
     doc = vault / "02-Areas" / "conventions.md"
     doc.write_text("house convention for every project", encoding="utf-8")
     indexing.index_vault(None)
 
+    confirmed_uri = indexing._resource_uri(GLOBAL_PROJECT_ID, "02-Areas/conventions.md")
     monkeypatch.setattr(
         openviking_adapter,
         "search_resources",
         lambda query, limit=8: [
             openviking_adapter.SearchHit(
-                uri=str(doc),
+                uri=confirmed_uri,
                 text="house convention for every project",
                 score=0.7,
                 category="resource",
@@ -594,7 +613,10 @@ def test_index_vault_incremental_skip_on_unchanged_hash(runtime, monkeypatch, va
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
     from agent_takkub.core.context_sources import indexing, openviking_adapter
 
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    # Real API (`POST /api/v1/resources`): the sidecar confirms whatever
+    # `to=` it was given back as `result.root_uri` — simulate a server
+    # that honors the request, same as `add_resource`'s real return value.
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: to)
     (vault / "01-Projects" / "demo" / "a.md").write_text("hello world", encoding="utf-8")
 
     first = indexing.index_vault("demo")
@@ -611,7 +633,10 @@ def test_index_vault_changed_content_reindexes(runtime, monkeypatch, vault):
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
     from agent_takkub.core.context_sources import indexing, openviking_adapter
 
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    # Real API (`POST /api/v1/resources`): the sidecar confirms whatever
+    # `to=` it was given back as `result.root_uri` — simulate a server
+    # that honors the request, same as `add_resource`'s real return value.
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: to)
     doc = vault / "01-Projects" / "demo" / "a.md"
     doc.write_text("hello world", encoding="utf-8")
     indexing.index_vault("demo")
@@ -626,7 +651,7 @@ def test_index_vault_add_resource_failure_is_counted_not_raised(runtime, monkeyp
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
     from agent_takkub.core.context_sources import indexing, openviking_adapter
 
-    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: False)
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, *, to=None, **kw: None)
     (vault / "01-Projects" / "demo" / "a.md").write_text("hello world", encoding="utf-8")
     result = indexing.index_vault("demo")
     assert result.ok is True

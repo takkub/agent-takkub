@@ -255,10 +255,13 @@ def test_add_resource_disabled_is_noop(monkeypatch):
     monkeypatch.setattr(openviking_adapter.urllib.request, "urlopen", boom)
     from pathlib import Path
 
-    assert openviking_adapter.add_resource(Path("x.md")) is False
+    assert openviking_adapter.add_resource(Path("x.md")) is None
 
 
-def test_add_resource_success(ov_on, monkeypatch, tmp_path):
+def test_add_resource_success_returns_confirmed_root_uri(ov_on, monkeypatch, tmp_path):
+    """issue #377: the real API's `POST /api/v1/resources` response carries
+    `result.root_uri` — the resource's actual identity, which callers must
+    key off instead of assuming their own `to=` request was honored."""
     monkeypatch.setattr(
         openviking_adapter.urllib.request,
         "urlopen",
@@ -266,7 +269,7 @@ def test_add_resource_success(ov_on, monkeypatch, tmp_path):
     )
     f = tmp_path / "note.md"
     f.write_text("hello", encoding="utf-8")
-    assert openviking_adapter.add_resource(f) is True
+    assert openviking_adapter.add_resource(f, to="viking://requested") == "viking://x"
 
 
 def test_add_resource_failure_response(ov_on, monkeypatch, tmp_path):
@@ -277,4 +280,18 @@ def test_add_resource_failure_response(ov_on, monkeypatch, tmp_path):
     )
     f = tmp_path / "note.md"
     f.write_text("hello", encoding="utf-8")
-    assert openviking_adapter.add_resource(f) is False
+    assert openviking_adapter.add_resource(f) is None
+
+
+def test_add_resource_success_without_root_uri_is_failure(ov_on, monkeypatch, tmp_path):
+    """Schema-drift guard: a "success" status with no `root_uri` field is
+    treated as a failure — this module never invents an identity to key
+    the local registry off of."""
+    monkeypatch.setattr(
+        openviking_adapter.urllib.request,
+        "urlopen",
+        lambda *a, **kw: _FakeResponse({"result": {"status": "success"}}),
+    )
+    f = tmp_path / "note.md"
+    f.write_text("hello", encoding="utf-8")
+    assert openviking_adapter.add_resource(f) is None

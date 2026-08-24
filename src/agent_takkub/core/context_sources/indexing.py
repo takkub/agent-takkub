@@ -14,12 +14,22 @@ is indexing bookkeeping, not a memory/fact, and Brain's write path
 A second file, ``_registry.json`` in the same directory, is the local
 scope-metadata store issue #372's follow-up (`02_OPENVIKING_STRICT_
 SCOPE.md`) adds: every resource pushed to the sidecar is recorded there —
-keyed by the exact ``path`` string handed to `openviking_adapter.
-add_resource` — with the full metadata set that spec requires
-(workspace_id/project_id/source/kind/resource_id/trust/updated_at,
-reusing `obsidian_metadata.NoteMetadata`). `openviking_source.py` looks a
-search hit's `uri` up here rather than trusting anything OpenViking itself
-returns — see that module's docstring for why.
+with the full metadata set that spec requires (workspace_id/project_id/
+source/kind/resource_id/trust/updated_at, reusing `obsidian_metadata.
+NoteMetadata`). `openviking_source.py` looks a search hit's `uri` up here
+rather than trusting anything OpenViking itself returns — see that
+module's docstring for why.
+
+Issue #377 fix: the registry key is now the ``uri`` OpenViking's sidecar
+itself confirmed for that resource — either `openviking_adapter.
+add_resource`'s ``result.root_uri`` (the SAME identifier a later
+``/search/find`` hit echoes back, per `docs/en/concepts/04-viking-uri.md`)
+when it was actually stored, or (on the incremental-skip path, where no
+fresh add call happens) the deterministic ``viking://resources/<workspace>/
+<project>/<rel path>`` uri this module requests via ``to=`` — NOT the
+local filesystem ``path`` string, which lives in a completely different
+namespace from anything `/search/find` ever returns and could never
+correlate with a hit's `uri` at read time. See `_resource_uri`.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from agent_takkub.obsidian_boundary import is_indexable
 from agent_takkub.obsidian_metadata import TRUST_CURATED, NoteMetadata, content_hash
@@ -90,16 +101,29 @@ def _save_state(project: str | None, state: dict[str, str]) -> None:
 
 def resource_metadata_for_uri(uri: str) -> dict | None:
     """Best-effort local lookup: the scope metadata Takkub itself attached
-    to a resource at index time (`_resource_metadata`), keyed by the exact
-    ``path`` string handed to OpenViking's ingest call. Never raises — an
-    unreadable/missing registry is just "nothing known about this uri",
-    the same fail-closed signal as an uri that was never indexed at all."""
+    to a resource at index time (`_resource_metadata`), keyed by the
+    OpenViking-confirmed ``uri`` (see module docstring — `_resource_uri`
+    for the deterministic form, `openviking_adapter.add_resource`'s
+    ``root_uri`` return for what's actually stored when it disagrees).
+    Never raises — an unreadable/missing registry is just "nothing known
+    about this uri", the same fail-closed signal as an uri that was never
+    indexed at all."""
     meta = _load_json_dict(_registry_path()).get(uri)
     return meta if isinstance(meta, dict) else None
 
 
-def _resource_metadata(rel: str, text: str) -> dict:
-    project_id = resolve_vault_project_id(rel) or GLOBAL_PROJECT_ID
+def _resource_uri(project_id: str, rel: str) -> str:
+    """Deterministic ``viking://`` uri this module requests via `add_resource`'s
+    ``to=`` for a given vault-relative path — re-ingesting the same doc
+    always asks for the same uri (idempotent), and identifies the resource
+    across Takkub's `workspace_id`/`project_id` scope even though OpenViking
+    itself has no notion of either. Not guaranteed to be what the sidecar
+    actually stores (issue #377) — always prefer `add_resource`'s returned
+    ``root_uri`` over this when one was returned."""
+    return f"viking://resources/{WORKSPACE_ID}/{project_id}/{quote(rel, safe='/')}"
+
+
+def _resource_metadata(project_id: str, text: str) -> dict:
     meta = NoteMetadata.new(
         project_id=project_id, source="ov-index", kind="doc", trust=TRUST_CURATED, text=text
     )
@@ -173,20 +197,29 @@ def index_vault(project: str | None) -> IndexResult:
             failed += 1
             continue
         h = content_hash(text)
-        key = str(path)
+        project_id = resolve_vault_project_id(rel) or GLOBAL_PROJECT_ID
+        requested_uri = _resource_uri(project_id, rel)
         if state.get(rel) == h:
-            if key not in registry:
-                registry[key] = _resource_metadata(rel, text)
+            if requested_uri not in registry:
+                registry[requested_uri] = _resource_metadata(project_id, text)
             skipped += 1
             continue
         try:
-            ok = adapter.add_resource(path)
+            root_uri = adapter.add_resource(path, to=requested_uri)
         except Exception:
             _log.exception("indexing.index_vault: add_resource raised for %s (fail-open)", rel)
-            ok = False
-        if ok:
+            root_uri = None
+        if root_uri:
+            if root_uri != requested_uri:
+                _log.warning(
+                    "indexing.index_vault: sidecar root_uri %r != requested to=%r for %s "
+                    "(server did not honor to=; registry keyed off the actual root_uri)",
+                    root_uri,
+                    requested_uri,
+                    rel,
+                )
             state[rel] = h
-            registry[key] = _resource_metadata(rel, text)
+            registry[root_uri] = _resource_metadata(project_id, text)
             added += 1
         else:
             failed += 1
