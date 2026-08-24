@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.4.0] - 2026-08-24
+
+Final closeout pack (after 1.3.0) — roadmap `docs/plans/final-closeout-after-1.3.0/` · reviewer `docs/audit/2026-08-24-closeout-review.md`
+(ship ทั้งชุด, 1 HIGH follow-up ไม่บล็อก → #377) · Phase 10/V2 authority (#362) ไม่ถูกแตะ
+
+### Added (เพิ่ม)
+
+- **OpenViking strict project isolation** — ทุก resource ที่ index ติด `workspace_id/project_id/source/kind/resource_id/trust/updated_at`
+  · defense-in-depth 3 ชั้น: source-level gate (`openviking_source`/`resource_source`) + `context_builder.merge_openviking_traced`
+  re-check ก่อน inject เสมอ · fail-closed: metadata หาย/project อื่น → reject, มีแค่ project ตรง + `GLOBAL` เท่านั้นที่ผ่าน · trace โชว์
+  `scope_rejects`/`trust_rejects` ต่อ source + ตัวอย่าง reject reason · **known gap** (#377): `read`/`hybrid` mode ยัง likely
+  ไม่ได้ผลจริงกับ sidecar จริง (uri correlation ยังไม่ verify) — ปลอดภัย (fail-closed) แค่ยังไม่ทำงาน ไม่กระทบ default (`shadow`, ปิด)
+- **Context/token gate ตามขนาดงาน** — `core/brain/context_gate.py`: small/medium/large classify จาก task text (+ override `flags={"context":...}`)
+  · small = ไม่เรียก OpenViking/Resource เลย (ไม่ใช่แค่ trace บอก, ยืนยันด้วย call-spy test), budget ~2-4k · medium = Brain+Graft+files,
+  ~4-8k · large = ทุก source adaptive ~6-12k · `TAKKUB_CONTEXT_GATE=0` คืนพฤติกรรมเดิมไบต์ต่อไบต์ (ยืนยันด้วย equality test ไม่ใช่แค่ claim)
+  · trace เพิ่ม `task_size`/`inefficient` flag (small task เกิน 15k tokens → warn ใน doctor)
+- **Settings UI: Knowledge & Design** — กลุ่มใหม่ใน Settings nav (`settings_knowledge_design.py`): **Knowledge** (Brain/Obsidian/Graft/
+  OpenViking status รวม) · **OpenViking** (mode/strict-project/include-global/limit/timeout + Test/Sync/Re-index, env ยังชนะเสมอ
+  ระบุใน UI) · **Design Tools** (Storybook/21st/Figma/Penpot status, credential เข้า SecretManager มาสก์เสมอ ไม่มี round-trip กลับ UI,
+  Test/Permissions) · **Context Debug** (ตาราง SOURCE/ITEMS/TOKENS/TIME จาก trace ล่าสุด, scope/trust rejects, Total/budget, Copy Report)
+  — network/subprocess ทุกจุดผ่าน worker thread จริง ไม่มีบน Qt main thread
+
 ## [v1.3.1] - 2026-08-24
 
 ### Fixed (แก้)
