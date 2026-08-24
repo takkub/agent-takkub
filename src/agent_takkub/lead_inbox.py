@@ -196,13 +196,24 @@ def _prompt_block_reason(session) -> str | None:
     checked before the generic "tty" catch-all so Claude Code's own
     numbered tool-approval menu — which has no [y/N] bracket for the tty
     regex to match — gets its own accurate wording instead of being
-    mislabelled a shell prompt."""
+    mislabelled a shell prompt.
+
+    (#376 CI) Each read is guarded against its own real return type — a real
+    PtySession's `is_at_trust_prompt()` always returns `bool`, while
+    `is_blocked_on_permission_prompt()`/`is_blocked_on_tty_prompt()` return
+    `str | None` (the matched prompt text). A test double / unconfigured
+    mock session returns a truthy Mock object by default for any of these
+    (neither a bool nor a str) — never treat that as a genuine prompt-block
+    hit, same guard as every other marker read in this module."""
     try:
-        if session.is_at_trust_prompt():
+        _at_trust = session.is_at_trust_prompt()
+        if isinstance(_at_trust, bool) and _at_trust:
             return "trust"
-        if session.is_blocked_on_permission_prompt():
+        _blocked_permission = session.is_blocked_on_permission_prompt()
+        if isinstance(_blocked_permission, str) and _blocked_permission:
             return "permission"
-        if session.is_blocked_on_tty_prompt():
+        _blocked_tty = session.is_blocked_on_tty_prompt()
+        if isinstance(_blocked_tty, str) and _blocked_tty:
             return "tty"
     except Exception:
         pass
