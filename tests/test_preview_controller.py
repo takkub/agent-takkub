@@ -368,6 +368,18 @@ class TestNavigationAllowedFileUrlComparison:
 
         assert navigation_allowed(state, nav_url) is True
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason=(
+            "a bare Windows-style path (backslashes, drive letter) isn't a "
+            "real filesystem path on POSIX, so Path(...).resolve() doesn't "
+            "round-trip it the way this test needs — the same-path-allowed/"
+            "different-path-denied logic this pins is already covered on "
+            "every OS by test_file_url_for_the_same_path_is_allowed and "
+            "test_file_url_for_a_different_path_is_denied above, which use "
+            "tmp_path so the path shape always matches the host OS"
+        ),
+    )
     def test_windows_drive_letter_path_round_trips_through_file_url(self) -> None:
         # QUrl("C:/proj/index.html").scheme() returns "c" — RFC 3986 treats a
         # drive letter + ":" as a syntactically valid one-letter scheme, so a
