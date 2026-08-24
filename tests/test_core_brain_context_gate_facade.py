@@ -36,8 +36,13 @@ def _rec(**kwargs) -> MemoryRecord:
     return MemoryRecord(**defaults)
 
 
-def _fake_item(text: str):
-    from agent_takkub.core.context_sources.base import ContextItem
+def _fake_item(text: str, *, project_id: str = "proj"):
+    """`project_id`/`workspace_id` default to matching every test in this
+    file's own `build_context_for_assign(..., "proj", ...)` call — without
+    them the fixture is indistinguishable from a real item with no scope
+    claim at all, which `apply_scope_and_trust`'s layer-c re-check (issue
+    #372 follow-up, `02_OPENVIKING_STRICT_SCOPE.md`) fails closed on."""
+    from agent_takkub.core.context_sources.base import WORKSPACE_ID, ContextItem
 
     return ContextItem(
         text=text,
@@ -46,6 +51,8 @@ def _fake_item(text: str):
         provenance="p",
         trust="external",
         score=0.5,
+        project_id=project_id,
+        workspace_id=WORKSPACE_ID,
     )
 
 
