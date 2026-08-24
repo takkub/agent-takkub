@@ -76,6 +76,18 @@ def _blocked_then_clear(n: int):
     return _fn
 
 
+def _string_then_none(n: int, s: str):
+    """Like `_blocked_then_clear`, but for a marker predicate that returns a
+    string (`is_blocked_on_tty_prompt`) rather than a bare bool."""
+    calls = {"n": 0}
+
+    def _fn() -> str | None:
+        calls["n"] += 1
+        return s if calls["n"] <= n else None
+
+    return _fn
+
+
 @pytest.fixture
 def orch(qapp, monkeypatch) -> Orchestrator:
     o = Orchestrator.__new__(Orchestrator)
@@ -102,10 +114,14 @@ class TestPromptBlockedEarlyNotice:
         pane's own delivery hard timeout, unlike busy-wait/unconfirmed."""
         lead = _pane(_live_session())
         gemini = _pane(_live_session())
-        gemini.session.is_at_trust_prompt.return_value = True
-        # Stays blocked, then eventually clears and delivers — large
+        # Stays blocked for several polls, then clears and delivers — large
         # max_wait_ms so the busy/stall hard-timeout branch never runs; the
-        # early notice must fire anyway.
+        # early notice must fire anyway, well before that. (#376 round 2:
+        # the ready-streak gate now also holds at 0 for as long as this
+        # stays True — a modal that never cleared at all would mean
+        # delivery legitimately never happens via the ready path, which is
+        # the fix, but is not what THIS test is about.)
+        gemini.session.is_at_trust_prompt.side_effect = _blocked_then_clear(5)
         gemini.session.is_at_ready_prompt.side_effect = _ready_after(3)
         gemini.session.seconds_since_output.return_value = 1.0
         orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}
@@ -126,7 +142,9 @@ class TestPromptBlockedEarlyNotice:
         lead = _pane(_live_session())
         backend = _pane(_live_session())
         backend.session.is_at_trust_prompt.return_value = False
-        backend.session.is_blocked_on_tty_prompt.return_value = "Overwrite? (y/n)"
+        backend.session.is_blocked_on_tty_prompt.side_effect = _string_then_none(
+            5, "Overwrite? (y/n)"
+        )
         backend.session.is_at_ready_prompt.side_effect = _ready_after(3)
         backend.session.seconds_since_output.return_value = 1.0
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
@@ -145,7 +163,11 @@ class TestPromptBlockedEarlyNotice:
         still only produce a single warning, not one per poll."""
         lead = _pane(_live_session())
         gemini = _pane(_live_session())
-        gemini.session.is_at_trust_prompt.return_value = True
+        # Blocked for many polls (well past the one-shot warning firing on
+        # the first) before it finally clears — bounded so delivery still
+        # completes and this test doesn't recurse anywhere near the real
+        # (100_000ms / 150ms) poll budget.
+        gemini.session.is_at_trust_prompt.side_effect = _blocked_then_clear(20)
         gemini.session.is_at_ready_prompt.side_effect = _ready_after(4)
         gemini.session.seconds_since_output.return_value = 1.0
         orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}

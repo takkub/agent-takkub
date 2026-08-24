@@ -1332,6 +1332,14 @@ class LeadInboxMixin:
                     except Exception:
                         pass
                 if accepted:
+                    # (#376 round 2) Same reasoning, for the OTHER state a
+                    # not-ready read can be conflated with: a trust/
+                    # permission/tty modal drawn over an otherwise-idle
+                    # footer. `_prompt_block_reason` is already ungated and
+                    # exception-safe (see its docstring) — reuse it directly.
+                    if _prompt_block_reason(_task_sess):
+                        accepted = False
+                if accepted:
                     manager.mark_accepted(delivery.delivery_id)
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
@@ -1433,25 +1441,26 @@ class LeadInboxMixin:
                 return
             if elapsed_at_session_alive[0] is None:
                 elapsed_at_session_alive[0] = elapsed[0]
-            if not prompt_blocked_warned[0]:
-                # #186: recognise "blocked on a prompt that needs a keypress"
-                # as its own state, checked on every poll independent of
-                # elapsed/max_wait_ms — NOT folded into the busy/stall split
-                # below, which only runs once the hard timeout has already
-                # fired and can't tell a periodically-redrawing modal apart
-                # from genuine work output. Warn the Lead the first poll that
-                # sees it, however early, instead of waiting out the full
-                # busy-wait ceiling.
-                _reason = _prompt_block_reason(pane.session)
-                if _reason:
-                    prompt_blocked_warned[0] = True
-                    _log_event(
-                        "task_deliver_blocked_on_prompt",
-                        project=self._resolve_project(project),
-                        role=role_name,
-                        reason=_reason,
-                    )
-                    self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            # #186: recognise "blocked on a prompt that needs a keypress" as
+            # its own state, checked on every poll independent of
+            # elapsed/max_wait_ms — NOT folded into the busy/stall split
+            # below, which only runs once the hard timeout has already fired
+            # and can't tell a periodically-redrawing modal apart from
+            # genuine work output. Computed every poll (not just once) so
+            # the ready-streak gate further down can reuse the live read —
+            # see its (#376 round 2) comment for why: a modal can sit
+            # directly over a footer that still reads idle, so a stale
+            # "already warned" flag must not let the streak keep advancing.
+            _reason = _prompt_block_reason(pane.session)
+            if _reason and not prompt_blocked_warned[0]:
+                prompt_blocked_warned[0] = True
+                _log_event(
+                    "task_deliver_blocked_on_prompt",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                    reason=_reason,
+                )
+                self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
             # #271: computed once per poll (not just while the #254 warning
             # below is still armed) so the elapsed>=max_wait_ms blind-paste
             # guard further down can reuse the SAME read instead of calling
@@ -1711,8 +1720,24 @@ class LeadInboxMixin:
             # ready_streak[0] = 0` branch below, so a pane frozen on its
             # provider's account-pending banner never accumulates a ready
             # streak no matter how idle its footer looks.
+            #
+            # (#376 round 2) Same fold-in for `_reason` (the live
+            # `_prompt_block_reason()` read above): the earlier fix only
+            # warned the Lead once and left the streak counting up regardless
+            # — a trust/tty/permission modal drawn over a footer that still
+            # reads idle would clear `is_at_ready_prompt()` and eventually
+            # reach `_deliver()` through the NORMAL ready path (not the
+            # blind-paste timeout branch, the only one `_deliver()` itself
+            # already guarded), pasting the task's bytes onto the modal as
+            # keystrokes. Re-checked every poll for the same reason
+            # `account_pending` is — a one-shot flag can't un-ring this bell
+            # once the streak has already advanced.
             if (
-                can_accept_input(is_ready=_pane_ready_now, account_pending=_account_pending_now)
+                can_accept_input(
+                    is_ready=_pane_ready_now,
+                    account_pending=_account_pending_now,
+                    prompt_blocked=bool(_reason),
+                )
                 and not _still_booting
             ):
                 ready_streak[0] += 1
