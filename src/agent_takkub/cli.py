@@ -1152,6 +1152,42 @@ def cmd_report(args: argparse.Namespace) -> dict:
         return {"ok": False, "msg": str(exc)}
 
 
+def cmd_ov(args: argparse.Namespace) -> dict:
+    """`takkub ov index|status` (#372) — OpenViking sidecar resource
+    indexing. Local-only: direct filesystem + HTTP I/O against
+    `core.context_sources.indexing`, no orchestrator IPC — same posture as
+    `cmd_report` above, works whether the cockpit is running or not."""
+    from .core.context_sources import indexing
+
+    project = getattr(args, "project", None) or _from_project()
+    if not project:
+        try:
+            project, _ = config.active_project()
+        except Exception:
+            project = None
+
+    if args.ov_action == "index":
+        result = indexing.index_vault(project)
+        if not result.ok:
+            return {"ok": False, "msg": f"index skipped: {result.reason}"}
+        return {
+            "ok": True,
+            "msg": (
+                f"indexed +{result.added} skipped={result.skipped} failed={result.failed} "
+                f"total={result.total}"
+            ),
+        }
+
+    status = indexing.index_status(project)
+    lines = [
+        f"enabled={status['enabled']} mode={status['mode']}",
+        f"health_ok={status['health_ok']} healthy={status['healthy']} "
+        f"version={status['version'] or '?'} known_version={status['known_version']}",
+        f"indexed_count={status['indexed_count']}",
+    ]
+    return {"ok": True, "msg": "\n".join(lines)}
+
+
 def cmd_harvest(args: argparse.Namespace) -> dict:
     """Scan artifact paths for a role that forgot `takkub done`, then optionally
     synthesize a done event via harvest-done IPC.
@@ -3187,6 +3223,22 @@ def main(argv: list[str] | None = None) -> int:
     sr_rotate.add_argument("name")
     sr_rotate.add_argument("--project", default=None)
     sr_rotate.set_defaults(func=cmd_report)
+
+    # #372 — optional OpenViking sidecar resource indexing.
+    sov = sub.add_parser("ov", help="OpenViking sidecar resource indexing (#372, off by default)")
+    sov_sub = sov.add_subparsers(dest="ov_action", required=True)
+    sov_index = sov_sub.add_parser(
+        "index", help="push allowlisted Obsidian docs into the sidecar's knowledge base"
+    )
+    sov_index.add_argument(
+        "--project", default=None, help="project namespace (default: active project)"
+    )
+    sov_index.set_defaults(func=cmd_ov)
+    sov_status = sov_sub.add_parser(
+        "status", help="show sidecar enabled/health/version/indexed counts"
+    )
+    sov_status.add_argument("--project", default=None)
+    sov_status.set_defaults(func=cmd_ov)
 
     sh = sub.add_parser(
         "harvest",

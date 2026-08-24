@@ -86,7 +86,7 @@ def build_context_for_assign(
         budget = context_builder.budget_tokens_for(
             context_window, file_read_supported=file_read_supported
         )
-        return context_builder.build_context(project, role, task_text, budget)
+        text = context_builder.build_context(project, role, task_text, budget)
     except Exception:
         _log.exception(
             "core.brain.facade.build_context_for_assign failed role=%r project=%r (fail-open)",
@@ -94,6 +94,27 @@ def build_context_for_assign(
             project,
         )
         return ""
+    # OpenViking hybrid merge (#372) — a SEPARATE fail-open boundary from
+    # the one above: a bug here must fall back to the perfectly good Brain/
+    # Conversation `text` already built, not discard it and return "".
+    # No-op (same `text` back) whenever OpenViking is disabled — the
+    # default — so this can never change the pre-#372 return value.
+    try:
+        text, trace = context_builder.merge_openviking_traced(
+            text, project=project, role=role, task_text=task_text, budget_tokens=budget
+        )
+        if trace is not None:
+            from agent_takkub.core.context_sources.trace_store import save_last_trace
+
+            save_last_trace(trace, project=project, role=role)
+    except Exception:
+        _log.exception(
+            "core.brain.facade.build_context_for_assign: openviking merge failed "
+            "role=%r project=%r (fail-open to the pre-merge context)",
+            role,
+            project,
+        )
+    return text
 
 
 def on_pane_done(
