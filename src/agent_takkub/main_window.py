@@ -864,6 +864,18 @@ class MainWindow(
             _log_event("remote_boot_failed")
         self._refresh_remote_chip()
 
+        # OpenViking managed-local (Wave 2, `12_PERFORMANCE.md`): always
+        # reaps a process orphaned by a crashed previous session, then only
+        # starts a NEW one (on a background thread — never blocks boot)
+        # when the user opted into both Enable and "Start automatically
+        # with Cockpit" in Settings. Never installs anything on its own.
+        try:
+            from .openviking import manager as _ov_manager
+
+            _ov_manager.boot_wiring()
+        except Exception:
+            _log_event("openviking_boot_wiring_failed")
+
         # Reflect orchestrator errors (eg. claude.exe not found) into the
         # status bar instead of swallowing them silently.
         self.orch.paneRequested.connect(self._track_pane_request)
@@ -1723,6 +1735,16 @@ class MainWindow(
         try:
             if self._remote is not None:
                 self._remote.stop()
+        except Exception:
+            pass
+        # `stop()` only ever kills a process THIS manager spawned
+        # (`owned=True`) — an externally-owned OpenViking is never touched
+        # (`05_PROCESS_LIFECYCLE.md`), so calling it unconditionally here is
+        # safe even when OpenViking was never enabled this session.
+        try:
+            from .openviking import manager as _ov_manager
+
+            _ov_manager.get_manager().stop()
         except Exception:
             pass
         self.cli.close()

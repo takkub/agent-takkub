@@ -6,9 +6,12 @@ network/subprocess ever runs — `port.is_healthy`/`installer.is_installed`/
 from __future__ import annotations
 
 import itertools
+import os
+import threading
 
 import pytest
 
+from agent_takkub import openviking_settings
 from agent_takkub.core.context_sources import openviking_adapter
 from agent_takkub.openviking import installer, manager, port
 
@@ -291,3 +294,126 @@ class TestRestart:
         mgr.restart()
 
         assert start_calls == []  # falls through to status(), never calls start() again
+
+
+class TestEnsureInstalledForce:
+    def test_force_flag_is_forwarded(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(installer, "ensure_installed", lambda **kw: calls.append(kw) or True)
+        mgr = manager.OpenVikingManager()
+
+        assert mgr.ensure_installed(force=True) is True
+        assert calls == [{"force": True}]
+
+    def test_default_force_is_false(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(installer, "ensure_installed", lambda **kw: calls.append(kw) or True)
+        mgr = manager.OpenVikingManager()
+
+        mgr.ensure_installed()
+
+        assert calls == [{"force": False}]
+
+
+class TestGetManager:
+    def test_returns_the_same_instance(self, monkeypatch):
+        monkeypatch.setattr(manager, "_instance", None)
+        a = manager.get_manager()
+        b = manager.get_manager()
+        assert a is b
+
+
+class TestBootWiring:
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self, monkeypatch):
+        monkeypatch.setattr(manager, "_instance", None)
+
+    def _fake_cfg(self, *, enabled: bool, start_automatically: bool):
+        return openviking_settings.OpenVikingUiConfig(
+            enabled=enabled, start_automatically=start_automatically
+        )
+
+    def test_always_reaps_orphan_process_regardless_of_enabled_state(self, monkeypatch):
+        reap_calls = []
+        monkeypatch.setattr(manager, "reap_orphan_process", lambda: reap_calls.append(1))
+        monkeypatch.setattr(
+            manager.openviking_settings,
+            "load",
+            lambda: self._fake_cfg(enabled=False, start_automatically=False),
+        )
+
+        manager.boot_wiring()
+
+        assert reap_calls == [1]
+
+    def test_disabled_never_starts_and_never_sets_env(self, monkeypatch):
+        monkeypatch.setattr(manager, "reap_orphan_process", lambda: None)
+        monkeypatch.setattr(
+            manager.openviking_settings,
+            "load",
+            lambda: self._fake_cfg(enabled=False, start_automatically=True),
+        )
+        start_calls = []
+        monkeypatch.setattr(manager, "get_manager", lambda: _FakeStartable(start_calls))
+
+        manager.boot_wiring()
+
+        assert start_calls == []
+        assert openviking_adapter._ENV_ENABLED not in os.environ
+
+    def test_enabled_without_auto_start_sets_env_but_never_starts(self, monkeypatch):
+        monkeypatch.setattr(manager, "reap_orphan_process", lambda: None)
+        monkeypatch.setattr(
+            manager.openviking_settings,
+            "load",
+            lambda: self._fake_cfg(enabled=True, start_automatically=False),
+        )
+        start_calls = []
+        monkeypatch.setattr(manager, "get_manager", lambda: _FakeStartable(start_calls))
+
+        manager.boot_wiring()
+
+        assert start_calls == []
+        assert os.environ[openviking_adapter._ENV_ENABLED] == "1"
+
+    def test_explicit_env_override_is_never_clobbered(self, monkeypatch):
+        monkeypatch.setattr(manager, "reap_orphan_process", lambda: None)
+        monkeypatch.setenv(openviking_adapter._ENV_ENABLED, "0")
+        monkeypatch.setattr(
+            manager.openviking_settings,
+            "load",
+            lambda: self._fake_cfg(enabled=True, start_automatically=True),
+        )
+        started = threading.Event()
+        monkeypatch.setattr(manager, "get_manager", lambda: _FakeStartable(event=started))
+
+        manager.boot_wiring()
+        started.wait(timeout=2)
+
+        assert os.environ[openviking_adapter._ENV_ENABLED] == "0"
+
+    def test_enabled_and_auto_start_starts_on_a_background_thread(self, monkeypatch):
+        monkeypatch.setattr(manager, "reap_orphan_process", lambda: None)
+        monkeypatch.setattr(
+            manager.openviking_settings,
+            "load",
+            lambda: self._fake_cfg(enabled=True, start_automatically=True),
+        )
+        started = threading.Event()
+        monkeypatch.setattr(manager, "get_manager", lambda: _FakeStartable(event=started))
+
+        manager.boot_wiring()
+
+        assert started.wait(timeout=2)
+
+
+class _FakeStartable:
+    def __init__(self, start_calls: list | None = None, event: threading.Event | None = None):
+        self._start_calls = start_calls
+        self._event = event
+
+    def start(self):
+        if self._start_calls is not None:
+            self._start_calls.append(1)
+        if self._event is not None:
+            self._event.set()

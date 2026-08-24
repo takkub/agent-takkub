@@ -35,6 +35,7 @@ presence, never to populate the field.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -50,6 +51,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QSpinBox,
     QVBoxLayout,
@@ -58,6 +60,9 @@ from PyQt6.QtWidgets import (
 
 from . import cockpit_theme, openviking_settings
 from . import pane_tools_policy as pt_policy
+from .openviking import installer as ov_installer
+from .openviking import manager as ov_manager
+from .openviking import process as ov_process
 
 _DESIGN_MCPS: tuple[tuple[str, str], ...] = (
     ("reference-21st", "21st.dev"),
@@ -241,6 +246,8 @@ class KnowledgeDesignSettingsMixin:
         banner.setWordWrap(True)
         lay.addWidget(banner)
 
+        lay.addWidget(self._build_openviking_managed_panel(view))
+
         status_panel = QWidget(view)
         status_panel.setObjectName("panel")
         sp_lay = QVBoxLayout(status_panel)
@@ -327,6 +334,217 @@ class KnowledgeDesignSettingsMixin:
 
         self._kd_ov_thread: _CallableThread | None = None
         return view
+
+    # ──────────────────────────────────────────────────────────
+    # OpenViking managed-runtime controls (Wave 2, `08_SETTINGS_UI.md`)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_openviking_managed_panel(self, view: QWidget) -> QWidget:
+        panel = QWidget(view)
+        panel.setObjectName("panel")
+        mp_lay = QVBoxLayout(panel)
+        mp_lay.setContentsMargins(14, 12, 14, 12)
+        mp_lay.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(self._build_card_header("OPENVIKING", "Managed Runtime", "", panel), 1)
+        refresh_btn = cockpit_theme.secondary_button("Refresh", panel)
+        refresh_btn.clicked.connect(self._on_kd_ov_managed_refresh_clicked)
+        header_row.addWidget(refresh_btn)
+        mp_lay.addLayout(header_row)
+
+        self._kd_ov_not_installed_lbl = QLabel(
+            "○ Not installed — Optional. Takkub works normally without it.", panel
+        )
+        self._kd_ov_not_installed_lbl.setObjectName("panelHint")
+        self._kd_ov_not_installed_lbl.setWordWrap(True)
+        mp_lay.addWidget(self._kd_ov_not_installed_lbl)
+
+        self._kd_ov_install_enable_btn = cockpit_theme.gold_button("Install & Enable", panel)
+        self._kd_ov_install_enable_btn.clicked.connect(self._on_kd_ov_install_enable_clicked)
+        mp_lay.addWidget(self._kd_ov_install_enable_btn)
+
+        self._kd_ov_managed_detail_host = QWidget(panel)
+        detail_form = QFormLayout(self._kd_ov_managed_detail_host)
+        detail_form.setContentsMargins(0, 0, 0, 0)
+        self._kd_ov_managed_status_lbl = QLabel("—", self._kd_ov_managed_detail_host)
+        detail_form.addRow("Status", self._kd_ov_managed_status_lbl)
+        self._kd_ov_managed_runtime_lbl = QLabel("—", self._kd_ov_managed_detail_host)
+        detail_form.addRow("Runtime", self._kd_ov_managed_runtime_lbl)
+        self._kd_ov_managed_address_lbl = QLabel("—", self._kd_ov_managed_detail_host)
+        detail_form.addRow("Address", self._kd_ov_managed_address_lbl)
+        self._kd_ov_managed_version_lbl = QLabel("—", self._kd_ov_managed_detail_host)
+        detail_form.addRow("Version", self._kd_ov_managed_version_lbl)
+        self._kd_ov_managed_install_lbl = QLabel("—", self._kd_ov_managed_detail_host)
+        detail_form.addRow("Installation", self._kd_ov_managed_install_lbl)
+        mp_lay.addWidget(self._kd_ov_managed_detail_host)
+
+        self._kd_ov_auto_start_check = QCheckBox("Start automatically with Cockpit", panel)
+        self._kd_ov_auto_start_check.setChecked(openviking_settings.load().start_automatically)
+        self._kd_ov_auto_start_check.toggled.connect(self._on_kd_ov_auto_start_toggled)
+        mp_lay.addWidget(self._kd_ov_auto_start_check)
+
+        manage_row = QHBoxLayout()
+        self._kd_ov_repair_btn = cockpit_theme.secondary_button("Repair", panel)
+        self._kd_ov_repair_btn.clicked.connect(self._on_kd_ov_repair_clicked)
+        manage_row.addWidget(self._kd_ov_repair_btn)
+        self._kd_ov_remove_btn = cockpit_theme.secondary_button("Remove", panel)
+        self._kd_ov_remove_btn.clicked.connect(self._on_kd_ov_remove_clicked)
+        manage_row.addWidget(self._kd_ov_remove_btn)
+        manage_row.addStretch(1)
+        mp_lay.addLayout(manage_row)
+
+        service_row = QHBoxLayout()
+        self._kd_ov_start_btn = cockpit_theme.secondary_button("Start", panel)
+        self._kd_ov_start_btn.clicked.connect(self._on_kd_ov_service_start_clicked)
+        service_row.addWidget(self._kd_ov_start_btn)
+        self._kd_ov_stop_btn = cockpit_theme.secondary_button("Stop", panel)
+        self._kd_ov_stop_btn.clicked.connect(self._on_kd_ov_service_stop_clicked)
+        service_row.addWidget(self._kd_ov_stop_btn)
+        self._kd_ov_restart_btn = cockpit_theme.secondary_button("Restart", panel)
+        self._kd_ov_restart_btn.clicked.connect(self._on_kd_ov_service_restart_clicked)
+        service_row.addWidget(self._kd_ov_restart_btn)
+        self._kd_ov_logs_btn = cockpit_theme.secondary_button("View Logs", panel)
+        self._kd_ov_logs_btn.clicked.connect(self._on_kd_ov_view_logs_clicked)
+        service_row.addWidget(self._kd_ov_logs_btn)
+        service_row.addStretch(1)
+        mp_lay.addLayout(service_row)
+
+        self._kd_ov_managed_status_msg = QLabel("", panel)
+        self._kd_ov_managed_status_msg.setObjectName("panelHint")
+        self._kd_ov_managed_status_msg.setWordWrap(True)
+        mp_lay.addWidget(self._kd_ov_managed_status_msg)
+
+        self._kd_ov_managed_thread: _CallableThread | None = None
+        self._kd_ov_apply_managed_visibility(installed=ov_installer.is_installed())
+        return panel
+
+    def _kd_ov_apply_managed_visibility(self, *, installed: bool) -> None:
+        self._kd_ov_not_installed_lbl.setVisible(not installed)
+        self._kd_ov_install_enable_btn.setVisible(not installed)
+        self._kd_ov_managed_detail_host.setVisible(installed)
+        self._kd_ov_auto_start_check.setVisible(installed)
+        for btn in (
+            self._kd_ov_repair_btn,
+            self._kd_ov_remove_btn,
+            self._kd_ov_start_btn,
+            self._kd_ov_stop_btn,
+            self._kd_ov_restart_btn,
+            self._kd_ov_logs_btn,
+        ):
+            btn.setVisible(installed)
+
+    def _on_kd_ov_managed_refresh_clicked(self) -> None:
+        self._kd_ov_managed_status_msg.setText("กำลังตรวจสอบ…")
+        thread = _CallableThread(lambda: ov_manager.get_manager().status(), self)
+        thread.resultReady.connect(self._on_kd_ov_managed_status_ready)
+        self._kd_ov_managed_thread = thread
+        thread.start()
+
+    def _on_kd_ov_managed_status_ready(self, result: object) -> None:
+        if isinstance(result, Exception):
+            self._kd_ov_managed_status_msg.setText(f"ตรวจสอบไม่สำเร็จ: {result}")
+            return
+        self._kd_ov_managed_status_msg.setText("")
+        status: ov_manager.ManagerStatus = result
+        self._kd_ov_apply_managed_visibility(installed=status.installed)
+        self._kd_ov_managed_status_lbl.setText("● Running" if status.healthy else "○ Stopped")
+        self._kd_ov_managed_runtime_lbl.setText("Managed by Takkub" if status.owned else "External")
+        self._kd_ov_managed_address_lbl.setText(status.url or "—")
+        self._kd_ov_managed_version_lbl.setText(_openviking_installed_version_text())
+        if not status.installed:
+            self._kd_ov_managed_install_lbl.setText("Not installed")
+        elif status.error:
+            self._kd_ov_managed_install_lbl.setText(f"Broken — {status.error}")
+        else:
+            self._kd_ov_managed_install_lbl.setText("Healthy")
+
+    def _on_kd_ov_install_enable_clicked(self) -> None:
+        from .openviking_setup_dialog import OpenVikingSetupDialog
+
+        dlg = OpenVikingSetupDialog(self, fonts=self._fonts)
+        dlg.exec()
+        self._kd_ov_apply_managed_visibility(installed=ov_installer.is_installed())
+        self._kd_ov_auto_start_check.setChecked(openviking_settings.load().start_automatically)
+        self._on_kd_ov_managed_refresh_clicked()
+
+    def _on_kd_ov_repair_clicked(self) -> None:
+        self._kd_ov_managed_status_msg.setText("กำลังซ่อมแซม…")
+        thread = _CallableThread(
+            lambda: ov_manager.get_manager().ensure_installed(force=True), self
+        )
+        thread.resultReady.connect(self._on_kd_ov_repair_ready)
+        self._kd_ov_managed_thread = thread
+        thread.start()
+
+    def _on_kd_ov_repair_ready(self, result: object) -> None:
+        if isinstance(result, Exception) or not result:
+            self._kd_ov_managed_status_msg.setText(f"ซ่อมแซมไม่สำเร็จ: {result}")
+            return
+        self._on_kd_ov_managed_refresh_clicked()
+
+    def _on_kd_ov_remove_clicked(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Remove OpenViking",
+            "หยุดและถอนการติดตั้ง OpenViking managed runtime?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        remove_data = (
+            QMessageBox.question(
+                self,
+                "Remove OpenViking",
+                "ลบ config และข้อมูลที่ index ไว้ด้วยหรือไม่? (ค่าเริ่มต้น: ไม่ลบ)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
+        def _do():
+            ov_manager.get_manager().stop()
+            ov_installer.uninstall(remove_data=remove_data)
+            return ov_manager.get_manager().status()
+
+        self._kd_ov_managed_status_msg.setText("กำลังถอนการติดตั้ง…")
+        thread = _CallableThread(_do, self)
+        thread.resultReady.connect(self._on_kd_ov_managed_status_ready)
+        self._kd_ov_managed_thread = thread
+        thread.start()
+
+    def _kd_ov_run_service_action(self, fn, label: str) -> None:
+        self._kd_ov_managed_status_msg.setText(f"{label}…")
+        thread = _CallableThread(fn, self)
+        thread.resultReady.connect(self._on_kd_ov_managed_status_ready)
+        self._kd_ov_managed_thread = thread
+        thread.start()
+
+    def _on_kd_ov_service_start_clicked(self) -> None:
+        self._kd_ov_run_service_action(lambda: ov_manager.get_manager().start(), "กำลังเริ่ม")
+
+    def _on_kd_ov_service_stop_clicked(self) -> None:
+        def _do():
+            ov_manager.get_manager().stop()
+            return ov_manager.get_manager().status()
+
+        self._kd_ov_run_service_action(_do, "กำลังหยุด")
+
+    def _on_kd_ov_service_restart_clicked(self) -> None:
+        self._kd_ov_run_service_action(lambda: ov_manager.get_manager().restart(), "กำลัง restart")
+
+    def _on_kd_ov_view_logs_clicked(self) -> None:
+        try:
+            text = ov_process.LOG_FILE.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = "(ยังไม่มี log)"
+        self._kd_ctx_show_text_dialog("OpenViking — Logs", text[-20000:])
+
+    def _on_kd_ov_auto_start_toggled(self, checked: bool) -> None:
+        cfg = openviking_settings.load()
+        openviking_settings.save(dataclasses.replace(cfg, start_automatically=checked))
 
     def _on_kd_ov_save_clicked(self) -> None:
         cfg = openviking_settings.OpenVikingUiConfig(
@@ -779,6 +997,11 @@ class KnowledgeDesignSettingsMixin:
 # module-level helpers — run entirely off the Qt thread inside
 # `_CallableThread`, so they must not touch any Qt object.
 # ──────────────────────────────────────────────────────────────
+
+
+def _openviking_installed_version_text() -> str:
+    version = ov_installer.read_state().get("version")
+    return str(version) if version else "—"
 
 
 def _collect_knowledge_status(project: str | None) -> dict[str, tuple[bool | None, str]]:

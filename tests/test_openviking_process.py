@@ -16,6 +16,8 @@ from agent_takkub.openviking import process
 @pytest.fixture(autouse=True)
 def _isolate_pid_file(monkeypatch, tmp_path):
     monkeypatch.setattr(process, "PID_FILE", tmp_path / "openviking_pid.json")
+    monkeypatch.setattr(process, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(process, "LOG_FILE", tmp_path / "logs" / "openviking.log")
 
 
 class _FakeProc:
@@ -111,6 +113,36 @@ class TestStartStop:
     def test_stop_on_never_started_process_is_a_no_op(self, tmp_path):
         p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)
         p.stop()  # must not raise
+
+    def test_start_writes_log_file(self, monkeypatch, tmp_path):
+        proc = _FakeProc(pid=1, lines=[b"hello\n", b"world\n"], returncode=None)
+        exe = tmp_path / "venv" / "bin" / "openviking-server"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        monkeypatch.setattr(process, "server_executable", lambda: exe)
+        monkeypatch.setattr(process, "_spawn", lambda argv: proc)
+        monkeypatch.setattr(process.OpenVikingProcess, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(process.time, "sleep", lambda s: None)
+
+        p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)
+        p.start()
+        p._reader.join(timeout=2)
+
+        text = process.LOG_FILE.read_text(encoding="utf-8")
+        assert "hello" in text
+        assert "world" in text
+
+    def test_rotate_log_if_large_clears_oversized_file(self):
+        process.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        process.LOG_FILE.write_bytes(b"x" * (process._LOG_ROTATE_BYTES + 1))
+        process.OpenVikingProcess._rotate_log_if_large()
+        assert not process.LOG_FILE.exists()
+
+    def test_rotate_log_if_large_keeps_small_file(self):
+        process.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        process.LOG_FILE.write_text("small", encoding="utf-8")
+        process.OpenVikingProcess._rotate_log_if_large()
+        assert process.LOG_FILE.exists()
 
     def test_is_alive_reflects_fresh_poll(self, tmp_path):
         p = process.OpenVikingProcess(tmp_path / "ov.conf", 1933)

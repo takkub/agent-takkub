@@ -40,6 +40,12 @@ _MAX_DRAINED_LINES = 20
 _STARTUP_CHECK_S = 0.4
 
 PID_FILE = OPENVIKING_HOME / "openviking_pid.json"
+# Settings UI "View Logs" (`08_SETTINGS_UI.md`) reads this — `_last_output`
+# alone doesn't survive a restart, so every drained line is also appended
+# here. Rotated (not appended-to-unbounded) each time `start()` runs.
+LOG_DIR = OPENVIKING_HOME / "logs"
+LOG_FILE = LOG_DIR / "openviking.log"
+_LOG_ROTATE_BYTES = 5 * 1024 * 1024
 
 
 class ProcessError(RuntimeError):
@@ -269,6 +275,7 @@ class OpenVikingProcess:
         if not exe.is_file():
             raise ProcessError(f"openviking-server executable not found: {exe}")
         argv = [str(exe), "--config", str(self._config_path), "--port", str(self._port)]
+        self._rotate_log_if_large()
         self._proc = _spawn(argv)
         self._own_job_if_windows()
         self._drain_output()
@@ -276,20 +283,49 @@ class OpenVikingProcess:
         if self._proc is not None:
             _write_pid_file(self._proc.pid, self._port)
 
+    @staticmethod
+    def _rotate_log_if_large() -> None:
+        """Best-effort — a failed rotation only means the log grows past
+        `_LOG_ROTATE_BYTES` once, never a reason to fail `start()`."""
+        try:
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > _LOG_ROTATE_BYTES:
+                LOG_FILE.unlink()
+        except OSError:
+            pass
+
     def _drain_output(self) -> None:
         """The child's stdout pipe must be drained continuously or
         `openviking-server`'s own log output fills the pipe buffer and
-        blocks it — only the last `_MAX_DRAINED_LINES` are kept, so a
-        same-process startup failure can still be reported with the
-        server's own error text."""
+        blocks it — only the last `_MAX_DRAINED_LINES` are kept in memory
+        for a same-process startup failure report, but every line is also
+        appended to `LOG_FILE` so "View Logs" has something after a
+        restart. A log-file write failure never stops the drain (best-effort,
+        stdout draining itself must keep going regardless)."""
 
         def _drain() -> None:
             proc = self._proc
             if proc is None or proc.stdout is None:
                 return
-            for line in proc.stdout:
-                self._last_output.append(line.decode("utf-8", errors="replace").rstrip())
-                del self._last_output[:-_MAX_DRAINED_LINES]
+            log_fh = None
+            try:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                log_fh = LOG_FILE.open("a", encoding="utf-8", errors="replace")
+            except OSError:
+                log_fh = None
+            try:
+                for line in proc.stdout:
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    self._last_output.append(text)
+                    del self._last_output[:-_MAX_DRAINED_LINES]
+                    if log_fh is not None:
+                        try:
+                            log_fh.write(text + "\n")
+                            log_fh.flush()
+                        except OSError:
+                            pass
+            finally:
+                if log_fh is not None:
+                    log_fh.close()
 
         self._reader = threading.Thread(target=_drain, daemon=True)
         self._reader.start()

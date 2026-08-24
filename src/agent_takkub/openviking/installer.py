@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import time
@@ -34,6 +35,10 @@ VENV_DIR = OPENVIKING_HOME / "venv"
 CONFIG_DIR = OPENVIKING_HOME / "config"
 CONFIG_FILE = CONFIG_DIR / "ov.conf"
 STATE_FILE = OPENVIKING_HOME / "state.json"
+# Setup Wizard points ov.conf's `storage.workspace` here (Wave 2,
+# `openviking_setup_dialog.py`) — an absolute path so the child process's
+# indexed data lands in the same place regardless of Cockpit's own cwd.
+DATA_DIR = OPENVIKING_HOME / "data"
 
 # Tested against the live upstream API today (docs/audit/2026-08-24-
 # openviking-managed-local-phase0.md) — no exact version pin frozen yet, kept
@@ -160,3 +165,17 @@ def ensure_installed(*, force: bool = False) -> bool:
         raise InstallerError(f"installer step timed out: {exc}") from exc
     _write_state(version)
     return True
+
+
+def uninstall(*, remove_data: bool = False) -> None:
+    """Settings UI "Remove" (`08_SETTINGS_UI.md`). Caller's responsibility to
+    stop any running managed process first — this module only owns paths,
+    never process lifecycle (see module docstring). Always removes the venv
+    + install-state marker; ov.conf and any indexed data under `DATA_DIR`
+    are only removed when *remove_data* is True (a separate confirmation in
+    the UI, defaulting to not-removed)."""
+    shutil.rmtree(VENV_DIR, ignore_errors=True)
+    STATE_FILE.unlink(missing_ok=True)
+    if remove_data:
+        shutil.rmtree(CONFIG_DIR, ignore_errors=True)
+        shutil.rmtree(DATA_DIR, ignore_errors=True)

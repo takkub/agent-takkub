@@ -33,6 +33,12 @@ class OpenVikingUiConfig:
     include_global: bool = True
     result_limit: int = 8
     timeout: float = 4.0
+    # Wave 2 managed-runtime controls (`08_SETTINGS_UI.md`). `enabled` only
+    # ever *supplies* `TAKKUB_OPENVIKING_ENABLED` when that env var is unset
+    # (`openviking.manager.boot_wiring`) — an explicit env var the user set
+    # themselves always wins, same rule `mode`'s own docstring above states.
+    enabled: bool = False
+    start_automatically: bool = False
 
 
 def path():
@@ -66,6 +72,8 @@ def load() -> OpenVikingUiConfig:
         include_global=bool(raw.get("include_global", defaults.include_global)),
         result_limit=result_limit,
         timeout=timeout,
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        start_automatically=bool(raw.get("start_automatically", defaults.start_automatically)),
     )
 
 
