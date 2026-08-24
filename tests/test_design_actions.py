@@ -18,6 +18,7 @@ from agent_takkub.design_actions import (
     DesignArtifactError,
     DesignArtifactRegistry,
     approve,
+    format_revision_feedback,
     publish_design_artifact,
     request_revision,
 )
@@ -225,6 +226,42 @@ class TestTransitions:
         approved = approve("demo", artifact.artifact_id, registry=registry)
 
         assert approved.status == "approved"
+
+
+# ── format_revision_feedback (#371 BUG-006 — structured feedback text) ──
+
+
+class TestFormatRevisionFeedback:
+    def test_includes_artifact_fields_and_feedback(self) -> None:
+        artifact = DesignArtifact(
+            artifact_id="a1",
+            project_id="demo",
+            title="Dashboard v2",
+            kind="html",
+            target="/abs/path/dashboard.html",
+        )
+
+        text = format_revision_feedback(artifact, "move the CTA up")
+
+        assert "a1" in text
+        assert "Dashboard v2" in text
+        assert "html" in text
+        assert "/abs/path/dashboard.html" in text
+        assert "move the CTA up" in text
+        assert "takkub design publish" in text
+
+    def test_missing_feedback_gets_a_placeholder_not_a_blank_line(self) -> None:
+        artifact = DesignArtifact(
+            artifact_id="a1",
+            project_id="demo",
+            title="X",
+            kind="url",
+            target="http://127.0.0.1:3000",
+        )
+
+        text = format_revision_feedback(artifact, "")
+
+        assert "feedback: (no feedback text provided)" in text
 
 
 # ── schema sanity ──────────────────────────────────────────────────────
