@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 313,
+  "module_count": 317,
   "modules": [
     {
       "module": "agent_takkub",
@@ -480,6 +480,7 @@
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.migration.engine",
         "agent_takkub.core.migration.steps_v1",
+        "agent_takkub.core.resilience.circuit_breaker",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.paths",
@@ -561,7 +562,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 98,
+      "fan_in": 99,
       "fan_out": 2
     },
     {
@@ -749,14 +750,15 @@
         "agent_takkub.core.brain.task_complexity",
         "agent_takkub.core.context_sources.base",
         "agent_takkub.core.context_sources.trace_store",
-        "agent_takkub.core.models.memory"
+        "agent_takkub.core.models.memory",
+        "agent_takkub.core.resilience.circuit_breaker"
       ],
       "imported_by": [
         "agent_takkub.orchestrator",
         "agent_takkub.settings_core_v2"
       ],
       "fan_in": 2,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.core.brain.flag",
@@ -918,13 +920,15 @@
     },
     {
       "module": "agent_takkub.core.capabilities.design_clients",
-      "imports": [],
+      "imports": [
+        "agent_takkub.core.resilience.circuit_breaker"
+      ],
       "imported_by": [
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 2,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.core.capabilities.design_integrations",
@@ -1766,6 +1770,47 @@
       "fan_out": 3
     },
     {
+      "module": "agent_takkub.core.resilience",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.core.resilience.circuit_breaker",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.capabilities.design_clients",
+        "agent_takkub.core.resilience.doctor_section"
+      ],
+      "fan_in": 3,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.resilience.doctor_section",
+      "imports": [
+        "agent_takkub.core.resilience.circuit_breaker",
+        "agent_takkub.core.resilience.policy"
+      ],
+      "imported_by": [
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.resilience.policy",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.resilience.doctor_section"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.core.routing",
       "imports": [
         "agent_takkub.core.routing.facade",
@@ -2344,6 +2389,7 @@
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.context_sources.doctor_section",
+        "agent_takkub.core.resilience.doctor_section",
         "agent_takkub.core.secrets.backends",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.layout",
@@ -2374,7 +2420,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 30
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.editor_service",

@@ -3292,6 +3292,19 @@ def check_context() -> list[Finding]:
     ]
 
 
+def check_resilience() -> list[Finding]:
+    """[resilience] — central fail-open policy labels + circuit breaker
+    states (v2-hardening D/F, `10_FAIL_OPEN_MATRIX.md`/`11_CIRCUIT_
+    BREAKER.md`). Same delegation shape as `check_context`: the real logic
+    lives in `core.resilience.doctor_section` (owned by that feature), this
+    just converts its plain rows into `Finding` objects."""
+    from .core.resilience.doctor_section import build_findings
+
+    return [
+        Finding(row.category, row.name, Status(row.status), row.detail) for row in build_findings()
+    ]
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
@@ -3318,6 +3331,7 @@ def run_all_checks() -> list[Finding]:
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),
         ("check_context", check_context),
+        ("check_resilience", check_resilience),
         ("check_version", check_version),
     )
     for check_name, check in checks:
