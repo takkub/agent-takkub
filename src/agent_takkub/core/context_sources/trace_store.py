@@ -39,13 +39,23 @@ def save_last_trace(trace, *, project: str | None, role: str) -> None:
             "role": role,
             "mode": trace.mode,
             "sources": [
-                {"name": s.name, "count": s.count, "unit": s.unit, "tokens": s.tokens}
+                {
+                    "name": s.name,
+                    "count": s.count,
+                    "unit": s.unit,
+                    "tokens": s.tokens,
+                    "scope_rejects": s.scope_rejects,
+                    "trust_rejects": s.trust_rejects,
+                }
                 for s in trace.sources
             ],
             "total_tokens": trace.total_tokens,
             "budget_tokens": trace.budget_tokens,
             "dedup_count": trace.dedup_count,
             "latency_ms": trace.latency_ms,
+            "scope_rejects": trace.scope_rejects,
+            "trust_rejects": trace.trust_rejects,
+            "rejected_examples": list(trace.rejected_examples),
         }
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")

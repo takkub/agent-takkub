@@ -88,10 +88,16 @@ def test_conversation_source_flag_off_returns_nothing(runtime):
 
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
+    import agent_takkub.config as config
+
     root = tmp_path / "vault"
     (root / "01-Projects" / "demo").mkdir(parents=True)
     (root / "99-Logs").mkdir(parents=True)
     monkeypatch.setenv("TAKKUB_VAULT_DIR", str(root))
+    # Sandboxes `project_identity.resolve_project_id`'s own registry read
+    # (issue #372 follow-up scope filtering) so these tests never touch a
+    # real user's DATA_HOME.
+    monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
     return root
 
 
@@ -135,6 +141,56 @@ def test_resource_source_zero_budget_returns_nothing(vault):
     )
 
 
+# ── ResourceSource: project scope isolation (issue #372 follow-up,
+#    `02_OPENVIKING_STRICT_SCOPE.md`) ─────────────────────────────────────
+
+
+def test_resource_source_project_a_cannot_retrieve_project_b(vault):
+    (vault / "01-Projects" / "other").mkdir(parents=True)
+    (vault / "01-Projects" / "other" / "secret.md").write_text(
+        "JWT session auth secret for project other", encoding="utf-8"
+    )
+    items = ResourceSource().retrieve(
+        "JWT session auth", project="demo", role="backend", budget_tokens=2000
+    )
+    assert items == []
+
+
+def test_resource_source_project_b_cannot_retrieve_project_a(vault):
+    (vault / "01-Projects" / "demo" / "auth.md").write_text(
+        "JWT session auth for project demo", encoding="utf-8"
+    )
+    items = ResourceSource().retrieve(
+        "JWT session auth", project="other", role="backend", budget_tokens=2000
+    )
+    assert items == []
+
+
+def test_resource_source_global_area_visible_to_both_projects(vault):
+    (vault / "02-Areas").mkdir(parents=True)
+    (vault / "02-Areas" / "conventions.md").write_text(
+        "JWT session auth is the house convention for every project", encoding="utf-8"
+    )
+    for proj in ("demo", "other"):
+        items = ResourceSource().retrieve(
+            "JWT session auth", project=proj, role="backend", budget_tokens=2000
+        )
+        assert len(items) == 1
+        assert items[0].provenance == "02-Areas/conventions.md"
+
+
+def test_resource_source_no_active_project_fails_closed_on_project_scoped_doc(vault):
+    """`project=None` means no scope to match against — only GLOBAL is
+    safe to return; a project-scoped doc must fail closed, not leak."""
+    (vault / "01-Projects" / "demo" / "auth.md").write_text(
+        "JWT session auth for project demo", encoding="utf-8"
+    )
+    items = ResourceSource().retrieve(
+        "JWT session auth", project=None, role="backend", budget_tokens=2000
+    )
+    assert items == []
+
+
 # ── OpenVikingSource: gated on adapter.enabled() ──────────────────────────
 
 
@@ -151,7 +207,8 @@ def test_openviking_source_disabled_returns_nothing_without_network(monkeypatch)
 
 
 def test_openviking_source_maps_hits_to_context_items(monkeypatch):
-    from agent_takkub.core.context_sources import openviking_adapter
+    from agent_takkub.core.context_sources import indexing, openviking_adapter
+    from agent_takkub.core.context_sources.base import GLOBAL_PROJECT_ID, WORKSPACE_ID
 
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
     monkeypatch.setattr(
@@ -163,11 +220,140 @@ def test_openviking_source_maps_hits_to_context_items(monkeypatch):
             )
         ],
     )
+    # issue #372 follow-up (`02_OPENVIKING_STRICT_SCOPE.md`): a hit only
+    # survives when Takkub's own local registry (never OpenViking's
+    # response) confirms its scope — this hit is registered as GLOBAL.
+    monkeypatch.setattr(
+        indexing,
+        "resource_metadata_for_uri",
+        lambda uri: {"project_id": GLOBAL_PROJECT_ID, "workspace_id": WORKSPACE_ID},
+    )
     items = OpenVikingSource().retrieve("q", project=None, role="backend", budget_tokens=2000)
     assert len(items) == 1
     assert items[0].source == "openviking"
     assert items[0].trust == "external"
     assert items[0].provenance == "viking://a"
+
+
+# ── OpenVikingSource: project scope isolation, end-to-end through the real
+#    local registry `indexing.index_vault` writes (issue #372 follow-up,
+#    `02_OPENVIKING_STRICT_SCOPE.md`) ──────────────────────────────────────
+
+
+def test_openviking_source_project_a_cannot_retrieve_project_b(runtime, monkeypatch, vault):
+    from agent_takkub.core.context_sources import indexing, openviking_adapter
+
+    monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    doc = vault / "01-Projects" / "demo" / "auth.md"
+    doc.write_text("JWT session auth for project demo", encoding="utf-8")
+    indexing.index_vault("demo")
+
+    monkeypatch.setattr(
+        openviking_adapter,
+        "search_resources",
+        lambda query, limit=8: [
+            openviking_adapter.SearchHit(
+                uri=str(doc),
+                text="JWT session auth for project demo",
+                score=0.9,
+                category="resource",
+            )
+        ],
+    )
+
+    demo_source = OpenVikingSource()
+    demo_items = demo_source.retrieve("auth", project="demo", role="backend", budget_tokens=2000)
+    assert len(demo_items) == 1
+
+    other_source = OpenVikingSource()
+    other_items = other_source.retrieve("auth", project="other", role="backend", budget_tokens=2000)
+    assert other_items == []
+    assert other_source.last_scope_rejects == 1
+
+
+def test_openviking_source_project_b_cannot_retrieve_project_a(runtime, monkeypatch, vault):
+    """Same as above, symmetric direction: index under a different
+    project name and confirm THAT project's own query still works while
+    'demo' cannot see it."""
+    from agent_takkub.core.context_sources import indexing, openviking_adapter
+
+    monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    (vault / "01-Projects" / "other").mkdir(parents=True)
+    doc = vault / "01-Projects" / "other" / "secret.md"
+    doc.write_text("secret notes for project other", encoding="utf-8")
+    indexing.index_vault("other")
+
+    monkeypatch.setattr(
+        openviking_adapter,
+        "search_resources",
+        lambda query, limit=8: [
+            openviking_adapter.SearchHit(
+                uri=str(doc), text="secret notes for project other", score=0.9, category="resource"
+            )
+        ],
+    )
+
+    other_source = OpenVikingSource()
+    assert (
+        len(other_source.retrieve("secret", project="other", role="backend", budget_tokens=2000))
+        == 1
+    )
+
+    demo_source = OpenVikingSource()
+    assert demo_source.retrieve("secret", project="demo", role="backend", budget_tokens=2000) == []
+    assert demo_source.last_scope_rejects == 1
+
+
+def test_openviking_source_global_visible_to_any_project(runtime, monkeypatch, vault):
+    from agent_takkub.core.context_sources import indexing, openviking_adapter
+
+    monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
+    monkeypatch.setattr(openviking_adapter, "add_resource", lambda path, **kw: True)
+    (vault / "02-Areas").mkdir(parents=True)
+    doc = vault / "02-Areas" / "conventions.md"
+    doc.write_text("house convention for every project", encoding="utf-8")
+    indexing.index_vault(None)
+
+    monkeypatch.setattr(
+        openviking_adapter,
+        "search_resources",
+        lambda query, limit=8: [
+            openviking_adapter.SearchHit(
+                uri=str(doc),
+                text="house convention for every project",
+                score=0.7,
+                category="resource",
+            )
+        ],
+    )
+    for proj in ("demo", "other"):
+        items = OpenVikingSource().retrieve(
+            "convention", project=proj, role="backend", budget_tokens=2000
+        )
+        assert len(items) == 1
+
+
+def test_openviking_source_unknown_resource_fails_closed(runtime, monkeypatch):
+    """A hit for a `uri` never indexed by this install (no registry entry
+    at all) has no Takkub-known scope — must reject, not treat as global."""
+    from agent_takkub.core.context_sources import openviking_adapter
+
+    monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
+    monkeypatch.setattr(
+        openviking_adapter,
+        "search_resources",
+        lambda query, limit=8: [
+            openviking_adapter.SearchHit(
+                uri="viking://never-indexed", text="mystery", score=0.5, category="resource"
+            )
+        ],
+    )
+    source = OpenVikingSource()
+    items = source.retrieve("mystery", project="demo", role="backend", budget_tokens=2000)
+    assert items == []
+    assert source.last_scope_rejects == 1
 
 
 # ── context_builder.merge_openviking_traced: the actual hybrid merge ─────
@@ -300,6 +486,30 @@ def test_merge_budget_trims_lowest_priority_first(runtime, monkeypatch):
     assert "filler word" not in text
 
 
+def test_merge_layer_c_rejects_wrong_project_and_records_reason(runtime, monkeypatch):
+    """Layer c (`02_OPENVIKING_STRICT_SCOPE.md`) is a real, independent
+    re-check: even when a source's own layer-b gate is bypassed (here the
+    whole `retrieve()` is replaced), a wrongly-scoped item never reaches
+    the injected text, and the trace records why."""
+    monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
+    monkeypatch.setenv("TAKKUB_OPENVIKING_MODE", "read")
+    from agent_takkub.core.context_sources.openviking_source import OpenVikingSource as _OVS
+
+    monkeypatch.setattr(
+        _OVS,
+        "retrieve",
+        lambda self, query, *, project, role, budget_tokens: [
+            _fake_item("wrong project content", project_id="other-project")
+        ],
+    )
+    text, trace = context_builder.merge_openviking_traced(
+        "", project="proj", role="backend", task_text="q", budget_tokens=2000
+    )
+    assert "wrong project content" not in text
+    assert trace.scope_rejects >= 1
+    assert any("project scope mismatch" in ex for ex in trace.rejected_examples)
+
+
 def test_merge_openviking_fail_open_on_exception(runtime, monkeypatch):
     monkeypatch.setenv("TAKKUB_OPENVIKING_ENABLED", "1")
     from agent_takkub.core.context_sources.openviking_source import OpenVikingSource as _OVS
@@ -316,8 +526,8 @@ def test_merge_openviking_fail_open_on_exception(runtime, monkeypatch):
     # confirms facade.build_context_for_assign is what must catch this.
 
 
-def _fake_item(text: str, *, trust: str = "external"):
-    from agent_takkub.core.context_sources.base import ContextItem
+def _fake_item(text: str, *, trust: str = "external", project_id: str | None = "proj"):
+    from agent_takkub.core.context_sources.base import WORKSPACE_ID, ContextItem
 
     return ContextItem(
         text=text,
@@ -326,6 +536,8 @@ def _fake_item(text: str, *, trust: str = "external"):
         provenance="p",
         trust=trust,
         score=0.5,
+        project_id=project_id,
+        workspace_id=WORKSPACE_ID,
     )
 
 

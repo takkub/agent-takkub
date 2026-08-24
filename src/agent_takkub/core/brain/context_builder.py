@@ -265,13 +265,26 @@ class SourceTrace:
     count: int
     unit: str
     tokens: int
+    # `08_OBSERVABILITY_FINAL.md` — per-source reject counts from that
+    # source's own layer-b scope/trust gate (`base.apply_scope_and_trust`
+    # called inside `openviking_source.py`/`resource_source.py`).
+    scope_rejects: int = 0
+    trust_rejects: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ContextTrace:
     """Doctor/debug-facing summary of one `merge_openviking_traced` call —
     shape matches `15_CONTEXT_SOURCE_ARCHITECTURE.md`'s suggested trace
-    format (`.render()`)."""
+    format (`.render()`).
+
+    `scope_rejects`/`trust_rejects` (issue #372 follow-up, `02_OPENVIKING_
+    STRICT_SCOPE.md`) are the GRAND total across every layer — each
+    source's own layer-b gate plus this function's own layer-c re-check —
+    never just one of the two, so a bug in either layer still shows up
+    here. `rejected_examples` are a handful of `apply_scope_and_trust`'s
+    own "REJECTED ... reason=..." lines from the layer-c pass, for
+    doctor/debug (`08_OBSERVABILITY_FINAL.md`)."""
 
     mode: str
     sources: tuple[SourceTrace, ...]
@@ -279,12 +292,21 @@ class ContextTrace:
     budget_tokens: int
     dedup_count: int = 0
     latency_ms: float = 0.0
+    scope_rejects: int = 0
+    trust_rejects: int = 0
+    rejected_examples: tuple[str, ...] = ()
 
     def render(self) -> str:
         lines = ["Context:"]
         for s in self.sources:
-            lines.append(f"- {s.name}: {s.count} {s.unit} / {s.tokens} tokens")
+            line = f"- {s.name}: {s.count} {s.unit} / {s.tokens} tokens"
+            if s.scope_rejects or s.trust_rejects:
+                line += f" (rejected: scope={s.scope_rejects} trust={s.trust_rejects})"
+            lines.append(line)
         lines.append(f"Total: {self.total_tokens} / budget {self.budget_tokens}")
+        if self.scope_rejects or self.trust_rejects:
+            lines.append(f"Rejected: scope={self.scope_rejects} trust={self.trust_rejects}")
+            lines.extend(self.rejected_examples)
         return "\n".join(lines)
 
 
@@ -334,9 +356,13 @@ def merge_openviking_traced(
     import time as _time
 
     from agent_takkub.core.context_sources import openviking_adapter
-    from agent_takkub.core.context_sources.base import collapse_near_duplicates
+    from agent_takkub.core.context_sources.base import (
+        apply_scope_and_trust,
+        collapse_near_duplicates,
+    )
     from agent_takkub.core.context_sources.openviking_source import OpenVikingSource
     from agent_takkub.core.context_sources.resource_source import ResourceSource
+    from agent_takkub.project_identity import resolve_project_id
 
     if not openviking_adapter.enabled():
         return base_text, None
@@ -346,16 +372,29 @@ def merge_openviking_traced(
     base_tokens = _token_cost(base_text) if base_text else 0
     remaining = max(0, budget_tokens - base_tokens)
 
-    ov_items = OpenVikingSource().retrieve(
-        task_text, project=project, role=role, budget_tokens=remaining
-    )
+    try:
+        allowed_project_id = resolve_project_id(project) if project else None
+    except ValueError:
+        allowed_project_id = None
+
+    ov_source = OpenVikingSource()
+    ov_items = ov_source.retrieve(task_text, project=project, role=role, budget_tokens=remaining)
+    resource_source = ResourceSource()
     resource_items = (
-        ResourceSource().retrieve(task_text, project=project, role=role, budget_tokens=remaining)
+        resource_source.retrieve(task_text, project=project, role=role, budget_tokens=remaining)
         if ov_mode == "hybrid"
         else []
     )
 
-    pool, dedup_count = collapse_near_duplicates(resource_items + ov_items)
+    # Layer c (`02_OPENVIKING_STRICT_SCOPE.md` defense in depth): re-check
+    # the merged pool right before injection, independent of whatever each
+    # source's own layer-b gate already did — a bug in one layer must not
+    # be the only thing standing between a pane and another project's
+    # content.
+    pool, final_rejects = apply_scope_and_trust(
+        resource_items + ov_items, allowed_project_id=allowed_project_id
+    )
+    pool, dedup_count = collapse_near_duplicates(pool)
     pool.sort(key=lambda item: (_trust_weight(item.trust), item.score), reverse=True)
 
     injected = []
@@ -367,12 +406,24 @@ def merge_openviking_traced(
         used += item.tokens
 
     sources = [
-        SourceTrace("OpenViking", len(ov_items), "resources", sum(i.tokens for i in ov_items))
+        SourceTrace(
+            "OpenViking",
+            len(ov_items),
+            "resources",
+            sum(i.tokens for i in ov_items),
+            scope_rejects=ov_source.last_scope_rejects,
+            trust_rejects=ov_source.last_trust_rejects,
+        )
     ]
     if ov_mode == "hybrid":
         sources.append(
             SourceTrace(
-                "Resource", len(resource_items), "docs", sum(i.tokens for i in resource_items)
+                "Resource",
+                len(resource_items),
+                "docs",
+                sum(i.tokens for i in resource_items),
+                scope_rejects=resource_source.last_scope_rejects,
+                trust_rejects=resource_source.last_trust_rejects,
             )
         )
 
@@ -383,6 +434,13 @@ def merge_openviking_traced(
         budget_tokens=budget_tokens,
         dedup_count=dedup_count,
         latency_ms=(_time.monotonic() - started) * 1000,
+        scope_rejects=(
+            final_rejects.scope + ov_source.last_scope_rejects + resource_source.last_scope_rejects
+        ),
+        trust_rejects=(
+            final_rejects.trust + ov_source.last_trust_rejects + resource_source.last_trust_rejects
+        ),
+        rejected_examples=final_rejects.examples,
     )
 
     # shadow: retrieve + trace, never inject (`14_OPENVIKING_INTEGRATION.md`

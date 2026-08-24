@@ -55,7 +55,8 @@ def build_findings(project: str | None = None) -> list[FindingRow]:
                     "knowledge",
                     "openviking",
                     "warn",
-                    f"mode={status['mode']} sidecar unreachable at {adapter.base_url()}",
+                    f"mode={status['mode']} sidecar unreachable at {adapter.base_url()} "
+                    f"error={status.get('health_error') or '?'}",
                 )
             )
         else:
@@ -63,7 +64,10 @@ def build_findings(project: str | None = None) -> list[FindingRow]:
             detail = (
                 f"mode={status['mode']} healthy={status['healthy']} "
                 f"version={status['version'] or '?'} known_version={status['known_version']} "
-                f"indexed={status['indexed_count']}"
+                f"indexed={status['indexed_count']} "
+                f"strict_project_scope={status['strict_project_scope']} "
+                f"last_sync={status.get('last_sync') or 'never'} "
+                f"latency={status['health_latency_ms']:.0f}ms"
             )
             findings.append(FindingRow("knowledge", "openviking", level, detail))
 
@@ -74,7 +78,13 @@ def build_findings(project: str | None = None) -> list[FindingRow]:
         )
     else:
         src_summary = ", ".join(
-            f"{s['name']}={s['count']}/{s['tokens']}t" for s in trace.get("sources", [])
+            f"{s['name']}={s['count']}/{s['tokens']}t"
+            + (
+                f" rej(scope={s.get('scope_rejects', 0)},trust={s.get('trust_rejects', 0)})"
+                if s.get("scope_rejects") or s.get("trust_rejects")
+                else ""
+            )
+            for s in trace.get("sources", [])
         )
         findings.append(
             FindingRow(
@@ -83,6 +93,8 @@ def build_findings(project: str | None = None) -> list[FindingRow]:
                 "info",
                 f"mode={trace.get('mode')} {src_summary} total={trace.get('total_tokens')}/"
                 f"{trace.get('budget_tokens')} dedup={trace.get('dedup_count')} "
+                f"scope_rejects={trace.get('scope_rejects', 0)} "
+                f"trust_rejects={trace.get('trust_rejects', 0)} "
                 f"latency={trace.get('latency_ms', 0):.0f}ms",
             )
         )

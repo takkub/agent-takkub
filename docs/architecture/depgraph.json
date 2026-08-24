@@ -719,7 +719,8 @@
         "agent_takkub.core.conversation.flag",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.conversation.summary",
-        "agent_takkub.core.models.memory"
+        "agent_takkub.core.models.memory",
+        "agent_takkub.project_identity"
       ],
       "imported_by": [
         "agent_takkub.core.brain.facade",
@@ -727,7 +728,7 @@
         "agent_takkub.core.context_sources.conversation_source"
       ],
       "fan_in": 3,
-      "fan_out": 11
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.core.brain.facade",
@@ -995,10 +996,11 @@
         "agent_takkub.core.context_sources",
         "agent_takkub.core.context_sources.brain_source",
         "agent_takkub.core.context_sources.conversation_source",
+        "agent_takkub.core.context_sources.indexing",
         "agent_takkub.core.context_sources.openviking_source",
         "agent_takkub.core.context_sources.resource_source"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 1
     },
     {
@@ -1038,17 +1040,20 @@
       "module": "agent_takkub.core.context_sources.indexing",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.core.context_sources.base",
         "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.obsidian_boundary",
         "agent_takkub.obsidian_metadata",
         "agent_takkub.vault_mirror"
       ],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.core.context_sources.doctor_section"
+        "agent_takkub.core.context_sources.doctor_section",
+        "agent_takkub.core.context_sources.openviking_source"
       ],
-      "fan_in": 2,
-      "fan_out": 5
+      "fan_in": 3,
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.context_sources.openviking_adapter",
@@ -1069,13 +1074,15 @@
       "module": "agent_takkub.core.context_sources.openviking_source",
       "imports": [
         "agent_takkub.core.context_sources.base",
-        "agent_takkub.core.context_sources.openviking_adapter"
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.project_identity"
       ],
       "imported_by": [
         "agent_takkub.core.brain.context_builder"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.core.context_sources.resource_source",
@@ -1084,13 +1091,15 @@
         "agent_takkub.core.context_sources.base",
         "agent_takkub.obsidian_boundary",
         "agent_takkub.obsidian_metadata",
+        "agent_takkub.project_identity",
         "agent_takkub.vault_mirror"
       ],
       "imported_by": [
-        "agent_takkub.core.brain.context_builder"
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources.indexing"
       ],
-      "fan_in": 1,
-      "fan_out": 5
+      "fan_in": 2,
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.context_sources.trace_store",
@@ -3249,10 +3258,13 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources.openviking_source",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.obsidian_backfill",
         "agent_takkub.vault_mirror"
       ],
-      "fan_in": 2,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
