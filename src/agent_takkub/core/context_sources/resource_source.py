@@ -25,6 +25,7 @@ from .base import (
     ContextItem,
     apply_scope_and_trust,
     estimate_tokens,
+    wrap_untrusted_reference,
 )
 
 _log = logging.getLogger(__name__)
@@ -142,12 +143,19 @@ class ResourceSource:
         items: list[ContextItem] = []
         for meta, score, text in ranked:
             snippet = text[:_SNIPPET_CHARS]
+            provenance = meta.get("path", "?")
+            # v2-hardening H: this snippet is retrieved document content, not
+            # this cockpit's own state — frame it as untrusted data before it
+            # can reach any pane prompt, so an "ignore previous instructions"
+            # line planted inside a vault doc is never mistaken for a real
+            # instruction (`14_SECURITY_RETRIEVAL.md`).
+            wrapped = wrap_untrusted_reference(snippet, provenance)
             items.append(
                 ContextItem(
-                    text=snippet,
-                    tokens=estimate_tokens(snippet),
+                    text=wrapped,
+                    tokens=estimate_tokens(wrapped),
                     source=self.name,
-                    provenance=meta.get("path", "?"),
+                    provenance=provenance,
                     trust=TRUST_CURATED,
                     score=score,
                     project_id=meta.get("project_id"),
