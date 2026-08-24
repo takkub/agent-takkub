@@ -1,6 +1,6 @@
-"""Best-effort persistence of the most recent Context Builder / OpenViking
-merge trace (`19_DIAGNOSTICS_OBSERVABILITY.md`'s "Context: last context
-source token counts, retrieval latency, dedup count"). `doctor.py` is a
+"""Best-effort persistence of the most recent Context Builder trace (`19_
+DIAGNOSTICS_OBSERVABILITY.md`'s "Context: last context source token counts,
+retrieval latency, dedup count"). `doctor.py` is a
 leaf module with no live-cockpit round-trip for this — a plain `takkub
 doctor` runs as its own short-lived process — so the only way it can see
 "what did the last context build look like" is a small file on disk, not
@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 def _trace_path():
     from agent_takkub import config
 
-    return config.DATA_HOME / "openviking" / "last_context_trace.json"
+    return config.DATA_HOME / "context" / "last_context_trace.json"
 
 
 def save_last_trace(

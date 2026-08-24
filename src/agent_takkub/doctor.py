@@ -3274,57 +3274,22 @@ def check_obsidian() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
-# [knowledge] / [context]
+# [context]
 # ---------------------------------------------------------------------------
 
 
-def check_knowledge_context() -> list[Finding]:
-    """[knowledge]/[context] — OpenViking sidecar enabled/health/version/
-    indexed counts + the last Context Builder merge trace (issue #372, `19_
-    DIAGNOSTICS_OBSERVABILITY.md`). Cheap by default: OpenViking is disabled
-    out of the box, and the check below is a single SKIP finding in that
-    case — no network call. All the actual logic lives in
-    `core.context_sources.doctor_section` (owned by that feature, not this
-    file) — see its module docstring for why it returns plain rows instead
-    of `Finding` directly (`core-is-bottom-layer`: `core.context_sources`
-    must never import this module, which transitively pulls in PyQt6)."""
+def check_context() -> list[Finding]:
+    """[context] — the last Context Builder merge trace (`19_DIAGNOSTICS_
+    OBSERVABILITY.md`). All the actual logic lives in `core.context_sources.
+    doctor_section` (owned by that feature, not this file) — see its module
+    docstring for why it returns plain rows instead of `Finding` directly
+    (`core-is-bottom-layer`: `core.context_sources` must never import this
+    module, which transitively pulls in PyQt6)."""
     from .core.context_sources.doctor_section import build_findings
 
     return [
         Finding(row.category, row.name, Status(row.status), row.detail) for row in build_findings()
     ]
-
-
-def check_openviking_managed() -> list[Finding]:
-    """[openviking] — managed local runtime install/process status (Wave 3,
-    `10_CLI.md`/`11_UPDATE_REPAIR.md`). Distinct from `check_knowledge_
-    context` above (that one reports #372's index/context pipeline for
-    whatever `TAKKUB_OPENVIKING_URL` currently resolves to, managed or not)
-    — this one specifically reports on the LOCAL managed install/process
-    this cockpit itself owns, via `openviking.manager.managed_runtime_
-    report` — the same helper `takkub ov managed status` uses, so the two
-    can never disagree. Cheap: only touches the network when the sidecar is
-    enabled (same posture `check_knowledge_context` already documents)."""
-    from .openviking.manager import managed_runtime_report
-
-    report = managed_runtime_report()
-    if not report.installed:
-        return [Finding("openviking", "managed-runtime", Status.SKIP, "not installed")]
-
-    detail = (
-        f"version={report.version or '?'} running={report.running} "
-        f"owned={report.owned} healthy={report.healthy} address={report.address or '-'}"
-    )
-    if report.error:
-        detail += f" error={report.error}"
-
-    if report.healthy:
-        status = Status.OK
-    elif report.running:
-        status = Status.WARN  # process alive but failing its own /health check
-    else:
-        status = Status.INFO  # installed, not currently running
-    return [Finding("openviking", "managed-runtime", status, detail)]
 
 
 def run_all_checks() -> list[Finding]:
@@ -3352,8 +3317,7 @@ def run_all_checks() -> list[Finding]:
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),
-        ("check_knowledge_context", check_knowledge_context),
-        ("check_openviking_managed", check_openviking_managed),
+        ("check_context", check_context),
         ("check_version", check_version),
     )
     for check_name, check in checks:

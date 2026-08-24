@@ -16,5 +16,5 @@ Takkub Cockpit
 Suggested:
 `src/agent_takkub/openviking/{manager,installer,process,config,diagnostics,settings_dialog}.py`
 
-Keep `src/agent_takkub/core/context_sources/openviking_adapter.py` as the HTTP client.
+Keep the HTTP-client module (openviking_adapter, removed in 1.6.0) as the HTTP client.
 Core must not import PyQt/UI manager.

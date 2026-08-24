@@ -87,25 +87,22 @@ def build_context_for_assign(
     own comment in orchestrator.py); this function itself is plain sync so
     it stays trivially unit-testable without a thread pool in the loop.
 
-    Closeout #C (`context_gate.py`) sits in front of the original assembly
-    below: `TAKKUB_CONTEXT_GATE=0` skips it entirely and reproduces the
-    exact pre-gate path byte-for-byte (unclamped budget, OpenViking/
-    Resource always attempted whenever the sidecar itself is on) — `flags`
-    (an explicit `{"context": "small"|"medium"|"large"}` override) is only
-    ever consulted when the gate is on.
+    Closeout #C (`context_gate.py`) sits in front of the assembly below:
+    `TAKKUB_CONTEXT_GATE=0` skips it entirely and reproduces the exact
+    pre-gate path byte-for-byte (unclamped budget) — `flags` (an explicit
+    `{"context": "small"|"medium"|"large"}` override) is only ever
+    consulted when the gate is on.
     """
     if not v2_context_enabled():
         return ""
     gate_on = context_gate.gate_enabled()
     task_size: context_gate.TaskSize | None = None
-    policy: context_gate.SourcePolicy | None = None
     try:
         base_budget = context_builder.budget_tokens_for(
             context_window, file_read_supported=file_read_supported
         )
         if gate_on:
             task_size = context_gate.classify_task_size(task_text, role, flags)
-            policy = context_gate.policy_for(task_size)
             budget = context_gate.gate_budget(task_size, base_budget)
         else:
             budget = base_budget
@@ -117,78 +114,35 @@ def build_context_for_assign(
             project,
         )
         return ""
-    # OpenViking hybrid merge (#372) — a SEPARATE fail-open boundary from
-    # the one above: a bug here must fall back to the perfectly good Brain/
-    # Conversation `text` already built, not discard it and return "".
-    # No-op (same `text` back) whenever OpenViking is disabled — the
-    # default — so this can never change the pre-#372 return value. The
-    # gate additionally skips this call outright for a `policy` that
-    # disallows reference sources (small tasks) — cheaper than calling in
-    # and discarding the result, and keeps `OpenVikingSource`/
-    # `ResourceSource` off a small task's critical path entirely.
-    trace = None
-    if policy is None or policy.allow_reference_sources:
-        try:
-            text, trace = context_builder.merge_openviking_traced(
-                text, project=project, role=role, task_text=task_text, budget_tokens=budget
-            )
-        except Exception:
-            _log.exception(
-                "core.brain.facade.build_context_for_assign: openviking merge failed "
-                "role=%r project=%r (fail-open to the pre-merge context)",
-                role,
-                project,
-            )
     if gate_on:
-        _save_gate_trace(
-            text, trace, task_size=task_size, budget=budget, project=project, role=role
-        )
-    elif trace is not None:
-        from agent_takkub.core.context_sources.trace_store import save_last_trace
-
-        save_last_trace(trace, project=project, role=role)
+        _save_gate_trace(text, task_size=task_size, budget=budget, project=project, role=role)
     return text
 
 
 def _save_gate_trace(
     text: str,
-    ov_trace,
     *,
     task_size: context_gate.TaskSize | None,
     budget: int,
     project: str | None,
     role: str,
 ) -> None:
-    """Persist a Context Gate trace unconditionally when the gate is on —
-    unlike the pre-gate OpenViking-only trace (still the only thing saved
-    when the gate is off, see the caller), so `doctor`'s `[context]` section
-    sees the task-size decision and total tokens even for a small task that
-    skipped OpenViking/Resource entirely. Best-effort: never raises into
-    the caller, same contract `trace_store.save_last_trace` already has."""
+    """Persist a Context Gate trace whenever the gate is on, so `doctor`'s
+    `[context]` section sees the task-size decision and total tokens for
+    every gated build. Best-effort: never raises into the caller, same
+    contract `trace_store.save_last_trace` already has."""
     try:
         from agent_takkub.core.context_sources.base import estimate_tokens
         from agent_takkub.core.context_sources.trace_store import save_last_trace
 
-        if ov_trace is not None:
-            sources = ov_trace.sources
-            total_tokens = ov_trace.total_tokens
-            dedup_count = ov_trace.dedup_count
-            latency_ms = ov_trace.latency_ms
-            mode = f"gated:{task_size}:{ov_trace.mode}"
-        else:
-            sources = ()
-            total_tokens = estimate_tokens(text) if text else 0
-            dedup_count = 0
-            latency_ms = 0.0
-            mode = f"gated:{task_size}"
-
+        total_tokens = estimate_tokens(text) if text else 0
         trace = context_builder.ContextTrace(
-            mode=mode,
-            sources=tuple(sources),
+            mode=f"gated:{task_size}",
+            sources=(),
             total_tokens=total_tokens,
             budget_tokens=budget,
-            dedup_count=dedup_count,
-            latency_ms=latency_ms,
+            dedup_count=0,
+            latency_ms=0.0,
         )
         inefficient = task_size == "small" and total_tokens > _INEFFICIENT_SMALL_TOKENS
         save_last_trace(

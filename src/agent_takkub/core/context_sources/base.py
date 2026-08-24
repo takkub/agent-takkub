@@ -1,8 +1,8 @@
 """Context Source vocabulary (issue #372, GAP-013/017/018) — `15_CONTEXT_
 SOURCE_ARCHITECTURE.md`. One shared shape every source (`brain_source`,
-`conversation_source`, `resource_source`, `openviking_source`) returns, so
-`core.brain.context_builder`'s merge step never has to know which source a
-result came from beyond the fields on `ContextItem` itself.
+`conversation_source`, `resource_source`) returns, so `core.brain.
+context_builder` never has to know which source a result came from beyond
+the fields on `ContextItem` itself.
 
 Pure/stdlib-only — no filesystem I/O, no config import beyond what a single
 helper lazily reaches for (`bm25_search.tokenize`, itself pure) — safe for
@@ -16,8 +16,8 @@ from typing import Protocol, runtime_checkable
 
 # Same rough "1 token ~= 4 chars" estimate `core.brain.context_builder`
 # already documents and uses for its own budget trim — kept in sync
-# deliberately so a mixed Brain+OpenViking budget adds up consistently
-# rather than each source using its own conversion.
+# deliberately so a mixed-source budget adds up consistently rather than
+# each source using its own conversion.
 _CHARS_PER_TOKEN = 4
 
 
@@ -26,10 +26,9 @@ def estimate_tokens(text: str) -> int:
 
 
 # `02_OPENVIKING_STRICT_SCOPE.md` — the GLOBAL sentinel matches the one
-# `vault_mirror._MOC_PROJECT_ID` already uses for cross-project MOC pages,
-# and `indexing.py`'s own pre-existing `project or "_global"` state-file
-# fallback; kept here as the single canonical spelling every context
-# source can import instead of re-inventing the string. `WORKSPACE_ID` is
+# `vault_mirror._MOC_PROJECT_ID` already uses for cross-project MOC pages;
+# kept here as the single canonical spelling every context source can
+# import instead of re-inventing the string. `WORKSPACE_ID` is
 # the single-tenant placeholder the V2 schema reserves a field for
 # (`V2_IMPLEMENTATION_PLAN.md`: "ทุก persistent model มี user_id/
 # workspace_id/project_id ... implement เป็น single-user") — every
@@ -39,10 +38,11 @@ GLOBAL_PROJECT_ID = "_global"
 WORKSPACE_ID = "local"
 
 # Trust vocabulary every writer in this codebase already uses
-# (`obsidian_metadata.TRUST_*` plus `openviking_source`'s own "external")
-# — kept as plain strings here (not an import of that module, which is
-# not stdlib-pure) so `apply_scope_and_trust` can fail closed on a value
-# outside this set without pulling in a heavier dependency.
+# (`obsidian_metadata.TRUST_*`, plus "external" reserved for any future
+# non-local/reference source) — kept as plain strings here (not an import
+# of that module, which is not stdlib-pure) so `apply_scope_and_trust` can
+# fail closed on a value outside this set without pulling in a heavier
+# dependency.
 _VALID_TRUST = frozenset({"auto", "distilled", "curated", "external"})
 
 _MAX_REJECT_EXAMPLES = 3
@@ -53,18 +53,18 @@ class ContextItem:
     """One retrievable unit of context, already-scored and ready to be
     merged/budgeted by the Context Builder. `provenance` must always be
     something a human can trace back to the origin (a memory id, a vault-
-    relative path, a `viking://` URI) — `16_CONTEXT_MERGE_POLICY.md`:
-    "resources must cite provenance".
+    relative path) — `16_CONTEXT_MERGE_POLICY.md`: "resources must cite
+    provenance".
 
     `project_id`/`workspace_id` (issue #372 follow-up, `02_OPENVIKING_
     STRICT_SCOPE.md`) are the scope claim `apply_scope_and_trust` checks
-    before injection — `None` on `brain`/`conversation` items (which never
-    cross the OpenViking sidecar boundary and are never passed through
-    that gate) is not a claim of any kind, just "not applicable"."""
+    before injection — `None` on `brain`/`conversation` items (which are
+    never passed through that gate) is not a claim of any kind, just "not
+    applicable"."""
 
     text: str
     tokens: int
-    source: str  # "brain" | "conversation" | "resource" | "openviking"
+    source: str  # "brain" | "conversation" | "resource"
     provenance: str
     trust: str
     score: float = 0.0
@@ -84,8 +84,8 @@ class ContextSource(Protocol):
 # Containment threshold above which two items are treated as the same fact
 # stated twice rather than two related-but-distinct ones — same boundary
 # `core.brain.context_builder._NEAR_DUP_CONTAINMENT` uses for Brain-only
-# dedup; kept identical here so a Brain memory and an OpenViking resource
-# that restate the same fact collapse the same way a Brain/Brain pair does.
+# dedup; kept identical here so a mixed pair of sources restating the same
+# fact collapses the same way a Brain/Brain pair does.
 _NEAR_DUP_CONTAINMENT = 0.7
 
 
@@ -146,10 +146,8 @@ def apply_scope_and_trust(
     items: list[ContextItem], *, allowed_project_id: str | None
 ) -> tuple[list[ContextItem], ScopeRejects]:
     """Fail-closed project/workspace/trust gate (issue #372 follow-up,
-    `02_OPENVIKING_STRICT_SCOPE.md`) — Takkub is the control plane for
-    scope (`14_OPENVIKING_INTEGRATION.md`: "Takkub remains control plane:
-    scope... user/project identity"), never OpenViking, so this never
-    trusts an item's tag without re-checking it here.
+    `02_OPENVIKING_STRICT_SCOPE.md`) — a `ContextSource` never injects its
+    own results without this re-checking them here first.
 
     An item passes iff its `trust` is a recognised value AND its
     `workspace_id` matches this install's own AND its `project_id` is
@@ -158,11 +156,9 @@ def apply_scope_and_trust(
     "no scope claim at all" — is rejected: missing metadata is never
     treated as implicitly global.
 
-    Applied twice on the live path: once inside each source's own
-    `retrieve()` (layer b — `openviking_source.py`/`resource_source.py`),
-    and again on the merged pool right before injection
-    (`context_builder.merge_openviking_traced`, layer c) — a bug in one
-    layer is still caught by the other."""
+    Called by each source's own `retrieve()` as a defense-in-depth re-check
+    of its own results (e.g. `resource_source.py`) — a bug in the source's
+    own filtering logic is still caught here."""
     kept: list[ContextItem] = []
     scope_rejects = trust_rejects = 0
     examples: list[str] = []

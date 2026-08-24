@@ -1,5 +1,12 @@
 # OpenViking sidecar setup (#372)
 
+> **Removed in v1.6.0.** OpenViking support was pulled from the product
+> entirely (`docs/plans/remove-openviking-2026-08-24/`) — this guide is kept
+> for historical reference only, describes a feature no version after
+> v1.5.0 has. If a v1.5.0 install left a managed runtime under
+> `~/.agent-takkub/services/openviking/`, reclaim it with `takkub cleanup
+> openviking` (`--purge-data` to also remove indexed data/config).
+
 OpenViking (`volcengine/OpenViking`, AGPL) is an optional external context
 database — knowledge index + semantic retrieval — Takkub can pull curated
 resources from. It is never vendored into this repo (MIT vs. AGPL): the

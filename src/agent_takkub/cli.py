@@ -1152,52 +1152,33 @@ def cmd_report(args: argparse.Namespace) -> dict:
         return {"ok": False, "msg": str(exc)}
 
 
-def cmd_ov(args: argparse.Namespace) -> dict:
-    """`takkub ov index|status` (#372) — OpenViking sidecar resource
-    indexing. Local-only: direct filesystem + HTTP I/O against
-    `core.context_sources.indexing`, no orchestrator IPC — same posture as
-    `cmd_report` above, works whether the cockpit is running or not."""
-    from .core.context_sources import indexing
+def cmd_cleanup(args: argparse.Namespace) -> dict:
+    """`takkub cleanup <target>` — explicit, opt-in removal of a leftover
+    resource an older Takkub version installed. Only `openviking` exists
+    today (docs/plans/remove-openviking-2026-08-24/07_RUNTIME_DATA_
+    MIGRATION.md): the managed-local runtime a v1.5.0 install may have left
+    under `~/.agent-takkub/services/openviking/`. Never silently deletes
+    user data, never touches a process this cockpit didn't itself spawn —
+    see `openviking_cleanup.py`'s module docstring."""
+    if args.cleanup_target != "openviking":
+        return {"ok": False, "msg": f"unknown cleanup target: {args.cleanup_target!r}"}
 
-    project = getattr(args, "project", None) or _from_project()
-    if not project:
-        try:
-            project, _ = config.active_project()
-        except Exception:
-            project = None
+    from . import openviking_cleanup
 
-    if args.ov_action == "index":
-        result = indexing.index_vault(project)
-        if not result.ok:
-            return {"ok": False, "msg": f"index skipped: {result.reason}"}
-        return {
-            "ok": True,
-            "msg": (
-                f"indexed +{result.added} skipped={result.skipped} failed={result.failed} "
-                f"total={result.total}"
-            ),
-        }
-
-    status = indexing.index_status(project)
-    lines = [
-        f"enabled={status['enabled']} mode={status['mode']}",
-        f"health_ok={status['health_ok']} healthy={status['healthy']} "
-        f"version={status['version'] or '?'} known_version={status['known_version']}",
-        f"indexed_count={status['indexed_count']}",
-    ]
-    return {"ok": True, "msg": "\n".join(lines)}
-
-
-def _cmd_ov_managed_remove(mgr, args: argparse.Namespace) -> dict:
-    from .openviking import installer as ov_installer
-
-    if not ov_installer.is_installed() and not ov_installer.STATE_FILE.exists():
-        return {"ok": False, "msg": "OpenViking managed runtime is not installed"}
+    info = openviking_cleanup.report()
+    if not info.exists:
+        return {"ok": False, "msg": "no OpenViking managed runtime found — nothing to clean up"}
 
     purge = bool(getattr(args, "purge_data", False))
     if not getattr(args, "yes", False):
+        lines = [
+            f"OpenViking managed runtime found at {info.path} ({_fmt_bytes(info.size_bytes)})",
+        ]
+        if info.owned_pid is not None:
+            lines.append(f"a Takkub-owned process is running (pid={info.owned_pid}) — will stop it")
         prompt = "remove the managed OpenViking runtime"
         prompt += " AND all indexed data/config" if purge else " (config/data are kept)"
+        print("\n".join(lines))
         try:
             answer = input(f"{prompt}? [y/N] ").strip().lower()
         except EOFError:
@@ -1205,94 +1186,9 @@ def _cmd_ov_managed_remove(mgr, args: argparse.Namespace) -> dict:
         if answer not in ("y", "yes"):
             return {"ok": False, "msg": "cancelled"}
 
-    mgr.stop()  # never touches an externally-owned process — see manager.stop()
-    ov_installer.uninstall(remove_data=purge)
+    openviking_cleanup.stop_owned_process()
+    openviking_cleanup.remove(purge_data=purge)
     return {"ok": True, "msg": "removed" + (" (data purged)" if purge else " (config/data kept)")}
-
-
-def _cmd_ov_managed_studio(mgr) -> dict:
-    """`takkub ov managed studio` (`09_WEB_STUDIO.md`) — opens the running
-    managed server's own Web Studio in the default browser. Never starts
-    the service itself: `status()` is read-only, so a stopped/unhealthy
-    sidecar just gets told to start first."""
-    import webbrowser
-
-    status = mgr.status()
-    if not status.healthy or not status.url:
-        return {
-            "ok": False,
-            "msg": "OpenViking is not running — start it first with `takkub ov managed start`",
-        }
-    studio_url = status.url.rstrip("/") + "/studio"
-    webbrowser.open(studio_url)
-    return {"ok": True, "msg": f"opened {studio_url}"}
-
-
-def cmd_ov_managed(args: argparse.Namespace) -> dict:
-    """`takkub ov managed status|install|start|stop|restart|doctor|update|
-    repair|remove|studio` (Wave 3, `10_CLI.md`) — debugging/automation entry
-    points for the managed local OpenViking runtime; normal users drive
-    install/start/stop/repair/remove through the Settings UI (Wave 2)
-    instead. Local-only, same posture as `cmd_ov` above: direct calls into
-    `openviking.manager`/`openviking.installer`, no orchestrator IPC, works
-    whether the cockpit is running or not."""
-    from .openviking import installer as ov_installer
-    from .openviking.manager import get_manager, managed_runtime_report
-
-    action = args.ov_managed_action
-    mgr = get_manager()
-
-    if action == "status":
-        report = managed_runtime_report(mgr)
-        lines = [
-            f"installed={report.installed} version={report.version or '?'}",
-            f"running={report.running} owned={report.owned} healthy={report.healthy}",
-            f"address={report.address or '-'}",
-        ]
-        if report.error:
-            lines.append(f"error={report.error}")
-        return {"ok": True, "msg": "\n".join(lines)}
-
-    if action == "install":
-        ok = mgr.ensure_installed()
-        return {"ok": ok, "msg": "installed" if ok else "install failed — see logs"}
-
-    if action in ("start", "restart"):
-        result = mgr.restart() if action == "restart" else mgr.start()
-        msg = f"healthy={result.healthy} owned={result.owned} address={result.url or '-'}"
-        if result.error:
-            msg += f" error={result.error}"
-        return {"ok": result.healthy, "msg": msg}
-
-    if action == "stop":
-        mgr.stop()
-        return {"ok": True, "msg": "stopped"}
-
-    if action == "doctor":
-        ok, output = ov_installer.run_doctor()
-        return {"ok": ok, "msg": output}
-
-    if action == "update":
-        try:
-            result = ov_installer.update()
-        except ov_installer.InstallerError as exc:
-            return {"ok": False, "msg": str(exc)}
-        lines = [f"updated {result.previous_version or '?'} -> {result.new_version or '?'}"]
-        if result.warning:
-            lines.append(f"warning: {result.warning}")
-        return {"ok": True, "msg": "\n".join(lines)}
-
-    if action == "repair":
-        ok = mgr.ensure_installed(force=True)
-        return {"ok": ok, "msg": "repaired" if ok else "repair failed — see logs"}
-
-    if action == "remove":
-        return _cmd_ov_managed_remove(mgr, args)
-
-    if action == "studio":
-        return _cmd_ov_managed_studio(mgr)
-
-    return {"ok": False, "msg": f"unknown ov managed action: {action!r}"}
 
 
 def cmd_harvest(args: argparse.Namespace) -> dict:
@@ -3331,55 +3227,22 @@ def main(argv: list[str] | None = None) -> int:
     sr_rotate.add_argument("--project", default=None)
     sr_rotate.set_defaults(func=cmd_report)
 
-    # #372 — optional OpenViking sidecar resource indexing.
-    sov = sub.add_parser("ov", help="OpenViking sidecar resource indexing (#372, off by default)")
-    sov_sub = sov.add_subparsers(dest="ov_action", required=True)
-    sov_index = sov_sub.add_parser(
-        "index", help="push allowlisted Obsidian docs into the sidecar's knowledge base"
+    # Removal cleanup (docs/plans/remove-openviking-2026-08-24/) — reclaim a
+    # leftover managed-runtime install an older Takkub version left behind.
+    scl = sub.add_parser("cleanup", help="remove a leftover resource an older Takkub left behind")
+    scl_sub = scl.add_subparsers(dest="cleanup_target", required=True)
+    scl_ov = scl_sub.add_parser(
+        "openviking",
+        help="stop + remove the OpenViking managed runtime "
+        "(~/.agent-takkub/services/openviking/); config/data kept unless --purge-data",
     )
-    sov_index.add_argument(
-        "--project", default=None, help="project namespace (default: active project)"
-    )
-    sov_index.set_defaults(func=cmd_ov)
-    sov_status = sov_sub.add_parser(
-        "status", help="show sidecar enabled/health/version/indexed counts"
-    )
-    sov_status.add_argument("--project", default=None)
-    sov_status.set_defaults(func=cmd_ov)
-
-    # Wave 3 (`10_CLI.md`) — managed local runtime lifecycle, for debugging/
-    # automation. Normal users use the Settings UI instead.
-    sov_managed = sov_sub.add_parser(
-        "managed",
-        help="managed local OpenViking runtime lifecycle (debugging/automation — "
-        "normal users use the Settings UI)",
-    )
-    sov_managed_sub = sov_managed.add_subparsers(dest="ov_managed_action", required=True)
-    for _name, _help in (
-        ("status", "installed/version/running/owned/address/health"),
-        ("install", "create the managed venv + pip install openviking"),
-        ("start", "start the managed openviking-server (idempotent)"),
-        ("stop", "stop the managed openviking-server (owned process only)"),
-        ("restart", "stop then start with bounded backoff"),
-        ("doctor", "run openviking-server doctor in the managed venv"),
-        ("update", "pip install --upgrade in the managed venv (explicit action only)"),
-        ("repair", "recreate the managed venv, preserving config/data"),
-        ("studio", "open the running managed server's Web Studio in a browser"),
-    ):
-        sov_managed_sub.add_parser(_name, help=_help).set_defaults(func=cmd_ov_managed)
-
-    sov_managed_remove = sov_managed_sub.add_parser(
-        "remove", help="stop + remove the managed venv (config/data kept unless --purge-data)"
-    )
-    sov_managed_remove.add_argument(
+    scl_ov.add_argument(
         "--purge-data",
         action="store_true",
-        help="also delete config/ov.conf and indexed data",
+        help="also delete config and indexed data",
     )
-    sov_managed_remove.add_argument(
-        "--yes", action="store_true", help="skip the confirmation prompt"
-    )
-    sov_managed_remove.set_defaults(func=cmd_ov_managed)
+    scl_ov.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    scl_ov.set_defaults(func=cmd_cleanup)
 
     sh = sub.add_parser(
         "harvest",

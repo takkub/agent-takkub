@@ -2,9 +2,9 @@
 `11_MASTER_PROMPT_FOR_LEAD.md`'s "Token policy") — classifies a task's size
 so `facade.build_context_for_assign` can scope which optional sources it
 calls and how much budget it spends, instead of unconditionally calling
-every source (OpenViking/Resource today; Figma/21st/Graft once item D of
-the closeout pack wires them into Context Builder) for every assign
-regardless of how small the task is.
+every optional reference source (Figma/21st/Graft once item D of the
+closeout pack wires them into Context Builder) for every assign regardless
+of how small the task is.
 
 Pure/stdlib-only, no I/O — `classify_task_size` only inspects task text
 (plus an optional explicit override). `routing_planner.classify` has no
@@ -34,8 +34,7 @@ _ENV_GATE = "TAKKUB_CONTEXT_GATE"
 
 
 def gate_enabled() -> bool:
-    """`=0` reverts every caller to the pre-gate path (unclamped budget,
-    OpenViking/Resource always attempted when the sidecar itself is on) —
+    """`=0` reverts every caller to the pre-gate path (unclamped budget) —
     unset or any other value keeps the gate on (the shipped default)."""
     return os.environ.get(_ENV_GATE, "1") != "0"
 
@@ -126,12 +125,12 @@ def classify_task_size(
 @dataclass(frozen=True, slots=True)
 class SourcePolicy:
     size: TaskSize
-    # Gates `context_builder.merge_openviking_traced` as a whole (both the
-    # OpenViking sidecar and the local Resource/vault source it can pair
-    # with in hybrid mode) — the only optional reference-source hook that
-    # exists in Context Builder today. Figma/21st/Graft aren't wired into
-    # context injection yet (closeout item D); extend this dataclass with
-    # their own flag when they land instead of overloading this one.
+    # Gates any optional reference-source hook Context Builder wires in on
+    # top of Brain/Conversation (none exist today — the OpenViking/
+    # Resource pair this originally gated was removed along with
+    # OpenViking). Figma/21st/Graft aren't wired into context injection yet
+    # (closeout item D); extend this dataclass with their own flag when
+    # they land instead of overloading this one.
     allow_reference_sources: bool
     budget_floor: int
     budget_ceiling: int
