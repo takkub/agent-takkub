@@ -2,6 +2,49 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.3.0] - 2026-08-24
+
+Master Upgrade batch — roadmap `docs/plans/workspace-master-upgrade-2026-08-24/` (Phase 0 re-audit
+`docs/audit/2026-08-24-master-upgrade-phase0.md` · reviewer `docs/audit/2026-08-24-master-upgrade-review.md` ·
+QA `docs/audit/2026-08-24-master-upgrade-qa.md`) — Phase 10/V2 authority (#362) **ไม่ถูกแตะ**
+
+### Added (เพิ่ม)
+
+- **Explorer "Ask Agent" + Git-native ignore** (#374) — คลิกขวาไฟล์/โฟลเดอร์ใน Explorer → เลือก role ที่ live ใน project (ทุก provider)
+  + พิมพ์คำถาม → ส่ง path (ไม่ส่งเนื้อไฟล์) ผ่าน `orch.send` เดิม · การซ่อนไฟล์ใช้ `git check-ignore --stdin -z` batch ต่อ directory
+  (background, ผ่าน `_run_git` lock) fallback เป็น chain `.gitignore` เดิมเมื่อไม่มี git · placeholder Monaco สำหรับ encoding_unsupported
+  แสดงข้อความของตัวเอง
+- **Git Changes: rename/deleted/multi-root** (#375) — `FileChange` มี `old_path` + `repo_root` · diff rules M/A/D/R ตาม `06_GIT_FINAL_SPEC`
+  (D ไม่ stat ไฟล์ที่หาย, R อ่าน `HEAD:old_path`) · `RepoDiscoveryService` resolve ทุก root → `git rev-parse --show-toplevel`
+  (แก้ root ที่เป็น subdirectory ของ repo ซึ่งเดิมทิ้งทุก row เงียบๆ) · CHANGES จัดกลุ่มต่อ repo เมื่อ >1 repo
+- **Design-tool integrations จริง: 21st.dev / Figma / Penpot** (#373) — `core/capabilities/design_clients.py` (stdlib urllib, fail-open,
+  ทุกผลลัพธ์ติด `Provenance` = untrusted) · construct ได้ทางเดียวผ่าน `build_client` ที่เช็ค `PermissionEngine.mcp_allowed` (default-deny)
+  + credential ใน `SecretManager` ทุกครั้ง · `takkub design integrations status|enable|disable|doctor` · doctor section `[design-integrations]`
+  · Storybook ยัง priority 1 · 21st.dev ทางหลัก = official MCP (`register_twentyfirst_mcp`), REST ตรงเป็น opt-in ต้องใส่ base_url เอง
+  (ไม่มี public search endpoint ยืนยัน 2026-08-24) · docs `docs/design-tool-integrations.md`
+- **OpenViking optional sidecar + Context Sources** (#372) — `core/context_sources/` (base/brain/conversation/resource/openviking/
+  indexing/trace_store/doctor_section) · `TAKKUB_OPENVIKING_ENABLED=0` default, `MODE=shadow|read|hybrid`, HTTP adapter เท่านั้น
+  (ไม่ vendor AGPL) · Context Builder ยังเป็นผู้ merge/budget/dedup/provenance เดียว (`merge_openviking_traced` เป็น stage
+  fail-open แยก — disabled = byte-identical) · Obsidian index allowlist 01-Projects/02-Areas ผ่าน `obsidian_boundary` · `takkub ov index|status`
+  · doctor `[knowledge/context]` · docs `docs/guides/2026-08-24-openviking-sidecar.md`
+
+### Fixed (แก้)
+
+- **Preview: file:// normalization + project-aware + close cleanup** (#369, BUG-001/002/003) — `navigation_allowed` file mode เทียบ
+  raw path กับ `file:///…` ที่ Chromium ส่งกลับ → block ไฟล์ตัวเองเสมอ → แก้ canonical `_local_file_path` (QUrl→toLocalFile→resolve,
+  normcase, กัน `C:` ถูกอ่านเป็น scheme) · `PreviewHost` แสดงเฉพาะ project ที่ active (background publish = status bar notice,
+  tab switch = show state/hide dock ไม่ destroy WebView) · ปิด tab → `preview_command("close")` ล้าง state + nav counters
+- **Editor: strict UTF-8/BOM + POSIX mode** (#370, BUG-004/005) — `stat_snapshot` ไม่ใช้ `errors="replace"` อีก: invalid UTF-8 →
+  `encoding_unsupported` เปิด read-only, `save_atomic` ปฏิเสธ · UTF-8/BOM ยัง editable round-trip · `_write_atomic_text` preserve
+  `stat.S_IMODE` ลง temp ก่อน `os.replace` (POSIX; win32 skip ชัดเจน)
+- **Revise → Designer** (#371, BUG-006) — `design_revise` ส่ง structured feedback (id/title/kind/target/feedback ไม่ส่ง HTML) ไปยัง
+  pane ผู้สร้าง artifact หรือ `designer` ที่ live (provider-agnostic) · Lead ยังได้ audit notice ระบุ routed/fallback
+- **Windows native abort (access violation) จาก QThreadPool worker** (#375 follow-up, reviewer HIGH ×2) — `RepoDiscoveryService`
+  connect queued signal ตรงเข้า `signal.emit` ทำให้ receiver ที่ถูก destroy ยังโดนยิง → แก้เป็น bound slot · `SUBPROCESS_LOCK` +
+  `RESOLVE_LOCK` (`project_file_index`) ครอบทุก `subprocess.run`/`Path.resolve()` ใน git_changes_service/project_file_index/
+  project_explorer/preview_controller/editor_widget/file_watch_service — pair `test_project_explorer + test_project_file_index`
+  เคย abort 3/3 → เขียว 3/3
+
 ## [v1.2.1] - 2026-08-24
 
 ### Added (เพิ่ม)
