@@ -2,6 +2,29 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.0] - 2026-08-24
+
+### Removed (ถอนออก)
+
+- **OpenViking ถูกถอนออกจากผลิตภัณฑ์ทั้งหมด** (user decision — pack `docs/plans/remove-openviking-2026-08-24/`) — ฟีเจอร์บังคับให้มี
+  AI embedding provider (จ่าย API หรือรัน Ollama) ขัดกับหลัก "ง่ายและฟรี" ของระบบ · ลบ: managed runtime ทั้ง package
+  (`openviking/`), HTTP adapter/source/indexing, `merge_openviking*` ใน Context Builder, หน้า Settings + Setup Wizard,
+  boot auto-start/shutdown wiring, CLI `takkub ov *`, doctor rows, secrets backend — **~7,600 บรรทัดออก** · เก็บครบ:
+  Brain / Conversation / Graft / Obsidian local resources / context gate (small/medium/large) / generic trace / `apply_scope_and_trust`
+  · env `TAKKUB_OPENVIKING_*` เก่าถูกเมินอย่างปลอดภัย ไม่ crash · regression suite ใหม่ (`test_remove_openviking_regression.py`):
+  ไม่มี module/CLI/network/process ของ OpenViking เหลือใน boot/assign path
+- **`takkub cleanup openviking`** (ใหม่, แทน `ov *` ทั้งหมด) — ล้าง runtime เก่าจาก 1.5.0 อย่างปลอดภัย: ตรวจ ownership ผ่าน PID file
+  เดิม, โชว์ path+ขนาด, ขอ confirm (`--yes`), stop เฉพาะ process ที่ Takkub เปิดเอง (external ไม่แตะ), ลบ venv/log/state,
+  `--purge-data` เท่านั้นถึงลบ config/data
+
+### Changed (ปรับ)
+
+- **Settings จัดใหม่ให้เรียบ** (user directive "หน้าไหน auto แล้ว เอาออก") — ลบหน้า: Role Overlap (read-only diagnostic ซ้ำ doctor),
+  Core V2 Overview (flag default-on ตั้งแต่ 1.0.84, doctor โชว์เหมือนกัน), Core V2 Migration (auto-migrate ตอน boot #361 ทำแทนแล้ว)
+  · Knowledge & Design 4 หน้า → 1 หน้า "Knowledge" (3 tab: Knowledge/Design Tools/Context Debug) · Accounts & Pools/Routing/Brain/
+  Scheduler/Performance → section **ADVANCED** พับเก็บ default (จำสถานะกาง/พับ, เข้าหน้าใน section ที่พับ = auto-expand)
+  · nav เห็นทันทีเหลือ 9 แถวจากเดิม 21 หน้า
+
 ## [v1.5.0] - 2026-08-24
 
 ### Added (เพิ่ม)
