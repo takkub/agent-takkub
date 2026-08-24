@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from .. import openviking_settings
 from ..core.context_sources import openviking_adapter
 from . import installer, port
-from .process import OpenVikingProcess, ProcessError, reap_orphan_process
+from .process import OpenVikingProcess, ProcessError, is_process_alive, reap_orphan_process
 
 _log = logging.getLogger(__name__)
 
@@ -202,6 +202,43 @@ class OpenVikingManager:
         if result.healthy:
             self._restart_attempts = 0
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedRuntimeReport:
+    """One shared read-only summary of the managed runtime for both
+    `takkub ov managed status` and doctor's `[openviking]` managed-runtime
+    section (Wave 3, `10_CLI.md` / `19_DIAGNOSTICS_OBSERVABILITY.md`) — the
+    single place both callers build this so their output can never drift."""
+
+    installed: bool
+    version: str | None
+    running: bool
+    owned: bool
+    address: str | None
+    healthy: bool
+    error: str | None = None
+
+
+def managed_runtime_report(mgr: OpenVikingManager | None = None) -> ManagedRuntimeReport:
+    """`running` comes from `process.is_process_alive()` (disk-based PID
+    file check, survives across manager instances/cockpit sessions) rather
+    than from `status().healthy` alone — a managed process that's up but
+    failing its own `/health` check should report running=True,
+    healthy=False, not vanish entirely. Read-only, same "never spawns or
+    kills anything" contract as `OpenVikingManager.status()`."""
+    mgr = mgr or get_manager()
+    status = mgr.status()
+    version = installer.read_state().get("version")
+    return ManagedRuntimeReport(
+        installed=status.installed,
+        version=version,
+        running=is_process_alive(),
+        owned=status.owned,
+        address=status.url,
+        healthy=status.healthy,
+        error=status.error,
+    )
 
 
 _instance: OpenVikingManager | None = None

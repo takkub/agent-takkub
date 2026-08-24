@@ -315,6 +315,61 @@ class TestEnsureInstalledForce:
         assert calls == [{"force": False}]
 
 
+class TestManagedRuntimeReport:
+    def test_not_installed_reports_installed_false(self, monkeypatch):
+        monkeypatch.setattr(openviking_adapter, "enabled", lambda: False)
+        monkeypatch.setattr(installer, "is_installed", lambda: False)
+        monkeypatch.setattr(manager, "is_process_alive", lambda: False)
+        mgr = manager.OpenVikingManager()
+
+        report = manager.managed_runtime_report(mgr)
+
+        assert report.installed is False
+        assert report.version is None
+        assert report.running is False
+
+    def test_running_but_unhealthy_is_reported_distinctly(self, monkeypatch):
+        monkeypatch.setattr(openviking_adapter, "enabled", lambda: True)
+        monkeypatch.setattr(openviking_adapter, "base_url", lambda: "http://127.0.0.1:1933")
+        monkeypatch.setattr(port, "is_healthy", lambda url, timeout=2.0: False)
+        monkeypatch.setattr(installer, "is_installed", lambda: True)
+        monkeypatch.setattr(installer, "read_state", lambda: {"version": "0.4.2"})
+        monkeypatch.setattr(manager, "is_process_alive", lambda: True)
+        mgr = manager.OpenVikingManager()
+
+        report = manager.managed_runtime_report(mgr)
+
+        assert report.installed is True
+        assert report.version == "0.4.2"
+        assert report.running is True
+        assert report.healthy is False
+
+    def test_healthy_owned_reports_address(self, monkeypatch):
+        monkeypatch.setattr(openviking_adapter, "enabled", lambda: True)
+        monkeypatch.setattr(openviking_adapter, "base_url", lambda: "http://127.0.0.1:1933")
+        monkeypatch.setattr(port, "is_healthy", lambda url, timeout=2.0: True)
+        monkeypatch.setattr(installer, "is_installed", lambda: True)
+        monkeypatch.setattr(installer, "read_state", lambda: {"version": "0.4.2"})
+        monkeypatch.setattr(manager, "is_process_alive", lambda: True)
+        mgr = manager.OpenVikingManager()
+        mgr._owned = True
+
+        report = manager.managed_runtime_report(mgr)
+
+        assert report.owned is True
+        assert report.address == "http://127.0.0.1:1933"
+
+    def test_defaults_to_shared_singleton_when_no_manager_passed(self, monkeypatch):
+        monkeypatch.setattr(manager, "_instance", None)
+        monkeypatch.setattr(openviking_adapter, "enabled", lambda: False)
+        monkeypatch.setattr(installer, "is_installed", lambda: False)
+        monkeypatch.setattr(manager, "is_process_alive", lambda: False)
+
+        report = manager.managed_runtime_report()
+
+        assert report.installed is False
+
+
 class TestGetManager:
     def test_returns_the_same_instance(self, monkeypatch):
         monkeypatch.setattr(manager, "_instance", None)

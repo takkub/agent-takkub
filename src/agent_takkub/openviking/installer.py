@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .._win_console import SUBPROCESS_NO_WINDOW
@@ -134,9 +135,14 @@ def _verify(venv: Path) -> str | None:
     return _installed_version(venv)
 
 
-def _write_state(version: str | None) -> None:
+def _write_state(version: str | None, *, previous_version: str | None = None) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": version, "installed_at": time.time()}
+    payload: dict = {"version": version, "installed_at": time.time()}
+    if previous_version is not None:
+        # `update()`'s rollback breadcrumb (`11_UPDATE_REPAIR.md`: "preserve
+        # prior version metadata for rollback") — a human can `pip install
+        # openviking==<previous_version>` inside the managed venv.
+        payload["previous_version"] = previous_version
     tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -165,6 +171,62 @@ def ensure_installed(*, force: bool = False) -> bool:
         raise InstallerError(f"installer step timed out: {exc}") from exc
     _write_state(version)
     return True
+
+
+def run_doctor() -> tuple[bool, str]:
+    """`takkub ov managed doctor` (Wave 3, `10_CLI.md`) — surfaces
+    `openviking-server doctor`'s own output verbatim, unlike `_verify` above
+    (which only uses it internally to prove the binary launches post-
+    install). Returns (ok, output); ok=False and a canned message when the
+    binary isn't installed at all — never attempts to launch it."""
+    exe = server_executable()
+    if not exe.is_file():
+        return False, "openviking-server is not installed (run `takkub ov managed install`)"
+    try:
+        proc = _run([str(exe), "doctor"], timeout=_DOCTOR_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False, "openviking-server doctor timed out"
+    return proc.returncode == 0, proc.stdout
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateResult:
+    previous_version: str | None
+    new_version: str | None
+    warning: str | None = None
+
+
+def update() -> UpdateResult:
+    """`takkub ov managed update` (Wave 3, `11_UPDATE_REPAIR.md`): explicit
+    user action only, never called from boot/start/install. Re-runs `pip
+    install --upgrade` against the SAME managed venv (no venv recreation —
+    that's `repair`'s job), then compares the new version's major segment
+    against the version previously on record — the only "Takkub-tested
+    range" this codebase actually has evidence for (phase 0 audit found no
+    upstream version pin to check against, see this module's own docstring
+    above). A major-version jump only warns, never blocks — OpenViking
+    stays fail-open per `manager.py`'s own contract. The prior version is
+    kept in `state.json` as `previous_version` so a human can roll back with
+    `pip install openviking==<previous_version>` inside the managed venv."""
+    if not is_installed():
+        raise InstallerError("OpenViking is not installed — run `ov managed install` first")
+    previous_version = read_state().get("version")
+    try:
+        _pip_install(VENV_DIR)
+        new_version = _installed_version(VENV_DIR)
+    except subprocess.TimeoutExpired as exc:
+        raise InstallerError(f"update step timed out: {exc}") from exc
+    warning = None
+    if previous_version and new_version:
+        old_major, _, _ = previous_version.partition(".")
+        new_major, _, _ = new_version.partition(".")
+        if old_major.isdigit() and new_major.isdigit() and old_major != new_major:
+            warning = (
+                f"major version change {previous_version} -> {new_version} is outside "
+                "Takkub's tested range; verify before relying on it"
+            )
+    _write_state(new_version, previous_version=previous_version)
+    return UpdateResult(previous_version, new_version, warning)
 
 
 def uninstall(*, remove_data: bool = False) -> None:
