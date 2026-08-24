@@ -22,12 +22,13 @@ below is the gate it's expected to call first).
 from __future__ import annotations
 
 import ipaddress
+import os
 import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QUrl, pyqtSignal
 
 from . import config
 from .project_file_index import resolve_and_contain
@@ -104,6 +105,49 @@ def resolve_preview_file(path: Path | str, roots: list[Path]) -> Path:
     if resolved.suffix.lower() not in ALLOWED_PREVIEW_FILE_EXTENSIONS:
         raise ValueError(f"preview file must be .html/.htm, got {resolved.name!r}")
     return resolved
+
+
+def _local_file_path(value: str) -> Path | None:
+    """Resolve *value* to a canonical filesystem `Path` if it names a local
+    file — either a bare path (how `PreviewState.target` stores it, e.g.
+    `C:\\proj\\index.html` or `/proj/index.html`) or a `file://` URL (how
+    Chromium reports a navigation target, per `QUrl.fromLocalFile` in
+    `preview_widget.py`'s `load_file`). Returns `None` for anything that
+    isn't a local-file target (an http(s) URL, empty string, or something
+    unparsable) so file-mode comparison never treats a non-file value as a
+    match by accident (#369 BUG-001 — the old code compared the raw
+    `PreviewState.target` path string directly against the `file://` URL
+    string Chromium hands back, which never matched even for the exact same
+    file).
+
+    A `file://` URL's fragment (`#anchor`) is not part of `QUrl.toLocalFile()`
+    — so an in-page anchor jump or hash-only reload on the same file already
+    resolves to the same `Path` here, matching the "stay on the exact open
+    file" contract `navigation_allowed`'s docstring pins.
+
+    Gotcha this deliberately works around: `QUrl("C:/proj/index.html").scheme()`
+    returns `"c"` — RFC 3986 treats a Windows drive letter followed by `:` as
+    a syntactically valid one-letter URL scheme, so `qurl.scheme()` truthiness
+    alone can't distinguish a bare Windows path from a real URL. A `"://"`
+    substring check does: every URL this function needs to recognize as
+    *not* a local path (`http://`, `https://`, `file://`) has an authority
+    delimiter; no bare filesystem path (POSIX `/…` or Windows `C:\…`/`C:/…`)
+    ever does."""
+    if not value:
+        return None
+    qurl = QUrl(value)
+    if qurl.isLocalFile():
+        raw = qurl.toLocalFile()
+    elif "://" not in value:
+        raw = value  # bare filesystem path, not a URL at all
+    else:
+        return None
+    if not raw:
+        return None
+    try:
+        return Path(raw).resolve()
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +260,10 @@ class PreviewController(QObject):
         return state
 
     def close(self, project: str) -> bool:
+        # #369 BUG-003: a project's nav-block counter must not survive its
+        # Preview closing — otherwise a tab reopening the same project later
+        # inherits a stale count from a previous, unrelated session.
+        self._nav_block_counts.pop(project, None)
         if project not in self._states:
             return False
         del self._states[project]
@@ -278,6 +326,17 @@ def navigation_allowed(current: PreviewState, target_url: str) -> bool:
       `TestPreviewPageNavigationContract`.
     """
     if current.mode == "file":
+        current_path = _local_file_path(current.target)
+        target_path = _local_file_path(target_url)
+        if current_path is not None and target_path is not None:
+            # normcase: a no-op on POSIX, case-insensitive on Windows — the
+            # widget's own QUrl.fromLocalFile()/toLocalFile() round-trip can
+            # come back with a differently-cased drive letter than the
+            # PreviewState.target string this compares against.
+            return os.path.normcase(str(current_path)) == os.path.normcase(str(target_path))
+        # Neither side parsed as a local-file target (e.g. current.target is
+        # somehow a bare non-path string) — fall back to the old exact-string
+        # check rather than silently allowing a mismatch through.
         return target_url == current.target
     try:
         cur = urlsplit(current.target)

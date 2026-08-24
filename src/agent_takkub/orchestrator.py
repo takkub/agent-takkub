@@ -6180,6 +6180,13 @@ class Orchestrator(
     # publishing a mockup) — restricting that to Lead would just make Lead
     # a relay for work that isn't Lead's to do.
     # ──────────────────────────────────────────────────────────────
+    def preview_status(self, project: str):
+        """Current `PreviewState | None` for *project* — the read-only half
+        of `preview_command`'s "status" action, exposed directly for
+        in-process callers (`main_window.py`'s tab-switch sync, #369
+        BUG-002) that need it without going through the IPC dict-shape."""
+        return self._preview_controller.status(project)
+
     def preview_command(
         self,
         action: str,

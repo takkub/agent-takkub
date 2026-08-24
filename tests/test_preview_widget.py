@@ -410,6 +410,36 @@ class TestDevicePresets:
         assert view.applied_devices == before
 
 
+# ── header: project · target · device (#369 item 4) ──────────────────────
+
+
+class TestHeaderShowsProjectTargetDevice:
+    def test_status_label_includes_project_target_and_device(self, container, stub_factory) -> None:
+        host = pw.PreviewHost(container, view_factory=stub_factory, artifact_lookup=_no_artifact)
+
+        host.show_state(
+            "demo",
+            PreviewState(
+                project="demo", mode="url", target="http://127.0.0.1:3000", device="tablet"
+            ),
+        )
+
+        text = host._lbl_status.text()
+        assert "demo" in text
+        assert "http://127.0.0.1:3000" in text
+        assert "tablet" in text
+
+    def test_status_label_updates_device_on_device_switch(self, container, stub_factory) -> None:
+        host = pw.PreviewHost(container, view_factory=stub_factory, artifact_lookup=_no_artifact)
+        host.show_state(
+            "demo", PreviewState(project="demo", mode="url", target="http://127.0.0.1:1")
+        )
+
+        host.set_device("mobile")
+
+        assert "mobile" in host._lbl_status.text()
+
+
 # ── toolbar actions: refresh / open externally ────────────────────────────
 
 

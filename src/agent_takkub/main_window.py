@@ -307,8 +307,12 @@ class MainWindow(
         # same "hidden = discard candidate" wiring terminal_widget.py's
         # pane-tab keep-alive uses, applied to the dock instead of a tab.
         self._preview_dock.visibilityChanged.connect(self._preview_host.set_keepalive)
-        self.orch.previewOpened.connect(self._preview_host.show_state)
-        self.orch.previewUpdated.connect(self._preview_host.show_state)
+        # #369 BUG-002: previewOpened/Updated fire for ANY project's Preview,
+        # not just the one currently on screen — routed through
+        # _on_preview_state_changed so a background project's update never
+        # hijacks the shared host away from the active tab.
+        self.orch.previewOpened.connect(self._on_preview_state_changed)
+        self.orch.previewUpdated.connect(self._on_preview_state_changed)
         self.orch.previewClosed.connect(self._preview_host.close_project)
 
         # Build the initial tab for the active project. Order matters: adding the
@@ -500,6 +504,46 @@ class MainWindow(
     def _on_preview_opened(self, _project_name: str) -> None:
         self._preview_dock.show()
         self._preview_dock.raise_()
+
+    def _active_project_name(self) -> str | None:
+        """Project namespace of whichever tab is currently focused, or
+        `None` with no tabs open. Duck-typed on purpose — `self.tabs`'s
+        `currentWidget()` only ever returns a `ProjectTab` or `None` in
+        production, so this stays trivially testable against a fake `self`
+        without constructing one."""
+        tab = self.tabs.currentWidget()
+        return getattr(tab, "project_name", None)
+
+    def _on_preview_state_changed(self, project: str, state) -> None:
+        """`Orchestrator.previewOpened`/`previewUpdated` fire for whichever
+        project's Preview just opened/changed — that may not be the tab the
+        user currently has focused. The shared `PreviewHost` must only ever
+        paint the active tab's project (#369 BUG-002); a background
+        project's update just gets a status-bar notice instead of hijacking
+        the dock."""
+        if project != self._active_project_name():
+            self._status.showMessage(
+                f"preview[{project}] updated in the background — switch tabs to view", 5_000
+            )
+            return
+        self._preview_host.show_state(project, state)
+
+    def _sync_preview_to_active_tab(self, project: str | None) -> None:
+        """Called on every tab switch (#369 BUG-002): show whatever Preview
+        state the newly active project already has open, or — if it has
+        none — hide the dock so a previous, now-inactive project's content
+        stops being visible. Deliberately never touches `PreviewHost`'s
+        underlying `QWebEngineView` in the "no state" branch: hiding the
+        dock alone already fires `visibilityChanged` into
+        `PreviewHost.set_keepalive` (wired in `__init__`), which arms the
+        existing #364-lever-1 discard timer — reusing that RAM path instead
+        of destroying/recreating the shared widget on every tab switch."""
+        state = self.orch.preview_status(project) if project else None
+        if state is not None:
+            self._preview_host.show_state(project, state)
+            return
+        if self._preview_host.current_project() not in (None, project):
+            self._preview_dock.hide()
 
     def _on_preview_approve_requested(self, project: str, artifact_id: str) -> None:
         """Preview's Approve button (#365 phase 6). `Orchestrator.design_approve`
@@ -1381,6 +1425,12 @@ class MainWindow(
         # (tab.explorer is about to be torn down with the tab) so a later
         # `takkub doctor --workspace` doesn't read from a deleted QObject.
         self.orch.unregister_workspace_diag_sources(tab.project_name)
+        # #369 BUG-003: an open Preview must not outlive its tab.
+        # PreviewController.close() clears state + nav_block_counts and
+        # emits `closed`, which previewClosed -> PreviewHost.close_project
+        # already tears the shared view down for (only a no-op if this
+        # project's Preview wasn't the one on screen).
+        self.orch.preview_command("close", project=tab.project_name)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
         try:
@@ -1402,10 +1452,12 @@ class MainWindow(
             # not keep pointing at a project with no open tab (#102).
             clear_active_project()
             self._tasks_dock_widget.set_project(None)
+            self._sync_preview_to_active_tab(None)
             return
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
             return
+        self._sync_preview_to_active_tab(tab.project_name)
         # Only the visible project keeps painting; every hidden project suspends
         # its panes' paint keep-alive so their Chromium renderers can release
         # compositor memory (fix for backgrounded renderers ballooning to GBs).
