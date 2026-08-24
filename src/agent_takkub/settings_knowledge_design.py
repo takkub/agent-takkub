@@ -37,10 +37,12 @@ presence, never to populate the field.
 from __future__ import annotations
 
 import json
+import os
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -51,18 +53,27 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from . import cockpit_theme
+from . import cockpit_theme, core_v2_settings
 from . import pane_tools_policy as pt_policy
 
 _DESIGN_MCPS: tuple[tuple[str, str], ...] = (
     ("reference-21st", "21st.dev"),
     ("figma", "Figma"),
     ("penpot", "Penpot"),
+)
+
+# Context Strategy (v2-hardening C, `13_SIMPLE_UX.md`/`23_UI_EXAMPLES.md`) —
+# value -> (button label, one-line description). Order is display order.
+_CONTEXT_STRATEGY_CHOICES: tuple[tuple[str, str, str], ...] = (
+    ("fast", "Fast", "ประหยัดสุด งานเล็ก"),
+    ("automatic", "Automatic", "ระบบประเมินเอง (แนะนำ)"),
+    ("deep", "Deep", "ค้นเยอะสุด งานใหญ่/ซับซ้อน"),
 )
 
 
@@ -410,6 +421,69 @@ class KnowledgeDesignSettingsMixin:
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────
+    # panel: Context Strategy (v2-hardening C, `13_SIMPLE_UX.md`) — Fast/
+    # Automatic/Deep switch, read/write through `core_v2_settings.
+    # load_context_strategy`/`save_context_strategy`. `TAKKUB_CONTEXT_
+    # STRATEGY` env still wins at build time (`core.brain.flag.
+    # context_strategy`) — this panel just mirrors that precedence: when the
+    # env var is set to a valid value the buttons show it and lock, same
+    # "env wins, Settings UI just informs" precedent `settings_core_v2.py`'s
+    # own `TAKKUB_V2_*` banners already use.
+    # ──────────────────────────────────────────────────────────
+
+    def _build_context_strategy_panel(self, parent: QWidget) -> QWidget:
+        panel = QWidget(parent)
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        env_value = os.environ.get("TAKKUB_CONTEXT_STRATEGY")
+        env_active = env_value in {v for v, _label, _desc in _CONTEXT_STRATEGY_CHOICES}
+        self._kd_ctx_strategy_banner: QLabel | None = None
+        if env_active:
+            banner = QLabel(
+                f"TAKKUB_CONTEXT_STRATEGY={env_value} (env) — ตัวเลือกด้านล่างถูกปิดไว้ชั่วคราว",
+                panel,
+            )
+            banner.setObjectName("infoBanner")
+            lay.addWidget(banner)
+            self._kd_ctx_strategy_banner = banner
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Context Strategy:", panel))
+        current = env_value if env_active else core_v2_settings.load_context_strategy()
+        self._kd_ctx_strategy_group = QButtonGroup(panel)
+        self._kd_ctx_strategy_group.setExclusive(True)
+        self._kd_ctx_strategy_buttons: dict[str, QPushButton] = {}
+        for value, label, _desc in _CONTEXT_STRATEGY_CHOICES:
+            btn = QPushButton(label, panel)
+            btn.setObjectName("secondaryButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setCheckable(True)
+            btn.setChecked(value == current)
+            btn.setEnabled(not env_active)
+            btn.clicked.connect(lambda _checked, v=value: self._on_kd_ctx_strategy_clicked(v))
+            self._kd_ctx_strategy_group.addButton(btn)
+            self._kd_ctx_strategy_buttons[value] = btn
+            row.addWidget(btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        hint = QLabel(
+            "  ·  ".join(f"{label} = {desc}" for _v, label, desc in _CONTEXT_STRATEGY_CHOICES),
+            panel,
+        )
+        hint.setObjectName("panelHint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        return panel
+
+    def _on_kd_ctx_strategy_clicked(self, value: str) -> None:
+        core_v2_settings.save_context_strategy(value)
+        for v, btn in self._kd_ctx_strategy_buttons.items():
+            btn.setChecked(v == value)
+
+    # ──────────────────────────────────────────────────────────
     # view: Context Debug
     # ──────────────────────────────────────────────────────────
 
@@ -418,6 +492,8 @@ class KnowledgeDesignSettingsMixin:
         lay = QVBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(14)
+
+        lay.addWidget(self._build_context_strategy_panel(view))
 
         panel = QWidget(view)
         panel.setObjectName("panel")
@@ -434,6 +510,12 @@ class KnowledgeDesignSettingsMixin:
         self._kd_ctx_header_lbl = QLabel("", panel)
         self._kd_ctx_header_lbl.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
         p_lay.addWidget(self._kd_ctx_header_lbl)
+
+        self._kd_ctx_explain_lbl = QLabel("", panel)
+        self._kd_ctx_explain_lbl.setObjectName("panelHint")
+        self._kd_ctx_explain_lbl.setWordWrap(True)
+        self._kd_ctx_explain_lbl.setVisible(False)
+        p_lay.addWidget(self._kd_ctx_explain_lbl)
 
         self._kd_ctx_grid_host = QWidget(panel)
         self._kd_ctx_grid = QGridLayout(self._kd_ctx_grid_host)
@@ -484,6 +566,7 @@ class KnowledgeDesignSettingsMixin:
 
         if not has_trace:
             self._kd_ctx_header_lbl.setText(f"Project: {self._project or '(no project)'}")
+            self._kd_ctx_explain_lbl.setVisible(False)
             self._kd_ctx_totals_lbl.setText(
                 "ยังไม่มี context build record — ยังไม่เคยรัน assign ที่มี context source เปิดอยู่"
             )
@@ -493,6 +576,10 @@ class KnowledgeDesignSettingsMixin:
             f"Project: {trace.get('project') or self._project or '(no project)'}"
             f"   Role: {trace.get('role') or '—'}   Mode: {trace.get('mode') or '—'}"
         )
+
+        explain_text = _explainable_trace_text(trace)
+        self._kd_ctx_explain_lbl.setText(explain_text)
+        self._kd_ctx_explain_lbl.setVisible(bool(explain_text))
 
         headers = ("SOURCE", "ITEMS", "TOKENS", "TIME")
         for col, h in enumerate(headers):
@@ -557,6 +644,9 @@ class KnowledgeDesignSettingsMixin:
             f"Task size: {trace.get('task_size', '—')}",
             f"Latency: {trace.get('latency_ms', 0):.0f}ms",
         ]
+        explain_text = _explainable_trace_text(trace)
+        if explain_text:
+            lines += ["", explain_text]
         return "\n".join(lines)
 
     def _kd_ctx_show_text_dialog(self, title: str, text: str) -> None:
@@ -590,7 +680,58 @@ class KnowledgeDesignSettingsMixin:
 
 
 # ──────────────────────────────────────────────────────────────
-# module-level helpers — run entirely off the Qt thread inside
+# module-level helpers
+# ──────────────────────────────────────────────────────────────
+
+
+def _explainable_trace_text(trace: dict) -> str:
+    """Render the v2-hardening C/E Explainable Trace fields (`07_
+    EXPLAINABLE_TRACE.md`) that `trace_store.save_last_trace` adds on top of
+    the pre-existing shape — Classifier v2's score/confidence/risk_flags,
+    adaptive escalation's initial->final size, the active Context Strategy,
+    and skipped sources. Every field is read with `.get()`: an older trace
+    file (or the gate disabled) simply omits the section entirely instead of
+    crashing, same contract every other `trace.get(...)` call in this module
+    already keeps."""
+    lines: list[str] = []
+
+    score = trace.get("score")
+    confidence = trace.get("confidence")
+    if score is not None or confidence is not None:
+        conf_text = f"{confidence * 100:.0f}%" if isinstance(confidence, (int, float)) else "—"
+        size_text = str(trace.get("task_size") or "—").upper()
+        score_text = score if score is not None else "—"
+        lines.append(f"Complexity: {size_text}   score {score_text}   confidence {conf_text}")
+
+    risk_flags = trace.get("risk_flags")
+    if risk_flags:
+        lines.append(f"Risk: {', '.join(str(r) for r in risk_flags)}")
+
+    initial_size = trace.get("initial_size")
+    final_size = trace.get("final_size")
+    if initial_size is not None and final_size is not None:
+        if initial_size != final_size:
+            lines.append(f"Initial → Final: {initial_size} → {final_size}")
+            reason = trace.get("escalation_reason")
+            if reason:
+                lines.append(f"Escalation reason: {reason}")
+        else:
+            lines.append(f"Initial → Final: {final_size} (no escalation)")
+
+    strategy = trace.get("strategy")
+    if strategy:
+        lines.append(f"Strategy: {strategy}")
+
+    skipped = trace.get("skipped")
+    if skipped:
+        skip_text = "; ".join(f"{s.get('name', '?')} ({s.get('reason', '—')})" for s in skipped)
+        lines.append(f"Skipped sources: {skip_text}")
+
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
+# module-level status helpers — run entirely off the Qt thread inside
 # `_CallableThread`, so they must not touch any Qt object.
 # ──────────────────────────────────────────────────────────────
 

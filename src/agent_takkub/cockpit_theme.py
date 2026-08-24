@@ -572,6 +572,15 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         background: rgba(255,255,255,0.05);
         color: {TEXT_PRIMARY};
     }}
+    QPushButton#secondaryButton:checked {{
+        background: {ACCENT_GOLD};
+        border: 1px solid {ACCENT_GOLD};
+        color: {GOLD_TEXT_ON};
+    }}
+    QPushButton#secondaryButton:disabled {{
+        color: {TEXT_FAINT};
+        border: 1px solid {BORDER_HAIRLINE};
+    }}
     QWidget#panel {{
         background: {GROUND_PANEL};
         border: 1px solid {BORDER_HAIRLINE};

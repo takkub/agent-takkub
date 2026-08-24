@@ -2290,9 +2290,10 @@
         "agent_takkub.core.scheduling.facade",
         "agent_takkub.core.scheduling.flag",
         "agent_takkub.core.storage.v2_authority",
-        "agent_takkub.settings_core_v2"
+        "agent_takkub.settings_core_v2",
+        "agent_takkub.settings_knowledge_design"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 1
     },
     {
@@ -3953,6 +3954,7 @@
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.secrets.manager",
+        "agent_takkub.core_v2_settings",
         "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
@@ -3962,7 +3964,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 1,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.settings_management",
