@@ -264,6 +264,108 @@ class TestOpenVikingManagedRuntimeView:
         assert dlg._kd_ov_install_enable_btn.isHidden() is True
         dlg.deleteLater()
 
+    def test_open_studio_disabled_before_any_refresh(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        assert dlg._kd_ov_open_studio_btn.isEnabled() is False
+        dlg.deleteLater()
+
+    def test_open_studio_disabled_when_status_unhealthy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, False, False, None, True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_managed_refresh_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert dlg._kd_ov_open_studio_btn.isEnabled() is False
+        assert "start" in dlg._kd_ov_open_studio_btn.toolTip().lower()
+        dlg.deleteLater()
+
+    def test_open_studio_enabled_when_healthy_and_opens_browser(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeManagerHandle(
+            ov_manager.ManagerStatus(True, True, True, "http://127.0.0.1:1933", True)
+        )
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+        opened_urls: list[str] = []
+        monkeypatch.setattr(
+            "agent_takkub.settings_knowledge_design.QDesktopServices.openUrl",
+            lambda url: opened_urls.append(url.toString()),
+        )
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_managed_refresh_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert dlg._kd_ov_open_studio_btn.isEnabled() is True
+        assert dlg._kd_ov_open_studio_btn.toolTip() == ""
+        dlg._on_kd_ov_open_studio_clicked()
+
+        assert opened_urls == ["http://127.0.0.1:1933/studio"]
+        dlg.deleteLater()
+
+    def test_update_button_calls_installer_and_shows_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+        update_calls = 0
+
+        def _fake_update() -> ov_installer.UpdateResult:
+            nonlocal update_calls
+            update_calls += 1
+            return ov_installer.UpdateResult(previous_version="0.3.0", new_version="0.3.1")
+
+        monkeypatch.setattr(ov_installer, "update", _fake_update)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_update_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert update_calls == 1
+        assert "0.3.0" in dlg._kd_ov_managed_status_msg.text()
+        assert "0.3.1" in dlg._kd_ov_managed_status_msg.text()
+        dlg.deleteLater()
+
+    def test_update_button_shows_major_version_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+        monkeypatch.setattr(
+            ov_installer,
+            "update",
+            lambda: ov_installer.UpdateResult(
+                previous_version="0.3.0", new_version="1.0.0", warning="major version change"
+            ),
+        )
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_update_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert "คำเตือน" in dlg._kd_ov_managed_status_msg.text()
+        dlg.deleteLater()
+
+    def test_update_button_reports_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeManagerHandle(ov_manager.ManagerStatus(True, True, True, "u", True))
+        monkeypatch.setattr(ov_manager, "get_manager", lambda: fake)
+
+        def _raise() -> ov_installer.UpdateResult:
+            raise ov_installer.InstallerError("boom")
+
+        monkeypatch.setattr(ov_installer, "update", _raise)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_OPENVIKING)
+        dlg._on_kd_ov_update_clicked()
+        _wait(dlg._kd_ov_managed_thread)
+
+        assert "ไม่สำเร็จ" in dlg._kd_ov_managed_status_msg.text()
+        dlg.deleteLater()
+
     def test_repair_calls_ensure_installed_with_force(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

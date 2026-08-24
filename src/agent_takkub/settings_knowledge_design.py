@@ -38,8 +38,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -391,6 +391,9 @@ class KnowledgeDesignSettingsMixin:
         self._kd_ov_remove_btn = cockpit_theme.secondary_button("Remove", panel)
         self._kd_ov_remove_btn.clicked.connect(self._on_kd_ov_remove_clicked)
         manage_row.addWidget(self._kd_ov_remove_btn)
+        self._kd_ov_update_btn = cockpit_theme.secondary_button("Update", panel)
+        self._kd_ov_update_btn.clicked.connect(self._on_kd_ov_update_clicked)
+        manage_row.addWidget(self._kd_ov_update_btn)
         manage_row.addStretch(1)
         mp_lay.addLayout(manage_row)
 
@@ -407,6 +410,11 @@ class KnowledgeDesignSettingsMixin:
         self._kd_ov_logs_btn = cockpit_theme.secondary_button("View Logs", panel)
         self._kd_ov_logs_btn.clicked.connect(self._on_kd_ov_view_logs_clicked)
         service_row.addWidget(self._kd_ov_logs_btn)
+        self._kd_ov_open_studio_btn = cockpit_theme.secondary_button("Open Studio", panel)
+        self._kd_ov_open_studio_btn.clicked.connect(self._on_kd_ov_open_studio_clicked)
+        self._kd_ov_open_studio_btn.setEnabled(False)
+        self._kd_ov_open_studio_btn.setToolTip("Start the OpenViking service first")
+        service_row.addWidget(self._kd_ov_open_studio_btn)
         service_row.addStretch(1)
         mp_lay.addLayout(service_row)
 
@@ -416,6 +424,7 @@ class KnowledgeDesignSettingsMixin:
         mp_lay.addWidget(self._kd_ov_managed_status_msg)
 
         self._kd_ov_managed_thread: _CallableThread | None = None
+        self._kd_ov_studio_url: str | None = None
         self._kd_ov_apply_managed_visibility(installed=ov_installer.is_installed())
         return panel
 
@@ -427,10 +436,12 @@ class KnowledgeDesignSettingsMixin:
         for btn in (
             self._kd_ov_repair_btn,
             self._kd_ov_remove_btn,
+            self._kd_ov_update_btn,
             self._kd_ov_start_btn,
             self._kd_ov_stop_btn,
             self._kd_ov_restart_btn,
             self._kd_ov_logs_btn,
+            self._kd_ov_open_studio_btn,
         ):
             btn.setVisible(installed)
 
@@ -458,6 +469,16 @@ class KnowledgeDesignSettingsMixin:
             self._kd_ov_managed_install_lbl.setText(f"Broken — {status.error}")
         else:
             self._kd_ov_managed_install_lbl.setText("Healthy")
+
+        # `status.url` is only ever populated when `healthy` is True (see
+        # `manager.ManagerStatus`/`OpenVikingManager.status()`), so it doubles
+        # as the "service is actually reachable" check for Open Studio.
+        self._kd_ov_studio_url = status.url if status.healthy else None
+        can_open_studio = bool(self._kd_ov_studio_url)
+        self._kd_ov_open_studio_btn.setEnabled(can_open_studio)
+        self._kd_ov_open_studio_btn.setToolTip(
+            "" if can_open_studio else "Start the OpenViking service first"
+        )
 
     def _on_kd_ov_install_enable_clicked(self) -> None:
         from .openviking_setup_dialog import OpenVikingSetupDialog
@@ -514,6 +535,32 @@ class KnowledgeDesignSettingsMixin:
         thread.resultReady.connect(self._on_kd_ov_managed_status_ready)
         self._kd_ov_managed_thread = thread
         thread.start()
+
+    def _on_kd_ov_update_clicked(self) -> None:
+        self._kd_ov_managed_status_msg.setText("กำลังอัปเดต…")
+        thread = _CallableThread(lambda: ov_installer.update(), self)
+        thread.resultReady.connect(self._on_kd_ov_update_ready)
+        self._kd_ov_managed_thread = thread
+        thread.start()
+
+    def _on_kd_ov_update_ready(self, result: object) -> None:
+        if isinstance(result, Exception):
+            self._kd_ov_managed_status_msg.setText(f"อัปเดตไม่สำเร็จ: {result}")
+            return
+        update_result: ov_installer.UpdateResult = result
+        msg = (
+            f"อัปเดตแล้ว: {update_result.previous_version or '?'} → "
+            f"{update_result.new_version or '?'}"
+        )
+        if update_result.warning:
+            msg += f" — คำเตือน: {update_result.warning}"
+        self._kd_ov_managed_status_msg.setText(msg)
+        self._kd_ov_managed_version_lbl.setText(_openviking_installed_version_text())
+
+    def _on_kd_ov_open_studio_clicked(self) -> None:
+        if not self._kd_ov_studio_url:
+            return
+        QDesktopServices.openUrl(QUrl(f"{self._kd_ov_studio_url}/studio"))
 
     def _kd_ov_run_service_action(self, fn, label: str) -> None:
         self._kd_ov_managed_status_msg.setText(f"{label}…")
