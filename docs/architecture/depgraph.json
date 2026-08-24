@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 300,
+  "module_count": 310,
   "modules": [
     {
       "module": "agent_takkub",
@@ -247,9 +247,11 @@
         "agent_takkub.cli",
         "agent_takkub.core.brain.context_builder",
         "agent_takkub.core.brain.pipeline",
-        "agent_takkub.core.brain.retrieval"
+        "agent_takkub.core.brain.retrieval",
+        "agent_takkub.core.context_sources.base",
+        "agent_takkub.core.context_sources.resource_source"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
@@ -332,6 +334,7 @@
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.core.capabilities.permission_engine",
+        "agent_takkub.core.context_sources.indexing",
         "agent_takkub.core.migration.engine",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
@@ -360,7 +363,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 30
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.cli_server",
@@ -471,6 +474,9 @@
         "agent_takkub.codex_helper",
         "agent_takkub.core.capabilities.audit",
         "agent_takkub.core.capabilities.skill_store",
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.migration.engine",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.secrets.manager",
@@ -554,7 +560,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 97,
+      "fan_in": 100,
       "fan_out": 2
     },
     {
@@ -704,16 +710,22 @@
         "agent_takkub.bm25_search",
         "agent_takkub.core.brain.retrieval",
         "agent_takkub.core.brain.store",
+        "agent_takkub.core.context_sources.base",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.core.context_sources.openviking_source",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.core.conversation.flag",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.conversation.summary",
         "agent_takkub.core.models.memory"
       ],
       "imported_by": [
-        "agent_takkub.core.brain.facade"
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.context_sources.brain_source",
+        "agent_takkub.core.context_sources.conversation_source"
       ],
-      "fan_in": 1,
-      "fan_out": 7
+      "fan_in": 3,
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.core.brain.facade",
@@ -726,6 +738,7 @@
         "agent_takkub.core.brain.sources.digest_facts_source",
         "agent_takkub.core.brain.sources.reflection_source",
         "agent_takkub.core.brain.store",
+        "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.models.memory"
       ],
       "imported_by": [
@@ -733,7 +746,7 @@
         "agent_takkub.settings_core_v2"
       ],
       "fan_in": 2,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.core.brain.flag",
@@ -942,6 +955,134 @@
       ],
       "fan_in": 4,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.context_sources",
+      "imports": [
+        "agent_takkub.core.context_sources.base"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.context_sources.base",
+      "imports": [
+        "agent_takkub.bm25_search"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources",
+        "agent_takkub.core.context_sources.brain_source",
+        "agent_takkub.core.context_sources.conversation_source",
+        "agent_takkub.core.context_sources.openviking_source",
+        "agent_takkub.core.context_sources.resource_source"
+      ],
+      "fan_in": 6,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.core.context_sources.brain_source",
+      "imports": [
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources.base"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.context_sources.conversation_source",
+      "imports": [
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources.base"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.context_sources.doctor_section",
+      "imports": [
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.core.context_sources.trace_store"
+      ],
+      "imported_by": [
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.core.context_sources.indexing",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.context_sources.openviking_adapter",
+        "agent_takkub.obsidian_boundary",
+        "agent_takkub.obsidian_metadata",
+        "agent_takkub.vault_mirror"
+      ],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.core.context_sources.doctor_section"
+      ],
+      "fan_in": 2,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.context_sources.openviking_adapter",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.secrets.backends.file_backend"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.context_builder",
+        "agent_takkub.core.context_sources.doctor_section",
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.openviking_source"
+      ],
+      "fan_in": 4,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.context_sources.openviking_source",
+      "imports": [
+        "agent_takkub.core.context_sources.base",
+        "agent_takkub.core.context_sources.openviking_adapter"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.context_builder"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.context_sources.resource_source",
+      "imports": [
+        "agent_takkub.bm25_search",
+        "agent_takkub.core.context_sources.base",
+        "agent_takkub.obsidian_boundary",
+        "agent_takkub.obsidian_metadata",
+        "agent_takkub.vault_mirror"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.context_builder"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.core.context_sources.trace_store",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.core.brain.facade",
+        "agent_takkub.core.context_sources.doctor_section"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.core.contracts",
@@ -1831,9 +1972,10 @@
         "agent_takkub.core.secrets.backends"
       ],
       "imported_by": [
+        "agent_takkub.core.context_sources.openviking_adapter",
         "agent_takkub.core.secrets.manager"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -2195,6 +2337,7 @@
         "agent_takkub.config",
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.capabilities.skill_store",
+        "agent_takkub.core.context_sources.doctor_section",
         "agent_takkub.core.secrets.backends",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.layout",
@@ -2224,7 +2367,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 29
+      "fan_out": 30
     },
     {
       "module": "agent_takkub.editor_service",
@@ -2684,9 +2827,11 @@
       "module": "agent_takkub.obsidian_boundary",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.doctor"
       ],
-      "fan_in": 1,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -2706,10 +2851,12 @@
       "module": "agent_takkub.obsidian_metadata",
       "imports": [],
       "imported_by": [
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.obsidian_backfill",
         "agent_takkub.vault_mirror"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -4580,13 +4727,15 @@
         "agent_takkub.project_identity"
       ],
       "imported_by": [
+        "agent_takkub.core.context_sources.indexing",
+        "agent_takkub.core.context_sources.resource_source",
         "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.obsidian_backfill",
         "agent_takkub.orchestrator",
         "agent_takkub.vault_graph"
       ],
-      "fan_in": 5,
+      "fan_in": 7,
       "fan_out": 4
     },
     {

@@ -1395,6 +1395,7 @@ class TestRunAllChecks:
             "check_hooks",
             "check_hook_wiring",
             "check_ready_markers",
+            "check_knowledge_context",
             "check_version",
             "check_editable_install",
         )

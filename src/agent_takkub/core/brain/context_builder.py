@@ -19,6 +19,8 @@ read is a single `summary.json`, never the raw message log.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from agent_takkub.bm25_search import tokenize
 from agent_takkub.core.models.memory import MemoryRecord, Scope
 
@@ -239,4 +241,166 @@ def build_context(project: str | None, role: str, task_text: str, budget_tokens:
     return "\n".join(parts)
 
 
-__all__ = ["budget_tokens_for", "build_context"]
+# ── OpenViking hybrid merge (issue #372, GAP-013/017/018) ──────────────────
+#
+# Everything below is ADDITIVE and never called by `build_context` above,
+# which stays exactly as it was (the legacy Brain+Conversation assembly
+# `facade.build_context_for_assign` already calls first). `facade` feeds
+# that result through `merge_openviking_traced` as a SEPARATE step — when
+# OpenViking is disabled (default: `TAKKUB_OPENVIKING_ENABLED=0`) that step
+# returns its input completely unchanged before touching anything else, so
+# the pre-#372 output stays byte-for-byte identical by construction rather
+# than by re-testing the whole assembly path again.
+#
+# This is also where "Context Builder = ONLY merge/budget/dedup/provenance
+# policy" (`15_CONTEXT_SOURCE_ARCHITECTURE.md`) actually lives: the
+# RETRIEVAL itself is `core.context_sources.*`'s job (imported lazily below
+# to avoid a module-load-time dependency a disabled feature shouldn't pay
+# for).
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTrace:
+    name: str
+    count: int
+    unit: str
+    tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextTrace:
+    """Doctor/debug-facing summary of one `merge_openviking_traced` call —
+    shape matches `15_CONTEXT_SOURCE_ARCHITECTURE.md`'s suggested trace
+    format (`.render()`)."""
+
+    mode: str
+    sources: tuple[SourceTrace, ...]
+    total_tokens: int
+    budget_tokens: int
+    dedup_count: int = 0
+    latency_ms: float = 0.0
+
+    def render(self) -> str:
+        lines = ["Context:"]
+        for s in self.sources:
+            lines.append(f"- {s.name}: {s.count} {s.unit} / {s.tokens} tokens")
+        lines.append(f"Total: {self.total_tokens} / budget {self.budget_tokens}")
+        return "\n".join(lines)
+
+
+# `16_CONTEXT_MERGE_POLICY.md` priority ordering, expressed as a trust
+# weight for the injected-section sort: curated local Obsidian docs first,
+# then external OpenViking resources — "exact project scope wins over
+# global" / "explicit/user-confirmed trust outranks inferred".
+_TRUST_WEIGHT: dict[str, int] = {"curated": 3, "distilled": 2, "external": 1, "auto": 0}
+
+
+def _trust_weight(trust: str) -> int:
+    return _TRUST_WEIGHT.get(trust, 0)
+
+
+def merge_openviking(
+    base_text: str,
+    *,
+    project: str | None,
+    role: str,
+    task_text: str,
+    budget_tokens: int,
+) -> str:
+    """`base_text` is `build_context(...)`'s own output — this only ever
+    APPENDS to it, never rewrites it. NOT itself a fail-open boundary: an
+    error talking to the sidecar or scanning the vault propagates to the
+    caller — `facade.build_context_for_assign` is where that's caught, so a
+    bug HERE falls back to the `base_text` already computed rather than
+    discarding a working Brain/Conversation build."""
+    text, _trace = merge_openviking_traced(
+        base_text, project=project, role=role, task_text=task_text, budget_tokens=budget_tokens
+    )
+    return text
+
+
+def merge_openviking_traced(
+    base_text: str,
+    *,
+    project: str | None,
+    role: str,
+    task_text: str,
+    budget_tokens: int,
+) -> tuple[str, ContextTrace | None]:
+    """Same as `merge_openviking`, plus the `ContextTrace` `facade` persists
+    for `doctor`/debug (`trace_store.save_last_trace`). Returns
+    `(base_text, None)` untouched whenever OpenViking is disabled — the
+    `None` trace is the caller's signal that nothing ran, not an error."""
+    import time as _time
+
+    from agent_takkub.core.context_sources import openviking_adapter
+    from agent_takkub.core.context_sources.base import collapse_near_duplicates
+    from agent_takkub.core.context_sources.openviking_source import OpenVikingSource
+    from agent_takkub.core.context_sources.resource_source import ResourceSource
+
+    if not openviking_adapter.enabled():
+        return base_text, None
+
+    started = _time.monotonic()
+    ov_mode = openviking_adapter.mode()
+    base_tokens = _token_cost(base_text) if base_text else 0
+    remaining = max(0, budget_tokens - base_tokens)
+
+    ov_items = OpenVikingSource().retrieve(
+        task_text, project=project, role=role, budget_tokens=remaining
+    )
+    resource_items = (
+        ResourceSource().retrieve(task_text, project=project, role=role, budget_tokens=remaining)
+        if ov_mode == "hybrid"
+        else []
+    )
+
+    pool, dedup_count = collapse_near_duplicates(resource_items + ov_items)
+    pool.sort(key=lambda item: (_trust_weight(item.trust), item.score), reverse=True)
+
+    injected = []
+    used = 0
+    for item in pool:
+        if injected and used + item.tokens > remaining:
+            continue
+        injected.append(item)
+        used += item.tokens
+
+    sources = [
+        SourceTrace("OpenViking", len(ov_items), "resources", sum(i.tokens for i in ov_items))
+    ]
+    if ov_mode == "hybrid":
+        sources.append(
+            SourceTrace(
+                "Resource", len(resource_items), "docs", sum(i.tokens for i in resource_items)
+            )
+        )
+
+    trace = ContextTrace(
+        mode=ov_mode,
+        sources=tuple(sources),
+        total_tokens=base_tokens + sum(i.tokens for i in injected),
+        budget_tokens=budget_tokens,
+        dedup_count=dedup_count,
+        latency_ms=(_time.monotonic() - started) * 1000,
+    )
+
+    # shadow: retrieve + trace, never inject (`14_OPENVIKING_INTEGRATION.md`
+    # rollout stage B). Also the natural fallback when nothing was found.
+    if ov_mode == "shadow" or not injected:
+        return base_text, trace
+
+    parts = [base_text] if base_text else [_HEADER]
+    parts.append("### Knowledge (OpenViking)")
+    parts.extend(f"- ({item.trust}) {item.text} [source: {item.provenance}]" for item in injected)
+    return "\n".join(parts), trace
+
+
+__all__ = [
+    "ContextTrace",
+    "SourceTrace",
+    "budget_tokens_for",
+    "build_context",
+    "merge_openviking",
+    "merge_openviking_traced",
+]

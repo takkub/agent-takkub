@@ -3255,6 +3255,28 @@ def check_obsidian() -> list[Finding]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# [knowledge] / [context]
+# ---------------------------------------------------------------------------
+
+
+def check_knowledge_context() -> list[Finding]:
+    """[knowledge]/[context] — OpenViking sidecar enabled/health/version/
+    indexed counts + the last Context Builder merge trace (issue #372, `19_
+    DIAGNOSTICS_OBSERVABILITY.md`). Cheap by default: OpenViking is disabled
+    out of the box, and the check below is a single SKIP finding in that
+    case — no network call. All the actual logic lives in
+    `core.context_sources.doctor_section` (owned by that feature, not this
+    file) — see its module docstring for why it returns plain rows instead
+    of `Finding` directly (`core-is-bottom-layer`: `core.context_sources`
+    must never import this module, which transitively pulls in PyQt6)."""
+    from .core.context_sources.doctor_section import build_findings
+
+    return [
+        Finding(row.category, row.name, Status(row.status), row.detail) for row in build_findings()
+    ]
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
@@ -3280,6 +3302,7 @@ def run_all_checks() -> list[Finding]:
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),
+        ("check_knowledge_context", check_knowledge_context),
         ("check_version", check_version),
     )
     for check_name, check in checks:
