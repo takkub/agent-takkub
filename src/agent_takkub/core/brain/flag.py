@@ -36,3 +36,22 @@ def v2_brain_enabled() -> bool:
 
 def v2_context_enabled() -> bool:
     return _env_or_setting("TAKKUB_V2_CONTEXT", "context")
+
+
+_STRATEGIES = ("fast", "automatic", "deep")
+
+
+def context_strategy() -> str:
+    """Fast/Automatic/Deep (v2-hardening C, `13_SIMPLE_UX.md`) — same
+    env-wins-then-setting precedence as the boolean flags above. Env
+    `TAKKUB_CONTEXT_STRATEGY` must be exactly one of "fast"/"automatic"/
+    "deep" to apply; anything else (unset included) falls through to the
+    persisted Settings value, itself defaulting to "automatic"
+    (`core_v2_settings.load_context_strategy`)."""
+    raw = os.environ.get("TAKKUB_CONTEXT_STRATEGY")
+    if raw in _STRATEGIES:
+        return raw
+
+    from agent_takkub import core_v2_settings
+
+    return core_v2_settings.load_context_strategy()

@@ -64,6 +64,17 @@ def build_findings() -> list[FindingRow]:
         risk_flags = trace.get("risk_flags")
         if risk_flags:
             detail += f" risk={risk_flags}"
+        if trace.get("retry_count"):
+            detail += (
+                f" retry={trace.get('retry_count')}"
+                f" escalated={trace.get('initial_size')}->{trace.get('final_size')}"
+            )
+        strategy = trace.get("strategy")
+        if strategy and strategy != "automatic":
+            detail += f" strategy={strategy}"
+        skipped = trace.get("skipped")
+        if skipped:
+            detail += " skipped=[" + "; ".join(f"{s['name']}: {s['reason']}" for s in skipped) + "]"
         if inefficient:
             detail += " ⚠ inefficient (small task over 15k tokens)"
         findings.append(
