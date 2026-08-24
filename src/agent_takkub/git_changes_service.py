@@ -56,11 +56,20 @@ _BINARY_SNIFF_BYTES = 8192
 _SUBPROCESS_LOCK = threading.Lock()
 
 
-def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+def _run_git(
+    args: list[str], *, cwd: Path, stdin_input: str | None = None
+) -> subprocess.CompletedProcess:
+    """The one locked entry point every `git` subprocess in this codebase
+    should go through (see `_SUBPROCESS_LOCK` above) — `project_file_index.
+    _git_check_ignore_batch` (#374 GAP-011) reuses this via a lazy import
+    rather than calling `subprocess.run` directly, for the same crash-avoidance
+    reason. `stdin_input`, when given, is piped to the process's stdin (e.g.
+    `git check-ignore --stdin -z`'s NUL-separated path list)."""
     with _SUBPROCESS_LOCK:
         return subprocess.run(
             args,
             cwd=str(cwd),
+            input=stdin_input,
             capture_output=True,
             encoding="utf-8",
             errors="replace",

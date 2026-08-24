@@ -6,7 +6,12 @@ no widgets. `project_explorer.py` is the only caller.
 Two jobs:
   * `ProjectFileIndex` — lists exactly one directory at a time on a
     `QThreadPool` worker thread (never the Qt main thread), filtered by a
-    fixed ignore-name set plus that directory's own `.gitignore` chain.
+    fixed ignore-name set plus that directory's ignore rules. Ignore rules
+    prefer real `git check-ignore` (#374 GAP-011 — one batched `--stdin -z`
+    call per directory listing, never one call per file) and fall back to
+    the handwritten `.gitignore` chain below when the directory isn't a git
+    repo, `git` isn't on PATH, or the call errors/times out — see
+    `_git_check_ignore_batch`.
   * `GitStatusService` — debounced, background `git status --porcelain`
     for one project root, feeding the Explorer's M/A/D badges. Phase 1
     scope only: refresh-on-request. Phase 4 wires it to a real file
@@ -85,8 +90,9 @@ def _parse_gitignore(gitignore_path: Path) -> list[tuple[str, bool, bool]]:
     Deliberately a subset, not a git reimplementation: literal names plus
     `fnmatch` globs (`*`, `?`, `[...]`), a trailing `/` marks dir-only, a
     leading `!` negates. No `**`, no anchoring semantics beyond "this
-    directory and below" — enough to hide what a generated repo
-    accumulates, which is all the Explorer needs it for."""
+    directory and below" — this is the fallback used when real `git
+    check-ignore` isn't available (see `_git_check_ignore_batch` / GAP-011),
+    good enough to hide what a generated repo accumulates in that case."""
     try:
         lines = gitignore_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError:
@@ -135,6 +141,54 @@ def _gitignore_chain(directory: Path, root: Path | None) -> list[tuple[str, bool
     return patterns
 
 
+def _git_check_ignore_batch(directory: Path, candidates: list[FileEntry]) -> frozenset[str] | None:
+    """Ask real `git check-ignore` which of `candidates` (already
+    scandir-ed, all direct children of `directory`) it would hide — one
+    batched `--stdin -z` call per directory listing, never one call per
+    file (#374 GAP-011).
+
+    Returns `None` — not "nothing is ignored" — when git can't answer at
+    all: `directory` isn't inside a work tree (exit 128), `git` isn't on
+    PATH, or the call times out. The caller falls back to the handwritten
+    `.gitignore` chain in that case. Routed through `git_changes_service.
+    _run_git` (lazy import — that module imports this one, so a top-level
+    import here would cycle) so this shares that module's `_SUBPROCESS_LOCK`:
+    concurrent `subprocess.run()` calls from separate QThreadPool workers
+    (this index's own listing workers alongside `GitChangesService`/
+    `RepoDiscoveryService`) reproducibly crashed the interpreter on Windows
+    without it (#375)."""
+    from .git_changes_service import _run_git
+
+    stdin_input = "".join(f"{e.name}\0" for e in candidates)
+    try:
+        proc = _run_git(
+            ["git", "check-ignore", "--stdin", "-z"],
+            cwd=directory,
+            stdin_input=stdin_input,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("project_file_index: git check-ignore failed for %s: %s", directory, exc)
+        return None
+    # 0 = at least one path is ignored, 1 = none are — both are git actually
+    # having answered. Anything else (128 = not a repo / fatal error, ...)
+    # means git couldn't answer at all.
+    if proc.returncode not in (0, 1):
+        return None
+    return frozenset(name for name in (proc.stdout or "").split("\0") if name)
+
+
+def _resolve_ignored_names(
+    directory: Path, root: Path | None, candidates: list[FileEntry]
+) -> frozenset[str]:
+    if not candidates:
+        return frozenset()
+    git_result = _git_check_ignore_batch(directory, candidates)
+    if git_result is not None:
+        return git_result
+    patterns = _gitignore_chain(directory, root)
+    return frozenset(e.name for e in candidates if _gitignore_hides(e.name, e.is_dir, patterns))
+
+
 def list_dir_sync(directory: Path, roots: Sequence[Path]) -> list[FileEntry]:
     """The actual (blocking) directory listing. Only ever call this from a
     worker thread (`_ListDirWorker.run`) or directly from a test — never
@@ -142,9 +196,8 @@ def list_dir_sync(directory: Path, roots: Sequence[Path]) -> list[FileEntry]:
     roots = [Path(r).resolve() for r in roots]
     directory = resolve_and_contain(Path(directory), roots)
     root = next((r for r in roots if directory == r or r in directory.parents), None)
-    patterns = _gitignore_chain(directory, root)
 
-    entries: list[FileEntry] = []
+    candidates: list[FileEntry] = []
     try:
         with os.scandir(directory) as it:
             for de in it:
@@ -169,12 +222,13 @@ def list_dir_sync(directory: Path, roots: Sequence[Path]) -> list[FileEntry]:
                     resolve_and_contain(Path(de.path), roots)
                 except (PathEscapesRootsError, OSError):
                     continue
-                if _gitignore_hides(name, is_dir, patterns):
-                    continue
-                entries.append(FileEntry(name=name, path=Path(de.path), is_dir=is_dir))
+                candidates.append(FileEntry(name=name, path=Path(de.path), is_dir=is_dir))
     except OSError as exc:
         logger.debug("project_file_index: scandir(%s) failed: %s", directory, exc)
         return []
+
+    ignored = _resolve_ignored_names(directory, root, candidates)
+    entries = [e for e in candidates if e.name not in ignored]
     entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
     return entries
 

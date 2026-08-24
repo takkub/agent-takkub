@@ -462,7 +462,14 @@
       ph.style.display = 'flex';
       ph.innerHTML = '';
       const msg = document.createElement('div');
-      const reasonText = tab.reason === 'binary' ? 'Binary file' : 'File too large to preview';
+      let reasonText;
+      if (tab.reason === 'binary') {
+        reasonText = 'Binary file';
+      } else if (tab.reason === 'encoding_unsupported') {
+        reasonText = 'Unsupported encoding (not valid UTF-8) — opened read-only, save disabled';
+      } else {
+        reasonText = 'File too large to preview';
+      }
       msg.textContent = `${reasonText} (${formatSize(tab.size)}) — ${baseName(tab.path)}`;
       ph.appendChild(msg);
       const row = document.createElement('div');

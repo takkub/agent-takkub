@@ -1,6 +1,7 @@
 """Project Explorer view (#365 phase 1): lazy tree population — never a
 direct filesystem scan, always a dispatch to `ProjectFileIndex` — plus the
-disabled phase-2 menu placeholders.
+context menu (including "Ask Agent", #374 GAP-010) and the "Open in Takkub"
+disabled-for-a-directory placeholder.
 
 `project_roots()` is monkeypatched directly (not routed through a real
 projects.json) so these tests stay isolated from config/DATA_HOME entirely.
@@ -168,15 +169,40 @@ class TestFileActivation:
 
 
 class TestContextMenu:
-    def test_ask_agent_is_a_disabled_placeholder(self, qapp, one_root_project) -> None:
+    def test_ask_agent_enabled_for_a_directory(self, qapp, one_root_project) -> None:
         explorer = pe.ProjectExplorer("proj")
         menu = explorer._build_context_menu(one_root_project, True)
 
         by_text = {a.text(): a for a in menu.actions() if a.text()}
-        assert by_text["Ask Agent"].isEnabled() is False
+        assert by_text["Ask Agent"].isEnabled() is True
         assert by_text["Open externally"].isEnabled() is True
         assert by_text["Reveal"].isEnabled() is True
         assert by_text["Copy path"].isEnabled() is True
+
+    def test_ask_agent_emits_signal_for_a_file(self, qapp, one_root_project) -> None:
+        f = one_root_project / "a.py"
+        f.write_text("x")
+        explorer = pe.ProjectExplorer("proj")
+        menu = explorer._build_context_menu(f, False)
+        by_text = {a.text(): a for a in menu.actions() if a.text()}
+        assert by_text["Ask Agent"].isEnabled() is True
+
+        received: list[str] = []
+        explorer.askAgentRequested.connect(received.append)
+        by_text["Ask Agent"].trigger()
+
+        assert received == [str(f)]
+
+    def test_ask_agent_emits_signal_for_a_directory(self, qapp, one_root_project) -> None:
+        explorer = pe.ProjectExplorer("proj")
+        menu = explorer._build_context_menu(one_root_project, True)
+        by_text = {a.text(): a for a in menu.actions() if a.text()}
+
+        received: list[str] = []
+        explorer.askAgentRequested.connect(received.append)
+        by_text["Ask Agent"].trigger()
+
+        assert received == [str(one_root_project)]
 
     def test_open_in_takkub_disabled_for_a_directory(self, qapp, one_root_project) -> None:
         explorer = pe.ProjectExplorer("proj")
