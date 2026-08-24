@@ -6180,6 +6180,13 @@ class Orchestrator(
     # publishing a mockup) — restricting that to Lead would just make Lead
     # a relay for work that isn't Lead's to do.
     # ──────────────────────────────────────────────────────────────
+    def preview_status(self, project: str):
+        """Current `PreviewState | None` for *project* — the read-only half
+        of `preview_command`'s "status" action, exposed directly for
+        in-process callers (`main_window.py`'s tab-switch sync, #369
+        BUG-002) that need it without going through the IPC dict-shape."""
+        return self._preview_controller.status(project)
+
     def preview_command(
         self,
         action: str,
@@ -6252,6 +6259,23 @@ class Orchestrator(
             return False, str(exc), {}
         return True, f"published design artifact {artifact.artifact_id}", artifact.as_dict()
 
+    def _live_design_feedback_role(
+        self, project_ns: str, created_by_role: str | None
+    ) -> str | None:
+        """Pick the live pane role to route design approve/revise feedback
+        to (#371 BUG-006) — the artifact's own creator when their pane is
+        still alive (most likely to act on it), else the generic
+        `designer` role. Provider-agnostic (checks pane liveness only, not
+        which CLI backs it) so every provider (claude/codex/gemini-agy/
+        opencode/kimi/cursor) qualifies the same way. `None` means no live
+        candidate — caller falls back to Lead-only, same as before #371."""
+        project_panes = self._project_panes(project_ns)
+        for role in dict.fromkeys(r for r in (created_by_role, "designer") if r):
+            pane = project_panes.get(role)
+            if pane is not None and pane.session is not None and pane.session.is_alive:
+                return role
+        return None
+
     def design_approve(self, project: str | None, artifact_id: str) -> tuple[bool, str, dict]:
         from .design_actions import DesignArtifactError, approve
 
@@ -6267,12 +6291,20 @@ class Orchestrator(
             from_role="system",
             note="design-approve",
         )
+        target_role = self._live_design_feedback_role(project_ns, artifact.created_by_role)
+        if target_role:
+            self.send(
+                target_role,
+                f'✅ [design-approve] artifact {artifact_id} approved — "{artifact.title}"',
+                from_role="system",
+                project=project_ns,
+            )
         return True, f"artifact {artifact_id} approved", artifact.as_dict()
 
     def design_revise(
         self, project: str | None, artifact_id: str, *, feedback: str = ""
     ) -> tuple[bool, str, dict]:
-        from .design_actions import DesignArtifactError, request_revision
+        from .design_actions import DesignArtifactError, format_revision_feedback, request_revision
 
         project_ns = self._resolve_project(project)
         try:
@@ -6280,12 +6312,26 @@ class Orchestrator(
         except DesignArtifactError as exc:
             return False, str(exc), {}
         feedback_note = f" — {feedback}" if feedback else ""
-        self._notify_lead(
-            project_ns,
-            f'🔁 [design] revision requested for artifact {artifact_id} — "{artifact.title}"{feedback_note}',
-            from_role="system",
-            note="design-revise",
-        )
+        # #371 BUG-006: route the structured feedback straight to whichever
+        # live pane can act on it, instead of only ever telling Lead.
+        target_role = self._live_design_feedback_role(project_ns, artifact.created_by_role)
+        if target_role:
+            self.send(
+                target_role,
+                format_revision_feedback(artifact, feedback),
+                from_role="system",
+                project=project_ns,
+            )
+            lead_note = (
+                f"🔁 [design] revision requested for artifact {artifact_id} — "
+                f'"{artifact.title}"{feedback_note} (routed to {target_role})'
+            )
+        else:
+            lead_note = (
+                f"🔁 [design] revision requested for artifact {artifact_id} — "
+                f'"{artifact.title}"{feedback_note} (no live designer pane — Lead fallback)'
+            )
+        self._notify_lead(project_ns, lead_note, from_role="system", note="design-revise")
         return True, f"revision requested for artifact {artifact_id}", artifact.as_dict()
 
     def record_main_thread_stall(self, details: dict) -> None:

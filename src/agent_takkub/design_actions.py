@@ -12,14 +12,17 @@ latest-record-per-`artifact_id` wins — the same upsert-log shape
 
 `publish_design_artifact` validates + ensures Preview shows it (calling into
 `preview_controller`, per `11_EDITOR_PREVIEW_AGENT_PROTOCOL.md`'s "cockpit
-validates -> ensures Preview -> opens/focuses"). Notifying Lead on
-approve/revise is deliberately NOT done here: every existing
-`_notify_lead` call in this codebase is `self._notify_lead(...)` on the live
-`Orchestrator` instance (a bound method, not a proxyable module function
-like `_log_event`), so that step is the caller's job — see
+validates -> ensures Preview -> opens/focuses"). Notifying Lead (and, since
+#371 BUG-006, the live Designer pane) on approve/revise is deliberately NOT
+done here: every existing `_notify_lead`/`send` call in this codebase is a
+bound method on the live `Orchestrator` instance (not a proxyable module
+function like `_log_event`), so that step is the caller's job — see
 `Orchestrator.design_approve`/`design_revise` in orchestrator.py, which call
 this module's pure `approve`/`request_revision` and then notify Lead
-themselves with a short artifact-id-only message ("ไม่ส่ง HTML").
+themselves with a short artifact-id-only message ("ไม่ส่ง HTML"), plus route
+structured feedback (`format_revision_feedback`, below) to whichever live
+pane created the artifact — falling back to Lead-only when no such pane is
+live.
 """
 
 from __future__ import annotations
@@ -250,4 +253,22 @@ def request_revision(
         registry,
         "workspace.design.revision_requested",
         feedback_len=len(feedback),
+    )
+
+
+def format_revision_feedback(artifact: DesignArtifact, feedback: str) -> str:
+    """Structured message routed to the live pane that should act on a
+    revision (#371 BUG-006) — record fields only (id/title/kind/target),
+    never the artifact's HTML/file content, plus the republish command.
+    Pure/testable without an Orchestrator instance; the caller
+    (`Orchestrator.design_revise`) owns picking *who* gets this and
+    actually delivering it via `self.send`."""
+    return "\n".join(
+        [
+            f'[design-revise] artifact {artifact.artifact_id} needs a revision — "{artifact.title}"',
+            f"kind: {artifact.kind}",
+            f"target: {artifact.target}",
+            f"feedback: {feedback or '(no feedback text provided)'}",
+            f'→ publish the revision with: takkub design publish --path <file> --title "{artifact.title}" --mode {artifact.kind}',
+        ]
     )

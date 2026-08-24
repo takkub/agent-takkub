@@ -391,6 +391,7 @@ class PreviewHost(QObject):
             self._view.apply_device(device)
         for name, btn in self._device_buttons.items():
             btn.setChecked(name == device)
+        self._refresh_header()  # #369 item 4: header's device text stays live
 
     # -- toolbar actions -----------------------------------------------------
     def refresh(self) -> None:
@@ -429,8 +430,12 @@ class PreviewHost(QObject):
         self._refresh_header()
 
     def _refresh_header(self) -> None:
+        # #369 item 4: project · target · device — the artifact half lives
+        # in the separate _lbl_artifact label refreshed just below.
         if self._lbl_status is not None and self._state is not None:
-            self._lbl_status.setText(f"{self._state.mode}: {self._state.target}")
+            self._lbl_status.setText(
+                f"{self._project} · {self._state.mode}: {self._state.target} · {self._device}"
+            )
         has_artifact = self._artifact is not None
         if self._lbl_artifact is not None:
             self._lbl_artifact.setText(
