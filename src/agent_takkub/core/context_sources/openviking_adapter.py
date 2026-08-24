@@ -75,8 +75,29 @@ def mode() -> str:
     return raw if raw in MODES else _DEFAULT_MODE
 
 
+_runtime_url: str | None = None
+
+
+def set_runtime_url(url: str | None) -> None:
+    """Set by `openviking.manager.OpenVikingManager` once it determines the
+    sidecar's actual reachable address (a managed-local spawn on a
+    `port.py`-picked port, or an already-healthy external instance sitting
+    at a non-default port) — read by `base_url()` below. Process-local only
+    (no IPC): the manager and every caller of this adapter run in the same
+    Python process. `TAKKUB_OPENVIKING_URL` — a user's own explicit pointer
+    to an external server — always wins over this and is never overwritten
+    by it (see `base_url()`)."""
+    global _runtime_url
+    _runtime_url = url
+
+
 def base_url() -> str:
-    return (os.environ.get(_ENV_URL) or _DEFAULT_URL).rstrip("/")
+    env = os.environ.get(_ENV_URL)
+    if env:
+        return env.rstrip("/")
+    if _runtime_url:
+        return _runtime_url.rstrip("/")
+    return _DEFAULT_URL.rstrip("/")
 
 
 def api_key() -> str | None:
@@ -256,4 +277,5 @@ __all__ = [
     "health",
     "mode",
     "search_resources",
+    "set_runtime_url",
 ]
