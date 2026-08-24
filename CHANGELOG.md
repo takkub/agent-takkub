@@ -2,6 +2,26 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.5.0] - 2026-08-24
+
+### Added (เพิ่ม)
+
+- **OpenViking แบบ Managed Local — ติดตั้ง/รันให้เองอัตโนมัติ ไม่ต้อง Docker ไม่ต้องเปิด terminal เอง** (pack
+  `docs/plans/openviking-managed-local-2026-08-24/` · reviewer `docs/audit/2026-08-24-openviking-managed-review.md` SHIP หลังแก้ HIGH+MEDIUM ครบ) —
+  ผู้ใช้แค่ Settings › Knowledge & Design › OpenViking → **[Install & Enable]** → Setup Wizard (provider/model ตาม upstream schema จริง:
+  volcengine/openai/kimi/glm/ollama — ollama = local ล้วนไม่ต้องมี key) → Takkub สร้าง venv แยกที่ `~/.agent-takkub/services/openviking`,
+  `pip install openviking`, เขียน ov.conf, start `openviking-server` ที่ 127.0.0.1 (port 1933 หรือ free port ถ้าชน — ถ้ามี OpenViking
+  ตัวอื่นรันอยู่แล้วและ healthy จะ**ใช้ร่วมกันเลยไม่เปิดซ้ำ** เช่น dev+prod cockpit ใช้ตัวเดียวกัน) แล้ว poll health
+  - เปิด Cockpit ครั้งถัดไป → auto-start ให้ (ถ้าติ๊ก Start automatically) · ปิด Cockpit → stop เฉพาะ process ที่ตัวเองเปิด
+    (**external process ไม่โดนฆ่าเด็ดขาด** — owner_pid+create_time guard แบบเดียวกับ remote tunnel) · crash → bounded restart backoff
+  - Settings: Status/Runtime/Address/Version · Start/Stop/Restart · Repair (venv `--clear` สร้างใหม่จริง) · Update (explicit เท่านั้น,
+    เก็บ prior version) · Remove (ถามแยกว่าลบ data ไหม) · View Logs (redacted) · **[Open Studio]** เปิด Web Studio ของ OpenViking ใน browser
+  - CLI: `takkub ov managed status|install|start|stop|restart|doctor|update|repair|remove|studio` · doctor section `[openviking]` managed runtime
+  - Security (reviewer HIGH แก้แล้ว): API key เก็บใน SecretManager เท่านั้น — ov.conf มีแค่ placeholder `${OPENVIKING_API_KEY}`
+    (env-substitution ของ upstream, ยืนยันจาก docs จริง) inject เป็น env ตอน spawn · log ผ่าน `redact()` ก่อนเขียน + View Logs redact ซ้ำ
+  - fail-open ทุกจุด: ปิด/พัง → Cockpit ทำงานปกติ (Brain/Conversation/Graft ไม่เกี่ยว) · localhost เท่านั้น ไม่มี tunnel/0.0.0.0 ·
+    ไม่ auto-install ตอน boot · docs: `docs/guides/2026-08-24-openviking-sidecar.md` (section "Managed local")
+
 ## [v1.4.1] - 2026-08-24
 
 ### Fixed (แก้)
