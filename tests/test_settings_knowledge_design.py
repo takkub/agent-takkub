@@ -26,7 +26,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QSettings
 from PyQt6.QtWidgets import QLineEdit
 
-from agent_takkub import config, custom_roles, pane_tools_policy, settings_window
+from agent_takkub import config, core_v2_settings, custom_roles, pane_tools_policy, settings_window
 from agent_takkub import roles as roles_mod
 from agent_takkub.core.capabilities import design_integrations
 from agent_takkub.core.secrets.manager import SecretManager
@@ -39,6 +39,10 @@ def _isolate_kd_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
+    # Context Strategy panel reads this env directly (`TAKKUB_CONTEXT_
+    # STRATEGY` wins over the persisted setting) — must start unset so tests
+    # aren't at the mercy of whatever the invoking shell happens to export.
+    monkeypatch.delenv("TAKKUB_CONTEXT_STRATEGY", raising=False)
     # Sidebar's ADVANCED section fold state — see
     # test_settings_window.py's own `_isolate_settings_paths` fixture for why
     # this must be redirected off the real machine registry/INI store.
@@ -227,6 +231,58 @@ class TestKnowledgeView:
         dlg.deleteLater()
 
 
+class TestContextStrategyPanel:
+    def test_defaults_to_automatic_and_all_choices_enabled(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+        buttons = dlg._kd_ctx_strategy_buttons
+        assert buttons["automatic"].isChecked() is True
+        assert buttons["fast"].isChecked() is False
+        assert buttons["deep"].isChecked() is False
+        assert all(b.isEnabled() for b in buttons.values())
+        assert dlg._kd_ctx_strategy_banner is None
+        dlg.deleteLater()
+
+    def test_clicking_a_choice_round_trips_through_core_v2_settings(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+        dlg._on_kd_ctx_strategy_clicked("deep")
+
+        assert core_v2_settings.load_context_strategy() == "deep"
+        assert dlg._kd_ctx_strategy_buttons["deep"].isChecked() is True
+        assert dlg._kd_ctx_strategy_buttons["automatic"].isChecked() is False
+        dlg.deleteLater()
+
+    def test_reopening_settings_reflects_the_persisted_choice(self) -> None:
+        core_v2_settings.save_context_strategy("fast")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+        assert dlg._kd_ctx_strategy_buttons["fast"].isChecked() is True
+        dlg.deleteLater()
+
+    def test_env_override_locks_choices_and_shows_banner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "deep")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+
+        buttons = dlg._kd_ctx_strategy_buttons
+        assert buttons["deep"].isChecked() is True
+        assert all(b.isEnabled() is False for b in buttons.values())
+        assert dlg._kd_ctx_strategy_banner is not None
+        assert "TAKKUB_CONTEXT_STRATEGY=deep" in dlg._kd_ctx_strategy_banner.text()
+        dlg.deleteLater()
+
+    def test_invalid_env_value_is_ignored_and_choices_stay_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_CONTEXT_STRATEGY", "bogus")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+
+        buttons = dlg._kd_ctx_strategy_buttons
+        assert all(b.isEnabled() for b in buttons.values())
+        assert buttons["automatic"].isChecked() is True
+        assert dlg._kd_ctx_strategy_banner is None
+        dlg.deleteLater()
+
+
 class TestContextDebugView:
     def test_no_trace_shows_placeholder_and_disables_buttons(
         self, monkeypatch: pytest.MonkeyPatch
@@ -298,4 +354,67 @@ class TestContextDebugView:
         assert "Scope rejected: 4" in dlg._kd_ctx_totals_lbl.text()
         assert "Task size: medium" in dlg._kd_ctx_totals_lbl.text()
         assert "10ms" in dlg._kd_ctx_report_text()
+        dlg.deleteLater()
+
+    def test_trace_without_explainable_fields_hides_explain_label(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-C/E trace shape (no score/risk_flags/escalation/strategy/
+        skipped) — the Explainable Trace label must degrade to hidden/empty,
+        never KeyError."""
+        from agent_takkub.core.context_sources import trace_store
+
+        fake_trace = {
+            "sources": [],
+            "total_tokens": 100,
+            "budget_tokens": 6000,
+            "dedup_count": 0,
+        }
+        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+        # Widgets never .show()'n in offscreen tests always report
+        # isVisible()=False regardless of state; isHidden() reflects the
+        # widget's own explicit setVisible() call (see test_settings_window.
+        # py's own comment on this).
+        assert dlg._kd_ctx_explain_lbl.isHidden()
+        assert dlg._kd_ctx_explain_lbl.text() == ""
+        dlg.deleteLater()
+
+    def test_trace_with_explainable_fields_renders_complexity_risk_and_escalation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.core.context_sources import trace_store
+
+        fake_trace = {
+            "sources": [],
+            "total_tokens": 4120,
+            "budget_tokens": 6000,
+            "dedup_count": 0,
+            "task_size": "medium",
+            "score": 8,
+            "confidence": 0.88,
+            "risk_flags": ["auth"],
+            "initial_size": "small",
+            "final_size": "medium",
+            "escalation_reason": "auth module + 5 impacted files",
+            "strategy": "automatic",
+            "skipped": [{"name": "openviking", "reason": "no knowledge-heavy signal"}],
+        }
+        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
+        assert not dlg._kd_ctx_explain_lbl.isHidden()
+        text = dlg._kd_ctx_explain_lbl.text()
+        assert "MEDIUM" in text
+        assert "score 8" in text
+        assert "confidence 88%" in text
+        assert "Risk: auth" in text
+        assert "small → medium" in text
+        assert "auth module + 5 impacted files" in text
+        assert "Strategy: automatic" in text
+        assert "openviking (no knowledge-heavy signal)" in text
+
+        report = dlg._kd_ctx_report_text()
+        assert "openviking" in report
         dlg.deleteLater()
