@@ -476,7 +476,16 @@ class TestWriteAtomicModePreservation:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Force the win32 branch regardless of the host OS running this
-        test, and assert the chmod path is never exercised there."""
+        test, and assert the chmod path is never exercised there.
+
+        `_win_long_path` is stubbed to identity here too: on a real Windows
+        host it's already covered on its own terms by
+        test_worktree_manager.py/test_disk_usage.py, and on POSIX its real
+        `\\?\` prefixing produces a string `open()` can't use — this test's
+        target is only the mode-preservation gate (`sys.platform`), not the
+        long-path helper, so it must not depend on which OS actually runs
+        the suite.
+        """
         import agent_takkub.editor_service as editor_service_module
 
         root = tmp_path / "proj"
@@ -486,6 +495,7 @@ class TestWriteAtomicModePreservation:
         expected = read_for_edit(f, [root])
 
         monkeypatch.setattr(editor_service_module.sys, "platform", "win32")
+        monkeypatch.setattr(editor_service_module, "_win_long_path", lambda p: str(p))
         chmod_calls: list[tuple] = []
         monkeypatch.setattr(
             editor_service_module.os, "chmod", lambda *a, **kw: chmod_calls.append(a)
