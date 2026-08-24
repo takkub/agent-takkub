@@ -341,3 +341,84 @@ class TestChangesPanel:
         explorer._on_git_status_changed({})
 
         assert row.foreground(0).color().name() == before
+
+    def test_rename_row_shows_old_arrow_new_path(self, qapp, one_root_project) -> None:
+        explorer = pe.ProjectExplorer("proj")
+
+        explorer._on_changes_changed([FileChange(path="new.py", status="R", old_path="old.py")])
+
+        row = explorer._changes_item.child(0)
+        assert row.text(0) == "R  old.py -> new.py"
+
+
+class TestMultiRepo:
+    """#375 GAP-009: a project whose configured roots span more than one
+    distinct repo (or whose first root is a *subdirectory* of its repo) —
+    driven directly through `_on_repos_discovered`/`_on_repo_changes_changed`
+    (same "no real git subprocess, no real background worker" convention
+    `TestChangesPanel` uses for `_on_changes_changed`), so these stay
+    deterministic and don't depend on real git repos on disk. The discovery
+    *mechanism* itself (`resolve_repo_root`/`discover_repo_roots`, the real
+    `git rev-parse --show-toplevel` subprocess) is covered directly in
+    test_git_changes_service.py; this class covers what `ProjectExplorer`
+    does with that result."""
+
+    @pytest.fixture
+    def two_root_project(self, monkeypatch, tmp_path):
+        root_a = tmp_path / "web"
+        root_b = tmp_path / "api"
+        root_a.mkdir()
+        root_b.mkdir()
+        monkeypatch.setattr(pe, "project_roots", lambda name: {"web": root_a, "api": root_b})
+        return root_a, root_b
+
+    def test_two_distinct_repos_group_rows_under_repo_labels(self, qapp, two_root_project) -> None:
+        root_a, root_b = two_root_project
+        explorer = pe.ProjectExplorer("proj")
+
+        explorer._on_repos_discovered(
+            {root_a.resolve(): root_a.resolve(), root_b.resolve(): root_b.resolve()}
+        )
+        explorer._on_changes_changed([FileChange(path="a.py", status="M")])
+        explorer._on_repo_changes_changed(root_b.resolve(), [FileChange(path="b.py", status="A")])
+
+        assert explorer._changes_item.childCount() == 2
+        group_labels = sorted(explorer._changes_item.child(i).text(0) for i in range(2))
+        assert group_labels == ["api (1)", "web (1)"]
+        assert explorer._changes_item.text(0) == "CHANGES (2)"
+
+    def test_single_shared_repo_across_two_roots_stays_compact(
+        self, qapp, two_root_project
+    ) -> None:
+        root_a, root_b = two_root_project
+        shared_toplevel = root_a.resolve()  # both configured roots live in one repo
+        explorer = pe.ProjectExplorer("proj")
+
+        explorer._on_repos_discovered(
+            {root_a.resolve(): shared_toplevel, root_b.resolve(): shared_toplevel}
+        )
+        explorer._on_changes_changed([FileChange(path="a.py", status="M")])
+
+        assert explorer._changes_item.childCount() == 1
+        row = explorer._changes_item.child(0)
+        assert row.data(0, pe._CHANGE_ROW_ROLE) is True  # a flat row, not a group header
+        assert row.data(0, pe._CHANGES_GROUP_ROLE) is None
+        assert len(explorer._extra_git_changes) == 0  # both roots collapse to the primary
+
+    def test_subdirectory_root_corrects_repo_root(self, qapp, monkeypatch, tmp_path) -> None:
+        # #375 GAP-009 repro: the configured project root is a subdirectory
+        # of the repo, not its top-level — `git status` still reports paths
+        # relative to the true top-level, so the original first-root-only
+        # code silently dropped every row (containment against the wrong
+        # base). Discovery must correct `git_changes.repo_root` for this to
+        # find anything at all.
+        repo_top = tmp_path / "repo"
+        sub = repo_top / "sub"
+        sub.mkdir(parents=True)
+        monkeypatch.setattr(pe, "project_roots", lambda name: {"main": sub})
+        explorer = pe.ProjectExplorer("proj")
+        assert explorer.git_changes.repo_root == sub.resolve()  # uncorrected default
+
+        explorer._on_repos_discovered({sub.resolve(): repo_top.resolve()})
+
+        assert explorer.git_changes.repo_root == repo_top.resolve()

@@ -2245,6 +2245,7 @@
         "agent_takkub._win_console",
         "agent_takkub.editor_service",
         "agent_takkub.file_watch_service",
+        "agent_takkub.git_changes_service",
         "agent_takkub.project_explorer",
         "agent_takkub.project_file_index"
       ],
@@ -2252,7 +2253,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -2301,9 +2302,10 @@
         "agent_takkub.project_file_index"
       ],
       "imported_by": [
+        "agent_takkub.editor_widget",
         "agent_takkub.project_explorer"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 2
     },
     {
