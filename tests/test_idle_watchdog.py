@@ -1236,6 +1236,64 @@ class TestProactiveIdleCompact:
 
         assert pane.session.write.call_count == 2
 
+    def test_no_new_output_since_last_compact_is_not_compacted_again(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User report 2026-08-25: an untouched Lead pane got `/compact`
+        every idle episode all night. A not-ready blip ends an episode, but
+        with no new output since the previous compact settled there is
+        nothing to compact — skip (and stop re-checking) until the pane has
+        actually produced PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES more."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", 1000)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        pane.session.output_bytes_total = 50_000  # a real int, like PtySession
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1  # first compact of the session
+
+        # compact runs (its own output counts toward the baseline, not as new)
+        pane.session.is_at_ready_prompt.return_value = False
+        pane.session.output_bytes_total += 3_000
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()  # settled → baseline = 53_000
+
+        # a not-ready blip with (almost) no output: new episode, nothing new
+        pane.session.is_at_ready_prompt.return_value = False
+        pane.session.output_bytes_total += 200  # footer redraw
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1, "re-compacted an untouched conversation"
+        clock[0] += 500  # and it stays quiet, not re-evaluated into a fire
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1
+
+        # real work later: lots of new output → next idle episode compacts
+        pane.session.is_at_ready_prompt.return_value = False
+        pane.session.output_bytes_total += 20_000
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 2
+
     def test_non_claude_provider_never_compacted(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

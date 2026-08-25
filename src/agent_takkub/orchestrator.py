@@ -274,6 +274,23 @@ PROACTIVE_COMPACT_PENDING_CEILING_S = int(
     os.environ.get("TAKKUB_PROACTIVE_COMPACT_PENDING_CEILING_S", str(10 * 60))
 )
 
+# "Nothing new since the last compact" gate (user report 2026-08-25): the
+# one-per-idle-episode rule above still re-fired `/compact` on the SAME
+# untouched conversation every ~25-45 min all night, because an idle episode
+# ends on ANY not-ready blip (a status-line redraw the ready classifier
+# misses for a tick, a hook-driven session report, a `ready_marker_possibly_
+# stale` wobble) — none of which add anything to compact. Claude Code then
+# either re-summarises an already-compacted context or reports there is
+# nothing to compact, and the cockpit counts that as a fresh episode and
+# does it again. Now the pane must have emitted at least this many raw PTY
+# bytes since the previous `/compact` settled before another one is sent;
+# otherwise the episode is marked handled without writing anything. 8 KiB
+# comfortably exceeds idle footer/clock redraws and is far below the output
+# of even a one-tool work turn. 0 = disable the gate.
+PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES = int(
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", str(8 * 1024))
+)
+
 # ── Screenshot evidence auto-attach (issue #5) ──────────────────────────────
 # Extensions done() treats as "evidence" when scanning the pane's artifacts
 # dir. Case-insensitive match against Path.suffix.
@@ -7955,6 +7972,12 @@ class Orchestrator(
                         # idle_since untouched so this idle episode still
                         # reads as already-compacted.
                         ps.proactive_compact_pending = False
+                        # Baseline for the "nothing new since" gate: taken
+                        # AFTER the compact's own output so the summary it
+                        # printed never counts as new conversation.
+                        total = getattr(sess, "output_bytes_total", None)
+                        if isinstance(total, int):
+                            ps.proactive_compact_baseline_bytes = total
                     if effective_provider_for(role, project=project_name) != CLAUDE:
                         continue
                     if ps.proactive_compact_idle_since is None:
@@ -7965,6 +7988,27 @@ class Orchestrator(
                         continue
                     if ps.proactive_compact_sent_ts >= ps.proactive_compact_idle_since:
                         continue  # already compacted this idle episode
+                    total = getattr(sess, "output_bytes_total", None)
+                    if (
+                        PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES > 0
+                        and isinstance(total, int)
+                        and ps.proactive_compact_baseline_bytes >= 0
+                        and total - ps.proactive_compact_baseline_bytes
+                        < PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES
+                    ):
+                        # Nothing new to compact since the last one settled.
+                        # Mark this episode handled (sent_ts) WITHOUT writing
+                        # anything, so it is not re-evaluated every tick and
+                        # never re-fires until real output arrives.
+                        ps.proactive_compact_sent_ts = now
+                        _log_event(
+                            "proactive_idle_compact_skipped",
+                            role=role,
+                            project=project_name,
+                            idle_for=round(idle_for),
+                            new_bytes=total - ps.proactive_compact_baseline_bytes,
+                        )
+                        continue
                     sess.write("/compact")
                     _delayed_enter(pane, sess, 150)
                     ps.proactive_compact_sent_ts = now

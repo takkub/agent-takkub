@@ -792,6 +792,13 @@ class PaneState:
     # and idles again). See orchestrator._check_proactive_compact.
     proactive_compact_idle_since: float | None = None
     proactive_compact_sent_ts: float = 0.0
+    # proactive_compact_baseline_bytes: the session's `output_bytes_total`
+    # observed when the last `/compact` settled (pane back at ready). -1 =
+    # never compacted. A later idle episode only earns another `/compact`
+    # when the pane produced at least PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES
+    # past this — nothing new in the conversation means nothing new to
+    # compact, however many idle episodes the footer redraws split it into.
+    proactive_compact_baseline_bytes: int = -1
     # proactive_compact_pending: True from the moment `/compact` is injected
     # until the pane is next observed back at its ready prompt. While True,
     # the watchdog's not-ready branch must NOT null out

@@ -1255,6 +1255,13 @@ class PtySession(QObject):
         # caller that only needs to know the PTY hasn't died isn't fooled by
         # content-fingerprint normalization, and vice versa.
         self._last_byte_ts: float = 0.0
+        # Running total of raw PTY bytes read since spawn. Monotonic, never
+        # reset. The proactive-compact watchdog compares it against the
+        # value it saw when the previous `/compact` settled, so a pane that
+        # produced nothing new since is never compacted again (user report
+        # 2026-08-25: overnight, the same idle Lead pane got `/compact`
+        # every ~25-45 min with nothing to compact).
+        self.output_bytes_total: int = 0
         # Fingerprint of the last chunk's normalized screen content — see
         # _content_fingerprint. "" until the first non-blank content arrives.
         self._last_content_fingerprint: str = ""
@@ -1370,6 +1377,7 @@ class PtySession(QObject):
         # content-fingerprint change.
         now = time.monotonic()
         self._last_byte_ts = now
+        self.output_bytes_total += len(data)
         window_bytes = int(self.__dict__.get("_output_rate_window_bytes", 0)) + len(data)
         window_started = float(self.__dict__.get("_output_rate_window_started", now))
         self.__dict__["_output_rate_window_bytes"] = window_bytes
