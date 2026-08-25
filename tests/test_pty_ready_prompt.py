@@ -710,6 +710,45 @@ def test_boot_phase_marker_true_while_codex_boots_mcp() -> None:
     assert s.shows_boot_phase_marker() is True
 
 
+def test_codex_banner_model_loading_is_a_boot_phase(monkeypatch) -> None:
+    """#380: codex 0.149 draws the composer + `? for shortcuts` footer while
+    its banner still says `model: loading` — every ready rule matches, so
+    the pane read READY and the task was typed into a TUI still booting.
+    The banner line sits above the composer box, so it is only visible in
+    delivery's taller window (`_BOOT_MARKER_TAIL_ROWS`), like #284's case."""
+    s = _feed_screen(
+        "╭──────────────────────────────────────────────╮",
+        "│ >_ OpenAI Codex (v0.149.1)                   │",
+        "│                                              │",
+        "│ model:       loading   /model to change      │",
+        "│ directory:   loading                         │",
+        "│ permissions: YOLO mode                       │",
+        "╰──────────────────────────────────────────────╯",
+        "",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "  ? for shortcuts",
+    )
+    from agent_takkub.pty_session import _BOOT_MARKER_TAIL_ROWS
+
+    assert s.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS) is True
+    assert "loading" in s.boot_phase_detail()
+    # the same screen once codex finished loading is NOT a boot phase
+    s2 = _feed_screen(
+        "│ model:       gpt-5.6-terra   /model to change │",
+        "│ directory:   ~/WebstormProjects/saas_admin    │",
+        "│ permissions: YOLO mode                        │",
+        "╰──────────────────────────────────────────────╯",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "  ? for shortcuts",
+    )
+    assert s2.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS) is False
+    assert s2.boot_phase_detail() == ""
+
+
 def test_boot_phase_marker_false_for_a_working_pane_with_a_queued_message() -> None:
     """The #281 regression in one assertion: codex shows "tab to queue
     message" the whole time it is working, which is not a boot phase."""

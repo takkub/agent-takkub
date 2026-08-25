@@ -406,6 +406,30 @@ _BOOT_PHASE_MARKERS: tuple[str, ...] = (
     "starting mcp server",
 )
 
+# #380: codex 0.149's TUI paints its banner box FIRST — `model: loading` /
+# `directory: loading` — with the composer ("Ask Codex to do anything",
+# "? for shortcuts") already drawn under it. Every ready rule matches that
+# footer, so the pane read READY while the CLI had not finished
+# initialising; the pasted task was typed character-by-character into a
+# TUI that was still booting and got dropped, delivery verify failed, and
+# auto-recover restarted the pane into the exact same race (3 respawns →
+# stuck-capped, never started). Headless `codex exec` from the same cwd
+# answered in seconds, so this is purely the boot-window race. The banner
+# pads the value column with a variable run of spaces, hence a regex, not a
+# substring.
+_BOOT_PHASE_MARKER_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmodel:\s+loading\b"),
+    re.compile(r"\bdirectory:\s+loading\b"),
+)
+
+
+def _has_boot_phase_marker(region: str) -> bool:
+    """*region* is already lowercased by `_tail_region`."""
+    return any(m in region for m in _BOOT_PHASE_MARKERS) or any(
+        r.search(region) for r in _BOOT_PHASE_MARKER_RES
+    )
+
+
 # Provider QUEUED-MESSAGE chrome: the composer exists, but the CLI is mid-turn,
 # so input is queued rather than run. codex shows this whenever it is working —
 # NOT only during boot.
@@ -1753,7 +1777,7 @@ class PtySession(QObject):
         wait that the existing delivery timeout already backstops, while a
         false "ready" pastes the task into a pane that cannot receive it.
         """
-        return any(m in _tail_region(self.display_lines(), rows) for m in _BOOT_PHASE_MARKERS)
+        return _has_boot_phase_marker(_tail_region(self.display_lines(), rows))
 
     def boot_phase_detail(self) -> str:
         """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
@@ -1769,8 +1793,7 @@ class PtySession(QObject):
         never paste a screenful into a notice.
         """
         for line in reversed(_boot_marker_region(self.display_lines()).splitlines()):
-            lowered = line
-            if any(m in lowered for m in _BOOT_PHASE_MARKERS):
+            if _has_boot_phase_marker(line):
                 return " ".join(line.split())[:200]
         return ""
 
