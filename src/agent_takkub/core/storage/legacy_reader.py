@@ -14,13 +14,18 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_takkub.cached_read import read_cached
+
 
 def read_json(path: Path) -> dict:
-    """Missing/invalid V1 file reads as empty, never raises — fail-open (plan §0.4)."""
-    if not path.exists():
-        return {}
+    """Missing/invalid V1 file reads as empty, never raises — fail-open (plan §0.4).
+
+    Stat-validated cache (#386): the cockpit re-reads these mirrors from the
+    Qt main thread on every idle-check / status-header tick; while the file
+    is unchanged the parsed value is reused after a single ``stat``.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_cached(path, json.loads, missing={})
     except (json.JSONDecodeError, OSError):
         return {}
 

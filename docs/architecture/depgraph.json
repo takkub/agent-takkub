@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 318,
+  "module_count": 319,
   "modules": [
     {
       "module": "agent_takkub",
@@ -284,6 +284,17 @@
       ],
       "fan_in": 3,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.cached_read",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.storage.legacy_reader",
+        "agent_takkub.role_messages",
+        "agent_takkub.task_ledger"
+      ],
+      "fan_in": 3,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.chatlog_scanner",
@@ -2156,7 +2167,9 @@
     },
     {
       "module": "agent_takkub.core.storage.legacy_reader",
-      "imports": [],
+      "imports": [
+        "agent_takkub.cached_read"
+      ],
       "imported_by": [
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.ingest.cursor_store",
@@ -2169,7 +2182,7 @@
         "agent_takkub.provider_config"
       ],
       "fan_in": 9,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.core.storage.paths",
@@ -3819,13 +3832,15 @@
     },
     {
       "module": "agent_takkub.role_messages",
-      "imports": [],
+      "imports": [
+        "agent_takkub.cached_read"
+      ],
       "imported_by": [
         "agent_takkub.orchestrator",
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.role_models",
@@ -4657,6 +4672,7 @@
     {
       "module": "agent_takkub.task_ledger",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.config",
         "agent_takkub.path_safe"
       ],
@@ -4666,7 +4682,7 @@
         "agent_takkub.task_dock"
       ],
       "fan_in": 3,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.terminal_widget",

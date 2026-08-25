@@ -515,3 +515,15 @@ class TestExplorerFillsSidebar:
         self._pump(qapp)
         assert tab.explorer.height() == project_nav_module._EXPLORER_MIN_H
         nav.close()
+
+
+def test_pending_scan_is_pure_and_matches_sync_refresh(monkeypatch) -> None:
+    """#386: the timer path runs `_scan_pending` on a pool thread; it must
+    be a pure function of (project names, open names) → rows so the
+    main-thread `_apply_pending_scan` can rebuild the list from it."""
+    from agent_takkub.project_nav import ProjectNav
+
+    counts = {"a": 2, "b": 0, "c": 1}
+    monkeypatch.setattr(ProjectNav, "_pending_task_count", staticmethod(lambda n: counts[n]))
+    assert ProjectNav._scan_pending(["a", "b", "c"], {"c"}) == [("a", 2)]
+    assert ProjectNav._scan_pending(["a", "b", "c"], set()) == [("a", 2), ("c", 1)]

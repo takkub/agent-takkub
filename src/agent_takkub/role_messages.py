@@ -37,10 +37,13 @@ Layer rule: pure store + policy. It MUST NOT import orchestrator / main_window
 
 from __future__ import annotations
 
+import copy
 import json
 import pathlib
 import time
 import uuid
+
+from .cached_read import read_cached
 
 # Per (project, role) cap. Generous — a message is a few hundred bytes and the
 # whole point is being able to look back at a long session — but bounded so an
@@ -67,13 +70,19 @@ def read(runtime_dir: pathlib.Path, project_ns: str, role: str | None = None) ->
     line is corrupt is worse than one that shows the rest.
     """
     path = _store_path(runtime_dir, project_ns)
-    if not path.is_file():
-        return []
-    out: list[dict] = []
     try:
-        raw = path.read_text(encoding="utf-8")
+        # #386: stat-validated cache — `_reap_role_messages` reads this on
+        # every idle-check tick from the main thread.
+        records = read_cached(path, _parse_lines, missing=())
     except OSError:
         return []
+    # Deep-copied: callers (`mark_delivered` etc.) mutate then `_write_all`,
+    # and the cached parse must never be edited in place.
+    return [copy.deepcopy(rec) for rec in records if role is None or rec.get("to") == role]
+
+
+def _parse_lines(raw: str) -> tuple[dict, ...]:
+    out: list[dict] = []
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -84,10 +93,8 @@ def read(runtime_dir: pathlib.Path, project_ns: str, role: str | None = None) ->
             continue
         if not isinstance(rec, dict):
             continue
-        if role is not None and rec.get("to") != role:
-            continue
         out.append(rec)
-    return out
+    return tuple(out)
 
 
 def _write_all(runtime_dir: pathlib.Path, project_ns: str, records: list[dict]) -> None:

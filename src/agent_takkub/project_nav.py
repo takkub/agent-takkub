@@ -37,8 +37,10 @@ from PyQt6.QtCore import (
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
+    QRunnable,
     QSettings,
     Qt,
+    QThreadPool,
     QTimer,
     pyqtSignal,
 )
@@ -63,6 +65,38 @@ from .token_meter import usage_color
 # ledgerChanged signal is wired to this widget (that connection lives in
 # main_window.py, out of this widget's scope), so it self-refreshes instead.
 _PENDING_POLL_MS = 6_000
+
+
+class _PendingScanSignals(QObject):
+    done = pyqtSignal(list)
+
+
+class _PendingScanWorker(QRunnable):
+    """Runs the ledger scan for the pending-projects section off the main
+    thread (#386). Reports back ONLY via the `done` signal (queued to the
+    main thread by Qt); never touches a widget itself."""
+
+    def __init__(self, scan, open_names: set[str], signals: _PendingScanSignals) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._scan = scan
+        self._open_names = open_names
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            all_names = list_project_names()
+        except Exception:
+            all_names = []
+        try:
+            rows = self._scan(all_names, self._open_names)
+        except Exception:
+            rows = []
+        try:
+            self._signals.done.emit(rows)
+        except RuntimeError:
+            pass  # widget already destroyed during shutdown
+
 
 _SIDEBAR_QSS = f"""
 #projectSidebar {{
@@ -529,8 +563,16 @@ class ProjectNav(QWidget):
         # seconds without any wiring on the caller's side.
         self._pending_timer = QTimer(self)
         self._pending_timer.setInterval(_PENDING_POLL_MS)
-        self._pending_timer.timeout.connect(self.refresh_pending_projects)
+        # #386: the periodic tick scans every project's ledger file — run
+        # that on a pool thread and only touch widgets on the main thread.
+        # The explicit callers (open/close/collapse) keep the synchronous
+        # `refresh_pending_projects()` since they already know the answer
+        # changed and want it reflected immediately.
+        self._pending_timer.timeout.connect(self._refresh_pending_projects_async)
         self._pending_timer.start()
+        self._pending_scan_inflight = False
+        self._pending_scan_signals = _PendingScanSignals(self)
+        self._pending_scan_signals.done.connect(self._apply_pending_scan)
 
         # Sidebar collapse/expand toggle. Lives in the sidebar footer (right
         # above "New project") so the control that hides the sidebar sits inside
@@ -583,13 +625,39 @@ class ProjectNav(QWidget):
         except Exception:
             all_names = []
 
-        self._pending_list.clear()
+        rows = self._scan_pending(all_names, open_names)
+        self._apply_pending_scan(rows)
+
+    @classmethod
+    def _scan_pending(cls, all_names: list[str], open_names: set[str]) -> list[tuple[str, int]]:
+        """Pure part of the refresh — file I/O only, no widgets — so it can
+        run on a pool thread (#386)."""
+        rows: list[tuple[str, int]] = []
         for name in all_names:
             if name in open_names:
                 continue
-            count = self._pending_task_count(name)
-            if count <= 0:
-                continue
+            count = cls._pending_task_count(name)
+            if count > 0:
+                rows.append((name, count))
+        return rows
+
+    def _refresh_pending_projects_async(self) -> None:
+        """Timer-driven refresh: ledger reads happen on a `QThreadPool`
+        thread, the widget rebuild happens back here via a signal (#386 —
+        the synchronous scan was a top main-thread stall source when the
+        disk was slow: one `read_text` per project per 6s tick)."""
+        if self._pending_scan_inflight:
+            return
+        open_names = {self._row_widget(i)._name_text for i in range(self._list.count())}
+        self._pending_scan_inflight = True
+        QThreadPool.globalInstance().start(
+            _PendingScanWorker(self._scan_pending, open_names, self._pending_scan_signals)
+        )
+
+    def _apply_pending_scan(self, rows: list[tuple[str, int]]) -> None:
+        self._pending_scan_inflight = False
+        self._pending_list.clear()
+        for name, count in rows:
             item = QListWidgetItem(f"○  {name}  ({count})")
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setToolTip(f"เปิด '{name}' ({count} task ค้าง)")

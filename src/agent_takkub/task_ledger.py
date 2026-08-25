@@ -41,6 +41,7 @@ is needed: the two code paths already never collide.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ import re
 import time
 from datetime import datetime
 
+from .cached_read import read_cached
 from .config import RUNTIME_DIR
 from .path_safe import safe_segment
 
@@ -113,8 +115,14 @@ def _atomic_write(path: pathlib.Path, content: str) -> None:
 
 
 def _load_state(project: str) -> dict:
+    # #386: stat-validated cache — the pending-projects poll re-reads every
+    # project's ledger on the main thread every 6s; unchanged files cost one
+    # stat instead of open+read+parse. Deep-copied so callers that mutate
+    # the returned dict (the save path does) never edit the cached value.
     try:
-        return json.loads(_state_path(project).read_text(encoding="utf-8"))
+        return copy.deepcopy(
+            read_cached(_state_path(project), json.loads, missing={"groups": [], "open": {}})
+        )
     except (OSError, ValueError):
         return {"groups": [], "open": {}}
 
