@@ -28,11 +28,17 @@ updates:
     # not match. pip dependency names normalise to lowercase, which is the most
     # likely reason; covering both spellings costs nothing and does not depend
     # on which one is right.
+    #
+    # Third attempt (#384, 2026-08-25): the update-types rule above did not
+    # stop a `<6.9` → `<6.12` widening either — dependabot classifies a
+    # range-widen on a `>=,<` spec as a "requirement update", which the
+    # semver update-types do not cover. `versions` blocks the version itself,
+    # whatever kind of update proposes it.
     ignore:
       - dependency-name: "pyqt6*"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+        versions: [">=6.9"]
       - dependency-name: "PyQt6*"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+        versions: [">=6.9"]
 
   # npm wrapper (root package.json — dev/wrapper only, zero runtime deps).
   - package-ecosystem: "npm"
