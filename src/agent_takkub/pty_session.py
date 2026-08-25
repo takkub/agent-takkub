@@ -1377,7 +1377,12 @@ class PtySession(QObject):
         # content-fingerprint change.
         now = time.monotonic()
         self._last_byte_ts = now
-        self.output_bytes_total += len(data)
+        # __dict__ idiom like the rate-window fields below: tests build the
+        # session via __new__ (no QObject __init__), where attribute access
+        # raises RuntimeError.
+        self.__dict__["output_bytes_total"] = int(self.__dict__.get("output_bytes_total", 0)) + len(
+            data
+        )
         window_bytes = int(self.__dict__.get("_output_rate_window_bytes", 0)) + len(data)
         window_started = float(self.__dict__.get("_output_rate_window_started", now))
         self.__dict__["_output_rate_window_bytes"] = window_bytes
