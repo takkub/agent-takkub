@@ -82,7 +82,7 @@ jobs:
       # dies (bit us on run 32335988102). Ship them out on failure.
       - name: Upload qa-gate logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-gate-logs-${{ matrix.os }}
           path: runtime/exports/qa-gate-*/
