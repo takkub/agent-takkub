@@ -389,6 +389,16 @@ class TestGitLeadOnlyDenied:
             "git stash pop",
             "git branch -d merged-branch",  # lowercase -d: safe delete, not -D
             "git tag -l",
+            # #385: hyphenated longer subcommands are different (read-only)
+            # commands — `merge\b` used to match `merge-base`.
+            "git merge-base HEAD master",
+            "git merge-base --is-ancestor master HEAD",
+            "git merge-tree --write-tree master HEAD",
+            "git log --merges --oneline -5",
+            "git branch --merged",
+            "git config merge.ff false",
+            "git commit-tree HEAD^{tree} -m x",
+            "git checkout-index -a -f",
             # reading/mentioning must never trip the guard
             "grep -rn 'git commit' docs/",
             "echo 'only Lead runs git commit'",
@@ -407,8 +417,9 @@ class TestGitLeadOnlyWorktreeCarveOut:
     """#81: an `--isolation worktree` pane owns a private branch and is
     explicitly told (by `orchestrator_text._append_worktree_hint`) to commit
     there itself — "the 'wait for Lead' policy is for the shared tree only".
-    Only `commit` is carved out; push/rebase/merge/checkout stay blocked
-    even there, matching that same hint's "ห้าม push · ห้าม switch/merge"."""
+    `commit` and (#385) `merge` are carved out — a worktree pane may pull
+    base INTO its own branch; push/rebase/checkout stay blocked even there,
+    matching that same hint's "ห้าม push · ห้าม switch branch/rebase"."""
 
     _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
     _WT_CWD_POSIX = "/home/dev/.agent-takkub/worktrees/myproj/backend-3-1700000000"
@@ -419,11 +430,28 @@ class TestGitLeadOnlyWorktreeCarveOut:
 
     @pytest.mark.parametrize(
         "command",
-        ["git push", "git rebase main", "git merge main", "git checkout main"],
+        ["git push", "git rebase main", "git checkout main"],
     )
-    def test_push_rebase_merge_checkout_still_denied_from_worktree_cwd(self, command: str) -> None:
+    def test_push_rebase_checkout_still_denied_from_worktree_cwd(self, command: str) -> None:
         verdict = pane_guard.classify(command, "backend", cwd=self._WT_CWD)
         assert not verdict.allowed, f"should still block from a worktree cwd: {command}"
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
+    @pytest.mark.parametrize(
+        "command",
+        ["git merge master", "git merge --no-edit origin/main", "git -C . merge main"],
+    )
+    def test_merge_allowed_from_worktree_cwd(self, command: str, cwd: str) -> None:
+        """#385: a second worktree pane needs base's latest commits to avoid
+        re-implementing what a sibling landed; merging base INTO its own
+        branch touches nothing shared."""
+        assert pane_guard.classify(command, "backend", cwd=cwd).allowed
+
+    def test_merge_still_denied_from_shared_tree(self) -> None:
+        verdict = pane_guard.classify("git merge feature-x", "backend", cwd=r"C:\Users\dev\proj")
+        assert not verdict.allowed
+        assert verdict.rule == "git_lead_only:merge"
+        assert not pane_guard.classify("git merge feature-x", "backend").allowed
 
     def test_commit_denied_when_cwd_missing(self) -> None:
         """No cwd (e.g. an older Claude Code build, or a malformed hook

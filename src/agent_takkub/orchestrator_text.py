@@ -655,7 +655,9 @@ def _append_worktree_hint(
         f"คุณทำงานบน **git worktree + branch แยกของคุณเอง** (`{branch}`) — "
         "เมื่องานเสร็จ **ต้อง `git add` + `git commit` บน branch นี้ด้วยตัวเอง** "
         "(นโยบาย 'รอ Lead commit' ใช้กับ shared tree เท่านั้น — branch นี้ override) "
-        "ห้าม push · ห้าม switch/merge branch เอง · Lead จะ review + merge กลับ base "
+        "ถ้าต้องการงานล่าสุดจาก base ให้ `git merge <base-branch>` เข้า branch นี้เองได้ "
+        "(#385 — worktree ของคุณเท่านั้น) · ห้าม push · ห้าม switch branch/rebase · "
+        "Lead จะ review + merge กลับ base "
         "หลังคุณ `takkub done`" + setup
     )
 

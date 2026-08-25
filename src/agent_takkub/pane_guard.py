@@ -157,8 +157,9 @@ GIT_LEAD_ONLY_RULE_TEXT = (
     "เพราะ role file ทั้งคู่มีข้อห้ามเดียวกัน แต่ prose อย่างเดียวโน้มน้าวให้ทำผิดได้). "
     'งานเสร็จ → `takkub done "<note สรุปงาน>"` แล้วรอ Lead review + commit '
     "ข้อยกเว้นเดียว: pane ที่ spawn ด้วย `--isolation worktree` (branch แยกของตัวเอง) "
-    "ต้อง `git commit` บน branch นั้นเอง (แต่ยังห้าม push/rebase/merge/checkout) "
-    "ตามที่ task prompt บอกไว้ตอน spawn."
+    "ต้อง `git commit` บน branch นั้นเอง และดึง base ล่าสุดเข้า branch ตัวเองได้ด้วย "
+    "`git merge <base>` ภายใน worktree นั้น (แต่ยังห้าม push/rebase/checkout — "
+    "merge กลับเข้า base เป็นงาน Lead) ตามที่ task prompt บอกไว้ตอน spawn."
 )
 
 
@@ -391,29 +392,60 @@ _GIT_SUBCMD_GAP = r"(?:\s+-{1,2}[\w-]+)*\s+"
 # `git commit` alone is the one carve-out for a worktree-isolated pane (see
 # module docstring) — kept separate from the no-exception rules below so
 # `classify()` can gate it on `_is_worktree_cwd()`.
-_GIT_COMMIT_PATTERN = re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit\b", re.M)
+# `(?![\w-])` (not `\b`) after every subcommand name (#385): `\b` treats `-`
+# as a boundary, so `merge\b` also matched `git merge-base` — a read-only
+# ancestry lookup that a worktree pane runs to find how far it is behind
+# base. The subcommand ends only at whitespace/end-of-command; a hyphenated
+# longer name (`merge-base`, `merge-tree`, `merge-file`, `checkout-index`,
+# `commit-tree`, `commit-graph`) is a different command and never a hit.
+_SUBCMD_END = r"(?![\w-])"
+_GIT_COMMIT_PATTERN = re.compile(
+    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit{_SUBCMD_END}", re.M
+)
 
 # No allowlist, no cwd exception — push/reset --hard/branch -D/tag -d/rebase/
-# merge/checkout stay Lead-only even from an isolated worktree branch (the
+# checkout stay Lead-only even from an isolated worktree branch (the
 # worktree carve-out is "commit your own branch", never "push it" or
-# "rewrite/switch it").
+# "rewrite/switch it"). `merge` is the one rule with a worktree carve-out
+# (#385, `_GIT_MERGE_PATTERN` below).
 _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push\b", re.M)),
+    ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}", re.M)),
     (
         "reset-hard",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}reset\b{_SAME_CMD}--hard\b", re.M),
+        re.compile(
+            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}reset{_SUBCMD_END}{_SAME_CMD}--hard\b", re.M
+        ),
     ),
     (
         "branch-delete",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}branch\b{_SAME_CMD}-D\b", re.M),
+        re.compile(
+            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}branch{_SUBCMD_END}{_SAME_CMD}-D\b", re.M
+        ),
     ),
     (
         "tag-delete",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}tag\b{_SAME_CMD}-d\b", re.M),
+        re.compile(
+            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}tag{_SUBCMD_END}{_SAME_CMD}-d\b", re.M
+        ),
     ),
-    ("rebase", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}rebase\b", re.M)),
-    ("merge", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}merge\b", re.M)),
-    ("checkout", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout\b", re.M)),
+    (
+        "rebase",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}rebase{_SUBCMD_END}", re.M),
+    ),
+    (
+        "checkout",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout{_SUBCMD_END}", re.M),
+    ),
+)
+
+# `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
+# pane's own `--isolation worktree` checkout. There the pane's branch is the
+# only thing that moves — merging base INTO it is how a second worktree pane
+# picks up what a sibling already landed, without a Lead round-trip for
+# every sync (the report's bottleneck). Merging the pane's branch INTO base
+# happens on the shared tree, which this carve-out never covers.
+_GIT_MERGE_PATTERN = re.compile(
+    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}merge{_SUBCMD_END}", re.M
 )
 
 # A cockpit-managed `--isolation worktree` checkout always lives under
@@ -566,6 +598,13 @@ def classify(
             False,
             rule="git_lead_only:commit",
             reason=(f"role `{name}` commit เองไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
+        )
+
+    if not _is_worktree_cwd(cwd) and _GIT_MERGE_PATTERN.search(cmd):
+        return Verdict(
+            False,
+            rule="git_lead_only:merge",
+            reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
         )
 
     for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
