@@ -2,6 +2,17 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.2] - 2026-08-25
+
+### Fixed (แก้)
+
+- **Lead ถูกอ่านว่า "กำลังทำงาน" ทั้งที่ว่าง ตลอดเวลาที่มี background agent/shell** (พบจริง 2026-08-25 — notice #343 "lead เงียบต่อเนื่อง 24s"
+  เตือนผิดทุก cooldown) — Claude Code รุ่นใหม่โชว์ `· esc to interrupt · ← for agents` บน**บรรทัด footer** (`⏵⏵ bypass permissions on
+  (shift+tab to cycle) · esc to interrupt · ← for agents` / `· 1 shell · esc to interrupt ·`) ขณะช่องพิมพ์ idle รับ input ได้ แต่ cockpit ใช้
+  `esc to interrupt` เป็น hard blocker → Lead delivery รอทั้งที่ pane ว่าง, compact idle episode ถูกตัด, stale-marker เตือนผิด
+  → แก้: hard-blocker scan ข้ามบรรทัด footer chrome (`shift+tab to cycle` / `bypass permissions`) — spinner จริง `✻ … (esc to interrupt)`
+  อยู่คนละบรรทัดจึงยัง busy เหมือนเดิม · doctor `ready_marker_selftest` เพิ่ม 2 เคส + 3 tests (`test_pty_ready_prompt.py`)
+
 ## [v1.6.1] - 2026-08-25
 
 ### Fixed (แก้)
