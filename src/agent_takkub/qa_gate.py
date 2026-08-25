@@ -352,6 +352,20 @@ def _lint_imports_cmd(bin_dir: Path | None) -> list[str]:
     return [exe] if exe else ["lint-imports"]
 
 
+def _log_stem(step_name: str) -> str:
+    """Step name → safe log-file stem (#378).
+
+    Node monorepo steps are named after their workspace (`typecheck:apps/admin`)
+    and were used verbatim as the log filename: `:` is illegal on NTFS (drive
+    letter / ADS separator → `[Errno 22] Invalid argument`, killing the gate
+    before any step ran) and `/` became an unintended sub-directory. Every
+    character outside `[A-Za-z0-9._-]` collapses to `-` on all platforms so
+    the exports layout is identical on Windows and macOS.
+    """
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", step_name).strip("-.")
+    return stem or "step"
+
+
 def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | None) -> StepResult:
     t0 = time.monotonic()
     # #349: sample memory in the background for the whole life of this step
@@ -397,9 +411,10 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
     memory_log_path = None
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{name}.log"
+        safe = _log_stem(name)
+        log_path = log_dir / f"{safe}.log"
         log_path.write_text(output, encoding="utf-8")
-        memory_log_path = log_dir / f"{name}-memory.log"
+        memory_log_path = log_dir / f"{safe}-memory.log"
         memory_log_path.write_text("\n".join(memory_samples) + "\n", encoding="utf-8")
     tail_lines = [ln for ln in output.strip().splitlines() if ln.strip()][-6:]
     detail = " / ".join(tail_lines) if tail_lines else "(no output)"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -547,3 +548,37 @@ class TestUnknownProjectGate:
         detail = report.steps[0].detail
         assert "refuse" in detail
         assert "pyproject.toml" in detail and "package.json" in detail
+
+
+class TestLogStem:
+    """#378: step names double as log filenames; `:` is illegal on NTFS and
+    `/` is a path separator everywhere, so the full gate died before its
+    first step on a Node monorepo (`typecheck:apps/admin`)."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("pytest", "pytest"),
+            ("typecheck:apps/admin", "typecheck-apps-admin"),
+            ("typecheck:packages/ui", "typecheck-packages-ui"),
+            ("test:apps\\api", "test-apps-api"),
+            ("lint-imports", "lint-imports"),
+            ("weird name*?<>|", "weird-name"),
+            ("", "step"),
+        ],
+    )
+    def test_sanitised(self, name: str, expected: str) -> None:
+        assert qa_gate._log_stem(name) == expected
+
+    def test_run_step_writes_log_for_colon_slash_name(self, tmp_path, monkeypatch) -> None:
+        log_dir = tmp_path / "exports"
+        step = qa_gate._run_step(
+            "typecheck:apps/admin",
+            [sys.executable, "-c", "print('hi')"],
+            dict(os.environ),
+            tmp_path,
+            log_dir,
+        )
+        assert step.log_path == log_dir / "typecheck-apps-admin.log"
+        assert step.log_path.read_text(encoding="utf-8").strip() == "hi"
+        assert (log_dir / "typecheck-apps-admin-memory.log").exists()
