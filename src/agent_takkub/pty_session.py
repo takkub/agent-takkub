@@ -351,6 +351,38 @@ def _extra_ready_markers() -> tuple[str, ...]:
     return tuple(m.strip().lower() for m in override.split(",") if m.strip())
 
 
+# Claude Code's idle status footer grew a background-task segment (observed
+# 2026-08-25 on real Lead panes, events.log `ready_marker_possibly_stale`
+# footer field):
+#
+#     ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+#
+# "esc to interrupt" there means "a background agent/shell is running", NOT
+# "the CLI is generating" — the composer above it is idle and accepts input.
+# But "esc to interrupt" is claude's hard blocker (the busy spinner line reads
+# "✻ Thinking… (esc to interrupt)"), so a pane with any background task was
+# classified BUSY for as long as the task lived: stale-marker false alarms
+# every cooldown (#343 notice "lead เงียบต่อเนื่อง 24s"), Lead delivery
+# waiting on a pane that was ready, proactive-compact idle episodes cut
+# short. The two cases differ structurally: the busy indicator is on its own
+# spinner line, the background segment shares the line with the ready
+# footer. So hard blockers are scanned with that footer line removed — the
+# spinner line (a different line) still blocks exactly as before.
+_FOOTER_CHROME_LINE_MARKERS: tuple[str, ...] = ("shift+tab to cycle", "bypass permissions")
+
+
+def _blocker_scan_text(text_lower: str) -> str:
+    """*text_lower* minus the provider status-footer lines (see
+    `_FOOTER_CHROME_LINE_MARKERS`) — what the hard-blocker scan looks at."""
+    if not any(m in text_lower for m in _FOOTER_CHROME_LINE_MARKERS):
+        return text_lower
+    return "\n".join(
+        line
+        for line in text_lower.splitlines()
+        if not any(m in line for m in _FOOTER_CHROME_LINE_MARKERS)
+    )
+
+
 def _classify_ready(text_lower: str) -> bool:
     """Pure ready-prompt verdict over already-lowercased screen text. Shared by
     is_at_ready_prompt() and the doctor self-test so the two can't drift. (M4#17)
@@ -358,8 +390,9 @@ def _classify_ready(text_lower: str) -> bool:
     Faithful to the original if/return chain: hard blockers (all → not ready)
     came first there too, so grouping them is equivalent; the ordered rules then
     reproduce the exact first-match-wins precedence."""
+    blocker_text = _blocker_scan_text(text_lower)
     for b in _READY_HARD_BLOCKERS:
-        if b in text_lower:
+        if b in blocker_text:
             # REMOVED (#346): a 'verifying your account' + 'please try again
             # shortly' bypass used to live here on the assumption that phrase
             # combo means the account check failed and dropped back to a
@@ -641,6 +674,22 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     ),
     ("bypass permissions", True, "claude"),  # claude idle
     ("(esc to interrupt) building...\nbypass permissions", False, "claude"),  # claude busy
+    # 2026-08-25: idle footer with a background agent/shell running — the
+    # "esc to interrupt" segment lives ON the footer line, not on a spinner
+    # line, and the composer is accepting input. Must read READY.
+    (
+        "❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        True,
+        "claude",
+    ),
+    # …but a real spinner above that same footer is still busy.
+    (
+        "✻ Churning… (esc to interrupt)\n"
+        "❯ \n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        False,
+        "claude",
+    ),
     # --- #26 hardening (558fcbe cross-check, gemini+codex) ---
     # codex update splash + status bar footer: the 'update available!' blocker
     # precedes 'fast off/on' in _READY_RULES → stays not-ready.
@@ -682,8 +731,9 @@ def _classify_ready_for_provider(text_lower: str, provider: str) -> bool:
     Ignores TAKKUB_EXTRA_READY_MARKERS, like the shipped-table self-test
     itself. (issue #103 Phase 0, design §5.6)"""
     spec = PROVIDER_REGISTRY[provider]
+    blocker_text = _blocker_scan_text(text_lower)
     for b in spec.ready_hard_blockers:
-        if b in text_lower:
+        if b in blocker_text:
             # REMOVED (#346): see the matching note in _classify_ready above.
             return False
     for rule in spec.ready_rules:

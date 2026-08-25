@@ -863,3 +863,47 @@ def test_finished_boot_is_not_reported_as_booting() -> None:
     )
     assert s.is_at_ready_prompt() is True
     assert s.shows_boot_phase_marker() is False
+
+
+def test_claude_idle_footer_with_background_task_is_ready() -> None:
+    """2026-08-25 (#343 false alarm on real Lead panes): Claude Code's idle
+    footer shows `· esc to interrupt · ← for agents` while a background
+    agent/shell runs. That segment is on the footer line itself, not a
+    spinner line — the composer is idle. Was classified busy for the whole
+    life of the background task (stale-marker notices every cooldown,
+    delivery waiting on a ready pane, compact episodes cut short)."""
+    s = _feed_screen(
+        "● ผมไม่ได้ค้างครับ — แค่รออยู่เฉยๆ",
+        "",
+        "─" * 40,
+        "❯ ทำ ui เหลี่ยมๆ แบบ A ต่อเลย",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        "  ⧉  night-report                                 ← for agents",
+    )
+    assert s.is_at_ready_prompt() is True
+
+
+def test_claude_spinner_above_background_footer_is_still_busy() -> None:
+    # (no blank row: the 80-col test screen wraps the footer onto a second
+    # row, and the spinner must stay inside the 6-row ready window)
+    s = _feed_screen(
+        "✻ Churning… (esc to interrupt)",
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_claude_wash_locker_footer_with_shell_count_is_ready() -> None:
+    """Second real footer shape from the same day (events.log 08:25:20):
+    `1 shell · esc to interrupt`."""
+    s = _feed_screen(
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← for agents · ↓ to manage",
+    )
+    assert s.is_at_ready_prompt() is True
