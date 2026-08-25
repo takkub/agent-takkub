@@ -2,6 +2,37 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.1] - 2026-08-25
+
+### Fixed (แก้)
+
+- **UI ค้างเป็นวินาทีทั้งที่ CPU ต่ำ (#386)** — `main_thread_stall` 45 ครั้ง/6 ชม. สูงสุด 18.8s → root cause (จาก watchdog stack dump
+  ใน boot.log): main thread อ่านไฟล์ JSON เล็กๆ ซ้ำทุก tick — ledger ทุกโปรเจค (pending list ทุก 6s), `role-models`/`role-providers`
+  (`effective_provider_for` ทุก idle-check + status header), projects registry, `role_messages` — ตอน disk ช้าแต่ละ read กิน 1–10s
+  → แก้: `cached_read.read_cached` (stat เดียวต่อ poll, ใช้ค่า parse เดิมถ้า mtime/size/inode ไม่เปลี่ยน, ไฟล์ที่เพิ่งเขียน <2s
+  อ่านใหม่เสมอ) ครอบ `legacy_reader.read_json` / `task_ledger._load_state` / `role_messages.read` · pending-projects scan
+  ย้ายไป `QThreadPool` + 8 tests (`test_cached_read.py`, `test_project_nav.py`)
+- **`/compact` ยิงซ้ำทั้งคืนบน pane ที่ไม่มีอะไรใหม่** (user report) — `proactive_idle_compact` ×18/2 วันบน Lead pane เดิม → root cause:
+  idle episode จบทุกครั้งที่ ready-marker วูบ/hook session report → episode ใหม่ = compact ใหม่บน context ที่ compact ไปแล้ว
+  → แก้: `PtySession.output_bytes_total` + gate `PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES` (8 KiB, env override, 0 = ปิด) — ไม่มี output
+  ใหม่ตั้งแต่ compact ครั้งก่อน settle = ไม่ยิง (log `proactive_idle_compact_skipped`) + 1 test (`test_idle_watchdog.py`)
+- **reviewer (codex) pane ค้างที่ TUI boot แล้ว respawn วน 3 รอบ (#380, #379)** — codex 0.149 วาด composer + `? for shortcuts`
+  ก่อน init เสร็จ (banner ยัง `model: loading`) ทุก ready rule จึง match → cockpit paste task เข้า TUI ที่ยังโหลด → หาย → verify fail
+  → auto-recover เข้า race เดิม → แก้: `model:/directory: loading` เป็น boot-phase marker ใน delivery window (`_BOOT_MARKER_TAIL_ROWS`)
+  paste รอจน ready จริง + 1 test (`test_pty_ready_prompt.py`)
+- **pane_guard บล็อก `git merge-base` (read-only) และบังคับ worktree pane วิ่งหา Lead ทุกครั้งที่ต้อง sync base (#385)** —
+  `merge` match `merge-base` เพราะ `-` เป็น word boundary → แก้: subcommand จบด้วย `(?![\w-])` (merge-base/merge-tree/commit-tree/
+  checkout-index ผ่าน) · `git merge <base>` **อนุญาตภายใน worktree ของ pane เอง** (branch ตัวเองเท่านั้นที่ขยับ; บน shared tree ยัง
+  Lead-only, push/rebase/checkout ห้ามเหมือนเดิม) · rule text + worktree hint อัปเดต + 14 tests (`test_pane_guard.py`)
+- **`takkub qa-gate` (full) ตายบน Windows กับ Node monorepo (#378)** — ชื่อ step `typecheck:apps/admin` ถูกใช้เป็นชื่อไฟล์ log ตรงๆ
+  (`:` ผิดกฎ NTFS → Errno 22, `/` กลายเป็น dir ซ้อน) → แก้: `_log_stem` sanitize ทุกตัวนอก `[A-Za-z0-9._-]` เป็น `-` ทั้ง 2 OS
+  + 8 tests (`test_qa_gate.py`)
+
+### Changed (ปรับ)
+
+- deps: ruff 0.16.4 (pin + pre-commit rev) · dependabot ignore PyQt6 ด้วย `versions: [">=6.9"]` (update-types กัน range widen
+  ไม่ได้ — #138/#147/#384 ครั้งที่ 3) · actions: setup-node 7, upload-artifact 7, codeql-action 4.37.8
+
 ## [v1.6.0] - 2026-08-24
 
 ### Removed (ถอนออก)
