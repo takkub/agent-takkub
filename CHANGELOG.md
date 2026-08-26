@@ -2,6 +2,15 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.6] - 2026-08-26
+
+### Fixed (แก้)
+
+- **codex / gemini / opencode ที่เปิดจาก IDE คิดว่าตัวเองเป็น pane ของ cockpit** — spawn ปลูก `AGENTS.md` (takkub-managed) ไว้ที่ root โปรเจคเพื่อให้ provider ที่ไม่ใช่ claude discover เอง แต่**ไม่เคยมีโค้ดลบ**
+  → พบจริง 18 ไฟล์ค้างใน 14 โปรเจค (รวม `GEMINI.md` จากเวอร์ชันเก่า) CLI ที่เปิดเองในโปรเจคนั้นอ่านเจอ "You are running inside an agent-takkub pane" · config home แยก (`CODEX_HOME`/`CLAUDE_CONFIG_DIR`) ช่วยไม่ได้เพราะไฟล์อยู่ในโปรเจค
+  → แก้: `codex_agents_md.remove_managed_context_files()` ลบเฉพาะไฟล์ที่บรรทัดแรกมี marker `takkub-managed` (ไฟล์ของ user ไม่แตะ) เรียกจาก `close()` / exit ไม่คาดคิด (เมื่อไม่มี pane อื่นใช้ cwd เดียวกัน) และตอนปิด cockpit (`release_all_planted_context`, รวม Lead) · spawn ครั้งหน้าปลูกใหม่เอง
+  · **`takkub cleanup agents-md [--dry-run] [--yes] [--path DIR]`** กวาดของเก่าทุก project path ที่ลงทะเบียน — รันหลังอัป 1 ครั้ง
+
 ## [v1.6.5] - 2026-08-26
 
 ### Fixed (แก้)

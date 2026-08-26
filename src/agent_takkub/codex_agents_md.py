@@ -270,6 +270,79 @@ def _ensure_git_excluded(repo_cwd: Path, filename: str) -> None:
         return
 
 
+# Every context file the cockpit has ever planted into a project cwd for a
+# non-claude provider's native discovery, by the marker its first line
+# carries. `GEMINI.md` is no longer written by any current code path but
+# older versions did plant it (found live 2026-08-26 in two projects), so the
+# sweep below still recognises it.
+MANAGED_CONTEXT_FILENAMES: tuple[str, ...] = ("AGENTS.md", "GEMINI.md")
+_MANAGED_MARKER_TOKEN = "takkub-managed"
+
+
+def is_takkub_managed(path: Path) -> bool:
+    """True when *path* exists and its FIRST line carries the takkub-managed
+    marker — the only files this module will ever delete. A user-owned
+    AGENTS.md/GEMINI.md (no marker on line 1) is never touched, same rule
+    `ensure_agents_md` applies before overwriting."""
+    try:
+        if not path.is_file():
+            return False
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return _MANAGED_MARKER_TOKEN in first
+
+
+def remove_managed_context_files(cwd: str | Path) -> list[str]:
+    """Delete the takkub-managed context files planted in *cwd* and return
+    the names removed.
+
+    Why (2026-08-26 user report): `ensure_agents_md` / `render_lead_agents_md`
+    plant `AGENTS.md` at spawn and NOTHING ever removed it — 18 managed
+    files were sitting in 14 of the user's projects long after every pane
+    had closed. codex / gemini / opencode opened from an IDE terminal
+    auto-discover `AGENTS.md` from the cwd exactly like a pane does, read
+    "You are running inside an agent-takkub pane", and behaved as one. The
+    per-pane isolated homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, ...) keep
+    settings/auth apart, but a file dropped into the project itself is
+    visible to every CLI that opens that project. Called when the last pane
+    using a cwd goes away (close / unexpected exit / cockpit shutdown) and
+    by `takkub cleanup agents-md` for what older versions left behind. Never
+    raises; a locked file is simply reported as not removed."""
+    base = Path(cwd)
+    removed: list[str] = []
+    if not base.is_absolute() or not base.is_dir():
+        return removed
+    for name in MANAGED_CONTEXT_FILENAMES:
+        target = base / name
+        if not is_takkub_managed(target):
+            continue
+        try:
+            target.unlink()
+        except OSError:
+            continue
+        removed.append(name)
+    return removed
+
+
+def find_managed_context_files(paths: list[str | Path]) -> dict[str, list[str]]:
+    """``{cwd: [names]}`` of takkub-managed context files present under each
+    of *paths* (read-only — the report half of `takkub cleanup agents-md`)."""
+    found: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for raw in paths:
+        base = Path(raw)
+        key = str(base)
+        if key in seen or not base.is_dir():
+            continue
+        seen.add(key)
+        names = [n for n in MANAGED_CONTEXT_FILENAMES if is_takkub_managed(base / n)]
+        if names:
+            found[key] = names
+    return found
+
+
 def ensure_agents_md(spawn_cwd: str | Path, extra: str = "") -> tuple[bool, str]:
     """Plant `<spawn_cwd>/AGENTS.md` with the cockpit cheatsheet.
 

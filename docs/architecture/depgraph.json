@@ -342,6 +342,7 @@
       "imports": [
         "agent_takkub.bm25_search",
         "agent_takkub.chatlog_scanner",
+        "agent_takkub.codex_agents_md",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.core.capabilities.design_integrations",
@@ -376,7 +377,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 33
+      "fan_out": 34
     },
     {
       "module": "agent_takkub.cli_server",
@@ -440,10 +441,12 @@
       "module": "agent_takkub.codex_agents_md",
       "imports": [],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.lead_context",
+        "agent_takkub.orchestrator",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -2983,6 +2986,7 @@
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
+        "agent_takkub.codex_agents_md",
         "agent_takkub.config",
         "agent_takkub.core.brain.escalation",
         "agent_takkub.core.brain.facade",
@@ -3035,7 +3039,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 47
+      "fan_out": 48
     },
     {
       "module": "agent_takkub.orchestrator_text",

@@ -546,6 +546,12 @@ def _install_signal_handlers(window: MainWindow) -> None:
                         pane.session.terminate(wait=True)
                     except Exception:
                         pass
+        # Planted AGENTS.md/GEMINI.md must not outlive the cockpit — an IDE
+        # CLI opening that project afterwards would read them as a pane.
+        try:
+            window.orch.release_all_planted_context()
+        except Exception:
+            pass
         try:
             window.orch.close_native_chrome()
         except Exception:

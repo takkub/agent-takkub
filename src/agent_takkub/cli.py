@@ -1330,6 +1330,8 @@ def cmd_cleanup(args: argparse.Namespace) -> dict:
     under `~/.agent-takkub/services/openviking/`. Never silently deletes
     user data, never touches a process this cockpit didn't itself spawn —
     see `openviking_cleanup.py`'s module docstring."""
+    if args.cleanup_target == "agents-md":
+        return _cmd_cleanup_agents_md(args)
     if args.cleanup_target != "openviking":
         return {"ok": False, "msg": f"unknown cleanup target: {args.cleanup_target!r}"}
 
@@ -1359,6 +1361,53 @@ def cmd_cleanup(args: argparse.Namespace) -> dict:
     openviking_cleanup.stop_owned_process()
     openviking_cleanup.remove(purge_data=purge)
     return {"ok": True, "msg": "removed" + (" (data purged)" if purge else " (config/data kept)")}
+
+
+def _cmd_cleanup_agents_md(args: argparse.Namespace) -> dict:
+    """`takkub cleanup agents-md` — sweep the takkub-managed AGENTS.md /
+    GEMINI.md that spawns planted into every registered project path (and
+    older versions never removed), so a CLI opened from an IDE in those
+    projects stops reading itself as a cockpit pane. Only files whose first
+    line carries the takkub-managed marker are ever deleted; a user-owned
+    AGENTS.md is skipped. Live panes re-plant their own on the next spawn."""
+    from .codex_agents_md import find_managed_context_files, remove_managed_context_files
+    from .config import load_projects
+
+    paths: list[str] = []
+    try:
+        for proj in (load_projects().get("projects") or {}).values():
+            for path in (proj.get("paths") or {}).values():
+                if isinstance(path, str) and path and path not in paths:
+                    paths.append(path)
+    except Exception as exc:
+        return {"ok": False, "msg": f"could not read projects registry: {exc}"}
+    for extra in getattr(args, "path", None) or []:
+        if extra not in paths:
+            paths.append(extra)
+
+    found = find_managed_context_files(paths)
+    if not found:
+        return {
+            "ok": True,
+            "msg": "no takkub-managed AGENTS.md/GEMINI.md found — nothing to clean up",
+        }
+
+    lines = [f"{cwd}: {', '.join(names)}" for cwd, names in found.items()]
+    if getattr(args, "dry_run", False):
+        return {"ok": True, "msg": "would remove:\n" + "\n".join(lines)}
+    if not getattr(args, "yes", False):
+        print("takkub-managed context files found:\n" + "\n".join(lines))
+        try:
+            answer = input("remove them? (a running pane re-plants its own on next spawn) [y/N] ")
+        except EOFError:
+            answer = "n"
+        if answer.strip().lower() not in ("y", "yes"):
+            return {"ok": False, "msg": "cancelled"}
+
+    removed_total = 0
+    for cwd in found:
+        removed_total += len(remove_managed_context_files(cwd))
+    return {"ok": True, "msg": f"removed {removed_total} file(s) from {len(found)} path(s)"}
 
 
 def cmd_harvest(args: argparse.Namespace) -> dict:
@@ -3491,6 +3540,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     scl_ov.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     scl_ov.set_defaults(func=cmd_cleanup)
+    scl_am = scl_sub.add_parser(
+        "agents-md",
+        help="remove takkub-managed AGENTS.md/GEMINI.md that spawns planted into project "
+        "roots (an IDE-launched codex/gemini otherwise reads itself as a cockpit pane)",
+    )
+    scl_am.add_argument(
+        "--path",
+        action="append",
+        help="extra directory to sweep (repeatable) on top of every registered project path",
+    )
+    scl_am.add_argument("--dry-run", action="store_true", help="list without deleting")
+    scl_am.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    scl_am.set_defaults(func=cmd_cleanup)
 
     sh = sub.add_parser(
         "harvest",

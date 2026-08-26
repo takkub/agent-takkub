@@ -1616,6 +1616,69 @@ class Orchestrator(
         if manager is not None:
             manager.close()
 
+    def _planted_context_cwd_in_use(self, cwd: str | None, exclude: tuple[str, str] | None) -> bool:
+        """True while some OTHER live pane (session attached, not exited) runs
+        in *cwd* — its planted AGENTS.md must stay until it goes too."""
+        if not cwd:
+            return False
+        for project_ns, panes in getattr(self, "_panes_by_project", {}).items():
+            for role, pane in panes.items():
+                if exclude is not None and (project_ns, role) == exclude:
+                    continue
+                if getattr(pane, "session", None) is None:
+                    continue
+                if getattr(pane, "state", None) == "exited":
+                    continue
+                if getattr(pane, "_session_cwd", None) == cwd:
+                    return True
+        return False
+
+    def _release_planted_context_if_unused(
+        self, cwd: str | None, *, exclude: tuple[str, str] | None = None
+    ) -> list[str]:
+        """Remove the takkub-managed context files from *cwd* once no live
+        pane needs them (see `codex_agents_md.remove_managed_context_files`
+        for why). Best-effort: never raises into close()/exit paths."""
+        if not cwd or self._planted_context_cwd_in_use(cwd, exclude):
+            return []
+        try:
+            from .codex_agents_md import remove_managed_context_files
+
+            removed = remove_managed_context_files(cwd)
+        except Exception:
+            return []
+        if removed:
+            _log_event("planted_context_removed", cwd=str(cwd), files=removed)
+        return removed
+
+    def release_all_planted_context(self) -> dict[str, list[str]]:
+        """Cockpit-shutdown sweep (app.py `_kill_all`): every cwd any pane —
+        Lead included — was spawned into gets its planted context files
+        removed, since no pane will outlive the process to need them."""
+        cwds: list[str] = []
+        for panes in getattr(self, "_panes_by_project", {}).values():
+            for pane in panes.values():
+                cwd = getattr(pane, "_session_cwd", None)
+                if cwd and cwd not in cwds:
+                    cwds.append(cwd)
+        out: dict[str, list[str]] = {}
+        for cwd in cwds:
+            try:
+                from .codex_agents_md import remove_managed_context_files
+
+                removed = remove_managed_context_files(cwd)
+            except Exception:
+                removed = []
+            if removed:
+                out[cwd] = removed
+        if out:
+            _log_event(
+                "planted_context_removed",
+                cwd="*",
+                files=[name for names in out.values() for name in names],
+            )
+        return out
+
     def _native_chrome_in_use(self) -> bool:
         """True while any live pane is one that `spawn()` starts/reuses the
         cockpit-owned mb Chrome for (#406): a non-sharded browser role
@@ -3807,8 +3870,13 @@ class Orchestrator(
             # mark exit as expected so the pane doesn't surface "exited"/crash
             pane.mark_expected_exit()
             self._warn_if_live_children(project_ns, role_name, pane.session)
+            _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
             pane.set_state("empty", note=None)
+            # Planted AGENTS.md leaves with the last pane that used this cwd —
+            # otherwise an IDE-launched CLI in that project reads it and
+            # thinks it is a pane (2026-08-26 report).
+            self._release_planted_context_if_unused(_closing_cwd, exclude=(project_ns, role_name))
         key = f"{project_ns}::{role_name}"
         resource_token = getattr(self, "_resource_tokens", {}).pop((project_ns, role_name), None)
         resource_governor = getattr(self, "_resource_governor", None)

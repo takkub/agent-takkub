@@ -3444,6 +3444,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 _chrome_idle()
             except Exception:
                 pass
+        # Same for the planted AGENTS.md: an unexpected exit is the last
+        # moment this cwd is known to be ours to clean.
+        _release_ctx = getattr(self, "_release_planted_context_if_unused", None)
+        if callable(_release_ctx):
+            try:
+                _release_ctx(cwd, exclude=(project, role_name))
+            except Exception:
+                pass
 
         # Revoke pane token on session death so a crashed or exited pane cannot
         # continue to authenticate send/done after it terminates.
