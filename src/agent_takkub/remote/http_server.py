@@ -19,6 +19,7 @@ import http.server
 import json
 import logging
 import queue
+import re
 import socketserver
 import threading
 import urllib.parse
@@ -109,7 +110,10 @@ def _content_disposition_attachment(name: str) -> str:
     no path separators), so no separate escaping step could let it inject a
     second header or break out of the quoted filename; this only guards
     against that invariant ever changing without this header changing too."""
-    safe = name.replace("\\", "").replace('"', "")
+    # CodeQL #41 (py/http-response-splitting): whitelist here too, so the
+    # sanitizer is local to the header construction — anything outside
+    # `[A-Za-z0-9._-]` (CR/LF, quotes, separators, unicode) becomes `_`.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "report"
     return f'attachment; filename="{safe}"'
 
 
@@ -769,7 +773,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         # inline, so widening the extension whitelist never grows what the
         # CSP above has to defend against.
         if reports.is_attachment(project_ns, name):
-            self.send_header("Content-Disposition", _content_disposition_attachment(name))
+            self.send_header("Content-Disposition", _content_disposition_attachment(path.name))
         self.end_headers()
         try:
             self.wfile.write(data)

@@ -238,3 +238,17 @@ class TestReportLockout:
         assert not server.auth.is_report_locked_out("demo", "status.html")
         status, _, _ = _get(_url(server, f"/sek/r/demo/status.html?k={published.token}"))
         assert status == 200
+
+
+def test_content_disposition_attachment_neutralizes_crlf_and_quotes() -> None:
+    """CodeQL #41 (py/http-response-splitting): the header helper must be a
+    sanitizer in its own right — CR/LF, quotes, separators and anything
+    outside `[A-Za-z0-9._-]` can never reach the response header line."""
+    from agent_takkub.remote.http_server import _content_disposition_attachment
+
+    hdr = _content_disposition_attachment('rep\r\nSet-Cookie: x=1"; ort.docx')
+    assert "\r" not in hdr and "\n" not in hdr
+    assert hdr.count('"') == 2
+    assert hdr == 'attachment; filename="rep__Set-Cookie__x_1___ort.docx"'
+    assert _content_disposition_attachment("") == 'attachment; filename="report"'
+    assert _content_disposition_attachment("a.docx") == 'attachment; filename="a.docx"'
