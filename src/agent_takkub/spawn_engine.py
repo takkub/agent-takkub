@@ -494,6 +494,12 @@ _PANE_ROWS = 36
 # live debugger session.
 CODEX_EARLY_CRASH_WINDOW_SEC = 90
 
+# #397: how many trailing on-screen lines `_write_pane_exit_snapshot` keeps
+# for a pane that exited unexpectedly (any provider) — a post-mortem aid,
+# not a full transcript (the raw byte-stream transcript already covers
+# that), so kept small.
+_PANE_EXIT_SNAPSHOT_LINES = 40
+
 
 # Tier 2: tight re-samples of InSendMessageEx immediately before each native
 # ConPTY call to narrow the TOCTOU window between the early gate check and the
@@ -1510,8 +1516,8 @@ class SpawnEngineMixin:
                 )
             else:
                 session.processExited.connect(
-                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess: (
-                        self._on_session_exit(r, c, p)
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess: (
+                        self._on_session_exit(r, c, p, session=s, exit_code=code)
                         if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
                         and pp.session is s
                         else None
@@ -3069,8 +3075,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # replacement that's already attached.
             _sess_claude = session
             session.processExited.connect(
-                lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude: (
-                    self._on_session_exit(r, c, p)
+                lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude: (
+                    self._on_session_exit(r, c, p, session=s, exit_code=code)
                     if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
                     and pp.session is s
                     else None
@@ -3268,7 +3274,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 session=session,
             )
 
-        self._on_session_exit(role_name, cwd, project)
+        self._on_session_exit(role_name, cwd, project, session=session, exit_code=exit_code)
 
     def _write_codex_crash_dump(
         self,
@@ -3338,7 +3344,47 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         except Exception:
             pass  # crash dump must never crash the orchestrator
 
-    def _on_session_exit(self, role_name: str, cwd: str, project: str) -> None:
+    def _write_pane_exit_snapshot(
+        self, role_name: str, project: str, session: PtySession | None
+    ) -> None:
+        """(#397) Best-effort: persist a pane's last on-screen lines to
+        ``runtime/sessions/<date>/<project>/<role>-last-output.txt`` the
+        moment an unexpected process exit is detected, for ANY provider —
+        not just codex's own early-crash dump above. Overwritten on every
+        exit (last-known-state, not a history archive).
+
+        *session* is the closure-captured `PtySession` object from the
+        `processExited` connection, not `pane.session` — by the time this
+        runs, the pane's OWN exit handler (connected earlier, at
+        `attach_session` time) has typically already detached and cleared
+        `pane.session`. The captured session's in-memory pyte screen buffer
+        survives that teardown regardless (same assumption
+        `_write_codex_crash_dump` already relies on for `display_lines()`),
+        so this only needs the object identity, not pane wiring.
+        """
+        if session is None:
+            return
+        try:
+            ensure_runtime = _from_orch("ensure_runtime")
+            RUNTIME_DIR = _from_orch("RUNTIME_DIR")
+            ensure_runtime()
+            day = RUNTIME_DIR / "sessions" / datetime.now().strftime("%Y-%m-%d") / project
+            day.mkdir(parents=True, exist_ok=True)
+            lines = session.display_lines()[-_PANE_EXIT_SNAPSHOT_LINES:]
+            path = day / f"{role_name}-last-output.txt"
+            path.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass  # diagnostics must never break the exit-handling path
+
+    def _on_session_exit(
+        self,
+        role_name: str,
+        cwd: str,
+        project: str,
+        *,
+        session: PtySession | None = None,
+        exit_code: int | None = None,
+    ) -> None:
         """Track recent exits so a quick respawn can pass --resume <uuid>, then
         decide whether to auto-respawn.
 
@@ -3347,6 +3393,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         matching `mark_expected_exit()` from `orchestrator.close()` /
         `done()`. Capped by AUTO_RESPAWN_MAX so a deterministically-
         crashing claude can't spawn-loop.
+
+        #397: before deciding whether/how to auto-respawn, ALWAYS tell Lead
+        right away that this exit happened at all — previously the only
+        proactive notice was `_warn_lead_respawn_capped`, fired solely once
+        the respawn budget was fully exhausted, so a crash that
+        auto-respawned successfully (or one that orphaned an in-flight
+        delivery via `task_delivery_failed reason=pane_closed`) was silently
+        absorbed with no signal reaching Lead at all until the operator
+        happened to check `takkub list`. *session* (best-effort, may be
+        None from an older/partial caller) also gets its last on-screen
+        lines snapshotted to disk for post-mortem — see
+        `_write_pane_exit_snapshot`.
         """
         self._recent_exits[_exit_key(project, role_name)] = {"cwd": cwd, "ts": time.time()}
 
@@ -3359,6 +3417,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         pane = self._panes_by_project.get(project, {}).get(role_name)
         if pane is None or pane.state != "exited":
             return
+
+        self._write_pane_exit_snapshot(role_name, project, session)
+        self._warn_lead_pane_exited(role_name, project, exit_code)
 
         key = f"{project}::{role_name}"
         ps = self._ps(key)

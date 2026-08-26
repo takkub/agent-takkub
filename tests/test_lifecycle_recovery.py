@@ -453,7 +453,22 @@ class TestSpinnerBlindspotsFixed:
 
 
 class TestRespawnCapWarnsLead:
-    def test_cap_warns_lead_when_alive(self, orch: Orchestrator) -> None:
+    def test_cap_warns_lead_when_alive(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #397: each item's real verify-resend chain never settles without a
+        # running Qt event loop, which would otherwise leave the SECOND
+        # queued item (respawn-capped) stuck behind the first — settle each
+        # one immediately instead so both flush synchronously within this
+        # single `_on_session_exit` call, in the order they were queued.
+        import agent_takkub.orchestrator as orch_mod
+
+        def _settle_immediately(*_a, on_settled=None, **_k):
+            if on_settled is not None:
+                on_settled()
+
+        monkeypatch.setattr(orch_mod, "_delayed_enter_verified", _settle_immediately)
+
         key = _exit_key(TEST_PROJECT, "backend")
         orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX
 
@@ -470,10 +485,18 @@ class TestRespawnCapWarnsLead:
         with patch("agent_takkub.orchestrator.QTimer"):
             orch._on_session_exit("backend", "/proj", TEST_PROJECT)
 
-        lead_pane.session.write.assert_called_once()
-        written = lead_pane.session.write.call_args.args[0]
-        assert "respawn-capped" in written
-        assert "backend" in written
+        # #397: the exited-without-done-report notice now goes out FIRST
+        # (before the respawn-capped verdict is even decided), immediately
+        # followed by the pre-existing capped notice.
+        assert lead_pane.session.write.call_count == 2
+        first_written = lead_pane.session.write.call_args_list[0].args[0]
+        assert "[system]" in first_written
+        assert "exited" in first_written
+        assert "backend" in first_written
+
+        second_written = lead_pane.session.write.call_args_list[1].args[0]
+        assert "respawn-capped" in second_written
+        assert "backend" in second_written
 
     def test_cap_clears_auto_chain(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "frontend")

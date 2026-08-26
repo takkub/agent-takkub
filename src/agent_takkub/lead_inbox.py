@@ -1161,6 +1161,11 @@ class LeadInboxMixin:
         # crosses BOOT_STALL_GRACE_SEC.
         boot_stall_elapsed = [0]
         boot_stall_warned = [False]
+        # #387: gates the ONE bounded re-probe at the boot-marker ceiling
+        # (see the ceiling check below) — set the instant that re-probe is
+        # used so a machine that stays stalled indefinitely still fails out
+        # after a single extra poll interval rather than never failing.
+        boot_ceiling_reprobed = [False]
         # Consecutive-poll counter gating the warn above — see
         # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
         # marker stops matching OR the pane reaches its own ready prompt.
@@ -1817,11 +1822,38 @@ class LeadInboxMixin:
                     if boot_marker_elapsed_ms < boot_ceiling_ms:
                         QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
                         return
+                    # #387: `elapsed[0]` assumes ticks land every
+                    # _READY_POLL_INTERVAL_MS, but a stalled Qt main thread
+                    # (the same backlog `_verify`'s _STALL_DEFER_AGE_S guard
+                    # already accounts for) delays the NEXT `_check()` call
+                    # itself — by the time this branch finally runs, the
+                    # boot-phase marker `_still_booting` read moments ago may
+                    # already be stale: the pane could have finished booting
+                    # and repainted during the very backlog that delayed us
+                    # from seeing it. One bounded re-probe (never more than
+                    # once per delivery — `boot_ceiling_reprobed` latches)
+                    # against a FRESH poll tells that apart from a pane that
+                    # is genuinely still stuck before paying the cost of
+                    # failing the whole delivery. A machine that stays
+                    # stalled past the extra tick still fails out normally.
+                    heartbeat_age = _orch_attr("_main_thread_heartbeat_age", lambda: 0.0)()
+                    if heartbeat_age > _STALL_DEFER_AGE_S and not boot_ceiling_reprobed[0]:
+                        boot_ceiling_reprobed[0] = True
+                        _log_event(
+                            "task_deliver_boot_ceiling_reprobe",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            elapsed_sec=round(boot_marker_elapsed_ms / 1000, 1),
+                            heartbeat_age_s=round(heartbeat_age, 2),
+                        )
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
                     _log_event(
                         "task_deliver_boot_marker_ceiling_timeout",
                         project=self._resolve_project(project),
                         role=role_name,
                         elapsed_sec=round(boot_marker_elapsed_ms / 1000, 1),
+                        reprobed=boot_ceiling_reprobed[0],
                     )
                     sent[0] = True
                     self._fail_boot_stalled_delivery(
@@ -2959,6 +2991,51 @@ class LeadInboxMixin:
         )
         self._notify_lead(project_ns, msg)
         _log_event("respawn_capped_warned", role=role_name, project=project_ns)
+
+    def _warn_lead_pane_exited(
+        self, role_name: str, project: str | None, exit_code: int | None
+    ) -> None:
+        """(#397) Tell Lead immediately whenever a pane's provider process
+        exits unexpectedly — crash, OOM, user `/exit` — WITHOUT a preceding
+        `takkub done`. Called from `spawn_engine._on_session_exit` the
+        instant the exit is confirmed unexpected (`pane.state == "exited"`,
+        the same marker `decide_exit_state` sets for every provider on
+        every platform), regardless of whether auto-respawn goes on to
+        recover it.
+
+        Before this, the ONLY proactive notice for an unexpected exit was
+        `_warn_lead_respawn_capped` above — fired solely once the respawn
+        budget (`AUTO_RESPAWN_MAX`) was fully exhausted. A crash that
+        auto-respawned successfully on the first or second attempt, or one
+        that orphaned an in-flight delivery (`task_delivery_failed
+        reason=pane_closed`, logged inside `close()`), reached Lead through
+        no path at all — the operator had to notice the gap by checking
+        `takkub list` themselves (issue #397 live evidence: a qa pane went
+        silent mid-task with zero `[system]` notice while `takkub wait`
+        sat blind). No-op when Lead is absent — same reasoning as
+        `_warn_lead_respawn_capped`: if Lead comes back, the pane's
+        dead/respawning slot is directly visible in the layout.
+        """
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        code_str = str(exit_code) if exit_code is not None else "?"
+        msg = (
+            f"⚠️ [system] pane {role_name} exited (code {code_str}) without done-report — "
+            f"process ตายกลางงาน (crash/OOM/`/exit`) ไม่ใช่ takkub close ปกติ "
+            f"เช็คด้วย takkub list — ถ้า auto-respawn อยู่รอรอบถัดไปได้ ไม่ก็ "
+            f"assign {role_name} ใหม่ (issue #397)"
+        )
+        self._notify_lead(project_ns, msg, from_role="system")
+        _log_event(
+            "pane_exited_without_done",
+            role=role_name,
+            project=project_ns,
+            exit_code=exit_code,
+        )
 
     # ------------------------------------------------------------------
     # Peer CC durability helpers

@@ -511,7 +511,11 @@ class TestCodexExitStaleSessionGuard:
         sess = object()
         orch = self._make_orch(pane_session=sess)
         self._call(orch, sess)
-        orch._on_session_exit.assert_called_once_with("backend", "/cwd", "proj")
+        # #397: also threads the exit code + session through for the
+        # pane-exited notice / last-output snapshot.
+        orch._on_session_exit.assert_called_once_with(
+            "backend", "/cwd", "proj", session=sess, exit_code=0
+        )
 
     def test_stale_session_does_not_fire_on_session_exit(self) -> None:
         sess_a = object()

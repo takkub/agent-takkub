@@ -132,7 +132,11 @@ class TestEarlyCrashDetection:
         ):
             orch._on_codex_exit(1, "codex", FAKE_CWD, TEST_PROJECT, session)
 
-        mock_exit.assert_called_once_with("codex", FAKE_CWD, TEST_PROJECT)
+        # #397: also threads the exit code + session through for the
+        # pane-exited notice / last-output snapshot.
+        mock_exit.assert_called_once_with(
+            "codex", FAKE_CWD, TEST_PROJECT, session=session, exit_code=1
+        )
 
     def test_spawn_time_cleared_after_exit(
         self, orch: Orchestrator, tmp_path: pathlib.Path
