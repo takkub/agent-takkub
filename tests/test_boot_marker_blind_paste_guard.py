@@ -227,6 +227,97 @@ class TestBootMarkerBlindPasteGuard:
         assert _written_strings(codex.session), "ready pane must still get its task delivered"
         assert not any("[delivery-unconfirmed]" in m for m in _written_strings(lead.session))
 
+    def test_ceiling_reprobes_once_under_a_stale_heartbeat_then_delivers_if_marker_cleared(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#387: `elapsed[0]` assumes ticks land every _READY_POLL_INTERVAL_MS,
+        but a stalled Qt main thread delays the NEXT `_check()` call itself —
+        by the time the ceiling branch finally runs, the boot-phase marker it
+        is about to fail on may already be stale (the pane could have
+        finished booting and repainted during the very backlog that delayed
+        this poll from seeing it). Live evidence: `ready_marker_possibly_stale
+        footer=""` immediately followed by `delivery_boot_timeout_failed
+        elapsed 300s`, then a re-deliver accepted within 27s — the pane was
+        ready, the read was not.
+
+        A stale `_main_thread_heartbeat_age` (the same stall signal
+        `_verify`'s own `_STALL_DEFER_AGE_S` guard already trusts) earns
+        exactly one extra poll before paying the cost of failing the whole
+        delivery. If the marker has genuinely cleared by then, deliver
+        normally instead of failing on a stale read.
+        """
+        monkeypatch.setattr(orch_mod, "BOOT_STALL_CEILING_SEC", 0)  # trips on the first check
+        monkeypatch.setattr(orch_mod, "_main_thread_heartbeat_age", lambda: 0.8)  # stale
+        lead = _pane(_live_session())
+        codex = _pane(_live_session())
+        marker_calls = {"n": 0}
+
+        def _marker(*_a, **_k) -> bool:
+            marker_calls["n"] += 1
+            return marker_calls["n"] <= 2  # still booting through the ceiling tick
+
+        def _ready(*_a, **_k) -> bool:
+            return marker_calls["n"] > 2  # ready from the reprobe tick onward
+
+        codex.session.shows_boot_phase_marker.side_effect = _marker
+        codex.session.is_at_ready_prompt.side_effect = _ready
+        orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        failures: list[float] = []
+        monkeypatch.setattr(
+            orch,
+            "_fail_boot_stalled_delivery",
+            lambda role, project, elapsed: failures.append(elapsed),
+        )
+        log_spy = MagicMock()
+        monkeypatch.setattr("agent_takkub.lead_inbox._log_event", log_spy)
+
+        orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
+
+        assert failures == [], "one bounded re-probe must rescue a pane whose marker had cleared"
+        assert _written_strings(codex.session), "task must still be delivered once ready"
+        reprobe_events = [
+            c
+            for c in log_spy.call_args_list
+            if c.args and c.args[0] == "task_deliver_boot_ceiling_reprobe"
+        ]
+        assert len(reprobe_events) == 1, "must re-probe exactly once, not loop"
+
+    def test_ceiling_still_fails_after_one_reprobe_if_marker_never_clears(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """The re-probe is bounded — a machine that stays stalled (or a pane
+        that is genuinely still stuck) past the extra tick must still fail
+        out exactly once, not hang forever waiting for a marker that will
+        never clear."""
+        monkeypatch.setattr(orch_mod, "BOOT_STALL_CEILING_SEC", 0)
+        monkeypatch.setattr(orch_mod, "_main_thread_heartbeat_age", lambda: 0.8)  # stale
+        lead = _pane(_live_session())
+        codex = _pane(_live_session())
+        codex.session.is_at_ready_prompt.return_value = False  # never ready
+        codex.session.shows_boot_phase_marker.return_value = True  # marker never clears
+        orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        failures: list[float] = []
+        monkeypatch.setattr(
+            orch,
+            "_fail_boot_stalled_delivery",
+            lambda role, project, elapsed: failures.append(elapsed),
+        )
+        log_spy = MagicMock()
+        monkeypatch.setattr("agent_takkub.lead_inbox._log_event", log_spy)
+
+        orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
+
+        assert not _written_strings(codex.session)
+        assert len(failures) == 1, "must still fail out exactly once, not hang forever"
+        reprobe_events = [
+            c
+            for c in log_spy.call_args_list
+            if c.args and c.args[0] == "task_deliver_boot_ceiling_reprobe"
+        ]
+        assert len(reprobe_events) == 1, "the re-probe budget is exactly one extra tick"
+
     def test_genuinely_stalled_pane_without_marker_still_blind_pastes(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
