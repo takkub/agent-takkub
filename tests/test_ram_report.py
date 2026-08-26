@@ -156,3 +156,67 @@ def test_collect_ram_report_marks_missing_or_unknown_pids_instead_of_guessing() 
     assert by_role["no-pid"]["total_bytes"] == 0
     assert by_role["gone"]["note"] == "process not found (exited?)"
     assert by_role["gone"]["total_bytes"] == 0
+
+
+class _CountingPsutil(_FakePsutil):
+    """Fake psutil that ALSO exposes the platform-module `ppid_map` primitive
+    real psutil has, counting how often it is hit."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.ppid_map_calls = 0
+        outer = self
+
+        class _Platform:
+            @staticmethod
+            def ppid_map() -> dict[int, int]:
+                outer.ppid_map_calls += 1
+                return {pid: proc._ppid for pid, proc in outer._by_pid.items()}
+
+        self._psplatform = _Platform()
+        for proc in self._by_pid.values():
+            proc.ppid_calls = 0
+            _orig = proc.ppid
+
+            def _counting_ppid(_orig=_orig, _proc=proc) -> int:
+                _proc.ppid_calls += 1
+                return _orig()
+
+            proc.ppid = _counting_ppid
+
+
+def test_collect_ram_report_snapshots_the_ppid_map_once_instead_of_per_process() -> None:
+    """Lead-pane input-lag fix (2026-08-26): psutil's Windows `Process.ppid()`
+    re-enumerates the whole process table inside a GIL-holding C call on
+    EVERY invocation, so the old per-descendant loop held the GIL for
+    0.7–2 s per RAM-chip tick (py-spy --gil: 51% of all GIL samples) and
+    the Qt main thread — Lead's keystroke echo — waited it out. One
+    `ppid_map()` snapshot must replace the per-process calls."""
+    psutil_module, main_pid = _build_tree()
+    counting = _CountingPsutil(psutil_module._by_pid, total=16_000 * MB, available=4_000 * MB)
+    pane_specs = [
+        {"role": "backend", "project": "proj1", "provider": "claude", "pid": 200},
+        {"role": "codex", "project": "proj1", "provider": "codex", "pid": 300},
+    ]
+
+    report = collect_ram_report(pane_specs, main_pid=main_pid, psutil_module=counting)
+
+    assert counting.ppid_map_calls == 1
+    assert all(proc.ppid_calls == 0 for proc in counting._by_pid.values())
+    # and the tree attribution is byte-identical to the per-process path
+    by_role = {row["role"]: row for row in report["panes"]}
+    assert by_role["backend"]["total_bytes"] == (550 + 80 + 99) * MB
+    assert report["shared_qtwebengine"]["process_count"] == 1
+
+
+def test_collect_ram_report_falls_back_to_per_process_ppid_without_ppid_map() -> None:
+    """A psutil without the platform primitive (or one whose snapshot misses
+    a pid that appeared between the two enumerations) still resolves the
+    parent via `Process.ppid()` — never silently drops a descendant."""
+    psutil_module, main_pid = _build_tree()
+    assert not hasattr(psutil_module, "_psplatform")
+    pane_specs = [{"role": "backend", "project": "proj1", "provider": "claude", "pid": 200}]
+
+    report = collect_ram_report(pane_specs, main_pid=main_pid, psutil_module=psutil_module)
+
+    assert report["panes"][0]["total_bytes"] == (550 + 80 + 99) * MB

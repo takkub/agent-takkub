@@ -118,6 +118,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     scan_artifacts,
 )
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
+    _DEFAULT_MCP_STARTUP_TIMEOUT_MS,
     _DEFAULT_MCP_TOOL_TIMEOUT_MS,
     _LEAD_ENV_EXTRA_ALLOWLIST,
     _PANE_ENV_ALLOWLIST,
@@ -361,6 +362,7 @@ _SHELL_OPEN_DIALOG_MARKER = "How do you want to open"
 __all__ = [  # backwards-compat re-exports
     "HARVEST_HINT_SEC",
     "LEAD_NOTIFY_BUSY_CAP",
+    "_DEFAULT_MCP_STARTUP_TIMEOUT_MS",
     "_DEFAULT_MCP_TOOL_TIMEOUT_MS",
     "_DEFAULT_VAULT",
     "_HARVEST_EXCLUDE_DIRS",
@@ -821,6 +823,10 @@ def _human_duration(total_seconds: float) -> str:
 
 
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
+# #406: how long the cockpit-owned mb Chrome may sit with no browser pane
+# alive before `_release_native_chrome_if_idle` kills it (see
+# `_schedule_native_chrome_idle_release` for why not immediately).
+_NATIVE_CHROME_IDLE_GRACE_MS = 60_000
 IDLE_REMINDER_TEXT = (
     "🔔 [auto-reminder] pane นี้ idle อยู่ — ถ้า task เสร็จแล้วต้อง run "
     '`takkub done "<summary>"` เป็นคำสั่ง shell **ตอนนี้** (ไม่ใช่พิมพ์เป็น text). '
@@ -1598,6 +1604,68 @@ class Orchestrator(
         manager = getattr(self, "_native_chrome", None)
         if manager is not None:
             manager.close()
+
+    def _native_chrome_in_use(self) -> bool:
+        """True while any live pane is one that `spawn()` starts/reuses the
+        cockpit-owned mb Chrome for (#406): a non-sharded browser role
+        (`browser_chrome.should_manage_native_chrome`) whose session is still
+        attached and not already in the `exited` state. Shards never share
+        that Chrome (#92), so they don't keep it alive either."""
+        from .browser_chrome import should_manage_native_chrome
+
+        for panes in getattr(self, "_panes_by_project", {}).values():
+            for role, pane in panes.items():
+                base_role, shard_idx = _split_shard(str(role).lower().strip())
+                if not should_manage_native_chrome(base_role, shard_idx):
+                    continue
+                if getattr(pane, "session", None) is None:
+                    continue
+                if getattr(pane, "state", None) == "exited":
+                    continue
+                return True
+        return False
+
+    def _schedule_native_chrome_idle_release(self) -> None:
+        """#406: release the cockpit-owned mb Chrome once the LAST pane that
+        could use it is gone, instead of holding it (measured ~500 MB working
+        set across 8 Chrome processes, sitting on about:blank) until
+        whole-app shutdown — the only place `close_native_chrome` was ever
+        called before this.
+
+        Debounced by `_NATIVE_CHROME_IDLE_GRACE_MS` rather than immediate:
+        the stuck-pane watchdog closes and respawns the same qa/critic pane
+        2 s later, a `done` auto-close is routinely followed by Lead
+        assigning the next browser task within a minute, and a fresh Chrome
+        launch is a multi-second boot per `NativeChromeManager.ensure_started`
+        — so a short grace keeps the reuse path warm through those churns
+        while an actually idle Chrome still goes away. Re-checks
+        `_native_chrome_in_use()` when the timer fires so a pane spawned
+        during the grace cancels the release without any bookkeeping.
+
+        The kill itself (`taskkill /T /F` with a 5 s ceiling, then
+        terminate/kill) runs on a daemon thread: a blocking subprocess on the
+        Qt thread is exactly the Lead-pane input-lag class the
+        `main_thread_stall` dumps in boot.log keep catching (same
+        investigation that fixed ram_report's GIL hold). Windows-only in
+        effect — `NativeChromeManager.close` is a no-op elsewhere."""
+        if getattr(self, "_native_chrome", None) is None:
+            return
+        timer = getattr(self, "_native_chrome_idle_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._release_native_chrome_if_idle)
+            self._native_chrome_idle_timer = timer
+        timer.start(_NATIVE_CHROME_IDLE_GRACE_MS)
+
+    def _release_native_chrome_if_idle(self) -> None:
+        manager = getattr(self, "_native_chrome", None)
+        if manager is None or self._native_chrome_in_use():
+            return
+        _log_event("native_chrome_idle_release")
+        threading.Thread(
+            target=manager.close, name="native-chrome-idle-release", daemon=True
+        ).start()
 
     def shutdown_timers(self) -> None:
         """Stop every QTimer this Orchestrator (recursively) owns (#344).
@@ -3751,6 +3819,8 @@ class Orchestrator(
             self.paneClosed.emit(role_name, project_ns)
         self.statusChanged.emit()
         _log_event("close", role=role_name, force=force, reason=reason)
+        # #406: the pane just removed may have been the last mb-Chrome user.
+        self._schedule_native_chrome_idle_release()
         # Fan-out queue (flag-gated): a genuine teammate close frees a slot —
         # drain one queued assign on the next event-loop tick (deferred so we
         # never re-enter the close/paneClosed emit stack, per the 0xc0000409

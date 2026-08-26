@@ -3420,6 +3420,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         """
         self._recent_exits[_exit_key(project, role_name)] = {"cwd": cwd, "ts": time.time()}
 
+        # #406: an unexpected exit (crash/OOM/`/exit`) never goes through
+        # `close()`, so check here too whether this was the last pane keeping
+        # the cockpit-owned mb Chrome alive. getattr: tests drive this
+        # handler on bare fakes without the orchestrator mixin.
+        _chrome_idle = getattr(self, "_schedule_native_chrome_idle_release", None)
+        if callable(_chrome_idle):
+            try:
+                _chrome_idle()
+            except Exception:
+                pass
+
         # Revoke pane token on session death so a crashed or exited pane cannot
         # continue to authenticate send/done after it terminates.
         _ptoks = getattr(self, "_pane_tokens", {})

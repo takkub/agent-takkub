@@ -56,3 +56,34 @@ class TestMcpTimeoutInAllowlist:
         monkeypatch.setenv("MCP_TOOL_TIMEOUT", "300000")
         env = _build_pane_env()
         assert env.get("MCP_TOOL_TIMEOUT") == "300000"
+
+
+class TestMcpStartupTimeout:
+    """#405: the MCP server *startup* handshake ceiling (Claude Code's
+    `MCP_TIMEOUT`), injected next to the per-call one so a graft MCP that
+    never answers `initialize` fails the server instead of hanging the
+    QA pane on boot forever."""
+
+    def test_sets_startup_default_on_empty_env(self) -> None:
+        from agent_takkub.orchestrator import _DEFAULT_MCP_STARTUP_TIMEOUT_MS
+
+        env: dict[str, str] = {}
+        _apply_mcp_timeout(env)
+        assert env["MCP_TIMEOUT"] == _DEFAULT_MCP_STARTUP_TIMEOUT_MS
+
+    def test_startup_default_matches_codex_startup_ceiling(self) -> None:
+        # Same slow server, same give-up point on claude and codex panes.
+        from agent_takkub.mcp_bridge import _CODEX_DEFAULT_STARTUP_TIMEOUT_SEC
+        from agent_takkub.orchestrator import _DEFAULT_MCP_STARTUP_TIMEOUT_MS
+
+        assert int(_DEFAULT_MCP_STARTUP_TIMEOUT_MS) == _CODEX_DEFAULT_STARTUP_TIMEOUT_SEC * 1000
+
+    def test_preserves_user_provided_startup_value(self) -> None:
+        env = {"MCP_TIMEOUT": "900000"}
+        _apply_mcp_timeout(env)
+        assert env["MCP_TIMEOUT"] == "900000"
+
+    def test_user_set_startup_value_passes_through_pane_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("MCP_TIMEOUT", "300000")
+        env = _build_pane_env()
+        assert env.get("MCP_TIMEOUT") == "300000"

@@ -65,6 +65,48 @@ def _proc_name(proc: object) -> str:
         return ""
 
 
+def _snapshot_ppid_map(psutil_module: object) -> dict[int, int] | None:
+    """One whole-machine ``{pid: ppid}`` snapshot, or None when the injected
+    psutil has no such primitive (the test fake) — callers then fall back to
+    per-process ``ppid()``.
+
+    Why this exists (2026-08-26 Lead-pane input-lag investigation): psutil's
+    ``Process.ppid()`` on Windows is implemented as ``ppid_map()[pid]`` —
+    i.e. EVERY call re-enumerates the ENTIRE process table
+    (``NtQuerySystemInformation``, ~10 ms for the 380 processes this box
+    runs) inside a C extension call that never releases the GIL. Called once
+    per cockpit descendant (28 measured) that is ~0.3 s of *uninterruptible*
+    GIL hold per 15 s RAM-chip tick standalone, and 0.7–2 s inside the live
+    cockpit — ``py-spy --gil`` put this one line at 51% of all GIL-holding
+    samples, and ``py-spy dump`` during a logged ``main_thread_stall`` showed
+    it as the only GIL holder while the Qt main thread sat blocked in
+    ``EnumWindows``/``Path.stat`` waiting to get the GIL back. Running the
+    walk on a QThreadPool worker (the existing design) does not help: a
+    worker thread that holds the GIL in C code stalls the main thread just
+    as hard as if the walk ran there. One ``ppid_map()`` call is a single
+    ~10 ms hold instead of 28 of them.
+
+    ``ppid_map`` is a private-but-stable psutil primitive present on every
+    platform module (Windows/Linux/macOS/BSD — ``Process.children()`` itself
+    is built on it), so this is no more platform-specific than the
+    ``children(recursive=True)`` call above."""
+    platform_mod = getattr(psutil_module, "_psplatform", None)
+    fn = getattr(platform_mod, "ppid_map", None)
+    if not callable(fn):
+        return None
+    try:
+        raw = fn()
+    except Exception:
+        return None
+    out: dict[int, int] = {}
+    try:
+        for pid, ppid in raw.items():
+            out[int(pid)] = int(ppid)
+    except Exception:
+        return None
+    return out
+
+
 def collect_ram_report(
     pane_specs: Sequence[Mapping[str, object]],
     *,
@@ -101,16 +143,19 @@ def collect_ram_report(
 
     by_pid: dict[int, object] = {}
     children_by_ppid: dict[int, list[int]] = {}
+    ppid_map = _snapshot_ppid_map(psutil_module)
     for proc in descendants:
         try:
             pid = int(proc.pid)
         except Exception:
             continue
         by_pid[pid] = proc
-        try:
-            ppid = int(proc.ppid())
-        except Exception:
-            continue
+        ppid = ppid_map.get(pid) if ppid_map is not None else None
+        if ppid is None:
+            try:
+                ppid = int(proc.ppid())
+            except Exception:
+                continue
         children_by_ppid.setdefault(ppid, []).append(pid)
 
     def _subtree_pids(root_pid: int) -> list[int]:

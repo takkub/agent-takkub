@@ -132,6 +132,9 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "CHROME_BIN",
         # User override for MCP per-call timeout (default injected below).
         "MCP_TOOL_TIMEOUT",
+        # User override for MCP server *startup* timeout (#405, default
+        # injected below alongside MCP_TOOL_TIMEOUT).
+        "MCP_TIMEOUT",
         # Scratch dir for temp files/screenshots/test scripts, out of the
         # project repo (plan item #1). Listed here for clarity only —
         # `_apply_artifacts_dir()` stamps the effective value into every
@@ -153,6 +156,23 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
 # hiding genuinely-stuck calls forever. Honoured per-pane only when the
 # user hasn't already set MCP_TOOL_TIMEOUT in the cockpit env.
 _DEFAULT_MCP_TOOL_TIMEOUT_MS = "180000"
+
+# Default MCP server STARTUP timeout (milliseconds) — Claude Code's
+# `MCP_TIMEOUT` env var, the only startup knob its strict `.mcp.json`
+# schema exposes (there is no per-server `startup_timeout_sec` field the way
+# codex's `mcp_servers.<name>` TOML has). #405: a QA-role pane whose graft
+# MCP never answered `initialize` sat on the MCP handshake with no timeout
+# at all and no fallback — the pane looked spawned but never reached the
+# composer. 120s mirrors `mcp_bridge._CODEX_DEFAULT_STARTUP_TIMEOUT_SEC`
+# (the value #351 verified against a cold `npx` server's real 30-300s+
+# start) so claude and codex panes give up on the same slow server at the
+# same point; claude then marks the server failed and boots without it
+# instead of hanging forever. Honoured only when the operator hasn't set
+# MCP_TIMEOUT in the cockpit env — same contract as MCP_TOOL_TIMEOUT.
+# Gemini has no startup-timeout knob in its settings.json mcpServers schema
+# (its `timeout` is per-request) — flagged as a #103 gap, not silently
+# papered over.
+_DEFAULT_MCP_STARTUP_TIMEOUT_MS = "120000"
 
 
 def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
@@ -310,7 +330,8 @@ def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
 
 
 def _apply_mcp_timeout(env: dict[str, str]) -> None:
-    """Set a 3-minute MCP per-call timeout when the user hasn't picked one.
+    """Set a 3-minute MCP per-call timeout (and a 2-minute MCP server
+    startup timeout, #405) when the user hasn't picked one.
 
     CC 2.1.142 fixed `MCP_TOOL_TIMEOUT` so it actually raises the per-request
     fetch timeout for HTTP/SSE MCP servers (was hard-capped at 60s before).
@@ -319,6 +340,8 @@ def _apply_mcp_timeout(env: dict[str, str]) -> None:
     alone if the operator has already set one at the cockpit level.
     """
     env.setdefault("MCP_TOOL_TIMEOUT", _DEFAULT_MCP_TOOL_TIMEOUT_MS)
+    # #405: startup handshake ceiling — see _DEFAULT_MCP_STARTUP_TIMEOUT_MS.
+    env.setdefault("MCP_TIMEOUT", _DEFAULT_MCP_STARTUP_TIMEOUT_MS)
 
 
 def _apply_non_interactive_env(env: dict[str, str]) -> None:

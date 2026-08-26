@@ -2,6 +2,19 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.4] - 2026-08-26
+
+### Fixed (แก้)
+
+- **Lead pane พิมพ์แล้วไม่ขึ้น / ค้างเป็นวินาที (main_thread_stall 500–977 ครั้ง/วัน ตั้งแต่ ≤ 08-23, รวมค้าง 15–39 นาที/วัน)** — root cause ไม่ใช่เครื่องอืด (RAM ว่าง 11GB, disk idle) แต่เป็น **GIL starvation**:
+  RAM chip (`ram_report.collect_ram_report`, #364 lever 6) เรียก `psutil.Process.ppid()` ทีละ descendant — บน Windows psutil สร้าง `ppid_map()` ของ**ทั้งเครื่อง**ใหม่ทุก call ใน C ext ที่ไม่ปล่อย GIL
+  (28 descendants × 381 procs) → ถือ GIL 0.7–2 วิ ทุก 15 วิ (`py-spy --gil` = 51% ของ GIL samples; `py-spy dump` ระหว่าง stall เห็น thread นี้ถือ GIL คนเดียวขณะ main thread รออยู่ใน `EnumWindows`/`Path.stat`)
+  — การย้ายไป QThreadPool worker ไม่ช่วยเพราะ C call ถือ GIL ข้าม thread → แก้: snapshot `ppid_map()` **ครั้งเดียว** (0.27s → 0.02s ต่อรอบ) · stall ยาว 3–30 วิ จาก `git` subprocess บน main thread (assign/done/diffstat) เป็นคนละคลาส ยังไม่แก้ในรอบนี้
+- **Chrome ที่ cockpit เปิดให้ qa/critic/designer ค้าง ~500MB (8 process, about:blank) หลัง pane ปิด จนกว่าจะปิดแอป (#406)** — `close_native_chrome` เคยถูกเรียกแค่ตอน shutdown → เพิ่ม `_schedule_native_chrome_idle_release`:
+  เมื่อ pane browser ตัวสุดท้าย (non-shard, #92) ปิดหรือ exit ไม่คาดคิด → รอ grace 60 วิ (กัน stuck-watchdog close→respawn 2 วิ / done→assign ถัดไป) → เช็คซ้ำว่ายังไม่มี pane ใช้ → `taskkill /T` บน daemon thread (ไม่บล็อก Qt) · spawn ใหม่ระหว่าง grace = ยกเลิกอัตโนมัติ
+- **QA pane ค้างที่ graft MCP boot ไม่มี timeout/fallback (#405)** — claude `.mcp.json` ไม่มี `startup_timeout_sec` แบบ codex → ใส่ env `MCP_TIMEOUT=120000` (startup handshake ceiling ของ Claude Code) ให้ทุก pane ที่ operator ไม่ได้ตั้งเอง
+  = ค่าเดียวกับ `_CODEX_DEFAULT_STARTUP_TIMEOUT_SEC` (#351) → server ที่ไม่ตอบใน 2 นาทีถูก mark failed แล้ว pane boot ต่อ · gemini ไม่มี startup knob (settings.json `timeout` = per-request) → gap #103
+
 ## [v1.6.3] - 2026-08-26
 
 ### Fixed (แก้)
