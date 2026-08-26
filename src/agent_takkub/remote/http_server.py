@@ -19,7 +19,6 @@ import http.server
 import json
 import logging
 import queue
-import re
 import socketserver
 import threading
 import urllib.parse
@@ -103,6 +102,11 @@ _REPORT_CONTENT_TYPES = {
 }
 
 
+_FILENAME_SAFE_CHARS: dict[str, str] = {
+    ch: ch for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+}
+
+
 def _content_disposition_attachment(name: str) -> str:
     """#389: build the `Content-Disposition` header for a forced-download
     report. `name` is always a value that already passed `reports.
@@ -110,10 +114,14 @@ def _content_disposition_attachment(name: str) -> str:
     no path separators), so no separate escaping step could let it inject a
     second header or break out of the quoted filename; this only guards
     against that invariant ever changing without this header changing too."""
-    # CodeQL #41 (py/http-response-splitting): whitelist here too, so the
-    # sanitizer is local to the header construction — anything outside
-    # `[A-Za-z0-9._-]` (CR/LF, quotes, separators, unicode) becomes `_`.
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "report"
+    # CodeQL #41/#42 (py/http-response-splitting): rebuild the filename
+    # character-by-character from the constant `_FILENAME_SAFE_CHARS` table
+    # — every output char is a dict VALUE from that table (never the input
+    # char itself), so anything outside `[A-Za-z0-9._-]` (CR/LF, quotes,
+    # separators, unicode) becomes `_` AND no request-derived string reaches
+    # the header at all. (`re.sub` did the same filtering but CodeQL does not
+    # treat it as a taint barrier — alert #42 re-fired on the same line.)
+    safe = "".join(_FILENAME_SAFE_CHARS.get(ch, "_") for ch in name[:120]) or "report"
     return f'attachment; filename="{safe}"'
 
 
