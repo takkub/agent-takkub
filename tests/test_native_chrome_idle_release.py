@@ -24,8 +24,9 @@ class _Pane:
 
 
 class _Manager:
-    def __init__(self) -> None:
+    def __init__(self, *, owns_process: bool = True) -> None:
         self.closed = threading.Event()
+        self._owns_process = owns_process
 
     def close(self) -> None:
         self.closed.set()
@@ -85,6 +86,15 @@ def test_release_is_a_noop_without_a_manager() -> None:
     fake = _fake({}, manager=None)
     Orchestrator._release_native_chrome_if_idle(fake)  # must not raise
     Orchestrator._schedule_native_chrome_idle_release(fake)  # no QTimer created
+    assert not hasattr(fake, "_native_chrome_idle_timer")
+
+
+def test_schedule_never_arms_a_timer_for_a_chrome_it_does_not_own() -> None:
+    """Reuse path (CDP 9222 already there) / never-launched manager — nothing
+    to kill, so no 60 s timer either. This is also what keeps every
+    Orchestrator built in the test suite from leaking the timer (#344)."""
+    fake = _fake({}, manager=_Manager(owns_process=False))
+    Orchestrator._schedule_native_chrome_idle_release(fake)
     assert not hasattr(fake, "_native_chrome_idle_timer")
 
 

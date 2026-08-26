@@ -1648,11 +1648,17 @@ class Orchestrator(
         `main_thread_stall` dumps in boot.log keep catching (same
         investigation that fixed ram_report's GIL hold). Windows-only in
         effect — `NativeChromeManager.close` is a no-op elsewhere."""
-        if getattr(self, "_native_chrome", None) is None:
+        manager = getattr(self, "_native_chrome", None)
+        # Only a Chrome THIS cockpit launched is ours to kill (the reuse path
+        # never owns one) — and only then is a grace timer worth arming: an
+        # Orchestrator built in a test never launches Chrome, so it never
+        # arms this timer and can't leak it past its owner (#344 tracker).
+        if manager is None or not getattr(manager, "_owns_process", False):
             return
         timer = getattr(self, "_native_chrome_idle_timer", None)
         if timer is None:
             timer = QTimer(self)
+            timer.setObjectName("native-chrome-idle-release")
             timer.setSingleShot(True)
             timer.timeout.connect(self._release_native_chrome_if_idle)
             self._native_chrome_idle_timer = timer
