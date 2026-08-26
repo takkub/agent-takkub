@@ -1982,11 +1982,19 @@ class LeadNotifier(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
-        self._timer.start()
 
         orch.agentDone.connect(self._on_done)
         orch.statusChanged.connect(self._resync)
-        orch.reportShared.connect(self._on_report_shared)
+        # #390's reportShared postdates some test/provider-harness fake orchs
+        # (no signal drift break — see `stop()` below for the disconnect side).
+        report_shared = getattr(orch, "reportShared", None)
+        if report_shared is not None:
+            report_shared.connect(self._on_report_shared)
+
+        # Start the poll timer only after every connect above succeeds — a
+        # constructor that raises partway through (e.g. a future signal drift)
+        # must not leave a running QTimer orphaned on this object (#344/#345).
+        self._timer.start()
         self._resync()
 
     # ── discover / rediscover every open project's Lead session uuid ────
@@ -2326,11 +2334,14 @@ class LeadNotifier(QObject):
         self._broadcaster.push("report", payload, project_ns)
 
     def stop(self) -> None:
-        for signal, slot in (
+        connections = [
             (self._orch.agentDone, self._on_done),
             (self._orch.statusChanged, self._resync),
-            (self._orch.reportShared, self._on_report_shared),
-        ):
+        ]
+        report_shared = getattr(self._orch, "reportShared", None)
+        if report_shared is not None:
+            connections.append((report_shared, self._on_report_shared))
+        for signal, slot in connections:
             try:
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
