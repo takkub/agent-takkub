@@ -7479,6 +7479,49 @@ class Orchestrator(
                         entry["escalated"] = False
                         continue
 
+                    # #391/#394/#395/#398: the pane reads READY (composer
+                    # accepts input, correctly per d047ab4) but may still be
+                    # babysitting a long background command (docker build,
+                    # node build, turbo/vitest, pio run, ...) — that is not
+                    # "idle-because-done". Three independent signals, any one
+                    # of which means genuinely active: claude's own
+                    # background-task footer segment, a provider tool-running
+                    # marker (#308, works for codex/gemini too), or the same
+                    # content-delta progress clock `takkub status` reports
+                    # ("last progress Ns ago") having moved recently — this
+                    # last one is what actually caught the reported cases,
+                    # where progress showed 5-6s ago while the naive
+                    # is_at_ready_prompt()-only watchdog above still thought
+                    # the pane had sat idle for 10+ minutes.
+                    _provider_bg = getattr(pane.model, "provider_name", None) or "claude"
+                    try:
+                        _has_bg_work = pane.session.has_background_work()
+                    except Exception:
+                        _has_bg_work = False
+                    # Same isinstance guard as _check_stuck_tool_panes/
+                    # _apply_screen_scrape_state (#376): a loosely mocked test
+                    # session's un-stubbed attribute call returns a truthy
+                    # MagicMock, not a real bool/str/float.
+                    if not isinstance(_has_bg_work, bool):
+                        _has_bg_work = False
+                    try:
+                        _tool_marker = pane.session.tool_running_marker(_provider_bg)
+                    except Exception:
+                        _tool_marker = None
+                    if not isinstance(_tool_marker, str) or not _tool_marker:
+                        _tool_marker = None
+                    _last_progress_ts = self._compute_last_progress_ts(name, project_name, pane)
+                    _progress_recent = bool(
+                        _last_progress_ts and (now - _last_progress_ts) < STALL_THRESHOLD_SEC
+                    )
+                    if _has_bg_work or _tool_marker is not None or _progress_recent:
+                        entry["seen_working"] = True
+                        entry["first_idle_ts"] = None
+                        entry["last_reminder_ts"] = 0.0
+                        entry["notice_rounds"] = 0
+                        entry["escalated"] = False
+                        continue
+
                     # Issue #59: pane is idle — check for malformed tool-call XML
                     # that the harness silently no-op'd (makes pane look hung).
                     # Defense-in-depth: this best-effort nudge sits in front of the
@@ -7544,9 +7587,30 @@ class Orchestrator(
                             lead_pane = project_panes.get(LEAD.name)
                             if lead_pane and lead_pane.session and lead_pane.session.is_alive:
                                 hint_min = HARVEST_HINT_SEC // 60
+                                # #391/#398: attach the same evidence `takkub
+                                # status` would show so Lead can judge on the
+                                # spot instead of tabbing over to check —
+                                # this notice already survived the
+                                # background-work/tool-marker/progress-recency
+                                # gate above, so "ready=True" here means
+                                # "genuinely idle at the ready prompt", not
+                                # just "composer accepts input".
+                                try:
+                                    _out_age = pane.session.seconds_since_output()
+                                except Exception:
+                                    _out_age = float("inf")
+                                if not isinstance(_out_age, (int, float)):
+                                    _out_age = float("inf")
+                                _out_age_str = (
+                                    "?" if _out_age == float("inf") else str(round(_out_age))
+                                )
+                                _prog_age = (now - _last_progress_ts) if _last_progress_ts else None
+                                _prog_age_str = "?" if _prog_age is None else str(round(_prog_age))
                                 hint_msg = (
                                     f"[cockpit] {name} ไม่ active >{hint_min}m. "
-                                    f"ลอง: takkub harvest --role {name}"
+                                    f"ลอง: takkub harvest --role {name} "
+                                    f"(last output {_out_age_str}s ago, last progress "
+                                    f"{_prog_age_str}s ago, ready=True)"
                                 )
                                 self._notify_lead(project_name, hint_msg)
                                 _log_event("harvest_hint", role=name, project=project_name)
@@ -7939,12 +8003,25 @@ class Orchestrator(
                         continue
                     key = f"{project_name}::{role}"
                     ps = self._ps(key)
+                    try:
+                        _has_bg_work = sess.has_background_work()
+                    except Exception:
+                        _has_bg_work = False
+                    if not isinstance(_has_bg_work, bool):
+                        _has_bg_work = False
                     if (
                         not sess.is_at_ready_prompt()
                         or sess.shows_startup_marker()
                         or sess.is_blocked_on_tty_prompt()
                         or sess.is_blocked_on_permission_prompt()
                         or ps.rate_limited_until > now
+                        # #392 part 2: `/compact` while a background
+                        # shell/agent is still running (footer shows "esc to
+                        # interrupt · ← for agents") would kill that
+                        # background task the same way any other
+                        # composer-busy interrupt does — never inject it into
+                        # that window, only once the pane is genuinely idle.
+                        or _has_bg_work
                     ):
                         # #190: don't null out idle_since for the busy stretch
                         # caused by the /compact we ourselves just injected —

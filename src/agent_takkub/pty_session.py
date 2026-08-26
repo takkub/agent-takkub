@@ -357,30 +357,133 @@ def _extra_ready_markers() -> tuple[str, ...]:
 #
 #     ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
 #
-# "esc to interrupt" there means "a background agent/shell is running", NOT
-# "the CLI is generating" — the composer above it is idle and accepts input.
-# But "esc to interrupt" is claude's hard blocker (the busy spinner line reads
-# "✻ Thinking… (esc to interrupt)"), so a pane with any background task was
-# classified BUSY for as long as the task lived: stale-marker false alarms
-# every cooldown (#343 notice "lead เงียบต่อเนื่อง 24s"), Lead delivery
-# waiting on a pane that was ready, proactive-compact idle episodes cut
-# short. The two cases differ structurally: the busy indicator is on its own
-# spinner line, the background segment shares the line with the ready
-# footer. So hard blockers are scanned with that footer line removed — the
-# spinner line (a different line) still blocks exactly as before.
+# d047ab4's first attempt read "esc to interrupt" on that footer line as
+# ALWAYS meaning "a background agent/shell is running, composer is actually
+# idle" and stripped the WHOLE footer line from the hard-blocker scan.
+# #391/#394/#395/#398 live evidence (2026-08-26, three actively-working
+# panes: idle_reminder firing every ~90s and harvest_hint at +10min while
+# `takkub status` showed fresh progress the whole time) disproved that
+# assumption: the currently-shipping Claude Code build renders "esc to
+# interrupt" on this SAME footer line UNCONDITIONALLY, including while the
+# pane is genuinely busy with no background task at all — its spinner line
+# no longer carries its own "(esc to interrupt)" suffix either (bare "✻
+# sock-hopping… 3", see `_BUSY_SPINNER_LINE_RE` below). Blanket-stripping the
+# footer line therefore threw away the ONLY busy indicator left on screen.
+#
+# The real distinguishing evidence, per that same footer line, is whether it
+# ALSO carries the background segment ("for agents" / "N shell" / "N
+# agent(s)") — "esc to interrupt" is ambiguous by itself now, but paired with
+# that segment it specifically means background work. So only the "esc to
+# interrupt" substring on a footer-chrome line that ALSO shows that segment
+# is neutralized — not the whole line, and not "esc to interrupt" appearing
+# there alone.
 _FOOTER_CHROME_LINE_MARKERS: tuple[str, ...] = ("shift+tab to cycle", "bypass permissions")
+_BACKGROUND_SEGMENT_MARKERS: tuple[str, ...] = ("for agents",)
+_BACKGROUND_WORK_COUNT_RE = re.compile(r"\b\d+\s+(?:shell|agent)s?\b")
+
+
+def _has_background_segment_evidence(text_lower: str) -> bool:
+    """True when *text_lower* (a `_ready_region` blob, possibly multi-line)
+    independently shows a background shell/agent segment — deliberately NOT
+    "esc to interrupt" itself, since that string alone no longer
+    distinguishes background work from ordinary foreground busy-ness (see
+    the module note above).
+
+    Checked over the WHOLE region with newlines removed rather than one
+    line: a narrow terminal can wrap the footer's trailing "· ← for agents"
+    onto the next pyte row, splitting the marker text itself mid-word across
+    two rows with no gap (confirmed by an 80-col capture of the real footer
+    string — the row breaks exactly at "for agent" / "s"). Concatenating
+    rows with no separator exactly reconstructs the original unwrapped text,
+    since pyte's own row-fill only wraps at the column boundary with no
+    padding gap; it can only make this check MORE lenient (a false negative
+    becomes a true positive), never manufacture marker text that wasn't
+    already on screen, since neither "for agents" nor the shell/agent count
+    shape is plausible to form by coincidence at an arbitrary row seam."""
+    joined = text_lower.replace("\n", "")
+    if any(m in joined for m in _BACKGROUND_SEGMENT_MARKERS):
+        return True
+    return bool(_BACKGROUND_WORK_COUNT_RE.search(joined))
+
+
+def _footer_chrome_esc_to_interrupt_line(line: str) -> bool:
+    """True when *line* (already lowercased) is the footer-chrome line
+    (`_FOOTER_CHROME_LINE_MARKERS`) AND carries "esc to interrupt" on that
+    same line — the row `_blocker_scan_text`/`_has_background_work_marker`
+    would neutralize/count once background evidence is confirmed elsewhere
+    in the region. A spinner line never matches (it doesn't carry
+    "bypass permissions"/"shift+tab to cycle"), so this can never touch it."""
+    return "esc to interrupt" in line and any(m in line for m in _FOOTER_CHROME_LINE_MARKERS)
 
 
 def _blocker_scan_text(text_lower: str) -> str:
-    """*text_lower* minus the provider status-footer lines (see
-    `_FOOTER_CHROME_LINE_MARKERS`) — what the hard-blocker scan looks at."""
-    if not any(m in text_lower for m in _FOOTER_CHROME_LINE_MARKERS):
+    """*text_lower* with the "esc to interrupt" substring removed from the
+    footer-chrome line, but ONLY when the region also independently proves
+    it's about background work (`_has_background_segment_evidence`) — what
+    the hard-blocker scan looks at. A footer-chrome line whose "esc to
+    interrupt" has no such evidence anywhere in the region (ordinary busy,
+    no background task) is left untouched — that's still a genuine blocker."""
+    if not _has_background_segment_evidence(text_lower):
+        return text_lower
+    lines = text_lower.splitlines()
+    if not any(_footer_chrome_esc_to_interrupt_line(ln) for ln in lines):
         return text_lower
     return "\n".join(
-        line
-        for line in text_lower.splitlines()
-        if not any(m in line for m in _FOOTER_CHROME_LINE_MARKERS)
+        ln.replace("esc to interrupt", "") if _footer_chrome_esc_to_interrupt_line(ln) else ln
+        for ln in lines
     )
+
+
+# #391/#394/#395/#398: d047ab4 correctly recognised that claude's idle-footer
+# background segment ("esc to interrupt · ← for agents", "1 shell · esc to
+# interrupt · ← for agents") means the composer genuinely accepts input
+# while a background shell/agent runs — but that fix collapses two different
+# questions into one verdict: "is the composer ready for input" (yes) and
+# "is there still background work this pane is babysitting" (also yes) used
+# to be the same bit (busy) and now both read as the ordinary idle case, so
+# the cockpit's idle watchdogs (forgot-`takkub done` reminder, harvest hint,
+# proactive `/compact`) treat a pane running a long `docker build`/`vitest
+# --watch`/`pio run` in the background exactly like one that is genuinely
+# done and forgotten. This is the flip side of `_blocker_scan_text`: what
+# that scan discards from the hard-blocker check (the footer's "esc to
+# interrupt", when background evidence backs it) is exactly the signal a
+# caller asking "is background work still running" needs to look AT instead.
+def _has_background_work_marker(text_lower: str) -> bool:
+    """True when the region's footer-chrome line carries "esc to interrupt"
+    AND the region independently proves background work — see
+    `_has_background_segment_evidence` / `_footer_chrome_esc_to_interrupt_line`.
+    A spinner line elsewhere on screen ("✻ churning… (esc to interrupt)")
+    can never satisfy this on its own — only the footer-chrome line counts,
+    and only once background evidence is confirmed."""
+    if not _has_background_segment_evidence(text_lower):
+        return False
+    return any(_footer_chrome_esc_to_interrupt_line(ln) for ln in text_lower.splitlines())
+
+
+# #391 (2026-08-26 live finding): the currently-shipping Claude Code build's
+# own busy-status line no longer carries "(esc to interrupt)" at all — the
+# captured shape is bare "✻ sock-hopping… 3" (rotating glyph, present-
+# participle verb, ellipsis, trailing counter). With "esc to interrupt" now
+# ambiguous wherever it appears on the footer (see above), this is the
+# independent, wording-proof structural signal for "the foreground turn is
+# actively generating": the SHAPE of claude's own status line (glyph + word
+# + ellipsis) rather than any specific verb, so an upstream vocabulary change
+# ("sock-hopping", "churning", "bunning", "thinking", ...) can't silently
+# break it the way exact-substring matching would (the same #20 lesson this
+# whole marker table already follows elsewhere). Glyph set per live
+# observation + Lead's own capture (2026-08-26): claude rotates through
+# several star-like frames, not just "✻".
+_BUSY_SPINNER_LINE_RE = re.compile(r"^[✻✢✳✶✽·*]\s*\S*…")
+
+
+def _has_busy_spinner_line(text_lower: str) -> bool:
+    """True when a `_ready_region` line matches claude's busy-status spinner
+    shape. Independent of `_blocker_scan_text`/`_footer_chrome_esc_to_interrupt_line`:
+    a footer line starts with "⏵⏵", never one of this glyph set, so the two
+    checks can never collide — a footer's background segment is never
+    mistaken for a busy spinner line, and a real spinner line is never
+    neutralized by the footer-line stripping there."""
+    return any(_BUSY_SPINNER_LINE_RE.match(ln.strip()) for ln in text_lower.splitlines())
 
 
 def _classify_ready(text_lower: str) -> bool:
@@ -390,6 +493,12 @@ def _classify_ready(text_lower: str) -> bool:
     Faithful to the original if/return chain: hard blockers (all → not ready)
     came first there too, so grouping them is equivalent; the ordered rules then
     reproduce the exact first-match-wins precedence."""
+    # #391: claude's own busy-status spinner line — checked ahead of (and
+    # independent from) the substring hard-blocker loop below, since the
+    # currently-shipping build no longer puts "esc to interrupt" on that
+    # line at all (see `_BUSY_SPINNER_LINE_RE`'s module note).
+    if _has_busy_spinner_line(text_lower):
+        return False
     blocker_text = _blocker_scan_text(text_lower)
     for b in _READY_HARD_BLOCKERS:
         if b in blocker_text:
@@ -690,6 +799,36 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
         False,
         "claude",
     ),
+    # #391 (2026-08-26 live finding): the currently-shipping Claude Code
+    # build renders "esc to interrupt" on the SAME footer line even with NO
+    # background task at all — three real Lead panes read READY continuously
+    # while actively working (idle_reminder firing every ~90s, harvest_hint
+    # at +10min, `takkub status` showing fresh progress the whole time).
+    # Must stay busy: no "for agents"/"N shell" evidence backs this
+    # particular "esc to interrupt".
+    (
+        "❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+        False,
+        "claude",
+    ),
+    # Same finding via the bare spinner line alone — the build's spinner no
+    # longer carries its own "(esc to interrupt)" suffix (captured shape:
+    # "✻ sock-hopping… 3") — with a completely plain idle footer underneath.
+    (
+        "✻ sock-hopping… 3\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        False,
+        "claude",
+    ),
+    # Busy AND background task at once: the footer's "esc to interrupt" gets
+    # neutralized (background evidence present), but the bare spinner line
+    # alone must still keep this busy.
+    (
+        "✻ sock-hopping… 3\n"
+        "❯ \n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        False,
+        "claude",
+    ),
     # --- #26 hardening (558fcbe cross-check, gemini+codex) ---
     # codex update splash + status bar footer: the 'update available!' blocker
     # precedes 'fast off/on' in _READY_RULES → stays not-ready.
@@ -731,6 +870,12 @@ def _classify_ready_for_provider(text_lower: str, provider: str) -> bool:
     Ignores TAKKUB_EXTRA_READY_MARKERS, like the shipped-table self-test
     itself. (issue #103 Phase 0, design §5.6)"""
     spec = PROVIDER_REGISTRY[provider]
+    # #391: keep in lockstep with _classify_ready's own spinner check (applied
+    # there unconditionally, not part of any spec's own `ready_hard_blockers`)
+    # — otherwise a case that classifies busy only via `_has_busy_spinner_line`
+    # would pass the combined-table check and fail this per-provider one.
+    if _has_busy_spinner_line(text_lower):
+        return False
     blocker_text = _blocker_scan_text(text_lower)
     for b in spec.ready_hard_blockers:
         if b in blocker_text:
@@ -1919,6 +2064,27 @@ class PtySession(QObject):
         # string quoted in the conversation body can't poison the verdict — the
         # #70 false-busy stall / #20 fragility root fix.
         return _classify_ready(_ready_region(self.display_lines()))
+
+    def has_background_work(self) -> bool:
+        """Claude-only structural signal (#391/#394/#395/#398): True when the
+        idle footer chrome line itself carries a background agent/shell
+        segment (``esc to interrupt`` / ``N shell`` / ``N agent`` / ``← for
+        agents``) alongside ``bypass permissions``/``shift+tab to cycle``.
+
+        Deliberately a DIFFERENT question from `is_at_ready_prompt()`: that
+        one already (correctly, since d047ab4) reads such a pane as READY —
+        the composer accepts input. This answers "is there still background
+        work this pane is babysitting" — a pane can be ready AND have
+        background work in flight at the same time, and callers deciding
+        whether to nudge/harvest/compact an apparently-idle pane need that
+        finer distinction. See `_has_background_work_marker` for the exact
+        shapes matched.
+
+        No other provider renders this footer shape (only claude's Ink TUI
+        has a "background tasks" segment on its idle status line as of
+        2026-08), so this always returns False for codex/gemini/opencode/
+        kimi/cursor — not a gap, just nothing to detect there yet (#103)."""
+        return _has_background_work_marker(_ready_region(self.display_lines()))
 
     def is_at_ready_prompt_cached(self) -> bool:
         """Lock-free read of the ready state the reader thread already
