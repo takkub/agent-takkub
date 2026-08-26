@@ -439,6 +439,106 @@ class TestIdleWatchdog:
         notify_lead.assert_called_once()
         assert "takkub harvest --role backend" in notify_lead.call_args.args[1]
 
+    def test_harvest_hint_message_carries_evidence(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#391/#398: the notice must carry last-output/last-progress/ready
+        evidence so Lead can judge without tabbing over to `takkub status`."""
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.seconds_since_output.return_value = 42.0
+        orch.panes["backend"] = pane
+        orch.panes["lead"] = _make_pane(state="active")
+        monkeypatch.setattr(orch_mod, "HARVEST_HINT_SEC", 100)
+        notify_lead = MagicMock()
+        monkeypatch.setattr(orch, "_notify_lead", notify_lead)
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        _work_then_idle(orch, pane, clock)
+        idle_since = orch._idle_state[_key("backend")]["first_idle_ts"]
+
+        clock[0] = float(idle_since) + orch_mod.HARVEST_HINT_SEC + 1
+        orch._check_idle_teammates()
+        notify_lead.assert_called_once()
+        msg = notify_lead.call_args.args[1]
+        assert "last output 42s ago" in msg
+        assert "ready=True" in msg
+
+
+class TestBackgroundWorkSuppressesIdleReminder:
+    """#391/#394/#395/#398: d047ab4 made a claude pane running a background
+    shell/agent read is_at_ready_prompt()==True (correct — the composer
+    accepts input), but the forgot-`takkub done` reminder / harvest hint must
+    still treat it as active work, not idle-because-done."""
+
+    def test_background_footer_segment_suppresses_reminder_and_harvest_hint(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.has_background_work.return_value = True
+        orch.panes["backend"] = pane
+        orch.panes["lead"] = _make_pane(state="active")
+        monkeypatch.setattr(orch_mod, "HARVEST_HINT_SEC", 100)
+        notify_lead = MagicMock()
+        monkeypatch.setattr(orch, "_notify_lead", notify_lead)
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        for _ in range(5):
+            clock[0] += orch_mod.HARVEST_HINT_SEC
+            orch._check_idle_teammates()
+
+        assert notices == []
+        notify_lead.assert_not_called()
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] is None
+
+    def test_tool_running_marker_suppresses_reminder(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.tool_running_marker.return_value = "running command"
+        # Deliberately below TOOL_STUCK_TIMEOUT_SEC (#308's own "stuck"
+        # threshold) — this pane is actively running a tool, not wedged, so
+        # `_check_stuck_tool_panes` never escalates it; the suppression here
+        # must be independent of that escalation flag.
+        pane.session.seconds_since_output.return_value = 5.0
+        orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + orch_mod.IDLE_REMIND_COOLDOWN_S + 10
+        orch._check_idle_teammates()
+
+        assert notices == []
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] is None
+
+    def test_recent_progress_ledger_suppresses_reminder(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproduces the reported shape directly: `takkub status` showing
+        "last progress 5-6s ago" while the naive is_at_ready_prompt()-only
+        watchdog thought the pane had sat idle for 10+ minutes — the pane's
+        content-delta clock (background output scrolling the conversation
+        body) kept moving even though the footer/ready region never changed."""
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + orch_mod.IDLE_REMIND_COOLDOWN_S + 10
+        orch._ps(_key("backend")).last_content_change_ts = clock[0] - 5.0
+        orch._check_idle_teammates()
+
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] is None
+
 
 class TestStuckToolSuppressesIdleReminder:
     """#308: the forgot-`takkub done` reminder must not nag a pane the
@@ -1329,6 +1429,34 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
 
         pane.session.write.assert_not_called()
+
+    def test_background_work_pane_never_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#392 part 2: `/compact` must never fire while claude's footer
+        shows a background shell/agent still running — injecting it would
+        interrupt that background task the same way any other busy state
+        does. Once the background segment clears, the pane earns a fresh
+        idle episode and compacts normally."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        pane.session.has_background_work.return_value = True
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        # Background work finishes — normal proactive-compact behaviour resumes.
+        pane.session.has_background_work.return_value = False
+        orch._check_idle_teammates()  # fresh idle episode starts
+        clock[0] += 101
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
 
     def test_lead_pane_is_eligible(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch

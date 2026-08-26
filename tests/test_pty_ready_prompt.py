@@ -907,3 +907,165 @@ def test_claude_wash_locker_footer_with_shell_count_is_ready() -> None:
         "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← for agents · ↓ to manage",
     )
     assert s.is_at_ready_prompt() is True
+
+
+# ── #391 (2026-08-26 live finding): "esc to interrupt" alone on the footer
+# is busy, not background work ───────────────────────────────────────────────
+# d047ab4's first attempt assumed "esc to interrupt" on the footer line ALWAYS
+# meant background work. Real evidence from 3 actively-working panes
+# (idle_reminder firing every ~90s, harvest_hint at +10min, `takkub status`
+# showing fresh progress the whole time) disproved that: the currently-
+# shipping Claude Code build renders "esc to interrupt" on that same footer
+# line even with NO background task, and its spinner line no longer carries
+# its own "(esc to interrupt)" suffix at all. Fixtures below are the 3 real
+# shapes: busy (no background task), idle (no background task), idle+background.
+
+
+def test_claude_busy_footer_without_background_segment_is_busy() -> None:
+    """The exact regression: footer merges 'esc to interrupt' onto the
+    'bypass permissions' line with NO 'for agents'/'N shell' evidence — this
+    is ordinary busy, not a background task, and must NOT read ready."""
+    s = _feed_screen(
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+    )
+    assert s.is_at_ready_prompt() is False
+    assert s.has_background_work() is False
+
+
+def test_claude_bare_spinner_line_with_no_esc_suffix_is_busy() -> None:
+    """The build's spinner line no longer carries '(esc to interrupt)' at
+    all — captured shape is bare 'sock-hopping… 3'. With a completely plain
+    idle footer underneath (no 'esc to interrupt' anywhere), the spinner
+    line alone must still be recognised as busy."""
+    s = _feed_screen(
+        "✻ Sock-hopping… 3",
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_claude_bare_spinner_above_background_footer_is_still_busy() -> None:
+    """Busy AND background task at once: the footer's 'esc to interrupt' is
+    neutralized (background evidence present), but the bare spinner line
+    (no suffix) must still keep this classified busy."""
+    s = _feed_screen(
+        "✻ Sock-hopping… 3",
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_claude_plain_idle_no_background_no_spinner_is_ready() -> None:
+    """Third shape: genuinely idle, no background task, no spinner at all."""
+    s = _feed_screen(
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.has_background_work() is False
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ("thinking", "churning", "bunning", "sock-hopping", "wibbling"),
+)
+def test_claude_busy_spinner_shape_is_verb_agnostic(verb: str) -> None:
+    """#391: structural shape (glyph + word + ellipsis), not a fixed verb
+    list — an upstream vocabulary change must not silently break this."""
+    s = _feed_screen(
+        f"✻ {verb.capitalize()}… 3",
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_claude_background_footer_wrapped_across_80col_rows_is_still_ready() -> None:
+    """An 80-col pane wraps the real footer string mid-word — pyte's own
+    display() breaks it exactly at "for agent" / "s" onto the next row
+    (confirmed directly against PtySession(cols=80)). The background-segment
+    evidence check must still recognise "for agents" once its two halves are
+    reunited, not miss it because a newline now sits between them."""
+    s = _feed_screen(
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.has_background_work() is True
+
+
+# ── has_background_work() (#391/#394/#395/#398) ─────────────────────────────
+# d047ab4 correctly stopped the background-task footer segment from reading
+# BUSY (is_at_ready_prompt() True above) but that alone can't tell "genuinely
+# done" apart from "ready for input AND still babysitting a background
+# docker build / vitest --watch / pio run" — has_background_work() is the
+# finer signal the idle watchdog needs for that split.
+
+
+def test_has_background_work_true_for_esc_to_interrupt_footer_segment() -> None:
+    s = _feed_screen(
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.has_background_work() is True
+
+
+def test_has_background_work_true_for_shell_count_footer_segment() -> None:
+    s = _feed_screen(
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← for agents · ↓ to manage",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.has_background_work() is True
+
+
+def test_has_background_work_false_for_plain_idle_footer() -> None:
+    """No background segment on the footer line at all — ordinary idle."""
+    s = _feed_screen(
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    )
+    assert s.is_at_ready_prompt() is True
+    assert s.has_background_work() is False
+
+
+def test_has_background_work_false_when_esc_to_interrupt_is_the_spinner_line() -> None:
+    """The spinner's own 'esc to interrupt' (busy, not background-task) must
+    NOT be mistaken for the footer-line background segment — has_background_work
+    only looks at the footer chrome line, same scope as _blocker_scan_text."""
+    s = _feed_screen(
+        "✻ Churning… (esc to interrupt)",
+        "─" * 40,
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    )
+    assert s.has_background_work() is False
+
+
+def test_has_background_work_false_for_non_claude_provider_shapes() -> None:
+    """No other provider renders claude's 'bypass permissions'/'shift+tab to
+    cycle' footer, so the marker never matches — always False elsewhere."""
+    codex = _feed_screen("gpt-5.5 medium · ~/project · 5h 79% left · Fast off")
+    assert codex.has_background_work() is False
+    gemini = _feed_screen("Type your message or @path/to/file")
+    assert gemini.has_background_work() is False
