@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.3] - 2026-08-26
+
+### Fixed (แก้)
+
+- **watchdog เตือน "ไม่ active" / idle_reminder ทุก 90 วิ / harvest_hint +10 นาที ใส่ pane ที่กำลังทำงาน (#391 #394 #395 #398)** — regression จาก 1.6.2 (d047ab4):
+  Claude Code รุ่นปัจจุบันวาง `esc to interrupt` บนบรรทัด footer **เสมอ** (busy หรือไม่ก็ตาม) และ spinner ไม่มี `(esc to interrupt)` อีกแล้ว → การตัดทั้งบรรทัด footer
+  ออกจาก blocker scan ทำให้ไม่เหลือ busy indicator เลย → แก้: ตัดเฉพาะ substring `esc to interrupt` และเฉพาะเมื่อมีหลักฐาน background จริง (`← for agents` / `N shell` / `N agent`)
+  + รู้จัก spinner line เปล่า (`✻ sock-hopping… 3`) เป็น busy + `PtySession.has_background_work()` แยกคำถาม "ready" กับ "ยังมีงาน background" · idle loop/harvest/compact เช็ค tool marker + progress ledger ก่อนเตือน
+- **`takkub wait` ถูกตัดซ้ำด้วย user_input เดิม (#393 #396)** — `begin_wait` attach ใช้ `started_ts` เดิม → stamp เดียว interrupt ทุก 4 วิ → latch `_wait_user_input_ack_ts` ต่อ project
+- **pane ตายเงียบ / boot ไม่ทัน (#387 #397)** — pane exit ไม่มี done-report แจ้ง Lead + snapshot 40 บรรทัดสุดท้ายไว้ `runtime/sessions/<date>/<project>/<role>-last-output.txt` · boot-ceiling reprobe เมื่อ main thread stall
+- **gemini/agy รับ task ไม่ได้เพราะ paste เร็วกว่า account verification (#404 — user directive)** — `ProviderSpec.post_boot_settle_s` (gemini = 8 วิ, override `TAKKUB_POST_BOOT_SETTLE_S_GEMINI`) รอหลัง boot ก่อน paste+Enter, เห็น banner "verifying your account" = reset นับใหม่, paste แล้ว banner กลับมา = re-deliver อัตโนมัติสูงสุด 3 ครั้งแล้วแจ้ง Lead
+- **pane_guard (#399 #400)** — rule ใหม่ `host_network` บล็อก `netsh wlan connect` / `ipconfig /release` / `route add` / `networksetup -set*` ฯลฯ (host network เป็นของ user) + แจ้ง Lead เมื่อบล็อก · git-block บอก pane ให้ `takkub done "พร้อม commit: …"` แทน retry วน · role files 16 ไฟล์ + docs อัปเดต
+- **`takkub worktree merge --role backend` merge ของ `backend#3` แทน (#403)** — role match เป็น `^wt/{slug}-(\d+)$` แบบ exact
+- **qa-gate / doctor / conftest (#388 #401 #402)** — status `ENV_GAP` (exit 78) แทน FAIL ปลอมเมื่อ env ขาด, fallback unittest, `--exec`, wheel-build fixture ล็อกร่วมกัน, `doctor` เช็ค `rtk`+`rg`
+- **report แนบไฟล์ binary + ส่งเข้าห้องแชท (#389 #390 #392)** — `.docx .xlsx .pptx .zip .csv .txt` เป็น `Content-Disposition: attachment` (cap 50MB), `report publish --send` / `send --file` ส่งไฟล์ไป remote channel (fallback เป็นลิงก์)
+- **CodeQL #41 `py/http-response-splitting`** — `Content-Disposition` ประกอบจาก `path.name` ที่ resolve แล้ว + whitelist `[A-Za-z0-9._-]` ใน helper เอง
+
 ## [v1.6.2] - 2026-08-25
 
 ### Fixed (แก้)
