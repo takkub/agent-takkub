@@ -272,6 +272,25 @@ class ProviderSpec:
     # it is) — empty here until a real screen is observed for that provider,
     # never guessed from docs alone.
     account_pending_markers: tuple[str, ...] = field(default_factory=tuple)
+    # #404: seconds `lead_inbox._send_when_ready` must see this provider
+    # continuously at its ready prompt (no account_pending_markers hit
+    # resetting the streak) before the FIRST task delivery after a fresh
+    # spawn/respawn is allowed to paste. Distinct from
+    # `account_pending_markers`/`account_pending_reason()` above — that gate
+    # only fires once a real screen-text match is CONFIRMED; this is a blind
+    # time buffer for the case those two rounds (#126/#346/#363) already
+    # tried and still didn't fully cover: gemini/agy's composer reads READY
+    # (`is_at_ready_prompt()` correctly True — nothing wrong with that
+    # classifier) before backend account-eligibility verification has
+    # actually settled, so a delivery landing in that window pastes straight
+    # onto "Verifying your account... Please try again shortly." and the
+    # task is silently dropped (real user report 2026-08-26, Antigravity CLI
+    # 1.1.21 / Gemini 3.7 Flash — pane title showed the delivery header while
+    # the screen still showed the verifying banner). 0 = no extra wait,
+    # unchanged behavior (every provider except the one below). Read through
+    # `post_boot_settle_s_for()`, which layers a per-provider env override on
+    # top so this can be tuned without a code change.
+    post_boot_settle_s: float = 0.0
 
     # ─── 14. Close-time scaffolding filter (#272) ───
     # Process names (matched case-insensitively, `.exe` suffix ignored so one
@@ -886,6 +905,13 @@ gemini_spec = ProviderSpec(
     # PtySession.account_pending_reason()) so the first few seconds of a
     # normal cold boot never false-positives.
     account_pending_markers=("verifying your account",),
+    # #404: confirmed live 2026-08-26 (Antigravity CLI 1.1.21 / Gemini 3.7
+    # Flash) — the composer reads ready and a task gets pasted+submitted
+    # (delivery header shown) while the screen is STILL on the "Verifying
+    # your account..." banner above, which then swallows it. 8s sits in the
+    # user-directed 5-10s band; see `post_boot_settle_s_for()` for the env
+    # override if a slower/faster machine needs retuning.
+    post_boot_settle_s=8.0,
     # #301: field-verified 2026-08-18 19:06, frontend#2 pane — the pane
     # printed exactly "⚠ Individual quota reached. Please upgrade your
     # subscription to increase your limits. Resets in 1h53m57s." before
@@ -1321,6 +1347,24 @@ def account_pending_markers_for(provider: str) -> tuple[str, ...]:
     wording for a specific provider-side gate, not a cross-provider phrase."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.account_pending_markers if spec is not None else ()
+
+
+def post_boot_settle_s_for(provider: str) -> float:
+    """Post-boot settle window for `provider` (#404, see
+    ``ProviderSpec.post_boot_settle_s``). ``TAKKUB_POST_BOOT_SETTLE_S_<NAME>``
+    (name upper-cased, e.g. ``TAKKUB_POST_BOOT_SETTLE_S_GEMINI``) overrides
+    the spec value when set, so this can be tuned per-machine without a code
+    change. 0.0 for an unknown provider name or an unparseable override
+    (never let a typo'd env var turn into a crash on the delivery path)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    default = spec.post_boot_settle_s if spec is not None else 0.0
+    override = os.environ.get(f"TAKKUB_POST_BOOT_SETTLE_S_{provider.upper()}")
+    if override is None:
+        return default
+    try:
+        return float(override)
+    except ValueError:
+        return default
 
 
 # ── quota/usage-limit detection (#301) ──────────────────────────────────────
