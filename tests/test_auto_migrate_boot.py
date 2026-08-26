@@ -75,12 +75,16 @@ class TestDiskGate:
     def test_no_runtime_dir_estimates_zero_bytes(self) -> None:
         assert auto_migrate_boot._estimate_copy_bytes(config.DATA_HOME) == 0
 
-    def test_sums_runtime_dir_file_sizes(self) -> None:
-        runtime = config.DATA_HOME / "runtime" / "sessions"
+    def test_sums_runtime_dir_file_sizes(self, tmp_path: Path) -> None:
+        # Own data_home, not the shared `config.DATA_HOME`: a late
+        # `_log_boot_event` / events.log flush from a sibling test landed
+        # under runtime/ there and turned 150 into 592 on macOS CI (v1.6.3).
+        data_home = tmp_path / "dh"
+        runtime = data_home / "runtime" / "sessions"
         runtime.mkdir(parents=True)
         (runtime / "a.txt").write_bytes(b"x" * 100)
         (runtime / "b.txt").write_bytes(b"y" * 50)
-        assert auto_migrate_boot._estimate_copy_bytes(config.DATA_HOME) == 150
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 150
 
     def test_room_available_passes(self) -> None:
         assert auto_migrate_boot._disk_has_room(config.DATA_HOME) is True
