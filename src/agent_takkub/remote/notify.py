@@ -4,6 +4,10 @@ orchestrator, not guessed):
 
 * done events: `orch.agentDone` (orchestrator.py, emitted on every
   `takkub done`).
+* report-shared events (#390): `orch.reportShared`, emitted by `Orchestrator.
+  push_report` on `takkub report publish --send` — forwarded to the PWA as a
+  `report` SSE event so a published file can reach the phone as a native
+  attachment instead of a link tapped in an in-app browser.
 * live Lead output: dispatches through the current provider's registered
   history scanner. Claude's scanner tails its structured session JSONL —
   `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<uuid>.jsonl` (the same store
@@ -1982,6 +1986,7 @@ class LeadNotifier(QObject):
 
         orch.agentDone.connect(self._on_done)
         orch.statusChanged.connect(self._resync)
+        orch.reportShared.connect(self._on_report_shared)
         self._resync()
 
     # ── discover / rediscover every open project's Lead session uuid ────
@@ -2307,10 +2312,24 @@ class LeadNotifier(QObject):
             return
         self._broadcaster.push("done", f"{role}: {note}"[:_MAX_EVENT_CHARS], project_ns)
 
+    # ── report-shared events (#390) ──────────────────────────────────────
+    def _on_report_shared(self, project_ns: str, payload: dict) -> None:
+        """`Orchestrator.push_report`'s `reportShared` -> SSE `report` event.
+
+        H-A (same as `_on_done` above): stamp the event's own `project_ns`,
+        not whatever project happens to be active — `push_report` can be
+        called for any open project. `payload` is already the small,
+        pre-shaped `{name,url,label,size_bytes,attachment}` dict
+        `Orchestrator.push_report` built; forwarded as-is (a structured SSE
+        payload, same as `blocked_on_picker`'s dict shape) rather than
+        wrapped as text."""
+        self._broadcaster.push("report", payload, project_ns)
+
     def stop(self) -> None:
         for signal, slot in (
             (self._orch.agentDone, self._on_done),
             (self._orch.statusChanged, self._resync),
+            (self._orch.reportShared, self._on_report_shared),
         ):
             try:
                 signal.disconnect(slot)

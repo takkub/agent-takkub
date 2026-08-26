@@ -25,7 +25,7 @@ re-implemented):
 
     <RUNTIME_DIR>/exports/<project_ns>/reports/
       <name>            <- the published file itself (copied in verbatim)
-      _shares.json      <- {name: {token, created, expires, label}}
+      _shares.json      <- {name: {token, created, expires, label, attachment}}
 """
 
 from __future__ import annotations
@@ -45,10 +45,47 @@ from .. import config as _config
 _SHARES_FILENAME = "_shares.json"
 
 # Deliberately narrow — a report is a document to hand to someone, never an
-# executable or an arbitrary blob. Matches the issue's whitelist exactly.
-_ALLOWED_EXTENSIONS = frozenset({".html", ".png", ".jpg", ".jpeg", ".svg", ".pdf", ".json", ".md"})
+# executable or an arbitrary blob. #389 widened this from the original #367
+# whitelist to cover office/archive documents a Lead publishes for a human
+# to download (not render) — those extra extensions are always served as a
+# forced download (see `_ATTACHMENT_EXTENSIONS`), never inline, so they never
+# grow the renderable-content XSS surface `validate_standalone_html` guards.
+_ALLOWED_EXTENSIONS = frozenset(
+    {
+        ".html",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".svg",
+        ".pdf",
+        ".json",
+        ".md",
+        ".docx",
+        ".xlsx",
+        ".pptx",
+        ".zip",
+        ".csv",
+        ".txt",
+    }
+)
+
+# #389: never rendered inline — served with `Content-Disposition: attachment`
+# unconditionally by `http_server.py`'s `/r/` route (see `is_attachment()`
+# below). Office/archive formats a browser might otherwise try to preview or
+# execute a handler for; `.csv`/`.txt` are plain text but still forced to
+# download so a report link never silently opens as an inline text/csv page.
+_ATTACHMENT_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx", ".zip", ".csv", ".txt"})
 
 _WARN_BYTES = 5 * 1024 * 1024
+# #389: publish() rejects outright past this size — the old 5 MB mark was
+# only ever a warning (see `validate_standalone_html`), so a Lead publishing
+# a 200 MB file got no signal until the (possibly slow, possibly failing)
+# copy had already happened. Chosen well above the warn threshold so a
+# normal report/dashboard/screenshot is never affected, but comfortably
+# below what a single-user loopback-plus-tunnel HTTP server should be asked
+# to hold in memory for one `path.read_bytes()` per request (see the `/r/`
+# route in `http_server.py`).
+_HARD_CAP_BYTES = 50 * 1024 * 1024
 
 # Stored filename: no path separators, no traversal, no drive letters (":"
 # is excluded from the allowed charset, which also closes the Windows
@@ -107,6 +144,12 @@ class ShareRecord:
     created: str
     expires: str | None
     label: str
+    # #389: True when this report must always be served as a forced download
+    # (never rendered inline) — either the caller asked for it at publish
+    # time (`--attachment`) or the stored name's extension is in
+    # `_ATTACHMENT_EXTENSIONS`. Defaulted so old `_shares.json` records
+    # written before #390 (no `attachment` key at all) still load cleanly.
+    attachment: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -244,7 +287,8 @@ def validate_standalone_html(path: Path) -> list[str]:
     best-effort regex gate, not the enforcement — `_REPORT_CSP_HEADER`
     (http_server.py)'s `default-src 'self'` is what actually blocks a
     report from reaching a third-party origin at render/fetch time, so a
-    shape this regex misses is still blocked there. Returns non-fatal
+    shape this regex misses is still blocked there. Also enforces
+    `_HARD_CAP_BYTES` (raises, every extension — #389) and returns non-fatal
     warnings (currently just the > 5 MB size heads-up) for the caller to
     print alongside a successful publish."""
     warnings: list[str] = []
@@ -263,6 +307,11 @@ def validate_standalone_html(path: Path) -> list[str]:
         size = path.stat().st_size
     except OSError:
         size = 0
+    if size > _HARD_CAP_BYTES:
+        raise ReportError(
+            f"{path.name} is {size / (1024 * 1024):.1f} MB — exceeds the Remote Reports "
+            f"limit of {_HARD_CAP_BYTES // (1024 * 1024)} MB"
+        )
     if size > _WARN_BYTES:
         warnings.append(f"{path.name} is {size / (1024 * 1024):.1f} MB — consider trimming assets")
     return warnings
@@ -275,12 +324,19 @@ def publish(
     *,
     expires: str | None = None,
     label: str = "",
+    attachment: bool = False,
 ) -> tuple[ShareRecord, list[str]]:
     """Copy `src` into the project's reports dir as `name`, mint a token (or
     reuse the existing one if `name` was already published — "publish ชื่อเดิม
     = ไฟล์ใหม่ token เดิม"), and persist the registry. Republishing without
     `--expires`/`--label` keeps whatever was already stored for that name
-    rather than clearing it."""
+    rather than clearing it.
+
+    #389: `attachment` forces `Content-Disposition: attachment` regardless of
+    extension. It is monotonic like the other flags above but never clears —
+    there is no `--no-attachment`, so once a name is published as forced-
+    download it stays that way on every republish (mirrors `_ATTACHMENT_
+    EXTENSIONS`, which can never be un-forced either)."""
     src_path = Path(src)
     if not src_path.is_file():
         raise ReportError(f"source file not found: {src_path}")
@@ -297,12 +353,14 @@ def publish(
     existing = existing if isinstance(existing, dict) else {}
     token = existing.get("token") or secrets.token_urlsafe(32)
     now = _now_iso()
+    forced_by_extension = Path(safe_name).suffix.lower() in _ATTACHMENT_EXTENSIONS
     record = ShareRecord(
         name=safe_name,
         token=token,
         created=existing.get("created") or now,
         expires=_parse_expires(expires) if expires is not None else existing.get("expires"),
         label=label or existing.get("label", ""),
+        attachment=bool(attachment) or bool(existing.get("attachment")) or forced_by_extension,
     )
     shares[safe_name] = record.as_dict()
     _save_shares(project, shares)
@@ -322,6 +380,7 @@ def list_shares(project: str | None) -> list[ShareRecord]:
                 created=data.get("created") or "",
                 expires=data.get("expires"),
                 label=data.get("label") or "",
+                attachment=bool(data.get("attachment")),
             )
         )
     out.sort(key=lambda r: r.name)
@@ -368,7 +427,24 @@ def rotate(name: str, project: str | None) -> ShareRecord:
         created=existing.get("created") or "",
         expires=existing.get("expires"),
         label=existing.get("label") or "",
+        attachment=bool(existing.get("attachment")),
     )
+
+
+def is_attachment(project_ns: str, name: str) -> bool:
+    """#389: whether `http_server.py`'s `/r/` route must serve `name` as a
+    forced download (`Content-Disposition: attachment`) rather than inline.
+    Never raises — an invalid name/project or a name with no record simply
+    isn't an attachment as far as this is concerned; `resolve()` is what
+    actually gates whether the request is served at all."""
+    try:
+        safe_name = _validate_report_name(name)
+    except ReportError:
+        return False
+    record = _load_shares(project_ns).get(safe_name)
+    if isinstance(record, dict) and bool(record.get("attachment")):
+        return True
+    return Path(safe_name).suffix.lower() in _ATTACHMENT_EXTENSIONS
 
 
 def resolve(project_ns: str, name: str, token: str | None) -> Path | None:

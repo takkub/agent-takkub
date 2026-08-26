@@ -144,6 +144,94 @@ class TestPublish:
         assert record.name == "status.html"
 
 
+class TestAttachmentExtensions:
+    """#389: office/archive/plain-text extensions widen the whitelist but are
+    always forced downloads — `attachment=True` on the record regardless of
+    the `--attachment` flag."""
+
+    @pytest.mark.parametrize("ext", [".docx", ".xlsx", ".pptx", ".zip", ".csv", ".txt"])
+    def test_publish_allows_new_binary_extensions(self, tmp_path, ext):
+        src = tmp_path / f"file{ext}"
+        src.write_bytes(b"binary-ish content")
+        record, warnings = reports.publish(str(src), f"file{ext}", "demo")
+        assert warnings == []
+        assert record.name == f"file{ext}"
+        assert record.attachment is True
+
+    def test_html_is_not_attachment_by_default(self, tmp_path):
+        record, _ = reports.publish(_html(tmp_path), "status.html", "demo")
+        assert record.attachment is False
+
+    def test_attachment_flag_forces_html_to_attachment(self, tmp_path):
+        record, _ = reports.publish(_html(tmp_path), "status.html", "demo", attachment=True)
+        assert record.attachment is True
+
+    def test_attachment_flag_is_sticky_across_republish(self, tmp_path):
+        reports.publish(_html(tmp_path), "status.html", "demo", attachment=True)
+        second, _ = reports.publish(_html(tmp_path), "status.html", "demo")
+        assert second.attachment is True
+
+    def test_is_attachment_true_for_forced_extension(self, tmp_path):
+        src = tmp_path / "data.zip"
+        src.write_bytes(b"PK")
+        reports.publish(str(src), "data.zip", "demo")
+        assert reports.is_attachment("demo", "data.zip") is True
+
+    def test_is_attachment_false_for_plain_html(self, tmp_path):
+        reports.publish(_html(tmp_path), "status.html", "demo")
+        assert reports.is_attachment("demo", "status.html") is False
+
+    def test_is_attachment_true_when_flag_was_used(self, tmp_path):
+        reports.publish(_html(tmp_path), "status.html", "demo", attachment=True)
+        assert reports.is_attachment("demo", "status.html") is True
+
+    def test_is_attachment_false_for_unknown_name(self):
+        assert reports.is_attachment("demo", "nope.html") is False
+
+    def test_is_attachment_false_for_invalid_name_never_raises(self):
+        assert reports.is_attachment("demo", "../evil.html") is False
+
+    def test_list_shares_carries_attachment_flag(self, tmp_path):
+        src = tmp_path / "data.csv"
+        src.write_text("a,b\n1,2\n", encoding="utf-8")
+        reports.publish(str(src), "data.csv", "demo")
+        records = {r.name: r for r in reports.list_shares("demo")}
+        assert records["data.csv"].attachment is True
+
+    def test_rotate_preserves_attachment_flag(self, tmp_path):
+        record, _ = reports.publish(_html(tmp_path), "status.html", "demo", attachment=True)
+        rotated = reports.rotate("status.html", "demo")
+        assert rotated.attachment is True
+        assert rotated.token != record.token
+
+
+class TestHardSizeCap:
+    def test_publish_rejects_over_hard_cap(self, tmp_path):
+        src = tmp_path / "huge.md"
+        with open(src, "wb") as fh:
+            fh.seek(reports._HARD_CAP_BYTES + 1)
+            fh.write(b"\0")
+        with pytest.raises(reports.ReportError, match="exceeds"):
+            reports.publish(str(src), "huge.md", "demo")
+
+    def test_publish_at_exactly_hard_cap_is_allowed(self, tmp_path):
+        src = tmp_path / "big.md"
+        with open(src, "wb") as fh:
+            fh.seek(reports._HARD_CAP_BYTES - 1)
+            fh.write(b"\0")
+        record, warnings = reports.publish(str(src), "big.md", "demo")
+        assert record.name == "big.md"
+        assert any("MB" in w for w in warnings)
+
+    def test_hard_cap_applies_to_non_html_extensions_too(self, tmp_path):
+        src = tmp_path / "huge.zip"
+        with open(src, "wb") as fh:
+            fh.seek(reports._HARD_CAP_BYTES + 1)
+            fh.write(b"\0")
+        with pytest.raises(reports.ReportError, match="exceeds"):
+            reports.publish(str(src), "huge.zip", "demo")
+
+
 class TestSvgValidation:
     """Should-fix #4 (review 2026-08-23-367): `.svg` was on the extension
     whitelist but never ran through the external-reference check at all —

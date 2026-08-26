@@ -1196,6 +1196,15 @@ class Orchestrator(
     # different pane — so a Lead notification can't slip by unseen now that the
     # panes-as-tabs layout shows only one pane at a time.
     leadNotified = pyqtSignal(str)  # project_ns
+    # #390: `takkub report publish --send` -> `push_report()` emits this so
+    # `remote.notify.LeadNotifier` (the only thing holding a reference to the
+    # SSE broadcaster) can push it to the connected mobile PWA as a native
+    # attachment instead of the recipient tapping an external link. Orch
+    # itself never imports `agent_takkub.remote` (remote-bolt-on-isolation
+    # contract) — this signal is the one-way bridge, same shape as
+    # `agentDone`/`leadNotified` above, which `LeadNotifier` already connects
+    # to the same way.
+    reportShared = pyqtSignal(str, dict)  # project_ns, {name,url,label,size_bytes,attachment}
     # UI-only session-cap notice. Lead crossings are never injected back into
     # Lead or auto-compacted; MainWindow surfaces the decision to the user.
     # Teammate crossings also emit this after their safe-idle advisory is queued.
@@ -3262,6 +3271,41 @@ class Orchestrator(
             f"queued to {to_role} (id {message_id}) — "
             f"ยืนยันว่าถึงมือจริงไหมด้วย `takkub messages --role {to_role}`"
         )
+
+    def push_report(
+        self,
+        name: str,
+        url: str,
+        label: str,
+        size_bytes: int,
+        attachment: bool,
+        project: str | None = None,
+    ) -> tuple[bool, str]:
+        """#390: `takkub report publish --send`'s IPC target (`cli_server`'s
+        `report-send` cmd). Emits `reportShared` for `remote.notify.
+        LeadNotifier` to turn into an SSE `report` event — see that signal's
+        comment for why this is emit-and-return rather than an import into
+        `remote`.
+
+        Always returns `(True, ...)` when it gets this far: reaching this
+        method at all already proves the cockpit is up and reachable (the
+        caller's IPC round-trip succeeded), which is the one thing this
+        layer can actually confirm. Whether remote control is enabled, a
+        tunnel is up, or a phone is actually connected right now are things
+        only `remote/` code knows — `cmd_report`'s CLI side already checked
+        `remote_status_text()` before attempting this call and reports that
+        reason itself when it skips the attempt entirely, so this never
+        needs to re-derive it via a forbidden import."""
+        project_ns = self._resolve_project(project)
+        payload = {
+            "name": name,
+            "url": url,
+            "label": label,
+            "size_bytes": int(size_bytes),
+            "attachment": bool(attachment),
+        }
+        self.reportShared.emit(project_ns, payload)
+        return True, f"pushed {name!r} to project {project_ns}"
 
     def answer_picker(self, key_sequence: str, project: str | None = None) -> tuple[bool, str]:
         """Remote mobile AskUserQuestion fix: write a raw key
