@@ -129,6 +129,14 @@ class TestSendAutoCancelsStaleDelivery:
         assert delivery.state.value == "cancelled"
         notices = _written_strings(lead.session)
         assert any("[delivery-superseded]" in m and "#255" in m for m in notices)
+        # #392: the notice must name the cancelled task (role#task_id + a
+        # preview of its text) and the message that replaced it, not just a
+        # bare count Lead has to cross-check against the transcript by hand.
+        superseded_notice = next(m for m in notices if "[delivery-superseded]" in m)
+        assert "backend#t1" in superseded_notice
+        assert "do X" in superseded_notice
+        assert "hey, doing this myself now" in superseded_notice
+        assert "#392" in superseded_notice
 
     def test_lead_send_keeps_a_delivery_that_never_reached_the_pane(
         self, orch: Orchestrator

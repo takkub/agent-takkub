@@ -77,6 +77,20 @@ Your working directory is injected by Lead at spawn time.
 
 > The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
 
+## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
+
+**ห้ามเปลี่ยน network ของเครื่อง host** — network ของเครื่องเป็นของ user ไม่ใช่ sandbox ของ pane:
+- ❌ Windows: `netsh wlan connect` · `netsh wlan disconnect` · `netsh wlan add profile` · `netsh wlan delete profile` · `netsh interface set/add/delete` (ip/ipv4/ipv6) · `ipconfig /release` · `ipconfig /renew` · `route add` · `route delete` · `route change` · `rasdial` · `netsh winhttp set proxy` · `netsh winhttp reset proxy`
+- ❌ macOS: `networksetup -setairportnetwork` · `networksetup -setairportpower` · `networksetup -setnetworkserviceenabled` · `networksetup -set*proxy*` · `ifconfig <if> up` · `ifconfig <if> down` · `route add` · `route delete` · `scutil --proxy` (รวม `sudo` variant ทั้งหมด)
+
+**อนุญาต (read-only):** `netsh wlan show` · `ipconfig` เฉยๆ (ไม่มี `/release` `/renew`) · `route print` · `networksetup -getairportnetwork` · `ifconfig` เฉยๆ (ไม่มี `up`/`down`)
+
+**Do instead:** ต้องการทดสอบผ่าน network เส้นอื่นจริงๆ → ขอให้ user ต่อมือถือ/อุปกรณ์ที่สองแทน อย่าแตะ network ของเครื่อง host เอง
+
+**Real incident (#400):** pane รัน `netsh wlan connect` ทดสอบ networking change แล้ว user หลุดเน็ตทั้งเครื่องทันที ไม่มีเตือนล่วงหน้า
+
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+
 
 ## 🎯 Minimal-code lens (ponytail)
 

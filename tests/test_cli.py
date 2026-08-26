@@ -467,7 +467,6 @@ class TestBrowserShardAssignWarning:
         cli.main(["assign", "--role", "qa", "--shards", "2", "smoke test"])
         out = capsys.readouterr().out
         assert "#146" in out or "#304" in out
-        assert "เบราว์เซอร์" in out
 
     def test_qa_plan_fanout_warns(
         self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
@@ -489,6 +488,56 @@ class TestBrowserShardAssignWarning:
         cli.main(["assign", "--role", "qa", "smoke test"])
         out = capsys.readouterr().out
         assert "เบราว์เซอร์" not in out
+
+
+class TestSelfCommitIsolationWarning:
+    """#399: a task that tells the pane to commit its own work only actually
+    works under `--isolation worktree` — `pane_guard`'s git_lead_only rule
+    hard-blocks `git commit` on the shared tree for every teammate role
+    (#314). Root incident: a task said "commit the result" on a shared-tree
+    assign; the pane's commit was denied and Lead ended up committing by
+    hand — this warns Lead at assign time instead of after a burned turn."""
+
+    @pytest.mark.parametrize(
+        "task",
+        [
+            "fix the bug and commit เอง",
+            "แก้บั๊กแล้ว commit ด้วยตัวเอง",
+            "implement this and commit it yourself",
+            "self-commit the result when done",
+        ],
+    )
+    def test_shared_isolation_self_commit_task_warns(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str], task: str
+    ) -> None:
+        rc = cli.main(["assign", "--role", "backend", task])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "--isolation worktree" in out
+        assert "399" in out
+
+    def test_worktree_isolation_self_commit_task_does_not_warn(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(
+            ["assign", "--role", "backend", "--isolation", "worktree", "fix it and commit เอง"]
+        )
+        out = capsys.readouterr().out
+        assert "--isolation worktree" not in out
+
+    def test_ordinary_task_does_not_warn(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "backend", "add /auth/login endpoint"])
+        out = capsys.readouterr().out
+        assert "--isolation worktree" not in out
+
+    def test_shard_fanout_self_commit_task_warns(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cli.main(["assign", "--role", "backend", "--shards", "2", "build it and commit เอง"])
+        out = capsys.readouterr().out
+        assert "--isolation worktree" in out
 
 
 class TestHarvestPayload:

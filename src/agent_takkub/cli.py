@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -332,6 +333,37 @@ def _browser_shard_warning(role: str, shards: int) -> str:
     )
 
 
+# #399: a task that tells the pane to commit its own work only actually works
+# under `--isolation worktree` — `pane_guard`'s git_lead_only rule hard-blocks
+# `git commit` on the shared tree for every teammate role (#314), no
+# exceptions. Root incident: a task said "commit the result" on a shared-tree
+# assign; the pane's commit was denied, and Lead ended up committing by hand
+# instead — which is Lead's actual job (see docs/lead/role-and-workflow.md),
+# but the task text had promised the pane would do it, so the mismatch looked
+# like a bug. Catching it here, at assign time, beats the pane discovering it
+# mid-task after burning a turn on a denied command.
+_SELF_COMMIT_TASK_RE = re.compile(
+    r"commit\s*(?:the\s+result|it|this)?\s*(?:เอง|ด้วยตัวเอง|yourself)|self[- ]commit",
+    re.I,
+)
+
+
+def _self_commit_isolation_warning(task: str, isolation: str) -> str:
+    """Empty string when nothing to warn about — see module comment above."""
+    if isolation == "worktree":
+        return ""
+    if not _SELF_COMMIT_TASK_RE.search(task or ""):
+        return ""
+    return (
+        "\n⚠️ task นี้ดูเหมือนสั่งให้ pane commit เอง แต่ isolation เป็น shared — "
+        "`git commit` จะถูก pane_guard บล็อกเสมอสำหรับ claude pane (#314/#399), "
+        "และ role อื่น (provider ที่ไม่มี hook) ก็ถูกห้ามด้วย prose เดียวกัน "
+        "ถ้าต้องการให้ pane commit เองจริงๆ ให้สั่งใหม่ด้วย `--isolation worktree` แทน — "
+        "ไม่งั้น pane จะจบงานด้วย `takkub done` รอ Lead review + commit ตามปกติ "
+        "(นั่นคือหน้าที่ Lead โดยตรง ไม่ใช่ Lead 'ทำงานเอง')"
+    )
+
+
 def cmd_assign(args: argparse.Namespace) -> dict:
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
@@ -460,7 +492,11 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
         )
         if resp.get("ok"):
-            resp["msg"] = str(resp.get("msg", "")) + _browser_shard_warning(args.role, shards)
+            resp["msg"] = (
+                str(resp.get("msg", ""))
+                + _browser_shard_warning(args.role, shards)
+                + _self_commit_isolation_warning(args.task, "shared")
+            )
         return resp
     if shards > 1:
         # Fan-out: spawn <role>#1 … <role>#N in parallel; each carries shard_total.
@@ -489,7 +525,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
-        warn = _browser_shard_warning(args.role, shards)
+        warn = _browser_shard_warning(args.role, shards) + _self_commit_isolation_warning(
+            args.task, isolation
+        )
         if mode == "subagent":
             details = "\n".join(str(r.get("msg", "")) for r in results if r.get("msg"))
             return {
@@ -497,7 +535,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip() + warn,
             }
         return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards{warn}"}
-    return _request(
+    resp = _request(
         _with_project(
             {
                 "cmd": "assign",
@@ -516,6 +554,11 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             }
         )
     )
+    if resp.get("ok"):
+        resp["msg"] = str(resp.get("msg", "")) + _self_commit_isolation_warning(
+            args.task, isolation
+        )
+    return resp
 
 
 def cmd_subagent_done(args: argparse.Namespace) -> dict:
@@ -2410,6 +2453,37 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
+_GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit")
+
+
+def _notify_lead_of_guard_block(role: str, verdict: object) -> None:
+    """Best-effort, fire-and-forget notice to Lead when a high-severity guard
+    rule fires — reuses the existing `progress` IPC path (`takkub progress`),
+    so this shows up in Lead's pane exactly like a self-reported status
+    update. Never raises: a notify failure must not turn a guard block into a
+    guard crash.
+
+    Scoped to a short allowlist of rule prefixes, not every denial:
+    * ``host_network:`` (#400) — the user can lose internet access with zero
+      warning; Lead needs to know immediately, not just the blocked pane.
+    * ``git_lead_only:commit`` (#399) — the fix is often "re-assign with
+      `--isolation worktree`", a Lead-side decision the blocked pane can't
+      make for itself.
+    Every other rule (browser_driver, disk_scan, host_destructive,
+    pip_editable, pane_poll_loop) is low-severity enough that the pane's own
+    stderr reason (already printed by the caller) is sufficient.
+    """
+    rule = getattr(verdict, "rule", "") or ""
+    if not rule.startswith(_GUARD_NOTIFY_LEAD_RULE_PREFIXES):
+        return
+    try:
+        reason = str(getattr(verdict, "reason", "") or "")
+        note = f"[guard] {rule} — {reason[:300]}"
+        _hook_request(_with_project({"cmd": "progress", "from": role, "note": note}))
+    except Exception:
+        pass
+
+
 def cmd_guard(_: argparse.Namespace) -> dict:
     """Internal command wired as the `PreToolUse`/`Bash` hook for every
     cockpit-spawned claude pane (see hook_wiring.py). Blocks a teammate pane
@@ -2458,6 +2532,7 @@ def cmd_guard(_: argparse.Namespace) -> dict:
         if verdict.allowed:
             return {"ok": True, "msg": ""}
         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
+        _notify_lead_of_guard_block(role, verdict)
         return {"ok": True, "msg": "", "exit_code": 2}
     except Exception:
         return {"ok": True, "msg": ""}

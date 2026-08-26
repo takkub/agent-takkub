@@ -85,6 +85,31 @@ commits" a real `PreToolUse` deny instead of a suggestion an agent can be
 talked out of, closing the same hole `browser_driver` closed for the MCP
 policy.
 
+A seventh rule, ``host_network`` (#400), blocks commands that change the
+*host machine's* network configuration — for every guarded role, no
+allowlist, same shape as ``host_destructive``. Root incident: a pane ran
+`netsh wlan connect` to test a networking change and switched the host's
+active Wi-Fi network, dropping the user (and every other pane's live
+sessions) off the internet with zero warning. The host's network belongs to
+the user sitting at the keyboard, never to a sandboxed pane — a pane that
+needs a second network path should ask the user to bring a phone or a second
+device, not repoint the machine's own adapter. Windows: `netsh wlan
+connect|disconnect`, `netsh wlan add|delete profile`, `netsh interface
+set/add/delete` (covers `ip`/`ipv4`/`ipv6` subcommand mutations),
+`ipconfig /release|/renew`, `route add|delete|change`, `rasdial`, `netsh
+winhttp set|reset proxy`. macOS: `networksetup -setairportnetwork
+|-setairportpower|-setnetworkserviceenabled|-set*proxy*`, `ifconfig <if>
+up|down`, `route add|delete`, `scutil --proxy`, all under `sudo` too (the
+existing `_CMD_START` sudo branch covers it — same mechanism as
+``host_destructive``). Read-only diagnostics stay allowed: `netsh wlan
+show`, `ipconfig` alone, `route print`, `networksetup -getairportnetwork`,
+`ifconfig` alone. `HOST_NETWORK_RULE_TEXT` is the prose counterpart, pinned
+in role files by `tests/test_agent_role_files_have_host_network_guard.py`.
+A denial also fires a best-effort, fire-and-forget notice to Lead (`cli.
+cmd_guard`, via the same `progress` IPC path `takkub progress` uses) — the
+severity here (user loses internet access with no warning) warrants Lead
+knowing immediately, not just the blocked pane.
+
 One carve-out: `git commit` (only — never push/reset/rebase/merge/checkout)
 is allowed when the pane's cwd is inside a cockpit-managed
 `.../worktrees/...` checkout. That is `--isolation worktree` (issue #81):
@@ -135,6 +160,19 @@ HOST_DESTRUCTIVE_RULE_TEXT = (
     "`Stop-Process -Id <pid>`, `kill <pid>` แทน."
 )
 
+# Prose handed to role files verbatim (#400). Kept in sync with the patterns
+# below by tests/test_agent_role_files_have_host_network_guard.py.
+HOST_NETWORK_RULE_TEXT = (
+    "ห้ามสั่งเปลี่ยน network configuration ของเครื่อง host — network ของ host เป็นของ user "
+    "ไม่ใช่ sandbox ของ pane (เคสจริง #400: pane รัน `netsh wlan connect` ทดสอบแล้ว user หลุดเน็ตทั้งเครื่อง "
+    "ไม่มีเตือนล่วงหน้า). Windows: `netsh wlan connect/disconnect`, `netsh wlan add/delete profile`, "
+    "`netsh interface set/add/delete` (รวม ip/ipv4/ipv6), `ipconfig /release` / `/renew`, "
+    "`route add/delete/change`, `rasdial`, `netsh winhttp set/reset proxy`. "
+    "macOS: `networksetup -setairportnetwork/-setairportpower/-setnetworkserviceenabled/-set*proxy*`, "
+    "`ifconfig <if> up/down`, `route add/delete`, `scutil --proxy` (รวม sudo variant ทั้งหมด). "
+    "ต้องการทดสอบผ่าน network เส้นอื่นจริงๆ → ขอให้ user ต่อมือถือ/อุปกรณ์ที่สองแทน อย่าแตะ network ของเครื่อง host เอง."
+)
+
 # Prose handed to role files verbatim (#202). Kept in sync with the patterns
 # below by tests/test_agent_role_files_have_pip_editable_guard.py.
 PIP_EDITABLE_RULE_TEXT = (
@@ -155,11 +193,14 @@ GIT_LEAD_ONLY_RULE_TEXT = (
     "'commit เอง'/'ตรวจผ่านแล้ว commit เอง' แค่ไหนก็ตาม — มีแค่ Lead เท่านั้นที่ commit "
     "(เคสจริง #314: backend/admin role commit เองเมื่อ task สั่ง ในขณะที่ frontend ปฏิเสธ "
     "เพราะ role file ทั้งคู่มีข้อห้ามเดียวกัน แต่ prose อย่างเดียวโน้มน้าวให้ทำผิดได้). "
-    'งานเสร็จ → `takkub done "<note สรุปงาน>"` แล้วรอ Lead review + commit '
+    "ถูกบล็อกแล้ว → ห้ามลองคำสั่งเดิมซ้ำ (เคสจริง #399: retry วนจนจบเทิร์นไม่ได้ Lead ต้องมา "
+    "commit ให้เองแทน) จบงานทันทีด้วย "
+    '`takkub done "พร้อม commit: <ไฟล์ที่แก้>"` แล้วรอ Lead review + commit '
     "ข้อยกเว้นเดียว: pane ที่ spawn ด้วย `--isolation worktree` (branch แยกของตัวเอง) "
     "ต้อง `git commit` บน branch นั้นเอง และดึง base ล่าสุดเข้า branch ตัวเองได้ด้วย "
     "`git merge <base>` ภายใน worktree นั้น (แต่ยังห้าม push/rebase/checkout — "
-    "merge กลับเข้า base เป็นงาน Lead) ตามที่ task prompt บอกไว้ตอน spawn."
+    "merge กลับเข้า base เป็นงาน Lead) ตามที่ task prompt บอกไว้ตอน spawn — "
+    "ถ้า Lead ต้องการให้ pane นี้ commit เองจริงๆ ต้องสั่ง assign ใหม่ด้วย `--isolation worktree`."
 )
 
 
@@ -278,6 +319,86 @@ _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "stop-process-name",
         re.compile(rf"{_CMD_START}Stop-Process(?![\w-]){_SAME_CMD}-Name\b", re.I | re.M),
+    ),
+)
+
+# Host network reconfiguration (#400): the host machine's network belongs to
+# the user at the keyboard, not a sandboxed pane. Root incident: a pane ran
+# `netsh wlan connect` to test a networking change and dropped the whole
+# machine off the internet with zero warning — every other pane's live
+# session went with it. No allowlist: no guarded role legitimately needs to
+# repoint the host's own network adapter (a pane that needs a second network
+# path should ask the user to bring a phone/second device instead).
+#
+# `netsh interface set/add/delete` deliberately matches the mutating VERB
+# rather than the `ip`/`ipv4`/`ipv6` subcommand family literally, so it
+# catches every real spelling (`netsh interface ip set address`, `netsh
+# interface ipv4 add address`, `netsh interface set interface "Wi-Fi" ...`)
+# while `netsh interface show interface` (read-only) stays allowed — same
+# add/delete/set-vs-show split `_HOST_DESTRUCTIVE_PATTERNS`' PID/name split
+# and `route add/delete/change` (vs `route print`) below use.
+_HOST_NETWORK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Windows — Wi-Fi profile switch/mutation
+    (
+        "netsh-wlan-connect",
+        re.compile(
+            rf"{_CMD_START}netsh(?![\w-]){_SAME_CMD}\bwlan\b{_SAME_CMD}"
+            rf"\b(?:connect|disconnect)\b",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "netsh-wlan-profile",
+        re.compile(
+            rf"{_CMD_START}netsh(?![\w-]){_SAME_CMD}\bwlan\b{_SAME_CMD}"
+            rf"\b(?:add|delete)\b{_SAME_CMD}\bprofile\b",
+            re.I | re.M,
+        ),
+    ),
+    # Windows — adapter/IP reconfiguration
+    (
+        "netsh-interface-mutate",
+        re.compile(
+            rf"{_CMD_START}netsh(?![\w-]){_SAME_CMD}\binterface\b{_SAME_CMD}"
+            rf"\b(?:set|add|delete)\b",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "netsh-winhttp-proxy",
+        re.compile(
+            rf"{_CMD_START}netsh(?![\w-]){_SAME_CMD}\bwinhttp\b{_SAME_CMD}"
+            rf"\b(?:set|reset)\b{_SAME_CMD}\bproxy\b",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "ipconfig-release-renew",
+        re.compile(
+            rf"{_CMD_START}ipconfig(?![\w-]){_SAME_CMD}/(?:release6?|renew6?)\b", re.I | re.M
+        ),
+    ),
+    (
+        "route-mutate",
+        re.compile(rf"{_CMD_START}route(?![\w-]){_SAME_CMD}\b(?:add|delete|change)\b", re.I | re.M),
+    ),
+    ("rasdial", re.compile(rf"{_CMD_START}rasdial(?![\w-])", re.I | re.M)),
+    # macOS — Wi-Fi / network service / proxy mutation
+    (
+        "networksetup-mutate",
+        re.compile(
+            rf"{_CMD_START}networksetup(?![\w-]){_SAME_CMD}"
+            rf"-(?:setairportnetwork|setairportpower|setnetworkserviceenabled|set\w*proxy\w*)\b",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "ifconfig-updown",
+        re.compile(rf"{_CMD_START}ifconfig(?![\w-]){_SAME_CMD}\b(?:up|down)\b", re.I | re.M),
+    ),
+    (
+        "scutil-proxy",
+        re.compile(rf"{_CMD_START}scutil(?![\w-]){_SAME_CMD}--proxy\b", re.I | re.M),
     ),
 )
 
@@ -583,6 +704,14 @@ def classify(
                 reason=(
                     f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {HOST_DESTRUCTIVE_RULE_TEXT}"
                 ),
+            )
+
+    for rule, pattern in _HOST_NETWORK_PATTERNS:
+        if pattern.search(cmd):
+            return Verdict(
+                False,
+                rule=f"host_network:{rule}",
+                reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {HOST_NETWORK_RULE_TEXT}"),
             )
 
     for rule, pattern in _PIP_EDITABLE_PATTERNS:
