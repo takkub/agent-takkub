@@ -87,6 +87,19 @@ class TestDeny:
         assert "host_destructive" in err
         assert "PID" in err, "the reason must name the safe alternative, not just say no"
 
+    def test_blocks_netsh_wlan_connect(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#400: the exact incident — a pane ran `netsh wlan connect` and
+        dropped the host off the internet with zero warning."""
+        _run(monkeypatch, _payload("netsh wlan connect name=Guest"), TAKKUB_ROLE="backend")
+
+        resp = cli.cmd_guard(None)
+
+        assert resp["exit_code"] == 2
+        err = capsys.readouterr().err
+        assert "host_network" in err
+
     def test_blocks_git_commit_for_backend(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
@@ -303,3 +316,75 @@ class TestCliDispatch:
     def test_main_returns_zero_when_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _run(monkeypatch, _payload("npm test"), TAKKUB_ROLE="frontend")
         assert cli.main(["_guard"]) == 0
+
+
+class TestNotifyLeadOfGuardBlock:
+    """#400/#399: a `host_network` or `git_lead_only:commit` denial fires a
+    best-effort notice to Lead (via the existing `progress` IPC path) — the
+    blocked pane's own stderr reason isn't enough for these two: #400 because
+    the user can lose internet with zero warning, #399 because the fix is
+    often a Lead-side re-assign with `--isolation worktree`."""
+
+    @pytest.fixture(autouse=True)
+    def _capture_hook_requests(self, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+        sent: list[dict] = []
+        monkeypatch.setattr(cli, "_hook_request", lambda payload, **_kw: sent.append(payload))
+        return sent
+
+    def test_host_network_block_notifies_lead(
+        self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
+    ) -> None:
+        _run(monkeypatch, _payload("netsh wlan connect name=Guest"), TAKKUB_ROLE="backend")
+        cli.cmd_guard(None)
+        assert len(_capture_hook_requests) == 1
+        sent = _capture_hook_requests[0]
+        assert sent["cmd"] == "progress"
+        assert sent["from"] == "backend"
+        assert "host_network" in sent["note"]
+
+    def test_git_commit_block_notifies_lead(
+        self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
+    ) -> None:
+        _run(monkeypatch, _payload('git commit -m "x"'), TAKKUB_ROLE="backend")
+        cli.cmd_guard(None)
+        assert len(_capture_hook_requests) == 1
+        assert _capture_hook_requests[0]["cmd"] == "progress"
+        assert "git_lead_only:commit" in _capture_hook_requests[0]["note"]
+
+    def test_git_push_block_does_not_notify_lead(
+        self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
+    ) -> None:
+        """Only the commit carve-out confusion (#399) warrants a notice —
+        push/rebase/etc. have no worktree alternative to point Lead at."""
+        _run(monkeypatch, _payload("git push"), TAKKUB_ROLE="backend")
+        cli.cmd_guard(None)
+        assert _capture_hook_requests == []
+
+    def test_browser_driver_block_does_not_notify_lead(
+        self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
+    ) -> None:
+        """Low-severity denials stay pane-local — no IPC noise for Lead."""
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        cli.cmd_guard(None)
+        assert _capture_hook_requests == []
+
+    def test_allowed_command_does_not_notify_lead(
+        self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
+    ) -> None:
+        _run(monkeypatch, _payload("npm test"), TAKKUB_ROLE="backend")
+        cli.cmd_guard(None)
+        assert _capture_hook_requests == []
+
+    def test_notify_failure_does_not_break_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A crash in the best-effort notice must never turn a guard block
+        into a guard crash (fail-open contract, same as every other layer
+        in cmd_guard)."""
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("orchestrator unreachable")
+
+        monkeypatch.setattr(cli, "_hook_request", boom)
+        _run(monkeypatch, _payload("netsh wlan connect name=Guest"), TAKKUB_ROLE="backend")
+
+        resp = cli.cmd_guard(None)
+        assert resp["exit_code"] == 2

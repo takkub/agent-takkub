@@ -327,6 +327,79 @@ class TestPipEditableDenied:
         assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
 
 
+class TestHostNetworkDenied:
+    """#400: the host machine's network belongs to the user at the keyboard,
+    not a sandboxed pane — the exact incident was a pane running `netsh wlan
+    connect` to test a networking change and dropping the whole box off the
+    internet with zero warning."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Windows
+            "netsh wlan connect name=Guest",
+            "netsh wlan disconnect",
+            "netsh wlan delete profile name=Office",
+            "netsh wlan add profile filename=profile.xml",
+            "netsh interface ip set address name=Wi-Fi static 10.0.0.5 255.255.255.0",
+            "netsh interface ipv4 add address Wi-Fi 10.0.0.6/24",
+            'netsh interface set interface "Wi-Fi" disabled',
+            "netsh winhttp set proxy proxy.example.com:8080",
+            "netsh winhttp reset proxy",
+            "ipconfig /release",
+            "ipconfig /renew",
+            "ipconfig /release6",
+            "route add 10.0.0.0 mask 255.0.0.0 10.0.0.1",
+            "route delete 10.0.0.0",
+            "route change 10.0.0.0 mask 255.0.0.0 10.0.0.2",
+            "rasdial MyVPN user pass",
+            # macOS
+            "networksetup -setairportnetwork en0 MyNetwork password",
+            "networksetup -setairportpower en0 off",
+            "networksetup -setnetworkserviceenabled Wi-Fi off",
+            "networksetup -setwebproxy Wi-Fi proxy.example.com 8080",
+            "networksetup -setsecurewebproxy Wi-Fi proxy.example.com 8080",
+            "ifconfig en0 down",
+            "ifconfig en0 up",
+            "scutil --proxy",
+            "sudo networksetup -setairportpower en0 off",
+            "sudo ifconfig en0 down",
+            "sudo scutil --proxy",
+        ],
+    )
+    def test_denied_for_backend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("host_network:")
+        assert "host" in verdict.reason.lower()
+
+    @pytest.mark.parametrize("role", ["frontend", "mobile", "devops", "reviewer", "qa", "critic"])
+    def test_denied_for_every_role_no_allowlist(self, role: str) -> None:
+        assert not pane_guard.classify("netsh wlan connect name=Guest", role).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # read-only diagnostics stay allowed
+            "netsh wlan show networks",
+            "netsh wlan show interfaces",
+            "netsh interface show interface",
+            "ipconfig",
+            "ipconfig /all",
+            "route print",
+            "networksetup -getairportnetwork en0",
+            "ifconfig",
+            "ifconfig en0",
+            # reading/mentioning must never trip the guard
+            "grep -rn 'netsh wlan connect' docs/",
+            "echo 'never run netsh wlan connect here'",
+            "cat docs/network-policy.md",
+        ],
+    )
+    def test_unrelated_and_readonly_commands_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+
 class TestGitLeadOnlyDenied:
     """#314: a `backend`/custom `admin` pane self-committed on a task
     instruction of "commit เอง" while a `frontend` pane in the same session
@@ -476,6 +549,7 @@ class TestFailOpen:
         assert pane_guard.classify("npx --yes playwright", role).allowed
         assert pane_guard.classify("find / -name x", role).allowed
         assert pane_guard.classify("taskkill /F /IM node.exe", role).allowed
+        assert pane_guard.classify("netsh wlan connect name=Guest", role).allowed
         assert pane_guard.classify("pip install -e .", role).allowed
         assert pane_guard.classify('git commit -m "x"', role).allowed
 
@@ -503,6 +577,14 @@ class TestRuleTextSyncedWithRoleFiles:
         assert "PID" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT
         assert "taskkill" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT.lower()
         assert "169" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT
+
+    def test_host_network_rule_text_is_actionable(self) -> None:
+        """Same contract as GUARD_RULE_TEXT: name the safe alternative
+        (a second device), not just the prohibition."""
+        assert "netsh" in pane_guard.HOST_NETWORK_RULE_TEXT.lower()
+        assert "networksetup" in pane_guard.HOST_NETWORK_RULE_TEXT.lower()
+        assert "400" in pane_guard.HOST_NETWORK_RULE_TEXT
+        assert "มือถือ" in pane_guard.HOST_NETWORK_RULE_TEXT
 
     def test_pip_editable_rule_text_is_actionable(self) -> None:
         """Same contract as GUARD_RULE_TEXT: name the safe alternative

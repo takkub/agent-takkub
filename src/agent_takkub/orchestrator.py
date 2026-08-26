@@ -3074,12 +3074,22 @@ class Orchestrator(
                     last_ids = getattr(self, "_last_delivery_ids", None)
                     if last_ids is not None:
                         last_ids.pop((project_ns, to_role), None)
+                    # #392: a bare count ("ยกเลิก 1 pending delivery") gave
+                    # Lead no way to tell WHICH task got cancelled or what
+                    # replaced it without cross-checking the transcript by
+                    # hand — name both here instead.
+                    cancelled_desc = "; ".join(
+                        f'{d.pane_id}#{d.task_id[:8]} "{_truncate_at_word_boundary(d.payload, 30)}"'
+                        for d in cancelled_list
+                    )
+                    replacement_desc = _truncate_at_word_boundary(msg, 30)
                     self._notify_lead(
                         project_ns,
                         f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ "
                         f"**paste ไปถึง {to_role} แล้ว** เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — "
+                        f'ที่ยกเลิก: {cancelled_desc} · แทนที่ด้วย: "{replacement_desc}" '
                         f"ที่ยกเลิกคือ re-paste ซ้ำของ task เดิม ไม่ใช่ใบงาน **ปลอดภัย ไม่ต้องทำอะไร** "
-                        f"(issue #255)",
+                        f"(issue #255/#392)",
                         from_role="system",
                         note="delivery_superseded",
                     )
