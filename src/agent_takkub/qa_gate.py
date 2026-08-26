@@ -63,6 +63,23 @@ _PYTEST_SUMMARY_RE = re.compile(
     r"=+\s+.*\b(?:passed|failed|error|no tests ran|deselected)\b.*\s+=+"
 )
 
+# #401: distinct from pytest's own 0-5 range and from a passthrough tool
+# returncode — a caller (CI, cmd_qa_gate) needs to tell "this venv is
+# genuinely missing a dev tool" apart from "a real test/lint failed" without
+# scraping stdout. 78 is sysexits.h's EX_CONFIG ("something was found in an
+# unconfigured or misconfigured state") — not load-bearing, just a
+# self-documenting, unlikely-to-collide choice.
+ENV_GAP_EXIT_CODE = 78
+
+# Install hint shown on an ENV_GAP step — the pip package name, which is not
+# always the same as the console-script name (`lint-imports` ships in the
+# `import-linter` package).
+_PIP_INSTALL_HINT = {
+    "pytest": "pip install pytest",
+    "ruff": "pip install ruff",
+    "lint-imports": "pip install import-linter",
+}
+
 
 def _sample_memory_line() -> str:
     """One diagnostic line: wall-clock, system available memory, and the
@@ -123,6 +140,12 @@ class StepResult:
     returncode: int | None = None
     log_path: Path | None = None
     memory_log_path: Path | None = None
+    # #401: this tool is legitimately absent from the project's environment
+    # (e.g. a unittest-only project designed to run its tests inside Docker)
+    # rather than a genuine code/test failure or a broken venv. `ok` stays
+    # True (an env gap must not fail the gate the same way a red test does)
+    # — `env_gap` is what a caller checks to still surface it distinctly.
+    env_gap: bool = False
 
 
 @dataclass
@@ -137,10 +160,16 @@ class GateReport:
         return all(s.ok for s in self.steps if not s.skipped)
 
     @property
+    def env_gap(self) -> bool:
+        return any(s.env_gap for s in self.steps)
+
+    @property
     def exit_code(self) -> int:
         for s in self.steps:
             if not s.skipped and not s.ok:
                 return s.returncode if s.returncode else 1
+        if self.env_gap:
+            return ENV_GAP_EXIT_CODE
         return 0
 
 
@@ -202,6 +231,14 @@ def _resolve_tool(bin_dir: Path | None, name: str) -> str | None:
 
 
 def _venv_check(bin_dir: Path | None) -> StepResult:
+    """Only refuses when the venv can't run ANYTHING at all (no `python`
+    itself) — that's a broken/incomplete install, still a hard FAIL. A venv
+    that has `python` but is missing `pytest`/`ruff`/`lint-imports` is not
+    broken — plenty of real projects (e.g. unittest-only, tests run inside
+    Docker) never install some or all of these on purpose (#401). `run_gate`
+    checks per-tool availability itself and reports each gap as ENV_GAP
+    rather than failing the whole gate on a venv-check refusal.
+    """
     t0 = time.monotonic()
     if bin_dir is None:
         return StepResult(
@@ -211,19 +248,55 @@ def _venv_check(bin_dir: Path | None) -> StepResult:
             time.monotonic() - t0,
             "no shared .venv found — trusting the running interpreter (CI/fresh install)",
         )
-    missing = [
-        n for n in ("python", "pytest", "ruff", "lint-imports") if _resolve_tool(bin_dir, n) is None
-    ]
-    if missing:
+    if _resolve_tool(bin_dir, "python") is None:
         return StepResult(
             "venv-check",
             False,
             False,
             time.monotonic() - t0,
-            f"refuse: {bin_dir} missing {', '.join(missing)} — broken/incomplete venv. "
+            f"refuse: {bin_dir} missing python — broken/incomplete venv. "
             "Do NOT fall back to system python + PYTHONPATH=src (known footgun, #202).",
         )
-    return StepResult("venv-check", True, False, time.monotonic() - t0, f"using {bin_dir}")
+    missing = [n for n in ("pytest", "ruff", "lint-imports") if _resolve_tool(bin_dir, n) is None]
+    detail = f"using {bin_dir}"
+    if missing:
+        detail += (
+            f" — env gap: {', '.join(missing)} not installed in this venv (#401, not a "
+            "broken install; each missing tool is reported as ENV_GAP below, not FAIL)"
+        )
+    return StepResult("venv-check", True, False, time.monotonic() - t0, detail)
+
+
+def _env_gap_step(tool: str, *, extra: str = "") -> StepResult:
+    """#401: a project's venv legitimately lacking this tool is a different
+    situation from a broken venv or a red test/lint run — surface it as
+    ENV_GAP (ok=True so it doesn't fail the gate the way a real failure
+    would, env_gap=True so a caller can still tell the difference from a
+    clean pass) with the install command that closes the gap."""
+    hint = _PIP_INSTALL_HINT.get(tool, f"pip install {tool}")
+    return StepResult(
+        tool,
+        True,
+        False,
+        0.0,
+        f"ENV_GAP: {tool} not found in this project's environment ({hint}){extra} "
+        "— not a code/test failure, see #401",
+        env_gap=True,
+    )
+
+
+def _unittest_discover_cmd(py: str, wroot: Path) -> list[str] | None:
+    """`python -m unittest discover` fallback for a venv with no pytest
+    (#401). Only offered when there's something under `tests/` to discover —
+    otherwise the caller reports ENV_GAP instead of a misleading "0 tests
+    ran" pass. Always discovers the whole `tests/` tree, even in targeted
+    mode: unittest's own discovery has no path-list narrowing to map targeted
+    paths onto (same reason the Node gate's `--targeted` note exists — the
+    caller adds that note to the step detail when `targeted` was requested)."""
+    tests_dir = wroot / "tests"
+    if not tests_dir.is_dir() or not any(tests_dir.rglob("test_*.py")):
+        return None
+    return [py, "-m", "unittest", "discover", "-s", str(tests_dir), "-p", "test_*.py"]
 
 
 def _xdist_worker_count() -> str:
@@ -251,7 +324,12 @@ def _xdist_worker_count() -> str:
     return str(n)
 
 
-def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> list[str]:
+def _pytest_cmd(
+    bin_dir: Path | None,
+    py: str,
+    targeted: list[str] | None,
+    exec_prefix: list[str] | None = None,
+) -> list[str]:
     """The full tier (`targeted` is None) runs under pytest-xdist — 16 idle
     cores running 8564 tests serially at ~646s was pure waste. A fixed
     worker count (see `_xdist_worker_count`) picks fewer workers than cores
@@ -318,9 +396,17 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     `--max-worker-restart=0` prevents xdist from silently restarting a dead
     worker — a worker crash should fail immediately (no hidden stderr) rather
     than restart invisibly and potentially corrupt state or mask a bug.
+
+    ``exec_prefix`` (#401): when set, every local venv resolution is skipped
+    — the command runs as ``[*exec_prefix, "pytest", ...]`` (e.g.
+    ``["docker", "compose", "exec", "-T", "gateway"]``), trusting that target
+    to own its own pytest on its own PATH.
     """
-    exe = _resolve_tool(bin_dir, "pytest")
-    base = [exe] if exe else [py, "-m", "pytest"]
+    if exec_prefix is not None:
+        base = [*exec_prefix, "pytest"]
+    else:
+        exe = _resolve_tool(bin_dir, "pytest")
+        base = [exe] if exe else [py, "-m", "pytest"]
     if targeted:
         return [
             *base,
@@ -341,13 +427,18 @@ def _pytest_cmd(bin_dir: Path | None, py: str, targeted: list[str] | None) -> li
     ]
 
 
-def _ruff_cmd(bin_dir: Path | None, py: str) -> list[str]:
-    exe = _resolve_tool(bin_dir, "ruff")
-    base = [exe, "check"] if exe else [py, "-m", "ruff", "check"]
+def _ruff_cmd(bin_dir: Path | None, py: str, exec_prefix: list[str] | None = None) -> list[str]:
+    if exec_prefix is not None:
+        base = [*exec_prefix, "ruff", "check"]
+    else:
+        exe = _resolve_tool(bin_dir, "ruff")
+        base = [exe, "check"] if exe else [py, "-m", "ruff", "check"]
     return [*base, "src/", "tests/"]
 
 
-def _lint_imports_cmd(bin_dir: Path | None) -> list[str]:
+def _lint_imports_cmd(bin_dir: Path | None, exec_prefix: list[str] | None = None) -> list[str]:
+    if exec_prefix is not None:
+        return [*exec_prefix, "lint-imports"]
     exe = _resolve_tool(bin_dir, "lint-imports")
     return [exe] if exe else ["lint-imports"]
 
@@ -600,12 +691,23 @@ def run_gate(
     v2_flags: bool = False,
     write_report: bool | None = None,
     cwd: Path | None = None,
+    exec_prefix: list[str] | None = None,
 ) -> GateReport:
     """Run the gate once. Default (no `targeted`) is the full-suite tier —
     venv-check -> pytest -> ruff check -> lint-imports, fail-fast, report
     written to docs/qa/. `targeted` is the mid-flight tier (pytest only on
     the given paths, no report file) — team policy: targeted tests mid-flight,
-    full suite once at the batch gate."""
+    full suite once at the batch gate.
+
+    `exec_prefix` (#401): e.g. ``["docker", "compose", "exec", "-T",
+    "gateway"]`` — delegates every tool invocation to that prefix instead of
+    resolving a local `.venv`, for a project whose tests are designed to run
+    inside a container rather than the host's own Python. Local venv-check
+    and per-tool ENV_GAP detection are both skipped entirely in this mode:
+    the exec target is trusted to own its own toolchain, so a missing tool
+    there surfaces as a normal step FAIL (real subprocess output), not
+    ENV_GAP.
+    """
     cwd = cwd or Path.cwd()
     wroot = worktree_root(cwd)
     bin_dir = shared_venv_bin(cwd)
@@ -637,7 +739,17 @@ def run_gate(
         _non_python_gate(kind, wroot, targeted, report, env, log_dir)
         return finish()
 
-    vc = _venv_check(bin_dir)
+    if exec_prefix is not None:
+        vc = StepResult(
+            "venv-check",
+            True,
+            False,
+            0.0,
+            f"--exec {' '.join(exec_prefix)!r} — local venv resolution and ENV_GAP "
+            "detection both skipped (#401); the exec target owns its own toolchain",
+        )
+    else:
+        vc = _venv_check(bin_dir)
     report.steps.append(vc)
     if not vc.ok:
         report.steps.append(_skip("pytest", "venv-check failed"))
@@ -647,7 +759,29 @@ def run_gate(
 
     py = _resolve_tool(bin_dir, "python") or sys.executable
 
-    pytest_step = _run_step("pytest", _pytest_cmd(bin_dir, py, targeted), env, wroot, log_dir)
+    # #401: only the LOCAL venv path ever produces an ENV_GAP — --exec trusts
+    # its target to have everything it needs (a missing tool there is a real
+    # subprocess failure, surfaced normally).
+    pytest_missing = (
+        exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "pytest") is None
+    )
+    if pytest_missing:
+        fallback_cmd = _unittest_discover_cmd(py, wroot)
+        if fallback_cmd is None:
+            pytest_step = _env_gap_step(
+                "pytest",
+                extra=" (no tests/test_*.py found for a `python -m unittest discover` fallback either)",
+            )
+        else:
+            pytest_step = _run_step("pytest", fallback_cmd, env, wroot, log_dir)
+            note = "[unittest discover fallback — pytest not installed, #401]"
+            if targeted:
+                note += " (unnarrowed — ran the whole tests/ tree, not just --targeted paths)"
+            pytest_step.detail = f"{note} {pytest_step.detail}"
+    else:
+        pytest_step = _run_step(
+            "pytest", _pytest_cmd(bin_dir, py, targeted, exec_prefix), env, wroot, log_dir
+        )
     report.steps.append(pytest_step)
     if not pytest_step.ok:
         report.steps.append(_skip("ruff", "pytest failed — fail-fast"))
@@ -659,29 +793,56 @@ def run_gate(
         # full-gate concern (once per wave), not a per-subtask one.
         return finish()
 
-    ruff_step = _run_step("ruff", _ruff_cmd(bin_dir, py), env, wroot, log_dir)
+    ruff_missing = (
+        exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "ruff") is None
+    )
+    if ruff_missing:
+        ruff_step = _env_gap_step("ruff")
+    else:
+        ruff_step = _run_step("ruff", _ruff_cmd(bin_dir, py, exec_prefix), env, wroot, log_dir)
     report.steps.append(ruff_step)
     if not ruff_step.ok:
         report.steps.append(_skip("lint-imports", "ruff failed — fail-fast"))
         return finish()
 
-    li_step = _run_step("lint-imports", _lint_imports_cmd(bin_dir), env, wroot, log_dir)
+    li_missing = (
+        exec_prefix is None
+        and bin_dir is not None
+        and _resolve_tool(bin_dir, "lint-imports") is None
+    )
+    if li_missing:
+        li_step = _env_gap_step("lint-imports")
+    else:
+        li_step = _run_step(
+            "lint-imports", _lint_imports_cmd(bin_dir, exec_prefix), env, wroot, log_dir
+        )
     report.steps.append(li_step)
 
     return finish()
 
 
+def _step_result_label(s: StepResult) -> str:
+    if s.skipped:
+        return "skip"
+    if s.env_gap:  # #401 — distinct from PASS: nothing actually ran
+        return "GAP"
+    return "PASS" if s.ok else "FAIL"
+
+
 def render_table(report: GateReport) -> str:
     lines = ["step         result  time     detail", "-" * 72]
     for s in report.steps:
-        result = "skip" if s.skipped else ("PASS" if s.ok else "FAIL")
+        result = _step_result_label(s)
         lines.append(f"{s.name:<12} {result:<7} {s.seconds:>6.1f}s  {s.detail[:100]}")
         if s.log_path:
             lines.append(f"             log: {s.log_path}")
         if s.memory_log_path:
             lines.append(f"             memory log: {s.memory_log_path}")
     lines.append("-" * 72)
-    lines.append("GATE: " + ("PASS" if report.ok else "FAIL"))
+    gate_line = "GATE: " + ("PASS" if report.ok else "FAIL")
+    if report.env_gap:
+        gate_line += "  (env gap present — see #401, not a code/test failure)"
+    lines.append(gate_line)
     if report.report_path:
         lines.append(f"report: {report.report_path}")
     return "\n".join(lines)
@@ -694,12 +855,15 @@ def render_report_md(report: GateReport, head: str) -> str:
         tag += "  ·  **V2 flags ON:** " + ", ".join(V2_FLAG_ENV_VARS)
     lines.append(tag)
     lines.append("")
-    lines.append(f"## Result: {'PASS' if report.ok else 'FAIL'}")
+    result_heading = "PASS" if report.ok else "FAIL"
+    if report.env_gap:
+        result_heading += " (env gap present — see #401, not a code/test failure)"
+    lines.append(f"## Result: {result_heading}")
     lines.append("")
     lines.append("| step | result | time | detail |")
     lines.append("|---|---|---|---|")
     for s in report.steps:
-        result = "skip" if s.skipped else ("PASS" if s.ok else "FAIL")
+        result = _step_result_label(s)
         detail = s.detail.replace("|", "\\|").replace("\n", " ")[:200]
         lines.append(f"| {s.name} | {result} | {s.seconds:.1f}s | {detail} |")
         if s.log_path:

@@ -2204,10 +2204,23 @@ def cmd_qa_gate(args: argparse.Namespace) -> dict:
     """`takkub qa-gate` (#325) — pure-local like `doctor`/`migrate`: no
     orchestrator socket needed, works with the cockpit closed. Heavy lifting
     lives in `.qa_gate` so it stays testable without going through argparse."""
+    import shlex
+
     from .qa_gate import render_table, run_gate
 
-    report = run_gate(targeted=args.targeted, v2_flags=args.v2_flags)
+    exec_prefix = shlex.split(args.exec_cmd) if getattr(args, "exec_cmd", None) else None
+    report = run_gate(targeted=args.targeted, v2_flags=args.v2_flags, exec_prefix=exec_prefix)
     _utf8_print(render_table(report))
+    if report.ok and report.env_gap:
+        # #401: nothing is actually broken, but the run didn't fully cover
+        # the project (a tool is missing from its environment) — a distinct
+        # exit code so a caller can tell this apart from both a clean pass
+        # and a real failure without scraping stdout.
+        return {
+            "ok": False,
+            "msg": "qa-gate: environment gap — see table above (not a code/test failure, #401)",
+            "exit_code": report.exit_code,
+        }
     if report.ok:
         return {"ok": True, "msg": "qa-gate: all steps passed", "exit_code": 0}
     return {"ok": False, "msg": "qa-gate: failed — see table above", "exit_code": report.exit_code}
@@ -4003,6 +4016,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="force every TAKKUB_V2_* flag on for this run, to check the Core V2 ladder "
         "before flipping any flag on by default (#309)",
+    )
+    sqag.add_argument(
+        "--exec",
+        dest="exec_cmd",
+        default=None,
+        metavar="CMD",
+        help="run pytest/ruff/lint-imports through this prefix instead of resolving a local "
+        '.venv (#401) — e.g. --exec "docker compose exec -T gateway" delegates to a '
+        "container that owns its own toolchain. Disables local venv-check and ENV_GAP "
+        "detection entirely; a tool missing on the exec target surfaces as a normal FAIL",
     )
     sqag.set_defaults(func=cmd_qa_gate)
 

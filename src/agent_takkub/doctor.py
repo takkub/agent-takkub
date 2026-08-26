@@ -3292,6 +3292,56 @@ def check_context() -> list[Finding]:
     ]
 
 
+def check_rtk_ripgrep() -> list[Finding]:
+    """[rtk] — #402: rtk (the external `rg`-based grep/read proxy every
+    pane's Bash PreToolUse hook routes commands through, see `rtk_helper`)
+    prints "Failed to resolve 'rg' via PATH, falling back to direct exec" on
+    stderr on EVERY call when ripgrep isn't installed — not just once. rtk is
+    a closed external binary we cannot patch, so the only real fix is
+    installing ripgrep; this check tells the user that instead of leaving
+    them to notice the noise call-by-call.
+
+    Verified there is no config/env knob to silence it instead (so this
+    check doesn't bother offering one): `rtk config` (`~/.../rtk/config.toml`)
+    has no `[ripgrep]`/`rg` key, and `RTK_LOG=error` / `RTK_QUIET=1` both
+    still print the warning — confirmed empirically against the actual rtk
+    binary, not from its `--help` text alone.
+    """
+    from . import rtk_helper
+
+    if not rtk_helper.rtk_binary_available():
+        return []  # rtk itself isn't installed — nothing to warn about yet
+
+    if shutil.which("rg") or shutil.which("rg.exe"):
+        return []  # already resolvable — rtk never hits the fallback path
+
+    if sys.platform == "win32":
+        install_hint = "winget install BurntSushi.ripgrep.MSVC"
+    elif sys.platform == "darwin":
+        install_hint = "brew install ripgrep"
+    else:
+        install_hint = (
+            "install ripgrep via your package manager, e.g. "
+            "`apt install ripgrep` / `dnf install ripgrep` / `pacman -S ripgrep`"
+        )
+
+    return [
+        Finding(
+            category="rtk",
+            name="ripgrep",
+            status=Status.WARN,
+            detail=(
+                "rtk is installed but ripgrep ('rg') is not on PATH — every rtk grep/read call "
+                "falls back to a slower direct exec and prints a stderr warning each time "
+                "(#402). rtk ships no config key or env var to silence this warning "
+                "(verified against the real binary: `rtk config`, RTK_LOG=error, RTK_QUIET=1 "
+                "all still print it) — installing ripgrep is the only fix."
+            ),
+            fix_hint=install_hint,
+        )
+    ]
+
+
 def check_resilience() -> list[Finding]:
     """[resilience] — central fail-open policy labels + circuit breaker
     states (v2-hardening D/F, `10_FAIL_OPEN_MATRIX.md`/`11_CIRCUIT_
@@ -3332,6 +3382,7 @@ def run_all_checks() -> list[Finding]:
         ("check_ready_markers", check_ready_markers),
         ("check_context", check_context),
         ("check_resilience", check_resilience),
+        ("check_rtk_ripgrep", check_rtk_ripgrep),
         ("check_version", check_version),
     )
     for check_name, check in checks:
