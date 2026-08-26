@@ -1134,6 +1134,105 @@ class TestWorktreeCli:
         assert rc == 0
         assert self._FakeWtMgr.merge_calls == [("wt/frontend-200", False)]  # newest ts
 
+    def test_merge_role_matches_exactly_not_by_prefix(self):
+        """#403 — `--role backend` must not swallow `--role backend#3`'s
+        branch just because `wt/backend-3-<ts>` starts with `wt/backend-`."""
+        self._FakeWtMgr.rows = [
+            {
+                "path": "/w1",
+                "branch": "wt/backend-1787711320",
+                "sha": "a",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w2",
+                "branch": "wt/backend-3-1787712691",
+                "sha": "b",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w3",
+                "branch": "wt/backend-2-1787712041",
+                "sha": "c",
+                "ahead": 1,
+                "dirty": False,
+            },
+        ]
+        rc = cli.main(["worktree", "merge", "--role", "backend"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/backend-1787711320", False)]
+
+    def test_merge_role_hash_suffix_matches_its_own_branch(self):
+        self._FakeWtMgr.rows = [
+            {
+                "path": "/w1",
+                "branch": "wt/backend-1787711320",
+                "sha": "a",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w2",
+                "branch": "wt/backend-3-1787712691",
+                "sha": "b",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w3",
+                "branch": "wt/backend-2-1787712041",
+                "sha": "c",
+                "ahead": 1,
+                "dirty": False,
+            },
+        ]
+        rc = cli.main(["worktree", "merge", "--role", "backend#3"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/backend-3-1787712691", False)]
+
+    def test_merge_role_hash2_matches_its_own_branch(self):
+        self._FakeWtMgr.rows = [
+            {
+                "path": "/w1",
+                "branch": "wt/backend-1787711320",
+                "sha": "a",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w2",
+                "branch": "wt/backend-3-1787712691",
+                "sha": "b",
+                "ahead": 1,
+                "dirty": False,
+            },
+            {
+                "path": "/w3",
+                "branch": "wt/backend-2-1787712041",
+                "sha": "c",
+                "ahead": 1,
+                "dirty": False,
+            },
+        ]
+        rc = cli.main(["worktree", "merge", "--role", "backend#2"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/backend-2-1787712041", False)]
+
+    def test_merge_role_multiple_candidates_noted_in_output(self, capsys):
+        self._FakeWtMgr.rows = [
+            {"path": "/w1", "branch": "wt/backend-100", "sha": "a", "ahead": 1, "dirty": False},
+            {"path": "/w2", "branch": "wt/backend-200", "sha": "b", "ahead": 1, "dirty": False},
+        ]
+        self._FakeWtMgr.merge_result = (True, "merged wt/backend-200 + cleanup เรียบร้อย")
+        rc = cli.main(["worktree", "merge", "--role", "backend"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/backend-200", False)]
+        out = capsys.readouterr().out
+        assert "wt/backend-200" in out
+        assert "2 worktree" in out
+
     def test_merge_exact_branch_and_keep(self):
         rc = cli.main(["worktree", "merge", "--branch", "wt/qa-300", "--keep"])
         assert rc == 0
