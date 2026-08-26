@@ -135,6 +135,52 @@ class TestReportRoute:
         assert status == 404
 
 
+class TestAttachmentDisposition:
+    """#389: binary/office extensions and anything published with
+    `--attachment` are served with `Content-Disposition: attachment` so the
+    browser downloads rather than renders them — never inline, regardless of
+    what `_REPORT_CONTENT_TYPES` maps the extension to."""
+
+    def test_docx_report_gets_octet_stream_and_attachment_header(self, server, tmp_path):
+        src = tmp_path / "doc.docx"
+        src.write_bytes(b"PK\x03\x04fake-docx")
+        record, _ = reports.publish(str(src), "doc.docx", "demo")
+        status, body, headers = _get(_url(server, f"/sek/r/demo/doc.docx?k={record.token}"))
+        assert status == 200
+        assert body == b"PK\x03\x04fake-docx"
+        assert "wordprocessingml" in headers.get("Content-Type", "")
+        assert headers.get("Content-Disposition") == 'attachment; filename="doc.docx"'
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+
+    def test_zip_csv_txt_all_get_attachment_header(self, server, tmp_path):
+        cases = {
+            "data.zip": b"PK",
+            "table.csv": b"a,b\n1,2\n",
+            "notes.txt": b"plain text",
+        }
+        for name, body in cases.items():
+            src = tmp_path / name
+            src.write_bytes(body)
+            record, _ = reports.publish(str(src), name, "demo")
+            status, resp_body, headers = _get(_url(server, f"/sek/r/demo/{name}?k={record.token}"))
+            assert status == 200
+            assert resp_body == body
+            assert headers.get("Content-Disposition") == f'attachment; filename="{name}"'
+
+    def test_html_default_has_no_disposition_header(self, server, published):
+        status, _, headers = _get(_url(server, f"/sek/r/demo/status.html?k={published.token}"))
+        assert status == 200
+        assert headers.get("Content-Disposition") is None
+
+    def test_attachment_flag_forces_disposition_on_html(self, server, tmp_path):
+        src = tmp_path / "forced.html"
+        src.write_text("<html><body>hi</body></html>", encoding="utf-8")
+        record, _ = reports.publish(str(src), "forced.html", "demo", attachment=True)
+        status, _, headers = _get(_url(server, f"/sek/r/demo/forced.html?k={record.token}"))
+        assert status == 200
+        assert headers.get("Content-Disposition") == 'attachment; filename="forced.html"'
+
+
 class TestReportLockout:
     def test_repeated_wrong_tokens_lock_out(self, server, published):
         for _ in range(2):

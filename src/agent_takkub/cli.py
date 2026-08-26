@@ -846,6 +846,46 @@ def cmd_prune(args: argparse.Namespace) -> dict:
 
 
 def cmd_send(args: argparse.Namespace) -> dict:
+    """`takkub send --to <role> <msg>` — the normal pane-to-pane messaging
+    IPC. `--to user --file <path>` (#390) is CLI-level sugar, not a real
+    pane: there is no "user" role for `orchestrator.send()` to route to, so
+    this branch never touches that IPC at all — it republishes `--file`
+    through `takkub report publish --send` (`cmd_report`) instead, with
+    `msg` (if given) reused as the report's `--label`. Kept as a thin
+    redirect rather than teaching `orchestrator.send()`/`Orchestrator.send`'s
+    pane-liveness/delivery-manager logic about a pseudo-role that was never
+    part of that model."""
+    file_path = getattr(args, "file", None)
+    if (args.to or "").strip().lower() == "user":
+        if not file_path:
+            return {
+                "ok": False,
+                "msg": "send --to user requires --file <path> (#390) — there is no 'user' "
+                "pane to message with plain text; this delivers a file to the mobile PWA. "
+                "Use `takkub report publish --send` directly for --expires/--name/etc.",
+            }
+        # `--to user --file` is sugar for `takkub report publish --send`, so
+        # it must be gated exactly like `report` itself — `main()`'s outer
+        # `_enforce_role_gate(args.command)` only ever sees "send" (not
+        # "report") for this subcommand and would otherwise let any
+        # teammate pane publish arbitrary local files to the reports store,
+        # something `takkub report publish` directly could never do.
+        gate_err = _enforce_role_gate("report")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        report_args = argparse.Namespace(
+            report_action="publish",
+            file=file_path,
+            name=None,
+            project=getattr(args, "project", None),
+            expires=None,
+            label=args.msg or "",
+            attachment=bool(getattr(args, "attachment", False)),
+            send=True,
+        )
+        return cmd_report(report_args)
+    if not (args.msg or "").strip():
+        return {"ok": False, "msg": "send requires a message (or --to user --file <path>)"}
     return _request(
         _with_project({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
     )
@@ -1112,6 +1152,47 @@ def _load_remote_reports():
     return importlib.import_module("agent_takkub.remote.reports")
 
 
+def _push_report_to_mobile(
+    *,
+    name: str,
+    url: str,
+    label: str,
+    size_bytes: int,
+    attachment: bool,
+    project: str | None,
+) -> tuple[bool, str]:
+    """#390: best-effort IPC round-trip to the running cockpit asking it to
+    push `name` into the connected mobile PWA's live feed as a native
+    attachment (`Orchestrator.push_report` -> `reportShared` signal ->
+    `remote.notify.LeadNotifier` -> SSE `report` event), instead of the
+    recipient having to tap an external link in an in-app browser that may
+    not load it (#390's original complaint).
+
+    Never raises — the caller (`cmd_report`) always still has the plain
+    link to fall back to, so a cockpit that isn't running, isn't reachable,
+    or rejects the request degrades to "here's why", not a crash."""
+    payload = _with_project(
+        {
+            "cmd": "report-send",
+            "name": name,
+            "url": url,
+            "label": label,
+            "size_bytes": int(size_bytes),
+            "attachment": bool(attachment),
+            "from": _from_role(),
+        }
+    )
+    if project:
+        payload["project"] = project
+    try:
+        resp = _request(payload, response_timeout=5.0)
+    except (RuntimeError, OSError) as exc:
+        return False, f"cockpit ไม่ได้รันอยู่ตอนนี้ ({exc})"
+    if not resp.get("ok"):
+        return False, resp.get("msg") or "push failed"
+    return True, resp.get("msg") or "pushed"
+
+
 def cmd_report(args: argparse.Namespace) -> dict:
     """`takkub report publish|list|revoke|rotate` (#367 Remote Reports) —
     direct filesystem I/O against `remote/reports.py`'s store, no IPC to the
@@ -1123,7 +1204,15 @@ def cmd_report(args: argparse.Namespace) -> dict:
     whether the URL is actually reachable *right now*). Lead-only is
     enforced purely by the CLI role gate (`LEAD_ONLY_COMMANDS`, checked in
     `main()` before this ever runs) — there's no server in this path to add
-    a second gate to."""
+    a second gate to.
+
+    The one exception is `publish --send` (#390): pushing the report as a
+    native attachment into the connected mobile PWA does need the live
+    cockpit process (only it holds the SSE broadcaster), so that one branch
+    makes a `report-send` IPC round-trip via `_push_report_to_mobile` —
+    best-effort, and every failure (cockpit not running, remote off, IPC
+    error) degrades to printing the plain link with a stated reason rather
+    than failing the whole publish."""
     try:
         reports_mod = _load_remote_reports()
     except ModuleNotFoundError:
@@ -1152,7 +1241,12 @@ def cmd_report(args: argparse.Namespace) -> dict:
         if action == "publish":
             name = args.name or Path(args.file).name
             record, warnings = reports_mod.publish(
-                args.file, name, project, expires=args.expires, label=args.label
+                args.file,
+                name,
+                project,
+                expires=args.expires,
+                label=args.label,
+                attachment=bool(getattr(args, "attachment", False)),
             )
             url = _url(record.name, record.token)
             lines = [status_line]
@@ -1162,6 +1256,26 @@ def cmd_report(args: argparse.Namespace) -> dict:
                 else "(local file only — remote public_url/secret_path not set up yet)"
             )
             lines.extend(f"warning: {w}" for w in warnings)
+            if getattr(args, "send", False):
+                if not url:
+                    lines.append("push: ข้าม — ยังไม่มี public URL ให้ส่ง (ตั้งค่า remote ก่อน)")
+                elif "เปิดอยู่" not in status_line:
+                    lines.append(f"push: ข้าม — {status_line}")
+                else:
+                    try:
+                        size_bytes = Path(args.file).stat().st_size
+                    except OSError:
+                        size_bytes = 0
+                    pushed, push_msg = _push_report_to_mobile(
+                        name=record.name,
+                        url=url,
+                        label=record.label,
+                        size_bytes=size_bytes,
+                        attachment=record.attachment,
+                        project=project,
+                    )
+                    status = "ส่งเข้ามือถือแล้ว" if pushed else "fallback (ใช้ลิงก์แทน)"
+                    lines.append(f"push: {status} — {push_msg}")
             return {"ok": True, "msg": "\n".join(lines), "name": record.name, "url": url}
         if action == "list":
             records = reports_mod.list_shares(project)
@@ -3078,7 +3192,23 @@ def main(argv: list[str] | None = None) -> int:
 
     ss = sub.add_parser("send", help="send a message to a running pane")
     ss.add_argument("--to", required=True)
-    ss.add_argument("msg", help="message (positional)")
+    ss.add_argument("msg", nargs="?", default="", help="message (positional)")
+    ss.add_argument(
+        "--file",
+        default=None,
+        help="with --to user: publish + push this file to the mobile PWA (#390) instead of "
+        "messaging a pane — shorthand for `takkub report publish --send`; msg (if given) "
+        "becomes the report's --label",
+    )
+    ss.add_argument(
+        "--project", default=None, help="with --to user --file: project namespace for the report"
+    )
+    ss.add_argument(
+        "--attachment",
+        action="store_true",
+        help="with --to user --file: force Content-Disposition: attachment (see "
+        "`report publish --attachment`)",
+    )
     ss.set_defaults(func=cmd_send)
 
     sc = sub.add_parser("close", help="close a running pane")
@@ -3273,7 +3403,10 @@ def main(argv: list[str] | None = None) -> int:
     sr_pub = sr_sub.add_parser(
         "publish", help="copy a standalone file into the reports store + mint/reuse its token"
     )
-    sr_pub.add_argument("file", help="local .html/.png/.jpg/.svg/.pdf/.json/.md file")
+    sr_pub.add_argument(
+        "file",
+        help="local .html/.png/.jpg/.svg/.pdf/.json/.md/.docx/.xlsx/.pptx/.zip/.csv/.txt file",
+    )
     sr_pub.add_argument(
         "--name", default=None, help="stored filename (default: the source file's own name)"
     )
@@ -3286,6 +3419,20 @@ def main(argv: list[str] | None = None) -> int:
         help="30d, 12h, or none — default: keep existing expiry on republish, else never",
     )
     sr_pub.add_argument("--label", default="", help="human label shown by `takkub report list`")
+    sr_pub.add_argument(
+        "--attachment",
+        action="store_true",
+        help="force Content-Disposition: attachment (forced download) even for an "
+        "extension that would otherwise render inline (#389) — sticky: cannot be "
+        "un-set by republishing without the flag",
+    )
+    sr_pub.add_argument(
+        "--send",
+        action="store_true",
+        help="also push this report as a native attachment into the connected mobile "
+        "PWA's live feed (#390) — falls back to link-only (with a reason) if remote "
+        "control isn't reachable right now",
+    )
     sr_pub.set_defaults(func=cmd_report)
     sr_list = sr_sub.add_parser("list", help="show published reports for a project")
     sr_list.add_argument("--project", default=None)

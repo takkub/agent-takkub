@@ -90,7 +90,27 @@ _REPORT_CONTENT_TYPES = {
     ".pdf": "application/pdf",
     ".json": "application/json; charset=utf-8",
     ".md": "text/markdown; charset=utf-8",
+    # #389 — always served with Content-Disposition: attachment (see
+    # `_report_headers` below), so the Content-Type here is a courtesy for
+    # the downloaded file's association, not a render decision.
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".zip": "application/zip",
+    ".csv": "text/csv; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
 }
+
+
+def _content_disposition_attachment(name: str) -> str:
+    """#389: build the `Content-Disposition` header for a forced-download
+    report. `name` is always a value that already passed `reports.
+    _validate_report_name` (letters/digits/`._-` only — no quotes, no CR/LF,
+    no path separators), so no separate escaping step could let it inject a
+    second header or break out of the quoted filename; this only guards
+    against that invariant ever changing without this header changing too."""
+    safe = name.replace("\\", "").replace('"', "")
+    return f'attachment; filename="{safe}"'
 
 
 @dataclass
@@ -242,7 +262,19 @@ class _Bridge(QObject):
 
 
 _ALLOWED_SSE_EVENTS = frozenset(
-    {"done", "lead", "user", "working", "idle", "blocked_on_picker", "session_changed"}
+    {
+        "done",
+        "lead",
+        "user",
+        "working",
+        "idle",
+        "blocked_on_picker",
+        "session_changed",
+        # #390: `takkub report publish --send` -> `Orchestrator.push_report`
+        # -> `LeadNotifier._on_report_shared` — a report to render as a
+        # native attachment card in the PWA feed.
+        "report",
+    }
 )
 
 
@@ -732,6 +764,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "private, no-store")
         self.send_header("X-Robots-Tag", "noindex")
+        # #389: office/archive/plain-text extensions and anything published
+        # with `--attachment` are always forced downloads — never rendered
+        # inline, so widening the extension whitelist never grows what the
+        # CSP above has to defend against.
+        if reports.is_attachment(project_ns, name):
+            self.send_header("Content-Disposition", _content_disposition_attachment(name))
         self.end_headers()
         try:
             self.wfile.write(data)

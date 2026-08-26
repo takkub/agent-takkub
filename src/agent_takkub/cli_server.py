@@ -82,6 +82,12 @@ _LEAD_ONLY_CMDS = frozenset(
         # messages (#277): the send-audit log carries other roles' full
         # instruction text — same read-sensitivity call as `inbox` above.
         "messages",
+        # #390: same Lead-only call as `report` itself (cli.py's
+        # `LEAD_ONLY_COMMANDS` — `cmd_report` normally never talks to
+        # cli_server at all, see its docstring, but `publish --send`'s push
+        # does) — enforced here too so a raw TCP client bypassing cli.py's
+        # gate can't push into the mobile feed either.
+        "report-send",
     }
 )
 
@@ -689,6 +695,21 @@ class CliServer(QObject):
                     msg=req.get("msg", ""),
                     from_role=req.get("from"),
                     project=from_project,
+                )
+            elif cmd == "report-send":
+                # `project` (an explicit `--project` on the CLI) wins over
+                # the auto-stamped `from_project` — mirrors `cmd_report`'s
+                # own `getattr(args, "project", None) or _from_project()`
+                # resolution, so a report published under a non-active
+                # project's namespace pushes to that same project's SSE
+                # clients, not whichever project happens to be active.
+                ok, msg = self._orch.push_report(
+                    req.get("name") or "",
+                    req.get("url") or "",
+                    req.get("label") or "",
+                    int(req.get("size_bytes") or 0),
+                    bool(req.get("attachment", False)),
+                    project=req.get("project") or from_project,
                 )
             elif cmd == "answer-picker":
                 ok, msg = self._orch.answer_picker(

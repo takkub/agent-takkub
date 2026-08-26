@@ -48,6 +48,7 @@ class _FakeScreenSession:
 class _FakeOrch(QObject):
     agentDone = pyqtSignal(str, str, str)
     statusChanged = pyqtSignal()
+    reportShared = pyqtSignal(str, dict)  # #390
 
     def __init__(self) -> None:
         super().__init__()
