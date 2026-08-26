@@ -1481,6 +1481,14 @@ class Orchestrator(
         # `LeadWaitMixin.poll_wait` needs "did the owner type ANYTHING
         # after this wait started", not "is a draft currently held".
         self._lead_last_user_input_ts: dict[str, float] = {}
+        # #393: the last `_lead_last_user_input_ts` value that has already
+        # fired a `poll_wait` "user_input" interrupt for this project — see
+        # `LeadWaitMixin._pending_user_input_interrupt`'s docstring for why a
+        # registration's `started_ts` alone isn't enough to stop the SAME
+        # stamp from re-triggering across repeated `begin_wait` attach
+        # cycles. Monotonic, never reset: a later genuine keystroke always
+        # produces a strictly newer timestamp than whatever this holds.
+        self._wait_user_input_ack_ts: dict[str, float] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
