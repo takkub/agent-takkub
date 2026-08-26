@@ -309,6 +309,31 @@ class TestDoneEvents:
             notifier.stop()
 
 
+class TestReportSharedSignalDrift:
+    """#390 regression: a fake/test-harness orch built before `reportShared`
+    existed (e.g. `test_opencode_helper.py` / `test_cursor_helper.py`'s own
+    `_FakeOrch`) must not crash the notifier — `orch.reportShared.connect(...)`
+    in `__init__` used to raise `AttributeError` unconditionally."""
+
+    class _OrchWithoutReportShared(QObject):
+        agentDone = pyqtSignal(str, str, str)
+        statusChanged = pyqtSignal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._panes_by_project: dict = {}
+            self._pane_state: dict = {}
+
+    def test_construct_and_stop_without_reportShared_signal(self, qapp):
+        orch = self._OrchWithoutReportShared()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            assert notifier._timer.isActive()
+        finally:
+            notifier.stop()
+
+
 class TestTailStartOffset:
     def test_empty_file_starts_at_zero(self, tmp_path):
         path = tmp_path / "f.jsonl"
