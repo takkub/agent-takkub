@@ -107,7 +107,12 @@ def _cross_process_wheel_lock(lock_path: Path, *, timeout: float = 240.0, poll: 
     while fd is None:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # PermissionError: Windows reports EACCES (not EEXIST) when the
+            # previous holder's `unlink` is still pending-delete at the
+            # moment we try to create — seen as a flaky
+            # test_wheel_build_lock failure on windows-latest CI
+            # (2026-08-26, 1.6.6 run). Same meaning as "still held": wait.
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"timed out after {timeout}s waiting for lock {lock_path} "
