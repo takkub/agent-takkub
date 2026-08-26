@@ -309,10 +309,38 @@ class LeadWaitMixin:
         `_pending_notice_outside`/`_pending_system_notice_for_watched`
         above) — a fully-resolved poll is already about to end the
         registration on its own.
+
+        #393: `started_ts` alone used to be enough — an interrupt always
+        popped the registration (see `poll_wait`), so the very next
+        `begin_wait` naturally got a fresh, later `started_ts` that the old
+        stamp could no longer beat. That assumption breaks when a second
+        `takkub wait` process is still alive and polling the SAME
+        registration (e.g. one launched in the background, still running):
+        `begin_wait`'s attach path (see its docstring) keeps returning the
+        registration's ORIGINAL `started_ts` for as long as it keeps being
+        polled often enough to never look stale — so one real keystroke,
+        stamped once, kept outranking that same frozen `started_ts` on
+        every poll tick, popping and effectively re-arming the registration
+        each time (a fresh `begin_wait`/attach right after inherits the
+        same old `started_ts` again). Reported live: a single stamp from a
+        remote-mirror message re-fired this interrupt on every ~4s poll
+        across several `takkub wait` invocations in a row, even with an
+        empty inbox and nothing newly typed.
+
+        Fix: once a given `last_input_ts` value has fired this interrupt,
+        it is "consumed" — latched into `_wait_user_input_ack_ts` — so it
+        can never fire a SECOND time no matter how many attach cycles
+        follow or how stale their `started_ts` is. Effective threshold is
+        `max(started_ts, ack_ts)`; a genuinely NEW keystroke always stamps
+        a fresh, strictly later `last_input_ts`, so it still interrupts
+        normally.
         """
         last_input_ts = getattr(self, "_lead_last_user_input_ts", {}).get(project_ns, 0.0)
-        if last_input_ts <= started_ts:
+        ack_ts = getattr(self, "_wait_user_input_ack_ts", {}).get(project_ns, 0.0)
+        if last_input_ts <= max(started_ts, ack_ts):
             return None
+        if hasattr(self, "_wait_user_input_ack_ts"):
+            self._wait_user_input_ack_ts[project_ns] = last_input_ts
         return {
             "role": LEAD.name,
             "detail": (

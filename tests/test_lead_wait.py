@@ -761,6 +761,80 @@ class TestPollWaitUserInputInterrupt:
         assert result["interrupt"] is None
         assert result["done"] == {"backend": "delivered"}
 
+    def test_attach_before_first_poll_does_not_replay_interrupt_forever(
+        self, orch: Orchestrator
+    ) -> None:
+        """#393 (regression of #357): a still-alive `takkub wait` process
+        (e.g. one running in the background) keeps `begin_wait`'s attach
+        path returning the registration's ORIGINAL `started_ts` for as
+        long as it keeps getting attached-to often enough to never look
+        stale (`begin_wait` refreshes `last_poll_ts` on attach too, before
+        `poll_wait` ever computes the interrupt). Before the fix, a single
+        real keystroke stamped once would re-fire the "user_input"
+        interrupt on EVERY subsequent `takkub wait` retry that attached to
+        that same not-yet-popped registration — even though nothing new
+        was typed and the inbox was empty — because the stale
+        `started_ts` never advanced past it. Once the first poll consumes
+        the stamp, a second attach that inherits the very same stale
+        `started_ts` must not re-fire."""
+        _register_working(orch, "backend")
+        begin1 = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        old_started_ts = orch._active_waits[PROJECT]["started_ts"]
+        orch._lead_last_user_input_ts[PROJECT] = old_started_ts + 0.5
+
+        # A second `takkub wait` invocation attaches to the still-active
+        # registration (not stale) and inherits the SAME old started_ts.
+        begin2 = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        assert begin2["attached"] is True
+        assert begin2["started_ts"] == old_started_ts
+        assert begin2["wait_id"] == begin1["wait_id"]
+
+        first = orch.poll_wait(PROJECT, begin2["wait_id"])
+        assert first["interrupt"] is not None
+        assert first["interrupt"]["reason"] == "user_input"
+        assert PROJECT not in orch._active_waits
+        assert orch._wait_user_input_ack_ts[PROJECT] == old_started_ts + 0.5
+
+        # A third `takkub wait` retry (still running in the background,
+        # so no NEW keystroke happened) attaches — simulated directly the
+        # way `begin_wait`'s attach branch would leave `_active_waits` if
+        # another still-alive registration reused the very same stale
+        # started_ts before this fix's ack ever got a chance to help.
+        rebegin_id = "rebegin-1"
+        orch._active_waits[PROJECT] = {
+            "wait_id": rebegin_id,
+            "roles": ["backend"],
+            "started_ts": old_started_ts,
+            "timeout_s": 1800.0,
+            "last_poll_ts": time.time(),
+        }
+
+        second = orch.poll_wait(PROJECT, rebegin_id)
+
+        assert second["interrupt"] is None
+        assert "backend" in second["pending"]
+
+    def test_new_keystroke_after_consumed_stamp_still_interrupts(self, orch: Orchestrator) -> None:
+        """The consume/ack fix must never suppress a genuinely NEW
+        keystroke that arrives after an earlier one already fired and was
+        consumed."""
+        _register_working(orch, "backend")
+        begin1 = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        started_ts = orch._active_waits[PROJECT]["started_ts"]
+        orch._lead_last_user_input_ts[PROJECT] = started_ts + 0.5
+
+        first = orch.poll_wait(PROJECT, begin1["wait_id"])
+        assert first["interrupt"]["reason"] == "user_input"
+
+        begin2 = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        # A brand new keystroke, strictly after the consumed one.
+        orch._lead_last_user_input_ts[PROJECT] = time.time() + 5.0
+
+        second = orch.poll_wait(PROJECT, begin2["wait_id"])
+
+        assert second["interrupt"] is not None
+        assert second["interrupt"]["reason"] == "user_input"
+
 
 class TestTerminalAutoReplyDetection:
     """#31 (CodeQL py/redos): `_TERMINAL_AUTO_REPLY_RE`'s old `(?:alt1|...|
