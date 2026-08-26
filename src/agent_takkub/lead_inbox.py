@@ -181,6 +181,14 @@ _PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
 # subsequent poll, so this costs it nothing.
 _AUTH_FAILURE_CONFIRM_POLLS = 5
 
+# #404: max automatic re-delivers when a paste that looked accepted turns out
+# to have landed on the provider's account-pending gate anyway (settled,
+# looked ready, but `shows_account_pending_marker` came back True right
+# after) — bounded the same way no_content_recover_attempts/auto_respawn_
+# attempts are: a provider stuck verifying forever gets ONE loud Lead notice
+# once this is exhausted instead of retrying silently forever.
+_POST_BOOT_REDELIVER_MAX = 3
+
 
 def _prompt_block_reason(session) -> str | None:
     """Return "trust" / "permission" / "tty" if *session* is currently
@@ -1097,6 +1105,22 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
+        # #404: extra continuous-ready polls the ready-streak gate below must
+        # accumulate before the FIRST delivery on a fresh spawn/respawn is
+        # allowed to paste — see ProviderSpec.post_boot_settle_s's docstring.
+        # 0 for every provider except gemini today, so this is a no-op
+        # everywhere else. Resolved once per call (provider is fixed for the
+        # life of one delivery attempt), not per poll.
+        try:
+            from .provider_spec import post_boot_settle_s_for
+
+            _settle_provider = getattr(pane.model, "provider_name", None) or "claude"
+            _settle_required_polls = max(
+                0,
+                -(-int(post_boot_settle_s_for(_settle_provider) * 1000) // _READY_POLL_INTERVAL_MS),
+            )
+        except Exception:
+            _settle_required_polls = 0
         # #235: two `assign`s for the same role can start two independent
         # _send_when_ready poll loops — nothing dedupes them *before*
         # _deliver() runs (DeliveryManager's single-flight gate only exists
@@ -1322,6 +1346,7 @@ class LeadInboxMixin:
                             accepted = _latest > write_baseline
                     except Exception:
                         pass
+                _swallowed_by_account_pending = False
                 if accepted:
                     # (#376) A not-ready read alone is not proof the CLI is
                     # actually processing the task — it is exactly what a
@@ -1345,6 +1370,7 @@ class LeadInboxMixin:
                             # same guard as every other marker read in this
                             # module.
                             accepted = False
+                            _swallowed_by_account_pending = True
                     except Exception:
                         pass
                 if accepted:
@@ -1357,6 +1383,56 @@ class LeadInboxMixin:
                         accepted = False
                 if accepted:
                     manager.mark_accepted(delivery.delivery_id)
+                elif _swallowed_by_account_pending:
+                    # #404: the settle wait above (post_boot_settle_s) still
+                    # wasn't enough this once — the pane looked ready, the
+                    # paste "settled" (no longer mid-render), but the
+                    # account-pending gate is back up, meaning the CLI itself
+                    # swallowed the paste rather than queuing it. Bounded
+                    # auto re-deliver instead of a single silent loss: a
+                    # fresh `_send_when_ready` call goes through the SAME
+                    # settle-then-paste gate above again, so it will not
+                    # repaste until the banner clears and settles a second
+                    # time. Only Lead-worthy once the bound is exhausted.
+                    _redeliver_key = _exit_key(project_ns, role_name)
+                    _ps_redeliver = self._ps(_redeliver_key)
+                    manager.mark_failed(delivery.delivery_id, "account_pending_after_settle")
+                    if (
+                        _ps_redeliver.post_boot_redeliver_attempts < _POST_BOOT_REDELIVER_MAX
+                        and pane.session is not None
+                        and pane.session.is_alive
+                    ):
+                        _ps_redeliver.post_boot_redeliver_attempts += 1
+                        _log_event(
+                            "task_deliver_post_boot_redeliver",
+                            project=project_ns,
+                            role=role_name,
+                            attempt=_ps_redeliver.post_boot_redeliver_attempts,
+                        )
+                        # Reuses the SAME max_wait_ms this call was given
+                        # (not the 45s default) — besides matching the
+                        # original delivery's own timing contract, a fresh
+                        # call with the default would nest a much longer
+                        # poll loop underneath this already-deep QTimer
+                        # callback chain; on a permanently-stuck pane
+                        # (worst case, e.g. #404's own banner) that stacks
+                        # real Python recursion once _POST_BOOT_REDELIVER_MAX
+                        # attempts each rebuild their own elapsed-buildup
+                        # loop from zero.
+                        QTimer.singleShot(
+                            _READY_POLL_INTERVAL_MS,
+                            lambda: self._send_when_ready(
+                                role_name, task, max_wait_ms=max_wait_ms, project=project
+                            ),
+                        )
+                    else:
+                        _log_event(
+                            "task_deliver_post_boot_redeliver_exhausted",
+                            project=project_ns,
+                            role=role_name,
+                            attempts=_ps_redeliver.post_boot_redeliver_attempts,
+                        )
+                        self._warn_lead_delivery_uncertain(role_name, project)
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
                     self._warn_lead_delivery_uncertain(role_name, project)
@@ -1761,6 +1837,17 @@ class LeadInboxMixin:
                 # to ensure the CLI has stabilized and prevent single-frame flicker.
                 # For tests with tiny max_wait_ms, cap the requirement so it can succeed.
                 required_polls = min(7, max(1, max_wait_ms // 150 - 1))
+                # #404: a provider with a confirmed post-boot settle window
+                # (gemini today) needs MORE than the generic 7-poll flicker
+                # guard — its composer reads ready before backend account
+                # verification has actually settled. Only raises the bar,
+                # never lowers it below the tiny-max_wait_ms cap above; still
+                # bounded by max_wait_ms itself via the elapsed[0] check
+                # below, so a settle window longer than the caller's own
+                # timeout still falls through to the ordinary
+                # busy/blind-paste path instead of hanging forever.
+                if _settle_required_polls > required_polls:
+                    required_polls = _settle_required_polls
                 if ready_streak[0] >= required_polls:
                     _deliver()
                     return

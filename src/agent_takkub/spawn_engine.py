@@ -634,6 +634,17 @@ class PaneState:
     # own _from_auto_respawn=True respawns — same split as
     # stuck_recover_attempts immediately above.
     no_content_recover_attempts: int = 0
+    # #404: consecutive count of "delivered, then the pane's own account-
+    # pending banner (e.g. gemini/agy 'Verifying your account...') came back
+    # up right after" — proof the paste was swallowed by the gate rather than
+    # accepted, distinct from no_content_recover_attempts above (that one
+    # never saw a ready prompt at all; this one saw ready, delivered, and the
+    # gate re-asserted itself). Bumped by lead_inbox's post-deliver settle
+    # check each time it re-fires `_send_when_ready`; capped at
+    # `_POST_BOOT_REDELIVER_MAX` so a provider stuck verifying forever gets
+    # ONE loud Lead notice instead of polling silently forever. Cleared on a
+    # deliberate fresh spawn, same as no_content_recover_attempts.
+    post_boot_redeliver_attempts: int = 0
     # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
     # preload it through --append-system-prompt-file; providers without an
     # equivalent file-backed system-prompt flag keep the pointer/PTY flow.
@@ -1735,6 +1746,7 @@ class SpawnEngineMixin:
                 # watchdog's own retry/degrade respawns) or the 1-retry
                 # cap would reset every time and never reach degrade.
                 _ps_spawn_clear.no_content_recover_attempts = 0
+                _ps_spawn_clear.post_boot_redeliver_attempts = 0
                 # A stale PaneState that survived a crash without a clean
                 # close()/done() (which would otherwise have popped it) must
                 # not keep a role pinned to claude forever. Note this clears

@@ -7555,7 +7555,19 @@ class Orchestrator(
                     # where progress showed 5-6s ago while the naive
                     # is_at_ready_prompt()-only watchdog above still thought
                     # the pane had sat idle for 10+ minutes.
-                    _provider_bg = getattr(pane.model, "provider_name", None) or "claude"
+                    # #404 review: use the same resolved-provider lookup as
+                    # `_check_stuck_tool_panes` (#308) rather than the raw
+                    # `pane.model.provider_name` attribute — a role mapped to
+                    # codex/gemini/opencode via provider routing needs ITS
+                    # OWN `tool_running_marker`, not claude's, or the marker
+                    # lookup below silently checks the wrong provider's
+                    # pattern and never fires for those roles.
+                    from .provider_config import effective_provider_for
+
+                    try:
+                        _provider_bg = effective_provider_for(name, project=project_name)
+                    except Exception:
+                        _provider_bg = getattr(pane.model, "provider_name", None) or "claude"
                     try:
                         _has_bg_work = pane.session.has_background_work()
                     except Exception:
