@@ -468,6 +468,17 @@ BOOT_STALL_GRACE_SEC = int(os.environ.get("TAKKUB_BOOT_STALL_GRACE_SEC", "110"))
 # via env for slower hardware.
 BOOT_STALL_CEILING_SEC = int(os.environ.get("TAKKUB_BOOT_STALL_CEILING_SEC", "300"))
 
+# #407: per-MCP-server startup allowance the boot ceiling above is widened by
+# when a pane was spawned with N cockpit-injected MCP servers. Matches the
+# startup timeout every provider branch actually hands its CLI —
+# `mcp_bridge._CODEX_DEFAULT_STARTUP_TIMEOUT_SEC` (codex `startup_timeout_sec`)
+# and `pane_env._DEFAULT_MCP_STARTUP_TIMEOUT_MS` (claude `MCP_TIMEOUT`), both
+# 120 s — so a pane legitimately still inside its OWN MCP startup budget
+# (e.g. codex + playwright + chrome-devtools on a cold npx cache: measured
+# >300 s end-to-end in #407) is not failed by a ceiling that predates MCP
+# injection. See `LeadInboxMixin._boot_stall_ceiling_sec`.
+MCP_STARTUP_TIMEOUT_SEC = int(os.environ.get("TAKKUB_MCP_STARTUP_TIMEOUT_SEC", "120"))
+
 
 # Live probe for Qt main-thread heartbeat staleness (#133 — fan-out delivery
 # corruption: concurrent pane spawns backlog the Qt event loop for ~1s at a
@@ -2102,7 +2113,13 @@ class Orchestrator(
         effort: str | None = None,
         mode: str = "pane",
         _resource_token: ResourceToken | None = None,
+        worktree_prepared: tuple | None = None,
     ) -> tuple[bool, str]:
+        """*worktree_prepared* (#408): ``(WorktreeInfo | None, reason)`` from a
+        `WorktreeManager.create` the caller already ran OFF the Qt thread
+        (`cli_server` does this for `--isolation worktree`, fed by
+        `worktree_assign_inputs`). When given, `_assign_with_worktree` uses
+        it instead of running `git worktree add` inline on the main thread."""
         if mode not in {"pane", "subagent"}:
             return False, "mode must be pane or subagent"
         if mode == "subagent":
@@ -2220,7 +2237,7 @@ class Orchestrator(
                     task_id=task_id,
                     resource_class=resource_class,
                     reason=decision.reason,
-                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider, ef=effort, dp=detail_path: (
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model, pr=provider, ef=effort, dp=detail_path, wp=worktree_prepared: (
                         self.assign(
                             r,
                             c,
@@ -2236,6 +2253,10 @@ class Orchestrator(
                             provider=pr,
                             effort=ef,
                             _resource_token=token,
+                            # #408: a worktree prepared off-thread for this
+                            # assign must not be orphaned by a governor
+                            # deferral — carry it into the admitted call.
+                            worktree_prepared=wp,
                         )
                     ),
                 )
@@ -2313,6 +2334,7 @@ class Orchestrator(
                 model,
                 provider,
                 effort,
+                prepared=worktree_prepared,
             )
         else:
             result = self._assign_dispatch(
@@ -2757,6 +2779,63 @@ class Orchestrator(
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
+    def worktree_assign_inputs(
+        self, role_name: str, cwd: str | None, project: str | None
+    ) -> dict | None:
+        """(#408) The cheap, main-thread half of `--isolation worktree`: the
+        arguments `WorktreeManager.create` needs, so `cli_server` can run the
+        slow `git worktree add` on a worker thread and hand the result back
+        through `assign(worktree_prepared=...)`. Returns None whenever the
+        synchronous path would not create a worktree anyway (bare-role
+        collision → `assign` rejects; no resolvable cwd → `_assign_with_worktree`
+        falls back) so nothing is ever created that `assign` then discards."""
+        try:
+            role_name = validate_name(role_name, "role")
+        except Exception:
+            return None
+        if self._worktree_bare_role_collision(role_name, project):
+            return None
+        project_ns = self._resolve_project(project)
+        base_role = _split_shard(role_name)[0]
+        base_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
+        if not base_cwd:
+            return None
+        sibling_ports = {
+            ps.worktree.get("port", 0)
+            for key, ps in getattr(self, "_pane_state", {}).items()
+            if key.startswith(f"{project_ns}::") and ps.worktree
+        } - {0}
+        return {
+            "base_cwd": base_cwd,
+            "project_ns": project_ns,
+            "role": role_name,
+            "ts": int(time.time()),
+            "exclude_ports": sibling_ports,
+        }
+
+    def done_git_inputs(self, from_role: str, project: str | None = None) -> dict | None:
+        """(#408) The cheap, main-thread half of `done()`'s git fact gather:
+        the inputs `WorktreeManager.collect_done_git_facts` needs, read from
+        pane state without touching git. `cli_server` runs the collect on a
+        worker thread and passes the dict to `done(git_facts=...)`. None when
+        there is no pane/state to report on (done() then fails the same way
+        it always did, synchronously)."""
+        try:
+            from_role = validate_name(from_role, "role")
+        except Exception:
+            return None
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(from_role)
+        ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{from_role}")
+        if pane is None or ps is None:
+            return None
+        return {
+            "worktree": dict(ps.worktree) if ps.worktree else None,
+            "pane_cwd": getattr(pane, "_session_cwd", None),
+            "assign_base_sha": ps.assign_base_sha,
+            "assign_git_root": ps.assign_git_root,
+        }
+
     def _assign_with_worktree(
         self,
         role_name: str,
@@ -2771,6 +2850,7 @@ class Orchestrator(
         model: str | None = None,
         provider: str | None = None,
         effort: str | None = None,
+        prepared: tuple | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -2822,9 +2902,14 @@ class Orchestrator(
             for key, ps in getattr(self, "_pane_state", {}).items()
             if key.startswith(f"{project_ns}::") and ps.worktree
         } - {0}
-        info, reason = mgr.create(
-            base_cwd, project_ns, role_name, int(time.time()), exclude_ports=sibling_ports
-        )
+        if prepared is not None:
+            # #408: `git worktree add` already ran off the Qt thread
+            # (`worktree_assign_inputs` → cli_server worker → here).
+            info, reason = prepared
+        else:
+            info, reason = mgr.create(
+                base_cwd, project_ns, role_name, int(time.time()), exclude_ports=sibling_ports
+            )
         if info is None:
             return _fallback(reason)
 
@@ -4383,6 +4468,7 @@ class Orchestrator(
         assign_base_sha: str | None,
         assign_git_root: str | None,
         assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None,
+        git_facts: dict | None = None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -4412,20 +4498,37 @@ class Orchestrator(
 
         mgr = WorktreeManager()
 
+        # #408: *git_facts* is `WorktreeManager.collect_done_git_facts`'s
+        # output when the caller already ran the git reads off the Qt
+        # thread; every `mgr.*` call below is skipped in that case.
+        gf = git_facts if isinstance(git_facts, dict) else None
         if had_worktree:
             info = WorktreeInfo.from_dict(had_worktree)
-            commits = mgr.commit_count(info)
-            dirty = mgr.is_dirty(info)
-            uncommitted = mgr.uncommitted_count(info) if dirty else 0
+            if gf is not None and gf.get("kind") == "worktree":
+                commits = int(gf.get("commits", 0))
+                dirty = bool(gf.get("dirty", False))
+                uncommitted = int(gf.get("uncommitted", 0))
+            else:
+                commits = mgr.commit_count(info)
+                dirty = mgr.is_dirty(info)
+                uncommitted = mgr.uncommitted_count(info) if dirty else 0
             if commits > 0:
-                merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                merge_conflicts = (
+                    gf.get("merge_conflicts")
+                    if gf is not None and gf.get("kind") == "worktree"
+                    else mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                )
                 merge_note = ""
             else:
                 # Nothing committed yet — "merge clean?" is not a question
                 # that applies (there's nothing on the branch to merge).
                 merge_conflicts = None
                 merge_note = "N/A (ยังไม่มี commit)"
-            diffstat = mgr.diffstat(info)
+            diffstat = (
+                str(gf.get("diffstat", ""))
+                if gf is not None and gf.get("kind") == "worktree"
+                else mgr.diffstat(info)
+            )
             files_touched, dirs = summarize_diffstat(diffstat)
             facts = DigestFacts(
                 role=from_role,
@@ -4452,7 +4555,11 @@ class Orchestrator(
         # Shared-tree pane: HEAD covers committed changes in the assignment
         # interval; the dirty-path metadata snapshot covers uncommitted state
         # while excluding unchanged dirt that pre-dated assign (#251).
-        branch = mgr.current_branch(pane_cwd) if pane_cwd else None
+        shared_gf = gf if gf is not None and gf.get("kind") == "shared" else None
+        if shared_gf is not None:
+            branch = shared_gf.get("branch")
+        else:
+            branch = mgr.current_branch(pane_cwd) if pane_cwd else None
         if (
             not pane_cwd
             or not assign_base_sha
@@ -4475,8 +4582,12 @@ class Orchestrator(
             )
         # One porcelain read feeds BOTH the uncommitted count and the metadata
         # comparison; done() does not pay for two status subprocesses.
-        commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
-        porcelain = mgr.shared_tree_status_porcelain(pane_cwd)
+        if shared_gf is not None:
+            commits_ahead = int(shared_gf.get("commits_ahead", 0))
+            porcelain = shared_gf.get("porcelain")
+        else:
+            commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
+            porcelain = mgr.shared_tree_status_porcelain(pane_cwd)
         if porcelain is None:
             return (
                 DigestFacts(
@@ -4497,7 +4608,11 @@ class Orchestrator(
         uncommitted = len(parse_porcelain_paths(porcelain))
         current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
         changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
-        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        diffstat = (
+            str(shared_gf.get("diffstat", ""))
+            if shared_gf is not None
+            else mgr.diffstat_since(pane_cwd, assign_base_sha)
+        )
         files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)
         facts = DigestFacts(
             role=from_role,
@@ -4573,6 +4688,7 @@ class Orchestrator(
         failed: bool = False,
         blocked: bool = False,
         force: bool = False,
+        git_facts: dict | None = None,
     ) -> tuple[bool, str]:
         """`blocked=True` (#296) means the work could not RUN — something
         outside the codebase is missing. It still counts as not-done (callers
@@ -4833,6 +4949,7 @@ class Orchestrator(
                     had_assign_base_sha,
                     had_assign_git_root,
                     had_assign_dirty_snapshot,
+                    git_facts=git_facts,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(

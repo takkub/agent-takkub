@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -103,10 +104,15 @@ _LEAD_SPOOF_GUARDED_CMDS = frozenset({"send"})
 
 class CliServer(QObject):
     started = pyqtSignal(int)  # port
+    # #408: worker-thread → Qt-thread hop. A worker emits a zero-arg callable
+    # here; Qt's auto connection sees the emitting thread differs from this
+    # QObject's and queues it, so the callable runs on the main thread.
+    _mainThreadCall = pyqtSignal(object)
 
     def __init__(self, orchestrator: Orchestrator, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._orch = orchestrator
+        self._mainThreadCall.connect(self._invoke_on_main)
         self._server = QTcpServer(self)
         self._server.newConnection.connect(self._on_new_connection)
         # {socket: connect_time} — track open connections for the idle-timeout
@@ -219,6 +225,32 @@ class CliServer(QObject):
         if is_browser_shard:
             self._browser_shard_slot_until = start + self._browser_shard_gap_ms
         return max(0, int(start - now))
+
+    def _invoke_on_main(self, fn: object) -> None:
+        if callable(fn):
+            fn()
+
+    def _run_off_thread(self, work: Callable[[], object], then: Callable[[object], None]) -> None:
+        """(#408) Run *work* on a daemon thread, then *then(result)* back on
+        the Qt thread via `_mainThreadCall`. *work* raising delivers
+        ``None`` to *then* — the callers here all treat None as "fall back
+        to the synchronous behaviour", never as data.
+
+        This exists for the two IPC commands whose orchestrator handlers
+        shelled out to git inline — `done` (merge-tree / diff --stat /
+        status for the digest + merge proposal) and `assign --isolation
+        worktree` (`git worktree add`) — each a multi-second main-thread
+        freeze on a big repo, caught repeatedly by the boot.log SOFT-stall
+        dumps while Lead's typed input sat unrendered."""
+
+        def _runner() -> None:
+            try:
+                result = work()
+            except Exception:
+                result = None
+            self._mainThreadCall.emit(lambda: then(result))
+
+        threading.Thread(target=_runner, name="cli-server-git-offload", daemon=True).start()
 
     def _fire_staggered(self, delay_ms: int, callback: Callable[[], None]) -> None:
         """Run *callback* once after *delay_ms*, via a QTimer parented to
@@ -666,24 +698,60 @@ class CliServer(QObject):
                     )
                     self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
                 else:
-                    self._fire_staggered(
-                        delay,
-                        lambda: self._orch.assign(
-                            role,
-                            cwd=req.get("cwd"),
-                            task=req.get("task", ""),
-                            requires_commit=bool(req.get("requires_commit", False)),
-                            auto_chain=bool(req.get("auto_chain", False)),
-                            shard_total=int(req.get("shard_total", 0)),
-                            plan=bool(req.get("plan", False)),
-                            isolation=str(req.get("isolation", "shared") or "shared"),
-                            project=from_project,
-                            feature=str(req.get("feature", "") or ""),
-                            model=(str(req.get("model", "") or "").strip() or None),
-                            provider=(str(req.get("provider", "") or "").strip().lower() or None),
-                            effort=(str(req.get("effort", "") or "").strip().lower() or None),
-                        ),
+                    _assign_kwargs = dict(
+                        cwd=req.get("cwd"),
+                        task=req.get("task", ""),
+                        requires_commit=bool(req.get("requires_commit", False)),
+                        auto_chain=bool(req.get("auto_chain", False)),
+                        shard_total=int(req.get("shard_total", 0)),
+                        plan=bool(req.get("plan", False)),
+                        isolation=str(req.get("isolation", "shared") or "shared"),
+                        project=from_project,
+                        feature=str(req.get("feature", "") or ""),
+                        model=(str(req.get("model", "") or "").strip() or None),
+                        provider=(str(req.get("provider", "") or "").strip().lower() or None),
+                        effort=(str(req.get("effort", "") or "").strip().lower() or None),
                     )
+                    _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
+                    if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
+                        # #408: `git worktree add` off the Qt thread, then the
+                        # ordinary assign with the prepared worktree.
+                        def _staged_worktree_assign(_role=role, _kw=_assign_kwargs):
+                            try:
+                                inputs = _wt_inputs_fn(_role, _kw["cwd"], _kw["project"])
+                            except Exception:
+                                inputs = None
+                            if not isinstance(inputs, dict) or not inputs:
+                                self._orch.assign(_role, **_kw)
+                                return
+
+                            def _create(_inp=inputs):
+                                from .worktree_manager import WorktreeManager
+
+                                return WorktreeManager().create(
+                                    _inp["base_cwd"],
+                                    _inp["project_ns"],
+                                    _inp["role"],
+                                    _inp["ts"],
+                                    exclude_ports=_inp["exclude_ports"],
+                                )
+
+                            def _dispatch_prepared(prepared, _role=_role, _kw=_kw):
+                                if prepared is None:
+                                    prepared = (
+                                        None,
+                                        "git worktree add ล้มเหลว (worker) — ใช้ shared cwd แทน",
+                                    )
+                                self._orch.assign(_role, worktree_prepared=prepared, **_kw)
+
+                            self._run_off_thread(_create, _dispatch_prepared)
+
+                        self._fire_staggered(delay, _staged_worktree_assign)
+                    else:
+                        self._fire_staggered(
+                            delay,
+                            lambda _role=role, _kw=_assign_kwargs: self._orch.assign(_role, **_kw),
+                        )
                     ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
                     if cmd == "assign" and auto_mode_note:
                         ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
@@ -724,14 +792,44 @@ class CliServer(QObject):
                 # orchestrator emits deferred so this reply flushes first.
                 ok, msg = self._orch.request_restart()
             elif cmd == "done":
-                ok, msg = self._orch.done(
-                    req.get("from") or "",
+                _done_role = req.get("from") or ""
+                _done_kwargs = dict(
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
                     blocked=bool(req.get("blocked", False)),
                     force=bool(req.get("force", False)),
                 )
+                # #408: gather the git facts done() needs on a worker thread
+                # first, then run done() itself (fast, state-only) on the Qt
+                # thread and reply. Orchestrators without the hook (test
+                # fakes) or panes with no state take the original inline path.
+                _inputs_fn = getattr(self._orch, "done_git_inputs", None)
+                _git_inputs = None
+                if callable(_inputs_fn):
+                    try:
+                        _git_inputs = _inputs_fn(_done_role, project=from_project)
+                    except Exception:
+                        _git_inputs = None
+                # isinstance, not truthiness: a MagicMock orchestrator (tests)
+                # returns a truthy mock here and must stay on the inline path.
+                if isinstance(_git_inputs, dict) and _git_inputs:
+
+                    def _collect(_inp=_git_inputs):
+                        from .worktree_manager import WorktreeManager
+
+                        return WorktreeManager().collect_done_git_facts(**_inp)
+
+                    def _finish(facts, _sock=sock, _role=_done_role, _kw=_done_kwargs):
+                        try:
+                            ok, msg = self._orch.done(_role, git_facts=facts, **_kw)
+                        except Exception as exc:
+                            ok, msg = False, f"done failed: {exc}"
+                        self._reply(_sock, ok=ok, msg=msg)
+
+                    self._run_off_thread(_collect, _finish)
+                    return
+                ok, msg = self._orch.done(_done_role, **_done_kwargs)
             elif cmd == "subagent-done":
                 ok, msg = self._orch.subagent_done(
                     req.get("role") or "",

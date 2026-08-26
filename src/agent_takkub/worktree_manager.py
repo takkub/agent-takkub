@@ -959,6 +959,60 @@ class WorktreeManager:
             return None
         return "<<<<<<<" in mt.stdout
 
+    def collect_done_git_facts(
+        self,
+        worktree: dict | None,
+        pane_cwd: str | None,
+        assign_base_sha: str | None,
+        assign_git_root: str | None,
+    ) -> dict:
+        """Every git read `done()` needs for its digest bullet / merge
+        proposal, gathered in one call so a caller can run it OFF the Qt
+        main thread (#408) and hand the plain dict to
+        `Orchestrator.done(git_facts=...)`.
+
+        Why (#408, boot.log SOFT-stall dumps 2026-08-26): `merge-tree` /
+        `diff --stat` / `status` on a large repo take seconds, and every one
+        of them used to run inline in `done()` on the Qt thread — Lead's
+        keystrokes froze for exactly that long. This method is pure
+        (`self._run` + the inputs) so it is safe on any thread; the shape it
+        returns mirrors what `_compute_digest_facts` reads back:
+
+        * worktree pane → ``{"kind": "worktree", "commits", "dirty",
+          "uncommitted", "merge_conflicts", "diffstat"}``
+        * shared-tree pane → ``{"kind": "shared", "branch", "commits_ahead",
+          "porcelain" (None = status failed), "diffstat"}``
+        """
+        if worktree:
+            info = WorktreeInfo.from_dict(worktree)
+            commits = self.commit_count(info)
+            dirty = self.is_dirty(info)
+            uncommitted = self.uncommitted_count(info) if dirty else 0
+            merge_conflicts = (
+                self.merge_conflicts_with_base(info.git_root, info.branch) if commits > 0 else None
+            )
+            return {
+                "kind": "worktree",
+                "commits": commits,
+                "dirty": dirty,
+                "uncommitted": uncommitted,
+                "merge_conflicts": merge_conflicts,
+                "diffstat": self.diffstat(info),
+            }
+        out: dict = {
+            "kind": "shared",
+            "branch": self.current_branch(pane_cwd) if pane_cwd else None,
+            "commits_ahead": 0,
+            "porcelain": None,
+            "diffstat": "",
+        }
+        if pane_cwd and assign_base_sha and assign_git_root:
+            out["commits_ahead"] = self.commits_since(pane_cwd, assign_base_sha)
+            out["porcelain"] = self.shared_tree_status_porcelain(pane_cwd)
+            if out["porcelain"] is not None:
+                out["diffstat"] = self.diffstat_since(pane_cwd, assign_base_sha)
+        return out
+
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
 
     def safe_remove(self, info: WorktreeInfo) -> tuple[bool, str]:

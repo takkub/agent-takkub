@@ -388,14 +388,15 @@
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
         "agent_takkub.spawn_queue_health",
-        "agent_takkub.user_profile"
+        "agent_takkub.user_profile",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.headless_window",
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -4888,6 +4889,7 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.cli_server",
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
@@ -4898,7 +4900,7 @@
         "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     }
   ]

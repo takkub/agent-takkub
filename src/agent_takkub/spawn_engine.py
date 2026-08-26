@@ -578,6 +578,11 @@ class PaneState:
     # mid-write finishes in seconds, so a few retries clear it; reset to 0
     # on the next successful spawn.
     corrupt_spawn_retries: int = 0
+    # #407: how many cockpit-injected MCP servers this pane's argv carries
+    # (from `mcp_bridge.describe_mcp_handshake` at spawn) — widens the
+    # boot-stall ceiling by MCP_STARTUP_TIMEOUT_SEC each, see
+    # `LeadInboxMixin._boot_stall_ceiling_sec`.
+    mcp_server_count: int = 0
     # _last_assigned_task: FULL composed task text (never a pointer); replayed
     # after crash-respawn regardless of whether the pane was only pasted a
     # pointer at assign time (issue #1 — file-based task handoff).
@@ -2194,6 +2199,7 @@ class SpawnEngineMixin:
             # connect at runtime.
             from .mcp_bridge import describe_mcp_handshake
 
+            _handshake = describe_mcp_handshake(spec.name, mcp_argv)
             _log_event(
                 "mcp_handshake_argv",
                 role=role_name,
@@ -2201,8 +2207,16 @@ class SpawnEngineMixin:
                 shard=shard_idx,
                 provider=spec.name,
                 project=project_ns,
-                **describe_mcp_handshake(spec.name, mcp_argv),
+                **_handshake,
             )
+            # #407: remember how many MCP servers this boot has to bring up so
+            # the delivery boot-stall ceiling can scale with it.
+            try:
+                self._ps(f"{project_ns}::{role_name}").mcp_server_count = len(
+                    _handshake.get("server_names") or []
+                )
+            except Exception:
+                pass
             # Project/session scoping (#132): opt-in per provider via
             # ProviderSpec.project_scope_flag — currently only gemini/agy,
             # whose own conversation history isn't keyed by cwd otherwise.

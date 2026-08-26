@@ -1904,7 +1904,7 @@ class LeadInboxMixin:
                     # pre-boot wait eat directly into this budget, tripping
                     # the ceiling on a pane whose OWN boot marker had barely
                     # been on screen at all.
-                    boot_ceiling_ms = _orch_attr("BOOT_STALL_CEILING_SEC", 300) * 1000
+                    boot_ceiling_ms = self._boot_stall_ceiling_sec(project, role_name) * 1000
                     boot_marker_elapsed_ms = elapsed[0] - (elapsed_at_session_alive[0] or 0)
                     if boot_marker_elapsed_ms < boot_ceiling_ms:
                         QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
@@ -2293,6 +2293,57 @@ class LeadInboxMixin:
             seconds_since_output=round(seconds_since_output, 1),
         )
 
+    def _boot_stall_ceiling_sec(self, project: str | None, role_name: str) -> int:
+        """(#407) How long a CONTINUOUS boot-marker streak may run before
+        `_fail_boot_stalled_delivery` cuts it: `BOOT_STALL_CEILING_SEC`
+        (300 s), widened to ``BOOT_STALL_GRACE_SEC + MCP_STARTUP_TIMEOUT_SEC ×
+        N`` when the pane was spawned with N cockpit-injected MCP servers
+        (`PaneState.mcp_server_count`, stamped by spawn from the argv it
+        actually launched with).
+
+        Why: the 300 s ceiling was sized against each provider's OWN
+        cold-boot allowance (90 s) plus codex's ~61 s baseline — before MCP
+        injection gave every server its own 120 s `startup_timeout_sec` /
+        `MCP_TIMEOUT`. #407 reproduced a codex QA pane (playwright +
+        chrome-devtools, cold npx cache, low RAM) still legitimately inside
+        that budget at 300 s and getting failed + torn down for it. A pane
+        with no MCP servers keeps the original ceiling exactly; every
+        provider gets the same arithmetic (#103)."""
+        base = int(_orch_attr("BOOT_STALL_CEILING_SEC", 300))
+        try:
+            project_ns = self._resolve_project(project)
+            ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role_name}")
+            count = int(getattr(ps, "mcp_server_count", 0) or 0)
+        except Exception:
+            count = 0
+        if count <= 0:
+            return base
+        per_server = int(_orch_attr("MCP_STARTUP_TIMEOUT_SEC", 120))
+        grace = int(_orch_attr("BOOT_STALL_GRACE_SEC", 110))
+        return max(base, grace + per_server * count)
+
+    def _boot_stall_ram_context(self) -> str:
+        """(#407) One-line low-RAM annotation for boot-stall notices when the
+        resource governor's latest sample sits under its own pause line —
+        the condition #407's reproduction ran under (4.4 GB free of 40 GB)
+        and the single biggest multiplier on a cold `npx` MCP start. Empty
+        when RAM is fine or the governor isn't wired (tests)."""
+        gov = getattr(self, "_resource_governor", None)
+        if gov is None:
+            return ""
+        try:
+            _cpu, ram = gov.current_metrics()
+            floor = float(gov.limits.min_available_ram_percent)
+        except Exception:
+            return ""
+        if ram >= floor:
+            return ""
+        return (
+            f" · ⚠️ RAM ว่างเหลือ {ram:.0f}% (ต่ำกว่าเส้น governor {floor:.0f}%) — "
+            f"MCP/CLI cold start ช้ากว่าปกติได้หลายเท่า (#407) "
+            f"ปิดโปรแกรมอื่นหรือรอ RAM ว่างก่อน assign ใหม่"
+        )
+
     def _fail_boot_stalled_delivery(
         self, role_name: str, project: str | None, elapsed_sec: float
     ) -> None:
@@ -2328,6 +2379,7 @@ class LeadInboxMixin:
             f"`takkub task show --role {role_name}` · สั่งใหม่ด้วย provider อื่นได้ทันที: "
             f"`takkub assign --role {role_name} --provider claude ...` "
             f"(assign ใหม่แบบไม่ระบุ --provider จะไปติด provider เดิมซ้ำ) (issue #276)"
+            f"{self._boot_stall_ram_context()}"
         )
         try:
             self.done(role_name, note=note, project=project_ns, failed=True, force=True)
@@ -2391,7 +2443,7 @@ class LeadInboxMixin:
         # cause may equally be the CLI's own slow cold start. Say only what
         # was seen, and let `_run_boot_diagnostic_async` (#273) below supply
         # the real per-provider detail when it can.
-        ceiling_sec = _orch_attr("BOOT_STALL_CEILING_SEC", 300)
+        ceiling_sec = self._boot_stall_ceiling_sec(project, role_name)
         # #281: the pane is displaying exactly which MCP servers it is waiting
         # on ("Starting MCP servers (0/3): codex_apps, context7, figma"). That
         # line is what makes a stuck boot actionable, and `codex mcp list` —

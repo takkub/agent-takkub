@@ -2,6 +2,18 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.5] - 2026-08-26
+
+### Fixed (แก้)
+
+- **Lead ค้าง 3–30 วิ ตอน `assign --isolation worktree` / `done` (#408)** — คลาสที่ 1.6.4 ยังไม่ได้แก้: `git worktree add` (assign) และ `merge-tree` / `diff --stat` / `status` (digest + merge proposal ตอน done)
+  รันบน Qt main thread ตรงๆ (boot.log SOFT-stall dumps 10 ครั้ง) → `cli_server` ย้ายไป worker thread: `Orchestrator.worktree_assign_inputs()` / `done_git_inputs()` (อ่าน state เท่านั้น) → thread รัน
+  `WorktreeManager.create()` / `collect_done_git_facts()` → ส่งกลับ main thread ผ่าน `_mainThreadCall` signal → `assign(worktree_prepared=…)` / `done(git_facts=…)` (`_compute_digest_facts` ข้าม git ทุก call เมื่อมี facts)
+  · worktree ที่เตรียมไว้ตาม governor deferral ไปด้วย ไม่ถูกทิ้งเป็น orphan · orchestrator ที่ไม่มี hook (test fakes) / pane ไม่มี state → path เดิม synchronous ทุกอย่าง
+- **QA/Codex pane ถูกตัดที่ 300s ทั้งที่ยังอยู่ใน MCP startup budget ของตัวเอง (#407)** — `BOOT_STALL_CEILING_SEC` 300 ถูกตั้งก่อนยุค MCP injection (startup 120s/server) → spawn จำ `PaneState.mcp_server_count`
+  จาก argv จริง (`describe_mcp_handshake`) → ceiling = `max(300, 110 + 120 × N)` (`MCP_STARTUP_TIMEOUT_SEC`, env `TAKKUB_MCP_STARTUP_TIMEOUT_SEC`) ทุก provider เท่ากัน (#103) · pane ไม่มี MCP = 300 เท่าเดิม
+  · notice boot-timeout FAILED บอกด้วยเมื่อ RAM ว่างต่ำกว่าเส้น governor (เคส #407 ว่าง 11%) — cold start ช้าเพราะเครื่อง ไม่ใช่ pane เสีย
+
 ## [v1.6.4] - 2026-08-26
 
 ### Fixed (แก้)
