@@ -639,20 +639,33 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         branch = args.branch
         if not branch and not args.role:
             return {"ok": False, "msg": "ระบุ --role <r> (branch ล่าสุดของ role) หรือ --branch wt/..."}
+        multi_note = ""
         if not branch:
-            # resolve the newest wt/<role>-* branch for --role
+            # resolve the newest wt/<role>-<ts> branch for --role, matched
+            # EXACTLY (not by prefix — #403: a bare `startswith` prefix let
+            # role "backend" swallow role "backend#3"'s branch too, since
+            # sanitize_ref_component("backend#3") -> "backend-3" and
+            # "wt/backend-3-<ts>".startswith("wt/backend-") is true).
             from .worktree_manager import sanitize_ref_component
 
-            prefix = f"wt/{sanitize_ref_component(args.role or '')}-"
-            cands = sorted(
-                (r["branch"] for r in mgr.list_isolated(root) if r["branch"].startswith(prefix)),
-            )
+            slug = sanitize_ref_component(args.role or "")
+            branch_re = re.compile(rf"^wt/{re.escape(slug)}-(\d+)$")
+            cands: list[tuple[int, str]] = []
+            for r in mgr.list_isolated(root):
+                m = branch_re.match(r["branch"])
+                if m:
+                    cands.append((int(m.group(1)), r["branch"]))
             if not cands:
                 return {"ok": False, "msg": f"ไม่พบ worktree branch ของ role '{args.role}'"}
-            branch = cands[-1]  # highest ts = newest
+            cands.sort()
+            branch = cands[-1][1]  # highest ts = newest
+            if len(cands) > 1:
+                multi_note = (
+                    f" (พบ {len(cands)} worktree ของ role '{args.role}' — เลือกตัวล่าสุด {branch})"
+                )
         live_paths = _live_worktree_paths_best_effort()
         ok, msg = mgr.merge_isolated(root, branch, keep=bool(args.keep), live_paths=live_paths)
-        return {"ok": ok, "msg": msg}
+        return {"ok": ok, "msg": f"{msg}{multi_note}"}
 
     if sub == "clean":
         do_orphans = bool(getattr(args, "orphans", False))
