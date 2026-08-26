@@ -82,3 +82,51 @@ def test_qa_gate_is_not_lead_only():
     # qa pane, backend pane, and a bare user terminal must all be able to run
     # this — it must never land in LEAD_ONLY_COMMANDS/TEAMMATE_ONLY_COMMANDS.
     assert "qa-gate" not in cli.LEAD_ONLY_COMMANDS
+
+
+# ── #401: --exec passthrough + ENV_GAP exit-code plumbing ──────────────────
+
+
+def test_qa_gate_exec_flag_defaults_to_none(monkeypatch):
+    captured: dict = {}
+
+    def fake_run_gate(**kwargs):
+        captured.update(kwargs)
+        return _fake_report(True)
+
+    monkeypatch.setattr(qa_gate, "run_gate", fake_run_gate)
+    cli.main(["qa-gate"])
+
+    assert captured["exec_prefix"] is None
+
+
+def test_qa_gate_exec_flag_is_shlex_split_into_a_list(monkeypatch):
+    captured: dict = {}
+
+    def fake_run_gate(**kwargs):
+        captured.update(kwargs)
+        return _fake_report(True)
+
+    monkeypatch.setattr(qa_gate, "run_gate", fake_run_gate)
+    cli.main(["qa-gate", "--exec", "docker compose exec -T gateway"])
+
+    assert captured["exec_prefix"] == ["docker", "compose", "exec", "-T", "gateway"]
+
+
+def test_qa_gate_env_gap_reports_non_zero_exit_with_distinct_message(monkeypatch, capsys):
+    def fake_run_gate(**kwargs):
+        r = qa_gate.GateReport()
+        r.steps.append(qa_gate.StepResult("venv-check", True, False, 0.0, "using .venv"))
+        r.steps.append(
+            qa_gate.StepResult(
+                "pytest", True, False, 0.0, "ENV_GAP: pytest not found", env_gap=True
+            )
+        )
+        return r
+
+    monkeypatch.setattr(qa_gate, "run_gate", fake_run_gate)
+    rc = cli.main(["qa-gate"])
+
+    assert rc == qa_gate.ENV_GAP_EXIT_CODE
+    out = capsys.readouterr().out
+    assert "GAP" in out

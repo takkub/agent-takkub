@@ -81,11 +81,13 @@ def test_shared_venv_bin_none_when_absent(repo):
     assert qa_gate.shared_venv_bin(cwd=repo) is None
 
 
-def test_venv_check_refuses_incomplete_venv(repo, monkeypatch):
+def test_venv_check_refuses_when_python_itself_is_missing(repo, monkeypatch):
+    """No `python` binary at all in the resolved venv is still a genuinely
+    broken/incomplete install — a hard refuse, unlike #401's missing
+    pytest/ruff/lint-imports (see the tests below)."""
     bin_dir = _bin_dir(repo)
     bin_dir.mkdir(parents=True)
-    ext = ".exe" if qa_gate._WIN else ""
-    (bin_dir / f"python{ext}").write_text("", encoding="utf-8")  # pytest/ruff/lint-imports missing
+    # python itself missing — nothing under bin_dir at all.
 
     recorder: list = []
     monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, []))
@@ -548,6 +550,181 @@ class TestUnknownProjectGate:
         detail = report.steps[0].detail
         assert "refuse" in detail
         assert "pyproject.toml" in detail and "package.json" in detail
+
+
+# ── #401: a venv with `python` but no pytest/ruff/lint-imports on purpose ──
+
+
+def _make_venv_missing(root, *missing_names: str):
+    """A venv with `python` present but the named tools absent — the #401
+    shape (e.g. a unittest-only project designed to run its tests in
+    Docker), distinct from `test_venv_check_refuses_when_python_itself_is_
+    missing`'s genuinely broken venv."""
+    bin_dir = _bin_dir(root)
+    bin_dir.mkdir(parents=True)
+    ext = ".exe" if qa_gate._WIN else ""
+    for name in ("python", "pytest", "ruff", "lint-imports"):
+        if name in missing_names:
+            continue
+        (bin_dir / f"{name}{ext}").write_text("", encoding="utf-8")
+    return bin_dir
+
+
+class TestEnvGap:
+    def test_venv_check_reports_gap_not_refuse_when_only_pytest_missing(self, repo) -> None:
+        _make_venv_missing(repo, "pytest")
+        vc = qa_gate._venv_check(_bin_dir(repo))
+        assert vc.ok is True
+        assert vc.env_gap is False  # venv-check itself is informational only
+        assert "env gap" in vc.detail
+        assert "pytest" in vc.detail
+
+    def test_missing_pytest_with_no_tests_dir_is_env_gap(self, repo, monkeypatch) -> None:
+        _make_venv_missing(repo, "pytest", "ruff", "lint-imports")
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
+        assert pytest_step.env_gap is True
+        assert pytest_step.ok is True
+        assert "ENV_GAP" in pytest_step.detail
+        assert "pip install pytest" in pytest_step.detail
+        # a real broken-venv refuse never shells out; an env gap likewise
+        # never invokes the missing tool.
+        assert recorder == []
+        # ruff/lint-imports are independently missing too -> also ENV_GAP,
+        # not skipped as a fail-fast cascade (nothing actually failed).
+        ruff_step = next(s for s in report.steps if s.name == "ruff")
+        li_step = next(s for s in report.steps if s.name == "lint-imports")
+        assert ruff_step.env_gap is True
+        assert li_step.env_gap is True
+        assert report.ok is True
+        assert report.env_gap is True
+        assert report.exit_code == qa_gate.ENV_GAP_EXIT_CODE
+
+    def test_missing_pytest_with_a_tests_dir_falls_back_to_unittest_discover(
+        self, repo, monkeypatch
+    ) -> None:
+        _make_venv_missing(repo, "pytest", "ruff", "lint-imports")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_x.py").write_text("import unittest\n", encoding="utf-8")
+
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
+        assert pytest_step.env_gap is False
+        assert pytest_step.ok is True
+        assert "unittest discover fallback" in pytest_step.detail
+        assert len(recorder) == 1
+        cmd = recorder[0][0]
+        assert cmd[1:4] == ["-m", "unittest", "discover"]
+        assert str(repo / "tests") in cmd
+
+    def test_unittest_fallback_failure_still_fails_the_gate(self, repo, monkeypatch) -> None:
+        """A real unittest failure in fallback mode must behave exactly like
+        a real pytest failure — fail-fast, non-zero exit — not get waved
+        through as an env gap."""
+        _make_venv_missing(repo, "pytest")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_x.py").write_text("import unittest\n", encoding="utf-8")
+
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [1]))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
+        assert pytest_step.env_gap is False
+        assert pytest_step.ok is False
+        assert next(s for s in report.steps if s.name == "ruff").skipped is True
+        assert report.ok is False
+        assert report.exit_code == 1
+
+    def test_targeted_mode_notes_the_fallback_is_unnarrowed(self, repo, monkeypatch) -> None:
+        _make_venv_missing(repo, "pytest")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_x.py").write_text("import unittest\n", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+
+        report = qa_gate.run_gate(cwd=repo, targeted=["tests/test_x.py"], write_report=None)
+
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
+        assert "unnarrowed" in pytest_step.detail
+
+    def test_missing_ruff_and_lint_imports_only_are_gap_after_pytest_passes(
+        self, repo, monkeypatch
+    ) -> None:
+        bin_dir = _bin_dir(repo)
+        bin_dir.mkdir(parents=True)
+        ext = ".exe" if qa_gate._WIN else ""
+        (bin_dir / f"python{ext}").write_text("", encoding="utf-8")
+        (bin_dir / f"pytest{ext}").write_text("", encoding="utf-8")
+        # ruff/lint-imports missing.
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        assert len(recorder) == 1  # only the real pytest call
+        assert next(s for s in report.steps if s.name == "pytest").env_gap is False
+        assert next(s for s in report.steps if s.name == "ruff").env_gap is True
+        assert next(s for s in report.steps if s.name == "lint-imports").env_gap is True
+        assert report.ok is True
+        assert report.env_gap is True
+
+    def test_render_table_shows_gap_label_and_footer_note(self, repo, monkeypatch) -> None:
+        _make_venv_missing(repo, "pytest", "ruff", "lint-imports")
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+        table = qa_gate.render_table(report)
+
+        assert "GAP" in table
+        assert "#401" in table
+        assert "GATE: PASS" in table  # nothing genuinely failed
+
+    def test_exec_prefix_bypasses_local_venv_and_env_gap_entirely(self, repo, monkeypatch) -> None:
+        """#401's `--exec`: the target is trusted to own its own toolchain —
+        no ENV_GAP detection, no local venv resolution, every command is
+        prefixed verbatim."""
+        # No .venv at all under repo — proves --exec doesn't need one.
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+        report = qa_gate.run_gate(
+            cwd=repo, write_report=False, exec_prefix=["docker", "compose", "exec", "-T", "gw"]
+        )
+
+        assert all(not s.env_gap for s in report.steps)
+        assert report.ok is True
+        assert len(recorder) == 3
+        assert recorder[0][0][:5] == ["docker", "compose", "exec", "-T", "gw"]
+        assert recorder[0][0][5] == "pytest"
+        assert recorder[1][0][:6] == ["docker", "compose", "exec", "-T", "gw", "ruff"]
+        assert recorder[2][0][:5] == ["docker", "compose", "exec", "-T", "gw"]
+        assert recorder[2][0][5] == "lint-imports"
+
+    def test_exec_prefix_missing_tool_on_target_is_a_real_fail_not_env_gap(
+        self, repo, monkeypatch
+    ) -> None:
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [127]))
+
+        report = qa_gate.run_gate(
+            cwd=repo, write_report=False, exec_prefix=["docker", "compose", "exec", "-T", "gw"]
+        )
+
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
+        assert pytest_step.env_gap is False
+        assert pytest_step.ok is False
+        assert report.env_gap is False
+        assert report.exit_code == 127
 
 
 class TestLogStem:

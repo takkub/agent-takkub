@@ -14,11 +14,16 @@ that bound them — to a per-test tmp dir, so no test can touch the real runtime
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import threading
+import time
+import venv
 import weakref
 from pathlib import Path
 
@@ -84,6 +89,160 @@ import pytest
 # settings-home guard's snapshot uses only these (see _snapshot_settings_home_files).
 _ORIG_OS_SCANDIR = os.scandir
 _ORIG_OS_STAT = os.stat
+
+_REPO_ROOT_FOR_WHEEL_BUILD = Path(__file__).resolve().parents[1]
+
+
+@contextlib.contextmanager
+def _cross_process_wheel_lock(lock_path: Path, *, timeout: float = 240.0, poll: float = 0.2):
+    """A cross-process mutual-exclusion lock via exclusive file creation.
+
+    ``threading.Lock`` is useless here — under pytest-xdist each worker is a
+    *separate process*, not a thread of this one. ``O_CREAT | O_EXCL`` is
+    portable (Windows + macOS/Linux) and atomic at the OS level, unlike a
+    plain existence check + create.
+    """
+    deadline = time.monotonic() + timeout
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out after {timeout}s waiting for lock {lock_path} "
+                    "(held by another pytest-xdist worker?)"
+                ) from None
+            time.sleep(poll)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def _latest_wheel_source_mtime() -> float:
+    """Newest mtime across everything `python -m build` reads from, so a
+    cached wheel can be trusted (or correctly invalidated) without rebuilding
+    just to find out."""
+    latest = 0.0
+    for tracked in (
+        _REPO_ROOT_FOR_WHEEL_BUILD / "pyproject.toml",
+        _REPO_ROOT_FOR_WHEEL_BUILD / "MANIFEST.in",
+    ):
+        if tracked.exists():
+            latest = max(latest, tracked.stat().st_mtime)
+    for path in (_REPO_ROOT_FOR_WHEEL_BUILD / "src").rglob("*"):
+        if path.is_file():
+            latest = max(latest, path.stat().st_mtime)
+    return latest
+
+
+def _build_or_reuse_wheel(wheel_cache_dir: Path) -> Path:
+    """Build the current source into *wheel_cache_dir*, or reuse whatever's
+    already cached there if it's not older than the source tree.
+
+    Caller must hold ``_cross_process_wheel_lock`` around this — it mutates a
+    directory (and `<repo_root>/build/`, `python -m build`'s own scratch dir)
+    shared by every pytest-xdist worker in the run.
+    """
+    cached = sorted(wheel_cache_dir.glob("*.whl"))
+    if cached and cached[0].stat().st_mtime >= _latest_wheel_source_mtime():
+        return cached[0]
+    for stale in cached:
+        stale.unlink()
+    # `python -m build` reuses <repo_root>/build/ as a staging dir across
+    # runs (regardless of --outdir, which only controls the final wheel's
+    # destination) — a tree left over from a prior source layout (e.g. a
+    # since-renamed _assets file) makes setuptools reference a path that no
+    # longer exists and fail with a spurious WinError 2 / errno 2, even
+    # though the current source is fine (see build_wheel() in release.py for
+    # the same fix). Safe to rmtree unconditionally here: the caller's lock
+    # guarantees we're the only worker touching repo_root/build/ right now —
+    # this fixture is the ONLY place in the suite that runs a real
+    # `python -m build` against this checkout (#388: two independent,
+    # unlocked copies of this fixture — one here, one in
+    # test_installed_cli_bin_integration.py — used to race on the same
+    # repo_root/build/ dir under pytest-xdist, producing a spurious
+    # "[Errno 2] No such file or directory: build/bdist.*/wheel" on CI).
+    shutil.rmtree(_REPO_ROOT_FOR_WHEEL_BUILD / "build", ignore_errors=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(wheel_cache_dir),
+            str(_REPO_ROOT_FOR_WHEEL_BUILD),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, f"wheel build failed:\n{result.stdout}\n{result.stderr}"
+    wheels = list(wheel_cache_dir.glob("*.whl"))
+    assert wheels, "no wheel produced"
+    return wheels[0]
+
+
+@pytest.fixture(scope="session")
+def installed_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A throwaway venv with the current source installed as a wheel
+    (--no-deps: only console-script placement + config/lead_context/pane_env/
+    cli's stdlib-only import chain matter to the tests that use this).
+
+    Shared by every test module that needs an installed-mode venv
+    (test_installed_mode_gate.py, test_installed_cli_bin_integration.py) —
+    a SINGLE fixture defined once here, so there is exactly one
+    `python -m build` per pytest run, guarded by one lock (#388). Do not
+    redefine a local `installed_venv` fixture in a test module; depend on
+    this one instead.
+
+    Session-scoped, but under pytest-xdist ``scope="session"`` only means
+    "once per worker *process*" — loadscope distributes test classes across
+    workers, so without coordination every worker would run its own
+    `python -m build` concurrently into the same repo_root/build/ staging
+    dir. One worker's rmtree could delete the tree out from under another
+    worker's in-flight build. The lock + shared wheel-cache dir (both
+    anchored at ``getbasetemp().parent`` — the root all workers in this run
+    share, one level up from each worker's own ``.../popen-gwN``) make
+    exactly one worker build per pytest run; the rest reuse its wheel.
+    """
+    shared_root = tmp_path_factory.getbasetemp().parent
+    wheel_cache_dir = shared_root / "installed-mode-wheel-cache"
+    wheel_cache_dir.mkdir(exist_ok=True)
+    lock_path = shared_root / "installed-mode-wheel-build.lock"
+
+    with _cross_process_wheel_lock(lock_path):
+        wheel = _build_or_reuse_wheel(wheel_cache_dir)
+
+    venv_dir = tmp_path_factory.mktemp("venv-target") / "venv"
+    venv.create(venv_dir, with_pip=True)
+    vpy = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    assert vpy.exists(), f"venv python missing at {vpy}"
+
+    # A caller's own PYTHONPATH (e.g. a worktree pane's documented workaround
+    # for this file's own `_assert_agent_takkub_matches_this_checkout` guard
+    # below) makes `agent_takkub` importable straight off source, with no
+    # dist-info — pip then treats the target as already-satisfied and skips
+    # writing its console-script entry points, producing a venv with NO
+    # `takkub`/`agent-takkub` scripts even though `pip install` itself
+    # reports success (reproduced directly: identical wheel, only the
+    # installing process's PYTHONPATH differed). Strip it so this fixture
+    # always yields a real, fully-installed venv regardless of the parent
+    # process's own PYTHONPATH.
+    install_env = dict(os.environ)
+    install_env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [str(vpy), "-m", "pip", "install", "--no-deps", "--quiet", str(wheel)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=install_env,
+    )
+    assert result.returncode == 0, f"pip install failed:\n{result.stdout}\n{result.stderr}"
+    return venv_dir
 
 
 def _assert_agent_takkub_matches_this_checkout() -> None:

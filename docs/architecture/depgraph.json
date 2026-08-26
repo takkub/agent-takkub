@@ -2440,6 +2440,7 @@
         "agent_takkub.provider_probe",
         "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
+        "agent_takkub.rtk_helper",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.system_baseline",
         "agent_takkub.update_helper",
@@ -2452,7 +2453,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 31
+      "fan_out": 32
     },
     {
       "module": "agent_takkub.editor_service",
@@ -3907,10 +3908,11 @@
         "agent_takkub.core.storage.dual_write"
       ],
       "imported_by": [
+        "agent_takkub.doctor",
         "agent_takkub.hook_wiring",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {

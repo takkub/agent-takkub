@@ -11,54 +11,21 @@ on (`Path(sys.executable).resolve().parent`). Both npm launch paths
 shortcut -> venvPythonw() -> pythonw.exe) must resolve to that same dir.
 
 Slow (builds a wheel + creates a venv) — kept as one session-scoped build.
+
+The `installed_venv` fixture itself lives in conftest.py, shared with
+test_installed_mode_gate.py (#388: two separate, unlocked copies of this
+fixture used to race on the same repo_root/build/ staging dir under
+pytest-xdist, producing spurious CI failures).
 """
 
 from __future__ import annotations
 
-import subprocess
 import sys
-import venv
 from pathlib import Path
 
 import pytest
 
 from agent_takkub import config
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture(scope="session")
-def installed_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A throwaway venv with the current source installed as a wheel
-    (--no-deps: only console-script placement matters here)."""
-    build_dir = tmp_path_factory.mktemp("wheel-build")
-    result = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(build_dir), str(_REPO_ROOT)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert result.returncode == 0, f"wheel build failed:\n{result.stdout}\n{result.stderr}"
-    wheels = list(build_dir.glob("*.whl"))
-    assert wheels, "no wheel produced"
-
-    venv_dir = tmp_path_factory.mktemp("venv-target") / "venv"
-    venv.create(venv_dir, with_pip=True)
-    vpy = (
-        venv_dir / "Scripts" / "python.exe"
-        if sys.platform == "win32"
-        else venv_dir / "bin" / "python"
-    )
-    assert vpy.exists(), f"venv python missing at {vpy}"
-
-    result = subprocess.run(
-        [str(vpy), "-m", "pip", "install", "--no-deps", "--quiet", str(wheels[0])],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert result.returncode == 0, f"pip install failed:\n{result.stdout}\n{result.stderr}"
-    return venv_dir
 
 
 class TestNpmWrapperConsoleScriptParity:
