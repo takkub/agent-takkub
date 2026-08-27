@@ -343,13 +343,13 @@ def _dir_has_node_modules(path: Path) -> bool:
     return False
 
 
-def _registered_isolated_worktree_paths(git_root: str, run: GitRunner) -> set[Path]:
+def _registered_isolated_worktree_paths(git_root: str, git_run: GitRunner) -> set[Path]:
     """Resolved paths of every currently-registered ``wt/*`` worktree of
     *git_root* — shared anchor logic for `list_orphans` and `sweep_trash`
     (#411), both of which need it to find candidate project dirs on disk
     and to know which on-disk children are still real, registered
     checkouts (never to be touched)."""
-    res = run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+    res = git_run(["-C", git_root, "worktree", "list", "--porcelain"], None)
     if not res.ok:
         return set()
     return {
