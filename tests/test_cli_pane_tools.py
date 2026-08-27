@@ -155,7 +155,7 @@ class TestMutationsAreLeadOnly:
         monkeypatch.setattr(pane_tools_policy, "allow_item", lambda *a: True)
         monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
         monkeypatch.setattr(
-            pane_tools_policy, "effective_mcps", lambda role, default=None: default or frozenset()
+            pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset({"foo"})
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 1)
 
@@ -170,7 +170,7 @@ class TestMutationsAreLeadOnly:
         monkeypatch.setattr(pane_tools_policy, "allow_item", lambda *a: True)
         monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
         monkeypatch.setattr(
-            pane_tools_policy, "effective_mcps", lambda role, default=None: default or frozenset()
+            pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset({"foo"})
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 1)
 
@@ -193,7 +193,9 @@ class TestMcpAllowDeny:
         )
         monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
         monkeypatch.setattr(
-            pane_tools_policy, "effective_mcps", lambda role, default=None: default or frozenset()
+            pane_tools_policy,
+            "effective_mcps",
+            lambda role, default=None: frozenset({"playwright"}),
         )
         regen_calls: list[int] = []
         monkeypatch.setattr(
@@ -219,7 +221,7 @@ class TestMcpAllowDeny:
         )
         monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
         monkeypatch.setattr(
-            pane_tools_policy, "effective_mcps", lambda role, default=None: default or frozenset()
+            pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset()
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
 
@@ -227,6 +229,34 @@ class TestMcpAllowDeny:
 
         assert code == 0
         assert calls == [("qa", "mcps", "chrome-devtools")]
+        out = capsys.readouterr().out
+        assert "denied 'chrome-devtools' for qa" in out, "must say 'denied', not 'denyed' (#414)"
+
+    def test_deny_reports_ok_but_ineffective_as_a_hard_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#414 regression guard: `deny_item` returning True must not be
+        trusted blindly — if the effective allowlist still contains the
+        "denied" item afterward (the exact silent no-op that shipped), the
+        CLI must fail loudly instead of printing a false 'denied' success."""
+        _clear_role_env(monkeypatch)
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setattr(pane_tools_policy, "deny_item", lambda role, kind, name: True)
+        monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
+        # Simulate the #414 bug directly: deny_item claimed success but the
+        # effective set still grants the item.
+        monkeypatch.setattr(
+            pane_tools_policy,
+            "effective_mcps",
+            lambda role, default=None: frozenset({"chrome-devtools", "playwright", "graft"}),
+        )
+        monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
+
+        code = cli.main(["mcp", "deny", "--role", "qa", "chrome-devtools"])
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "did not change the effective allowlist" in out
 
     def test_allow_unknown_role_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _clear_role_env(monkeypatch)
@@ -439,7 +469,7 @@ class TestPluginsAllowDenyReset:
         monkeypatch.setattr(
             pane_tools_policy,
             "effective_plugins",
-            lambda role, default=None: default or frozenset(),
+            lambda role, default=None: frozenset({"pordee"}),
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
 
