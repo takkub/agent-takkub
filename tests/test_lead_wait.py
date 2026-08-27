@@ -1360,3 +1360,99 @@ class TestCliWaitCommand:
         assert rc == 0
         assert len(calls) == 1
         assert "cancelled" in out
+
+    def test_no_longer_active_poll_error_gets_a_clear_resume_hint(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#410: a cockpit restart wipes `_active_waits` in memory, so a
+        `takkub wait` blocked across the restart gets back a bare "no longer
+        active" error from its next poll — indistinguishable server-side
+        from an explicit `takkub wait --cancel` run elsewhere (see
+        `poll_wait`'s docstring), so the CLI cannot safely auto-resume on
+        its own. It must at least hand back the exact command to resume
+        watching instead of leaving Lead to guess."""
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                return {
+                    "ok": True,
+                    "msg": "watching 2 role(s)",
+                    "wait_id": "w1",
+                    "roles": ["backend", "frontend"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                return {
+                    "ok": False,
+                    "msg": "wait session no longer active (already ended, timed out, or superseded)",
+                }
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--role", "backend", "--role", "frontend"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "no longer active" in out
+        assert "takkub wait --role backend --role frontend" in out
+        # No blind auto-re-arm: exactly one poll attempt, no extra wait-begin.
+        assert [c["cmd"] for c in calls] == ["wait-begin", "wait-poll"]
+
+    def test_no_longer_active_resume_hint_uses_still_pending_roles_only(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A role that already resolved before the registration was lost
+        doesn't need to be re-watched — the resume hint should only name
+        what was still pending."""
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                return {
+                    "ok": True,
+                    "msg": "watching 2 role(s)",
+                    "wait_id": "w1",
+                    "roles": ["backend", "frontend"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                if len(calls) == 2:
+                    return {
+                        "ok": True,
+                        "msg": "1 role(s) still pending",
+                        "done": {"backend": "delivered"},
+                        "failed": {},
+                        "gone": {},
+                        "pending": {"frontend": "ยังทำงานอยู่"},
+                        "elapsed": 1.0,
+                        "expired": False,
+                        "interrupt": None,
+                    }
+                return {
+                    "ok": False,
+                    "msg": "wait session no longer active (already ended, timed out, or superseded)",
+                }
+            if payload["cmd"] == "wait-end":
+                # The finally-block cleanup fires here too (the previous
+                # successful poll's `pending` is what triggers it) — not
+                # under test, just needs to not blow up the fake.
+                return {"ok": True, "msg": "wait ended"}
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        monkeypatch.setattr(cli, "_WAIT_POLL_INTERVAL_S", 0.0)
+
+        rc = cli.main(["wait", "--role", "backend", "--role", "frontend"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "takkub wait --role frontend" in out
+        assert "backend" not in out.rsplit("resume watching with", 1)[-1]

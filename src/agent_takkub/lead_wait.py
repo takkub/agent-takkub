@@ -422,6 +422,15 @@ class LeadWaitMixin:
         explicit `end_wait`/`cancel_wait` never writes an echo, so a
         genuinely cancelled wait still errors out for any straggler — there
         is no terminal result to hand back for those.
+
+        #410: a cockpit process restart is the same case as a genuine
+        cancel from this method's point of view — `_active_waits` lives in
+        `Orchestrator.__init__` state, so the successor process comes up
+        with an empty registry and no memory of any *wait_id* a still-
+        blocked `takkub wait` client happens to be holding. There is no
+        server-side signal to tell the two apart; `cli.cmd_wait` handles the
+        ambiguity by making the resume path explicit in its own error
+        message rather than guessing here.
         """
         active = self._active_waits.get(project_ns)
         if active is None or active["wait_id"] != wait_id:

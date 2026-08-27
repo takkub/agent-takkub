@@ -1018,10 +1018,22 @@ class WorktreeManager:
         returns mirrors what `_compute_digest_facts` reads back:
 
         * worktree pane → ``{"kind": "worktree", "commits", "dirty",
-          "uncommitted", "merge_conflicts", "diffstat"}``
+          "uncommitted", "merge_conflicts", "diffstat"}`` (+
+          ``"rediscovered_worktree"`` when *worktree* arrived empty and this
+          call reconstructed it from git state instead — #410)
         * shared-tree pane → ``{"kind": "shared", "branch", "commits_ahead",
           "porcelain" (None = status failed), "diffstat"}``
         """
+        rediscovered: dict | None = None
+        if not worktree and pane_cwd:
+            # #410: PaneState.worktree bookkeeping can go missing (a cockpit
+            # restart between assign() and done() before the snapshot was
+            # made durable) even though the pane really is sitting in an
+            # isolated `wt/*` checkout with real commits on it — reconstruct
+            # it from git instead of silently downgrading to the shared-tree
+            # path, which has no baseline for this cwd and reports "ตรวจไม่ได้".
+            rediscovered = self.rediscover_worktree(pane_cwd)
+            worktree = rediscovered
         if worktree:
             info = WorktreeInfo.from_dict(worktree)
             commits = self.commit_count(info)
@@ -1030,7 +1042,7 @@ class WorktreeManager:
             merge_conflicts = (
                 self.merge_conflicts_with_base(info.git_root, info.branch) if commits > 0 else None
             )
-            return {
+            out = {
                 "kind": "worktree",
                 "commits": commits,
                 "dirty": dirty,
@@ -1038,6 +1050,9 @@ class WorktreeManager:
                 "merge_conflicts": merge_conflicts,
                 "diffstat": self.diffstat(info),
             }
+            if rediscovered is not None:
+                out["rediscovered_worktree"] = info.as_dict()
+            return out
         out: dict = {
             "kind": "shared",
             "branch": self.current_branch(pane_cwd) if pane_cwd else None,
@@ -1051,6 +1066,51 @@ class WorktreeManager:
             if out["porcelain"] is not None:
                 out["diffstat"] = self.diffstat_since(pane_cwd, assign_base_sha)
         return out
+
+    def rediscover_worktree(self, pane_cwd: str) -> dict | None:
+        """Best-effort reconstruction of a `WorktreeInfo` dict from git state
+        alone, for a pane whose `PaneState.worktree` bookkeeping was lost —
+        e.g. a cockpit restart between `assign(isolation="worktree")` and
+        `done()` that happened before the assign-time snapshot was durable
+        (#410). ``base_sha`` cannot be recovered (the assign-time value only
+        ever lived in memory) — merge-base against the git root's CURRENT
+        HEAD is used instead, the same "compare against base now" fallback
+        `merge_conflicts_with_base` already relies on.
+
+        Returns None whenever *pane_cwd* isn't actually inside an isolated
+        `wt/*` worktree checkout, so a normal shared-tree pane is never
+        mistaken for one.
+        """
+        branch = self.current_branch(pane_cwd)
+        if not branch or not branch.startswith(f"{_BRANCH_PREFIX}/"):
+            return None
+        worktree_path = self.git_root(pane_cwd)
+        if not worktree_path:
+            return None
+        listed = self._run(["-C", pane_cwd, "worktree", "list", "--porcelain"], None)
+        if not listed.ok:
+            return None
+        entries = parse_worktree_list(listed.stdout)
+        if not entries:
+            return None
+        # `git worktree list` always reports the main checkout first, then
+        # every linked worktree — this one's own entry is one of "every
+        # linked worktree", never the first row.
+        git_root = entries[0].get("path")
+        if not git_root or os.path.normcase(os.path.normpath(git_root)) == os.path.normcase(
+            os.path.normpath(worktree_path)
+        ):
+            return None
+        base = self._run(["-C", git_root, "merge-base", "HEAD", branch], None)
+        base_sha = base.stdout.strip() if base.ok else ""
+        return {
+            "path": worktree_path,
+            "branch": branch,
+            "base_sha": base_sha,
+            "git_root": git_root,
+            "links": [],
+            "port": 0,
+        }
 
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
 

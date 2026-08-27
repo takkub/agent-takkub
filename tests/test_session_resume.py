@@ -68,10 +68,16 @@ class _FakeOrchestrator:
         self.spawn_calls: list[tuple[str, str | None, str]] = []
         self._pending_done_notices: dict = {}
         self.send_when_ready_calls: list[tuple[str, str]] = []
+        self._pane_state: dict = {}
 
     def spawn(self, role, cwd=None, project=None):
         self.spawn_calls.append((role, cwd, project))
         return True, "ok"
+
+    def _ps(self, key):
+        from agent_takkub.orchestrator import PaneState
+
+        return self._pane_state.setdefault(key, PaneState())
 
     def _save_pending_done_notices(self, project: str) -> None:
         pass
@@ -268,3 +274,152 @@ class TestRestoreTeammates:
         fake = _FakeOrchestrator()
         assert _run_restore(fake) == 1
         assert [c[0] for c in fake.spawn_calls] == ["backend"]
+
+
+class TestRestoreTeammatesWorktreeBookkeeping:
+    """#410: without this, a cockpit restart between assign(isolation=
+    "worktree") and done() strands the pane's merge-proposal identity in
+    memory only — the restored pane looks exactly like a fresh one with no
+    assignment on record, and done() reports "ตรวจไม่ได้" with no proposal
+    despite the branch really carrying commits."""
+
+    def test_restores_worktree_dict_from_snapshot(
+        self, isolated_session_file: pathlib.Path
+    ) -> None:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        wt = {
+            "path": "/wt/backend-1",
+            "branch": "wt/backend-1",
+            "base_sha": "abc123",
+            "git_root": "/repo",
+            "links": [],
+            "port": 0,
+        }
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/wt/backend-1", "worktree": wt}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        assert fake._pane_state["p::backend"].worktree == wt
+
+    def test_restores_shared_tree_baseline_from_snapshot(
+        self, isolated_session_file: pathlib.Path
+    ) -> None:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {
+                "p": [
+                    {
+                        "role": "backend",
+                        "cwd": "/repo/api",
+                        "assign_base_sha": "deadbeef",
+                        "assign_git_root": "/repo",
+                        # Stored (and read back) as JSON lists — restore
+                        # must turn them back into tuples so a later
+                        # comparison against a fresh `dirty_snapshot()`
+                        # read (which returns tuples) isn't always "changed"
+                        # just from a list-vs-tuple type mismatch.
+                        "assign_dirty_snapshot": {"a.py": ["M ", 111, 22]},
+                    }
+                ]
+            },
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        ps = fake._pane_state["p::backend"]
+        assert ps.assign_base_sha == "deadbeef"
+        assert ps.assign_git_root == "/repo"
+        assert ps.assign_dirty_snapshot == {"a.py": ("M ", 111, 22)}
+        assert isinstance(ps.assign_dirty_snapshot["a.py"], tuple)
+
+    def test_older_snapshot_without_bookkeeping_creates_no_pane_state(
+        self, isolated_session_file: pathlib.Path
+    ) -> None:
+        # A snapshot written before #410 has no worktree/assign_* keys at
+        # all — must not fabricate a spurious PaneState entry for it.
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "state": "active"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        assert fake._pane_state == {}
+
+
+class TestSnapshotStateWorktreeBookkeeping:
+    """#410's other half: snapshot_state() must actually persist the
+    bookkeeping restore_teammates() now knows how to restore."""
+
+    @staticmethod
+    def _pane(cwd: str, state: str = "working"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            _session_cwd=cwd, state=state, session=SimpleNamespace(is_alive=True)
+        )
+
+    def test_includes_worktree_dict_for_an_isolated_pane(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator, PaneState
+
+        wt = {
+            "path": "/wt/backend-1",
+            "branch": "wt/backend-1",
+            "base_sha": "abc",
+            "git_root": "/repo",
+            "links": [],
+            "port": 0,
+        }
+        fake = SimpleNamespace(
+            _panes_by_project={"p": {"backend": self._pane("/wt/backend-1")}},
+            _pane_state={"p::backend": PaneState(worktree=wt, last_assigned_task="fix X")},
+        )
+        snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
+        entry = snap["projects"]["p"][0]
+        assert entry["worktree"] == wt
+        assert entry["assign_base_sha"] is None
+        assert entry["assign_git_root"] is None
+        assert entry["assign_dirty_snapshot"] is None
+
+    def test_includes_shared_tree_baseline_and_stays_json_serialisable(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator, PaneState
+
+        fake = SimpleNamespace(
+            _panes_by_project={"p": {"backend": self._pane("/repo/api", state="active")}},
+            _pane_state={
+                "p::backend": PaneState(
+                    assign_base_sha="deadbeef",
+                    assign_git_root="/repo",
+                    assign_dirty_snapshot={"a.py": ("M ", 111, 22)},
+                )
+            },
+        )
+        snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
+        entry = snap["projects"]["p"][0]
+        assert entry["assign_base_sha"] == "deadbeef"
+        assert entry["assign_git_root"] == "/repo"
+        assert entry["assign_dirty_snapshot"] == {"a.py": ["M ", 111, 22]}
+        json.dumps(snap)  # must round-trip through JSON (tuples → lists)
+
+    def test_no_pane_state_entry_omits_bookkeeping_without_crashing(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = SimpleNamespace(
+            _panes_by_project={"p": {"backend": self._pane("/repo/api")}},
+            _pane_state={},
+        )
+        snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
+        entry = snap["projects"]["p"][0]
+        assert entry["worktree"] is None
+        assert entry["assign_dirty_snapshot"] is None

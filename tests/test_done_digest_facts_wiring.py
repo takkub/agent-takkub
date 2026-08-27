@@ -188,6 +188,99 @@ class TestWorktreePaneDigestFacts:
         assert failed_calls[0][1].get("digest_facts") is None
 
 
+class TestWorktreeRediscoveryAfterRestart:
+    """#410: a cockpit restart between assign(isolation="worktree") and
+    done() can strand PaneState.worktree as None even though the branch
+    genuinely carries commits. `git_facts["rediscovered_worktree"]` — what
+    `WorktreeManager.collect_done_git_facts`'s own #410 fallback returns —
+    must still drive the merge proposal + worktree-shaped digest facts, not
+    silently downgrade to the shared-tree "ตรวจไม่ได้" path."""
+
+    def test_rediscovered_worktree_still_produces_merge_proposal(self, orch, monkeypatch):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/wt/backend-1")
+        # This is exactly what a pane restored via restore_teammates() looks
+        # like to done() when its snapshot entry carried no worktree/assign_*
+        # bookkeeping at all (an older snapshot, or any other loss #410's
+        # snapshot_state()/restore_teammates() fix doesn't cover).
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="fix #245",
+            worktree=None,
+            assign_base_sha=None,
+            assign_git_root=None,
+        )
+
+        fake = _FakeMgr(commits=2, dirty=False, merge_conflicts=False)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done(
+            "backend",
+            note="แก้เสร็จแล้ว",
+            project=proj,
+            git_facts={
+                "kind": "worktree",
+                "commits": 2,
+                "dirty": False,
+                "uncommitted": 0,
+                "merge_conflicts": False,
+                "diffstat": " src/x.ts | 3 +++",
+                "rediscovered_worktree": _wt_info().as_dict(),
+            },
+        )
+
+        _done_notice, done_kw = next(c for c in captured if c[0].startswith("[backend done]"))
+        facts = done_kw["digest_facts"]
+        assert facts.branch == "wt/backend-1"
+        assert facts.commits_ahead == 2
+        assert (
+            facts.files_note
+            != "ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ — cwd ไม่ใช่ git repo, HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
+        )
+
+        proposal = next(n for n, _kw in captured if "merge --no-ff wt/backend-1" in n)
+        assert "2 commit" in proposal
+
+        # Everything came from git_facts / the rediscovered dict — the fake
+        # manager must never have been asked to compute anything itself.
+        assert fake.commit_count_calls == 0
+        assert fake.is_dirty_calls == 0
+        assert fake.merge_calls == 0
+        assert fake.diffstat_calls == 0
+
+    def test_no_rediscovery_available_still_falls_back_to_shared_tree_message(
+        self, orch, monkeypatch
+    ):
+        # collect_done_git_facts genuinely couldn't reconstruct anything
+        # (real shared-tree pane) — must behave exactly as before #410.
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="fix #245",
+            worktree=None,
+            assign_base_sha=None,
+            assign_git_root=None,
+        )
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done(
+            "backend",
+            note="done",
+            project=proj,
+            git_facts={"kind": "shared", "branch": "main", "commits_ahead": 0, "porcelain": None},
+        )
+
+        facts = next(kw["digest_facts"] for n, kw in captured if n.startswith("[backend done]"))
+        assert "ตรวจไม่ได้" in facts.files_note
+        assert not any("merge --no-ff" in n for n, _kw in captured)
+
+
 class TestSharedTreePaneDigestFacts:
     def test_no_snapshot_reports_unverifiable_not_zero(self, orch):
         proj = "proj"
