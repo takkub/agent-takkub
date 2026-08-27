@@ -375,6 +375,18 @@ def deny_item(role: str, kind: str, name: str) -> bool:
     """Remove an MCP or plugin from a role's allowlist (idempotent).
 
     Returns True on success, False on validation/I/O error.
+
+    A role with no existing `pane-tools.json` override is NOT "already
+    denied" just because there is no file entry yet — its effective
+    allowlist still comes from the built-in default (`_ROLE_MCP_POLICY` /
+    `_ROLE_PLUGIN_POLICY`), which may well grant `name`. The old code
+    returned True here without writing anything, so `takkub mcp deny` on a
+    role's first-ever override was a silent no-op: `effective_mcps()` kept
+    returning the untouched default and every consumer (claude's per-role
+    variant file, codex's `mcp_bridge.py` session-scoped injection) kept
+    granting the "denied" server (issue #414). Materialise the built-in
+    default first — same as `allow_item` already does — so removing `name`
+    from it actually shrinks the effective set instead of doing nothing.
     """
     if kind not in ("mcps", "plugins") or role not in known_roles():
         return False
@@ -384,7 +396,7 @@ def deny_item(role: str, kind: str, name: str) -> bool:
 
     policy = load_policy()
     if role not in policy:
-        return True  # already not present
+        policy[role] = _default_role_entry(role)
 
     items = list(policy[role].get(kind) or [])
     if name in items:

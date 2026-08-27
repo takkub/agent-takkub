@@ -2928,6 +2928,23 @@ def cmd_services(args: argparse.Namespace) -> dict:
 _MUTATING_MCP_SUBCOMMANDS = frozenset({"allow", "deny", "reset", "add", "remove"})
 _MUTATING_PLUGIN_SUBCOMMANDS = frozenset({"allow", "deny", "reset"})
 
+# "allow"/"deny" aren't regular verbs ("allowed" isn't `allow` + "ed" the way
+# it looks — "deny" + "ed" gives the wrong spelling "denyed", issue #414).
+_PANE_TOOLS_PAST_TENSE = {"allow": "allowed", "deny": "denied"}
+
+# Providers whose spawn path actually consults pane_tools_policy's effective
+# allowlist (claude via its per-role `shared-mcp-<role>.json` variant, codex
+# via `mcp_bridge.py`'s session-scoped `-c mcp_servers...` injection). Every
+# other registered provider has a *documented, pre-existing* MCP_ADAPTER gap
+# (see provider_spec.py's `mcp_adapter_variant` field for each): gemini/agy
+# stages MCPs into a global, per-machine plugin registry outside any
+# per-session policy (#103/#121); opencode/kimi/cursor auto-load their own
+# mcp config files and the cockpit does not drive their MCP set at all. A
+# role's `takkub mcp deny` fully takes effect for claude/codex panes; it is
+# recorded in the policy (so `takkub mcp list` reflects it) but has no way
+# to reach a gemini/opencode/kimi/cursor pane's actual MCP set.
+_MCP_POLICY_ENFORCED_PROVIDERS = ("claude", "codex")
+
 
 def _require_lead_for_pane_tools(action: str) -> str | None:
     role = _from_role()
@@ -3012,8 +3029,30 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
                 "msg": f"could not {sub} MCP {args.name!r} for {args.role} — invalid name?",
             }
         sdt.regen_role_variants()
+        # Verify the write actually took effect on the effective allowlist —
+        # never report success on a policy layer that silently didn't change
+        # anything (issue #414: `deny` used to return True as a no-op when
+        # the role had no override yet, while `list`/spawn still granted the
+        # "denied" MCP).
+        mcp_defaults = getattr(sdt, "_ROLE_MCP_POLICY", {})
+        effective = ptp.effective_mcps(args.role, mcp_defaults.get(args.role)) or frozenset()
+        present = args.name in effective
+        if present if sub == "deny" else not present:
+            return {
+                "ok": False,
+                "msg": (
+                    f"{sub} {args.name!r} for {args.role} did not change the effective "
+                    f"allowlist ({sorted(effective)}) — this is a bug, not a config issue."
+                ),
+            }
         _pane_tools_table("mcps", None)
-        return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
+        msg = f"{_PANE_TOOLS_PAST_TENSE[sub]} {args.name!r} for {args.role}"
+        if sub == "deny" and args.role != "lead":
+            msg += (
+                f" — enforced for {'/'.join(_MCP_POLICY_ENFORCED_PROVIDERS)} panes only; "
+                f"gemini/opencode/kimi/cursor don't consult this policy (#103/#121)"
+            )
+        return {"ok": True, "msg": msg}
 
     if sub == "reset":
         if args.role is not None and args.role not in ptp.known_roles():
@@ -3080,8 +3119,25 @@ def cmd_plugins(args: argparse.Namespace) -> dict:
                 "msg": f"could not {sub} plugin {args.name!r} for {args.role} — invalid name?",
             }
         sdt.regen_role_variants()
+        try:
+            from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
+        except Exception:  # pragma: no cover — CLI must degrade, not crash
+            _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS = {}, frozenset()
+        effective = (
+            ptp.effective_plugins(args.role, _ROLE_PLUGIN_POLICY.get(args.role, _TEAMMATE_PLUGINS))
+            or frozenset()
+        )
+        present = args.name in effective
+        if present if sub == "deny" else not present:
+            return {
+                "ok": False,
+                "msg": (
+                    f"{sub} {args.name!r} for {args.role} did not change the effective "
+                    f"allowlist ({sorted(effective)}) — this is a bug, not a config issue."
+                ),
+            }
         _pane_tools_table("plugins", None)
-        return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
+        return {"ok": True, "msg": f"{_PANE_TOOLS_PAST_TENSE[sub]} {args.name!r} for {args.role}"}
 
     if sub == "reset":
         if args.role is not None and args.role not in ptp.known_roles():

@@ -380,11 +380,20 @@ class TestDenyItem:
         policy = pane_tools_policy.load_policy()
         assert policy["qa"]["mcps"] == ["playwright"]
 
-    def test_idempotent_when_role_not_present(self, policy_file: Path) -> None:
+    def test_materializes_default_when_role_not_present(self, policy_file: Path) -> None:
+        """#414: denying an item that only comes from the BUILT-IN default
+        (no override yet) must actually remove it from the effective
+        allowlist, not silently no-op just because there was no file entry
+        to edit yet."""
         assert pane_tools_policy.deny_item("qa", "mcps", "playwright")
         policy = pane_tools_policy.load_policy()
-        # Role not created if it didn't exist
-        assert "qa" not in policy or policy["qa"]["mcps"] == []
+        assert "qa" in policy
+        assert "playwright" not in policy["qa"]["mcps"]
+        # The role's other default MCPs are preserved, not wiped out.
+        assert set(policy["qa"]["mcps"]) == {"chrome-devtools", "graft"}
+        effective = pane_tools_policy.effective_mcps("qa")
+        assert effective is not None
+        assert "playwright" not in effective
 
     def test_rejects_invalid_name(self, policy_file: Path) -> None:
         assert not pane_tools_policy.deny_item("qa", "mcps", "invalid name!")
