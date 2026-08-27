@@ -1281,6 +1281,156 @@ class TestListOrphans:
 
         assert WorktreeManager(r).list_orphans("/some/repo") == []
 
+    def test_trash_dirs_excluded_from_generic_orphan_report(self, tmp_path):
+        """#411 — a `.trash-*` staging dir is handled unconditionally by
+        `sweep_trash`, never gated behind `--orphans` like a genuine
+        forgotten checkout — `list_orphans` must not double-report it."""
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)  # still registered
+        (project_dir / ".trash-backend-2-4242").mkdir()
+
+        rows = WorktreeManager(self._runner(project_dir)).list_orphans("/repo")
+
+        assert rows == []
+
+
+class TestSweepTrash:
+    """#411 (1) — `.trash-*` leftovers from a partial/failed
+    `remove_worktree_tree` must be cleaned up every `clean`, with no
+    `--orphans`/`--orphans-node-modules-only` opt-in needed: by the time a
+    checkout is staged there, it already passed its caller's own safety
+    checks, so nothing of unknown value can be inside it."""
+
+    @pytest.fixture(autouse=True)
+    def _data_home(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path)
+
+    def _porcelain(self, project_dir: Path) -> str:
+        return (
+            "worktree /repo\n"
+            "HEAD aaaa111\n"
+            "branch refs/heads/main\n"
+            "\n"
+            f"worktree {project_dir / 'frontend-1'}\n"
+            "HEAD bbbb222\n"
+            "branch refs/heads/wt/frontend-1\n"
+        )
+
+    def _runner(self, project_dir: Path) -> FakeRunner:
+        return FakeRunner(
+            [(["worktree", "list", "--porcelain"], _ok(self._porcelain(project_dir)))]
+        )
+
+    def test_removes_trash_dir_unconditionally(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+        trash = project_dir / ".trash-backend-3-4242"
+        (trash / "node_modules" / "pkg").mkdir(parents=True)
+        (trash / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+
+        lines = WorktreeManager(self._runner(project_dir)).sweep_trash("/repo")
+
+        assert len(lines) == 1
+        assert lines[0].startswith("REMOVED")
+        assert not trash.exists()
+
+    def test_leaves_registered_and_non_trash_dirs_alone(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)  # registered
+        forgotten = project_dir / "backend-2"  # orphan, but NOT `.trash-*`
+        forgotten.mkdir()
+
+        lines = WorktreeManager(self._runner(project_dir)).sweep_trash("/repo")
+
+        assert lines == []
+        assert forgotten.exists()  # list_orphans/--orphans' job, not this one's
+
+    def test_live_path_trash_dir_never_touched(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+        trash = project_dir / ".trash-backend-2-99"
+        trash.mkdir()
+
+        lines = WorktreeManager(self._runner(project_dir)).sweep_trash(
+            "/repo", live_paths={str(trash)}
+        )
+
+        assert lines == []
+        assert trash.exists()
+
+    def test_reports_failure_instead_of_swallowing_it(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+        trash = project_dir / ".trash-backend-3-1"
+        trash.mkdir()
+        monkeypatch.setattr(wm, "_rmtree_long_path_safe", lambda p: (False, "ลบไม่ได้ (mock lock)"))
+
+        lines = WorktreeManager(self._runner(project_dir)).sweep_trash("/repo")
+
+        assert len(lines) == 1
+        assert lines[0].startswith("FAILED")
+        assert "mock lock" in lines[0]
+
+    def test_nothing_to_sweep_returns_empty(self, tmp_path):
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)
+
+        assert WorktreeManager(self._runner(project_dir)).sweep_trash("/repo") == []
+
+
+class TestRmtreeLongPathSafeRetry:
+    """#411 (3) — a Windows delete failure is often a transient file lock
+    (AV scan mid-walk, a just-exited process still holding a handle) that
+    clears within a couple hundred ms; `_rmtree_long_path_safe` retries
+    instead of leaving a leftover only a LATER manual `clean` would catch."""
+
+    def test_retries_and_succeeds_on_transient_failure(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        target = tmp_path / "flaky"
+        target.mkdir()
+        (target / "f.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+
+        calls = {"n": 0}
+        real_rmtree = wm.shutil.rmtree
+
+        def flaky_rmtree(path, onerror=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("mock transient lock")
+            real_rmtree(path, onerror=onerror)
+
+        monkeypatch.setattr(wm.shutil, "rmtree", flaky_rmtree)
+
+        ok, err = wm._rmtree_long_path_safe(target)
+
+        assert ok, err
+        assert calls["n"] == 2
+        assert not target.exists()
+
+    def test_gives_up_after_exhausting_retries(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        target = tmp_path / "stuck"
+        target.mkdir()
+        monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            wm.shutil,
+            "rmtree",
+            lambda path, onerror=None: (_ for _ in ()).throw(OSError("permanently locked")),
+        )
+
+        ok, err = wm._rmtree_long_path_safe(target)
+
+        assert not ok
+        assert "permanently locked" in err
+        assert target.exists()
+
 
 class TestMergeIsolated:
     def _runner(self, extra=None):
@@ -1492,6 +1642,64 @@ class TestCleanIsolated:
         assert all(".trash-stub" in line for line in lines), lines
         assert r.ran("worktree", "remove")
         assert r.ran("branch", "-D")
+
+    def test_branch_delete_retries_once_on_transient_failure(self, monkeypatch):
+        """#411 (2) — a `branch -D` failure right after `--force` already
+        destroyed the worktree used to be discarded silently (the call's
+        result was never even checked). A transient lock (packed-refs
+        contention with a sibling `git` process) should clear on retry."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        calls = {"branch_d": 0}
+
+        def runner(args, _cwd):
+            if "branch" in args and "-D" in args:
+                calls["branch_d"] += 1
+                return _fail("cannot lock ref", 128) if calls["branch_d"] == 1 else _ok()
+            if "worktree" in args and "list" in args:
+                return _ok(_PORCELAIN)
+            if "rev-list" in args:
+                return _ok("0\n")
+            if "status" in args:
+                return _ok("")
+            return _ok()
+
+        lines = WorktreeManager(runner).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert all("⚠" not in line for line in lines), lines  # retry saved it — no warning
+        # only the very first `branch -D` call (across both rows) fails —
+        # its immediate retry succeeds, and every later call succeeds too:
+        # one extra call total versus the 2 rows' baseline of 2.
+        assert calls["branch_d"] == 3
+
+    def test_branch_delete_persistent_failure_is_surfaced_not_silent(self, monkeypatch):
+        """A `branch -D` failure that persists past the retry must show up
+        in the reported line (with the manual command to run) instead of a
+        bare "REMOVED" that hides the branch is still dangling."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+
+        def runner(args, _cwd):
+            if "branch" in args and "-D" in args:
+                return _fail("cannot lock ref 'refs/heads/wt/frontend-9'", 128)
+            if "worktree" in args and "list" in args:
+                return _ok(_PORCELAIN)
+            if "rev-list" in args:
+                return _ok("0\n")
+            if "status" in args:
+                return _ok("")
+            return _ok()
+
+        lines = WorktreeManager(runner).clean_isolated("/repo")
+        by_branch = {line.split()[1]: line for line in lines}
+        # the worktree + git registration ARE gone (dir removal + `worktree
+        # remove` both succeeded) — only the branch delete failed, so the
+        # line stays REMOVED with an inline warning, not FAILED.
+        assert by_branch["wt/frontend-9"].startswith("REMOVED")
+        assert "⚠" in by_branch["wt/frontend-9"]
+        assert "branch -D wt/frontend-9" in by_branch["wt/frontend-9"]
 
 
 # ── repair_editable_pth_if_stale (#202) ─────────────────────────────────────
