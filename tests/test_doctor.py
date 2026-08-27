@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1399,6 +1401,7 @@ class TestRunAllChecks:
             "check_resilience",
             "check_version",
             "check_editable_install",
+            "check_rtk_ripgrep",
         )
         for name in no_findings:
             monkeypatch.setattr(f"agent_takkub.doctor.{name}", lambda: [])
@@ -1418,6 +1421,30 @@ class TestRunAllChecks:
             ("claude", "binary"),
             ("runtime", "node"),
         }
+
+    def test_no_findings_list_covers_every_check_in_run_all_checks(self) -> None:
+        # regression guard (#413): a new check_* added to run_all_checks()'s
+        # roster without a matching entry in test_returns_list_of_findings's
+        # no_findings/explicit-mock list silently ran for real (e.g. shelling
+        # out to `rg`) instead of being mocked, breaking on machines missing
+        # that dependency. Derive the expected set from doctor.run_all_checks
+        # itself so this can't drift again.
+        source = inspect.getsource(run_all_checks)
+        check_names = set(re.findall(r'"(check_\w+)"', source))
+
+        mocked_in_test = set(
+            re.findall(
+                r"(check_\w+)",
+                inspect.getsource(TestRunAllChecks.test_returns_list_of_findings),
+            )
+        )
+
+        assert check_names, "expected to find check_* names in run_all_checks source"
+        assert check_names <= mocked_in_test, (
+            "run_all_checks() calls checks not mocked in "
+            "test_returns_list_of_findings: "
+            f"{check_names - mocked_in_test}"
+        )
 
 
 # ---------------------------------------------------------------------------
