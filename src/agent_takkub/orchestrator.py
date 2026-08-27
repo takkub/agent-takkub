@@ -4826,6 +4826,25 @@ class Orchestrator(
         had_pipeline_run_id = _ps_done.pipeline_run_id
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
+        if not had_worktree and isinstance(git_facts, dict):
+            # #410: PaneState.worktree bookkeeping is gone (most commonly a
+            # cockpit restart between assign(isolation="worktree") and this
+            # done() — the snapshot restore below now carries it through
+            # going forward, but an OLDER snapshot, or any other bookkeeping
+            # loss, still lands here) — `collect_done_git_facts` (run off the
+            # Qt thread by cli_server, #408) already tried to reconstruct it
+            # from git state via `WorktreeManager.rediscover_worktree`; use
+            # that instead of silently treating a real worktree pane as a
+            # bare shared-tree one with no baseline.
+            _rediscovered_worktree = git_facts.get("rediscovered_worktree")
+            if _rediscovered_worktree:
+                had_worktree = _rediscovered_worktree
+                _log_event(
+                    "worktree_rediscovered",
+                    role=from_role,
+                    project=project_ns,
+                    branch=_rediscovered_worktree.get("branch"),
+                )
         had_assign_ts = _ps_done.assign_ts
         had_task_file = _ps_done.last_assigned_task_file
         had_assign_base_sha = _ps_done.assign_base_sha
@@ -7232,6 +7251,14 @@ class Orchestrator(
                 # #9: persist last_task + session_uuid so restore_teammates
                 # can re-paste the task and (optionally) resume the session.
                 ps_snap = getattr(self, "_pane_state", {}).get(_exit_key(project, role))
+                # #410: also persist the isolated-worktree / shared-tree
+                # assign-time baseline. Without this, a cockpit restart
+                # between assign() and done() strands a pane's merge-
+                # proposal identity in memory only — done() afterwards sees
+                # a blank PaneState and reports "ตรวจไม่ได้ (snapshot ตอน
+                # assign ไม่ครบ)" with no merge proposal, even though the
+                # branch really does carry commits.
+                assign_dirty_snapshot = ps_snap.assign_dirty_snapshot if ps_snap else None
                 entries.append(
                     {
                         "role": role,
@@ -7239,6 +7266,14 @@ class Orchestrator(
                         "state": pane.state,
                         "last_task": ((ps_snap.last_assigned_task if ps_snap else None) or ""),
                         "session_uuid": ((ps_snap.session_uuid if ps_snap else None) or ""),
+                        "worktree": (ps_snap.worktree if ps_snap else None),
+                        "assign_base_sha": (ps_snap.assign_base_sha if ps_snap else None),
+                        "assign_git_root": (ps_snap.assign_git_root if ps_snap else None),
+                        "assign_dirty_snapshot": (
+                            {k: list(v) for k, v in assign_dirty_snapshot.items()}
+                            if assign_dirty_snapshot is not None
+                            else None
+                        ),
                     }
                 )
             if entries:
@@ -7304,6 +7339,31 @@ class Orchestrator(
                 ok, _ = self.spawn(role, cwd=cwd, project=project)
                 if ok:
                     scheduled += 1
+                    # #410: restore the isolated-worktree / shared-tree
+                    # assign-time baseline saved by snapshot_state() — spawn()
+                    # never touches these fields (its fresh-spawn-clear block
+                    # only resets delivery/degrade bookkeeping), so it's safe
+                    # to set them right after. Without this, a pane resumed
+                    # after a restart looks exactly like a brand-new pane with
+                    # no assignment on record to done(), which then can't
+                    # produce a merge proposal or a "files touched" fact at
+                    # all for whatever it finishes here.
+                    _wt_restore = (entry or {}).get("worktree")
+                    _base_sha_restore = (entry or {}).get("assign_base_sha")
+                    _git_root_restore = (entry or {}).get("assign_git_root")
+                    _dirty_snap_restore = (entry or {}).get("assign_dirty_snapshot")
+                    if _wt_restore or _base_sha_restore or _git_root_restore:
+                        _ps_restore = self._ps(_exit_key(project, role))
+                        if _wt_restore:
+                            _ps_restore.worktree = _wt_restore
+                        if _base_sha_restore:
+                            _ps_restore.assign_base_sha = _base_sha_restore
+                        if _git_root_restore:
+                            _ps_restore.assign_git_root = _git_root_restore
+                        if isinstance(_dirty_snap_restore, dict):
+                            _ps_restore.assign_dirty_snapshot = {
+                                k: tuple(v) for k, v in _dirty_snap_restore.items()
+                            }
                     # #9: re-paste the last task so the pane continues working;
                     # queue a Lead notice (delivered when Lead spawns) either
                     # way so the operator knows the pane was re-spawned.

@@ -245,6 +245,81 @@ class TestInspect:
         assert r.ran("merge-base", "HEAD", "wt/x-1")
 
 
+# ── rediscover_worktree — #410 (lost PaneState.worktree bookkeeping) ────────
+
+
+class TestRediscoverWorktree:
+    _WORKTREE_LIST = (
+        "worktree /repo\n"
+        "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "branch refs/heads/main\n"
+        "\n"
+        "worktree /repo/.worktrees/backend-1\n"
+        "HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "branch refs/heads/wt/backend-1\n"
+    )
+
+    def test_reconstructs_worktree_info_from_git_state(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "--abbrev-ref", "HEAD"], _ok("wt/backend-1\n")),
+                (["rev-parse", "--show-toplevel"], _ok("/repo/.worktrees/backend-1\n")),
+                (["worktree", "list", "--porcelain"], _ok(self._WORKTREE_LIST)),
+                (["merge-base", "HEAD", "wt/backend-1"], _ok("deadbeef\n")),
+            ]
+        )
+        got = WorktreeManager(r).rediscover_worktree("/repo/.worktrees/backend-1")
+        assert got == {
+            "path": "/repo/.worktrees/backend-1",
+            "branch": "wt/backend-1",
+            "base_sha": "deadbeef",
+            "git_root": "/repo",
+            "links": [],
+            "port": 0,
+        }
+        # merge-base against git_root's CURRENT HEAD, never the (unrecoverable)
+        # assign-time sha.
+        assert r.ran("-C", "/repo", "merge-base", "HEAD", "wt/backend-1")
+
+    def test_returns_none_for_a_normal_non_isolated_branch(self):
+        # A shared-tree pane's branch never starts with `wt/` — must not be
+        # mistaken for a lost isolated worktree.
+        r = FakeRunner([(["rev-parse", "--abbrev-ref", "HEAD"], _ok("main\n"))])
+        assert WorktreeManager(r).rediscover_worktree("/repo") is None
+        # No further git calls once the branch name rules it out.
+        assert not r.ran("worktree", "list")
+
+    def test_returns_none_when_detached_head(self):
+        r = FakeRunner([(["rev-parse", "--abbrev-ref", "HEAD"], _ok("HEAD\n"))])
+        assert WorktreeManager(r).rediscover_worktree("/repo") is None
+
+    def test_returns_none_when_worktree_list_fails(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "--abbrev-ref", "HEAD"], _ok("wt/backend-1\n")),
+                (["rev-parse", "--show-toplevel"], _ok("/repo/.worktrees/backend-1\n")),
+                (["worktree", "list", "--porcelain"], _fail("boom", 128)),
+            ]
+        )
+        assert WorktreeManager(r).rediscover_worktree("/repo/.worktrees/backend-1") is None
+
+    def test_returns_none_when_toplevel_itself_is_the_main_checkout(self):
+        # Defensive: a `wt/*`-named branch checked out directly in the main
+        # tree (hand-created, never went through WorktreeManager.create)
+        # must not be reported as its own git_root.
+        r = FakeRunner(
+            [
+                (["rev-parse", "--abbrev-ref", "HEAD"], _ok("wt/backend-1\n")),
+                (["rev-parse", "--show-toplevel"], _ok("/repo\n")),
+                (
+                    ["worktree", "list", "--porcelain"],
+                    _ok("worktree /repo\nHEAD aaaa\nbranch refs/heads/wt/backend-1\n"),
+                ),
+            ]
+        )
+        assert WorktreeManager(r).rediscover_worktree("/repo") is None
+
+
 # ── Generic (cwd-based) probes — #245 shared-tree digest facts ──────────────
 #
 # `commit_count`/`diffstat`/`uncommitted_count` above are now thin wrappers

@@ -1731,6 +1731,14 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     loop quietly re-attaches to whatever roles are still pending and keeps
     polling — a genuine blocking report from an outside role (plain
     `interrupt`, no `reason`) still stops the wait immediately, unaffected.
+
+    #410: a `wait-poll` that comes back "no longer active" most commonly
+    means the cockpit process itself restarted while this call was blocked
+    (`_active_waits` is in-memory only — the successor process has no record
+    of *wait_id*), but is server-side indistinguishable from an explicit
+    `takkub wait --cancel` run elsewhere (see `poll_wait`'s docstring) — so
+    this loop never auto-resumes on it, only enriches the error with the
+    exact command to resume watching whatever roles were still pending.
     """
     if getattr(args, "cancel", False):
         result = _request(_with_project({"cmd": "wait-cancel", "from": _from_role()}))
@@ -1773,6 +1781,28 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 _with_project({"cmd": "wait-poll", "wait_id": wait_id, "from": _from_role()})
             )
             if not poll.get("ok"):
+                # #410: the most common real-world cause of "no longer
+                # active" is the cockpit process itself restarting while
+                # this `takkub wait` was blocked — `_active_waits` lives in
+                # orchestrator memory only, so the successor process comes
+                # up with no record of *wait_id* at all, indistinguishable
+                # (by design — see `poll_wait`'s docstring) from an explicit
+                # `takkub wait --cancel` run elsewhere. Auto-resuming would
+                # silently defeat that cancel, so instead hand back the exact
+                # command to resume watching whatever was still pending —
+                # never left as a bare, actionable-less error.
+                if "no longer active" in (poll.get("msg") or ""):
+                    resume_roles = sorted(last_pending_keys) or roles
+                    role_flags = " ".join(f"--role {r}" for r in resume_roles)
+                    poll = {
+                        **poll,
+                        "msg": (
+                            f"{poll.get('msg')} — most likely the cockpit restarted while "
+                            "this wait was blocked (could also be an explicit "
+                            "`takkub wait --cancel` from another pane). resume watching "
+                            f"with: takkub wait {role_flags}".rstrip()
+                        ),
+                    }
                 return poll
             last = poll
             pending = poll.get("pending") or {}

@@ -108,6 +108,60 @@ def test_collect_done_git_facts_shared_shape_skips_diff_when_status_fails() -> N
     assert not any("diff --stat" in c for c in calls)
 
 
+def test_collect_done_git_facts_rediscovers_lost_worktree_bookkeeping() -> None:
+    """#410: PaneState.worktree can go missing (most commonly a cockpit
+    restart between `assign(isolation="worktree")` and this pane's `done()`)
+    even though its cwd really is sitting in an isolated `wt/*` checkout with
+    real commits on it. Without reconstruction this would fall through to
+    the shared-tree branch, which has no baseline for the cwd at all and
+    reports "ตรวจไม่ได้" instead of proposing the merge."""
+    run, _calls = _scripted_runner(
+        {
+            "rev-parse --abbrev-ref HEAD": GitResult(0, "wt/backend-1\n", ""),
+            "rev-parse --show-toplevel": GitResult(0, "/wt/backend-1\n", ""),
+            "worktree list --porcelain": GitResult(
+                0,
+                "worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\n"
+                "worktree /wt/backend-1\nHEAD bbbb\nbranch refs/heads/wt/backend-1\n",
+                "",
+            ),
+            "merge-base": GitResult(0, "deadbeef\n", ""),
+            "rev-list --count": GitResult(0, "2\n", ""),
+            "status --porcelain": GitResult(0, "", ""),
+            "merge-tree": GitResult(0, "clean tree", ""),
+            "diff --stat": GitResult(0, " a.py | 1 +\n", ""),
+        }
+    )
+    mgr = WorktreeManager(runner=run)
+
+    facts = mgr.collect_done_git_facts(None, "/wt/backend-1", None, None)
+
+    assert facts["kind"] == "worktree"
+    assert facts["commits"] == 2
+    assert facts["dirty"] is False
+    assert facts["merge_conflicts"] is False
+    assert facts["rediscovered_worktree"] == {
+        "path": "/wt/backend-1",
+        "branch": "wt/backend-1",
+        "base_sha": "deadbeef",
+        "git_root": "/repo",
+        "links": [],
+        "port": 0,
+    }
+
+
+def test_collect_done_git_facts_no_cwd_never_attempts_rediscovery() -> None:
+    # No pane_cwd at all (e.g. the pane vanished) — must not raise, and must
+    # not fabricate a "rediscovered_worktree" key on the shared-tree shape.
+    run, _calls = _scripted_runner({})
+    mgr = WorktreeManager(runner=run)
+
+    facts = mgr.collect_done_git_facts(None, None, None, None)
+
+    assert facts["kind"] == "shared"
+    assert "rediscovered_worktree" not in facts
+
+
 # ── _compute_digest_facts consumes git_facts without git ──────────────────
 
 
