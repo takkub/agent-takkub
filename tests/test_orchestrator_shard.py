@@ -171,6 +171,18 @@ class TestShardPaneIndependence:
         assert orch._panes_by_project[TEST_PROJECT]["qa#2"] is pane2
         assert pane1 is not pane2
 
+    def test_close_targets_a_single_live_shard(self, orch: Orchestrator) -> None:
+        """#409: `close("frontend#4")` must terminate that exact shard's
+        pane, not fail "unknown role" — mirrors how send()/wait() already
+        treat `role#N` as an opaque pane-registry key."""
+        pane = _make_pane("frontend#4")
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["frontend#4"] = pane
+
+        ok, msg = orch.close("frontend#4", project=TEST_PROJECT)
+
+        assert ok is True, msg
+        pane.session.terminate.assert_called_once()
+
     def test_shards_have_independent_pane_state(self, orch: Orchestrator) -> None:
         """PaneState for qa#1 must not affect qa#2."""
         key1 = _exit_key(TEST_PROJECT, "qa#1")
