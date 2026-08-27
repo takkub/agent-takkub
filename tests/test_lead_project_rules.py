@@ -59,6 +59,16 @@ def fake_project(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
         return {"projects": {"myproj": {"paths": {"main": str(proj_root)}}}}
 
     monkeypatch.setattr(lc_mod, "load_projects", fake_load)
+
+    # _render_lead_context writes to RUNTIME_DIR/lead-context.md. Isolate it to
+    # this test's own tmp_path — otherwise it writes to the real, shared
+    # RUNTIME_DIR (a module-level binding conftest's autouse _isolate_runtime
+    # fixture doesn't touch, since lead_context isn't in
+    # _RUNTIME_DIR_MODULES), which races other concurrent xdist workers/tests
+    # writing the same file (#415).
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
     return proj_root
 
 
