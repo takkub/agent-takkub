@@ -38,6 +38,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,17 @@ _GIT_TIMEOUT_S = 30
 # Branch/dir prefix so isolated worktrees are unmistakable in `git worktree
 # list`, `git branch`, and the pane title chip.
 _BRANCH_PREFIX = "wt"
+
+# `_stage_for_delete` renames a checkout aside under this prefix before the
+# recursive delete that follows — always our own staged trash, never a real
+# checkout, so `sweep_trash` cleans it up unconditionally (#411).
+_TRASH_PREFIX = ".trash-"
+
+# `_rmtree_long_path_safe` retry count/backoff for a transient Windows file
+# lock (AV scan, delayed handle release right after the git process that was
+# using the dir exits) — see its docstring (#411).
+_RMTREE_ATTEMPTS = 3
+_RMTREE_RETRY_DELAY_S = 0.2
 
 
 @dataclass(frozen=True)
@@ -329,6 +341,22 @@ def _dir_has_node_modules(path: Path) -> bool:
     except OSError:
         pass
     return False
+
+
+def _registered_isolated_worktree_paths(git_root: str, run: GitRunner) -> set[Path]:
+    """Resolved paths of every currently-registered ``wt/*`` worktree of
+    *git_root* — shared anchor logic for `list_orphans` and `sweep_trash`
+    (#411), both of which need it to find candidate project dirs on disk
+    and to know which on-disk children are still real, registered
+    checkouts (never to be touched)."""
+    res = run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+    if not res.ok:
+        return set()
+    return {
+        Path(ent["path"]).resolve()
+        for ent in parse_worktree_list(res.stdout)
+        if ent.get("branch") and ent["branch"].startswith(f"{_BRANCH_PREFIX}/")
+    }
 
 
 def _candidate_project_worktree_dirs(git_root: Path, registered_paths: set[Path]) -> set[Path]:
@@ -619,15 +647,26 @@ def _rmtree_long_path_safe(path: Path) -> tuple[bool, str]:
     mid-walk), a clean return does NOT prove full success — success is
     verified with an explicit post-hoc existence check instead of trusting
     ``shutil.rmtree``'s silence.
+
+    Retries up to :data:`_RMTREE_ATTEMPTS` times with a short backoff (#411):
+    a Windows delete failure here is often a transient file lock (AV scan
+    mid-walk, or a just-exited git/node process that hasn't released its
+    handle yet) that clears within a couple hundred ms — without a retry,
+    that transient turns into a permanent ``.trash-*``/orphan leftover that
+    only a LATER, manually-run ``clean``/``--orphans`` would catch.
     """
     target = _win_long_path(path) if sys.platform == "win32" else str(path)
-    try:
-        shutil.rmtree(target, onerror=_clear_readonly_and_retry)
-    except OSError as exc:
-        return False, str(exc)
-    if _path_exists_long_safe(path):
-        return False, f"{path} ลบไม่หมด (ไฟล์/โฟลเดอร์บางส่วนยังเหลืออยู่)"
-    return True, ""
+    last_err = ""
+    for attempt in range(_RMTREE_ATTEMPTS):
+        try:
+            shutil.rmtree(target, onerror=_clear_readonly_and_retry)
+        except OSError as exc:
+            last_err = str(exc)
+        if not _path_exists_long_safe(path):
+            return True, ""
+        if attempt < _RMTREE_ATTEMPTS - 1:
+            time.sleep(_RMTREE_RETRY_DELAY_S)
+    return False, last_err or f"{path} ลบไม่หมด (ไฟล์/โฟลเดอร์บางส่วนยังเหลืออยู่)"
 
 
 def _stage_for_delete(path: Path) -> tuple[Path | None, str]:
@@ -1125,16 +1164,7 @@ class WorktreeManager:
         anchor is already filtered to isolated ``wt/*`` entries.
         """
         root = Path(git_root).resolve()
-        res = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
-        registered_isolated = (
-            {
-                Path(ent["path"]).resolve()
-                for ent in parse_worktree_list(res.stdout)
-                if ent.get("branch") and ent["branch"].startswith(f"{_BRANCH_PREFIX}/")
-            }
-            if res.ok
-            else set()
-        )
+        registered_isolated = _registered_isolated_worktree_paths(git_root, self._run)
         live = {str(Path(p).resolve()) for p in live_paths}
         managed_root = (DATA_HOME / "worktrees").resolve()
         orphans: list[dict] = []
@@ -1148,6 +1178,8 @@ class WorktreeManager:
             except OSError:
                 continue
             for child in children:
+                if child.name.startswith(_TRASH_PREFIX):
+                    continue  # `sweep_trash` handles these unconditionally (#411)
                 child_r = child.resolve()
                 if child_r in registered_isolated or str(child_r) in live:
                     continue
@@ -1162,6 +1194,54 @@ class WorktreeManager:
                 )
         orphans.sort(key=lambda r: -r["size_bytes"])
         return orphans
+
+    def sweep_trash(
+        self, git_root: str, live_paths: frozenset[str] | set[str] = frozenset()
+    ) -> list[str]:
+        """Unconditionally delete leftover ``.trash-*`` staging dirs (#411).
+
+        `remove_worktree_tree` renames a checkout aside under this prefix
+        before its recursive delete, precisely so a partial/failed delete
+        never leaves debris at the ORIGINAL path — but a failed delete still
+        leaves the staged sibling itself on disk. Before this fix, cleaning
+        that up required a human to notice it and re-run `clean --orphans`
+        (`.trash-*` dirs sat in `list_orphans`'s report gated behind that
+        flag, same as any other unregistered dir).
+
+        That gate is unnecessary for a `.trash-*` name specifically: by the
+        time a checkout was staged there, it had already passed
+        `clean_isolated`/`merge_isolated`/`safe_remove`'s own safety checks
+        (not dirty, not ahead, or `--force` explicitly confirmed) — nothing
+        of unknown value can be sitting in it. So this runs every `clean`
+        call, no opt-in flag needed, and finishes the job the SAME round
+        `remove_worktree_tree`'s retries (see `_rmtree_long_path_safe`)
+        couldn't.
+        """
+        root = Path(git_root).resolve()
+        registered_isolated = _registered_isolated_worktree_paths(git_root, self._run)
+        live = {str(Path(p).resolve()) for p in live_paths}
+        managed_root = (DATA_HOME / "worktrees").resolve()
+        out: list[str] = []
+        for project_dir in _candidate_project_worktree_dirs(root, registered_isolated):
+            if project_dir != managed_root and managed_root not in project_dir.parents:
+                continue  # never scan outside the managed worktrees root
+            if not project_dir.is_dir():
+                continue
+            try:
+                children = [c for c in project_dir.iterdir() if c.is_dir()]
+            except OSError:
+                continue
+            for child in children:
+                if not child.name.startswith(_TRASH_PREFIX):
+                    continue
+                if str(child.resolve()) in live:
+                    continue  # paranoia — a .trash-* dir is never a live pane's cwd
+                ok, err = _rmtree_long_path_safe(child)
+                if ok:
+                    out.append(f"REMOVED {child.name} (.trash ค้างจากรอบก่อน)")
+                else:
+                    out.append(f"FAILED  {child.name} — {err}")
+        return out
 
     def merge_isolated(
         self,
@@ -1299,11 +1379,26 @@ class WorktreeManager:
                     "— รัน `worktree prune` เอง (branch ยังอยู่)"
                 )
                 continue
-            self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+            branch_rm = self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+            if not branch_rm.ok:
+                # transient ref lock (another `git` process racing this one,
+                # e.g. a sibling `clean`/`merge` touching packed-refs) — retry
+                # once before reporting, same reasoning as the rmtree retry
+                # (#411: this call's result used to be discarded entirely, so
+                # a failure here silently left the branch dangling forever
+                # after `--force` had already destroyed its worktree).
+                branch_rm = self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
             if leftover:
                 note += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
+            if not branch_rm.ok:
+                b_lines = (branch_rm.stderr or branch_rm.stdout).strip().splitlines()
+                b_detail = b_lines[-1] if b_lines else f"exit {branch_rm.returncode}"
+                note += (
+                    f" (⚠ ลบ branch ไม่สำเร็จ: {b_detail} — รัน "
+                    f"`git -C {git_root} branch -D {row['branch']}` เอง)"
+                )
             if repair_note:
                 note += f" · {repair_note}"
             out.append(note)

@@ -1065,6 +1065,8 @@ class TestWorktreeCli:
         clean_live_paths_calls: ClassVar[list] = []
         orphans: ClassVar[list] = []
         orphans_live_paths_calls: ClassVar[list] = []
+        trash_lines: ClassVar[list] = []
+        trash_live_paths_calls: ClassVar[list] = []
 
         def __init__(self, *a, **k):
             pass
@@ -1088,6 +1090,10 @@ class TestWorktreeCli:
             type(self).orphans_live_paths_calls.append(set(live_paths))
             return type(self).orphans
 
+        def sweep_trash(self, root, live_paths=frozenset()):
+            type(self).trash_live_paths_calls.append(set(live_paths))
+            return type(self).trash_lines
+
     @staticmethod
     def _no_cockpit(_payload):
         raise RuntimeError("agent-takkub cockpit is not running (no port file).")
@@ -1104,6 +1110,8 @@ class TestWorktreeCli:
         self._FakeWtMgr.merge_result = (True, "merged")
         self._FakeWtMgr.orphans = []
         self._FakeWtMgr.orphans_live_paths_calls = []
+        self._FakeWtMgr.trash_lines = []
+        self._FakeWtMgr.trash_live_paths_calls = []
         monkeypatch.setattr(wm, "WorktreeManager", self._FakeWtMgr)
         monkeypatch.delenv("TAKKUB_ROLE", raising=False)
         # `clean` now makes a best-effort live-pane-guard query (#187). Default
@@ -1341,6 +1349,72 @@ class TestWorktreeCli:
         )
         assert cli.main(["worktree", "clean"]) == 0
         assert self._FakeWtMgr.orphans_live_paths_calls[-1] == {"/w/live-9"}
+
+    def test_clean_sweeps_trash_dirs_by_default_no_flag_needed(self, capsys):
+        """#411 (1) — `.trash-*` leftovers from a partial `remove_worktree_tree`
+        must be swept every plain `clean`, without `--orphans`."""
+        self._FakeWtMgr.trash_lines = ["REMOVED .trash-backend-3-1 (.trash ค้างจากรอบก่อน)"]
+        assert cli.main(["worktree", "clean"]) == 0
+        out = capsys.readouterr().out
+        assert ".trash-backend-3-1" in out
+
+    def test_clean_trash_sweep_failure_sets_nonzero_exit(self):
+        self._FakeWtMgr.trash_lines = ["FAILED  .trash-x-1 — locked"]
+        assert cli.main(["worktree", "clean"]) != 0
+
+    def test_clean_forwards_live_paths_to_sweep_trash(self, monkeypatch):
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: {"ok": True, "msg": "1 live worktree(s)", "paths": ["/w/live-9"]},
+        )
+        assert cli.main(["worktree", "clean"]) == 0
+        assert self._FakeWtMgr.trash_live_paths_calls[-1] == {"/w/live-9"}
+
+    def test_clean_orphans_verify_retries_leftover_after_first_delete_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """#411 (3) — when the first `remove_worktree_tree` call during
+        `--orphans` leaves the dir on disk (e.g. a transient Windows file
+        lock), `clean --orphans` retries it in the SAME round instead of
+        requiring the caller to notice and re-run."""
+        from agent_takkub import worktree_manager as wm
+
+        orphan = tmp_path / "orphan-stuck"
+        orphan.mkdir()
+        self._FakeWtMgr.orphans = [
+            {"path": str(orphan), "size_bytes": 0, "file_count": 0, "has_node_modules": False}
+        ]
+        calls = {"n": 0}
+        real_remove = wm.remove_worktree_tree
+
+        def flaky_remove(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return False, "ลบไม่ได้ (mock lock)", ""
+            return real_remove(path)
+
+        monkeypatch.setattr(wm, "remove_worktree_tree", flaky_remove)
+        rc = cli.main(["worktree", "clean", "--orphans"])
+        assert rc == 0  # the retry succeeded, so nothing stays failed
+        assert calls["n"] == 2  # first attempt (failed) + verify retry (succeeded)
+        assert not orphan.exists()
+
+    def test_clean_orphans_verify_reports_still_stuck_after_retry(self, tmp_path, monkeypatch):
+        """A dir that is STILL there even after the verify retry must keep
+        the command's exit non-zero — the verify pass corrects the count,
+        it never silently swallows a genuine, persistent failure."""
+        from agent_takkub import worktree_manager as wm
+
+        orphan = tmp_path / "orphan-truly-stuck"
+        orphan.mkdir()
+        self._FakeWtMgr.orphans = [
+            {"path": str(orphan), "size_bytes": 0, "file_count": 0, "has_node_modules": False}
+        ]
+        monkeypatch.setattr(wm, "remove_worktree_tree", lambda path: (False, "ลบไม่ได้ (locked)", ""))
+        rc = cli.main(["worktree", "clean", "--orphans"])
+        assert rc != 0
+        assert orphan.exists()  # never actually removed by the mock
 
 
 class TestDiskPruneCli:

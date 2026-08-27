@@ -675,6 +675,12 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
 
         live_paths = _live_worktree_paths_best_effort()
         lines = mgr.clean_isolated(root, force=bool(args.force), live_paths=live_paths)
+        # #411 — `.trash-*` staging dirs `remove_worktree_tree` leaves behind
+        # after a partial/failed delete are our own already-vetted trash
+        # (never a real checkout with work of unknown value), so they're
+        # swept every `clean` call, unlike the gated `--orphans` report
+        # below — no separate manual run needed to finish the job.
+        lines = lines + mgr.sweep_trash(root, live_paths=live_paths)
         if lines:
             for line in lines:
                 _utf8_print(f"  {line}")
@@ -717,6 +723,28 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
                     else:
                         _utf8_print(f"          node_modules ลบแล้ว ({len(nm_dirs)} dir)")
             if do_orphans:
+                # #411 — verify the round actually finished: re-check each
+                # orphan's path directly on disk (not `list_orphans` again —
+                # a fresh registry-vs-disk diff would cost another `git
+                # worktree list`, and would look identical to the first pass
+                # for anything OTHER than what this loop just touched) and
+                # retry any that are still there (e.g. an empty dir whose
+                # first delete lost a transient Windows file-lock race)
+                # instead of leaving it for a human to notice and re-run.
+                stuck = [o for o in orphans if Path(o["path"]).exists()]
+                if stuck:
+                    # each of these was already counted FAILED in the loop
+                    # above (its path is still there only because that first
+                    # `remove_worktree_tree` call reported failure) — a fix
+                    # here undoes that count instead of adding a duplicate.
+                    _utf8_print(f"\nverify: {len(stuck)} orphan dir ยังไม่หายหลัง remove — retry")
+                    for o in stuck:
+                        removed, msg, _leftover = remove_worktree_tree(Path(o["path"]))
+                        if removed and not msg:
+                            _utf8_print(f"  RETRY   REMOVED {o['path']}")
+                            failed -= 1
+                        else:
+                            _utf8_print(f"  RETRY   FAILED: {o['path']} — {msg or 'ลบไม่ครบ'}")
                 orphan_note = f"; ลบ orphan {len(orphans)} dir ({_fmt_bytes(total_bytes)})"
             elif do_nm_only:
                 orphan_note = f"; ลบ node_modules ใน orphan {len(orphans)} dir"
