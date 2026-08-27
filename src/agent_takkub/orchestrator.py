@@ -597,6 +597,22 @@ _STALE_MARKER_CHECKS_TRIED = (
     "is_at_update_splash",
 )
 
+# (#412) Lead is exempt from `_check_idle_teammates`'s forgot-`done` loop
+# entirely, but `_check_stale_markers` above never special-cased Lead — so a
+# provider whose ready-prompt marker doesn't cover every genuinely-idle shape
+# (real report: opencode, macOS) can drive Lead through the SAME #343
+# escalation built for a wedged teammate, paging the operator that Lead
+# "ค้าง/ล่ม" while Lead is doing exactly what Lead is supposed to do: sitting
+# at its own prompt waiting for the human's next instruction after every
+# teammate finished. This is a structural, provider-agnostic guard (no marker
+# text involved, unlike the claude-only empty-composer fallback further
+# below) — for LEAD_DONE_IDLE_GRACE_S after the last teammate in a project
+# stops being "working", Lead's stale-marker streak is held at zero instead
+# of accumulating. Once the grace window elapses with the team still idle,
+# detection behaves exactly as before (a Lead still unrecognised past that
+# point is treated as potentially genuinely stuck, not idle-awaiting-user).
+LEAD_DONE_IDLE_GRACE_S = 1800.0
+
 
 def _stale_marker_footer(sess: PtySession) -> str:
     """Bottom-of-screen diagnostic text for the stale-marker log/escalation —
@@ -1556,6 +1572,12 @@ class Orchestrator(
         # thing in _check_stale_markers so phase 2 runs unconditionally on
         # the very next tick, not gated behind the quiet/cooldown checks.
         self._stale_marker_nudged: dict[str, dict[str, object]] = {}
+        # Per-project timestamp of "every non-Lead teammate stopped being
+        # 'working'" (#412) — drives Lead's LEAD_DONE_IDLE_GRACE_S exemption
+        # from the #343 stale-marker escalation above. Absent/0.0 means at
+        # least one teammate is currently working, or the project has never
+        # been observed all-idle yet. See `_team_idle_since_for`.
+        self._team_idle_since: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -3739,7 +3761,8 @@ class Orchestrator(
 
     def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
         """Names of the processes running under *session* that represent real
-        work, with the provider's own launcher scaffolding filtered out.
+        work, with the provider's own launcher scaffolding filtered out AND
+        any child that has already exited excluded (#412).
 
         #288 split this out of :meth:`_warn_if_live_children`: the same list
         that explains what a close is about to kill is also the proof that a
@@ -3747,6 +3770,17 @@ class Orchestrator(
         to consult it *before* deciding to kill (see `_check_stuck_panes`).
         Returns ``[]`` on any probe failure — every caller must treat "no
         evidence of live work" as inconclusive, never as proof of idleness.
+
+        #412 (real report: macOS, opencode): `psutil.Process(pid).children()`
+        can still enumerate a child that has ALREADY finished — e.g. a `vite
+        build` whose process exited but whose own parent (an intermediate
+        shell/launcher under the pane) hasn't `wait()`-ed on it yet, so POSIX
+        keeps it around as a zombie/defunct entry. That produced a "10
+        subprocess(es) still running... about to be killed" warning on
+        `takkub done` for work that had, in fact, already completed. Exit
+        detection differs by OS (Windows has no zombie state at all), hence
+        the explicit branch below rather than one exception-swallowing check
+        assumed to cover both.
         """
         pid = getattr(session, "_pid", None)
         if not pid:
@@ -3766,6 +3800,29 @@ class Orchestrator(
         scaffolding = scaffolding_process_names_for(provider)
         names: list[str] = []
         for child in children:
+            try:
+                status = child.status()
+            except Exception:
+                # Vanished between the children() snapshot and this check —
+                # gone is the opposite of "still running", never a reason to
+                # warn.
+                continue
+            if sys.platform == "win32":
+                # No zombie state on Windows — a PID enumerated a moment ago
+                # can still have exited by now (the job-object teardown this
+                # warning precedes races against the child's own exit), so
+                # recheck liveness directly rather than trusting the status
+                # string alone.
+                try:
+                    if not child.is_running():
+                        continue
+                except Exception:
+                    continue
+            elif status == psutil.STATUS_ZOMBIE:
+                # POSIX: exited but not yet reaped by its own parent — the
+                # exact #412 shape (a finished `vite build`). Still enumerable
+                # by name, but not "still running" by any meaningful sense.
+                continue
             try:
                 child_name = child.name()
             except Exception:
@@ -5800,6 +5857,56 @@ class Orchestrator(
             )
         return extra
 
+    def _resource_wait_for_role(self, project_ns: str, role: str) -> dict[str, str] | None:
+        """(#412) The resource-governor's own queued-wait entry for *role* in
+        *project_ns*, if any — checked regardless of whether a pane already
+        exists for it.
+
+        `_queued_resource_roles` above only ever surfaces a queued wait for a
+        role with NO pane entry at all (a brand-new spawn blocked before it
+        ever got one) — a re-assign to an ALREADY-spawned pane that then gets
+        governor-queued (e.g. hitting `heavy_project_limit`) used to vanish
+        from `takkub status`/`list` entirely: the pane's stale PREVIOUS
+        display state kept showing, with nothing telling Lead a new task was
+        actually parked behind a resource limit until the slot finally freed.
+        Feeds `_derive_display_state`'s `queued:<reason>` tier via
+        `list_status_detailed`, which now calls this for every role, not
+        just ones missing from the pane map.
+        """
+        governor = getattr(self, "_resource_governor", None)
+        if governor is None:
+            return None
+        try:
+            waiting = governor.snapshot().get("waiting_tasks", [])
+        except Exception:
+            return None
+        for item in waiting:
+            if item.get("project_id") != project_ns:
+                continue
+            if str(item.get("pane_id") or "") != role:
+                continue
+            reason = str(item.get("reason") or "resources")
+            try:
+                resource_class = ResourceClass(str(item.get("resource_class") or ""))
+            except ValueError:
+                return {
+                    "reason": reason,
+                    "message": f"{role} queued — waiting for resources ({reason})",
+                }
+            holders = governor.holders_for_class(resource_class)
+            queue_len = governor.queue_length_for_class(resource_class)
+            message = _describe_resource_wait(
+                role,
+                resource_class,
+                reason,
+                holders,
+                metrics=governor.current_metrics(),
+                own_project=project_ns,
+                queue_len=queue_len,
+            )
+            return {"reason": reason, "message": message}
+        return None
+
     def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
         """Read-only snapshot of every done/FAILED report still sitting
         somewhere in the outbound-to-Lead pipeline instead of already
@@ -6075,6 +6182,7 @@ class Orchestrator(
         base_state: str,
         delivery_unconfirmed: bool,
         quota_stalled: bool = False,
+        resource_wait_reason: str | None = None,
     ) -> str:
         """(#263) Combine the 3 disagreeing sources of truth the issue names —
         `pane.state` (orchestrator-declared at dispatch), the ready-marker
@@ -6100,6 +6208,16 @@ class Orchestrator(
         an orchestrator-declared or notice-derived label, since the CLI
         itself cannot be doing two contradictory things at once):
 
+          -1. **queued:<reason>** (#412) — `resource_wait_reason` is set, i.e.
+             `ResourceGovernor` currently holds a queued task for this exact
+             (project, role) — e.g. "queued:heavy_project_limit". Checked
+             even ahead of quota-stall: this is the one tier that applies to
+             an ALREADY-spawned pane being denied a slot for a NEW task, a
+             case `_queued_resource_roles` never covers (it only ever adds an
+             entry for a role with no pane at ALL yet) — before this, a
+             re-assign that got governor-queued silently kept showing the
+             pane's stale PREVIOUS state on `takkub status`/`list`, with
+             nothing telling Lead a task was actually parked behind a limit.
           0. **stalled:quota** (#301) — `quota_stalled` is True, i.e. the
              idle watchdog's own `_rate_limit_suppressed` already recorded
              `PaneState.rate_limited_until` for this role this tick. Checked
@@ -6162,6 +6280,8 @@ class Orchestrator(
         instead of raising, matching `_pane_display_state`'s own
         `except Exception` fallback.
         """
+        if resource_wait_reason:
+            return f"queued:{resource_wait_reason}"
         if base_state not in ("active", "working"):
             return base_state
         if quota_stalled:
@@ -6322,8 +6442,16 @@ class Orchestrator(
                     model = None
             display_state_base = self._pane_display_state(pane)
             try:
+                resource_wait = self._resource_wait_for_role(project_ns, role)
+            except Exception:
+                resource_wait = None
+            try:
                 display_state = self._derive_display_state(
-                    pane, display_state_base, delivery_unconfirmed, quota_stalled
+                    pane,
+                    display_state_base,
+                    delivery_unconfirmed,
+                    quota_stalled,
+                    resource_wait_reason=(resource_wait["reason"] if resource_wait else None),
                 )
             except Exception:
                 display_state = display_state_base
@@ -6337,6 +6465,7 @@ class Orchestrator(
                 "quota_resets_at": quota_resets_at,
                 "quota_marker": quota_marker,
                 "model": model,
+                "resource_wait_message": resource_wait["message"] if resource_wait else None,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
@@ -6349,6 +6478,7 @@ class Orchestrator(
                 "quota_resets_at": 0.0,
                 "quota_marker": "",
                 "model": None,
+                "resource_wait_message": None,
             }
         for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
@@ -6361,6 +6491,7 @@ class Orchestrator(
                 "quota_resets_at": 0.0,
                 "quota_marker": "",
                 "model": None,
+                "resource_wait_message": state,
             }
         return result
 
@@ -6925,6 +7056,7 @@ class Orchestrator(
                 "transcript_tail": transcript_tail,
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
+                "resource_wait_message": info.get("resource_wait_message"),
             }
 
         any_stalled = any(info["stall_minutes"] is not None for info in panes_out.values())
@@ -7969,6 +8101,38 @@ class Orchestrator(
                         )
                         self._idle_err_last[key] = (err, now)
 
+    def _team_idle_since_for(
+        self, project_name: str, project_panes: dict[str, AgentPane], now: float
+    ) -> float:
+        """(#412) Wall-clock time since every non-Lead pane in *project_name*
+        stopped being `working`, or 0.0 while at least one still is (or none
+        exist at all).
+
+        No teammates in the project is deliberately NOT the same as "every
+        role done" — a Lead with nobody ever assigned yet has no team-done
+        event behind it, so it gets no exemption (matches the pre-existing
+        #343 escalation tests, which use a lone "lead"-only pane map on
+        purpose to prove Lead itself can still be paged when genuinely
+        wedged). The exemption only kicks in once at least one teammate has
+        actually existed and none is currently working.
+
+        Deliberately reads `pane.state` directly rather than any ready-marker
+        screen scrape — the whole point is a signal that works identically
+        for every provider, calibrated or not, since it never looks at PTY
+        text. Recomputed fresh each call instead of updated by `done()`/
+        `assign()` so a pane that closes/exits mid-task (never calling
+        `done()`) still correctly counts as "not working" the very next tick,
+        with no separate teardown path to keep in sync.
+        """
+        teammates = [p for role, p in project_panes.items() if role != LEAD.name]
+        if not teammates:
+            self._team_idle_since.pop(project_name, None)
+            return 0.0
+        if any(getattr(p, "state", None) == "working" for p in teammates):
+            self._team_idle_since.pop(project_name, None)
+            return 0.0
+        return self._team_idle_since.setdefault(project_name, now)
+
     def _check_stale_markers(self, now: float) -> None:
         """Surface a pane whose idle prompt no state marker recognises — the
         silent-break signature of #20 (an upstream CLI reworded its prompt so
@@ -7997,6 +8161,15 @@ class Orchestrator(
         — see _resolve_stale_marker_nudge's docstring for why phase 2 must
         run unconditionally on the very next sweep tick after the nudge, not
         whenever this pane next happens to pass the quiet/cooldown gate.
+
+        (#412) Lead is NOT skipped by the loop below (unlike the
+        forgot-`done` reminder in `_check_idle_teammates`) — a Lead whose
+        provider has no ready-prompt marker covering every genuinely-idle
+        shape would otherwise get escalated as "provider ค้าง/ล่ม" while
+        simply waiting for the human's next instruction. `_team_idle_since_for`
+        grants Lead a LEAD_DONE_IDLE_GRACE_S exemption while every teammate in
+        its project is non-working, checked right after the alive check so it
+        also cancels any nudge already in flight.
         """
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
@@ -8007,6 +8180,12 @@ class Orchestrator(
                         self._stale_marker_streak.pop(key, None)
                         self._stale_marker_nudged.pop(key, None)
                         continue
+                    if name == LEAD.name:
+                        idle_since = self._team_idle_since_for(project_name, project_panes, now)
+                        if idle_since and (now - idle_since) < LEAD_DONE_IDLE_GRACE_S:
+                            self._stale_marker_streak.pop(key, None)
+                            self._stale_marker_nudged.pop(key, None)
+                            continue
                     if key in self._stale_marker_nudged:
                         self._resolve_stale_marker_nudge(project_name, name, pane, sess, key, now)
                         continue

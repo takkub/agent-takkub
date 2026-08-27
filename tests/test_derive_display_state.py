@@ -233,6 +233,34 @@ class TestPriorityOrder:
         pane = _pane("working", session=session)
         assert Orchestrator._derive_display_state(None, pane, "working", False) == "login-required"
 
+    def test_queued_resource_wait_beats_everything_else(self) -> None:
+        """#412: a role literally parked in the resource-governor's queue for
+        a NEW task cannot simultaneously be doing anything else — must win
+        even over login-required, the previous top-priority tier."""
+        session = _StubSession(auth_reason="send /login to login", booting=True, hard_blocked=True)
+        pane = _pane("active", session=session)
+        result = Orchestrator._derive_display_state(
+            None, pane, "active", False, resource_wait_reason="heavy_project_limit"
+        )
+        assert result == "queued:heavy_project_limit"
+
+    def test_queued_resource_wait_applies_even_to_terminal_pane_states(self) -> None:
+        """Unlike every other tier, this one isn't gated behind base_state in
+        ("active", "working") — the whole point is surfacing a queued NEW
+        task regardless of the pane's stale previous state (done/empty/...)."""
+        pane = _pane("done", session=None)
+        result = Orchestrator._derive_display_state(
+            None, pane, "done", False, resource_wait_reason="heavy_project_limit"
+        )
+        assert result == "queued:heavy_project_limit"
+
+    def test_no_resource_wait_falls_through_unchanged(self) -> None:
+        pane = _pane("active", session=None)
+        result = Orchestrator._derive_display_state(
+            None, pane, "active", False, resource_wait_reason=None
+        )
+        assert result == "active"
+
 
 class _RealSignalSession:
     """Delegates to the REAL `PtySession.auth_failure_reason` /
@@ -476,3 +504,49 @@ class TestListStatusDetailedWiring:
 
         assert detailed["backend"]["state"] == "active"
         assert detailed["backend"]["display_state"] == "active"
+
+    def test_queued_reassign_on_an_existing_pane_is_surfaced(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#412: a re-assign to an ALREADY-spawned pane that gets denied a
+        resource-governor slot (e.g. heavy_project_limit) used to vanish —
+        `_queued_resource_roles` only ever adds an entry for a role with NO
+        pane at all yet, so the pane's stale previous state kept showing
+        with nothing telling Lead a new task was parked behind a limit."""
+        from agent_takkub.resource_governor import GovernorLimits, ResourceClass, ResourceGovernor
+
+        project = "display-state-wiring"
+        pane = _pane("active", session=None, provider="claude")
+        orch._panes_by_project[project] = {"frontend": pane}
+        orch._lead_digest_queue[project] = collections.deque()
+        orch._lead_notify_queue[project] = collections.deque()
+        governor = ResourceGovernor(GovernorLimits(max_heavy_per_project=2))
+        orch._resource_governor = governor
+        governor.request_slot(
+            project_id=project,
+            pane_id="backend",
+            task_id="t-held",
+            resource_class=ResourceClass.HEAVY,
+        )
+        governor.request_slot(
+            project_id=project,
+            pane_id="backend#2",
+            task_id="t-held-2",
+            resource_class=ResourceClass.HEAVY,
+        )
+        governor.enqueue(
+            project_id=project,
+            pane_id="frontend",
+            task_id="t-wait",
+            resource_class=ResourceClass.HEAVY,
+            reason="heavy_project_limit",
+        )
+
+        detailed = orch.list_status_detailed(project=project)
+
+        # The pane's own (unrelated) base state is untouched — only the
+        # additive `display_state` tier changes, same additive-only contract
+        # every other tier in this priority chain already follows.
+        assert detailed["frontend"]["state"] == "spawning"
+        assert detailed["frontend"]["display_state"] == "queued:heavy_project_limit"
+        assert "heavy_project_limit" in (detailed["frontend"]["resource_wait_message"] or "")

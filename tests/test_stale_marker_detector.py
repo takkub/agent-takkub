@@ -479,3 +479,98 @@ def test_is_claude_empty_composer_rejects_bare_prompt_without_borders() -> None:
 
     lines = ["some conversation text", "❯", "more conversation text"]
     assert _is_claude_empty_composer(lines) is False
+
+
+# -- #412: Lead's idle-awaiting-user grace exemption --------------------------
+
+
+def _add_done_teammate(orch: Orchestrator, project: str, role: str) -> None:
+    """A teammate pane that has already finished its task (state != working)
+    — the "every role done" shape #412's grace exemption is keyed on."""
+    pane = MagicMock()
+    pane.state = "done"
+    pane.session = _sess(quiet=2.0)  # streaming/no-op if the sweep visits it
+    orch._panes_by_project.setdefault(project, {})[role] = pane
+
+
+def test_lead_not_flagged_within_grace_after_team_done(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No teammates working (the "every role is done" shape) → Lead gets
+    LEAD_DONE_IDLE_GRACE_S of slack even though its screen matches no
+    marker (the opencode/macOS real-world report: Lead genuinely idle,
+    waiting on the human for the next commit/push decision)."""
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _add_done_teammate(orch, "projX", "backend")
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    # 3 ticks * (COOLDOWN+1)s stays comfortably inside LEAD_DONE_IDLE_GRACE_S
+    # (1200s elapsed vs. the 1800s grace) — the 4th tick is where the grace
+    # window itself would lapse (see the next test).
+    _tick_n_cooldowns(orch, 3)
+
+    assert not [e for e in events if e[0] == "ready_marker_possibly_stale"]
+    assert not [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert not notify_calls
+    assert "projX::lead" not in orch._stale_marker_streak
+
+
+def test_lead_escalates_once_grace_window_elapses(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Still unrecognised well past LEAD_DONE_IDLE_GRACE_S → no longer
+    "just idle-awaiting-user", so normal #343 escalation resumes exactly as
+    it would for any other pane. Ticks 0-2 are exempt (grace); the streak
+    then accumulates fresh from tick 3 onward, reaching the escalation
+    threshold at tick 6 (3 exempt + 3 to build the streak + 1 resolve tick)."""
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _add_done_teammate(orch, "projX", "backend")
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, 7)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 1
+    assert escalations[0][1]["role"] == "lead"
+    assert escalations[0][1]["streak"] == _STALE_MARKER_ESCALATE_EVERY
+    assert len(notify_calls) == 1
+
+
+def test_lead_with_no_teammates_ever_assigned_gets_no_grace(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lone Lead pane with no teammate roles at all is NOT the "every role
+    done" shape (nothing was ever assigned to finish) — must escalate on the
+    ordinary schedule, exactly like the pre-#412 behaviour every other test
+    in this file already pins for a "lead"-named pane."""
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    assert [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+
+
+def test_lead_grace_voided_by_a_still_working_teammate(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A teammate still `working` means the team is NOT "every role done" —
+    Lead gets no exemption and escalates on the same schedule as before #412."""
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    teammate_pane = MagicMock()
+    teammate_pane.session = _sess(quiet=2.0)
+    teammate_pane.state = "working"
+    orch._panes_by_project["projX"]["backend"] = teammate_pane
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 1
+    assert escalations[0][1]["role"] == "lead"
+    assert len(notify_calls) == 1
+    assert "projX" not in orch._team_idle_since

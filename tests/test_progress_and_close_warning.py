@@ -542,6 +542,142 @@ class TestWarnIfLiveChildren:
         assert "docker" in written
         assert "node" not in written
 
+    def test_zombie_child_posix_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
+        """#412 (real report: macOS, opencode): a `vite build` that already
+        exited but hasn't been reaped by its own parent yet is enumerable by
+        `psutil` as a zombie/defunct entry on POSIX — not "still running",
+        must not warn."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        import psutil
+
+        child = MagicMock()
+        child.name.return_value = "vite"
+        child.status.return_value = psutil.STATUS_ZOMBIE
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_zombie_child_beside_real_work_posix_only_counts_real_work(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        import psutil
+
+        finished = MagicMock()
+        finished.name.return_value = "vite"
+        finished.status.return_value = psutil.STATUS_ZOMBIE
+        alive = MagicMock()
+        alive.name.return_value = "docker"
+        alive.status.return_value = psutil.STATUS_RUNNING
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [finished, alive]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "1 subprocess" in written
+        assert "docker" in written
+        assert "vite" not in written
+
+    def test_child_vanished_mid_probe_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
+        """Exited in the gap between the children() snapshot and this check
+        (any OS) — psutil raises when querying a PID that's already gone."""
+        import psutil
+
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        child = MagicMock()
+        child.status.side_effect = psutil.NoSuchProcess(1234)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_windows_no_longer_running_child_stays_silent(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """Windows has no zombie state, but a child that raced its own exit
+        against this check must still be excluded via a direct liveness
+        recheck rather than the (POSIX-only) zombie-status branch."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        import psutil
+
+        child = MagicMock()
+        child.name.return_value = "node.exe"
+        child.status.return_value = psutil.STATUS_RUNNING
+        child.is_running.return_value = False
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_windows_still_running_child_warns(self, orch: Orchestrator, monkeypatch) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        import psutil
+
+        child = MagicMock()
+        child.name.return_value = "docker.exe"
+        child.status.return_value = psutil.STATUS_RUNNING
+        child.is_running.return_value = True
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "frontend", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "docker.exe" in written
+
     def test_close_calls_warn_before_terminate(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())
         session = _make_alive_session()

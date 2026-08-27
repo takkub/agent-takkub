@@ -490,6 +490,48 @@ class TestBrowserShardAssignWarning:
         assert "เบราว์เซอร์" not in out
 
 
+class TestShardFanoutResourceWaitVisibility:
+    """#412: a shard fan-out reply used to collapse every shard's own `msg`
+    into a bare "queued N/N shards" count, discarding a resource-governor
+    wait reason (e.g. `heavy_project_limit`) some shard's own `assign`
+    response carried — the summary read "queued 3/3 shards" even when one
+    shard was actually just PARKED behind another pane's slot, not spawned."""
+
+    def test_resource_blocked_shard_reason_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        responses = iter(
+            [
+                {"ok": True, "msg": "task queued for backend#1 (sending when ready)"},
+                {
+                    "ok": True,
+                    "msg": (
+                        "backend#2 queued — waiting for heavy slot "
+                        "(heavy_project_limit, blocked by backend#1)"
+                    ),
+                },
+            ]
+        )
+        monkeypatch.setattr(cli, "_request", lambda _payload: next(responses))
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        cli.main(["assign", "--role", "backend", "--shards", "2", "build it"])
+
+        out = capsys.readouterr().out
+        assert "heavy_project_limit" in out
+        assert "blocked by backend#1" in out
+
+    def test_ordinary_shard_success_is_not_mistaken_for_resource_wait(
+        self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The routine per-shard success wording (the default stub's plain
+        "stubbed" message) must not itself trip the resource-wait detection."""
+        cli.main(["assign", "--role", "backend", "--shards", "2", "build it"])
+        out = capsys.readouterr().out
+        assert "queued 2/2 shards" in out
+        assert "heavy_project_limit" not in out
+
+
 class TestSelfCommitIsolationWarning:
     """#399: a task that tells the pane to commit its own work only actually
     works under `--isolation worktree` — `pane_guard`'s git_lead_only rule

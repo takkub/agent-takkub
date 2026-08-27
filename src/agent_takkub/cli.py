@@ -534,7 +534,26 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "ok": ok_count == shards,
                 "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip() + warn,
             }
-        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards{warn}"}
+        # (#412) A shard can come back `ok=True` yet only PARKED behind a
+        # resource-governor limit (heavy_project_limit, machine overload, the
+        # pane-count cap, ...) rather than actually spawned — the bare
+        # "queued N/N shards" count below used to swallow that distinction
+        # completely, since a routine successful shard ALSO says "task
+        # queued for ... (sending when ready)". The two are told apart by
+        # wording: `_describe_resource_wait`/`_enqueue_assign`'s messages are
+        # the only ones shaped "<role> queued — ..." or "queued (machine at
+        # capacity ...)" — anything else is the ordinary delivery-queue note.
+        resource_blocked = [
+            str(r["msg"])
+            for r in results
+            if r.get("ok")
+            and (
+                "queued —" in str(r.get("msg", ""))
+                or "queued (machine at capacity" in str(r.get("msg", ""))
+            )
+        ]
+        detail = ("\n" + "\n".join(resource_blocked)) if resource_blocked else ""
+        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards{warn}{detail}"}
     resp = _request(
         _with_project(
             {
@@ -1618,6 +1637,14 @@ def _print_status_report(report: object) -> None:
             quota_human = info.get("quota_resets_human") or "?"
             marker_str = f' — "{quota_marker}"' if quota_marker else ""
             print(f"    ⏳ quota resets in {quota_human}{marker_str}")
+        # (#412) A "queued:<reason>" display_state means a NEW task for this
+        # role is sitting in the resource-governor's queue (e.g. it hit
+        # heavy_project_limit) — name the reason and the blocking pane(s)
+        # instead of leaving Lead to guess from the bare tag on the line above.
+        if state.startswith("queued:"):
+            wait_msg = info.get("resource_wait_message") or ""
+            if wait_msg:
+                print(f"    ⏳ {wait_msg}")
         model = info.get("model")
         if model:
             print(f"    model: {model}")
