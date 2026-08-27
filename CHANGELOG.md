@@ -2,6 +2,13 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [vNEXT]
+
+### Fixed (แก้)
+
+- **codex pane ค้างหน้า `Starting MCP servers (0/3)` ~110 วิทุก spawn ทั้งที่ MCP server พร้อมใน 2-3 วิ (#416)** — log ของ codex เอง (`logs_2.sqlite`) ยืนยัน server ทุกตัวตอบ `initialize` + `startupStatus` ครบใน ~2 วิ แต่ TUI ใน pane ไม่ repaint/ไม่โชว์ prompt จนกว่าจะมี input ใดๆ เข้ามา (พิสูจน์สด: `takkub send "."` ที่ +30 วิ → "Working" ทันที ข้อความเข้า composer) → delivery รอ marker จน blind-paste 90 วิ / boot-stall 110 วิ; reproduce นอก cockpit (ConPTY เดียวกัน, argv/env/cwd เดียวกัน) ไม่ค้าง — trigger ใน pane ยังไม่ชี้ตัว
+  → แก้: knob ใหม่ `ProviderSpec.boot_splash_paste_after_s` (codex 10 วิ, env `TAKKUB_BOOT_SPLASH_PASTE_AFTER_S_CODEX`, provider อื่น 0 = เดิม) — `_send_when_ready` เห็น MCP splash + ไม่มี modal + ผ่าน 10 วิหลัง session ขึ้น → paste+Enter เลย (event `task_deliver_boot_splash_paste`) แล้วเข้า acceptance-verify/re-deliver ปกติ · E2E บน dev: codex qa (3 MCP) task ถึงมือ **12 วิ** (เดิม 109-113 วิ), gemini ไม่กระทบ (21 วิ ตาม #404 เดิม)
+
 ## [v1.6.7] - 2026-08-27
 
 ### Fixed (แก้)

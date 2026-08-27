@@ -292,6 +292,32 @@ class ProviderSpec:
     # top so this can be tuned without a code change.
     post_boot_settle_s: float = 0.0
 
+    # (2026-08-27, codex "Starting MCP servers (0/3)" stall) seconds after the
+    # pane's session came up that a delivery may paste+submit the task EVEN
+    # THOUGH the screen still shows this provider's MCP boot splash. 0 = never
+    # (unchanged: wait for the boot marker to clear, then the ready prompt).
+    #
+    # Why a provider needs this at all — root-caused live on the dev cockpit
+    # 2026-08-27 (dev codex-cli 0.150.1, pywinpty ConPTY): codex's own log DB
+    # (`CODEX_HOME/logs_2.sqlite`) proves every injected MCP server answers
+    # `initialize` and all `mcpServer/startupStatus/updated` events fire
+    # within ~2-3s of spawn, yet the TUI keeps painting "Starting MCP servers
+    # (0/3): … (0s • esc to interrupt)" — its elapsed counter frozen — and
+    # emits no ready prompt until EITHER any input reaches the pane (a single
+    # `takkub send` keystroke at +30s flipped it to "Working" instantly, the
+    # text landing in the composer and running) OR ~110s pass on its own.
+    # Standalone reproductions outside the cockpit (same argv, env, cwd,
+    # ConPTY backend, early resizes, DA/focus answers) never stall, so the
+    # trigger is still unattributed; what IS proven is that the composer is
+    # live behind the splash and accepts a task. Pasting after a short
+    # settle therefore turns a 90-110s dead wait (and the blind-paste health
+    # note it ends in) into a normal delivery. Pairs with, and does not
+    # replace, the BOOT_STALL_GRACE/ceiling escalations — if the paste is
+    # NOT accepted (cold `npx` cache still genuinely starting, #407) the
+    # ordinary acceptance verification / re-deliver path (#404) still runs.
+    # Read through `boot_splash_paste_after_s_for()` (env override).
+    boot_splash_paste_after_s: float = 0.0
+
     # ─── 14. Close-time scaffolding filter (#272) ───
     # Process names (matched case-insensitively, `.exe` suffix ignored so one
     # entry covers both Windows and POSIX) that are THIS provider's own
@@ -606,6 +632,13 @@ codex_spec = ProviderSpec(
     # actual blind-paste backstop, this just keeps the common case from
     # relying on that extension at all.
     ready_wait_ms=180_000,  # lead_inbox.py:434-435 (cold-boot + MCP-boot allowance)
+    # Composer is live behind the "Starting MCP servers (n/N)" splash while the
+    # TUI sits frozen on it (see ProviderSpec.boot_splash_paste_after_s):
+    # paste the task 10s after the session is up instead of waiting ~110s.
+    # 10s sits in the user-directed 5-10s settle band (same band as gemini's
+    # #404 window) — enough for a warm-cache MCP boot (measured 2-7s for
+    # playwright/chrome-devtools/graft) to have genuinely finished.
+    boot_splash_paste_after_s=10.0,
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
@@ -1347,6 +1380,24 @@ def account_pending_markers_for(provider: str) -> tuple[str, ...]:
     wording for a specific provider-side gate, not a cross-provider phrase."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.account_pending_markers if spec is not None else ()
+
+
+def boot_splash_paste_after_s_for(provider: str) -> float:
+    """Seconds after which delivery may paste onto `provider`'s MCP boot
+    splash (see ``ProviderSpec.boot_splash_paste_after_s``).
+    ``TAKKUB_BOOT_SPLASH_PASTE_AFTER_S_<NAME>`` overrides the spec value
+    (same shape as `post_boot_settle_s_for`); 0.0 disables. 0.0 for an
+    unknown provider or an unparseable override — never a crash on the
+    delivery path."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    default = spec.boot_splash_paste_after_s if spec is not None else 0.0
+    override = os.environ.get(f"TAKKUB_BOOT_SPLASH_PASTE_AFTER_S_{provider.upper()}")
+    if override is None:
+        return default
+    try:
+        return max(0.0, float(override))
+    except ValueError:
+        return default
 
 
 def post_boot_settle_s_for(provider: str) -> float:

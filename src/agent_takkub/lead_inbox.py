@@ -1121,6 +1121,22 @@ class LeadInboxMixin:
             )
         except Exception:
             _settle_required_polls = 0
+        # (2026-08-27) codex "Starting MCP servers" splash: the composer behind
+        # it is live and accepts a paste while the TUI stays frozen on the
+        # splash for ~110s (see ProviderSpec.boot_splash_paste_after_s for the
+        # live root-cause evidence). Resolved once per call like the #404
+        # window above; 0 for every provider except codex today.
+        try:
+            from .provider_spec import boot_splash_paste_after_s_for
+
+            _splash_paste_after_ms = int(
+                boot_splash_paste_after_s_for(
+                    getattr(pane.model, "provider_name", None) or "claude"
+                )
+                * 1000
+            )
+        except Exception:
+            _splash_paste_after_ms = 0
         # #235: two `assign`s for the same role can start two independent
         # _send_when_ready poll loops — nothing dedupes them *before*
         # _deliver() runs (DeliveryManager's single-flight gate only exists
@@ -1606,6 +1622,38 @@ class LeadInboxMixin:
                         )
                 else:
                     boot_stall_elapsed[0] = 0
+            if _still_booting and _splash_paste_after_ms > 0:
+                # (2026-08-27) Paste onto the MCP boot splash once the
+                # provider's settle window has passed — measured from the
+                # moment the session came up (same clock as the boot
+                # ceiling, #356), not from the caller's call time. Gated on
+                # the splash being an MCP boot line specifically (never a
+                # trust/login/other boot screen — those have no composer) and
+                # on no modal prompt sitting on top. `_deliver()` runs the
+                # ordinary paste+submit + acceptance verification, so a
+                # paste the provider does NOT take (cold `npx` still
+                # genuinely starting, #407) falls into the same re-deliver /
+                # unconfirmed paths a normal delivery would.
+                _splash_elapsed_ms = elapsed[0] - (elapsed_at_session_alive[0] or 0)
+                # Reuse this poll's `_reason` read (never a second
+                # `_prompt_block_reason()` call — see the #271 note above).
+                if _splash_elapsed_ms >= _splash_paste_after_ms and not _reason:
+                    try:
+                        _splash_line = pane.session.boot_phase_detail()
+                        if not isinstance(_splash_line, str):
+                            _splash_line = ""
+                    except Exception:
+                        _splash_line = ""
+                    if "mcp" in _splash_line.lower():
+                        _log_event(
+                            "task_deliver_boot_splash_paste",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            elapsed_sec=round(_splash_elapsed_ms / 1000, 1),
+                            boot_line=_splash_line[:120],
+                        )
+                        _deliver()
+                        return
             try:
                 _pane_ready_now = pane.session.is_at_ready_prompt()
             except Exception:
