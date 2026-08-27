@@ -85,8 +85,15 @@ def test_scan_skills_tolerates_malformed_yaml(tmp_path: Path) -> None:
 
 def test_scan_skills_finds_real_repo_skill() -> None:
     """The task spec's concrete example — cockpit-ui-style must exist for
-    real under this checkout's .claude/skills/ and be discoverable."""
-    result = scan_skills(config.REPO_ROOT)
+    real under this checkout's .claude/skills/ and be discoverable.
+
+    Uses the real on-disk repo root directly, not `config.REPO_ROOT` — the
+    global test-isolation fixture (tests/conftest.py's `_isolate_runtime`)
+    redirects that to an isolated tmp dir by default so no test writes into
+    the real checkout, which would make this real-filesystem check see an
+    empty `.claude/skills/` instead of this repo's actual skills."""
+    real_repo_root = Path(__file__).resolve().parents[1]
+    result = scan_skills(real_repo_root)
     names = {s.name for s in result}
     assert "cockpit-ui-style" in names
 
