@@ -24,6 +24,22 @@ from agent_takkub.spawn_engine import (
 TEST_PROJECT = "spawn-task-test"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_data_home(tmp_path, monkeypatch):
+    """`orch.assign()` below is the real orchestrator method, not a mock, so
+    it runs the real context-build pipeline (`facade._save_gate_trace` ->
+    `trace_store.save_last_trace`) whenever Core V2 context is enabled. That
+    write resolves its path via `config.DATA_HOME`, which equals REPO_ROOT
+    on this dev checkout's default resolution (`config.py`'s
+    `_resolve_data_home`) — unpatched, every real `assign()` call in this
+    file leaks `<repo_root>/context/last_context_trace.json` into the
+    working tree (confirmed live). Same fix/reasoning as
+    `test_orchestrator_v2_context_hook.py`'s `_isolate_data_home` fixture."""
+    import agent_takkub.config as config
+
+    monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")
+
+
 def _pump_until(app: QCoreApplication, predicate, timeout: float = 5.0) -> bool:
     """Same idiom as test_remote_e2e_round2.py / test_remote_http_server.py /
     test_resume_session_picker.py — a fixed `for _ in range(N): processEvents()`
