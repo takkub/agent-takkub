@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.8] - 2026-08-27
+
 ### Fixed (แก้)
 
 - **codex pane ค้างหน้า `Starting MCP servers (0/3)` ~110 วิทุก spawn ทั้งที่ MCP server พร้อมใน 2-3 วิ (#416)** — log ของ codex เอง (`logs_2.sqlite`) ยืนยัน server ทุกตัวตอบ `initialize` + `startupStatus` ครบใน ~2 วิ แต่ TUI ใน pane ไม่ repaint/ไม่โชว์ prompt จนกว่าจะมี input ใดๆ เข้ามา (พิสูจน์สด: `takkub send "."` ที่ +30 วิ → "Working" ทันที ข้อความเข้า composer) → delivery รอ marker จน blind-paste 90 วิ / boot-stall 110 วิ; reproduce นอก cockpit (ConPTY เดียวกัน, argv/env/cwd เดียวกัน) ไม่ค้าง — trigger ใน pane ยังไม่ชี้ตัว
