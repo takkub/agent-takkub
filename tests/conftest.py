@@ -750,6 +750,38 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
             )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _guard_repo_root_no_leaked_context_dir():
+    """Regression backstop for the `trace_store._trace_path()` leak: it
+    resolves via `config.DATA_HOME`, which equals REPO_ROOT on this dev
+    checkout's default resolution (`config.py`'s `_resolve_data_home`)
+    whenever some test's real context-build pipeline call reaches it with an
+    unpatched `config.DATA_HOME` — confirmed live as
+    `test_spawn_task_delivery.py`'s real (unmocked) `orch.assign()` calls
+    writing `<repo_root>/context/last_context_trace.json` before that file
+    gained its own `_isolate_data_home` fixture (see
+    `test_orchestrator_v2_context_hook.py`'s fixture of the same name for
+    the established fix). Session-scoped so it catches the leak regardless
+    of which test causes it, not just this one file.
+
+    Do NOT "fix" a failure here by gitignoring `context/` — find the test
+    with the real (unpatched) pipeline call and give it its own
+    `monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data")`, same as
+    the two files referenced above."""
+    context_dir = _REPO_ROOT_FOR_WHEEL_BUILD / "context"
+    pre_existing = context_dir.exists()
+    yield
+    if not pre_existing and context_dir.exists():
+        leaked = sorted(p.name for p in context_dir.iterdir())
+        pytest.fail(
+            f"test session leaked real files into {context_dir} via an "
+            f"unisolated config.DATA_HOME resolving to REPO_ROOT: {leaked}. "
+            "Isolate config.DATA_HOME in the leaking test (see "
+            "test_orchestrator_v2_context_hook.py's _isolate_data_home) — "
+            "do not gitignore context/ instead."
+        )
+
+
 @pytest.fixture
 def isolated_v2_data_home(tmp_path):
     """The exact path `_isolate_runtime` (above) redirects `storage_layout_v2()`'s
