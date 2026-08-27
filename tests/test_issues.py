@@ -490,7 +490,11 @@ def test_new_issue_cockpit_bug_overrides_cwd_to_repo_root() -> None:
     fired from a pms-api pane must NOT file against the pms-api repo —
     cockpit/orchestrator/CLI bugs always go to agent-takkub.
     """
-    from agent_takkub.config import REPO_ROOT
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT
 
     detected_cwds: list = []
 
@@ -519,7 +523,11 @@ def test_new_issue_default_routes_to_agent_takkub_repo(tmp_path) -> None:
     (REPO_ROOT) regardless of cwd, so a forgotten flag can't leak a cockpit
     bug onto another project's repo. This is the fix for issues filed against
     other projects when they should only be agent-takkub bugs."""
-    from agent_takkub.config import REPO_ROOT
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT
 
     detected_cwds: list = []
 
@@ -600,8 +608,11 @@ def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monk
 def test_cockpit_repo_cwd_dev_checkout_returns_repo_root() -> None:
     """DATA_HOME == REPO_ROOT (dev checkout) → REPO_ROOT unchanged, matching
     every pre-#237 test's assumption."""
-    from agent_takkub.config import REPO_ROOT
-    from agent_takkub.issues import _cockpit_repo_cwd
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT, _cockpit_repo_cwd
 
     assert _cockpit_repo_cwd() == REPO_ROOT
 
@@ -822,7 +833,11 @@ def test_list_issues_default_cockpit_bug_routes_to_repo_root(tmp_path) -> None:
     """`list_issues()` with no flag must detect the repo at REPO_ROOT, exactly
     like `new_issue()` — regardless of a caller-supplied cwd pointing at some
     other pane's directory."""
-    from agent_takkub.config import REPO_ROOT
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT
 
     detected_cwds: list = []
 
@@ -855,7 +870,11 @@ def test_list_issues_no_cockpit_bug_uses_cwd(tmp_path) -> None:
 
 
 def test_close_issue_default_cockpit_bug_routes_to_repo_root() -> None:
-    from agent_takkub.config import REPO_ROOT
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT
 
     detected_cwds: list = []
 
@@ -872,7 +891,11 @@ def test_close_issue_default_cockpit_bug_routes_to_repo_root() -> None:
 
 
 def test_show_issue_default_cockpit_bug_routes_to_repo_root() -> None:
-    from agent_takkub.config import REPO_ROOT
+    # issues.py binds its own REPO_ROOT at import time (`from .config import
+    # ... REPO_ROOT`), so it doesn't track conftest's per-test
+    # monkeypatch.setattr(config, "REPO_ROOT", ...) isolation — import the
+    # same bound copy _cockpit_repo_cwd() actually reads.
+    from agent_takkub.issues import REPO_ROOT
 
     detected_cwds: list = []
 
