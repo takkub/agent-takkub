@@ -436,6 +436,38 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if _real_settings_home is not None
         else {}
     )
+    # `DATA_HOME` defaults to `REPO_ROOT` verbatim in a dev checkout
+    # (config.py's `_resolve_data_home`) — exactly this repo's own checkout
+    # when the suite runs from source — so any CALL-TIME reader of
+    # `config.DATA_HOME` (unlike a module-level constant bound once at
+    # import, e.g. PROJECTS_JSON/RUNTIME_DIR/ASSETS_ROOT/CLI_BIN_DIR — those
+    # don't move no matter what we patch here) that a test exercises without
+    # its own isolation fixture writes into the REAL repo checkout. Confirmed
+    # live: `trace_store._trace_path()` (`config.DATA_HOME / "context" /
+    # "last_context_trace.json"`) leaked into this checkout's real `context/`
+    # dir from test_orchestrator_assign_resource_gate.py's and
+    # test_orchestrator_shard.py's real (unmocked) `orch.assign()` calls,
+    # caught by `_guard_repo_root_no_leaked_context_dir` below.
+    #
+    # Redirect BOTH `DATA_HOME` and `REPO_ROOT` to the SAME isolated tmp dir
+    # — not just `DATA_HOME` — so `DATA_HOME == REPO_ROOT` stays True by
+    # default: every "dev checkout" branch in config.py (`provider_home_env`,
+    # `instance_identity_label`, `instance_window_title`, ...) keeps taking
+    # the same branch it always has, just pointed at an isolated location
+    # instead of the real repo. Patching `DATA_HOME` alone was tried before
+    # and reverted (see the `storage_layout_v2` comment below — proven: broke
+    # 3 test_spawn_v2_account_env.py tests that rely on the default
+    # `DATA_HOME == REPO_ROOT` identity with no fixture of their own, e.g.
+    # `provider_home_env` must stay `{}`); pairing `REPO_ROOT` alongside it
+    # preserves that identity instead of breaking it. A test with its own
+    # `monkeypatch.setattr(config, "REPO_ROOT"/"DATA_HOME", ...)` — the
+    # codebase's existing convention for simulating a specific instance, see
+    # test_config.py — still wins: autouse fixtures run first, so the test's
+    # own call simply overwrites this default afterward.
+    if cfg is not None and hasattr(cfg, "REPO_ROOT") and hasattr(cfg, "DATA_HOME"):
+        _isolated_repo_root = tmp_path / "_isolated_takkub" / "repo-root"
+        monkeypatch.setattr(cfg, "REPO_ROOT", _isolated_repo_root, raising=False)
+        monkeypatch.setattr(cfg, "DATA_HOME", _isolated_repo_root, raising=False)
     if cfg is not None and hasattr(cfg, "PORT_FILE"):
         monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)
     # epic #309 Wave C: core.routing.Router.effective_model_for's own
