@@ -200,3 +200,40 @@ class TestCancelQueuedResourceTask:
         ok, msg = orch.cancel_task_delivery("backend", project=PROJECT)
         assert ok is False
         assert "no pane open" in msg
+
+
+class TestCloseQueuedResourceTask:
+    """#409: `takkub close --role <r>#N` used to fail "unknown role" for a
+    shard still parked behind the resource governor (assign() acked async
+    but spawn() hasn't run yet) — `takkub status` already shows it queued,
+    but `close()` bailed before ever reaching the cancel path
+    `cancel_task_delivery` already grew for this in #303 item 2. `close()`
+    now falls back to that same `_cancel_queued_resource_task` helper."""
+
+    def test_close_cancels_a_queued_shard_and_closes_ledger_row(self, orch: Orchestrator) -> None:
+        _occupy_the_only_browser_slot(orch)
+        orch.assign("qa#2", "/api", "run e2e suite", project=PROJECT)
+        assert len(orch._resource_governor._waiting.get(PROJECT, [])) == 1
+
+        ok, msg = orch.close("qa#2", project=PROJECT)
+
+        assert ok is True, msg
+        assert "cancelled" in msg
+        assert (
+            PROJECT not in orch._resource_governor._waiting
+            or not orch._resource_governor._waiting[PROJECT]
+        )
+        state = task_ledger.load_state(PROJECT)
+        assert "qa#2" not in state["open"]
+        row = state["groups"][0]["features"][0]["rows"][0]
+        assert row["status"] == "closed"
+
+    def test_close_unrelated_unknown_role_still_reports_unknown(self, orch: Orchestrator) -> None:
+        ok, msg = orch.close("totally-not-a-role", project=PROJECT)
+        assert ok is False
+        assert "unknown role" in msg
+
+    def test_close_known_role_with_nothing_queued_or_spawned(self, orch: Orchestrator) -> None:
+        ok, msg = orch.close("backend", project=PROJECT)
+        assert ok is False
+        assert "no pane open" in msg

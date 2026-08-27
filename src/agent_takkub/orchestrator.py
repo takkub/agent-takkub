@@ -3860,7 +3860,15 @@ class Orchestrator(
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role_name)
         if pane is None:
-            return False, f"unknown role: {role_name}"
+            # #409: a `role#N` target still parked behind the resource
+            # governor's admission queue — `assign()` acked async but
+            # spawn() hasn't run yet, so there's no pane entry although
+            # `takkub status` already shows it queued (`_queued_resource_roles`)
+            # — used to fail "unknown role" here even though `cancel_task_delivery`
+            # already grew this exact fallback for `task cancel` (#303 item 2).
+            # Reuse that same helper instead of leaving `close` unable to
+            # abort a mid-flight assign until it finally spawns on its own.
+            return self._cancel_queued_resource_task(role_name, project_ns)
         was_alive = pane.session is not None
         if was_alive:
             # Lead is permanent; only force=True (tab close, project switch) may terminate
