@@ -2,6 +2,22 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v1.6.7] - 2026-08-27
+
+### Fixed (แก้)
+
+- **`takkub close --role <role>#N` ตอบ `unknown role` ปิด pane instance ไม่ได้ (#409)** — pane `frontend#4` ที่ยังค้างคิว resource governor (assign ตอบ ok แล้วแต่ spawn ยังไม่รัน) ไม่มี entry ใน pane map → close คืน unknown role ทั้งที่ `status` โชว์ queued อยู่
+  → แก้: `close()` หา pane ไม่เจอ → fallback `_cancel_queued_resource_task()` (helper เดียวกับ `task cancel` #303) ยกเลิกคิว + ปิด ledger · role ที่ไม่รู้จักจริงยังได้ unknown role เหมือนเดิม + 4 tests
+- **done digest หลัง Lead restart = `merge:ไม่ทราบ · snapshot ตอน assign ไม่ครบ` ไม่มี merge proposal (#410)** — `snapshot_state()/restore_teammates()` ไม่เคย persist `PaneState.worktree` / `assign_base_sha` / `assign_git_root` / `assign_dirty_snapshot` → restart คร่อม assign→done ทำ bookkeeping หายจาก memory
+  → แก้ 3 ชั้น: persist+restore ครบใน session snapshot · `WorktreeManager.rediscover_worktree()` สร้าง branch/git_root/base_sha (merge-base กับ HEAD) จาก `git worktree list` เมื่อ bookkeeping หาย (รันใน `collect_done_git_facts` นอก Qt thread ตาม #408) · `takkub wait` ที่ตอบ "no longer active" หลัง restart แนบคำสั่ง `takkub wait --role …` ให้ resume (ไม่ auto re-arm เพราะแยกจาก `--cancel` ไม่ได้) + 15 tests
+- **`takkub worktree clean` เก็บกวาดไม่จบในรอบเดียว (#411)** — ทิ้ง `.trash-*` (node_modules 518MB) ต้องรัน `--orphans` ซ้ำ · `--force` ลบ dir แต่ branch `wt/*` ค้าง · dir ว่างเหลือหลัง `--orphans`
+  → แก้: `sweep_trash()` ลบ `.trash-*` ทุกรอบ clean (ของที่ผ่าน safety check มาแล้ว) · `branch -D` เช็คผล+retry · `--orphans` verify ซ้ำหลังลบ · `_rmtree_long_path_safe` retry 3× กัน Windows file-lock ชั่วคราว + 10 tests
+- **watchdog เตือน Lead "ค้าง 1228s" ทั้งที่ idle รอ user · heavy_project_limit บล็อกเงียบ · done เตือน vite build ที่จบแล้วจะถูก kill (#412, รายงานจาก macOS/opencode)**
+  → watchdog: Lead ได้ grace 30 นาที (`LEAD_DONE_IDLE_GRACE_S`) หลังทีมทุกคนเลิก working ก่อนนับ stale-marker (provider-agnostic ไม่พึ่ง marker text) · status/list: `display_state` tier ใหม่ `queued:<reason>` + บรรทัด `⏳ <เหตุผล>` ครอบ re-assign บน pane เดิมที่ถูก governor คิว (เดิมหายเงียบ) · shard fan-out โชว์ reason ของ shard ที่โดนบล็อก · `_live_non_scaffolding_children` ข้าม zombie (POSIX `STATUS_ZOMBIE`) / re-check `is_running()` (Windows) ก่อนเตือน + 14 tests
+- **`takkub mcp deny --role qa chrome-devtools` ตอบ ok แต่ allowlist ไม่เปลี่ยน (#414, รายงานภายนอก)** — `deny_item()` บน role ที่ยังไม่มี override ถือว่า "ไม่มีอยู่แล้ว" คืน True โดยไม่เขียน ทั้งที่ effective list มาจาก built-in default
+  → แก้: materialize default ก่อนลบ (เหมือน `allow_item`) · `cmd_mcp`/`cmd_plugins` verify effective list หลัง write — ไม่เปลี่ยน = `ok=False` บอกชัด · typo `denyed`→`denied` · ข้อความ deny บอกว่าบังคับได้เฉพาะ claude/codex (gemini/opencode/kimi/cursor ไม่อ่าน policy — gap เดิม #103/#121)
+- **test hygiene** — suite รั่ว `context/last_context_trace.json` ลง repo root (`config.DATA_HOME == REPO_ROOT` บน dev checkout ไม่ถูก isolate) → conftest isolate `DATA_HOME`+`REPO_ROOT` ทั้ง suite + session guard fail ถ้ามี leak · `test_doctor` mock ขาด `check_rtk_ripgrep` แดงบนเครื่องไม่มี `rg` (#413) + drift guard derive จาก `run_all_checks` · `test_subprocess_no_window_guard` false-positive กับ GitRunner param ชื่อ `run` → rename `git_run` · `test_lead_project_rules` flaky บน windows CI (#415) = fixture ไม่ isolate `lead_context.RUNTIME_DIR` → xdist worker แย่งเขียน `lead-context.md` ไฟล์เดียวกัน
+
 ## [v1.6.6] - 2026-08-26
 
 ### Fixed (แก้)
