@@ -859,6 +859,14 @@ class TestTerminalAutoReplyDetection:
             b"\x1b[200~",  # bracketed-paste start marker
             b"\x1b[201~",  # bracketed-paste end marker
             b"\x1b[24;80R\x1b[?1;2c",  # two tokens back to back
+            # #420 — replies that cut `takkub wait` short with nothing typed
+            b"\x1b[?2026;2$y",  # DECRPM (synchronized-output mode report)
+            b"\x1b[2026;0$y",  # DECRPM, non-private mode
+            b"\x1b[?0u",  # kitty keyboard-protocol flags reply
+            b"\x1b[8;24;80t",  # XTWINOPS text-area size report
+            b"\x1bP>|xterm.js(5.5.0)\x1b\\",  # XTVERSION DCS reply
+            b"\x1bP1$r0m\x1b\\",  # DECRQSS DCS reply
+            b"\x1b[?2026;2$y\x1b[6;1R",  # DECRPM then CPR back to back
         ],
     )
     def test_pure_auto_reply_chunks_detected(self, chunk: bytes) -> None:
@@ -873,6 +881,9 @@ class TestTerminalAutoReplyDetection:
             b"\x1b[24;80",  # truncated — no terminator
             b"\x1b[",  # bare CSI intro, nothing after
             b"\x1b]11;rgb:0000/0000/0000",  # OSC with no BEL/ST terminator
+            b"\x1bP>|xterm.js",  # DCS with no ST terminator (#420)
+            b"\x1b[A",  # a real arrow key is still user input (#420)
+            b"\x1b[?2026;2$yq",  # DECRPM followed by a real keystroke (#420)
         ],
     )
     def test_non_auto_reply_chunks_rejected(self, chunk: bytes) -> None:

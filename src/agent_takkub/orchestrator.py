@@ -10066,6 +10066,11 @@ class Orchestrator(
     #   ESC]...BEL / ESC]...ST   OSC reply (e.g. color-query answers)
     #   ESC[I / ESC[O      focus-in / focus-out reporting
     #   ESC[200~ / ESC[201~      bracketed-paste markers (no content between)
+    #   ESC[?<m>;<v>$y     DECRPM mode report (sync-output query ESC[?2026$p
+    #                      → ESC[?2026;2$y)                              (#420)
+    #   ESC[?<flags>u      kitty keyboard-protocol flags reply          (#420)
+    #   ESC[<n>;<r>;<c>t   XTWINOPS size/position report                (#420)
+    #   ESC P ... ESC \    DCS reply — XTVERSION (ESC[>q) / DECRQSS      (#420)
     # Terminal-structural, not provider- or platform-specific — applies to
     # every pane on every OS this widget runs on.
     #
@@ -10090,6 +10095,12 @@ class Orchestrator(
         rb"|\x1b\][^\x07\x1b]{0,4096}(?:\x07|\x1b\\)"
         rb"|\x1b\[[IO]"
         rb"|\x1b\[20[01]~"
+        # #420 — replies xterm.js also emits with nobody typing, seen cutting
+        # `takkub wait` short 3× in a row against an empty inbox:
+        rb"|\x1b\[\??\d{1,8};\d\$y"  # DECRPM mode report (ESC[?2026;2$y)
+        rb"|\x1b\[\?\d{0,8}u"  # kitty keyboard-protocol flags reply
+        rb"|\x1b\[\d{1,3}(?:;\d{1,8}){0,2}t"  # XTWINOPS report (ESC[8;24;80t)
+        rb"|\x1bP[^\x1b]{0,1024}\x1b\\"  # DCS reply (XTVERSION / DECRQSS)
     )
 
     # A real terminal auto-reply is at most a few dozen bytes (a CPR is
@@ -10149,4 +10160,16 @@ class Orchestrator(
                 # leaving the owner queued behind up to --timeout of
                 # teammate polling.
                 self._lead_last_user_input_ts[project_ns] = time.time()
+                if data[:1] == b"\x1b" and len(data) <= 256:
+                    # #420 forensics: an ESC-led chunk that got past the
+                    # auto-reply filter is either a real special key (arrow,
+                    # F-key) or a terminal reply the filter doesn't know yet.
+                    # A wait cut short with nothing typed was undiagnosable
+                    # without the bytes — log a bounded repr.
+                    _log_event(
+                        "lead_user_input_stamp",
+                        project=project_ns,
+                        size=len(data),
+                        sample=repr(data[:64]),
+                    )
         pane.session.write(data)
