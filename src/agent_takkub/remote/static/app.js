@@ -2531,6 +2531,11 @@
       noteText = p.error || "provider นี้ยังไม่มีข้อมูล usage ให้ดู";
     } else if (p.status === "error") {
       noteText = "ดึงข้อมูลไม่สำเร็จ" + (p.error ? " — " + p.error : "");
+    } else if (p.status === "stale" && p.error) {
+      // #423: a stale snapshot ships WHY it is stale (gemini: agy never
+      // writes the Antigravity quota cache, only the desktop app does) —
+      // without this line the card read as a broken clock ("~6 เดือนก่อน").
+      noteText = p.error;
     } else if (p.provider === "opencode" && p.spend) {
       var s = p.spend;
       var cost = typeof s.cost_usd === "number" ? "$" + s.cost_usd.toFixed(2) : "—";

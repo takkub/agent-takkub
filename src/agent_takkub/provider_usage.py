@@ -431,7 +431,10 @@ _GEMINI_STALE_THRESHOLD_S = 24 * 3600.0
 # "nothing will ever update this until the app is opened". The generic stale
 # wording in `usage_meter` implies a refresh is on its way, which is exactly
 # backwards here, so the adapter ships its own hint alongside the snapshot.
-GEMINI_STALE_HINT = "ต้องเปิดแอป Antigravity ถึงจะอัปเดต (agy CLI ไม่เขียน cache นี้)"
+GEMINI_STALE_HINT = (
+    "agy CLI ไม่มี usage API — ตัวเลขนี้คือ cache ของแอป Antigravity ครั้งล่าสุด "
+    "ต้องเปิดแอป Antigravity ถึงจะอัปเดต (pane gemini ที่รันอยู่ไม่ทำให้ค่านี้ใหม่ขึ้น)"
+)
 
 
 def _antigravity_authorized_cache_dirs() -> list[Path]:
