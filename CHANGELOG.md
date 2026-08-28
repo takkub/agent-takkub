@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **Global skills — skill ส่วนกลางระดับ cockpit ที่ทุกโปรเจค + ทุก provider เห็น (#419)** — store ใหม่ `DATA_HOME/skills/<name>/SKILL.md` (`config.GLOBAL_SKILLS_HOME`) ใช้ surface เดียวกับ project-skills: `ensure_project_skill_links` junction/symlink ทุก skill กลางเข้า `<project>/.claude/skills/` ตอนเปิด tab **และตอน spawn** (skill ของ project ชื่อซ้ำชนะ ไม่ clobber) → claude/codex/agy ที่ discover จาก cwd เห็นเหมือน skill project, provider ที่ใช้ instruction-bridge (Skill Matrix appendix) ก็ scan เจอจาก root เดียวกัน · Settings › New Skill มี checkbox **Global skill** · `takkub migrate-skills --to-global <name>` ยก skill จาก central ของ project ขึ้นชั้นกลาง (refuse ถ้าชื่อซ้ำ/ยังไม่อยู่ใน central) · `takkub assign --cwd <GLOBAL_SKILLS_HOME>` ผ่าน allowlist แล้ว Lead delegate การเขียน skill กลางได้ตามกฎ (ไม่ต้อง Write เอง) · tests 10 ตัว
+
+### Fixed (แก้)
+
+- **done digest ติดป้าย `⚠️ [unverified origin — <role> respawned since queued]` ทุกใบทั้งที่ pane ไม่ได้ respawn (#421)** — trace จาก events.log: `done 14:46:54 → close 14:46:56 → lead_inbox_digest 14:46:57` — `done()` ปิด pane อัตโนมัติก่อน digest debounce ยิง ทำให้ `_current_pane_identity` เป็น None แล้ว `_provenance_stale` fail-safe เป็น stale=True ทุกครั้ง → ตอนนี้ "ไม่มี pane live" + token เป็นตัวที่ cockpit นี้ mint เอง (`_pane_token_minted_at`) = pane ปิดตามปกติ ไม่ติดป้าย; token ที่ไม่เคย mint (replay/forge/cockpit restart) ยังติดป้ายเหมือนเดิม (#228 true-positive คงอยู่) · tests 2 ตัว
+- **`takkub wait` จบด้วย "interrupted by user input" ซ้ำ 3 ครั้งติด (4s/16s/36s) ทั้งที่ inbox ว่างและไม่ได้พิมพ์ (#420)** — ทางเดียวที่ stamp `_lead_last_user_input_ts` ได้คือ byte จาก xterm.js ของ Lead pane; filter auto-reply เดิม (#357) รู้จักแค่ CPR/DA/DSR/OSC/focus/paste แต่ไม่รู้จัก reply ที่ TUI สมัยใหม่ query: DECRPM `ESC[?2026;2$y` (synchronized output), kitty keyboard `ESC[?0u`, XTWINOPS `ESC[8;r;ct`, DCS `ESC P … ESC \` (XTVERSION/DECRQSS) → เพิ่มทั้ง 4 token · เพิ่ม event `lead_user_input_stamp` (repr 64 byte แรก) เฉพาะ chunk ที่ขึ้นต้นด้วย ESC และผ่าน filter — รอบหน้าถ้ายังหลุดจะเห็นลำดับ byte ตัวจริงใน events.log แทนต้องเดา · tests +10 case
+
 ## [v1.6.8] - 2026-08-27
 
 ### Fixed (แก้)

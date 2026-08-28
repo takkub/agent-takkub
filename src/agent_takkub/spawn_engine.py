@@ -398,6 +398,18 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
     except Exception:
         _log.exception("could not repair shipped-skill surface; spawning without it")
     roots = list(_allowed_project_roots(project_ns)) if project_ns else []
+    if roots and project_ns != "default":
+        # #419: (re)link central project + global skills into the project's
+        # `.claude/skills/` at spawn time too — tab-open already does this,
+        # but a global skill created AFTER the tab opened (in another
+        # project's Settings, or by a delegated pane) must reach this pane
+        # without a restart. Cheap (no git), best-effort, never blocks.
+        try:
+            from .skill_scan import ensure_project_skill_links
+
+            ensure_project_skill_links(roots[0], project_ns)
+        except Exception:
+            _log.exception("could not repair project skill links; spawning without them")
     roots.append(REPO_ROOT)
     return roots
 

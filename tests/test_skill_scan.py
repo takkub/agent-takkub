@@ -489,3 +489,109 @@ class TestConfigCentralPaths:
     def test_project_docs_dir_rejects_traversal(self) -> None:
         with pytest.raises(ValueError):
             config.project_docs_dir("../../etc")
+
+
+# ── #419 cockpit-level (global) skills ─────────────────────────────────────
+
+
+@pytest.fixture
+def global_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point GLOBAL_SKILLS_HOME at a throwaway dir (never the real one)."""
+    home = tmp_path / "central" / "skills"
+    monkeypatch.setattr(config, "GLOBAL_SKILLS_HOME", home)
+    return home
+
+
+class TestGlobalSkills:
+    def test_create_global_writes_global_store_and_links_into_project(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        ok, err = create_skill(
+            project, "vps-hardening", "harden a vps", "body", project_ns="myproj", scope="global"
+        )
+        assert ok, err
+        assert (global_home / "vps-hardening" / "SKILL.md").is_file()
+        assert not (central_home / "myproj" / "vps-hardening").exists()
+        link = project / ".claude" / "skills" / "vps-hardening"
+        assert (link / "SKILL.md").is_file()
+        assert [s.name for s in scan_skills(project)] == ["vps-hardening"]
+
+    def test_ensure_links_brings_global_skill_into_every_project(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        (global_home / "shared-skill").mkdir(parents=True)
+        (global_home / "shared-skill" / "SKILL.md").write_text(
+            "---\nname: shared-skill\ndescription: global\n---\nglobal body", encoding="utf-8"
+        )
+        for ns in ("proj_a", "proj_b"):
+            project = tmp_path / ns
+            project.mkdir()
+            assert ensure_project_skill_links(project, ns) == []
+            assert (project / ".claude" / "skills" / "shared-skill" / "SKILL.md").is_file()
+            assert [s.name for s in scan_skills(project)] == ["shared-skill"]
+
+    def test_project_skill_wins_name_collision_with_global(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "dup", "project one", "project body", project_ns="myproj")
+        (global_home / "dup").mkdir(parents=True)
+        (global_home / "dup" / "SKILL.md").write_text(
+            "---\nname: dup\ndescription: global one\n---\nglobal body", encoding="utf-8"
+        )
+        assert ensure_project_skill_links(project, "myproj") == []
+        link = project / ".claude" / "skills" / "dup" / "SKILL.md"
+        assert "project body" in link.read_text(encoding="utf-8")
+
+    def test_global_dir_without_skill_md_is_ignored(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        (global_home / "notes").mkdir(parents=True)
+        project = tmp_path / "proj"
+        project.mkdir()
+        assert ensure_project_skill_links(project, "myproj") == []
+        assert not (project / ".claude" / "skills" / "notes").exists()
+
+    def test_migrate_skill_to_global_moves_and_relinks(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "promote-me", "d", "the body", project_ns="myproj")
+        ok, msg = skill_scan.migrate_skill_to_global(project, "myproj", "promote-me")
+        assert ok, msg
+        assert (global_home / "promote-me" / "SKILL.md").is_file()
+        assert not (central_home / "myproj" / "promote-me").exists()
+        link = project / ".claude" / "skills" / "promote-me" / "SKILL.md"
+        assert "the body" in link.read_text(encoding="utf-8")
+        # A second project sees it on its next link repair.
+        other = tmp_path / "other"
+        other.mkdir()
+        ensure_project_skill_links(other, "otherproj")
+        assert (other / ".claude" / "skills" / "promote-me" / "SKILL.md").is_file()
+
+    def test_migrate_skill_to_global_refuses_conflict_and_missing(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        ok, msg = skill_scan.migrate_skill_to_global(project, "myproj", "nope")
+        assert not ok and "central store" in msg
+        create_skill(project, "taken", "d", "b", project_ns="myproj")
+        (global_home / "taken").mkdir(parents=True)
+        ok, msg = skill_scan.migrate_skill_to_global(project, "myproj", "taken")
+        assert not ok and "อยู่แล้ว" in msg
+        # Untouched on refusal.
+        assert (central_home / "myproj" / "taken" / "SKILL.md").is_file()
+
+    def test_global_skill_is_writable_via_central_dirs(
+        self, tmp_path: Path, central_home: Path, global_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "g", "d", "b", project_ns="myproj", scope="global")
+        skill = scan_skills(project)[0]
+        assert is_writable_skill(skill.path, [], extra_dirs=[global_home]) is True

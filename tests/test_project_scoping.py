@@ -421,3 +421,33 @@ class TestRecentExitsProjectScoping:
         assert "proj_b::backend" in fake._recent_exits
         # bare key must not exist
         assert "backend" not in fake._recent_exits
+
+
+class TestGlobalSkillsCwd:
+    """#419: the cockpit-level skills store is a legal --cwd for every role
+    of every project so Lead can delegate writing a global skill."""
+
+    def test_accepts_global_skills_home_for_teammate(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        home = tmp_path / "skills-home"
+        home.mkdir()
+        monkeypatch.setattr(config, "GLOBAL_SKILLS_HOME", home)
+        assert orch_mod._cwd_within_project(str(home), "proj_a", "backend") is True
+        nested = str(home / "vps-deploy")
+        assert orch_mod._cwd_within_project(nested, "proj_b", "devops") is True
+
+    def test_global_skills_home_named_in_valid_paths(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        home = tmp_path / "skills-home"
+        monkeypatch.setattr(config, "GLOBAL_SKILLS_HOME", home)
+        assert str(home.resolve()) in orch_mod._describe_valid_project_cwds("proj_a")
+
+    def test_sibling_of_global_home_still_rejected(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        home = tmp_path / "skills-home"
+        monkeypatch.setattr(config, "GLOBAL_SKILLS_HOME", home)
+        sibling = str(tmp_path / "skills-home2")
+        assert orch_mod._cwd_within_project(sibling, "proj_a", "backend") is False

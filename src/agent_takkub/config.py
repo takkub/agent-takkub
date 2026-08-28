@@ -423,6 +423,13 @@ EVENTS_LOG = RUNTIME_DIR / "events.log"
 # Keeping the real files central means the New-Skill button never dirties the
 # user's repo (`git status` stays clean, nothing to accidentally commit).
 PROJECT_SKILLS_HOME = DATA_HOME / "project-skills"
+# Cockpit-level skills every project AND every provider sees (#419) — the
+# same central-store + per-project junction surface as PROJECT_SKILLS_HOME,
+# just one tier up: `ensure_project_skill_links` links every dir here into
+# each project's `.claude/skills/` on tab open / spawn (a project skill of
+# the same name wins). Also a legal `takkub assign --cwd` target so Lead can
+# delegate writing a global skill instead of authoring it by hand.
+GLOBAL_SKILLS_HOME = DATA_HOME / "skills"
 # Central home for LLM-authored docs (design-review / reviews / guides /
 # system-overview) a pane produces per the CLAUDE.md routing. Panes read the
 # effective path from the `TAKKUB_DOCS_DIR` env var (`pane_env`), so the
@@ -452,6 +459,13 @@ def project_skills_dir(project_ns: str) -> Path:
     if d != base and base not in d.parents:
         raise ValueError(f"project-skills path escapes home: {project_ns!r}")
     return d
+
+
+def global_skills_dir() -> Path:
+    """Central storage dir for cockpit-level skills shared by every project
+    (#419): ``GLOBAL_SKILLS_HOME/<name>/SKILL.md``. Resolved at call time so
+    tests can repoint ``GLOBAL_SKILLS_HOME``."""
+    return GLOBAL_SKILLS_HOME.resolve()
 
 
 def project_docs_dir(project_ns: str) -> Path:

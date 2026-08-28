@@ -113,9 +113,12 @@ def validate_skill_name(name: str, existing: Iterable[str] = ()) -> tuple[bool, 
     return True, ""
 
 
-def _link_skill_into_project(project_root: Path, project_ns: str, name: str) -> str | None:
+def _link_skill_into_project(
+    project_root: Path, project_ns: str, name: str, *, central: Path | None = None
+) -> str | None:
     """Ensure `<project_root>/.claude/skills/<name>` links to the central
-    real skill dir `project_skills_dir(project_ns)/<name>`.
+    real skill dir `project_skills_dir(project_ns)/<name>` — or to *central*
+    when given (#419: the global store `global_skills_dir()/<name>`).
 
     Returns None on success (or when the link already points at the right
     target), an error string otherwise. Uses `worktree_manager._make_link`
@@ -124,7 +127,8 @@ def _link_skill_into_project(project_root: Path, project_ns: str, name: str) -> 
     Never clobbers a *real* directory already sitting at the project path
     (a user's own committed skill of the same name) — it's left untouched.
     """
-    central = config.project_skills_dir(project_ns) / name
+    if central is None:
+        central = config.project_skills_dir(project_ns) / name
     if not central.is_dir():
         return f"central skill missing: {central}"
     dst = project_root / ".claude" / "skills" / name
@@ -154,20 +158,83 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
     re-linked here so claude/codex/agy keep discovering it from cwd.
     """
     project_root = Path(project_root)
+    errors: list[str] = []
     try:
         central = config.project_skills_dir(project_ns)
     except ValueError:
         return []
-    if not central.is_dir():
-        return []
-    errors: list[str] = []
-    for skill_dir in sorted(central.iterdir()):
-        if not skill_dir.is_dir():
-            continue
-        err = _link_skill_into_project(project_root, project_ns, skill_dir.name)
-        if err:
-            errors.append(f"{skill_dir.name}: {err}")
+    if central.is_dir():
+        for skill_dir in sorted(central.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            err = _link_skill_into_project(project_root, project_ns, skill_dir.name)
+            if err:
+                errors.append(f"{skill_dir.name}: {err}")
+    # #419: cockpit-level skills ride the SAME surface — linked after the
+    # project's own so a same-named project skill (already present at the
+    # link path by now) wins; `_link_skill_into_project` never clobbers.
+    global_dir = config.global_skills_dir()
+    if global_dir.is_dir():
+        for skill_dir in sorted(global_dir.iterdir()):
+            if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+                continue
+            err = _link_skill_into_project(
+                project_root, project_ns, skill_dir.name, central=skill_dir
+            )
+            if err:
+                errors.append(f"{skill_dir.name} (global): {err}")
     return errors
+
+
+def migrate_skill_to_global(
+    project_root: str | Path, project_ns: str, name: str
+) -> tuple[bool, str]:
+    """Promote one central project skill `project_skills_dir(project_ns)/
+    <name>` to the cockpit-level store `global_skills_dir()/<name>` (#419),
+    re-pointing this project's link at the new home. Other projects pick it
+    up on their next tab open / spawn via `ensure_project_skill_links`.
+
+    Refuses (never clobbers): a name already in the global store, or a
+    skill that isn't in this project's central store yet (a real dir still
+    inside the repo — run `takkub migrate-skills` first). Returns
+    (ok, message); message is the new path on success. Never raises.
+    """
+    project_root = Path(project_root)
+    ok, err = validate_skill_name(name)
+    if not ok:
+        return False, err
+    name = name.strip().lower()
+    try:
+        src = config.project_skills_dir(project_ns) / name
+    except ValueError as e:
+        return False, f"project ไม่ถูกต้อง: {e}"
+    dst = config.global_skills_dir() / name
+    if not src.is_dir():
+        return False, (
+            f"skill '{name}' ไม่อยู่ใน central store ของ project ({src}) — "
+            "ถ้ายังเป็น dir จริงใน repo ให้รัน `takkub migrate-skills` ก่อน"
+        )
+    if dst.exists():
+        return False, f"global store มี '{name}' อยู่แล้วที่ {dst}"
+    link_path = project_root / ".claude" / "skills" / name
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _remove_link(link_path)
+        shutil.move(str(src), str(dst))
+    except OSError as e:
+        return False, f"move failed: {e}"
+    err = _link_skill_into_project(project_root, project_ns, name, central=dst)
+    if err:
+        # Roll back so the skill stays where this project can see it.
+        try:
+            _remove_link(link_path)
+            shutil.move(str(dst), str(src))
+            _link_skill_into_project(project_root, project_ns, name)
+        except OSError:
+            pass
+        return False, f"link failed after move (rolled back): {err}"
+    _log.info("promoted skill %r → global (%s)", name, dst)
+    return True, str(dst)
 
 
 def _is_reparse_point(p: Path) -> bool:
@@ -336,9 +403,15 @@ def create_skill(
     *,
     project_ns: str | None = None,
     existing: Iterable[str] = (),
+    scope: str = "project",
 ) -> tuple[bool, str]:
     """Validate + write a new skill's `SKILL.md`, then make it discoverable
     from `<root>/.claude/skills/<name>`.
+
+    `scope="global"` (#419) writes the real file to the cockpit-level store
+    `global_skills_dir()/<name>/SKILL.md` instead of the project's central
+    dir; it is linked into `root` right away and into every OTHER project
+    by `ensure_project_skill_links` on their next tab open / spawn.
 
     When `project_ns` is given (the normal path from the Settings UI) the
     real file is written to the central `project_skills_dir(project_ns)/
@@ -361,18 +434,23 @@ def create_skill(
     body = (instructions or "").strip() or f"# {name}\n\n_(เพิ่มเนื้อหา skill นี้)_\n"
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"
 
-    if project_ns:
+    if scope not in ("project", "global"):
+        return False, f"scope ต้องเป็น project หรือ global (ได้ {scope!r})"
+    if scope == "global":
+        store_dir = config.global_skills_dir()
+    elif project_ns:
         try:
             store_dir = config.project_skills_dir(project_ns)
         except ValueError as e:
             return False, f"project ไม่ถูกต้อง: {e}"
     else:
         store_dir = root / ".claude" / "skills"
+    linked = scope == "global" or bool(project_ns)
     skill_dir = store_dir / name
     link_path = root / ".claude" / "skills" / name
     if skill_dir.exists():
         return False, f"skill '{name}' มีอยู่แล้วที่ {skill_dir}"
-    if project_ns and link_path.exists():
+    if linked and link_path.exists():
         return False, f"skill '{name}' มีอยู่แล้วที่ {link_path}"
 
     tmp_path: Path | None = None
@@ -402,8 +480,10 @@ def create_skill(
             pass
         return False, f"สร้าง skill ไม่สำเร็จ: {e}"
 
-    if project_ns:
-        err = _link_skill_into_project(root, project_ns, name)
+    if linked:
+        err = _link_skill_into_project(
+            root, project_ns or "", name, central=skill_dir if scope == "global" else None
+        )
         if err:
             # Link failed — the central file exists but claude won't discover
             # it from cwd. Roll back so the UI's create/scan stays consistent

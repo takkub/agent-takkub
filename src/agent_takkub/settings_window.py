@@ -3405,6 +3405,14 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         create_btn = cockpit_theme.gold_button("+ Create Skill", form)
         create_btn.clicked.connect(self._on_create_skill_clicked)
         create_row.addWidget(create_btn)
+        # #419: cockpit-level scope — real file lands in GLOBAL_SKILLS_HOME
+        # and every project (every provider) gets the junction on open/spawn.
+        self._ns_global = QCheckBox("Global skill (ทุกโปรเจค ทุก provider)", form)
+        self._ns_global.setToolTip(
+            f"เขียนไว้ที่ {config.GLOBAL_SKILLS_HOME} — ไม่ผูกกับ project ไหน "
+            "โปรเจคอื่นเห็นอัตโนมัติตอนเปิด tab / spawn ครั้งถัดไป"
+        )
+        create_row.addWidget(self._ns_global)
         create_row.addStretch(1)
         f_lay.addLayout(create_row)
 
@@ -3422,12 +3430,14 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         junction). Passed to `is_writable_skill` so a junctioned skill, whose
         `SkillInfo.path` resolves into the central store, still shows a delete
         button. Empty when no project is active."""
+        dirs: list[Path] = [config.GLOBAL_SKILLS_HOME]  # #419 global store
         if not self._project:
-            return []
+            return dirs
         try:
-            return [config.project_skills_dir(self._project)]
+            dirs.append(config.project_skills_dir(self._project))
         except ValueError:
-            return []
+            pass
+        return dirs
 
     def _reload_skill_catalog(self) -> None:
         """(Re)populate the skill list from disk — called at view build time
@@ -3511,6 +3521,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
             return
 
         existing = {s.name for s in self._catalog_skills}
+        is_global = bool(getattr(self, "_ns_global", None) and self._ns_global.isChecked())
         ok, err = skill_scan.create_skill(
             root[0],
             name,
@@ -3518,12 +3529,13 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
             instructions,
             project_ns=self._project,
             existing=existing,
+            scope="global" if is_global else "project",
         )
         if not ok:
             self._ns_status.setText(f"! {err}")
             return
 
-        self._ns_status.setText(f"OK: สร้าง skill '{name}' แล้ว")
+        self._ns_status.setText(f"OK: สร้าง{' global ' if is_global else ' '}skill '{name}' แล้ว")
         self._ns_name.clear()
         self._ns_desc.clear()
         self._ns_instructions.clear()

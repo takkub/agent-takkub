@@ -879,6 +879,19 @@ def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
         pass
     if any(target == root or root in target.parents for root in _allowed_project_roots(project)):
         return True
+    # #419: the cockpit-level skills store is a legal target for every role
+    # of every project, so Lead can delegate "write a global skill" via
+    # `takkub assign --cwd <GLOBAL_SKILLS_HOME>` instead of authoring it by
+    # hand (which the Lead rules forbid). Read from config at call time so a
+    # monkeypatched home is honoured.
+    try:
+        from .config import global_skills_dir
+
+        g = global_skills_dir()
+        if target == g or g in target.parents:
+            return True
+    except Exception:
+        pass
     project_root = _project_root_dir(project)
     return project_root is not None and (target == project_root or project_root in target.parents)
 
@@ -903,6 +916,12 @@ def _describe_valid_project_cwds(project: str) -> str:
     ]
     if project_root is not None and project_root not in roots:
         valid_paths.append(f"{project_root} (project root)")
+    try:
+        from .config import global_skills_dir
+
+        valid_paths.append(f"{global_skills_dir()} (global skills, #419)")
+    except Exception:
+        pass
     return ", ".join(valid_paths) if valid_paths else "(no paths configured for this project)"
 
 

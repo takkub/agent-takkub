@@ -2107,6 +2107,19 @@ def cmd_migrate_skills(args: argparse.Namespace) -> dict:
     if not roots:
         return {"ok": False, "msg": f"could not resolve a folder for project {project!r}"}
 
+    to_global = getattr(args, "to_global", None)
+    if to_global:
+        # #419: promote ONE central project skill to the cockpit-level store.
+        if args.dry_run:
+            from .config import global_skills_dir
+
+            return {
+                "ok": True,
+                "msg": f"would promote '{to_global}' → {global_skills_dir() / to_global}",
+            }
+        ok, msg = skill_scan.migrate_skill_to_global(roots[0], project, to_global)
+        return {"ok": ok, "msg": (f"promoted '{to_global}' → {msg}" if ok else msg)}
+
     records = skill_scan.migrate_legacy_project_skills(roots[0], project, dry_run=args.dry_run)
     if not records:
         return {"ok": True, "msg": f"no skills under {roots[0]}/.claude/skills (nothing to do)"}
@@ -3918,6 +3931,15 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="report what would move without changing anything",
+    )
+    sms.add_argument(
+        "--to-global",
+        metavar="NAME",
+        default=None,
+        help=(
+            "promote one central project skill to the cockpit-level global store "
+            "(visible to every project + every provider, #419)"
+        ),
     )
     sms.set_defaults(func=cmd_migrate_skills)
 

@@ -4546,9 +4546,10 @@
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_window",
-        "agent_takkub.skill_policy"
+        "agent_takkub.skill_policy",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 3
     },
     {
@@ -4588,6 +4589,7 @@
         "agent_takkub.rtk_helper",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy",
+        "agent_takkub.skill_scan",
         "agent_takkub.spawn_gate",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
@@ -4598,7 +4600,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 37
+      "fan_out": 38
     },
     {
       "module": "agent_takkub.spawn_gate",
