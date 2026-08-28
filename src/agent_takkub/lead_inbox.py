@@ -3519,17 +3519,31 @@ class LeadInboxMixin:
         respawn that happens strictly AFTER `queued_ts` is ordinary
         sequential hand-off and is not flagged.
 
-        *queued_ts* absent, or no live pane at all under the role, or no
-        recorded mint time for the current token — fails safe to stale=True
-        (the pre-#315, conservative behaviour) since there's no timing
-        evidence to prove the mismatch is benign.
+        *queued_ts* absent, or no recorded mint time for the current token —
+        fails safe to stale=True (the pre-#315, conservative behaviour) since
+        there's no timing evidence to prove the mismatch is benign. No live
+        pane at all under the role is NOT stale when the report's token is
+        one this cockpit minted itself (#421 — the pane simply closed after
+        `done()`, which is the normal end of every clean task).
         """
         if role is None or pane_token is None:
             return False
         current = self._current_pane_identity(project_ns, role)
         if current == pane_token:
             return False
-        if current is None or queued_ts is None:
+        if current is None:
+            # #421: no live pane under the role at render time. The ORDINARY
+            # cause is the reporting pane having already closed: `done()`
+            # auto-closes it ~2s later and the digest debounce fires after
+            # that (traced live: done 14:46:54 → close 14:46:56 → digest
+            # 14:46:57), so every clean done of a pane that wasn't
+            # immediately re-assigned rendered "respawned since queued" —
+            # factually false, nobody took the slot over. A token THIS
+            # cockpit minted and later revoked is that benign shape; only a
+            # token it never minted (replayed/forged report, or a cockpit
+            # restart in between) is still unverifiable and keeps the banner.
+            return pane_token not in getattr(self, "_pane_token_minted_at", {})
+        if queued_ts is None:
             return True
         current_mint_ts = self._current_pane_mint_ts(project_ns, role)
         if current_mint_ts is None:

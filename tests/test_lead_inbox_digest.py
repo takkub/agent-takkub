@@ -374,3 +374,65 @@ def test_phantom_report_still_renders_stale_banner_one_line(
     banner_line_end = written.index("\n", banner_idx)
     banner_line = written[max(0, banner_idx - 3) : banner_line_end]
     assert "\n" not in banner_line.strip("\n")
+
+
+def test_closed_pane_after_done_does_not_render_stale_banner(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#421: `done()` auto-closes the pane ~2s before the digest debounce
+    fires, so at render time there is NO live pane under the role — the
+    token the report carries was minted (and later revoked) by this very
+    cockpit. That is the ordinary end of every clean task, not a respawn:
+    no banner."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+    orch._pane_tokens = {}  # pane already closed → token revoked
+    orch._pane_token_minted_at = {"tok-closed": 1_000.0}
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(
+            PROJECT,
+            "[devops done] root cause found",
+            from_role="devops",
+            pane_token="tok-closed",
+            queued_ts=1_005.0,
+        )
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "root cause found" in written
+    assert "unverified origin" not in written
+
+
+def test_unknown_token_with_no_live_pane_still_renders_stale_banner(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#421 keeps the #228 true positive: a token this cockpit never minted
+    (replayed/forged report, or a cockpit restart in between) with nothing
+    live to check it against stays flagged."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+    orch._pane_tokens = {}
+    orch._pane_token_minted_at = {}
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(
+            PROJECT,
+            "[devops done] from nowhere",
+            from_role="devops",
+            pane_token="tok-alien",
+            queued_ts=1_005.0,
+        )
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "from nowhere" in written
+    assert "unverified origin" in written
