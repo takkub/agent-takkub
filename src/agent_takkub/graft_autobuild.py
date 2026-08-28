@@ -866,6 +866,57 @@ def _has_new_files(target: Path, rel_paths: list[str], staging: Path) -> bool:
 _LIVE_RESYNC_MIN_INTERVAL_S = 15.0
 _live_resync_lock = threading.Lock()
 _last_live_resync: dict[str, float] = {}
+# Per-target fingerprint of the work tree as of the last live resync
+# (2026-08-28 prod py-spy: `_sync_staging` + `_stat_or_none` owned 32% of
+# ALL samples — every pane's 5s idle tick, throttled to 15s per cwd, walked
+# and stat'ed the whole saas_admin tree (2,243 files x2 + the staging
+# mirror) in a Python thread. os.stat drops the GIL per call but the loop
+# re-takes it thousands of times a pass, so the Qt main thread queued
+# behind it and keystrokes echoed late — same convoy as ram_report (1.6.4).
+# A `git status --porcelain` + HEAD (one subprocess, no GIL) tells us in
+# ~50ms whether anything could have changed; unchanged → skip the walk.
+_last_tree_fp: dict[str, str] = {}
+
+
+def _tree_fingerprint(target: Path) -> str | None:
+    """Cheap "could the non-ignored tree have changed?" token for *target*:
+    sha256 over `git rev-parse HEAD` + `git status --porcelain -z -uall`
+    (untracked included, so a brand-new file changes it). None when git is
+    missing / *target* is not a work tree / the command fails — callers
+    treat None as "unknown, do the full pass"."""
+    git_bin = _git_bin()
+    if git_bin is None:
+        return None
+    try:
+        head = subprocess.run(
+            [git_bin, "-C", str(target), "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        status = subprocess.run(
+            [git_bin, "-C", str(target), "status", "--porcelain", "-z", "--untracked-files=all"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except Exception:  # OSError/TimeoutExpired, or a test-faked subprocess seam
+        return None
+    if status.returncode != 0:
+        return None
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(head.stdout if head.returncode == 0 else b"?")
+    h.update(b"\0")
+    h.update(status.stdout)
+    return h.hexdigest()
 
 
 def resync_staging_only(cwd: str | None) -> None:
@@ -902,6 +953,11 @@ def resync_staging_only(cwd: str | None) -> None:
         _last_live_resync[key] = now
 
     def _do() -> None:
+        fp = _tree_fingerprint(target)
+        with _live_resync_lock:
+            unchanged = fp is not None and _last_tree_fp.get(key) == fp
+        if unchanged and staging_dir_for(target).is_dir():
+            return  # nothing could have changed since the last pass — skip the walk
         rel_paths = _git_nonignored_files(target)
         if rel_paths is None:
             return
@@ -922,6 +978,9 @@ def resync_staging_only(cwd: str | None) -> None:
             _spawn_build(target)
             return
         _sync_staging(target, rel_paths, staging)
+        if fp is not None:
+            with _live_resync_lock:
+                _last_tree_fp[key] = fp
 
     threading.Thread(target=_do, name=f"graft-live-resync-{target.name}", daemon=True).start()
 

@@ -1067,6 +1067,9 @@ def test_resync_staging_only_syncs_staging_mirror(tmp_path, monkeypatch):
     case — see `test_resync_staging_only_escalates_to_full_build_for_new_file`."""
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
+    # fingerprint fast path (2026-08-28) shells to git via Popen too — keep this
+    # test counting only `graft build` calls.
+    monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
     target = tmp_path / "target-repo"
     target.mkdir()
@@ -1191,6 +1194,9 @@ def test_resync_staging_only_escalates_to_full_build_for_new_file(tmp_path, monk
     present in the staging mirror must escalate to a full build instead of
     a no-op-for-graft-purposes sync."""
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
+    # fingerprint fast path (2026-08-28) shells to git via Popen too — keep this
+    # test counting only `graft build` calls.
+    monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
     target = tmp_path / "target-repo"
@@ -1289,3 +1295,68 @@ def test_orchestrator_construction_spawns_no_graft_subprocess(qapp, monkeypatch)
     o.shutdown_timers()
 
     assert calls == [], f"Orchestrator() construction spawned graft subprocess.run calls: {calls}"
+
+
+# ── live resync fast path (2026-08-28 prod py-spy: GIL convoy from stat walk) ──
+
+
+def _arm_live_resync(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
+    monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:ake\graft.cmd")
+    monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
+    target = tmp_path / "live-repo"
+    target.mkdir()
+    (target / "main.py").write_text("pass", encoding="utf-8")
+    gab._last_live_resync.clear()
+    gab._last_tree_fp.clear()
+    return target
+
+
+def test_live_resync_skips_the_walk_when_tree_fingerprint_unchanged(tmp_path, monkeypatch):
+    target = _arm_live_resync(monkeypatch, tmp_path)
+    walks: list = []
+    monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: "fp-A")
+    monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: walks.append(t) or ["main.py"])
+    staging = gab.staging_dir_for(target)
+    staging.mkdir(parents=True)
+    (staging / "main.py").write_text("old", encoding="utf-8")  # known to the graph already
+
+    gab.resync_staging_only(str(target))
+    assert len(walks) == 1  # first pass: no fingerprint yet → full sync
+
+    gab._last_live_resync.clear()  # step past the 15s throttle
+    gab.resync_staging_only(str(target))
+    assert len(walks) == 1  # unchanged tree → no ls-files, no stat walk
+
+    monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: "fp-B")
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert len(walks) == 2  # a real change → full pass again
+
+
+def test_live_resync_unknown_fingerprint_always_does_the_full_pass(tmp_path, monkeypatch):
+    target = _arm_live_resync(monkeypatch, tmp_path)
+    walks: list = []
+    monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: None)
+    monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: walks.append(t) or ["main.py"])
+    staging = gab.staging_dir_for(target)
+    staging.mkdir(parents=True)
+    (staging / "main.py").write_text("old", encoding="utf-8")
+    for _ in range(2):
+        gab._last_live_resync.clear()
+        gab.resync_staging_only(str(target))
+    assert len(walks) == 2
+
+
+def test_tree_fingerprint_tracks_head_and_untracked(tmp_path):
+    if gab._git_bin() is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "fp-repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    fp0 = gab._tree_fingerprint(repo)
+    (repo / "new.txt").write_text("x", encoding="utf-8")
+    fp1 = gab._tree_fingerprint(repo)
+    assert fp0 and fp1 and fp0 != fp1  # an untracked file changes it
+    assert gab._tree_fingerprint(repo) == fp1  # stable when nothing moves
+    assert gab._tree_fingerprint(tmp_path / "not-a-repo") is None
