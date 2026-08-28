@@ -360,3 +360,20 @@ class TestBootUpdateWindowAutoMigrateStage:
 
 def _STATUS(mod, key: str) -> str:
     return mod._STATUS_LABELS[key]
+
+
+def test_no_mechanism_skip_reads_as_usable_not_broken(qapp) -> None:
+    """2026-08-28: gemini (GUI-installer, no update command) rendered as a faint
+    dot with no text — the operator read it as "never turned green". It is
+    installed and usable, so it must draw as a muted check with a label that
+    says so; not-installed / disabled keep the faint dot."""
+    from agent_takkub import boot_update_window as buw
+    from agent_takkub import provider_update as pu
+
+    win = buw.BootUpdateWindow()
+    row = win._rows["gemini"]
+    row.set_status(pu.STATUS_SKIPPED_NO_MECHANISM, pu.NO_UPDATE_MECHANISM_GAPS["gemini"])
+    assert row._icon._kind == buw._StatusIcon._KIND_OK_MUTED
+    assert "ใช้ได้" in row._status_label.text()
+    row.set_status(pu.STATUS_SKIPPED_NOT_INSTALLED, "")
+    assert row._icon._kind == buw._StatusIcon._KIND_SKIPPED

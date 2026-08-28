@@ -72,7 +72,12 @@ _STATUS_LABELS = {
     provider_update.STATUS_FAILED: "ล้มเหลว",
     provider_update.STATUS_SKIPPED_NOT_INSTALLED: "ไม่ได้ติดตั้ง",
     provider_update.STATUS_SKIPPED_DISABLED: "ปิดใช้งานอยู่",
-    provider_update.STATUS_SKIPPED_NO_MECHANISM: "ไม่มีกลไกอัพเดต",
+    # Installed + usable, just nothing the cockpit can run to update it
+    # (gemini/agy GUI installer, cursor remote script — see
+    # provider_update.NO_UPDATE_MECHANISM_GAPS). Worded and drawn as
+    # "fine, self-managed", not as a failure: a faint dot with no text read
+    # as "Gemini never turned green" to the operator (2026-08-28).
+    provider_update.STATUS_SKIPPED_NO_MECHANISM: "ใช้ได้ — อัพเดตเองผ่าน installer (ไม่มีคำสั่งอัพเดตให้รัน)",
 }
 
 _DONE_STATUSES = frozenset(
@@ -195,6 +200,7 @@ class _StatusIcon(QWidget):
     _KIND_OK = "ok"
     _KIND_ERROR = "error"
     _KIND_SKIPPED = "skipped"
+    _KIND_OK_MUTED = "ok_muted"  # installed + usable, update is self-managed
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -240,6 +246,16 @@ class _StatusIcon(QWidget):
             painter.setPen(ring)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(rect)
+        elif kind == self._KIND_OK_MUTED:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(theme.TEXT_MUTED))
+            painter.drawEllipse(rect)
+            mark = QPen(QColor(theme.GROUND_WINDOW))
+            mark.setWidth(2)
+            mark.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(mark)
+            painter.drawLine(cx - 3, cy, cx - 1, cy + 3)
+            painter.drawLine(cx - 1, cy + 3, cx + 4, cy - 3)
         elif kind == self._KIND_SKIPPED:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(theme.TEXT_FAINT))
@@ -348,6 +364,8 @@ class _ProviderRow(QWidget):
             color, kind = theme.STATE_OK, _StatusIcon._KIND_OK
         elif status == provider_update.STATUS_FAILED:
             color, kind = theme.STATE_ERROR, _StatusIcon._KIND_ERROR
+        elif status == provider_update.STATUS_SKIPPED_NO_MECHANISM:
+            color, kind = theme.TEXT_MUTED, _StatusIcon._KIND_OK_MUTED
         elif status in _SKIPPED_STATUSES:
             color, kind = theme.TEXT_FAINT, _StatusIcon._KIND_SKIPPED
         elif status == "updating":
