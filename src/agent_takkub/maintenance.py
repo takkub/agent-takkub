@@ -260,6 +260,7 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     warn: Counter[str] = Counter()
     worst_stall = 0
     stall_callouts: list[str] = []
+    recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
     total = 0
     try:
         with log_path.open(encoding="utf-8", errors="replace") as fh:
@@ -278,6 +279,8 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                 name = str(rec.get("event") or "")
                 if name in _SEVERE_EVENTS:
                     severe[name] += 1
+                    if name.endswith("_pane_recover"):
+                        recover_reasons[str(rec.get("reason") or "unclassified")] += 1
                 elif name in _WARN_EVENTS:
                     warn[name] += 1
                 if name == "main_thread_stall":
@@ -298,6 +301,11 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
             f"ไม่มี event ใน {since_hours:.0f} ชม.ล่าสุด (cockpit ไม่ได้รัน?)",
         )
     details = [f"🔴 {_SEVERE_EVENTS[k]} ×{v}" for k, v in severe.most_common()]
+    if recover_reasons:
+        details.append(
+            "   เหตุผล recovery: "
+            + " · ".join(f"{k} ×{v}" for k, v in recover_reasons.most_common())
+        )
     details += [f"🟡 {_WARN_EVENTS[k]} ×{v}" for k, v in warn.most_common()]
     details += stall_callouts[-5:]
     if worst_stall:

@@ -2084,6 +2084,149 @@ def cmd_audit_skills(args: argparse.Namespace) -> dict:
     return {"ok": True, "msg": f"{len(pairs)} overlap pair(s) found"}
 
 
+def _skill_scope(path, *, global_dir, project_central, repo_root) -> str:
+    """Where a scanned skill REALLY lives (junctions resolved): global /
+    project (central store) / built-in (cockpit checkout) / repo (a real dir
+    committed inside the user's project)."""
+    from pathlib import Path
+
+    try:
+        real = Path(path).resolve()
+    except OSError:
+        return "?"
+    for label, base in (
+        ("global", global_dir),
+        ("project", project_central),
+        ("built-in", repo_root),
+    ):
+        if base is None:
+            continue
+        try:
+            if real.is_relative_to(Path(base).resolve()):
+                return label
+        except (OSError, ValueError):
+            continue
+    return "repo"
+
+
+def cmd_skills(args: argparse.Namespace) -> dict:
+    """`takkub skills list|effective` (#422 item 4) — what skills exist and
+    which ones a role actually receives, from the CLI instead of Settings.
+
+    Pure local (no orchestrator IPC): scans the same roots the spawn path
+    scans (`spawn_engine._skill_roots_for_project` order: project paths first,
+    cockpit checkout last), resolves junctions to label each skill's real
+    home (global #419 / project / built-in / repo), and for `effective`
+    crosses the Skill Matrix assignment with the provider's bridge state
+    (`provider_spec.capability_matrix` — native Skill tool vs instruction
+    appendix) so a role on codex/gemini is never assumed to get what a claude
+    role gets."""
+
+    from . import config, skill_policy, skill_scan
+    from .lead_context import _allowed_project_roots
+
+    project = args.project or config.active_project()[0]
+    roots = list(_allowed_project_roots(project)) if project else []
+    roots.append(config.REPO_ROOT)
+    global_dir = config.global_skills_dir()
+    try:
+        project_central = config.project_skills_dir(project) if project else None
+    except ValueError:
+        project_central = None
+    skills = skill_scan.scan_skills(roots)
+    scoped = {
+        s.name: (
+            s,
+            _skill_scope(
+                s.path,
+                global_dir=global_dir,
+                project_central=project_central,
+                repo_root=config.REPO_ROOT,
+            ),
+        )
+        for s in skills
+    }
+    # A global skill that no project has linked yet is still a real skill —
+    # list it from the store directly so `list --global` is complete.
+    if global_dir.is_dir():
+        for d in sorted(global_dir.iterdir()):
+            if d.is_dir() and (d / "SKILL.md").is_file() and d.name not in scoped:
+                try:
+                    fm, _ = skill_scan.read_skill(d / "SKILL.md")
+                    desc = str(fm.get("description") or "")
+                except Exception:
+                    desc = ""
+                scoped[d.name] = (
+                    skill_scan.SkillInfo(name=d.name, description=desc, path=d / "SKILL.md"),
+                    "global",
+                )
+
+    if args.skills_cmd == "list":
+        want = "global" if args.only_global else None
+        rows = [
+            (name, scope, info)
+            for name, (info, scope) in sorted(scoped.items())
+            if want is None or scope == want
+        ]
+        if not rows:
+            return {"ok": True, "msg": "no skills found" + (" (global)" if want else "")}
+        width = max(len(n) for n, _, _ in rows)
+        for name, scope, info in rows:
+            desc = (info.description or "")[:60]
+            print(f"  {name:<{width}}  {scope:<8}  {desc}")
+            print(f"  {'':<{width}}  {'':<8}  {info.path}")
+        return {
+            "ok": True,
+            "msg": f"{len(rows)} skill(s) · project={project or '-'} · global store={global_dir}",
+        }
+
+    # effective
+    role = args.role
+    provider = args.provider
+    if not provider:
+        try:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(role, project)
+        except Exception:
+            provider = "claude"
+    from .provider_spec import PROVIDER_REGISTRY, capability_state
+
+    spec = PROVIDER_REGISTRY.get(provider)
+    skills_state = capability_state(provider, "skills")
+    bridge = {
+        "supported": "native Skill tool (auto-trigger จาก description)",
+        "partial": "instruction-only — appendix ใน AGENTS.md ให้เปิดไฟล์อ่านเอง ไม่มี auto-trigger",
+        "unsupported": "ไม่มีทางส่ง skill ให้ provider นี้",
+        "experimental": "experimental",
+    }[skills_state]
+    assigned = skill_policy.effective_skills(role)
+    print(f"  role={role}  provider={provider}  skills={skills_state}  → {bridge}")
+    if not assigned:
+        print("  (Skill Matrix ไม่ได้ assign skill ให้ role นี้ — pane จะเห็นแค่ที่ discover เองจาก cwd)")
+    missing: list[str] = []
+    for name in assigned:
+        entry = scoped.get(name)
+        if entry is None:
+            missing.append(name)
+            print(f"  ✗ {name}  (assigned แต่หาไฟล์ไม่เจอใน roots — ถูก drop เงียบตอน spawn)")
+            continue
+        info, scope = entry
+        print(f"  ✓ {name}  [{scope}]  {info.path}")
+    if spec is not None and skills_state != "supported" and assigned:
+        print(
+            "  ⚠ provider นี้ได้ skill แบบ instruction-only — "
+            "engine log `provider_capability_fallback` ทุก spawn (#422)"
+        )
+    return {
+        "ok": not missing,
+        "msg": (
+            f"{len(assigned) - len(missing)}/{len(assigned)} assigned skill(s) resolve for "
+            f"{role} on {provider}" + (f" · missing: {', '.join(missing)}" if missing else "")
+        ),
+    }
+
+
 def cmd_migrate_skills(args: argparse.Namespace) -> dict:
     """Migrate legacy cockpit-created skills out of a project's repo into the
     central store (junction/symlink left behind). Pure local — no orchestrator
@@ -3917,6 +4060,26 @@ def main(argv: list[str] | None = None) -> int:
     sas.add_argument("--output", default="runtime/skill_audit.md")
     sas.add_argument("--json", action="store_true", help="emit JSON instead of writing markdown")
     sas.set_defaults(func=cmd_audit_skills)
+
+    ssk = sub.add_parser(
+        "skills",
+        help="list skills (global/project/built-in) or show what a role effectively gets (#422)",
+    )
+    ssk_sub = ssk.add_subparsers(dest="skills_cmd", required=True)
+    sskl = ssk_sub.add_parser("list", help="every skill visible to the project, with its real home")
+    sskl.add_argument("--project", default=None, help="project name (default: active project)")
+    sskl.add_argument(
+        "--global", dest="only_global", action="store_true", help="only cockpit-level skills"
+    )
+    sske = ssk_sub.add_parser(
+        "effective", help="skills a role actually receives (Skill Matrix × provider bridge)"
+    )
+    sske.add_argument("--role", required=True, help="role name (e.g. backend)")
+    sske.add_argument("--project", default=None, help="project name (default: active project)")
+    sske.add_argument(
+        "--provider", default=None, help="override provider (default: resolved for the role)"
+    )
+    ssk.set_defaults(func=cmd_skills)
 
     sms = sub.add_parser(
         "migrate-skills",

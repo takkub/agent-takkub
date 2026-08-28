@@ -1392,6 +1392,7 @@ class TestRunAllChecks:
             "check_projects",
             "check_providers",
             "check_provider_isolation",
+            "check_provider_capabilities",
             "check_provider_auth",
             "check_secret_backend",
             "check_hooks",

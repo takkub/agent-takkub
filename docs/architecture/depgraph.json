@@ -371,13 +371,14 @@
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
+        "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 34
+      "fan_out": 35
     },
     {
       "module": "agent_takkub.cli_server",
@@ -4521,6 +4522,7 @@
         "agent_takkub.skill_scan"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.core.capabilities.registry",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.repositories.skills",
@@ -4529,7 +4531,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 6
     },
     {

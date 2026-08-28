@@ -112,9 +112,11 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _task_handoff_pointer,
     _teammate_tier,
     _truncate_at_word_boundary,
+    classify_stuck_reason,
     cwd_validation_error,
     is_delivery_pointer_failure,
     prune_old_transcripts,
+    recovery_snapshot,
     scan_artifacts,
 )
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
@@ -4003,6 +4005,11 @@ class Orchestrator(
                 )
 
         self._idle_state.pop(key, None)
+        # #422 item 3: keep the session id for the `close` event below — the
+        # PaneState that carries it is popped right here.
+        _closed_session_uuid = getattr(
+            getattr(self, "_pane_state", {}).get(key), "session_uuid", None
+        )
         getattr(self, "_pane_state", {}).pop(key, None)
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
@@ -4042,7 +4049,14 @@ class Orchestrator(
         if role_name != LEAD.name:
             self.paneClosed.emit(role_name, project_ns)
         self.statusChanged.emit()
-        _log_event("close", role=role_name, force=force, reason=reason)
+        _log_event(
+            "close",
+            role=role_name,
+            force=force,
+            reason=reason,
+            project=project_ns,
+            session_uuid=_closed_session_uuid,
+        )
         # #406: the pane just removed may have been the last mb-Chrome user.
         self._schedule_native_chrome_idle_release()
         # Fan-out queue (flag-gated): a genuine teammate close frees a slot —
@@ -5295,7 +5309,15 @@ class Orchestrator(
                 self.close(from_role, project=project_ns)
 
         QTimer.singleShot(2_500, _close_if_same_session)
-        _log_event("done", role=from_role, note=note[:200])
+        _log_event(
+            "done",
+            role=from_role,
+            note=note[:200],
+            project=project_ns,
+            session_uuid=getattr(
+                self._pane_state.get(_exit_key(project_ns, from_role)), "session_uuid", None
+            ),
+        )
         # `now`/`transcript_path`/the actual _save_decision_note write already
         # happened above, ahead of the notice — see the comment there. Reuse
         # the same `now` so this stamp can't disagree with the written file.
@@ -9196,6 +9218,31 @@ class Orchestrator(
         # Reset the output timestamp so the next tick doesn't re-trigger
         # before claude has had a chance to print anything from the new
         # session.
+        # #422: classify WHY (closed enum) + attach a bounded screen/process
+        # snapshot + a recovery_id that the respawn/re-deliver events below
+        # share, so one recovery reads as one chain in events.log instead of
+        # three timestamps to eyeball (#418 post-mortem).
+        recovery_id = _uuid.uuid4().hex[:12]
+        _idle_rounds = int((self._idle_state.get(key) or {}).get("notice_rounds") or 0)
+        reason = classify_stuck_reason(
+            idle_rounds=_idle_rounds,
+            live_child_defer_since=(
+                _ps_snap.live_child_defer_since if _ps_snap is not None else 0.0
+            ),
+        )
+        try:
+            _children = self._live_non_scaffolding_children(project, role, pane.session)
+        except Exception:
+            _children = []
+        snapshot = recovery_snapshot(
+            pane.session,
+            now=now,
+            last_output_ts=getattr(pane, "_last_output_ts", None),
+            last_content_ts=_content_ts,
+            assign_ts=_ps_snap.assign_ts if _ps_snap is not None else None,
+            children=_children,
+            spinner_phrases=_spinner_interrupt_phrases(),
+        )
         pane._last_output_ts = now
         _log_event(
             "stuck_pane_recover",
@@ -9204,6 +9251,11 @@ class Orchestrator(
             cwd=cwd or "",
             silent_for_s=silent_for_s,
             content_static_s=content_static_s,
+            reason=reason,
+            idle_rounds=_idle_rounds,
+            recovery_id=recovery_id,
+            session_uuid=snap_uuid,
+            snapshot=snapshot,
         )
         # suppress_pipeline + suppress_auto_chain: this close is the first half of a
         # close→respawn recovery, not a real pane death.  Neither the pipeline hop
@@ -9262,7 +9314,16 @@ class Orchestrator(
                 _from_auto_respawn=True,
                 _shard_total=snap_shard_total,
             )
-            _log_event("stuck_recover_respawn", role=role, project=project, ok=ok, msg=msg[:160])
+            _log_event(
+                "stuck_recover_respawn",
+                role=role,
+                project=project,
+                ok=ok,
+                msg=msg[:160],
+                reason=reason,
+                recovery_id=recovery_id,
+                session_uuid=snap_uuid,
+            )
             if not ok:
                 # Spawn failed — pop the whole PaneState (pane is dead, return
                 # to post-close empty state) rather than resetting fields one by

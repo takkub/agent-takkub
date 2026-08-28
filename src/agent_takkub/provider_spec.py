@@ -140,6 +140,12 @@ class ProviderSpec:
     multiline_newline_seq: str | None = None
 
     # ─── 8. Spawning capability flags ───
+    # #422 item 2: explicit per-capability state overrides. `capability_matrix`
+    # DERIVES every entry from the existing flags below (so the matrix can't
+    # drift from what the engine actually branches on); this dict only wins
+    # for a capability whose real-world state the flags can't express (e.g.
+    # "experimental"). Values: supported | partial | unsupported | experimental.
+    capability_overrides: dict[str, str] = field(default_factory=dict)
     supports_mirror: bool = False
     supports_resume: bool = False
     supports_slash_commands: bool = False
@@ -1233,6 +1239,79 @@ cursor_spec = ProviderSpec(
     # reads "unknown" for it ahead of any quota tier anyway.
     quota_markers=(),
 )
+
+
+# ─── #422 item 2: provider capability contract ───
+# Lead delegates by ROLE, not by provider — so every place the engine has to
+# do less for one provider must be visible, never a silent branch. This is
+# the closed list of capabilities the cockpit knows how to talk about; each
+# maps to one state per provider (`capability_matrix`), derived from the
+# very flags the engine branches on. `takkub doctor` prints the matrix and
+# the engine logs `provider_capability_fallback` whenever it takes the
+# degraded path for a `partial`/`unsupported` capability.
+CAPABILITY_STATES: tuple[str, ...] = ("supported", "partial", "unsupported", "experimental")
+CAPABILITY_NAMES: tuple[str, ...] = (
+    "skills",  # Skill Matrix reaches the pane: native Skill tool vs instruction bridge
+    "mcp",  # cockpit-managed MCP servers reach the pane
+    "resume",  # --resume <uuid> after respawn
+    "multiline_input",  # Shift+Enter newline sequence known
+    "slash_commands",  # provider TUI accepts /commands the cockpit sends
+    "remote_mirror",  # Remote/PWA mirror of the pane
+    "token_meter",  # per-pane token accounting
+    "remote_history",  # transcript readable from Remote
+    "file_read_tool",  # structured file-read tool (long-task handoff pointer)
+    "modal_detection",  # ready/blocker markers known (permission/modal prompts)
+    "tool_stuck_detection",  # shell-tool running markers known
+    "provider_isolation",  # provider home isolated under DATA_HOME
+)
+
+
+def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
+    """State of every `CAPABILITY_NAMES` entry for *spec*, derived from its
+    flags (see the comment above). `capability_overrides` wins per key."""
+    m: dict[str, str] = {}
+    if spec.context_strategy == "append_system_prompt_file":
+        m["skills"] = "supported"
+    elif spec.context_strategy == "agents_md_file":
+        m["skills"] = "partial"  # instruction bridge: no auto-trigger / bundled scripts
+    else:
+        m["skills"] = "unsupported"
+    m["mcp"] = "supported" if spec.mcp_adapter_variant != "none" else "partial"
+    m["resume"] = (
+        "supported" if spec.supports_resume and spec.session_resume_flag else "unsupported"
+    )
+    m["multiline_input"] = "supported" if spec.multiline_newline_seq else "partial"
+    m["slash_commands"] = "supported" if spec.supports_slash_commands else "unsupported"
+    m["remote_mirror"] = "supported" if spec.supports_mirror else "unsupported"
+    m["token_meter"] = "supported" if spec.supports_token_meter else "unsupported"
+    m["remote_history"] = "supported" if spec.supports_remote_history else "unsupported"
+    m["file_read_tool"] = "supported" if spec.supports_agent_file_read else "unsupported"
+    m["modal_detection"] = "supported" if spec.ready_hard_blockers else "partial"
+    m["tool_stuck_detection"] = "supported" if spec.tool_running_markers else "unsupported"
+    try:
+        from .config import PROVIDER_ISOLATION_GAPS
+
+        # GAPS is the single authority on "no isolation knob upstream";
+        # everything else has one (claude/codex/opencode) — state of the
+        # knob, not whether this checkout currently applies it.
+        m["provider_isolation"] = (
+            "unsupported" if spec.name in PROVIDER_ISOLATION_GAPS else "supported"
+        )
+    except Exception:
+        m["provider_isolation"] = "partial"
+    for key, value in spec.capability_overrides.items():
+        if key in CAPABILITY_NAMES and value in CAPABILITY_STATES:
+            m[key] = value
+    return m
+
+
+def capability_state(provider: str, capability: str) -> str:
+    """One cell of `capability_matrix`; "unsupported" for an unknown provider
+    or capability name so a caller can never mistake "unknown" for "works"."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None or capability not in CAPABILITY_NAMES:
+        return "unsupported"
+    return capability_matrix(spec)[capability]
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {

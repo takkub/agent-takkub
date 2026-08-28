@@ -6,6 +6,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
+- **#422 reliability contract (cherry-pick จาก roadmap review)** —
+  (1) ทุก `*_pane_recover` event มี `reason` เป็น enum ปิด (`orchestrator_text.RECOVERY_REASONS`: `content_static` · `idle_no_response` · `child_alive_grace_expired` · `no_first_content[_retry_failed]` · `auth_failed` · `account_pending`) + `snapshot` (5 บรรทัดท้ายจอหลังกรอง spinner, วินาทีตั้งแต่ byte/content/assign ล่าสุด, child process) + `recovery_id` ที่ event `*_recover_respawn`/`*_pane_respawned` ใช้ร่วม → `takkub ma` สรุป "เหตุผล recovery: idle_no_response ×2 · …" ได้เลย ไม่ต้องไล่ log มือเหมือนตอนปิด #418 ·
+  (2) **ProviderSpec capability matrix** (`provider_spec.capability_matrix/capability_state`, 12 capability × supported/partial/unsupported/experimental) derive จาก flag ที่ engine branch จริง (ไม่พิมพ์มือ ไม่ drift) + `capability_overrides` ต่อ provider · `takkub doctor` เพิ่ม `[provider-capabilities]` INFO ต่อ provider · engine log `provider_capability_fallback` ทุกครั้งที่เดินทาง degraded (skills → instruction bridge บน provider ที่ไม่มี Skill tool, resume ถูกปฏิเสธ) — ห้าม fallback เงียบตามกฎ multi-provider ·
+  (3) `done`/`close` event มี `project` + `session_uuid` ให้ correlate กับ recovery chain ·
+  (4) **`takkub skills list [--global] [--project X]`** (ชื่อ · scope global/project/built-in/repo · path — resolve junction แล้ว, global ที่ยังไม่ถูก link ก็แสดง) และ **`takkub skills effective --role R [--provider P]`** (Skill Matrix × bridge ของ provider: native Skill tool vs instruction-only, ชี้ skill ที่ assign แต่หาไฟล์ไม่เจอซึ่งเดิมถูก drop เงียบตอน spawn) · tests 22 ตัว
+
 - **Global skills — skill ส่วนกลางระดับ cockpit ที่ทุกโปรเจค + ทุก provider เห็น (#419)** — store ใหม่ `DATA_HOME/skills/<name>/SKILL.md` (`config.GLOBAL_SKILLS_HOME`) ใช้ surface เดียวกับ project-skills: `ensure_project_skill_links` junction/symlink ทุก skill กลางเข้า `<project>/.claude/skills/` ตอนเปิด tab **และตอน spawn** (skill ของ project ชื่อซ้ำชนะ ไม่ clobber) → claude/codex/agy ที่ discover จาก cwd เห็นเหมือน skill project, provider ที่ใช้ instruction-bridge (Skill Matrix appendix) ก็ scan เจอจาก root เดียวกัน · Settings › New Skill มี checkbox **Global skill** · `takkub migrate-skills --to-global <name>` ยก skill จาก central ของ project ขึ้นชั้นกลาง (refuse ถ้าชื่อซ้ำ/ยังไม่อยู่ใน central) · `takkub assign --cwd <GLOBAL_SKILLS_HOME>` ผ่าน allowlist แล้ว Lead delegate การเขียน skill กลางได้ตามกฎ (ไม่ต้อง Write เอง) · tests 10 ตัว
 
 ### Fixed (แก้)

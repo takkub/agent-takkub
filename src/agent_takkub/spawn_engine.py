@@ -2022,6 +2022,15 @@ class SpawnEngineMixin:
                 )
             if resume_uuid:
                 if not spec.supports_resume or not spec.session_resume_flag:
+                    _log_event(
+                        "provider_capability_fallback",
+                        role=role_name,
+                        project=project_ns,
+                        provider=spec.name,
+                        capability="resume",
+                        state="unsupported",
+                        fallback="refused",
+                    )
                     return False, f"resume unavailable for provider {spec.name}"
                 if not _resume_uuid_matches_provider_cwd(
                     project_ns, spec.name, resume_uuid, spawn_cwd
@@ -2056,6 +2065,20 @@ class SpawnEngineMixin:
                     _skill_extra = skill_policy.render_skill_appendix(
                         base_role, _skill_roots_for_project(project_ns), spec.context_strategy
                     )
+                    if _skill_extra:
+                        # #422 item 2: this role HAS Skill Matrix skills and
+                        # this provider only gets them as instruction text
+                        # (no Skill tool) — say so in events.log instead of
+                        # silently doing less than a claude pane would.
+                        _log_event(
+                            "provider_capability_fallback",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            capability="skills",
+                            state="partial",
+                            fallback="instruction_bridge",
+                        )
                     # Permission-gate awareness (#243): this provider has no
                     # persistent, bypass-proof "ask" mechanism the cockpit
                     # can enumerate yet (see permission_gates.py module

@@ -37,6 +37,7 @@ import pathlib
 import re
 import sys as _sys
 import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 
@@ -60,6 +61,7 @@ from .orchestrator_text import (
     _notice_fingerprint,
     _paste_payload,
     _sanitize_pane_text,
+    recovery_snapshot,
 )
 from .pipeline_executor import _split_shard
 from .pty_session import PtySession, WritePriority
@@ -2993,12 +2995,43 @@ class LeadInboxMixin:
         # no-content check on this same pane degrade sooner, never later).
         _ps_snap = getattr(self, "_pane_state", {}).get(key)
         snap_attempts = _ps_snap.no_content_recover_attempts if _ps_snap is not None else 0
+        # #422: closed-enum reason + bounded snapshot + recovery_id shared
+        # with the `{kind}_pane_respawned` event below (see
+        # orchestrator_text.RECOVERY_REASONS).
+        if kind == "no_content":
+            reason = "no_first_content_retry_failed" if degrade else "no_first_content"
+        elif kind == "auth_failure":
+            reason = "auth_failed"
+        else:
+            reason = kind
+        recovery_id = uuid.uuid4().hex[:12]
+        _now = time.time()
+        _snap_uuid = _ps_snap.session_uuid if _ps_snap is not None else None
+        try:
+            _children = self._live_non_scaffolding_children(
+                project_ns, role_name, getattr(pane, "session", None)
+            )
+        except Exception:
+            _children = []
+        snapshot = recovery_snapshot(
+            getattr(pane, "session", None),
+            now=_now,
+            last_output_ts=getattr(pane, "_last_output_ts", None),
+            last_content_ts=_ps_snap.last_content_change_ts if _ps_snap is not None else None,
+            assign_ts=_ps_snap.assign_ts if _ps_snap is not None else None,
+            children=_children,
+            spinner_phrases=_orch_attr("_spinner_interrupt_phrases", lambda: ())(),
+        )
         _log_event(
             f"{kind}_pane_recover",
             role=role_name,
             project=project_ns,
             degrade=degrade,
             prior_attempts=snap_attempts,
+            reason=reason,
+            recovery_id=recovery_id,
+            session_uuid=_snap_uuid,
+            snapshot=snapshot,
         )
         self.close(role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True)
 
@@ -3015,6 +3048,8 @@ class LeadInboxMixin:
                 degrade=degrade,
                 ok=ok,
                 msg=msg[:160],
+                reason=reason,
+                recovery_id=recovery_id,
             )
             if ok and task:
                 self._send_when_ready(role_name, task, project=project_ns)

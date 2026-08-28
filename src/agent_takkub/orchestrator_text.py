@@ -943,6 +943,80 @@ def cwd_validation_error(cwd: str, project: str, role_name: str) -> str | None:
     )
 
 
+# #422 item 1 — closed vocabulary for WHY a watchdog recovery fired. Every
+# `*_pane_recover` event carries exactly one of these in `reason` so
+# `takkub ma` / auto-issue can bucket recoveries without re-deriving the
+# cause from surrounding events by hand (what closing #418 took).
+RECOVERY_REASONS: tuple[str, ...] = (
+    "content_static",  # screen (spinner-filtered) unchanged >= STUCK_THRESHOLD_S
+    "idle_no_response",  # sat at its prompt through >=1 idle reminder, then went static
+    "child_alive_grace_expired",  # a real child process was alive, grace ran out
+    "no_first_content",  # never printed anything after spawn (NO_CONTENT_WATCHDOG_SEC)
+    "no_first_content_retry_failed",  # same, on the retry → degrade to claude
+    "auth_failed",  # provider printed an auth-failure marker
+    "account_pending",  # provider stuck on account-verification gate (#346)
+)
+
+
+def classify_stuck_reason(*, idle_rounds: int, live_child_defer_since: float) -> str:
+    """Pick the `reason` for a `stuck_pane_recover` from the two signals the
+    watchdog already tracks (see `RECOVERY_REASONS`). Idle reminders win over
+    a live-child grace expiry: a pane that was nudged and never answered is a
+    stopped agent regardless of what its shell left running."""
+    if idle_rounds > 0:
+        return "idle_no_response"
+    if live_child_defer_since > 0:
+        return "child_alive_grace_expired"
+    return "content_static"
+
+
+def recovery_snapshot(
+    session,
+    *,
+    now: float,
+    last_output_ts: float | None,
+    last_content_ts: float | None,
+    assign_ts: float | None,
+    children: list[str] | None = None,
+    spinner_phrases: tuple[str, ...] = (),
+    tail_lines: int = 5,
+) -> dict:
+    """Bounded diagnostic snapshot attached to every `*_pane_recover` event
+    (#422): the last non-blank screen lines (spinner lines dropped, each
+    clipped to 120 chars), the seconds since last PTY byte / last content
+    change / last assign, and any live non-scaffolding children. Never
+    raises — a dead session just yields an empty tail."""
+    tail: list[str] = []
+    try:
+        lines = list(session.display_lines()) if session is not None else []
+    except Exception:
+        lines = []
+    phrases = tuple(spinner_phrases)
+    for ln in reversed(lines):
+        stripped = ln.strip()
+        if not stripped or any(p in stripped.lower() for p in phrases):
+            continue
+        tail.append(stripped[:120])
+        if len(tail) >= tail_lines:
+            break
+    tail.reverse()
+
+    def _since(ts: float | None) -> int | None:
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            return None
+        return int(now - ts)
+
+    snap: dict = {
+        "tail": tail,
+        "since_last_byte_s": _since(last_output_ts),
+        "since_content_change_s": _since(last_content_ts),
+        "since_assign_s": _since(assign_ts),
+    }
+    if children:
+        snap["children"] = list(children)[:10]
+    return snap
+
+
 def _exit_key(project: str, role: str) -> str:
     """Composite key for `_recent_exits` so the same role in different
     project tabs never shares a resume record."""

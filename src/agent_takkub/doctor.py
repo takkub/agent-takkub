@@ -2972,6 +2972,45 @@ def check_provider_isolation() -> list[Finding]:
     return findings
 
 
+def check_provider_capabilities() -> list[Finding]:
+    """[provider-capabilities/*] — per-provider capability state matrix
+    (#422 item 2, extends #103): one INFO line per registered provider that
+    has ANY `partial`/`unsupported` capability, naming them, so "Lead
+    delegates by role" never hides that a role's provider does less. A
+    provider with every capability `supported` gets one OK line. Derived
+    straight from `provider_spec.capability_matrix` — nothing here is typed
+    by hand, so it can't disagree with what the engine does.
+    """
+    from .provider_spec import PROVIDER_REGISTRY, capability_matrix
+
+    findings: list[Finding] = []
+    for name, spec in sorted(PROVIDER_REGISTRY.items()):
+        matrix = capability_matrix(spec)
+        gaps = {k: v for k, v in matrix.items() if v != "supported"}
+        if not gaps:
+            findings.append(
+                Finding("provider-capabilities", name, Status.OK, "all capabilities supported")
+            )
+            continue
+        by_state: dict[str, list[str]] = {}
+        for cap, state in gaps.items():
+            by_state.setdefault(state, []).append(cap)
+        detail = " · ".join(
+            f"{state}: {', '.join(sorted(caps))}" for state, caps in sorted(by_state.items())
+        )
+        findings.append(
+            Finding(
+                "provider-capabilities",
+                name,
+                Status.INFO,
+                detail,
+                "engine logs `provider_capability_fallback` when it takes the degraded path "
+                "(#422); upstream gaps tracked in #103",
+            )
+        )
+    return findings
+
+
 def check_core_version_compat() -> list[Finding]:
     """[version/*] — Core V2 Schema/Adapter/Compat verdict per provider
     (#309 Phase 4): detected CLI version vs `core.versioning.compatibility`,
@@ -3375,6 +3414,7 @@ def run_all_checks() -> list[Finding]:
         ("check_projects", check_projects),
         ("check_providers", check_providers),
         ("check_provider_isolation", check_provider_isolation),
+        ("check_provider_capabilities", check_provider_capabilities),
         ("check_provider_auth", check_provider_auth),
         ("check_secret_backend", check_secret_backend),
         ("check_hooks", check_hooks),
