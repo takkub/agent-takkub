@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.9] - 2026-08-28
+
 ### Added (เพิ่ม)
 
 - **#422 reliability contract (cherry-pick จาก roadmap review)** —
