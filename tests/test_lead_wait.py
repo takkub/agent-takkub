@@ -867,6 +867,11 @@ class TestTerminalAutoReplyDetection:
             b"\x1bP>|xterm.js(5.5.0)\x1b\\",  # XTVERSION DCS reply
             b"\x1bP1$r0m\x1b\\",  # DECRQSS DCS reply
             b"\x1b[?2026;2$y\x1b[6;1R",  # DECRPM then CPR back to back
+            b"\x1b[<65;51;24M",  # SGR mouse wheel-down (the live #420 culprit)
+            b"\x1b[<35;51;23M",  # SGR mouse motion
+            b"\x1b[<0;10;5m",  # SGR mouse release
+            b"\x1b[<65;51;24M\x1b[<65;51;24M\x1b[<64;51;24M",  # a scroll burst
+            b"\x1b[M !!",  # X10 mouse report
         ],
     )
     def test_pure_auto_reply_chunks_detected(self, chunk: bytes) -> None:

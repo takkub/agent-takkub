@@ -248,3 +248,19 @@ class TestSkillsCli:
         cli.main(["skills", "effective", "--role", "qa"])
         assert seen[0].skills_cmd == "list" and seen[0].only_global is True
         assert seen[1].skills_cmd == "effective" and seen[1].role == "qa"
+
+
+class TestSessionUuidCorrelation:
+    def test_last_reported_uuid_survives_pane_state_pop(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = SimpleNamespace(
+            _pane_state={"p::backend": SimpleNamespace(session_uuid="live-1")},
+            _last_session_uuid={"p::backend": "old-1", "p::qa": "qa-9"},
+        )
+        assert Orchestrator._session_uuid_for(fake, "p::backend") == "live-1"
+        # done()/close() pop PaneState before logging — the memo still answers.
+        assert Orchestrator._session_uuid_for(fake, "p::qa") == "qa-9"
+        assert Orchestrator._session_uuid_for(fake, "p::nobody") is None

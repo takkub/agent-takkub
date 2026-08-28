@@ -4007,9 +4007,7 @@ class Orchestrator(
         self._idle_state.pop(key, None)
         # #422 item 3: keep the session id for the `close` event below — the
         # PaneState that carries it is popped right here.
-        _closed_session_uuid = getattr(
-            getattr(self, "_pane_state", {}).get(key), "session_uuid", None
-        )
+        _closed_session_uuid = self._session_uuid_for(key)
         getattr(self, "_pane_state", {}).pop(key, None)
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
@@ -5314,9 +5312,7 @@ class Orchestrator(
             role=from_role,
             note=note[:200],
             project=project_ns,
-            session_uuid=getattr(
-                self._pane_state.get(_exit_key(project_ns, from_role)), "session_uuid", None
-            ),
+            session_uuid=self._session_uuid_for(_exit_key(project_ns, from_role)),
         )
         # `now`/`transcript_path`/the actual _save_decision_note write already
         # happened above, ahead of the notice — see the comment there. Reuse
@@ -5499,6 +5495,12 @@ class Orchestrator(
         key = f"{project_ns}::{from_role}"
         ps = self._ps(key)
         ps.session_uuid = session_id
+        # #422 item 3: PaneState is popped by done()/close() BEFORE their
+        # events are logged, so keep the last reported uuid per slot here —
+        # overwritten by the next report, never popped — for correlation.
+        if not hasattr(self, "_last_session_uuid"):
+            self._last_session_uuid: dict[str, str] = {}
+        self._last_session_uuid[key] = session_id
         if cwd:
             ps.session_uuid_cwd = cwd
         # Also push the rollover onto the *live* pane (issue #129): the token
@@ -9167,6 +9169,17 @@ class Orchestrator(
                 except Exception:
                     _log_event("tool_stuck_watchdog_error", role=role, project=project_name)
 
+    def _session_uuid_for(self, key: str) -> str | None:
+        """Best-known transcript uuid for a `project::role` slot (#422 item 3):
+        the live PaneState first, else the last `session_report` this slot
+        ever made (survives the PaneState pop done()/close() perform before
+        they log)."""
+        ps = getattr(self, "_pane_state", {}).get(key)
+        live = getattr(ps, "session_uuid", None)
+        if live:
+            return live
+        return getattr(self, "_last_session_uuid", {}).get(key)
+
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The
         spawn uses the pane's last-known cwd so claude rejoins the same
@@ -10132,6 +10145,9 @@ class Orchestrator(
     #   ESC[?<flags>u      kitty keyboard-protocol flags reply          (#420)
     #   ESC[<n>;<r>;<c>t   XTWINOPS size/position report                (#420)
     #   ESC P ... ESC \    DCS reply — XTVERSION (ESC[>q) / DECRQSS      (#420)
+    #   ESC[<b;x;yM/m      SGR mouse report (wheel/motion/click) — seen live
+    #                      as ESC[<65;51;24M cutting waits short           (#420)
+    #   ESC[M<3 bytes>     X10 mouse report                                 (#420)
     # Terminal-structural, not provider- or platform-specific — applies to
     # every pane on every OS this widget runs on.
     #
@@ -10162,6 +10178,11 @@ class Orchestrator(
         rb"|\x1b\[\?\d{0,8}u"  # kitty keyboard-protocol flags reply
         rb"|\x1b\[\d{1,3}(?:;\d{1,8}){0,2}t"  # XTWINOPS report (ESC[8;24;80t)
         rb"|\x1bP[^\x1b]{0,1024}\x1b\\"  # DCS reply (XTVERSION / DECRQSS)
+        # #420 (caught live by `lead_user_input_stamp`): SGR mouse reports —
+        # wheel/motion/click over the Lead pane while the TUI has mouse
+        # tracking on. Scrolling is not a command; it must never end a wait.
+        rb"|\x1b\[<\d{1,3};\d{1,5};\d{1,5}[mM]"
+        rb"|\x1b\[M[\x20-\xff]{3}"  # X10/normal mouse report (3 payload bytes)
     )
 
     # A real terminal auto-reply is at most a few dozen bytes (a CPR is

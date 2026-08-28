@@ -123,3 +123,7 @@ graft-graphs/
 # Unanchored so it covers both and any future build target — we author our
 # ripgrep excludes as .rgignore, so no .ignore in this tree is ever ours.
 .ignore
+
+# dev checkout doubles as DATA_HOME (config._resolve_data_home) — central skill stores (#419)
+skills/
+project-skills/
