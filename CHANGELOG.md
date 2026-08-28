@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.10] - 2026-08-28
+
 ### Fixed (แก้)
 
 - **Usage/limit panel: Gemini แสดง 'อัปเดตเมื่อ ~6 เดือนก่อน' ทั้งที่ pane gemini รันอยู่ (#423)** — ค่าที่อ่านได้คือ cache ของแอป Antigravity (`~/.antigravity_cockpit/cache/quota_api_v1_plugin`, updatedAt 27 ก.พ. จริง) เพราะ agy CLI ไม่มี usage API/ไม่เขียน cache นี้ — adapter รู้และส่ง `GEMINI_STALE_HINT` มาแล้ว แต่ Remote UI แสดง hint เฉพาะ status unsupported/error → การ์ด stale เห็นแค่เวลาเก่า · แก้: การ์ด stale แสดง hint ด้วย + เขียน hint ให้ตรง ("agy CLI ไม่มี usage API — ตัวเลขนี้คือ cache ของแอป Antigravity ครั้งล่าสุด")
