@@ -168,6 +168,7 @@ class TestRunMaintenance:
         assert {c["key"] for c in payload["checks"]} == {
             "issues",
             "prs",
+            "code_scanning",
             "logs",
             "local_issues",
             "repo",
@@ -233,3 +234,93 @@ class TestLocalIssueBacklog:
         ]
         actions = maintenance.build_actions(checks)
         assert any("ค้างในเครื่อง" in a for a in actions)
+
+
+class TestCheckCodeScanning:
+    """Alerts on the GitHub Security tab never appear in `gh issue list` and CI
+    stays green over them, so the sweep must surface them itself (alert #43)."""
+
+    def _fake_run(self, monkeypatch, api_ok: bool, api_out: str, slug_ok: bool = True):
+        calls: list[list[str]] = []
+
+        def fake(cmd, cwd=None, timeout=60.0):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return (True, "takkub/agent-takkub") if slug_ok else (False, "no remote")
+            return api_ok, api_out
+
+        monkeypatch.setattr(maintenance, "_run", fake)
+        return calls
+
+    def test_empty_is_ok_and_reads_clean(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_run(monkeypatch, True, "[]")
+        check = maintenance.check_code_scanning(tmp_path)
+        assert check.status == "ok"
+        assert check.key == "code_scanning"
+
+    def test_open_alert_is_attention_with_path_line_and_url(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        rows = [
+            {
+                "number": 43,
+                "html_url": "https://github.com/takkub/agent-takkub/security/code-scanning/43",
+                "rule": {
+                    "id": "py/overly-permissive-file",
+                    "description": "Overly permissive file permissions",
+                    "security_severity_level": "high",
+                },
+                "tool": {"name": "CodeQL"},
+                "most_recent_instance": {
+                    "location": {"path": "src/agent_takkub/resource_lock.py", "start_line": 101}
+                },
+            }
+        ]
+        calls = self._fake_run(monkeypatch, True, json.dumps(rows))
+        check = maintenance.check_code_scanning(tmp_path)
+        assert check.status == "attention"
+        assert check.summary.startswith("1 ใบ")
+        assert "high 1" in check.summary
+        line = check.details[0]
+        assert "#43" in line and "[high]" in line
+        assert "resource_lock.py:101" in line
+        assert "security/code-scanning/43" in line
+        assert check.data["numbers"] == [43]
+        api = next(c for c in calls if c[:2] == ["gh", "api"])
+        assert "repos/takkub/agent-takkub/code-scanning/alerts?state=open" in api[2]
+
+    def test_sorted_by_severity_not_by_recency(self, tmp_path: Path, monkeypatch) -> None:
+        rows = [
+            {"number": 9, "rule": {"id": "n", "security_severity_level": "low"}},
+            {"number": 3, "rule": {"id": "c", "security_severity_level": "critical"}},
+            {"number": 7, "rule": {"id": "m", "security_severity_level": "medium"}},
+        ]
+        self._fake_run(monkeypatch, True, json.dumps(rows))
+        check = maintenance.check_code_scanning(tmp_path)
+        assert check.data["numbers"] == [3, 7, 9]
+
+    def test_scanning_not_enabled_is_skip_not_error(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_run(monkeypatch, False, "HTTP 404: no analysis found for this repository")
+        assert maintenance.check_code_scanning(tmp_path).status == "skip"
+
+    def test_gh_failure_is_error_not_ok(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_run(monkeypatch, False, "gh auth required")
+        assert maintenance.check_code_scanning(tmp_path).status == "error"
+
+    def test_no_slug_is_error(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_run(monkeypatch, True, "[]", slug_ok=False)
+        assert maintenance.check_code_scanning(tmp_path).status == "error"
+
+    def test_plan_names_the_alerts_only_when_present(self) -> None:
+        with_alert = maintenance.build_actions(
+            [maintenance.Check("code_scanning", "c", "attention", "1 ใบ")]
+        )
+        assert any("code scanning" in a for a in with_alert)
+        clean = maintenance.build_actions([maintenance.Check("code_scanning", "c", "ok", "")])
+        assert not any("code scanning" in a for a in clean)
+
+    def test_no_net_skips_code_scanning(self, tmp_path: Path) -> None:
+        log = _write_events(tmp_path / "events.log", [])
+        report = maintenance.run_maintenance(tmp_path, include_network=False, log_path=log)
+        cs = [c for c in report.checks if c.key == "code_scanning"]
+        assert cs and cs[0].status == "skip"

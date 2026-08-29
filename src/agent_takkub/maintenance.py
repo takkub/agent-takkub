@@ -1,7 +1,8 @@
 """`takkub ma` — the cockpit's own maintenance sweep.
 
 One command that walks the standing checklist instead of the operator
-remembering it: open issues, open PRs and their CI, what the running cockpit's
+remembering it: open issues, open PRs and their CI, open code-scanning alerts
+(GitHub Security tab — never surfaced by `gh issue list`), what the running cockpit's
 own `events.log` says went wrong recently, and whether this checkout is in a
 state where a fix could actually be shipped.
 
@@ -241,6 +242,91 @@ def check_prs(repo_dir: Path, limit: int = 30) -> Check:
     return Check("prs", "Pull request ที่เปิดค้าง", "attention", summary, details)
 
 
+# ── 2b. code scanning (GitHub security tab) ──────────────────────────────────
+
+_CS_TITLE = "Code scanning alert (GitHub security)"
+# Ranking so the loudest finding leads the list — GitHub returns newest-first,
+# which buries a `critical` behind ten fresh `note`s.
+_CS_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _gh_repo_slug(repo_dir: Path) -> str | None:
+    ok, out = _run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd=repo_dir
+    )
+    return out.strip() if ok and out.strip() else None
+
+
+def check_code_scanning(repo_dir: Path, limit: int = 100) -> Check:
+    """Open alerts under the repo's Security → Code scanning tab.
+
+    These never show up in `gh issue list` and CI stays green while they pile
+    up, so without this section the sweep would happily say "พร้อม ship" over a
+    `high`-severity CodeQL finding nobody has looked at (the case that
+    prompted it: alert #43, an overly-permissive `os.open` mode)."""
+    slug = _gh_repo_slug(repo_dir)
+    if slug is None:
+        return Check(
+            "code_scanning", _CS_TITLE, "error", "หา owner/repo ของ remote ไม่ได้ (gh repo view)"
+        )
+    ok, out = _run(
+        [
+            "gh",
+            "api",
+            f"repos/{slug}/code-scanning/alerts?state=open&per_page={limit}",
+        ],
+        cwd=repo_dir,
+    )
+    if not ok:
+        low = out.lower()
+        if "no analysis found" in low or "not enabled" in low or "404" in low:
+            return Check("code_scanning", _CS_TITLE, "skip", "repo นี้ยังไม่ได้เปิด code scanning")
+        return Check("code_scanning", _CS_TITLE, "error", out)
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return Check("code_scanning", _CS_TITLE, "error", "อ่านผลจาก gh api ไม่ได้")
+    if not isinstance(rows, list):
+        return Check("code_scanning", _CS_TITLE, "error", "gh api ตอบรูปแบบที่ไม่รู้จัก")
+    if not rows:
+        return Check("code_scanning", _CS_TITLE, "ok", "ไม่มี alert เปิดค้าง")
+
+    def _sev(row: dict) -> str:
+        rule = row.get("rule") or {}
+        return str(rule.get("security_severity_level") or rule.get("severity") or "").lower()
+
+    rows.sort(key=lambda r: (_CS_SEVERITY_RANK.get(_sev(r), 9), -int(r.get("number") or 0)))
+    counts = Counter(_sev(r) or "unknown" for r in rows)
+    details: list[str] = []
+    for row in rows:
+        rule = row.get("rule") or {}
+        loc = ((row.get("most_recent_instance") or {}).get("location")) or {}
+        where = ""
+        if loc.get("path"):
+            where = f" — {loc.get('path')}"
+            if loc.get("start_line"):
+                where += f":{loc.get('start_line')}"
+        tool = ((row.get("tool") or {}).get("name")) or ""
+        details.append(
+            f"#{row.get('number')} [{_sev(row) or '?'}] "
+            f"{str(rule.get('description') or rule.get('id') or '')[:70]}{where}"
+            + (f" · {tool}" if tool else "")
+            + f" · {row.get('html_url') or ''}"
+        )
+    ordered = [
+        f"{k} {counts[k]}" for k in sorted(counts, key=lambda k: _CS_SEVERITY_RANK.get(k, 9))
+    ]
+    summary = f"{len(rows)} ใบ ({' · '.join(ordered)})"
+    return Check(
+        "code_scanning",
+        _CS_TITLE,
+        "attention",
+        summary,
+        details,
+        {"numbers": [r.get("number") for r in rows], "by_severity": dict(counts)},
+    )
+
+
 # ── 3. runtime log ───────────────────────────────────────────────────────────
 
 
@@ -474,6 +560,12 @@ def build_actions(checks: list[Check]) -> list[str]:
     prs = by_key.get("prs")
     if prs is not None and prs.status == "attention":
         steps.append("เคลียร์ PR: CI แดง = ดู log ก่อนตัดสิน · CI เขียว = review แล้ว merge")
+    scanning = by_key.get("code_scanning")
+    if scanning is not None and scanning.status == "attention":
+        steps.append(
+            "ปิด code scanning alert: อ่านโค้ดตรงบรรทัดที่ชี้ก่อน — fix จริงถ้าเป็นช่องโหว่ "
+            "หรือ dismiss พร้อมเหตุผลบน GitHub ถ้าเป็น false positive (ห้ามปล่อยค้างเงียบ)"
+        )
     backlog = by_key.get("local_issues")
     if backlog is not None and backlog.status == "attention":
         steps.append("ส่ง issue ที่ค้างในเครื่องขึ้น GitHub ก่อน — ตอนนี้ยังไม่มีใครนอกเครื่องนี้เห็น")
@@ -501,9 +593,11 @@ def run_maintenance(
     if include_network:
         checks.append(check_issues(repo_dir))
         checks.append(check_prs(repo_dir))
+        checks.append(check_code_scanning(repo_dir))
     else:
         checks.append(Check("issues", "Issue ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
         checks.append(Check("prs", "Pull request ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
+        checks.append(Check("code_scanning", _CS_TITLE, "skip", "ข้าม (--no-net)"))
     checks.append(scan_events(log_path or EVENTS_LOG, since_hours=since_hours))
     checks.append(check_local_issue_backlog())
     checks.append(

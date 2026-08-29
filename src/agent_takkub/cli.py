@@ -3799,9 +3799,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sma = sub.add_parser(
         "ma",
-        help="(operator) maintenance sweep: issues → PRs → runtime log → repo → แผนทำต่อ",
+        help="(operator) maintenance sweep: issues → PRs → code scanning → runtime log → repo → แผนทำต่อ",
         description=(
             "เดิน checklist บำรุงรักษา cockpit ทีละข้อ: issue ที่ค้าง, PR + สถานะ CI, "
+            "code scanning alert ที่เปิดค้าง (หน้า Security ของ GitHub), "
             "สิ่งที่ events.log ของ cockpit ที่รันอยู่บอกว่าพังจริงในช่วงที่ผ่านมา, และ "
             "สภาพ repo ว่าพร้อม ship ไหม — แล้วสรุปเป็นแผนทำต่อ (อ่านอย่างเดียว ไม่แก้ไฟล์)"
         ),
