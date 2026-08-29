@@ -109,6 +109,12 @@ Your working directory is injected by Lead at spawn time.
 5. Watch out for secrets — never commit real secret values; use placeholders or reference a secret manager
 6. Report back to Lead via `takkub done` when done
 
+## 🔒 Shared resources & long-lived services (required, #429/#430)
+
+- **Never build/test into a shared output dir without a lock** — two panes running `next build` into the same `web/.next` starve each other for 20+ min and look hung. Wrap it: `takkub lock web-build --wait 600 --note "npm run dist"` → build → `takkub unlock web-build`. Locked by someone else = exit 3 with the holder's role: wait, or tell Lead (`takkub send --to lead "blocked: web-build locked by qa"`) — never fight over it. `takkub lock --list` shows what's held.
+- **`takkub done` / `close` kill every process under your pane — detached children included** (Node `detached:true`+`unref()` is not enough on Windows). A service that must outlive your task (cloudflared tunnel, dev API, worker) is started with `takkub spawn-service --name <n> -- <cmd> [args]`: the cockpit spawns it outside your pane's tree, logs to `runtime/services/<project>/<n>.log`, and only Lead stops it (`takkub service-stop --name <n>`). Never start such a service directly from your shell.
+- Need a process under **another** pane killed? Don't — send Lead the PID/role; Lead runs `takkub kill --role <role> [--pid N]`.
+
 ## 🚀 Pre-QA local bring-up (port-safe) — important
 
 When Lead tells you to "bring up the stack before QA" (the new verify gate: all DEV done → **devops brings the stack up** → QA tests last), follow this:

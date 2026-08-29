@@ -118,6 +118,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     prune_old_transcripts,
     recovery_snapshot,
     scan_artifacts,
+    ui_evidence_gate,
 )
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
     _DEFAULT_MCP_STARTUP_TIMEOUT_MS,
@@ -1525,6 +1526,13 @@ class Orchestrator(
         # `LeadWaitMixin.poll_wait` needs "did the owner type ANYTHING
         # after this wait started", not "is a draft currently held".
         self._lead_last_user_input_ts: dict[str, float] = {}
+        # #428/#431: when the owner's own keystroke last reached the Lead
+        # PTY, per project. Compared against `session.last_write_ts` (stamped
+        # by EVERY write, engine-originated included) so `_on_pane_input`
+        # can tell "an ESC-led chunk right after the cockpit pasted a digest/
+        # notice" (a terminal reply the auto-reply filter doesn't know yet)
+        # from a genuine special key — see `_LEAD_INJECT_GRACE_S`.
+        self._lead_last_user_write_ts: dict[str, float] = {}
         # #393: the last `_lead_last_user_input_ts` value that has already
         # fired a `poll_wait` "user_input" interrupt for this project — see
         # `LeadWaitMixin._pending_user_input_interrupt`'s docstring for why a
@@ -3761,6 +3769,74 @@ class Orchestrator(
                     note="message_replayed",
                 )
 
+    def kill_pane_children(
+        self,
+        role_name: str,
+        project: str | None = None,
+        pid: object = None,
+        by: str = "lead",
+    ) -> tuple[bool, str]:
+        """#430 `takkub kill --role X [--pid N]` — kill the processes running
+        under *role_name*'s pane (children of its PTY shell, recursive)
+        without touching the pane itself. A `--pid` must be inside that
+        pane's tree — the point is that a Lead can end a runaway build in
+        one pane without ever reaching for `taskkill /IM` (#169). Audited
+        to events.log as `pane_children_killed`."""
+        role_name = (role_name or "").lower().strip()
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is None or pane.session is None:
+            return False, f"'{role_name}' has no live pane in project '{project_ns}'"
+        root_pid = getattr(pane.session, "_pid", None)
+        if not root_pid:
+            return False, f"'{role_name}' pane has no process id yet"
+        try:
+            import psutil
+
+            children = psutil.Process(root_pid).children(recursive=True)
+        except Exception as exc:
+            return False, f"could not enumerate processes under '{role_name}': {exc}"
+        if pid not in (None, ""):
+            try:
+                want = int(pid)
+            except (TypeError, ValueError):
+                return False, f"--pid must be an integer, got {pid!r}"
+            children = [c for c in children if c.pid == want]
+            if not children:
+                return False, (
+                    f"pid {want} is not running under '{role_name}'s pane — refusing "
+                    "(only processes inside that pane's tree can be killed this way)"
+                )
+        killed: list[str] = []
+        failed: list[str] = []
+        # Deepest first so a parent never respawns a child we already killed.
+        for child in sorted(children, key=lambda c: -len(c.parents()) if c.is_running() else 0):
+            try:
+                label = f"{child.name()}({child.pid})"
+            except Exception:
+                label = f"pid {child.pid}"
+            try:
+                child.kill()
+                killed.append(label)
+            except Exception:
+                failed.append(label)
+        _log_event(
+            "pane_children_killed",
+            role=role_name,
+            project=project_ns,
+            by=by,
+            killed=killed[:20],
+            failed=failed[:20],
+        )
+        if not killed and not failed:
+            return True, f"nothing running under '{role_name}' (pane idle)"
+        msg = f"killed {len(killed)} process(es) under '{role_name}': {', '.join(killed[:8])}"
+        if len(killed) > 8:
+            msg += f" … (+{len(killed) - 8})"
+        if failed:
+            msg += f" · could not kill: {', '.join(failed[:5])}"
+        return not failed, msg
+
     def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
         """Names of the processes running under *session* that represent real
         work, with the provider's own launcher scaffolding filtered out AND
@@ -3927,7 +4003,20 @@ class Orchestrator(
             # already grew this exact fallback for `task cancel` (#303 item 2).
             # Reuse that same helper instead of leaving `close` unable to
             # abort a mid-flight assign until it finally spawns on its own.
-            return self._cancel_queued_resource_task(role_name, project_ns)
+            cancelled, cancel_msg = self._cancel_queued_resource_task(role_name, project_ns)
+            if cancelled:
+                return True, cancel_msg
+            # #432: a KNOWN role with no pane (already closed by done()'s
+            # own teardown, a worktree merge, or an earlier `close`) is a
+            # no-op, not an error — the Lead's post-merge sequence
+            # (`worktree merge` → `close --role X`) must read the same on
+            # every pane regardless of whether the pane outlived the merge.
+            # A genuinely unknown role name still errors.
+            base_role, _shard_idx = _split_shard(role_name)
+            if _role_by_name(base_role) is not None:
+                _log_event("close_noop_no_pane", role=role_name, project=project_ns)
+                return True, f"'{role_name}' has no pane open right now — already closed (no-op)"
+            return False, cancel_msg
         was_alive = pane.session is not None
         if was_alive:
             # Lead is permanent; only force=True (tab close, project switch) may terminate
@@ -4850,6 +4939,21 @@ class Orchestrator(
         pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
+
+        # #433: a frontend/mobile done on a UI-shaped task must carry real
+        # screenshot evidence — see `orchestrator_text.ui_evidence_gate`.
+        # Skipped for FAILED/blocked reports (nothing to show) and `--force`.
+        if not force and not failed and not blocked:
+            _ps_done = self._pane_state.get(f"{project_ns}::{from_role}")
+            _gate_msg = ui_evidence_gate(
+                from_role,
+                note,
+                getattr(_ps_done, "last_assigned_task", None),
+                getattr(pane, "_session_cwd", None),
+            )
+            if _gate_msg:
+                _log_event("done_rejected_ui_evidence", role=from_role, project=project_ns)
+                return False, _gate_msg
 
         # #278/#276: refuse a report about an assignment that never reached
         # this pane — see `_pane_reports_undelivered_task`. `--force` stays
@@ -10190,6 +10294,30 @@ class Orchestrator(
     # going to be one, so bail before the scanner ever looks at it.
     _TERMINAL_AUTO_REPLY_MAX_LEN = 512
 
+    # (#428/#431) The auto-reply token list above is a denylist — every new
+    # TUI feature that queries the terminal (#420 added five in one go)
+    # slips through until someone catches it in `lead_user_input_stamp`.
+    # Complement it with a structural rule: an ESC-led chunk that arrives
+    # within this many seconds of an ENGINE write into the Lead PTY (digest
+    # / worktree notice / task paste — the exact moment the TUI redraws and
+    # queries the terminal) and AFTER the owner's last real keystroke is
+    # treated as a terminal reply, not typing. Printable text and CR/LF
+    # still count immediately — a human pressing an arrow key inside this
+    # window loses nothing but a wait-interrupt, and the next keystroke
+    # re-stamps normally.
+    _LEAD_INJECT_GRACE_S = 5.0
+
+    def _is_post_inject_terminal_reply(self, project_ns: str, session, data: bytes) -> bool:
+        if data[:1] != b"\x1b" or len(data) > self._TERMINAL_AUTO_REPLY_MAX_LEN:
+            return False
+        if b"\r" in data or b"\n" in data:
+            return False
+        last_write = float(getattr(session, "last_write_ts", 0.0) or 0.0)
+        last_user = self._lead_last_user_write_ts.get(project_ns, 0.0)
+        if last_write <= last_user:
+            return False  # nothing engine-written since the owner last typed
+        return (time.time() - last_write) <= self._LEAD_INJECT_GRACE_S
+
     @classmethod
     def _is_terminal_auto_reply_chunk(cls, data: bytes) -> bool:
         """True iff `data` is nothing but one-or-more terminal auto-reply
@@ -10231,9 +10359,22 @@ class Orchestrator(
         # real keystroke in it at all) — see `_TERMINAL_AUTO_REPLY_TOKEN_RE`'s
         # comment above. Still forwarded to the PTY exactly as before either
         # way; only the draft/user-input tracking is skipped for it.
+        user_project_ns: str | None = None
         if pane.role.name == LEAD.name and not self._is_terminal_auto_reply_chunk(data):
             project_ns = self._project_ns_for_pane(pane)
+            if project_ns is not None and self._is_post_inject_terminal_reply(
+                project_ns, pane.session, data
+            ):
+                _log_event(
+                    "lead_user_input_suppressed_post_inject",
+                    project=project_ns,
+                    size=len(data),
+                    sample=repr(data[:64]),
+                )
+                pane.session.write(data)
+                return
             if project_ns is not None:
+                user_project_ns = project_ns
                 self._track_lead_draft_input(project_ns, data)
                 # #265: any byte here is proven to be the owner actually
                 # typing (see this method's comment above and
@@ -10255,3 +10396,8 @@ class Orchestrator(
                         sample=repr(data[:64]),
                     )
         pane.session.write(data)
+        if user_project_ns is not None:
+            # Stamped AFTER the write so the owner's own keystroke never
+            # reads as "an engine write newer than the last user write" in
+            # `_is_post_inject_terminal_reply`.
+            self._lead_last_user_write_ts[user_project_ns] = time.time()

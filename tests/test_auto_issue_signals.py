@@ -118,7 +118,7 @@ class TestThresholds:
             json.dumps(
                 {"ts": (now - timedelta(minutes=m)).isoformat(), "event": "stuck_pane_recover"}
             )
-            for m in (1, 2, 3)
+            for m in (1, 20, 40)  # >15 min apart: three chains (#427), not one
         )
         log.write_text("garbage\n" + good + "\n", encoding="utf-8")
         assert [h.rule.key for h in sig.scan_for_signals(log, now=now)] == ["stuck_pane_recover"]
@@ -135,11 +135,11 @@ class TestIssueBody:
                 {
                     "ts": (now - timedelta(minutes=m)).isoformat(),
                     "event": "stuck_pane_recover",
-                    "role": "qa",
+                    "role": role,
                     "cwd": "C:/Users/secret/project",
                     "note": "do not leak me",
                 }
-                for m in (1, 2, 3)
+                for m, role in ((1, "qa"), (2, "devops"), (3, "reviewer"))  # 3 panes = 3 chains
             ],
         )
         hit = sig.scan_for_signals(log, now=now)[0]

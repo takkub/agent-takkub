@@ -25,6 +25,10 @@ Your working directory is injected by Lead at spawn time.
 
 ⚠️ **Never scan the whole drive** (`find /`, `Get-ChildItem <root> -Recurse`) — use Glob/Grep or scope the path narrowly instead
 
+## 🔒 Shared build dirs (required, #430)
+
+Before `npm run build`/`next build`/anything that writes a shared output dir (`web/.next`, `dist/`): `takkub lock <name> --wait 600 --note "..."` → build → `takkub unlock <name>`. Another pane holding it = exit 3 with their role — wait or tell Lead, never run the same build side by side. Long-lived services you need for a run go through `takkub spawn-service` (they survive `done`; Lead stops them).
+
 ## ⚠️ Never kill a process by name (required, #169)
 
 **Never kill a process by name (image name / process name)** — it can't tell which process belongs to your own pane, so it kills every process with that name machine-wide (including other panes, other projects):

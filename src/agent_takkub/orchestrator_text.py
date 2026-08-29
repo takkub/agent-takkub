@@ -117,6 +117,90 @@ _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
     "gemini": ("claude-opus-5", "high", "claude-sonnet-5"),
 }
 
+# ── #433 UI evidence gate for `takkub done` ──────────────────────────────────
+# A frontend/mobile pane reporting done on a UI-shaped task must carry real
+# screenshot evidence (user directive 2026-08-29: "ทำไมไม่ดูด้วยตาจริงตอนเก็บภาพเลย
+# แล้วจะมา QA ทำไมสองรอบ"). Pure text/filesystem helper — no orchestrator state.
+_UI_TASK_HINT_RE = re.compile(
+    r"\b(ui|ux|css|layout|responsive|page|screen|component|modal|dialog|form|button|"
+    r"navbar|sidebar|header|footer|carousel|banner|theme|dark mode|mobile|tailwind|"
+    r"storybook|widget|render|redesign|design|style|animation|font|icon|dashboard)\b"
+    r"|หน้า|จอ|ปุ่ม|ฟอร์ม|เมนู|สไตล์|ดีไซน์|เลย์เอาต์|คอมโพเนนต์",
+    re.IGNORECASE,
+)
+_UI_NOT_VERIFIED_RE = re.compile(
+    r"ยังไม่ได้เปิด|ไม่ได้เปิด\s*browser|route\s*ไป\s*qa|ส่งต่อ\s*qa|ให้\s*qa\s*(เช็ค|ตรวจ|ดู)|"
+    r"not (?:visually )?verified|hand(?:ed)? (?:off )?to qa|for qa to (?:check|verify)",
+    re.IGNORECASE,
+)
+_SCREENSHOT_PATH_RE = re.compile(r"[^\s\"'`<>()\[\]]+\.(?:png|jpe?g|webp)\b", re.IGNORECASE)
+UI_NO_UI_MARKER = "[no-ui]"
+
+
+def screenshot_paths_in_note(note: str) -> list[str]:
+    return [m.group(0).strip("\"'`.,;:") for m in _SCREENSHOT_PATH_RE.finditer(note or "")]
+
+
+def ui_evidence_gate(
+    role: str,
+    note: str,
+    task_text: str | None,
+    cwd: str | None = None,
+    *,
+    exists=None,
+) -> str | None:
+    """Return a rejection message when *role*'s done note lacks screenshot
+    evidence for a UI-shaped task, else None.
+
+    Gated only when the assigned task text reads as UI work (or the note
+    itself admits the work was never opened in a browser) — a frontend pane
+    finishing a pure-logic task with no visual impact is not asked for
+    screenshots, and `[no-ui]` in the note opts out explicitly. `exists` is
+    injectable for tests; defaults to `os.path.exists` against absolute
+    paths or paths joined onto *cwd*.
+    """
+    from .pane_guard import UI_SELF_VERIFY_ROLES, normalise_role
+
+    if normalise_role(role) not in UI_SELF_VERIFY_ROLES:
+        return None
+    text = note or ""
+    if UI_NO_UI_MARKER in text.lower():
+        return None
+    admits_unverified = bool(_UI_NOT_VERIFIED_RE.search(text))
+    ui_task = bool(task_text) and bool(_UI_TASK_HINT_RE.search(task_text or ""))
+    if not ui_task and not admits_unverified:
+        return None
+    if admits_unverified:
+        return (
+            f"done ถูกปฏิเสธ (#433): note บอกว่ายังไม่ได้เปิดดูจริง/จะให้ qa ดู — งาน UI ต้อง "
+            f"self-verify เอง: รัน app จับ screenshot (mobile 390px + desktop 1440px) ของทุกหน้าที่แตะ "
+            f"บันทึกลง $TAKKUB_ARTIFACTS_DIR/screenshots/ ดูด้วยตาเทียบโจทย์ แล้วใส่ path ภาพใน note "
+            f"(บรรทัดละไฟล์) ค่อย done ใหม่ · งานที่ไม่มีผลต่อหน้าจอ ใส่ {UI_NO_UI_MARKER} · "
+            f"เสร็จจริงแต่ระบบบันทึกผิด → `takkub done --force`"
+        )
+    paths = screenshot_paths_in_note(text)
+    if not paths:
+        return (
+            f"done ถูกปฏิเสธ (#433): งาน UI ของ {role} ต้องแนบ path screenshot จริงใน note "
+            f"(mobile 390px + desktop 1440px ของทุกหน้า/คอมโพเนนต์ที่แตะ บันทึกลง "
+            f"$TAKKUB_ARTIFACTS_DIR/screenshots/ แล้วใส่ path บรรทัดละไฟล์ — ไม่ต้อง embed รูป) · "
+            f"ไม่มีผลต่อหน้าจอ → ใส่ {UI_NO_UI_MARKER} ใน note · `--force` ถ้าระบบบันทึกผิด"
+        )
+    if exists is None:
+
+        def exists(p: str) -> bool:
+            candidate = p if os.path.isabs(p) or not cwd else os.path.join(cwd, p)
+            return os.path.isfile(candidate)
+
+    missing = [p for p in paths if not exists(p)]
+    if len(missing) == len(paths):
+        return (
+            f"done ถูกปฏิเสธ (#433): ไม่พบไฟล์ screenshot ตาม path ใน note ({missing[0]}) — "
+            f"ต้องเป็นไฟล์จริงที่จับจาก app ที่รันอยู่ ไม่ใช่แค่ข้อความอ้างว่าเปิดดูแล้ว"
+        )
+    return None
+
+
 # ── bracketed-paste framing ───────────────────────────────────────────────────
 # Bracketed-paste threshold for messages injected into a pane via the
 # orchestrator (assign / send / slash-command). Below this length we

@@ -34,15 +34,16 @@ Your working directory is injected by Lead at spawn time.
 
 ## Browser & heavy tooling (required)
 
-⚠️ **Never install or run a browser driver yourself** — `playwright` / `puppeteer` / `selenium` / headless chrome **through any channel**:
-- ❌ `npx playwright ...` · `npm i playwright` · `pnpm add puppeteer` · `yarn add puppeteer-core`
-- ❌ `pip install playwright` · `python -m playwright install`
-- ❌ an ad-hoc node/python script doing `require('playwright')` / `from playwright...`
-- ❌ `chrome --headless` · `chromium --remote-debugging-port=...`
+✅ this role **is granted browser access** for **self-verifying its own UI work** (#433) — use the project's own tooling (`npx playwright screenshot ...`, a screenshot script the project already ships, or the Playwright MCP if Lead attached one). Don't `npx playwright install` a new Chromium while an existing one works (cache once bloated to 2.88GB across 4 builds) — check `ls ~/AppData/Local/ms-playwright` / `~/.cache/ms-playwright` first. Full e2e / regression suites are still **qa**'s job — you take screenshots of what *you* changed, nothing more.
 
-**Why:** browser verification is **qa**'s job (critic/designer for visual review) — they have a Playwright MCP + browser profile the cockpit hands out per shard. Installing your own outside that isolation reloads Chromium (cache once bloated to 2.88 GB across 4 builds) and burns RAM+disk nobody's tracking.
+### ✅ UI self-verify rule (required before `takkub done`, #433)
+Every UI change must be **seen with your own eyes** before you report done — never hand a "please have qa look" note to Lead:
+1. Run the app (dev server / storybook / simulator — whatever the project uses).
+2. Screenshot **every page/component you touched** at **mobile 390px** and **desktop 1440px** (e.g. `npx playwright screenshot --viewport-size=390,844 http://localhost:3000/page $TAKKUB_ARTIFACTS_DIR/screenshots/page-390.png`).
+3. Open the shots (Read tool) and compare against the task — fix and re-shoot until it matches.
+4. Put the **file path of each screenshot on its own line** in the done note (path only — never embed the image; Lead/user open it themselves). `$TAKKUB_ARTIFACTS_DIR/screenshots/` is where the cockpit and the Remote app already look for them.
 
-**Do instead:** work that needs browser verification → write it in the note on `takkub done` and let Lead route it to qa.
+`takkub done` for a `mobile` UI task is **rejected** when the note carries no screenshot path, the path doesn't exist, or the note says "ยังไม่ได้เปิดจริง / route ไป qa". A task with zero visual impact (pure logic, config, types) → write `[no-ui]` in the note.
 
 ⚠️ **Never scan the whole drive** — `find / ...` · `find C:\ ...` · `Get-ChildItem <root> -Recurse` burns disk I/O until the whole machine stutters. Use the **Glob/Grep tool** or scope the path narrowly instead (e.g. `find src -name '*.ts'`)
 
@@ -111,7 +112,7 @@ Before writing code, always check the project's conventions first — each proje
 1. Read the task from Lead, sent through the orchestrator
 2. Work in the working directory Lead specified
 3. Check the project's conventions (Expo vs pure RN, etc.) before writing code
-4. Write code with **unit tests** for the code you wrote (integration/e2e is QA's job)
+4. Write code with **unit tests** for the code you wrote (full integration/e2e suites are QA's job) — and **self-verify every UI change with screenshots** (see the UI self-verify rule above)
 5. Coordinate with backend on API contracts if needed
 6. Report back to Lead via `takkub done` when done
 

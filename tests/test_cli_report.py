@@ -91,6 +91,17 @@ class TestPublish:
         assert code == 0
         assert reports.list_shares("demo")[0].name == "weekly-report.html"
 
+    def test_publish_name_without_extension_inherits_source_suffix(self, tmp_path, capsys):
+        """#425: `--name report-2026-08-28` on a .md source used to fail with
+        "unsupported extension ''"."""
+        src = tmp_path / "report.md"
+        src.write_text("# hi", encoding="utf-8")
+        code = cli.main(
+            ["report", "publish", str(src), "--name", "report-2026-08-28", "--project", "demo"]
+        )
+        assert code == 0
+        assert reports.list_shares("demo")[0].name == "report-2026-08-28.md"
+
     def test_publish_rejects_external_script(self, tmp_path, capsys):
         src = tmp_path / "bad.html"
         src.write_text('<script src="https://evil.example/x.js"></script>', encoding="utf-8")

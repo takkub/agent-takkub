@@ -62,6 +62,8 @@ _LEAD_ONLY_CMDS = frozenset(
         "subagent-done",
         "close",
         "close-all",
+        "kill",  # #430
+        "service-stop",  # #429
         "harvest",
         "harvest-done",
         "pipeline-run",
@@ -229,6 +231,60 @@ class CliServer(QObject):
     def _invoke_on_main(self, fn: object) -> None:
         if callable(fn):
             fn()
+
+    def _service_command(self, cmd: str, req: dict, from_project: str | None) -> tuple[bool, str]:
+        """#429 `spawn-service` / `service-list` / `service-stop` — the service
+        is spawned by THIS (cockpit) process so it sits outside every pane's
+        job/tree; see `service_spawner`'s docstring."""
+        from . import service_spawner
+        from .config import RUNTIME_DIR
+
+        _resolve = getattr(self._orch, "_resolve_project", None)
+        project_ns = _resolve(from_project) if callable(_resolve) else (from_project or "default")
+        by_role = str(req.get("from") or "?")
+        try:
+            if cmd == "service-list":
+                rows = service_spawner.list_services(RUNTIME_DIR, project_ns)
+                if not rows:
+                    return True, f"no live services in project '{project_ns}'"
+                lines = [
+                    f"  {r.get('name'):20s} pid {r.get('pid')}  by {r.get('by_role')}  "
+                    f"log {r.get('log_path')}"
+                    for r in rows
+                ]
+                return True, f"{len(rows)} live service(s):\n" + "\n".join(lines)
+            if cmd == "service-stop":
+                ok, msg = service_spawner.stop(RUNTIME_DIR, project_ns, str(req.get("name") or ""))
+                _log_event(
+                    "service_stop", project=project_ns, name=req.get("name"), ok=ok, by=by_role
+                )
+                return ok, msg
+            argv = req.get("argv")
+            if not isinstance(argv, list) or not argv:
+                return False, "missing argv — usage: takkub spawn-service --name X -- <cmd...>"
+            record = service_spawner.spawn(
+                RUNTIME_DIR,
+                project_ns,
+                str(req.get("name") or ""),
+                [str(a) for a in argv],
+                cwd=req.get("cwd"),
+                by_role=by_role,
+            )
+        except service_spawner.ServiceSpawnError as exc:
+            return False, str(exc)
+        _log_event(
+            "service_spawned",
+            project=project_ns,
+            name=record.name,
+            pid=record.pid,
+            by=by_role,
+            cmd=" ".join(record.cmd)[:200],
+        )
+        return True, (
+            f"service '{record.name}' started (pid {record.pid}) outside this pane's tree — "
+            f"survives `takkub done`/`close` · log: {record.log_path} · "
+            f"stop: `takkub service-stop --name {record.name}` (lead)"
+        )
 
     def _run_off_thread(self, work: Callable[[], object], then: Callable[[object], None]) -> None:
         """(#408) Run *work* on a daemon thread, then *then(result)* back on
@@ -488,6 +544,8 @@ class CliServer(QObject):
         _token_gated_cmds = (
             "done",
             "progress",
+            "spawn-service",  # #429: identity of the starting pane is recorded
+            "service-list",
             "send",
             "answer-picker",
             "hook",
@@ -787,6 +845,16 @@ class CliServer(QObject):
                 ok, msg = self._orch.close(req["role"], project=from_project)
             elif cmd == "close-all":
                 ok, msg = self._orch.close_all_teammates(project=from_project)
+            elif cmd == "kill":
+                # #430: Lead kills processes under another pane, audited.
+                ok, msg = self._orch.kill_pane_children(
+                    req.get("role") or "",
+                    project=from_project,
+                    pid=req.get("pid"),
+                    by=req.get("from") or "lead",
+                )
+            elif cmd in ("spawn-service", "service-list", "service-stop"):
+                ok, msg = self._service_command(cmd, req, from_project)
             elif cmd == "restart":
                 # Full cockpit restart (persist state → relaunch). The
                 # orchestrator emits deferred so this reply flushes first.

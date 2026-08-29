@@ -133,7 +133,16 @@ from dataclasses import dataclass
 # `designer` need to look at rendered pages for visual review. Everyone else
 # writes unit tests and hands browser verification to qa — which is what
 # `.claude/agents/frontend.md` already says ("integration/e2e เป็นหน้าที่ QA").
-BROWSER_ROLES: frozenset[str] = frozenset({"qa", "critic", "designer"})
+# #433 (user directive 2026-08-29): `frontend` and `mobile` are browser roles
+# too — a UI change must be self-verified with a real screenshot by the pane
+# that made it (mobile 390px + desktop 1440px, path in the done note) instead
+# of every UI task costing a second qa round. qa keeps regression / e2e /
+# cross-model review; it is no longer the visual check for fresh UI work.
+BROWSER_ROLES: frozenset[str] = frozenset({"qa", "critic", "designer", "frontend", "mobile"})
+
+# Roles whose `takkub done` is gated on screenshot evidence for UI-shaped
+# tasks (`orchestrator_text.ui_evidence_gate`, #433).
+UI_SELF_VERIFY_ROLES: frozenset[str] = frozenset({"frontend", "mobile"})
 
 # Panes the user types into directly (mirrors `roles.USER_DRIVEN_ROLES` — kept
 # as a literal so this module stays import-free of the role registry). The
@@ -147,6 +156,17 @@ GUARD_RULE_TEXT = (
     "`pip install playwright` และ ad-hoc node/python script ที่ require มัน. "
     "ต้อง verify ผ่าน browser → เขียนใน note ตอน `takkub done` "
     "แล้วให้ Lead ส่งงานต่อให้ qa (qa มี Playwright MCP + browser profile ที่ cockpit จัดการให้)."
+)
+
+# Prose for the UI roles (#433) — the permission half plus the self-verify
+# duty. Pinned into `.claude/agents/frontend.md` / `mobile.md` by
+# tests/test_agent_role_files_have_browser_guard.py.
+UI_SELF_VERIFY_RULE_TEXT = (
+    "งาน UI ทุกชิ้นต้อง self-verify ก่อน `takkub done`: รัน app ขึ้นมาจริง จับ screenshot "
+    "ของทุกหน้า/คอมโพเนนต์ที่แตะ ที่ mobile 390px และ desktop 1440px ดูด้วยตาเทียบกับโจทย์ "
+    "บันทึกลง `$TAKKUB_ARTIFACTS_DIR/screenshots/` แล้วใส่ path ของภาพ (บรรทัดละไฟล์ ไม่ embed รูป) "
+    "ใน done note — done ที่ไม่มี path ภาพจริง หรือเขียนว่า 'ยังไม่ได้เปิดจริง / route ไป qa' จะถูกปฏิเสธ "
+    "(งานที่ไม่มีผลต่อหน้าจอเลย ใส่ `[no-ui]` ใน note)."
 )
 
 # Prose handed to role files verbatim (#169). Kept in sync with the patterns

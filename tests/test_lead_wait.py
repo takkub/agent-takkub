@@ -1097,7 +1097,7 @@ class TestCliWaitCommand:
 
         rc = cli.main(["wait"])
 
-        assert rc == 1
+        assert rc == cli._WAIT_EXIT_ERROR  # #431: wait itself broke → 2, not 'roles pending'
 
     def test_timeout_is_clamped_into_range(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sent: list[dict] = []
@@ -1413,7 +1413,7 @@ class TestCliWaitCommand:
         rc = cli.main(["wait", "--role", "backend", "--role", "frontend"])
         out = capsys.readouterr().out
 
-        assert rc == 1
+        assert rc == cli._WAIT_EXIT_ERROR  # #431: wait itself broke → 2, not 'roles pending'
         assert "no longer active" in out
         assert "takkub wait --role backend --role frontend" in out
         # No blind auto-re-arm: exactly one poll attempt, no extra wait-begin.
@@ -1469,6 +1469,6 @@ class TestCliWaitCommand:
         rc = cli.main(["wait", "--role", "backend", "--role", "frontend"])
         out = capsys.readouterr().out
 
-        assert rc == 1
+        assert rc == cli._WAIT_EXIT_ERROR  # #431: wait itself broke → 2, not 'roles pending'
         assert "takkub wait --role frontend" in out
         assert "backend" not in out.rsplit("resume watching with", 1)[-1]

@@ -922,8 +922,19 @@ def main(argv: list[str] | None = None) -> int:
                 import psutil
 
                 proc = psutil.Process(old_pid)
-                # Kill the whole process tree (cockpit + spawned panes/CLIs).
+                # Kill the whole process tree (cockpit + spawned panes/CLIs)
+                # — except services started via `takkub spawn-service`
+                # (#429): those are cockpit children on purpose so they
+                # outlive panes, and must outlive a cockpit restart too.
+                try:
+                    from .service_spawner import registered_pids
+
+                    _keep = registered_pids(RUNTIME_DIR)
+                except Exception:
+                    _keep = set()
                 for child in proc.children(recursive=True):
+                    if child.pid in _keep:
+                        continue
                     try:
                         child.kill()
                     except (psutil.NoSuchProcess, psutil.AccessDenied):

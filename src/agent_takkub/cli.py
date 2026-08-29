@@ -38,6 +38,8 @@ LEAD_ONLY_COMMANDS = frozenset(
         "subagent-done",
         "close",
         "close-all",
+        "kill",  # #430: kill processes under ANOTHER pane — Lead's call, audited
+        "service-stop",  # #429: stopping a detached service is Lead's call too
         "end-session",
         "harvest",
         "release",
@@ -83,6 +85,56 @@ _WAIT_DEFAULT_TIMEOUT_S = 1800.0  # 30 min
 _WAIT_MIN_TIMEOUT_S = 5.0
 _WAIT_MAX_TIMEOUT_S = 1800.0  # 30 min hard ceiling (#253 — was 7200s/2h)
 _WAIT_POLL_INTERVAL_S = 4.0
+# #431: a `takkub wait` that ends on an orchestrator-side error (timeout /
+# lost registration) exits 2, distinct from 1 = "roles still pending", so a
+# Lead running it in the background can tell "pane not done" from "wait
+# itself broke" without parsing the text.
+_WAIT_EXIT_ERROR = 2
+# #431: the cockpit's main thread stalls for >15s during `git worktree`
+# merges/cleans on a big repo (`main_thread_stall duration_ms=16625` seen
+# live) — one bridge timeout mid-wait is transient, not a dead cockpit, so
+# the wait retries a few times before giving up.
+_WAIT_BRIDGE_RETRIES = 3
+_WAIT_BRIDGE_RETRY_SLEEP_S = 3.0
+# Mirrors `lead_wait._GONE_NEVER_SPAWNED` (pinned by tests/test_lead_wait.py)
+# — cli.py must stay free of the orchestrator import.
+_WAIT_GONE_NEVER_SPAWNED = "ไม่เคยถูก spawn"
+
+
+def _split_role_args(raw: list[str] | None) -> list[str]:
+    """`--role a --role b` and `--role a,b,c` both mean three roles (#428
+    bug 2: the comma form used to be one literal role name that resolved
+    "gone" and reported success)."""
+    out: list[str] = []
+    for item in raw or []:
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def _request_with_retry(payload: dict) -> dict:
+    """`_request` that rides out a transient orchestrator bridge timeout
+    (#431). Only the timeout shape is retried — a real error answer from
+    the server comes back on the first try like before."""
+    resp = _request(dict(payload))
+    tries = 0
+    while (
+        not resp.get("ok")
+        and "timed out waiting for orchestrator response" in str(resp.get("msg") or "")
+        and tries < _WAIT_BRIDGE_RETRIES
+    ):
+        tries += 1
+        print(
+            f"[wait] orchestrator ไม่ตอบใน {_RESPONSE_TIMEOUT_S:.0f}s (main thread ติด I/O ชั่วคราว?) "
+            f"— retry {tries}/{_WAIT_BRIDGE_RETRIES}"
+        )
+        time.sleep(_WAIT_BRIDGE_RETRY_SLEEP_S)
+        resp = _request(dict(payload))
+    return resp
+
+
 _WAIT_POLL_MAX_INTERVAL_S = 15.0
 # #249 item 4: print a heartbeat line at least this often while roles are
 # still pending, so an external observer (or the Lead session that spawned
@@ -1012,6 +1064,109 @@ def cmd_ma(args: argparse.Namespace) -> dict:
     }
 
 
+def cmd_lock(args: argparse.Namespace) -> dict:
+    """(any pane) `takkub lock <name>` — advisory per-project lock around a
+    shared resource (#430: two panes building into the same `web/.next`
+    starved each other for 20+ min). Pure-local file lock under
+    RUNTIME_DIR/locks/<project>/ — works even while the cockpit is wedged."""
+    from . import resource_lock
+
+    project = _from_project() or "default"
+    holder = _from_role() or "terminal"
+    if getattr(args, "list", False) or not getattr(args, "name", None):
+        locks = resource_lock.list_locks(config.RUNTIME_DIR, project)
+        if not locks:
+            return {"ok": True, "msg": f"no locks held in project '{project}'"}
+        lines = [resource_lock.format_lock_line(info) for info in locks]
+        print("\n".join(lines))
+        return {"ok": True, "msg": f"{len(locks)} lock(s) in project '{project}'"}
+    try:
+        ok, info, waited = resource_lock.acquire(
+            config.RUNTIME_DIR,
+            project,
+            args.name,
+            holder,
+            ttl_s=float(getattr(args, "ttl", None) or resource_lock.DEFAULT_TTL_S),
+            wait_s=float(getattr(args, "wait", None) or 0.0),
+            note=getattr(args, "note", None) or "",
+        )
+    except resource_lock.LockError as exc:
+        return {"ok": False, "msg": str(exc)}
+    if ok:
+        suffix = f" (waited {int(waited)}s)" if waited >= 1 else ""
+        return {"ok": True, "msg": f"lock '{info.name}' acquired by {holder}{suffix}"}
+    return {
+        "ok": False,
+        "exit_code": 3,
+        "msg": (
+            f"lock '{info.name}' is held by {info.holder} (pid {info.pid}, "
+            f"{int(info.age_s())}s ago"
+            + (f": {info.note}" if info.note else "")
+            + ") — รอด้วย `--wait <sec>` หรือแจ้ง Lead ว่าชนกับ role นั้น "
+            "(`takkub send --to lead ...`) แทนที่จะแย่ง resource เดียวกัน"
+        ),
+    }
+
+
+def cmd_unlock(args: argparse.Namespace) -> dict:
+    from . import resource_lock
+
+    project = _from_project() or "default"
+    holder = _from_role() or "terminal"
+    force = bool(getattr(args, "force", False)) and holder in ("lead", "terminal")
+    try:
+        ok, msg = resource_lock.release(config.RUNTIME_DIR, project, args.name, holder, force=force)
+    except resource_lock.LockError as exc:
+        return {"ok": False, "msg": str(exc)}
+    return {"ok": ok, "msg": msg}
+
+
+def cmd_kill(args: argparse.Namespace) -> dict:
+    """(lead) kill the processes running under another pane (#430) without
+    hunting the PID chain by hand. `--pid` narrows to one process that must
+    belong to that pane's tree; omitted = every live child of the pane."""
+    return _request(
+        _with_project(
+            {
+                "cmd": "kill",
+                "role": args.role,
+                "pid": getattr(args, "pid", None),
+                "from": _from_role(),
+            }
+        )
+    )
+
+
+def cmd_spawn_service(args: argparse.Namespace) -> dict:
+    """(any pane) start a service that must OUTLIVE this pane (#429) — the
+    cockpit spawns it outside every pane's job/process tree, so `takkub
+    done`/`close` never take it down. `--list` shows this project's live
+    services; stopping one is `takkub service-stop --name X` (Lead)."""
+    if getattr(args, "list", False):
+        return _request(_with_project({"cmd": "service-list", "from": _from_role()}))
+    cmd = list(getattr(args, "command", None) or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        return {"ok": False, "msg": "usage: takkub spawn-service --name <name> -- <cmd> [args...]"}
+    name = getattr(args, "name", None) or Path(cmd[0]).stem
+    return _request(
+        _with_project(
+            {
+                "cmd": "spawn-service",
+                "name": name,
+                "argv": cmd,
+                "cwd": getattr(args, "cwd", None) or os.getcwd(),
+                "from": _from_role(),
+            }
+        )
+    )
+
+
+def cmd_service_stop(args: argparse.Namespace) -> dict:
+    return _request(_with_project({"cmd": "service-stop", "name": args.name, "from": _from_role()}))
+
+
 def cmd_progress(args: argparse.Namespace) -> dict:
     """(agent) report a status update to Lead WITHOUT ending the task.
 
@@ -1300,6 +1455,11 @@ def cmd_report(args: argparse.Namespace) -> dict:
     try:
         if action == "publish":
             name = args.name or Path(args.file).name
+            if args.name and not Path(args.name).suffix:
+                # #425: `--name report-2026-08-28` used to die with
+                # "unsupported extension ''" — the caller almost always means
+                # "this name, same type as the source file".
+                name = args.name + Path(args.file).suffix.lower()
             record, warnings = reports_mod.publish(
                 args.file,
                 name,
@@ -1803,19 +1963,20 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
     no_interrupt = getattr(args, "no_interrupt", False)
+    requested_roles = _split_role_args(getattr(args, "role", None))
 
-    begin = _request(
+    begin = _request_with_retry(
         _with_project(
             {
                 "cmd": "wait-begin",
-                "roles": getattr(args, "role", None) or [],
+                "roles": requested_roles,
                 "timeout": timeout,
                 "from": _from_role(),
             }
         )
     )
     if not begin.get("ok"):
-        return begin
+        return {**begin, "exit_code": _WAIT_EXIT_ERROR}
 
     wait_id = begin.get("wait_id")
     roles = begin.get("roles") or []
@@ -1832,7 +1993,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     interrupted_by: dict | None = None
     try:
         while True:
-            poll = _request(
+            poll = _request_with_retry(
                 _with_project({"cmd": "wait-poll", "wait_id": wait_id, "from": _from_role()})
             )
             if not poll.get("ok"):
@@ -1858,7 +2019,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                             f"with: takkub wait {role_flags}".rstrip()
                         ),
                     }
-                return poll
+                return {**poll, "exit_code": _WAIT_EXIT_ERROR}
             last = poll
             pending = poll.get("pending") or {}
             pending_keys = set(pending)
@@ -1902,7 +2063,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                     )
                 )
                 if not rebegin.get("ok"):
-                    return rebegin
+                    return {**rebegin, "exit_code": _WAIT_EXIT_ERROR}
                 wait_id = rebegin.get("wait_id")
                 continue
             if interrupt:
@@ -1968,8 +2129,17 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         for role, reason in sorted(pending.items()):
             print(f"    - {role}: {reason}")
 
-    ok = not pending
-    if ok:
+    # #428 bug 2: a role that was never spawned (typo, or `--role a,b,c`
+    # before comma-splitting existed) resolves as "gone" — that must never
+    # read as success to a Lead watching exit codes.
+    never_spawned = sorted(r for r, why in gone.items() if _WAIT_GONE_NEVER_SPAWNED in why)
+    ok = not pending and not never_spawned
+    if never_spawned:
+        msg = (
+            f"role ไม่พบในโปรเจคนี้: {', '.join(never_spawned)} — เช็คชื่อ role "
+            "(หลาย role ใช้ `--role a --role b` หรือ `--role a,b`)"
+        )
+    elif ok:
         msg = "all roles resolved"
     elif interrupted_by:
         if interrupted_by.get("reason") == "user_input":
@@ -1984,6 +2154,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     return {
         "ok": ok,
         "msg": msg,
+        "exit_code": 0 if ok else (_WAIT_EXIT_ERROR if never_spawned else 1),
         "done": done,
         "failed": failed,
         "gone": gone,
@@ -4029,6 +4200,51 @@ def main(argv: list[str] | None = None) -> int:
         "blocking report from an outside role (#253) — that still stops the wait.",
     )
     swt.set_defaults(func=cmd_wait)
+
+    # #430 advisory locks
+    slk = sub.add_parser(
+        "lock",
+        help="take an advisory per-project lock around a shared resource (build dir, db) — #430",
+    )
+    slk.add_argument("name", nargs="?", default=None, help="lock name, e.g. web-build")
+    slk.add_argument(
+        "--wait", type=float, default=0.0, metavar="SEC", help="block up to SEC for it"
+    )
+    slk.add_argument(
+        "--ttl", type=float, default=None, metavar="SEC", help="auto-expire (default 30m)"
+    )
+    slk.add_argument("--note", default=None, help="what you're doing with it (shown to others)")
+    slk.add_argument("--list", action="store_true", help="show locks held in this project")
+    slk.set_defaults(func=cmd_lock)
+
+    sul = sub.add_parser("unlock", help="release a lock you hold (#430)")
+    sul.add_argument("name")
+    sul.add_argument("--force", action="store_true", help="(lead) release someone else's lock")
+    sul.set_defaults(func=cmd_unlock)
+
+    # #430 lead-side kill under a pane
+    skl = sub.add_parser(
+        "kill",
+        help="(lead) kill the processes running under a pane — no PID hunting (#430)",
+    )
+    skl.add_argument("--role", required=True, help="pane whose child processes to kill")
+    skl.add_argument("--pid", type=int, default=None, help="only this PID (must be under the pane)")
+    skl.set_defaults(func=cmd_kill)
+
+    # #429 detached services
+    ssv = sub.add_parser(
+        "spawn-service",
+        help="start a service that outlives this pane (cockpit-owned, outside the pane tree) — #429",
+    )
+    ssv.add_argument("--name", default=None, help="service name (default: command basename)")
+    ssv.add_argument("--cwd", default=None, help="working directory (default: current)")
+    ssv.add_argument("--list", action="store_true", help="show this project's live services")
+    ssv.add_argument("command", nargs=argparse.REMAINDER, help="-- <cmd> [args...]")
+    ssv.set_defaults(func=cmd_spawn_service)
+
+    sst = sub.add_parser("service-stop", help="(lead) stop a spawn-service by name (#429)")
+    sst.add_argument("--name", required=True)
+    sst.set_defaults(func=cmd_service_stop)
 
     sv = sub.add_parser("verify", help="auto-detect stack and run lint/test gate")
     sv.add_argument("--cwd", default=None, help="working directory (default: current dir)")

@@ -129,6 +129,14 @@ class ProviderSpec:
     enter_delay_per_kb_ms: int = 150
     enter_delay_max_ms: int = 3000
     input_swallow_recovery: bool = True
+    # #424: split one big PTY paste into chunks of this many characters with
+    # `paste_chunk_delay_ms` between them (0 = write the payload in one go).
+    # Only needed for a provider WITHOUT `supports_agent_file_read` (so a long
+    # task can't take the file-pointer handoff, #273) whose TUI drops the tail
+    # of a multi-KB bracketed paste — codex's ratatui composer, seen live
+    # with a ~1.5KB Thai task: text cut at "…ก", no Enter, pane stalled.
+    paste_chunk_chars: int = 0
+    paste_chunk_delay_ms: int = 0
     # Escape sequence terminal.html sends on Shift+Enter/Alt+Enter to request a
     # multiline newline instead of submitting (#149). Confirmed correct only
     # for Ink-based TUIs (claude, gemini/agy), which treat a bare ESC as a
@@ -680,6 +688,11 @@ codex_spec = ProviderSpec(
     # using on the path (#104). Long tasks fall back to an inline paste for
     # this provider instead (see `_task_handoff_pointer` callers).
     supports_agent_file_read=False,
+    # #424: codex has no file-read tool for the pointer handoff, so long
+    # tasks are pasted inline — chunked so the composer never sees more than
+    # ~300 chars (≈900 bytes of Thai) per write. 300/60ms ≈ 1.5KB in ~0.3s.
+    paste_chunk_chars=300,
+    paste_chunk_delay_ms=60,
     # #273: `codex mcp list` prints the real config error on one line
     # (confirmed: "Error: failed to load bootstrap configuration / Caused
     # by: invalid transport in ...") when ~/.codex/config.toml's

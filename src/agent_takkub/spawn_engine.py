@@ -1472,6 +1472,7 @@ class SpawnEngineMixin:
         auto_trust: bool = False,
         auto_trust_wait_ms: int = 30_000,
         resume_uuid: str | None = None,
+        paste_chunking: tuple[int, int] = (0, 0),
     ) -> tuple[bool, str]:
         """Common ConPTY launch tail for the non-claude spawn branches (shell,
         gemini, codex). Creates the PtySession, runs the final TOCTOU re-sample
@@ -1497,6 +1498,9 @@ class SpawnEngineMixin:
         _build_pane_env = _from_orch("_build_pane_env")
         _build_transcript_path = _from_orch("_build_transcript_path")
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        if paste_chunking and paste_chunking[0] > 0:
+            # #424: provider-specific paste chunking (codex today).
+            session.set_paste_chunking(*paste_chunking)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
         self._spawn_in_progress = True
@@ -2310,6 +2314,7 @@ class SpawnEngineMixin:
                 _from_auto_respawn=_from_auto_respawn,
                 _shard_total=_shard_total,
                 codex_exit=spec.early_exit_watch,
+                paste_chunking=(spec.paste_chunk_chars, spec.paste_chunk_delay_ms),
                 auto_trust=spec.auto_trust,
                 # #186: watch at least as long as this provider's own
                 # cold-boot ready allowance, so a trust modal rendered late

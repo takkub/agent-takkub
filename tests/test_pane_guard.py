@@ -37,13 +37,14 @@ class TestRoleNormalisation:
     def test_shard_inherits_browser_permission(self) -> None:
         """`--shards 4` spawns `qa#1…qa#4`; every shard is still qa."""
         assert pane_guard.is_browser_role("qa#4")
-        assert not pane_guard.is_browser_role("frontend#4")
+        assert not pane_guard.is_browser_role("backend#4")
 
-    @pytest.mark.parametrize("role", ["qa", "critic", "designer"])
+    @pytest.mark.parametrize("role", ["qa", "critic", "designer", "frontend", "mobile"])
     def test_browser_roles(self, role: str) -> None:
+        # #433: frontend/mobile self-verify UI work with real screenshots.
         assert pane_guard.is_browser_role(role)
 
-    @pytest.mark.parametrize("role", ["frontend", "backend", "mobile", "devops", "reviewer"])
+    @pytest.mark.parametrize("role", ["backend", "devops", "reviewer", "docs", "security"])
     def test_non_browser_roles(self, role: str) -> None:
         assert not pane_guard.is_browser_role(role)
 
@@ -77,18 +78,26 @@ class TestBrowserDriverDenied:
             "google-chrome --headless=new https://localhost:3000",
         ],
     )
-    def test_denied_for_frontend(self, command: str) -> None:
-        verdict = pane_guard.classify(command, "frontend")
+    def test_denied_for_backend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
         assert not verdict.allowed, f"should have blocked: {command}"
         assert verdict.rule.startswith("browser_driver:")
         assert "qa" in verdict.reason
 
-    @pytest.mark.parametrize("role", ["backend", "mobile", "devops", "reviewer", "docs"])
+    @pytest.mark.parametrize("role", ["backend", "devops", "reviewer", "docs", "security"])
     def test_denied_for_every_non_browser_role(self, role: str) -> None:
         assert not pane_guard.classify("npx --yes playwright", role).allowed
 
     def test_denied_for_shard_of_non_browser_role(self) -> None:
-        assert not pane_guard.classify("npx playwright test", "frontend#2").allowed
+        assert not pane_guard.classify("npx playwright test", "backend#2").allowed
+
+    @pytest.mark.parametrize("role", ["frontend", "frontend#2", "mobile"])
+    def test_ui_roles_may_screenshot_their_own_work(self, role: str) -> None:
+        """#433: self-verification needs the project's own playwright."""
+        assert pane_guard.classify(
+            "npx playwright screenshot --viewport-size=390,844 http://localhost:3000 out.png",
+            role,
+        ).allowed
 
 
 class TestBrowserDriverAllowed:
@@ -125,7 +134,7 @@ class TestBrowserDriverAllowed:
         ],
     )
     def test_reading_and_unrelated_commands_allowed(self, command: str) -> None:
-        assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
 
     def test_ms_playwright_cache_path_is_not_a_package_token(self) -> None:
         """`ms-playwright` is the browser *cache* dir — listing it is fine."""
@@ -209,7 +218,7 @@ class TestDiskScanDenied:
         ],
     )
     def test_root_scans_denied(self, command: str) -> None:
-        verdict = pane_guard.classify(command, "frontend")
+        verdict = pane_guard.classify(command, "backend")
         assert not verdict.allowed, f"should have blocked: {command}"
         assert verdict.rule.startswith("disk_scan:")
 

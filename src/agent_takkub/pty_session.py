@@ -1150,6 +1150,45 @@ class PtyWriteMessage:
     validator: Callable[[], bool] | None = field(default=None, repr=False)
 
 
+# #424 paste chunking. A chunk boundary must never fall inside an escape
+# sequence (the bracketed-paste markers ESC[200~ / ESC[201~ in particular —
+# a split marker is exactly how paste mode ends early and the rest of the
+# task turns into live keystrokes), so the payload is tokenised into
+# "one escape sequence" | "one character" units first and chunks are
+# assembled from whole units. Str-based so a multi-byte character is never
+# split either (the writer re-encodes per platform).
+_PASTE_UNIT_RE = re.compile(
+    r"\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)?|\x1b.|.", re.S
+)
+
+
+def split_paste_chunks(data: bytes | str, chunk_chars: int) -> list[bytes | str]:
+    """Split *data* into pieces of at most *chunk_chars* characters without
+    breaking escape sequences or multi-byte characters. Returns ``[data]``
+    unchanged when chunking is off or the payload is short."""
+    if not chunk_chars or chunk_chars <= 0:
+        return [data]
+    was_bytes = isinstance(data, bytes)
+    text = data.decode("utf-8", "replace") if was_bytes else str(data)
+    if len(text) <= chunk_chars:
+        return [data]
+    out: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for m in _PASTE_UNIT_RE.finditer(text):
+        unit = m.group(0)
+        if cur and cur_len + len(unit) > chunk_chars:
+            out.append("".join(cur))
+            cur, cur_len = [], 0
+        cur.append(unit)
+        cur_len += len(unit)
+    if cur:
+        out.append("".join(cur))
+    if was_bytes:
+        return [c.encode("utf-8") for c in out]
+    return out
+
+
 class _WriterThread(QThread):
     """Bounded, priority-aware, non-blocking PTY writer.
 
@@ -1173,6 +1212,9 @@ class _WriterThread(QThread):
         self._maxsize = max(4, int(maxsize))
         self._control_reserve = max(1, min(self._maxsize - 1, int(control_reserve)))
         self._generation_getter = generation_getter
+        # #424: (chars, delay_ms) — see `PtySession.set_paste_chunking`.
+        self.paste_chunk_chars = 0
+        self.paste_chunk_delay_ms = 0
         self._queues: dict[WritePriority, deque[PtyWriteMessage]] = {
             priority: deque() for priority in WritePriority
         }
@@ -1238,7 +1280,16 @@ class _WriterThread(QThread):
                     self.stale_drop_count += 1
                     continue
             try:
-                self._proc.write(message.data)
+                chunks = split_paste_chunks(message.data, self.paste_chunk_chars)
+                if len(chunks) <= 1:
+                    self._proc.write(message.data)
+                else:
+                    for idx, chunk in enumerate(chunks):
+                        if idx and self.paste_chunk_delay_ms > 0:
+                            time.sleep(self.paste_chunk_delay_ms / 1000.0)
+                        if self._stopping:
+                            break
+                        self._proc.write(chunk)
             except Exception as e:
                 print(f"[pty_session] write error: {e!r}", flush=True)
 
@@ -1559,7 +1610,19 @@ class PtySession(QObject):
             parent=self,
             generation_getter=lambda: self.session_generation,
         )
+        _chunking = getattr(self, "_paste_chunking", None)
+        if _chunking:
+            self._writer.paste_chunk_chars, self._writer.paste_chunk_delay_ms = _chunking
         self._writer.start()
+
+    def set_paste_chunking(self, chunk_chars: int, delay_ms: int) -> None:
+        """#424: have the writer split big payloads (a long inline task
+        paste) into *chunk_chars*-character pieces *delay_ms* apart. Safe to
+        call any time after `spawn()`; a no-op before the writer exists."""
+        self._paste_chunking = (max(0, int(chunk_chars or 0)), max(0, int(delay_ms or 0)))
+        writer = self._writer
+        if writer is not None:
+            writer.paste_chunk_chars, writer.paste_chunk_delay_ms = self._paste_chunking
 
     def _feed_and_log(self, data: bytes) -> None:
         """Runs in the reader thread. Does the heavy work off the Qt main
@@ -1669,6 +1732,10 @@ class PtySession(QObject):
     ) -> bool:
         if not self._alive or self._proc is None or self._writer is None:
             return False
+        # #428/#431: wall-clock of the latest write of ANY origin (owner
+        # keystroke or engine paste) — `Orchestrator._is_post_inject_terminal_reply`
+        # reads it to recognise a terminal reply provoked by an engine write.
+        self.last_write_ts = time.time()
         # pywinpty 3.x .write() expects str (it does its own UTF-8 encoding
         # internally). Passing bytes raises TypeError.
         if isinstance(data, bytes):

@@ -111,6 +111,8 @@ native subagent tool ของ provider ปัจจุบันด้วย cap
 3. Render proposal รอ confirm **ห้าม chain auto-fire**
 `classify_failure(note)` suggest role ใน fix-loop ให้แล้ว (devops > backend > frontend > qa) — เป็น suggestion, Lead ตัดสิน
 
+**งาน UI จบในรอบเดียว (#433, user directive 2026-08-29):** frontend/mobile ต้อง self-verify ด้วย screenshot จริง (390px + 1440px, path ใน done note — `done` จะถูก reject ถ้าไม่มี path/ไฟล์ไม่มีจริง/note บอก "ยังไม่ได้เปิดจริง") · **ห้าม** spawn qa เพื่อ "ดูภาพงานที่เพิ่งแก้" อีกรอบ — qa ใช้เฉพาะ regression / e2e หลายหน้า / cross-model review · หลักฐานเข้า Lead แค่ **path** ของภาพ (ไม่ Read รูปเองเว้นแต่ user ถาม — รูปชาร์จตาม resolution และค้างใน history) · ใช้ได้ทุก provider (codex/gemini/opencode/kimi/cursor อ่านกฎเดียวกันจาก role file)
+
 ### Lead reply style
 รายงาน/finding/รายละเอียดยาว → เขียนลงไฟล์ (`docs/audit/`, `docs/lead/`, session report) แล้วชี้ path สั้นๆ 1-3 บรรทัดในแชท (แบบเดียวกับที่ teammate role รายงาน `takkub done`) ห้าม paste เนื้อหายาวลงแชท — ยกเว้น propose table (role/task/cwd) ที่ต้องโชว์เต็มเพราะ user ต้อง confirm ก่อน fire แต่ก็ให้กระชับที่สุด ไม่มี prose ยาวคั่น
 

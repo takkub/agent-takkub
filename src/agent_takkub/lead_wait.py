@@ -80,6 +80,12 @@ _WAIT_TERMINAL_PANE_STATES = frozenset({"empty", "done", "exited", "error"})
 _WAIT_RESOLVED_ECHO_GRACE_S = 30.0
 
 
+# #428: the "never spawned" gone-reason. `cli.py`'s `_WAIT_GONE_NEVER_SPAWNED`
+# substring-matches this so `takkub wait` can turn it into a non-zero exit.
+_GONE_NEVER_SPAWNED = "ไม่เคยถูก spawn"
+_GONE_NEVER_SPAWNED_DETAIL = f"role ไม่พบ — {_GONE_NEVER_SPAWNED} ในโปรเจคนี้ (เช็คชื่อ role)"
+
+
 class LeadWaitMixin:
     """Provides `begin_wait` / `poll_wait` / `end_wait` on `Orchestrator`.
 
@@ -98,7 +104,9 @@ class LeadWaitMixin:
         nothing to wait on; otherwise ``{"ok": True, "wait_id", "roles",
         "started_ts", "attached"}``.
         """
-        clean_roles = [r for r in dict.fromkeys(roles or []) if r and r != LEAD.name]
+        # #428 bug 2: accept `a,b,c` from older/raw clients too.
+        split_roles = [part.strip() for item in (roles or []) for part in str(item).split(",")]
+        clean_roles = [r for r in dict.fromkeys(split_roles) if r and r != LEAD.name]
         if not clean_roles:
             known = self.list_status(project=project_ns)
             native_pending = {
@@ -246,7 +254,7 @@ class LeadWaitMixin:
             # "never spawned" (#249 item 2).
             if time.time() - started_ts < _WAIT_NEVER_SPAWNED_GRACE_S:
                 return "pending", "ยังไม่พบ pane ของ role นี้ — กำลังรอ spawn"
-            return "gone", "role ไม่พบ — ไม่เคยถูก spawn ในโปรเจคนี้ (เช็คชื่อ role)"
+            return "gone", _GONE_NEVER_SPAWNED_DETAIL
 
         info = detailed.get(role, {})
         state = info.get("state", pane.state)

@@ -108,6 +108,12 @@ class SignalRule:
     # window than the 6h default to ever cross `min_count=1` meaningfully.
     # `None` means "use the scan's own `window_hours`".
     window_hours: float | None = None
+    # #427: collapse repeats of the same (`chain_field`) value that land
+    # within `chain_window_s` of the previous counted one into ONE count. A
+    # stuck-pane recovery is a close→respawn→(still stuck)→close… chain up
+    # to STUCK_RECOVER_MAX for the same pane — three events, one problem.
+    chain_field: str | None = None
+    chain_window_s: float = 0.0
 
 
 # Each `min_count` is stated against what the reference box actually produced,
@@ -118,7 +124,13 @@ RULES: tuple[SignalRule, ...] = (
         event="stuck_pane_recover",
         min_count=3,
         title="watchdog respawn ซ้ำผิดปกติ",
-        why="วัดจริง 6 ครั้งใน 2 วัน — 3 ครั้งใน 6 ชม. คือผิดปกติชัดเจน",
+        why=(
+            "วัดจริง 6 ครั้งใน 2 วัน — 3 ครั้งใน 6 ชม. คือผิดปกติชัดเจน · นับเป็น 'chain' ต่อ pane: "
+            "recover ซ้ำของ pane เดิมภายใน 15 นาที (close→respawn→ยังค้าง→close… จนถึง "
+            "STUCK_RECOVER_MAX) นับครั้งเดียว (#427: devops ×3 ใน 20 นาที = ปัญหาเดียว)"
+        ),
+        chain_field="role",
+        chain_window_s=15 * 60,
     ),
     SignalRule(
         key="task_delivery_failed",
@@ -223,6 +235,8 @@ def scan_for_signals(
     counts: Counter[str] = Counter()
     worst: dict[str, float] = {}
     samples: dict[str, list[str]] = {}
+    # #427: last counted stamp per (rule, chain value) for chain collapsing.
+    last_chain: dict[tuple[str, str], datetime] = {}
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -254,6 +268,18 @@ def scan_for_signals(
                         if rule.field_min is not None and value < rule.field_min:
                             continue
                         worst[rule.key] = max(worst.get(rule.key, 0.0), value)
+                    if rule.chain_field is not None and rule.chain_window_s > 0:
+                        chain_key = (
+                            rule.key,
+                            f"{rec.get('project') or ''}::{rec.get(rule.chain_field) or ''}",
+                        )
+                        prev = last_chain.get(chain_key)
+                        last_chain[chain_key] = stamp
+                        if (
+                            prev is not None
+                            and abs((stamp - prev).total_seconds()) <= rule.chain_window_s
+                        ):
+                            continue  # same pane, same chain — already counted
                     counts[rule.key] += 1
                     if len(samples.setdefault(rule.key, [])) < 5:
                         # Include the reason when the event carries one —
