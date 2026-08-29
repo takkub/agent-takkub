@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.11] - 2026-08-29
+
+### Added (เพิ่ม)
+
+- **Remote: path รูปใน Lead reply แสดงเป็นรูปจริง + lightbox zoom (#434)** — path (absolute/relative/ใน quote/backtick · png/jpg/webp/gif) ที่ Lead พิมพ์ถึง กลายเป็น image card ใต้ข้อความ แตะ = lightbox บีบนิ้ว/ล้อ zoom · ลาก · double-tap · ไฟล์ส่งผ่าน `GET /api/image` (bearer+password, จำกัดใต้ project cwd / RUNTIME_DIR, เช็ค ext+magic+ขนาด, ทุก reject = 404 เปล่า) · compact summary ของ Claude Code แสดงเป็น pill บรรทัดเดียวแทนกำแพงข้อความ · resume picker กรอง session teammate ที่ spawn แบบ one-shot (first line = spawn trigger) เหลือแต่ Lead
+- **`takkub spawn-service --name <n> -- <cmd>` / `--list` / `service-stop` (#429)** — service ที่ต้องอยู่รอด `done`/`close` (cloudflared, dev API) ให้ cockpit spawn นอก job/tree ของ pane (Windows DETACHED|BREAKAWAY_FROM_JOB · POSIX setsid) log ที่ `runtime/services/<project>/<n>.log` · single-instance kill ของ cockpit ข้าม PID เหล่านี้
+- **`takkub lock <name> [--wait s]` / `unlock` / `lock --list` + `takkub kill --role <r> [--pid N]` (#430)** — advisory lock ต่อ project รอบ shared build dir (ไฟล์ใน `runtime/locks/` ใช้ได้แม้ cockpit ค้าง, ติด = exit 3 บอก role ที่ถือ, TTL 30 นาที) · Lead ฆ่า process ใต้ pane อื่นได้โดยไม่ต้องไล่ PID (audit `pane_children_killed`) · role docs devops/qa บังคับ wrap build
+- **งาน UI จบในรอบเดียว (#433, user directive)** — frontend/mobile เป็น browser role แล้ว ต้อง self-verify ด้วย screenshot จริง (390px + 1440px, path ใน done note) · `done` ของ task ที่เป็น UI ถูกปฏิเสธถ้าไม่มี path ภาพจริง/note บอก "ยังไม่ได้เปิดจริง/route ไป qa" (`orchestrator_text.ui_evidence_gate`, opt-out `[no-ui]`, `--force`) · qa เหลือ regression/e2e/cross-model · role file + role-and-workflow.md อัปเดต ใช้ทุก provider
+
+### Fixed (แก้)
+
+- **codex pane: task ยาว ~1.5KB ถูกตัดกลางคัน ไม่กด Enter (#424)** — codex ไม่มี file-read tool จึงไม่ได้ pointer handoff (#273) ถูก paste ทั้งก้อน → writer แตก paste เป็นก้อนละ 300 ตัวอักษร ห่าง 60ms (`ProviderSpec.paste_chunk_chars/paste_chunk_delay_ms` เฉพาะ codex) ตัดที่ขอบ escape sequence/ตัวอักษร ไม่ตัดกลาง marker หรือ UTF-8
+- **`takkub report publish --name <ไม่มีนามสกุล>` → 'unsupported extension' (#425)** — ใช้นามสกุลของไฟล์ต้นทางให้อัตโนมัติ
+- **auto-issue `stuck_pane_recover` เปิดใบจาก chain เดียว (#427)** — devops ×3 ใน 20 นาที = close→respawn→ยังค้างจนถึง STUCK_RECOVER_MAX คือปัญหาเดียว → rule นับเป็น chain ต่อ pane (pane เดิมภายใน 15 นาที = 1)
+- **`takkub wait` (#428 #431)** — `--role a,b,c` แตกเป็นหลาย role ทั้ง CLI/server · role ที่ไม่เคย spawn → ok=False exit 2 (เดิม "all roles resolved") · orchestrator bridge timeout (main_thread_stall 16.6s ตอน worktree merge) retry 3 ครั้งก่อนตาย · wait ที่พังเอง exit 2 แยกจาก exit 1 (role ยัง pending) · ESC-led chunk ภายใน 5s หลัง cockpit เขียน digest/notice เข้า Lead PTY = terminal reply ไม่ใช่ user input (`lead_user_input_suppressed_post_inject`) — ไม่ interrupt wait เพราะ notice ของ cockpit เองอีก
+- **`takkub close --role X` หลัง worktree merge ตอบ 'no pane open' exit 2 บางครั้ง (#432)** — role ที่รู้จักแต่ไม่มี pane = ok no-op; ชื่อผิดยัง error
+
 ## [v1.6.10] - 2026-08-28
 
 ### Fixed (แก้)
