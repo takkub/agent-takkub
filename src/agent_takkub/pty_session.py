@@ -1189,6 +1189,34 @@ def split_paste_chunks(data: bytes | str, chunk_chars: int) -> list[bytes | str]
     return out
 
 
+# #435 — `takkub done` narrated as text instead of executed. A real run
+# leaves the CLI's own `ok:`/`err:` answer (or the pane closing) right after
+# it; narrated text just sits there while the ledger stays "working".
+_TYPED_DONE_RE = re.compile(r"(?<![\w/.-])takkub\s+done\b")
+_DONE_RESULT_RE = re.compile(r"^\s*(?:ok|err|error)\s*:", re.IGNORECASE)
+_TYPED_DONE_TAIL_ROWS = 14
+
+
+def find_typed_done_line(lines: list[str], cursor_row: int) -> str | None:
+    """Pure helper behind `PtySession.has_typed_done_text` (unit-testable)."""
+    if not lines:
+        return None
+    lo = max(0, min(cursor_row, len(lines) - 1) - _TYPED_DONE_TAIL_ROWS + 1)
+    hi = min(len(lines), cursor_row + 1)
+    window = lines[lo:hi]
+    for idx in range(len(window) - 1, -1, -1):
+        line = window[idx]
+        if not _TYPED_DONE_RE.search(line):
+            continue
+        # A `$ takkub done ...`/`> takkub done` shell prompt line followed by
+        # the CLI's answer means it DID run — only an unanswered mention counts.
+        answered = any(_DONE_RESULT_RE.match(later) for later in window[idx + 1 :])
+        if answered:
+            return None
+        return line.strip()
+    return None
+
+
 class _WriterThread(QThread):
     """Bounded, priority-aware, non-blocking PTY writer.
 
@@ -2553,6 +2581,16 @@ class PtySession(QObject):
             if _PERMISSION_MENU_OPTION1_RE.search(line):
                 return line.strip() or "permission prompt detected"
         return "permission prompt detected"
+
+    def has_typed_done_text(self) -> str | None:
+        """#435: the line if the pane printed ``takkub done`` as plain TEXT
+        (a model narrating the command instead of executing it — gemini qa
+        pane, 2026-08-29) near the cursor with no command result after it;
+        else None. See `find_typed_done_line`."""
+        with self._screen_lock:
+            lines = self._display_lines_locked()
+            cursor_row = self.screen.cursor.y
+        return find_typed_done_line(lines, cursor_row)
 
     def has_unparsed_tool_call(self) -> str | None:
         """Return the first line containing a literal tool-call XML tag if one is

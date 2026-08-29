@@ -89,6 +89,8 @@ def _make_pane(
     pane.session.is_blocked_on_permission_prompt.return_value = None
     # Default: no malformed tool-call XML on screen.
     pane.session.has_unparsed_tool_call.return_value = unparsed_xml
+    # Default: `takkub done` was not narrated as text on screen (#435).
+    pane.session.has_typed_done_text.return_value = None
     # Default: input box is empty (real PtySession returns False when no
     # "[Pasted text +N lines]" placeholder is showing). Without this a
     # MagicMock would return a truthy stub and the stuck-paste reaper would
@@ -1476,3 +1478,38 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
 
         pane.session.write.assert_called_once_with("/compact")
+
+
+class TestDoneTypedAsText:
+    """#435: a pane that prints `takkub done` as prose instead of running it."""
+
+    def test_idle_pane_with_narrated_done_gets_nudge(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.has_typed_done_text.return_value = "takkub done"
+        orch.panes["qa"] = pane
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count >= 1
+        text = str(pane.session.write.call_args_list[0])
+        assert "takkub done" in text and "shell" in text
+
+        # cooldown: a second tick right away must not nudge again
+        pane.session.write.reset_mock()
+        clock[0] += 5
+        orch._check_idle_teammates()
+        assert not any("orchestrator ไม่ได้รับ" in str(c) for c in pane.session.write.call_args_list)
+
+    def test_detector_ignores_executed_done(self) -> None:
+        from agent_takkub.pty_session import find_typed_done_line
+
+        ran = ['$ takkub done "finished"', "ok: done report queued", "$ "]
+        assert find_typed_done_line(ran, 2) is None
+        narrated = ["I wrote the report to docs/qa/x.md", "", "takkub done", ""]
+        assert find_typed_done_line(narrated, 3) == "takkub done"
+        assert find_typed_done_line(["nothing here"], 0) is None
+        assert find_typed_done_line([], 0) is None

@@ -857,6 +857,9 @@ IDLE_WATCHDOG_INTERVAL_MS = 5_000
 # alive before `_release_native_chrome_if_idle` kills it (see
 # `_schedule_native_chrome_idle_release` for why not immediately).
 _NATIVE_CHROME_IDLE_GRACE_MS = 60_000
+# #435: min seconds between two `takkub done`-typed-as-text nudges per pane.
+DONE_TEXT_NOTICE_COOLDOWN_S = 10 * 60
+
 IDLE_REMINDER_TEXT = (
     "🔔 [auto-reminder] pane นี้ idle อยู่ — ถ้า task เสร็จแล้วต้อง run "
     '`takkub done "<summary>"` เป็นคำสั่ง shell **ตอนนี้** (ไม่ใช่พิมพ์เป็น text). '
@@ -8194,6 +8197,15 @@ class Orchestrator(
                     # that forgot to report sits idle until the user closes it,
                     # never reaching Lead. Isolate it so the reminder always runs.
                     try:
+                        self._maybe_surface_done_typed_as_text(key, name, project_name, pane, now)
+                    except Exception as _dt_err:
+                        _log_event(
+                            "done_text_check_error",
+                            role=name,
+                            project=project_name,
+                            err=f"{type(_dt_err).__name__}: {_dt_err}",
+                        )
+                    try:
                         self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
                     except Exception as _mx_err:
                         _log_event(
@@ -10118,6 +10130,34 @@ class Orchestrator(
         _delayed_enter(pane, _xml_sess, 150)
         ps.malformed_xml_notice_ts = now
         _log_event("malformed_tool_call_detected", role=role, project=project)
+
+    def _maybe_surface_done_typed_as_text(
+        self, key: str, role: str, project: str, pane: AgentPane, now: float
+    ) -> None:
+        """#435: an idle teammate whose screen shows `takkub done` as plain
+        text (narrated, never executed — gemini qa pane, 2026-08-29: report +
+        43 screenshots written, ledger stuck "working", Lead saw nothing)
+        gets a one-line nudge to run it for real. Provider-neutral: reads the
+        rendered screen, not a transcript. Cooldown `DONE_TEXT_NOTICE_COOLDOWN_S`."""
+        ps = self._ps(key)
+        if now - ps.done_text_notice_ts < DONE_TEXT_NOTICE_COOLDOWN_S:
+            return
+        if pane.session is None or not pane.session.is_alive:
+            return
+        probe = getattr(pane.session, "has_typed_done_text", None)
+        matched = probe() if callable(probe) else None
+        if not isinstance(matched, str) or not matched:
+            return
+        msg = (
+            "⚠️ [cockpit] เห็น `takkub done` บนจอเป็นข้อความ แต่ orchestrator ไม่ได้รับ report — "
+            'ต้องรันเป็นคำสั่ง shell จริงตอนนี้: takkub done "<สรุปงาน 1 บรรทัด + path ไฟล์/ภาพ>" '
+            "(ห้ามพิมพ์เป็น text/markdown) Lead ยังไม่เห็นงานของคุณจนกว่าคำสั่งจะรันสำเร็จ"
+        )
+        _dt_sess = pane.session
+        _dt_sess.write(msg)
+        _delayed_enter(pane, _dt_sess, 150)
+        ps.done_text_notice_ts = now
+        _log_event("done_typed_as_text", role=role, project=project, line=matched[:120])
 
     def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
         """Close every non-Lead pane in `project` (defaults to active).

@@ -701,6 +701,8 @@ class PaneState:
     last_tty_block_surface_ts: float = 0.0
     # malformed_xml_notice_ts: last time a malformed-tool-call nudge was injected (issue #59).
     malformed_xml_notice_ts: float = 0.0
+    # done_text_notice_ts: last `takkub done`-typed-as-text nudge (#435).
+    done_text_notice_ts: float = 0.0
     # _codex_spawn_times: wall-clock at spawn for early-crash detection (None = not set)
     codex_spawn_ts: float | None = None
     # _last_send_ts: last delivery ts for stall detection
