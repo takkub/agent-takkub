@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.12] - 2026-08-29
+
+### Fixed (แก้)
+
+- **gemini pane พิมพ์ `takkub done` เป็นข้อความแทนรันคำสั่ง → ledger ค้าง working (#435)** — idle watchdog อ่านจอ (provider-neutral): ถ้า pane idle แล้วบนจอมี `takkub done` เป็น text โดยไม่มี `ok:`/`err:` ตามหลัง → inject nudge ให้รันเป็น shell command จริง (cooldown 10 นาที, event `done_typed_as_text`)
+
 ## [v1.6.11] - 2026-08-29
 
 ### Added (เพิ่ม)
