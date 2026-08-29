@@ -234,6 +234,7 @@ class TestCloseQueuedResourceTask:
         assert "unknown role" in msg
 
     def test_close_known_role_with_nothing_queued_or_spawned(self, orch: Orchestrator) -> None:
+        # #432: a known role with nothing queued or spawned is a no-op, not an error.
         ok, msg = orch.close("backend", project=PROJECT)
-        assert ok is False
-        assert "no pane open" in msg
+        assert ok is True
+        assert "no pane open" in msg and "no-op" in msg

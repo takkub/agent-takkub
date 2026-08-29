@@ -42,10 +42,10 @@ def _payload(command: str, cwd: str | None = None) -> dict:
 
 
 class TestDeny:
-    def test_blocks_npx_playwright_for_frontend(
+    def test_blocks_npx_playwright_for_backend(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
 
         resp = cli.cmd_guard(None)
 
@@ -70,7 +70,7 @@ class TestDeny:
         assert "disk_scan" in capsys.readouterr().err
 
     def test_shard_role_is_still_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _run(monkeypatch, _payload("npx playwright test"), TAKKUB_ROLE="frontend#3")
+        _run(monkeypatch, _payload("npx playwright test"), TAKKUB_ROLE="backend#3")
         assert cli.cmd_guard(None)["exit_code"] == 2
 
     def test_blocks_taskkill_by_image_name(
@@ -78,7 +78,7 @@ class TestDeny:
     ) -> None:
         """#169: the exact command that killed every teammate pane's node
         process on 2026-07-08."""
-        _run(monkeypatch, _payload("taskkill /F /T /IM node.exe"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("taskkill /F /T /IM node.exe"), TAKKUB_ROLE="backend")
 
         resp = cli.cmd_guard(None)
 
@@ -120,7 +120,7 @@ class TestAllow:
     def test_allows_ordinary_command(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="backend")
 
         resp = cli.cmd_guard(None)
 
@@ -134,7 +134,7 @@ class TestAllow:
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
     def test_allows_pid_targeted_taskkill(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _run(monkeypatch, _payload("taskkill /F /PID 12345"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("taskkill /F /PID 12345"), TAKKUB_ROLE="backend")
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
     def test_lead_is_never_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +198,7 @@ class TestFailOpen:
     def test_malformed_payload_allows(
         self, monkeypatch: pytest.MonkeyPatch, payload: dict | str
     ) -> None:
-        _run(monkeypatch, payload, TAKKUB_ROLE="frontend")
+        _run(monkeypatch, payload, TAKKUB_ROLE="backend")
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
     def test_guard_exception_allows(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +209,7 @@ class TestFailOpen:
             raise RuntimeError("regex engine on fire")
 
         monkeypatch.setattr(pane_guard, "classify", boom)
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
 
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
@@ -225,7 +225,7 @@ class TestFailOpen:
                 raise RuntimeError("permission engine on fire")
 
         monkeypatch.setattr(permission_engine, "PermissionEngine", BoomEngine)
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
 
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
@@ -274,7 +274,7 @@ class TestPermissionEngineWiring:
         events_log = tmp_path / "events.log"
         monkeypatch.setattr(config_mod, "EVENTS_LOG", events_log)
         monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
 
         resp = cli.cmd_guard(None)
 
@@ -283,7 +283,7 @@ class TestPermissionEngineWiring:
         assert len(lines) == 1
         payload = json.loads(lines[0])
         assert payload["event"] == "capability.shell_command_denied"
-        assert payload["who"] == "frontend"
+        assert payload["who"] == "backend"
         assert payload["rule"].startswith("browser_driver")
 
     def test_allowed_command_is_not_audited(
@@ -294,7 +294,7 @@ class TestPermissionEngineWiring:
         events_log = tmp_path / "events.log"
         monkeypatch.setattr(config_mod, "EVENTS_LOG", events_log)
         monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
-        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="backend")
 
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
         assert not events_log.exists()
@@ -305,16 +305,16 @@ class TestCliDispatch:
         """Every teammate pane has to be able to run it — a lead-only gate
         would make the guard fail open for exactly the roles it exists for."""
         assert "_guard" not in cli.LEAD_ONLY_COMMANDS
-        monkeypatch.setenv("TAKKUB_ROLE", "frontend")
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
         assert cli._enforce_role_gate("_guard") is None
 
     def test_main_returns_exit_code_2_on_deny(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """End-to-end through argparse: the block has to survive dispatch."""
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
         assert cli.main(["_guard"]) == 2
 
     def test_main_returns_zero_when_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _run(monkeypatch, _payload("npm test"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npm test"), TAKKUB_ROLE="backend")
         assert cli.main(["_guard"]) == 0
 
 
@@ -364,7 +364,7 @@ class TestNotifyLeadOfGuardBlock:
         self, monkeypatch: pytest.MonkeyPatch, _capture_hook_requests: list[dict]
     ) -> None:
         """Low-severity denials stay pane-local — no IPC noise for Lead."""
-        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="frontend")
+        _run(monkeypatch, _payload("npx --yes playwright"), TAKKUB_ROLE="backend")
         cli.cmd_guard(None)
         assert _capture_hook_requests == []
 

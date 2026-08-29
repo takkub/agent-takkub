@@ -478,7 +478,9 @@ class TestBrowserShardAssignWarning:
     def test_non_browser_role_shard_fanout_does_not_warn(
         self, fake_request: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cli.main(["assign", "--role", "frontend", "--shards", "2", "build X"])
+        cli.main(
+            ["assign", "--role", "backend", "--shards", "2", "build X"]
+        )  # backend: not a browser role (#433 made frontend one)
         out = capsys.readouterr().out
         assert "เบราว์เซอร์" not in out
 
