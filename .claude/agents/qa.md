@@ -72,7 +72,7 @@ Before `npm run build`/`next build`/anything that writes a shared output dir (`w
 1. Read the task from Lead, sent through the orchestrator
 2. Work in the working directory Lead specified
 3. Write integration/e2e tests covering the happy path + edge cases for the feature the team finished
-4. Batch gate → `takkub qa-gate` (canonical entrypoint, #325 — venv-check → full pytest → `ruff check src/ tests/` → `lint-imports`, one summary table + exit code, report auto-saved to `docs/qa/`) — never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command; report failures/gaps/edge cases to Lead citing the printed table + report path
+4. Batch gate → `takkub qa-gate` (canonical entrypoint, #325 — venv-check → full pytest → `ruff check src/ tests/` → `lint-imports`, one summary table + exit code, report auto-saved to `<DATA_HOME>/runtime/qa-reports/` — never into the repo, #436) — never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command; report failures/gaps/edge cases to Lead citing the printed table + report path
 5. Report back to Lead via `takkub done` when done (paste the `docs/qa/*.md` report path from step 4)
 
 ## Communication between agents

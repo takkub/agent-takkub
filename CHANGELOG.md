@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.13] - 2026-08-29
+
+### Added (เพิ่ม)
+
+- **`takkub qa-gate --auto` เลือก tier จาก diff จริง (#436, user directive)** — อ่าน `git diff --name-only` (tree+index+untracked, tree สะอาด = HEAD~1..HEAD) แล้วพิมพ์ tier + เหตุผลเป็นแถวแรกของตาราง: แตะแค่ .css/asset/font/i18n json/md = `style` **ไม่รัน test suite เลย** (Node: typecheck/verify เท่านั้น, test/lint skip) · module logic = `targeted` pytest บนไฟล์ `tests/test_<name>*.py` ที่ map ได้ (Node: typecheck+test เพราะ narrow ไม่ได้ #368) · แตะ api/auth/schema/prisma/shared/lib/lockfile/tsconfig/ci/docker/config = `full` · source ที่ไม่มีเทส map → widen เป็น full ไม่เดา · CLAUDE.md + role frontend/mobile/qa + cli-reference บอกให้ specialist ใช้ `--auto` ก่อน `done` ทุก provider
+- **`takkub ma` เช็ค GitHub code-scanning alert** — หัวข้อใหม่ดึง `gh api .../code-scanning/alerts?state=open` เรียงตาม severity แสดง path:line + URL; repo ไม่เปิด scanning = skip, `--no-net` = skip; แผน "ทำต่อ" เพิ่มข้อ fix/dismiss เฉพาะตอนมี alert (ก่อนหน้านี้ sweep บอก "พร้อม ship" ทับ alert high #43)
+
+### Changed (เปลี่ยน)
+
+- **qa-gate report ออกจาก repo** — full gate เขียน report ไป `<DATA_HOME>/runtime/qa-reports/` (ที่เดียวกับ events.log/qa-plans) แทน `docs/qa/` และ log ของแต่ละ step ไป `<DATA_HOME>/runtime/exports/` แทน `<repo>/runtime/` (ไม่สร้าง dir แปลกในโปรเจค Node) · ลบไฟล์ auto-generate `docs/qa/*-qa-gate*.md` 53 ไฟล์ — `docs/qa/` เหลือเฉพาะรายงานที่ qa pane/คนเขียน
+
+### Fixed (แก้)
+
+- **CodeQL #43 `py/overly-permissive-file`** — `resource_lock._write_exclusive` สร้าง lock file ด้วย mode 0o600 แทน 0o644 (lock มีแค่ pid+role ของ user เอง)
+
 ## [v1.6.12] - 2026-08-29
 
 ### Fixed (แก้)

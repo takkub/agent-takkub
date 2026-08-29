@@ -2683,7 +2683,12 @@ def cmd_qa_gate(args: argparse.Namespace) -> dict:
     from .qa_gate import render_table, run_gate
 
     exec_prefix = shlex.split(args.exec_cmd) if getattr(args, "exec_cmd", None) else None
-    report = run_gate(targeted=args.targeted, v2_flags=args.v2_flags, exec_prefix=exec_prefix)
+    report = run_gate(
+        targeted=args.targeted,
+        v2_flags=args.v2_flags,
+        exec_prefix=exec_prefix,
+        auto=bool(getattr(args, "auto", False)),
+    )
     _utf8_print(render_table(report))
     if report.ok and report.env_gap:
         # #401: nothing is actually broken, but the run didn't fully cover
@@ -4628,6 +4633,14 @@ def main(argv: list[str] | None = None) -> int:
         help="mid-flight tier: run pytest on only these paths (skips ruff/lint-imports, "
         "no report file written) — team policy: targeted mid-flight, full gate once at the "
         "batch gate. Python only: on a Node project the gate says so and runs unnarrowed",
+    )
+    sqag.add_argument(
+        "--auto",
+        action="store_true",
+        help="#436: pick the tier from `git diff --name-only` and say why — style/asset/"
+        "wording-only diff runs NO test suite (Node: typecheck only), module logic runs "
+        "the mapped targeted tests, anything touching api/auth/schema/shared/tooling runs the "
+        "full gate. The specialist's default before `takkub done`; every provider",
     )
     sqag.add_argument(
         "--v2-flags",

@@ -152,10 +152,15 @@ def test_full_gate_success_runs_all_three_steps_in_order(repo, monkeypatch):
     assert recorder[2][0][0].endswith(("lint-imports", "lint-imports.exe"))
 
 
-def test_full_gate_writes_report_file(repo, monkeypatch):
+def test_full_gate_writes_report_file_outside_the_repo(repo, monkeypatch, tmp_path):
+    """The report is runtime state (DATA_HOME/runtime/qa-reports), never a
+    file inside the checkout — the old docs/qa/ location left one committed
+    1KB file per full gate behind."""
     _make_complete_venv(repo)
     recorder: list = []
     monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+    runtime = tmp_path / "data-home" / "runtime"
+    monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: runtime)
 
     report = qa_gate.run_gate(cwd=repo, write_report=True)
 
@@ -163,7 +168,9 @@ def test_full_gate_writes_report_file(repo, monkeypatch):
     assert report.report_path.exists()
     content = report.report_path.read_text(encoding="utf-8")
     assert "Result: PASS" in content
-    assert str(report.report_path).startswith(str(repo / "docs" / "qa"))
+    assert str(report.report_path).startswith(str(runtime / "qa-reports"))
+    assert not (repo / "docs" / "qa").exists()
+    assert not (repo / "runtime").exists()
 
 
 def test_targeted_mode_runs_pytest_only_and_writes_no_report(repo, monkeypatch):
@@ -759,3 +766,138 @@ class TestLogStem:
         assert step.log_path == log_dir / "typecheck-apps-admin.log"
         assert step.log_path.read_text(encoding="utf-8").strip() == "hi"
         assert (log_dir / "typecheck-apps-admin-memory.log").exists()
+
+
+# ── #436: --auto picks the tier from the diff ────────────────────────────────
+
+
+def _ignore_venv(root):
+    """The fixture venv is untracked; a real project gitignores its own."""
+    (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _commit_all(root, "gitignore")
+
+
+def _commit_all(root, msg="c"):
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", msg], cwd=root, check=True)
+
+
+def test_auto_style_only_diff_runs_no_test_suite(repo, monkeypatch):
+    """A CSS/asset/wording-only diff is the #436 case — the gate must say so
+    and run nothing, not the whole suite."""
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "src" / "app.css").write_text(".x{padding:2px}", encoding="utf-8")
+    (repo / "README.md").write_text("y", encoding="utf-8")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, []))
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    assert report.ok
+    assert report.steps[0].name == "auto-tier"
+    assert report.steps[0].detail.startswith("style:")
+    assert recorder == []  # no pytest/ruff/lint-imports launched at all
+    assert all(s.skipped for s in report.steps[1:])
+    assert report.report_path is None
+
+
+def test_auto_module_logic_runs_only_the_mapped_tests(repo, monkeypatch):
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_widget.py").write_text("def test_a(): pass", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "src" / "widget.py").write_text("X = 2", encoding="utf-8")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    assert report.steps[0].detail.startswith("targeted:")
+    assert [s.name for s in report.steps] == ["auto-tier", "venv-check", "pytest"]
+    assert recorder[0][0][-1] == "tests/test_widget.py"
+    assert report.report_path is None
+
+
+def test_auto_source_without_a_test_widens_to_full(repo, monkeypatch):
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "src" / "orphan.py").write_text("X = 2", encoding="utf-8")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+    monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: repo.parent / "rt")
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    assert report.steps[0].detail.startswith("full:")
+    assert [s.name for s in report.steps] == [
+        "auto-tier",
+        "venv-check",
+        "pytest",
+        "ruff",
+        "lint-imports",
+    ]
+
+
+def test_auto_tooling_or_schema_change_is_full_tier(repo, monkeypatch):
+    _make_complete_venv(repo)
+    (repo / "pyproject.toml").write_text('[project]\nname = "y"\n', encoding="utf-8")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+    monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: repo.parent / "rt")
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    assert report.steps[0].detail.startswith("full:")
+    assert "pyproject.toml" in report.steps[0].detail
+
+
+def test_auto_clean_tree_reads_the_last_commit(repo):
+    """After the specialist committed, the diff to gate is HEAD~1..HEAD."""
+    (repo / "src" / "app.css").write_text(".x{}", encoding="utf-8")
+    _commit_all(repo)
+    tier = qa_gate.classify_diff(repo, "python")
+    assert tier.tier == "style"
+    assert tier.files == ["src/app.css"]
+
+
+def test_auto_explicit_targeted_wins_over_auto(repo, monkeypatch):
+    _make_complete_venv(repo)
+    (repo / "src" / "app.css").write_text(".x{}", encoding="utf-8")
+    recorder: list = []
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0]))
+    report = qa_gate.run_gate(cwd=repo, auto=True, targeted=["tests/test_x.py"])
+    assert [s.name for s in report.steps] == ["venv-check", "pytest"]
+
+
+def test_classify_node_style_vs_logic(tmp_path):
+    root = tmp_path / "n"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "package.json").write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"],
+        cwd=root,
+        check=True,
+    )
+    (root / "app").mkdir()
+    (root / "app" / "menu.module.css").write_text(".m{}", encoding="utf-8")
+    assert qa_gate.classify_diff(root, "node").tier == "style"
+    (root / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")
+    assert qa_gate.classify_diff(root, "node").tier == "targeted"
+    (root / "app" / "api").mkdir()
+    (root / "app" / "api" / "route.ts").write_text("export {}", encoding="utf-8")
+    assert qa_gate.classify_diff(root, "node").tier == "full"
+
+
+def test_auto_non_python_logic_change_widens_to_full_not_empty_targeted(repo, monkeypatch):
+    """`--targeted []` would silently be a full pytest run with a 'targeted'
+    label — a script/binary change must be called full out loud instead."""
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "tools.sh").write_text("echo hi", encoding="utf-8")
+    tier = qa_gate.classify_diff(repo, "python")
+    assert tier.tier == "full"
+    assert tier.targeted == []

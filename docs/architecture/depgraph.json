@@ -548,6 +548,7 @@
         "agent_takkub.provider_state",
         "agent_takkub.provider_update",
         "agent_takkub.provider_usage",
+        "agent_takkub.qa_gate",
         "agent_takkub.remote",
         "agent_takkub.remote.api",
         "agent_takkub.remote.config",
@@ -581,7 +582,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 99,
+      "fan_in": 100,
       "fan_out": 2
     },
     {
@@ -3621,13 +3622,14 @@
       "module": "agent_takkub.qa_gate",
       "imports": [
         "agent_takkub._win_console",
+        "agent_takkub.config",
         "agent_takkub.verify"
       ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.ram_report",

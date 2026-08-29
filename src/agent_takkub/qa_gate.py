@@ -598,6 +598,218 @@ def detect_project_kind(root: Path) -> str:
     return "unknown"
 
 
+# ── #436: pick the gate tier from what actually changed ─────────────────────
+#
+# "gate before `done`" used to mean the whole suite for every diff — a
+# 2-line CSS change paid for install + prisma + tsc + 1165 vitest + eslint,
+# three rounds in a row. The tier is now read off `git diff --name-only`
+# and printed with its reason, so a specialist (any provider) runs
+# `takkub qa-gate --auto` and gets exactly the amount of gate the diff earns.
+_STYLE_ONLY_SUFFIXES = (
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".styl",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".avif",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".md",
+    ".mdx",
+    ".txt",
+    ".rst",
+)
+# i18n dictionaries / locale JSON are wording, not logic.
+_STYLE_ONLY_DIR_HINTS = (
+    "/locales/",
+    "/i18n/",
+    "/messages/",
+    "/lang/",
+    "/translations/",
+    "/public/",
+    "/assets/",
+    "/static/",
+    "/docs/",
+)
+# Anything here and the whole project has to be re-proven (schema, auth,
+# shared code, tooling, the lockfile) — a narrow run can't see the blast radius.
+_FULL_TIER_HINTS = (
+    "/api/",
+    "/auth",
+    "/schema",
+    "/prisma/",
+    "/migrations/",
+    "/migration/",
+    "/packages/",
+    "/shared/",
+    "/lib/",
+    "/server/",
+    "/db/",
+    "/middleware",
+    "package.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "bun.lock",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements",
+    "uv.lock",
+    "poetry.lock",
+    "tsconfig",
+    ".github/",
+    "docker",
+    ".env",
+    "next.config",
+    "vite.config",
+    "vitest.config",
+    "jest.config",
+    "eslint",
+    "tailwind.config",
+    "postcss.config",
+    "conftest.py",
+)
+_TEST_FILE_RE = re.compile(
+    r"(^|/)(tests?/|__tests__/)|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)test_[^/]*\.py$"
+)
+
+
+@dataclass
+class DiffTier:
+    tier: str  # "none" | "style" | "targeted" | "full"
+    files: list[str]
+    reason: str
+    targeted: list[str] = field(default_factory=list)  # Python test paths for "targeted"
+
+
+def _changed_files(root: Path) -> list[str]:
+    """Working-tree + index + untracked; falls back to the last commit when the
+    tree is clean (the specialist already committed — the diff is still the
+    thing to gate)."""
+
+    def git(*args: str) -> list[str]:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if proc.returncode != 0:
+            return []
+        return [ln.strip().replace("\\", "/") for ln in proc.stdout.splitlines() if ln.strip()]
+
+    files = set(git("diff", "--name-only", "HEAD"))
+    files.update(git("diff", "--name-only", "--cached"))
+    files.update(git("ls-files", "--others", "--exclude-standard"))
+    if not files:
+        files.update(git("diff", "--name-only", "HEAD~1", "HEAD"))
+    return sorted(files)
+
+
+def _is_style_only(path: str) -> bool:
+    low = "/" + path.lower()
+    if low.endswith(_STYLE_ONLY_SUFFIXES):
+        return True
+    return low.endswith(".json") and any(h in low for h in _STYLE_ONLY_DIR_HINTS)
+
+
+def _hits_full_tier(path: str) -> bool:
+    low = "/" + path.lower()
+    return any(h in low for h in _FULL_TIER_HINTS)
+
+
+def _map_python_tests(root: Path, files: list[str]) -> list[str] | None:
+    """`src/pkg/foo.py` → `tests/test_foo*.py`; a changed test file maps to
+    itself. None when any source file has no test to point at — then a
+    narrow run would prove nothing and the tier must widen to full."""
+    out: list[str] = []
+    for f in files:
+        if not f.endswith(".py"):
+            continue
+        if _TEST_FILE_RE.search(f):
+            out.append(f)
+            continue
+        stem = Path(f).stem
+        matches = sorted(
+            str(m.relative_to(root)).replace("\\", "/")
+            for m in (root / "tests").glob(f"test_{stem}*.py")
+        )
+        if not matches:
+            return None
+        out.extend(matches)
+    return sorted(set(out))
+
+
+def classify_diff(root: Path, kind: str) -> DiffTier:
+    files = _changed_files(root)
+    if not files:
+        return DiffTier(
+            "none", [], "no changed files (working tree clean, nothing in HEAD~1..HEAD)"
+        )
+    if all(_is_style_only(f) for f in files):
+        return DiffTier(
+            "style", files, f"{len(files)} file(s), all style/asset/wording — no logic changed"
+        )
+    hot = [f for f in files if _hits_full_tier(f)]
+    if hot:
+        return DiffTier(
+            "full",
+            files,
+            f"{len(files)} file(s); {len(hot)} touch api/auth/schema/shared/tooling: "
+            + " ".join(hot[:4]),
+        )
+    if kind == "python":
+        logic = [f for f in files if not _is_style_only(f)]
+        mapped = _map_python_tests(root, logic)
+        if not mapped:
+            # None = a source file with no test; [] = nothing Python at all
+            # changed but something non-style did (a binary, a script) —
+            # either way an empty `--targeted` would silently become a full
+            # pytest run, so name the widening instead.
+            return DiffTier(
+                "full",
+                files,
+                f"{len(files)} file(s); a changed source file has no tests/test_<name>*.py "
+                "to narrow to",
+            )
+        return DiffTier(
+            "targeted",
+            files,
+            f"{len(files)} file(s), module logic → pytest on {len(mapped)} mapped test file(s)",
+            mapped,
+        )
+    return DiffTier(
+        "targeted",
+        files,
+        f"{len(files)} file(s), component logic — typecheck + test "
+        "(Node can't narrow by path, #368)",
+    )
+
+
+def _tier_step(tier: DiffTier) -> StepResult:
+    sample = " ".join(tier.files[:5]) + (" …" if len(tier.files) > 5 else "")
+    detail = f"{tier.tier}: {tier.reason}" + (f" [{sample}]" if sample else "")
+    return StepResult("auto-tier", True, False, 0.0, detail)
+
+
 def _non_python_gate(
     kind: str,
     root: Path,
@@ -605,6 +817,7 @@ def _non_python_gate(
     report: GateReport,
     env: dict,
     log_dir: Path | None,
+    only_names: set[str] | None = None,
 ) -> GateReport:
     """Gate a tree that has no Python in it (#329).
 
@@ -634,6 +847,25 @@ def _non_python_gate(
     from .verify import detect_stack
 
     checks = detect_stack(root)
+    if only_names is not None:
+        # #436 style tier: typecheck is the only Node check a CSS/asset diff
+        # can break; skipping test/lint here is the whole point.
+        kept = [c for c in checks if c.name in only_names]
+        for c in checks:
+            if c not in kept:
+                report.steps.append(_skip(c.name, "auto-tier: style-only diff — not needed"))
+        checks = kept
+        if not checks:
+            report.steps.append(
+                StepResult(
+                    "detect",
+                    True,
+                    False,
+                    0.0,
+                    "style-only diff and no typecheck to run — nothing to gate",
+                )
+            )
+            return report
     if not checks:
         report.steps.append(
             StepResult(
@@ -692,12 +924,20 @@ def run_gate(
     write_report: bool | None = None,
     cwd: Path | None = None,
     exec_prefix: list[str] | None = None,
+    auto: bool = False,
 ) -> GateReport:
     """Run the gate once. Default (no `targeted`) is the full-suite tier —
     venv-check -> pytest -> ruff check -> lint-imports, fail-fast, report
-    written to docs/qa/. `targeted` is the mid-flight tier (pytest only on
+    written to `<DATA_HOME>/runtime/qa-reports/` (never into the repo — a
+    per-run log is runtime state, not a document). `targeted` is the mid-flight tier (pytest only on
     the given paths, no report file) — team policy: targeted tests mid-flight,
     full suite once at the batch gate.
+
+    `auto` (#436): read the tier off `git diff` — style-only diff runs no
+    test suite at all (Node: typecheck only), module logic runs the mapped
+    targeted tests, anything touching api/auth/schema/shared/tooling runs
+    the full gate. The chosen tier and its reason are the first row of the
+    table so nobody has to trust the choice blindly.
 
     `exec_prefix` (#401): e.g. ``["docker", "compose", "exec", "-T",
     "gateway"]`` — delegates every tool invocation to that prefix instead of
@@ -711,8 +951,25 @@ def run_gate(
     cwd = cwd or Path.cwd()
     wroot = worktree_root(cwd)
     bin_dir = shared_venv_bin(cwd)
+    kind = detect_project_kind(wroot)
+
+    tier: DiffTier | None = None
+    node_only: set[str] | None = None
+    if auto and targeted is None:
+        tier = classify_diff(wroot, kind)
+        if tier.tier in ("none", "style"):
+            if kind == "python":
+                report = GateReport(v2_flags=v2_flags, targeted=[])
+                report.steps.append(_tier_step(tier))
+                report.steps.append(_skip("pytest", "auto-tier: no logic changed"))
+                report.steps.append(_skip("ruff", "auto-tier: no logic changed"))
+                report.steps.append(_skip("lint-imports", "auto-tier: no logic changed"))
+                return report
+            node_only = {"typecheck", "verify"}
+        elif tier.tier == "targeted" and kind == "python":
+            targeted = tier.targeted
     if write_report is None:
-        write_report = targeted is None
+        write_report = targeted is None and tier is None
 
     env = dict(os.environ)
     # #349: zero-cost, and the exact difference between "died silently, no
@@ -724,6 +981,8 @@ def run_gate(
             env[name] = "1"
 
     report = GateReport(v2_flags=v2_flags, targeted=list(targeted) if targeted else None)
+    if tier is not None:
+        report.steps.append(_tier_step(tier))
 
     def finish() -> GateReport:
         if write_report:
@@ -732,11 +991,10 @@ def run_gate(
 
     log_dir = None
     if write_report:
-        log_dir = wroot / "runtime" / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
+        log_dir = _runtime_dir() / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
 
-    kind = detect_project_kind(wroot)
     if kind != "python":
-        _non_python_gate(kind, wroot, targeted, report, env, log_dir)
+        _non_python_gate(kind, wroot, targeted, report, env, log_dir, only_names=node_only)
         return finish()
 
     if exec_prefix is not None:
@@ -873,10 +1131,26 @@ def render_report_md(report: GateReport, head: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _runtime_dir() -> Path:
+    """DATA_HOME/runtime — the cockpit's own state dir, the same place
+    events.log and qa-plans live. Lazy so this module stays importable in a
+    bare CI checkout before config has resolved anything."""
+    from .config import RUNTIME_DIR
+
+    return RUNTIME_DIR
+
+
 def _maybe_write_report(wroot: Path, report: GateReport) -> Path | None:
+    """Full-gate report → `<DATA_HOME>/runtime/qa-reports/`, NOT `docs/qa/`.
+
+    It used to land in the repo, so every full gate left a 1KB
+    `<timestamp>-qa-gate.md` behind that got committed with whatever came
+    next — ~60 of them in two weeks, none ever read back. A per-run result is
+    runtime state like events.log; `docs/qa/` is for reports a person wrote.
+    """
     if report.targeted:
         return None
-    docs_dir = wroot / "docs" / "qa"
+    docs_dir = _runtime_dir() / "qa-reports"
     docs_dir.mkdir(parents=True, exist_ok=True)
     suffix = "-v2flags" if report.v2_flags else ""
     path = docs_dir / f"{time.strftime('%Y-%m-%d-%H%M%S')}-qa-gate{suffix}.md"

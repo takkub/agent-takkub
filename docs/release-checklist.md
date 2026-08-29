@@ -31,7 +31,7 @@ takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fa
 
 > **อย่าแตะเวอร์ชันระหว่าง gate กำลังรัน** — `test_version_sync` อ่าน `__version__` ตอน import
 > แต่อ่าน pyproject ตอนรันเทส bump คร่อมกันเมื่อไหร่จะตกแบบหลอกๆ (เจอจริงตอน 1.0.79,
-> `docs/qa/2026-08-20-165059-qa-gate.md`) — รอ gate จบก่อนค่อย bump
+> gate report 2026-08-20 16:50 — report ย้ายไป `<DATA_HOME>/runtime/qa-reports/` แล้ว #436) — รอ gate จบก่อนค่อย bump
 
 - **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **5 job ไม่ใช่ 4**:
   `lint-and-test` รัน 3 OS (`windows-latest` · `macos-latest` · `ubuntu-latest`) และ

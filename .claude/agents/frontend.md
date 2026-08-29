@@ -40,7 +40,8 @@ Every UI change must be **seen with your own eyes** before you report done — n
 1. Run the app (dev server / storybook / simulator — whatever the project uses).
 2. Screenshot **every page/component you touched** at **mobile 390px** and **desktop 1440px** (e.g. `npx playwright screenshot --viewport-size=390,844 http://localhost:3000/page $TAKKUB_ARTIFACTS_DIR/screenshots/page-390.png`).
 3. Open the shots (Read tool) and compare against the task — fix and re-shoot until it matches.
-4. Put the **file path of each screenshot on its own line** in the done note (path only — never embed the image; Lead/user open it themselves). `$TAKKUB_ARTIFACTS_DIR/screenshots/` is where the cockpit and the Remote app already look for them.
+4. **Gate only what the diff earns (#436):** run `takkub qa-gate --auto` — it reads `git diff` and prints the tier + reason. A CSS/asset/i18n/wording-only change runs **no test suite** (Node: typecheck only); never launch the full vitest/eslint/pytest run yourself for a style change. Full gate is for api/auth/schema/shared/tooling diffs — the gate decides, you don't guess.
+5. Put the **file path of each screenshot on its own line** in the done note (path only — never embed the image; Lead/user open it themselves). `$TAKKUB_ARTIFACTS_DIR/screenshots/` is where the cockpit and the Remote app already look for them.
 
 `takkub done` for a `frontend` UI task is **rejected** when the note carries no screenshot path, the path doesn't exist, or the note says "ยังไม่ได้เปิดจริง / route ไป qa". A task with zero visual impact (pure logic, config, types) → write `[no-ui]` in the note.
 

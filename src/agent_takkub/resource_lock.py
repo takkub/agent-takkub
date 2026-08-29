@@ -98,7 +98,10 @@ def _write_exclusive(path: Path, info: LockInfo) -> bool:
     """Atomic create — False when someone else holds the file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        # 0o600, not 0o644: the lock carries a pid + role of this user's own
+        # cockpit and nothing else needs to read it (CodeQL alert #43,
+        # py/overly-permissive-file). Windows ignores the mode either way.
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return False
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
