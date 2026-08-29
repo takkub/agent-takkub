@@ -218,6 +218,71 @@ _HEAVY_CLASSES = {
 }
 
 
+class BackgroundSampler:
+    """Wrap a blocking sampler so callers read a cached value instantly.
+
+    The wrapped function runs on a daemon thread every *interval_s*; calling
+    the wrapper returns the most recent result, or *fallback()* until the
+    first read lands. The thread starts lazily on first call, so merely
+    constructing a governor (every Orchestrator test does) spawns nothing.
+    """
+
+    def __init__(
+        self,
+        fn: Callable[[], tuple],
+        *,
+        interval_s: float = 2.0,
+        fallback: Callable[[], tuple] | None = None,
+    ) -> None:
+        self._fn = fn
+        self._interval_s = interval_s
+        self._fallback = fallback or self._cheap_fallback
+        self._latest: tuple | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _cheap_fallback() -> tuple:
+        # virtual_memory() is one syscall; the expensive parts (cpu_percent
+        # bookkeeping, the pid walk) are exactly what we refuse to do inline.
+        try:
+            vm = psutil.virtual_memory()
+            pct = 100.0 * float(vm.available) / max(1.0, float(vm.total))
+            return (0.0, pct, 0, int(vm.available), int(vm.total))
+        except Exception:
+            return (0.0, 100.0, 0, 0, 0)
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                value = self._fn()
+            except Exception:
+                value = None
+            if value is not None:
+                with self._lock:
+                    self._latest = value
+            if self._stop.wait(self._interval_s):
+                return
+
+    def _ensure_started(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="resource-governor-sampler", daemon=True
+        )
+        self._thread.start()
+
+    def __call__(self) -> tuple:
+        self._ensure_started()
+        with self._lock:
+            latest = self._latest
+        return latest if latest is not None else self._fallback()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
 class ResourceGovernor:
     """Non-blocking admission controller with hysteresis and project fairness.
 
@@ -245,7 +310,11 @@ class ResourceGovernor:
         # the same `SlotPolicy()` default — see `effective_slot_policy`'s
         # own docstring).
         self.slot_policy = slot_policy or scheduling_facade.effective_slot_policy()
-        self._sampler = sampler or self._sample_psutil
+        # No caller-supplied sampler → psutil, but read on a worker thread:
+        # `sample()` is called from the Qt tick, and `_sample_psutil`'s
+        # `psutil.pids()` + `cpu_percent` showed up in a main-thread stall
+        # dump (#437). The caller only ever sees the latest cached tuple.
+        self._sampler = sampler or BackgroundSampler(self._sample_psutil)
         self._clock = clock
         self._event_sink = event_sink
         self._cpu_percent = 0.0
@@ -279,6 +348,10 @@ class ResourceGovernor:
 
     @staticmethod
     def _sample_psutil() -> tuple[float, float, int, int, int]:
+        """The real psutil read. `psutil.pids()` walks the whole process
+        table (400+ entries on a busy box) — NEVER call this on the GUI
+        thread; `BackgroundSampler` below is how the default governor uses
+        it (#437)."""
         cpu = float(psutil.cpu_percent(interval=None))
         vm = psutil.virtual_memory()
         available_pct = 100.0 * float(vm.available) / max(1.0, float(vm.total))

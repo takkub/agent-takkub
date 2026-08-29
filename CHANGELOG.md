@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **UI ค้าง 1.5–18 s จาก psutil บน Qt main thread (#437)** — console sweeper (ซ่อนหน้าต่าง console ของ process ลูก) เคยเป็น QTimer 250 ms บน main thread แล้วเดิน parent chain ผ่าน psutil ทีละ hop; ตอน process แตกเยอะ (codex เปิด pwsh ทุก tool call, pytest-xdist, pre-commit) = 5/8 stack dump ของ main_thread_stall → ย้ายเป็น daemon thread `console-sweeper` (หยุดที่ aboutToQuit) + จำกัด 16 หน้าต่างใหม่ต่อรอบ · resource governor เคยเรียก `psutil.cpu_percent`+`psutil.pids()` (เดิน process table ทั้งเครื่อง) ใน tick ของ GUI → `BackgroundSampler` อ่านบน worker thread ทุก 2 s, tick อ่านค่า cache อย่างเดียว
+
 ## [v1.6.13] - 2026-08-29
 
 ### Added (เพิ่ม)

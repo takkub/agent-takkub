@@ -1082,26 +1082,36 @@ _GEMINI_MODEL_RE = re.compile(
 # instead of on a poll. Not done here: unlike this timer it is a global hook
 # with no CI mileage, and the first version of this sweeper already took the
 # Windows CI job down with a silent Qt abort (#330 follow-up).
-_CONSOLE_SWEEP_MS = 250
-_console_sweeper: QTimer | None = None
+_CONSOLE_SWEEP_S = 0.25
+_console_sweeper: threading.Thread | None = None
+_console_sweeper_stop: threading.Event | None = None
 _console_hwnds_seen: set[int] = set()
 
 
 def _ensure_console_sweeper() -> None:
     """Start the process-wide console sweeper once (real Windows GUI only).
 
-    Two guards, both learned the hard way when the first version of this took
-    CI's Windows job down with a silent Qt abort at 78% of the suite:
+    It is a daemon THREAD, not a QTimer (#437). The timer version ran
+    `hide_own_console_windows` on the Qt main thread every 250 ms, and its
+    ownership proof walks each new window's parent chain through psutil
+    (`ppid()` + `create_time()` = an OpenProcess/NtQuery per hop). Under a
+    process storm — codex opening `pwsh` per tool call, pytest-xdist workers,
+    pre-commit hooks — that walk took hundreds of ms per window, times
+    several windows per tick: 5 of 8 main-thread stall dumps in boot.log
+    ended in exactly that frame, 1.5–2.3 s each, 17.9 s at worst. Nothing in
+    the sweep needs the GUI thread: EnumWindows, the parent walk and
+    `ShowWindow(SW_HIDE)` on a foreign HWND all work from any thread.
+
+    Guards kept from the timer era (both learned when the first version took
+    CI's Windows job down with a silent Qt abort at 78% of the suite):
 
     * `offscreen` platform → don't start at all. Under the test QPA there are
-      no OS windows to hide, so the timer is pure cost — and a process-wide
-      timer created inside one test keeps firing through every later test,
-      across QApplication teardown, which is exactly how a Qt process dies
-      with no traceback to point at the cause.
-    * parent it to the application object, so it is destroyed with the app
-      instead of outliving it as an ownerless QObject.
+      no OS windows to hide, so the sweep is pure cost — and a process-wide
+      worker started inside one test keeps running through every later one.
+    * tied to the application's lifetime: `aboutToQuit` sets the stop event,
+      and the thread is a daemon so it can never hold process exit open.
     """
-    global _console_sweeper
+    global _console_sweeper, _console_sweeper_stop
     if sys.platform != "win32" or _console_sweeper is not None:
         return
     app = QCoreApplication.instance()
@@ -1114,19 +1124,26 @@ def _ensure_console_sweeper() -> None:
     import os
 
     root_pid = os.getpid()
+    stop = threading.Event()
 
-    def _sweep_owned() -> None:
+    def _loop() -> None:
+        while not stop.wait(_CONSOLE_SWEEP_S):
+            try:
+                hide_own_console_windows(root_pid, _console_hwnds_seen)
+            except Exception:
+                # A sweep is cosmetic; never let it kill the worker.
+                pass
+
+    about_to_quit = getattr(app, "aboutToQuit", None)
+    if about_to_quit is not None:
         try:
-            hide_own_console_windows(root_pid, _console_hwnds_seen)
+            about_to_quit.connect(stop.set)
         except Exception:
-            # A sweep is cosmetic; never let it reach the Qt event loop.
             pass
-
-    timer = QTimer(app)
-    timer.setInterval(_CONSOLE_SWEEP_MS)
-    timer.timeout.connect(_sweep_owned)
-    timer.start()
-    _console_sweeper = timer
+    worker = threading.Thread(target=_loop, name="console-sweeper", daemon=True)
+    worker.start()
+    _console_sweeper = worker
+    _console_sweeper_stop = stop
 
 
 class WritePriority(IntEnum):

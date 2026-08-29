@@ -129,7 +129,16 @@ def _is_descendant_of(pid: int, root_pid: int, max_depth: int = 16) -> bool:
     return False
 
 
-def hide_own_console_windows(root_pid: int, already_seen: set[int]) -> set[int]:
+# Upper bound on genuinely-new windows ruled on per sweep. A process storm
+# (pytest-xdist, codex's per-call pwsh) can raise dozens of console windows
+# between two sweeps; the rest simply wait for the next 250 ms tick instead
+# of one sweep stretching into seconds (#437).
+_MAX_NEW_WINDOWS_PER_SWEEP = 16
+
+
+def hide_own_console_windows(
+    root_pid: int, already_seen: set[int], *, max_new: int = _MAX_NEW_WINDOWS_PER_SWEEP
+) -> set[int]:
     """Hide console windows belonging to *root_pid*'s process tree.
 
     Why the ownership check, when spawn-time hiding never needed one: that
@@ -142,7 +151,9 @@ def hide_own_console_windows(root_pid: int, already_seen: set[int]) -> set[int]:
 
     *already_seen* is a caller-owned set of HWNDs this has already ruled on;
     it is mutated in place and returned. It keeps each sweep to an
-    `EnumWindows` plus a parent walk for genuinely new windows only.
+    `EnumWindows` plus a parent walk for genuinely new windows only — at most
+    *max_new* of them per call; the remainder are left unseen for the next
+    sweep. Runs on the console-sweeper thread (#437), never the GUI thread.
     """
     if sys.platform != "win32":
         return already_seen
@@ -150,7 +161,7 @@ def hide_own_console_windows(root_pid: int, already_seen: set[int]) -> set[int]:
     if not fresh:
         return already_seen
     mine: set[int] = set()
-    for hwnd in fresh:
+    for hwnd in sorted(fresh)[:max_new]:
         already_seen.add(hwnd)
         if window_class(hwnd) in _UNOWNABLE_WINDOW_CLASSES:
             continue

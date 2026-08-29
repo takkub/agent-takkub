@@ -154,6 +154,28 @@ class TestSweepCost:
         assert fake_windows["hidden"] == [{101}, {404}]
 
 
+class TestSweepCap:
+    def test_a_window_storm_is_spread_over_sweeps(self, fake_windows) -> None:
+        """#437: dozens of new console windows in one tick (xdist workers,
+        codex pwsh per call) must not turn one sweep into a multi-second
+        parent-walk marathon — rule on a bounded batch, leave the rest
+        genuinely unseen so the next sweep picks them up."""
+        for hwnd in range(100, 140):
+            fake_windows["hwnds"].add(hwnd)
+            fake_windows["pids"][hwnd] = 5000 + hwnd
+            fake_windows["tree"].add(5000 + hwnd)
+        seen: set[int] = set()
+
+        _win_console.hide_own_console_windows(1, seen, max_new=16)
+        assert len(seen) == 16
+        assert fake_windows["hidden"] == [set(range(100, 116))]
+
+        _win_console.hide_own_console_windows(1, seen, max_new=16)
+        _win_console.hide_own_console_windows(1, seen, max_new=16)
+        assert seen == set(range(100, 140))
+        assert set().union(*fake_windows["hidden"]) == set(range(100, 140))
+
+
 class TestNonWindows:
     def test_noop_off_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_win_console.sys, "platform", "darwin")
@@ -169,29 +191,42 @@ class TestSweeperWiring:
     def _fake_app(platform_name: str):
         return type("App", (), {"platformName": staticmethod(lambda: platform_name)})()
 
+    @staticmethod
+    def _fake_app(platform_name: str):
+        class _Signal:
+            def __init__(self) -> None:
+                self.slots: list = []
+
+            def connect(self, fn) -> None:
+                self.slots.append(fn)
+
+        app = type("App", (), {"platformName": staticmethod(lambda: platform_name)})()
+        app.aboutToQuit = _Signal()
+        return app
+
     def _install(self, monkeypatch, platform_name="windows", plat="win32"):
-        """Stand in for the Qt side so these run on any OS."""
+        """Stand in for the Qt side and for the thread so these run on any OS
+        without leaving a real sweeper running through the rest of the suite."""
         from agent_takkub import pty_session
 
         made: list = []
 
-        class _FakeTimer:
-            def __init__(self, parent=None) -> None:
-                made.append(parent)
-                self.timeout = type("S", (), {"connect": lambda _s, _f: None})()
+        class _FakeThread:
+            def __init__(self, target=None, name=None, daemon=None) -> None:
+                made.append({"target": target, "name": name, "daemon": daemon})
 
-            def setInterval(self, ms) -> None: ...
             def start(self) -> None: ...
 
         app = self._fake_app(platform_name)
         monkeypatch.setattr(pty_session, "_console_sweeper", None)
+        monkeypatch.setattr(pty_session, "_console_sweeper_stop", None)
         monkeypatch.setattr(pty_session.sys, "platform", plat)
-        monkeypatch.setattr(pty_session, "QTimer", _FakeTimer)
+        monkeypatch.setattr(pty_session.threading, "Thread", _FakeThread)
         monkeypatch.setattr(pty_session.QCoreApplication, "instance", staticmethod(lambda: app))
         return pty_session, made, app
 
-    def test_sweeper_is_a_single_process_wide_timer(self, monkeypatch) -> None:
-        """A timer per pane would multiply an EnumWindows sweep by the pane
+    def test_sweeper_is_a_single_process_wide_worker(self, monkeypatch) -> None:
+        """A worker per pane would multiply an EnumWindows sweep by the pane
         count for no benefit."""
         pty_session, made, _app = self._install(monkeypatch)
 
@@ -201,14 +236,30 @@ class TestSweeperWiring:
 
         assert len(made) == 1
 
-    def test_timer_is_owned_by_the_application(self, monkeypatch) -> None:
-        """An ownerless QObject outlives QApplication teardown and takes the
-        process down with it — the abort that killed CI's Windows job."""
-        pty_session, made, app = self._install(monkeypatch)
+    def test_sweeper_is_a_daemon_thread_not_a_gui_timer(self, monkeypatch) -> None:
+        """#437: the parent walk (psutil per hop) ran on the Qt main thread
+        via a 250 ms QTimer and was the top main-thread stall signature in
+        boot.log. It must be off-thread, and a daemon so it never holds
+        process exit open."""
+        pty_session, made, _app = self._install(monkeypatch)
 
         pty_session._ensure_console_sweeper()
 
-        assert made == [app]
+        assert made[0]["daemon"] is True
+        assert made[0]["name"] == "console-sweeper"
+        assert pty_session._console_sweeper_stop is not None
+
+    def test_sweeper_stops_when_the_application_quits(self, monkeypatch) -> None:
+        """Tied to app lifetime the way the QTimer's parent used to be — a
+        sweep firing during QApplication teardown was the CI abort."""
+        pty_session, _made, app = self._install(monkeypatch)
+
+        pty_session._ensure_console_sweeper()
+
+        assert app.aboutToQuit.slots
+        for slot in app.aboutToQuit.slots:
+            slot()
+        assert pty_session._console_sweeper_stop.is_set()
 
     def test_never_starts_under_the_offscreen_platform(self, monkeypatch) -> None:
         """Test/headless runs have no OS windows to hide, and a process-wide
