@@ -315,7 +315,11 @@ def _lead_user_text(rec: dict) -> str | None:
     skipped."""
     if rec.get("type") != "user":
         return None
-    if rec.get("isMeta"):
+    if rec.get("isMeta") or rec.get("isCompactSummary"):
+        # #424: Claude Code's post-`/compact` summary is a `type=="user"`
+        # record too, but it's a machine-written wall of "This session is
+        # being continued…" — never human prose. `_compact_marker` turns it
+        # into a short sys pill on the phone instead.
         return None
     msg = rec.get("message")
     if not isinstance(msg, dict):
@@ -678,8 +682,30 @@ def _first_user_line(path: Path) -> str:
 
 
 def _is_teammate_session_line(first_line: str) -> bool:
-    """True when a session's opening line marks it as an assigned task."""
-    return first_line.startswith(_TEAMMATE_TASK_PREFIXES)
+    """True when a session's opening line marks it as an assigned task.
+
+    Two shapes: the legacy inline task (`[ROLE:` / `[SESSION GOAL` first
+    line) and the one-shot system-prompt spawn, whose only typed line is
+    the machine-written `_SPAWN_TASK_TRIGGER` (#424 — without this every
+    teammate spawned since the preload path landed leaked into the Lead
+    resume picker). Lead spawns never go through `assign()`, so a Lead
+    session can't start with either."""
+    return first_line.startswith(_TEAMMATE_TASK_PREFIXES) or first_line.startswith(
+        _SPAWN_TASK_TRIGGER
+    )
+
+
+# #424: what the phone shows in place of a `/compact` summary record.
+_COMPACT_MARKER_TEXT = "🧹 context ถูก compact — สรุปงานก่อนหน้าถูกส่งต่อให้ Lead แล้ว"
+
+
+def _compact_marker(rec: dict) -> dict | None:
+    """A `{"text", "kind": "sys"}` pill for a Claude `isCompactSummary`
+    record, else None. Only history readers emit it (the live SSE path
+    drops the record — a mid-turn pill would just interrupt the reply)."""
+    if rec.get("type") == "user" and rec.get("isCompactSummary"):
+        return {"text": _COMPACT_MARKER_TEXT, "kind": "sys"}
+    return None
 
 
 def _list_recent_claude_sessions(
@@ -819,6 +845,10 @@ def _read_recent_claude_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
         lead_texts = _lead_text_blocks(rec)
         if lead_texts:
             out.append({"text": "\n".join(lead_texts)[:_MAX_EVENT_CHARS], "kind": "lead"})
+            continue
+        marker = _compact_marker(rec)
+        if marker is not None:
+            out.append(marker)
             continue
         user_text = _lead_user_text(rec)
         if user_text:

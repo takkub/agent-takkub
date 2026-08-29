@@ -796,6 +796,251 @@
     return hh + ":" + mm;
   }
 
+  // Kind of a history/resume record as the PWA stores it. "sys" only ever
+  // arrives for server-synthesised pills (#424 compact marker); anything
+  // else that isn't the user's own line is the Lead's.
+  function historyKind(m) {
+    if (!m) return "lead";
+    if (m.kind === "me") return "me";
+    if (m.kind === "sys") return "sys";
+    return "lead";
+  }
+
+  // ── #424 inline image preview ─────────────────────────────────────────
+  // A Lead reply that mentions an on-disk image path ("C:\...\shot.png",
+  // /tmp/a.jpg, docs/img/x.webp — quoted or bare) gets an image card
+  // appended under the message. The bytes come through the bearer-gated
+  // `/api/image` (an <img src> can't carry the Authorization header, so
+  // the PWA fetches and swaps in a blob: URL). Tapping a card, or any
+  // data-URL `.remote-image`, opens the zoomable lightbox below.
+  var IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif)$/i;
+  var IMAGE_QUOTED_RE = /["'`]([^"'`\n]{3,400}?\.(?:png|jpe?g|webp|gif))["'`]/gi;
+  var IMAGE_BARE_RE = /(?:^|[\s(])((?:[A-Za-z]:[\\\/]|\.{0,2}[\\\/]|[\w.-]+[\\\/])[^\s"'`<>()\[\]]{0,400}?\.(?:png|jpe?g|webp|gif))(?=$|[\s).,;:!?\]])/gim;
+  var IMAGE_CARDS_PER_MESSAGE = 6;
+  var imageBlobCache = {}; // "project|path" → objectURL (kept for the page's life)
+
+  function extractImagePaths(text) {
+    if (typeof text !== "string" || text.indexOf(".") < 0) return [];
+    var found = [];
+    var seen = {};
+    function add(raw) {
+      var pth = String(raw || "").trim();
+      if (!pth || !IMAGE_EXT_RE.test(pth)) return;
+      if (/^(?:data|https?|blob):/i.test(pth)) return;
+      if (seen[pth]) return;
+      seen[pth] = true;
+      found.push(pth);
+    }
+    var m;
+    IMAGE_QUOTED_RE.lastIndex = 0;
+    while ((m = IMAGE_QUOTED_RE.exec(text)) !== null) add(m[1]);
+    IMAGE_BARE_RE.lastIndex = 0;
+    while ((m = IMAGE_BARE_RE.exec(text)) !== null) add(m[1]);
+    return found.slice(0, IMAGE_CARDS_PER_MESSAGE);
+  }
+
+  function imageBaseName(pth) {
+    var parts = pth.split(/[\\\/]/);
+    return parts[parts.length - 1] || pth;
+  }
+
+  function fetchImageBlob(project, pth) {
+    var key = (project || "") + "|" + pth;
+    if (imageBlobCache[key]) return Promise.resolve(imageBlobCache[key]);
+    var q = "api/image?path=" + encodeURIComponent(pth);
+    if (project) q += "&project=" + encodeURIComponent(project);
+    return apiFetch(q).then(function (res) {
+      if (!res.ok) throw new Error("image_" + res.status);
+      return res.blob();
+    }).then(function (blob) {
+      if (!blob || !blob.size) throw new Error("image_empty");
+      var url = URL.createObjectURL(blob);
+      imageBlobCache[key] = url;
+      return url;
+    });
+  }
+
+  function hydrateImages(bodyEl, rawText) {
+    if (!bodyEl) return;
+    var paths = extractImagePaths(rawText);
+    if (!paths.length) return;
+    var project = visibleProject();
+    var strip = bodyEl.querySelector(":scope > .img-strip");
+    if (!strip) {
+      strip = document.createElement("div");
+      strip.className = "img-strip";
+      bodyEl.appendChild(strip);
+    }
+    paths.forEach(function (pth) {
+      if (strip.querySelector('[data-path="' + CSS.escape(pth) + '"]')) return;
+      var card = document.createElement("figure");
+      card.className = "img-card loading";
+      card.setAttribute("data-path", pth);
+      var img = document.createElement("img");
+      img.alt = imageBaseName(pth);
+      img.decoding = "async";
+      var cap = document.createElement("figcaption");
+      cap.textContent = imageBaseName(pth);
+      card.appendChild(img);
+      card.appendChild(cap);
+      strip.appendChild(card);
+      fetchImageBlob(project, pth).then(function (url) {
+        img.src = url;
+        img.onload = function () { card.classList.remove("loading"); };
+        img.onerror = function () { card.remove(); if (!strip.children.length) strip.remove(); };
+        card.addEventListener("click", function () { openLightbox(url, imageBaseName(pth)); });
+      }).catch(function () {
+        // Not an image the cockpit can serve (outside a project root, a
+        // bare mention of a file that no longer exists, …) — drop the card
+        // silently; the path text above it is still readable.
+        card.remove();
+        if (!strip.children.length) strip.remove();
+      });
+    });
+  }
+
+  // ── lightbox (pinch / wheel / drag / double-tap) ─────────────────────
+  var lightbox = { el: null, img: null, scale: 1, tx: 0, ty: 0, drag: null, pinch: null, lastTap: 0 };
+
+  function lightboxApply() {
+    lightbox.img.style.transform =
+      "translate(" + lightbox.tx + "px, " + lightbox.ty + "px) scale(" + lightbox.scale + ")";
+    lightbox.el.classList.toggle("zoomed", lightbox.scale > 1.01);
+  }
+
+  function lightboxReset() {
+    lightbox.scale = 1; lightbox.tx = 0; lightbox.ty = 0;
+    lightboxApply();
+  }
+
+  function lightboxZoomAt(factor, cx, cy) {
+    var next = Math.min(8, Math.max(1, lightbox.scale * factor));
+    if (next === lightbox.scale) return;
+    var rect = lightbox.img.getBoundingClientRect();
+    var ox = cx - (rect.left + rect.width / 2);
+    var oy = cy - (rect.top + rect.height / 2);
+    var ratio = next / lightbox.scale;
+    lightbox.tx -= ox * (ratio - 1);
+    lightbox.ty -= oy * (ratio - 1);
+    lightbox.scale = next;
+    if (next <= 1.01) { lightbox.tx = 0; lightbox.ty = 0; }
+    lightboxApply();
+  }
+
+  function openLightbox(src, caption) {
+    var el = $("lightbox");
+    if (!el) return;
+    lightbox.el = el;
+    lightbox.img = $("lightbox-img");
+    lightbox.img.src = src;
+    $("lightbox-caption").textContent = caption || "";
+    lightboxReset();
+    el.classList.add("open");
+    document.body.classList.add("lightbox-open");
+  }
+
+  function closeLightbox() {
+    if (!lightbox.el) return;
+    lightbox.el.classList.remove("open");
+    document.body.classList.remove("lightbox-open");
+    lightbox.drag = null; lightbox.pinch = null;
+  }
+
+  function wireLightbox() {
+    var el = $("lightbox");
+    if (!el) return;
+    var img = $("lightbox-img");
+    var stage = $("lightbox-stage");
+    $("lightbox-close").addEventListener("click", closeLightbox);
+    $("lightbox-fit").addEventListener("click", function (e) { e.stopPropagation(); lightboxReset(); });
+    stage.addEventListener("click", function (e) {
+      if (e.target === stage) closeLightbox();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && el.classList.contains("open")) closeLightbox();
+    });
+    stage.addEventListener("wheel", function (e) {
+      if (!el.classList.contains("open")) return;
+      e.preventDefault();
+      lightboxZoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
+    }, { passive: false });
+    img.addEventListener("dblclick", function (e) {
+      e.preventDefault();
+      if (lightbox.scale > 1.01) lightboxReset(); else lightboxZoomAt(2.5, e.clientX, e.clientY);
+    });
+    img.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "touch") return; // touch handled below (pinch-aware)
+      e.preventDefault();
+      lightbox.drag = { x: e.clientX, y: e.clientY, tx: lightbox.tx, ty: lightbox.ty };
+      img.setPointerCapture(e.pointerId);
+    });
+    img.addEventListener("pointermove", function (e) {
+      if (!lightbox.drag || e.pointerType === "touch") return;
+      lightbox.tx = lightbox.drag.tx + (e.clientX - lightbox.drag.x);
+      lightbox.ty = lightbox.drag.ty + (e.clientY - lightbox.drag.y);
+      lightboxApply();
+    });
+    img.addEventListener("pointerup", function () { lightbox.drag = null; });
+    img.addEventListener("pointercancel", function () { lightbox.drag = null; });
+    img.addEventListener("dragstart", function (e) { e.preventDefault(); });
+
+    function dist(t) { var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY; return Math.sqrt(dx * dx + dy * dy); }
+    function mid(t) { return { x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 }; }
+    stage.addEventListener("touchstart", function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        lightbox.drag = null;
+        lightbox.pinch = { d: dist(e.touches), scale: lightbox.scale };
+      } else if (e.touches.length === 1) {
+        var now = Date.now();
+        var t = e.touches[0];
+        if (now - lightbox.lastTap < 300) {
+          e.preventDefault();
+          if (lightbox.scale > 1.01) lightboxReset(); else lightboxZoomAt(2.5, t.clientX, t.clientY);
+          lightbox.lastTap = 0;
+          return;
+        }
+        lightbox.lastTap = now;
+        lightbox.drag = { x: t.clientX, y: t.clientY, tx: lightbox.tx, ty: lightbox.ty, moved: false };
+      }
+    }, { passive: false });
+    stage.addEventListener("touchmove", function (e) {
+      if (lightbox.pinch && e.touches.length === 2) {
+        e.preventDefault();
+        var m = mid(e.touches);
+        var target = Math.min(8, Math.max(1, lightbox.pinch.scale * (dist(e.touches) / lightbox.pinch.d)));
+        lightboxZoomAt(target / lightbox.scale, m.x, m.y);
+      } else if (lightbox.drag && e.touches.length === 1 && lightbox.scale > 1.01) {
+        e.preventDefault();
+        var t = e.touches[0];
+        lightbox.drag.moved = true;
+        lightbox.tx = lightbox.drag.tx + (t.clientX - lightbox.drag.x);
+        lightbox.ty = lightbox.drag.ty + (t.clientY - lightbox.drag.y);
+        lightboxApply();
+      }
+    }, { passive: false });
+    stage.addEventListener("touchend", function (e) {
+      if (e.touches.length < 2) lightbox.pinch = null;
+      if (e.touches.length === 0) {
+        var wasTapOnStage = lightbox.drag && !lightbox.drag.moved && e.target === stage;
+        lightbox.drag = null;
+        if (wasTapOnStage) closeLightbox();
+      }
+    });
+
+    // Any inline image in the chat (data-URL markdown images included)
+    // opens the same lightbox.
+    var log = $("lead-log");
+    if (log) {
+      log.addEventListener("click", function (e) {
+        var t = e.target;
+        if (t && t.tagName === "IMG" && t.classList.contains("remote-image") && t.src) {
+          openLightbox(t.src, t.alt || "");
+        }
+      });
+    }
+  }
+
   // XSS-safe HTML escape: route every raw string through the DOM's own
   // textContent→innerHTML conversion, never a hand-rolled regex.
   function mdEscape(s) {
@@ -1073,6 +1318,7 @@
     body.className = "msg-body";
     body.innerHTML = kind === "lead" ? renderMarkdown(text) : mdInline(text);
     div.appendChild(body);
+    if (kind === "lead") hydrateImages(body, text);
 
     log.appendChild(div);
     if (!skipScroll) {
@@ -1144,6 +1390,7 @@
       var log = $("lead-log");
       var atBottom = isPinnedToBottom(log);
       lastLeadBodyEl.insertAdjacentHTML("beforeend", renderMarkdown(text));
+      hydrateImages(lastLeadBodyEl, text);
       lastLeadAt = now;
       lastLeadRawAccum += "\n" + text;
       renderQuickReplies();
@@ -1670,7 +1917,7 @@
         lead.messages = [];
         messages.forEach(function (m) {
           var text = m && typeof m.text === "string" ? m.text : null;
-          if (text) lead.messages.push({ kind: m && m.kind === "me" ? "me" : "lead", text: text });
+          if (text) lead.messages.push({ kind: historyKind(m), text: text });
         });
         pending.forEach(function (message) {
           var duplicate = lead.messages.slice(-10).some(function (stored) {
@@ -2114,7 +2361,7 @@
             var text = message && typeof message.text === "string" ? message.text : "";
             if (!text) return;
             resumedLead.messages.push({
-              kind: message.kind === "me" ? "me" : "lead",
+              kind: historyKind(message),
               text: text,
             });
           });
@@ -2680,6 +2927,7 @@
   }
 
   function init() {
+    wireLightbox();
     if (!state.token) {
       showPairing();
       return;

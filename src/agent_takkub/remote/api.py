@@ -401,6 +401,85 @@ def answer_picker(orch, from_project: str | None, answers: object) -> dict:
     return {"ok": True}
 
 
+# #424 inline image preview on the phone: which on-disk images the Remote may
+# serve back. Only raster types the PWA can render inline (SVG is excluded on
+# purpose — it can carry active content) and only from roots the cockpit
+# already owns: every configured project's Lead cwd plus RUNTIME_DIR (where
+# `lead_upload_image` and the export pipeline write). Anything else — even a
+# real image — answers 404, indistinguishable from "no such file".
+_IMAGE_SUFFIXES = {
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".webp": "webp",
+    ".gif": "gif",
+}
+_IMAGE_PATH_QUOTES = "\"'`"
+
+
+def _image_roots() -> list[Path]:
+    roots: list[Path] = []
+    try:
+        roots.append(_config.RUNTIME_DIR.resolve())
+    except OSError:
+        pass
+    for name in _config.list_project_names():
+        cwd = _config.lead_cwd(name)
+        if not cwd:
+            continue
+        try:
+            roots.append(Path(cwd).resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def lead_image_path(project: object, path: object) -> dict:
+    """View-mode safe (read-only). Validate an image path that appeared in a
+    Lead message so the HTTP layer can stream the file to the phone
+    (`/api/image`). Runs on the Qt main thread because the project→cwd map
+    lives in `projects.json` (H2 cross-thread rule, same as `projects()`);
+    the actual file read happens back on the HTTP worker thread.
+
+    Every rejection is a bare 404 (§7.5): a bearer holder must not be able
+    to probe the workstation's filesystem for existence of arbitrary files.
+    A relative path resolves against the named project's Lead cwd."""
+    if not isinstance(path, str) or not path.strip() or len(path) > 1024:
+        raise RemoteApiError(404, "not found")
+    raw = path.strip().strip(_IMAGE_PATH_QUOTES)
+    if not raw or "\x00" in raw:
+        raise RemoteApiError(404, "not found")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        base = _config.lead_cwd(project) if isinstance(project, str) else ""
+        if not base:
+            raise RemoteApiError(404, "not found")
+        candidate = Path(base) / candidate
+    fmt = _IMAGE_SUFFIXES.get(candidate.suffix.lower())
+    if fmt is None:
+        raise RemoteApiError(404, "not found")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise RemoteApiError(404, "not found") from None
+    if not any(root == resolved or root in resolved.parents for root in _image_roots()):
+        raise RemoteApiError(404, "not found")
+    try:
+        if not resolved.is_file():
+            raise RemoteApiError(404, "not found")
+        size = resolved.stat().st_size
+        with resolved.open("rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        raise RemoteApiError(404, "not found") from None
+    if size == 0 or size > _MAX_REMOTE_IMAGE_BYTES:
+        raise RemoteApiError(404, "not found")
+    _, matches_magic = _IMAGE_FORMATS[fmt]
+    if not matches_magic(head):
+        raise RemoteApiError(404, "not found")
+    return {"ok": True, "path": str(resolved), "mime": f"image/{fmt}", "size": size}
+
+
 def lead_upload_image(
     orch,
     data_url: object,

@@ -65,7 +65,7 @@ def _content_type(suffix: str) -> str:
 # defense-in-depth against any future renderer regression.
 _CSP_HEADER = (
     "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; "
-    "img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'"
 )
 
 # #367 Remote Reports (`/r/` route): a report is a standalone document.
@@ -226,6 +226,18 @@ class _Bridge(QObject):
                                 self._orch,
                                 pending.params.get("project"),
                                 pending.params.get("session_uuid"),
+                            ),
+                        )
+                    )
+                except api.RemoteApiError as exc:
+                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+            elif pending.action == "image_path":
+                try:
+                    pending.reply.put(
+                        (
+                            200,
+                            api.lead_image_path(
+                                pending.params.get("project"), pending.params.get("path")
                             ),
                         )
                     )
@@ -504,6 +516,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         elif rest == "/api/activity":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("activity", {})
+        elif rest == "/api/image":
+            if self._check_bearer() and self._check_password_gate():
+                self._serve_image(query)
         elif rest == "/api/usage":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("usage", {})
@@ -695,16 +710,54 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         session = self.server.auth.issue_password_session()
         self._send_json(200, {"ok": True, "session": session})
 
-    def _respond_marshaled(self, action: str, params: dict) -> None:
+    def _bridge_call(self, action: str, params: dict) -> tuple[int, dict]:
         pending = _PendingRequest(action=action, params=params)
         self.server.bridge.request.emit(pending)
         try:
-            status, payload = pending.reply.get(timeout=_BRIDGE_TIMEOUT_SEC)
+            return pending.reply.get(timeout=_BRIDGE_TIMEOUT_SEC)
         except queue.Empty:
             # H1: the Qt main thread never answered (e.g. mid-shutdown) —
             # give up instead of blocking this worker thread forever.
-            status, payload = 504, {"ok": False, "msg": "orchestrator did not respond"}
+            return 504, {"ok": False, "msg": "orchestrator did not respond"}
+
+    def _respond_marshaled(self, action: str, params: dict) -> None:
+        status, payload = self._bridge_call(action, params)
         self._send_json(status, payload)
+
+    def _serve_image(self, query: dict) -> None:
+        """#424 `/api/image?path=<p>&project=<ns>` — stream one on-disk image
+        referenced by a Lead message so the phone can render it inline.
+        Bearer + password gated like every other `/api/*` read; the path is
+        validated on the Qt main thread (`api.lead_image_path` — extension
+        whitelist, must live under a project cwd or RUNTIME_DIR, magic bytes,
+        size cap) and the bytes are read here on the worker thread. Any
+        rejection is the same bare 404 as an unknown route."""
+        status, payload = self._bridge_call(
+            "image_path", {"project": query.get("project"), "path": query.get("path")}
+        )
+        if status != 200 or not payload.get("ok"):
+            if status >= 500:
+                self._send_json(status, payload)
+            else:
+                self._reject()
+            return
+        try:
+            data = Path(str(payload["path"])).read_bytes()
+        except (OSError, KeyError, TypeError):
+            self._reject()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", str(payload.get("mime") or "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Disposition", "inline")
+        self.send_header("Cache-Control", "private, no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except OSError:
+            pass
 
     def _issue_sse_ticket(self, requested_project: object = None) -> None:
         """H-A / project picker: stamp the ticket with `requested_project`
