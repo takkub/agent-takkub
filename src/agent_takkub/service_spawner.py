@@ -194,6 +194,8 @@ def spawn(
         log_fh.flush()
         for kwargs in _creation_kwargs():
             try:
+                # DETACHED_PROCESS on Windows ⇒ no console window at all.
+                # subprocess-console-ok: creationflags come from `_creation_kwargs`
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(workdir),
