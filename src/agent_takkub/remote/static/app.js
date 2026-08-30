@@ -230,9 +230,16 @@
         return;
       }
     }
-    if (!state.base) {
-      // installed PWA / plain reload under the secret path, no fragment.
-      state.base = location.origin + dirOf(location.pathname);
+    // The page is being served from under a secret path right now — that
+    // path is authoritative. A stored base from an older pairing (secret
+    // rotated since, or a URL-only link opened on a phone that once paired
+    // with #token=) would silently 404 every call and land on the pairing
+    // screen even though the link the user opened is perfectly valid.
+    var here = location.origin + dirOf(location.pathname);
+    if (!state.base || (!state.token && state.base !== here) ||
+        (state.base.indexOf(location.origin) === 0 && state.base !== here && dirOf(location.pathname) !== "/")) {
+      state.base = here;
+      try { localStorage.setItem(LS_BASE, state.base); } catch (e) {}
     }
     // hardReload() appends ?_r=<ts> purely as a cache-buster — drop it so the
     // address bar / next SW shell cache key stay canonical.

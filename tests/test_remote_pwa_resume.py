@@ -315,3 +315,12 @@ class TestUrlOnlyPwa:
         chunk = js.split('$("pairing-connect")')[1]
         assert "localStorage.removeItem(LS_TOKEN)" in chunk
         assert "localStorage.setItem(LS_BASE, state.base)" in chunk
+
+
+class TestBaseFollowsCurrentSecretPath:
+    def test_stale_stored_base_is_replaced_by_the_path_the_page_loaded_from(self):
+        js = _read("app.js")
+        chunk = js.split("function bootstrapFromLocation()")[1].split("function ")[0]
+        assert "var here = location.origin + dirOf(location.pathname);" in chunk
+        assert "state.base !== here" in chunk
+        assert "localStorage.setItem(LS_BASE, state.base)" in chunk
