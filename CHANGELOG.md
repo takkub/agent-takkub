@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.15] - 2026-08-30
+
+### Fixed (แก้)
+
+- **remote PWA หลุดไปหน้า pairing "session หมดอายุ" ทันทีที่สลับโปรเจค (#445)** — `apiFetch` ถือว่าทุก 404 บน `/api/*` ขณะถือ token = token ถูกเพิกถอน (ดีไซน์ zero-surface ตอบ auth ผิดเป็น 404 เปล่า) แต่ `/api/image` ก็ตอบ 404 เปล่าเวลารูปเสิร์ฟไม่ได้ (screenshot ที่ paste จาก desktop อยู่ใน image cache ของ CLI นอก project root, ไฟล์ถูกลบ) → history ที่มีรูปแบบนั้นสักรูปทำให้ `forgetToken()` ล้าง pairing ทั้งเครื่อง · `fetchImageBlob` ส่ง `allow404: true` — รูปหายเป็นแค่การ์ดหาย; route อื่นและ server ไม่เปลี่ยน · กระทบทุก install ตั้งแต่ #424 ไม่เกี่ยวกับ tunnel
+
 ## [v1.6.14] - 2026-08-30
 
 ### Fixed (แก้)
