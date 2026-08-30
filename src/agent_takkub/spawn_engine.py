@@ -3620,8 +3620,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if at_prompt:
                 due = elapsed[0] - last_press_ms[0] >= _AUTO_TRUST_RETRY_EVERY_MS
                 if due and presses[0] < _AUTO_TRUST_MAX_PRESSES:
-                    # option 1 (Yes) is preselected; just hit Enter
-                    pane.session.write("\r")
+                    if pane.session.trust_prompt_selects_no():
+                        # Claude parks the cursor on "No, exit" when the
+                        # folder pre-approves permissions via
+                        # .claude/settings.local.json — Enter there would
+                        # EXIT the CLI. Move down to "Yes"; the next tick
+                        # confirms once the redraw shows it selected.
+                        pane.session.write("\x1b[B")
+                    else:
+                        # option 1 (Yes) is preselected; just hit Enter
+                        pane.session.write("\r")
                     presses[0] += 1
                     last_press_ms[0] = elapsed[0]
             elif presses[0]:

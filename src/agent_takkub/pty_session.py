@@ -280,6 +280,10 @@ _PERMISSION_MENU_TAIL_ROWS = 12
 # its own trust modal "enter Confirm" with no "to" (#186). Tolerate both so
 # is_at_trust_prompt() doesn't silently miss the agy variant.
 _ENTER_CONFIRM_RE = re.compile(r"enter\s+(?:to\s+)?confirm", re.IGNORECASE)
+# Trust modal whose highlighted row is the decline option ("❯ No, exit").
+# Claude defaults here when the folder pre-approves permissions via
+# .claude/settings.local.json; Enter alone would exit instead of trusting.
+_TRUST_CURSOR_ON_NO_RE = re.compile(r"^\s*[❯>]\s*No\b", re.IGNORECASE | re.MULTILINE)
 
 
 # ── Ready-prompt detection markers (M4#17) ──────────────────────────────────
@@ -2141,6 +2145,20 @@ class PtySession(QObject):
         if "do you trust the contents of this directory" in text:
             return True
         return False
+
+    def trust_prompt_selects_no(self) -> bool:
+        """True when the trust modal's highlighted row is the *decline* option.
+
+        Newer claude builds flip the default to ``❯ No, exit`` whenever the
+        folder ships a ``.claude/settings.local.json`` that pre-approves tool
+        permissions (a freshly-imported project is exactly that case). A bare
+        Enter there does not accept — it exits the CLI. ``_auto_trust`` must
+        move the cursor down first. Matches the ``❯``/``>`` cursor glyph
+        followed by ``No`` at the start of a line; codex/agy keep Yes as the
+        default and never match.
+        """
+        text = "\n".join(self.display_lines())
+        return _TRUST_CURSOR_ON_NO_RE.search(text) is not None
 
     def is_at_claude_empty_composer(self) -> bool:
         """(#343) Structural claude-only fallback: bordered input box with a

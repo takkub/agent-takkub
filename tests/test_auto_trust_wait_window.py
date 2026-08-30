@@ -33,6 +33,7 @@ def _never_trusted_pane() -> MagicMock:
     p.session = MagicMock()
     p.session.is_alive = True
     p.session.is_at_trust_prompt.return_value = False
+    p.session.trust_prompt_selects_no.return_value = False
     p.session.write = MagicMock()
     return p
 
@@ -326,3 +327,52 @@ class TestAutoTrustGiveUpIsAnnounced:
             _drive_timer_queue(calls)
 
         assert not [c for c in lead.session.write.call_args_list if c.args]
+
+
+class TestAutoTrustCursorOnNo:
+    """Claude parks the cursor on "No, exit" when the folder pre-approves
+    permissions via .claude/settings.local.json (freshly-imported project).
+    A bare Enter there exits the CLI — the poller must arrow down first."""
+
+    def test_arrows_down_before_enter_when_no_is_selected(self, orch, monkeypatch) -> None:
+        pane = _never_trusted_pane()
+        pane.session.is_at_trust_prompt.return_value = True
+        selects_no = [True]
+        pane.session.trust_prompt_selects_no.side_effect = lambda: selects_no[0]
+
+        def _write(seq: str) -> None:
+            if seq == "\x1b[B":
+                selects_no[0] = False  # redraw now highlights "Yes"
+            elif seq == "\r":
+                pane.session.is_at_trust_prompt.return_value = False  # accepted
+
+        pane.session.write.side_effect = _write
+        orch._panes_by_project["P"] = {"lead": pane}
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        orch._auto_trust("lead", project="P")
+        _drive_timer_queue(calls)
+
+        seqs = [c.args[0] for c in pane.session.write.call_args_list]
+        assert seqs == ["\x1b[B", "\r"]
+
+    def test_enter_directly_when_yes_is_selected(self, orch, monkeypatch) -> None:
+        pane = _never_trusted_pane()
+        pane.session.is_at_trust_prompt.return_value = True
+        pane.session.trust_prompt_selects_no.return_value = False
+        pane.session.write.side_effect = lambda seq: setattr(
+            pane.session.is_at_trust_prompt, "return_value", False
+        )
+        orch._panes_by_project["P"] = {"lead": pane}
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        orch._auto_trust("lead", project="P")
+        _drive_timer_queue(calls)
+
+        assert [c.args[0] for c in pane.session.write.call_args_list] == ["\r"]

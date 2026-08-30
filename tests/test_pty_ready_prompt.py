@@ -1069,3 +1069,42 @@ def test_has_background_work_false_for_non_claude_provider_shapes() -> None:
     assert codex.has_background_work() is False
     gemini = _feed_screen("Type your message or @path/to/file")
     assert gemini.has_background_work() is False
+
+
+class TestTrustPromptSelectsNo:
+    _NO_DEFAULT = (
+        "Quick safety check: Is this a project you created or one you trust?",
+        "⚠ This folder pre-approves 4 tool permissions in .claude/settings.local.json:",
+        "",
+        "❯ No, exit",
+        "  Yes, I trust this folder",
+        "",
+        "Enter to confirm · Esc to cancel",
+    )
+    _YES_DEFAULT = (
+        "Do you trust the files in this folder?",
+        "❯ 1. Yes, I trust this folder",
+        "  2. No, exit",
+        "Enter to confirm · Esc to cancel",
+    )
+
+    def _session(self, lines):
+        from agent_takkub.pty_session import PtySession
+
+        s = PtySession.__new__(PtySession)
+        s.display_lines = lambda: list(lines)  # type: ignore[method-assign]
+        return s
+
+    def test_cursor_on_no_detected(self) -> None:
+        s = self._session(self._NO_DEFAULT)
+        assert s.is_at_trust_prompt()
+        assert s.trust_prompt_selects_no()
+
+    def test_cursor_on_yes_not_flagged(self) -> None:
+        s = self._session(self._YES_DEFAULT)
+        assert s.is_at_trust_prompt()
+        assert not s.trust_prompt_selects_no()
+
+    def test_prose_mentioning_no_does_not_match(self) -> None:
+        s = self._session(["> Nothing to see here", "❯ Note: retry"])
+        assert not s.trust_prompt_selects_no()
