@@ -290,7 +290,7 @@
           res.status === 404 && hadToken && !opts.allow404 &&
           /^api\//.test(path.replace(/^\/+/, ""))
         ) {
-          forgetToken();
+          forgetToken(path);
           throw new Error("unauthorized");
         }
         // Third auth factor (addendum): a cockpit-set password gates every
@@ -321,12 +321,20 @@
       });
   }
 
-  function forgetToken() {
+  function forgetToken(path) {
     state.token = "";
     state.session = "";
     localStorage.removeItem(LS_TOKEN);
     localStorage.removeItem(LS_SESSION);
-    showPairing("session หมดอายุ หรือ token ไม่ถูกต้อง — สแกน QR ใหม่");
+    // #445 follow-up: name the route that 404'd so a screenshot of this
+    // screen is enough to diagnose which call the cockpit rejected
+    // (pairs with the `remote_reject` breadcrumb in events.log). Route
+    // only — the query string may carry a project name or a ticket.
+    var route = typeof path === "string" ? path.replace(/^\/+/, "").split("?")[0] : "";
+    showPairing(
+      "session หมดอายุ หรือ token ไม่ถูกต้อง — สแกน QR ใหม่" +
+      (route ? " (404: " + route + ")" : "")
+    );
   }
 
   // ---------------------------------------------------------------

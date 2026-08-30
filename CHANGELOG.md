@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **remote ยังเด้งไปหน้า token หลัง 1.6.16 — cockpit ไม่เคยบอกว่า 404 มาจาก route ไหน (#445 follow-up)** — จำลอง flow สลับโปรเจคของ PWA ยิง prod ครบ 26 projects ทุก route (history/sessions/activity/pulse/sse-ticket/image) ด้วย token+session ที่ถูก = 200 หมด แต่มือถือยังเด้ง → ไม่มีหลักฐานฝั่งไหนเลย · server: ทุก bare-404 reject เขียน `remote_reject` ลง events.log (`reason` = bad_secret_path/bad_token/no_bearer/locked_out/image_unservable/sse_bad_ticket/… + `route` หลัง secret segment ตัด query ทิ้ง — ไม่มี secret/token/ticket, throttle 60/นาที) · PWA: หน้า pairing บอก route ที่ 404 ต่อท้ายข้อความ (`(404: api/lead/history)`) ให้ screenshot เดียวพอวินิจฉัย · bump SW cache v30
+
 ## [v1.6.16] - 2026-08-30
 
 ### Fixed (แก้)

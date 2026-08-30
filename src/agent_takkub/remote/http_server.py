@@ -34,6 +34,55 @@ from .config import RemoteConfig
 
 _log = logging.getLogger(__name__)
 
+# #445 follow-up: throttled events.log breadcrumb for every bare-404 rejection.
+# Best-effort, never raises. Route is the path *after* the secret segment with
+# the query string dropped (tickets/tokens live there).
+_REJECT_LOG_MAX_PER_MIN = 60
+_reject_log_window: list[float] = [0.0, 0.0]  # [window_start_epoch, count]
+_reject_log_lock = threading.Lock()
+
+
+def _log_reject(reason: str, raw_path: str) -> None:
+    try:
+        import os
+        import time
+        from datetime import datetime
+
+        now = time.time()
+        with _reject_log_lock:
+            if now - _reject_log_window[0] >= 60.0:
+                _reject_log_window[0] = now
+                _reject_log_window[1] = 0.0
+            if _reject_log_window[1] >= _REJECT_LOG_MAX_PER_MIN:
+                return
+            _reject_log_window[1] += 1
+        path_only = raw_path.split("?", 1)[0]
+        segments = path_only.split("/", 2)
+        route = "/" + segments[2] if len(segments) > 2 else "/"
+        if len(route) > 120:
+            route = route[:120] + "..."
+        events_log = _config.EVENTS_LOG
+        try:
+            events_log.parent.mkdir(parents=True, exist_ok=True)
+            if events_log.exists() and events_log.stat().st_size > 5_000_000:
+                os.replace(events_log, events_log.parent / (events_log.name + ".old"))
+        except OSError:
+            pass
+        line = json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "event": "remote_reject",
+                "reason": reason or "unspecified",
+                "route": route,
+            },
+            ensure_ascii=False,
+        )
+        with open(events_log, "a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except Exception:
+        pass
+
+
 _STATIC_ROOT = Path(__file__).resolve().parent / "static"
 _MAX_BODY_BYTES = 64 * 1024
 _MAX_IMAGE_BODY_BYTES = 12 * 1024 * 1024
@@ -424,9 +473,18 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         rest = "/" + segments[2] if len(segments) > 2 else "/"
         return rest, dict(urllib.parse.parse_qsl(parsed.query))
 
-    def _reject(self) -> None:
+    def _reject(self, reason: str = "") -> None:
         """§7.5: unauthenticated (wrong secret-path OR wrong token) always
-        gets a bare 404 — never a 401, never a hint that anything exists."""
+        gets a bare 404 — never a 401, never a hint that anything exists.
+
+        #445 follow-up: the PWA treats *any* bare 404 on `/api/*` as "token
+        died" and wipes the pairing, and nothing on the cockpit side ever
+        said which route/why. Every rejection now leaves a `remote_reject`
+        breadcrumb in events.log (route path only — never the secret
+        segment, query string, token or ticket) so the next "phone got
+        logged out" report is diagnosable from the log instead of guessed.
+        """
+        _log_reject(reason, self.path)
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -454,7 +512,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         header = self.headers.get("Authorization", "")
         token = header[7:] if header.startswith("Bearer ") else None
         if not self.server.auth.check_token(token):
-            self._reject()
+            self._reject(
+                "locked_out"
+                if self.server.auth.is_locked_out()
+                else ("no_bearer" if not token else "bad_token")
+            )
             return False
         self.server.auth.touch()  # M-6: only a *successful* auth counts as activity
         return True
@@ -478,7 +540,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         matched = self._match_secret_path()
         if matched is None:
-            self._reject()
+            self._reject("bad_secret_path")
             return
         rest, query = matched
         if rest == "/api/lead":
@@ -528,14 +590,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             # to be handed to someone who never gets cockpit credentials.
             self._serve_report(rest, query)
         elif rest.startswith("/api/"):
-            self._reject()
+            self._reject("unknown_get_route")
         else:
             self._serve_static(rest)
 
     def do_POST(self) -> None:
         matched = self._match_secret_path()
         if matched is None:
-            self._reject()
+            self._reject("bad_secret_path")
             return
         rest, _query = matched
         upload_authorized = False
@@ -564,14 +626,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            self._reject()
+            self._reject("bad_content_length")
             return
         max_body = _MAX_IMAGE_BODY_BYTES if upload_authorized else _MAX_BODY_BYTES
         if not (0 <= length <= max_body):
             if upload_authorized:
                 self._send_json(413, {"ok": False, "msg": "image too large"})
             else:
-                self._reject()
+                self._reject("body_too_large")
             return
         body = self.rfile.read(length) if length else b""
         if rest == "/api/lead/upload":
@@ -672,7 +734,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 {"project": payload.get("project"), "session_uuid": payload.get("session_uuid")},
             )
         else:
-            self._reject()
+            self._reject("unknown_post_route")
 
     def _check_password_gate(self) -> bool:
         """Third auth factor (H1 fix): every authenticated route besides
@@ -739,12 +801,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             if status >= 500:
                 self._send_json(status, payload)
             else:
-                self._reject()
+                self._reject("image_unservable")
             return
         try:
             data = Path(str(payload["path"])).read_bytes()
         except (OSError, KeyError, TypeError):
-            self._reject()
+            self._reject("image_read_failed")
             return
         self.send_response(200)
         self.send_header("Content-Type", str(payload.get("mime") or "application/octet-stream"))
@@ -801,23 +863,23 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         recipient."""
         parts = rest.split("/", 3)  # ["", "r", "<project_ns>", "<name>"]
         if len(parts) != 4 or not parts[2] or not parts[3]:
-            self._reject()
+            self._reject("report_bad_path")
             return
         project_ns, name = parts[2], parts[3]
         token = query.get("k")
         if self.server.auth.is_report_locked_out(project_ns, name):
-            self._reject()
+            self._reject("report_locked_out")
             return
         path = reports.resolve(project_ns, name, token)
         if token:
             self.server.auth.record_report_token_result(project_ns, name, path is not None)
         if path is None:
-            self._reject()
+            self._reject("report_not_found")
             return
         try:
             data = path.read_bytes()
         except OSError:
-            self._reject()
+            self._reject("report_read_failed")
             return
         self.send_response(200)
         self.send_header(
@@ -863,17 +925,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         # containment without first computing the canonical path.
         candidate = (_STATIC_ROOT / rel).resolve()
         if not candidate.is_relative_to(_STATIC_ROOT):
-            self._reject()
+            self._reject("static_escape")
             return
         # codeql[py/path-injection]: `candidate` is proven contained by the
         # `is_relative_to()` guard above — safe to stat/read.
         if not candidate.is_file():
-            self._reject()
+            self._reject("static_not_found")
             return
         try:
             data = candidate.read_bytes()  # codeql[py/path-injection]: see guard above
         except OSError:
-            self._reject()
+            self._reject("static_read_failed")
             return
         self.send_response(200)
         self.send_header("Content-Type", _content_type(candidate.suffix))
@@ -895,7 +957,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     def _handle_sse(self, query: dict) -> None:
         project_ns = self.server.auth.consume_ticket(query.get("ticket"))
         if project_ns is None:
-            self._reject()
+            self._reject("sse_bad_ticket")
             return
         self.server.auth.touch()  # M-6: a valid ticket is a successful auth
         q = self.server.broadcaster.register(project_ns)

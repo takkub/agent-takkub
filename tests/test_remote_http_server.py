@@ -1199,3 +1199,45 @@ class TestHandlerSocketTimeout:
 
     def test_handler_has_a_bounded_socket_timeout(self):
         assert http_server._RemoteHandler.timeout == 30
+
+
+class TestRejectBreadcrumb:
+    """#445 follow-up: every bare-404 rejection leaves a `remote_reject`
+    line in events.log naming the route (after the secret segment, query
+    dropped) and why — so a phone that got bounced to pairing can be
+    diagnosed from the cockpit log. Never the secret path, token or ticket."""
+
+    def _reject_lines(self):
+        from agent_takkub import config as _config
+
+        log = _config.EVENTS_LOG
+        if not log.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines()
+            if '"remote_reject"' in line
+        ]
+
+    def test_bad_token_names_route_and_reason(self, server):
+        status, _ = _get_status(
+            _url(server, "/sek/api/lead/history?project=p&limit=5"),
+            headers={"Authorization": "Bearer nope"},
+        )
+        assert status == 404
+        lines = self._reject_lines()
+        assert lines, "expected a remote_reject breadcrumb"
+        last = lines[-1]
+        assert last["reason"] == "bad_token"
+        assert last["route"] == "/api/lead/history"
+        raw = json.dumps(last)
+        assert "/sek" not in raw
+        assert "project=p" not in raw
+
+    def test_bad_secret_path_never_leaks_segment(self, server):
+        status, _ = _get_status(_url(server, "/wrong-secret/api/pulse?ticket=abc"))
+        assert status == 404
+        last = self._reject_lines()[-1]
+        assert last["reason"] == "bad_secret_path"
+        assert "wrong-secret" not in json.dumps(last)
+        assert "abc" not in json.dumps(last)
