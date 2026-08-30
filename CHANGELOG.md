@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.18] - 2026-08-30
+
 ### Added (เพิ่ม)
 
 - **ปุ่ม "🧹 ล้างแคช & โหลดใหม่" บน remote PWA (#445 follow-up)** — อยู่ท้ายหน้ารายการโปรเจคและบนหน้า pairing · ลบ cache ของ service worker + unregister SW แล้วโหลดหน้าใหม่จาก cockpit — **ไม่ลบ token/session** ไม่ต้องสแกน QR ใหม่ · ใช้เมื่ออัป cockpit แล้วมือถือยังทำตัวเหมือนเดิม (เคส 1.6.15→1.6.16 ที่ shell เก่าค้างใน cache) · bump SW cache v31
