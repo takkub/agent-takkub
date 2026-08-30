@@ -990,6 +990,46 @@ def _effective_port_file_for_app() -> Path:
     return PORT_FILE
 
 
+# Pane-only env stamped by `pane_env.py`. A cockpit's own process must never
+# carry these; when it does, they leaked in from another instance's pane
+# (the #354 scenario) and every in-process *client* read — `read_port()`
+# used by remote/api.py `_lead_frame`, the `takkub` CLI helpers the app
+# itself spawns — would keep dialing that OTHER cockpit even after
+# `_effective_port_file_for_app()` picked the right port file to WRITE.
+# Field report 2026-08-30: prod cockpit restarted from a dev Lead pane
+# shell served the phone fine (GET) but `lead/say` went to the dev cockpit
+# → "unauthorized: send requires a valid pane token" → 502 → Cloudflare's
+# own 502 page → PWA "cockpit ออฟไลน์".
+_LEAKED_PANE_ENV = (
+    "TAKKUB_ROLE",
+    "TAKKUB_BASE_ROLE",
+    "TAKKUB_LEAD_TOKEN",
+    "TAKKUB_PROJECT",
+    "TAKKUB_PANE_TOKEN",
+    "TAKKUB_TASK_ID",
+    "TAKKUB_SHARD",
+)
+
+
+def reconcile_inherited_pane_env() -> list[str]:
+    """App-boot only (#354 follow-up): make the process env agree with the
+    port file this instance actually owns, and drop pane markers a parent
+    cockpit's pane leaked into us. Returns the names it changed (for the
+    boot breadcrumb). No-op for a clean launch; no-op for a real pane
+    (this is never called from pane/CLI code paths)."""
+    changed: list[str] = []
+    effective = _effective_port_file_for_app()
+    override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
+    if override and Path(override) != effective:
+        os.environ["TAKKUB_PORT_FILE"] = str(effective)
+        changed.append("TAKKUB_PORT_FILE")
+    for name in _LEAKED_PANE_ENV:
+        if name in os.environ:
+            os.environ.pop(name, None)
+            changed.append(name)
+    return changed
+
+
 def write_port(port: int) -> None:
     ensure_runtime()
     _effective_port_file_for_app().write_text(str(port), encoding="utf-8")

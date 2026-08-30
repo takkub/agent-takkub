@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **remote ส่งข้อความไม่ได้ ("cockpit ออฟไลน์" / Cloudflare 502) เมื่อ cockpit ถูก start จาก shell ของ pane ของ cockpit อีกตัว (#354 follow-up)** — จำลองเป็น user ด้วย Playwright ผ่าน tunnel: login ผ่าน, อ่านได้, แต่ `POST /api/lead/say` = 502 · ต้นตอ: process cockpit สืบทอด `TAKKUB_PORT_FILE`/`TAKKUB_ROLE`/`TAKKUB_LEAD_TOKEN` ของ pane → #354 กัน "เขียน" port file ถูกตัวแล้ว แต่ *client read* ใน process (`read_port()` ที่ remote `_lead_frame` ใช้) ยังเชื่อ override → ส่ง `send` ไป cockpit อีก instance → "unauthorized: send requires a valid pane token" → 502 → Cloudflare แทนด้วยหน้า 502 ของตัวเอง → PWA ขึ้นออฟไลน์ · `config.reconcile_inherited_pane_env()` ตอน boot: ตั้ง `TAKKUB_PORT_FILE` ใน env ให้ตรง port file ของตัวเอง + ลบ marker ของ pane ทิ้ง + log `inherited_pane_env_reconciled`
+
 ## [v1.6.21] - 2026-08-30
 
 ### Fixed (แก้)

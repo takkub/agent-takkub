@@ -614,6 +614,26 @@ def _check_cli_bin_present() -> None:
         pass
 
 
+def _reconcile_inherited_pane_env() -> None:
+    """#354 follow-up: a cockpit launched from another cockpit's pane shell
+    inherits that pane's TAKKUB_PORT_FILE/TAKKUB_ROLE/... — fix the process
+    env before anything reads it, and leave a breadcrumb."""
+    try:
+        from . import config
+        from .orchestrator import _log_event
+
+        changed = config.reconcile_inherited_pane_env()
+        if changed:
+            _log_event(
+                "inherited_pane_env_reconciled",
+                pid=os.getpid(),
+                changed=changed,
+                port_file=str(config._effective_port_file_for_app()),
+            )
+    except Exception:
+        pass
+
+
 def _log_instance_boot() -> None:
     """One events.log breadcrumb per boot with the fully-resolved instance
     identity — DATA_HOME, SETTINGS_HOME, ASSETS_ROOT, CLI_BIN_DIR, effective
@@ -858,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
     # reaches the next line.  Any failure returns False silently.
     try_silent_self_update()
     _check_cli_bin_present()
+    _reconcile_inherited_pane_env()
     _log_instance_boot()
     _bootstrap_prod_claude_profile()
     _load_custom_roles()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -780,3 +781,46 @@ class TestLeadCwd:
     def test_no_project_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "nope.json")
         assert config.lead_cwd("ghost") is None
+
+
+class TestReconcileInheritedPaneEnv:
+    """#354 follow-up (2026-08-30): a cockpit launched from ANOTHER cockpit's
+    pane shell must fix its own process env at boot — otherwise in-process
+    client reads (`read_port()` → remote `lead/say`) keep dialing the
+    other cockpit."""
+
+    def test_leaked_override_and_markers_are_replaced(self, monkeypatch, tmp_path):
+        from agent_takkub import config
+
+        foreign = tmp_path / "other-cockpit" / "runtime" / "port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(foreign))
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setenv("TAKKUB_LEAD_TOKEN", "leaked")
+        monkeypatch.setenv("TAKKUB_PROJECT", "other")
+        monkeypatch.delenv(config._AUTO_PORT_FILE_ENV, raising=False)
+        changed = config.reconcile_inherited_pane_env()
+        assert "TAKKUB_PORT_FILE" in changed
+        assert Path(os.environ["TAKKUB_PORT_FILE"]) == config.PORT_FILE
+        assert config.read_port.__name__  # still importable
+        for name in ("TAKKUB_ROLE", "TAKKUB_LEAD_TOKEN", "TAKKUB_PROJECT"):
+            assert name not in os.environ
+            assert name in changed
+
+    def test_clean_launch_is_a_noop(self, monkeypatch):
+        from agent_takkub import config
+
+        for name in ("TAKKUB_PORT_FILE", *config._LEAKED_PANE_ENV):
+            monkeypatch.delenv(name, raising=False)
+        assert config.reconcile_inherited_pane_env() == []
+        assert "TAKKUB_PORT_FILE" not in os.environ
+
+    def test_own_override_without_pane_marker_is_kept(self, monkeypatch, tmp_path):
+        from agent_takkub import config
+
+        own = tmp_path / "custom-port"
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(own))
+        for name in config._LEAKED_PANE_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(config._AUTO_PORT_FILE_ENV, raising=False)
+        assert config.reconcile_inherited_pane_env() == []
+        assert os.environ["TAKKUB_PORT_FILE"] == str(own)
