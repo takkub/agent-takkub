@@ -277,3 +277,22 @@ class TestMobileViewportLayout:
         assert "overflow: hidden" in app_css
         assert "z-index: 20" in header_css
         assert "min-height: 50px" in header_css
+
+
+class TestHardReloadButton:
+    """Phone-side "ล้างแคช & โหลดใหม่": drops SW caches + registration and
+    reloads without touching the pairing token — the user's escape hatch
+    when an installed PWA keeps running a stale shell (#445 follow-up)."""
+
+    def test_buttons_exist_on_pairing_and_projects_views(self):
+        html = _read("index.html")
+        assert 'id="pairing-hard-reload"' in html
+        assert 'id="projects-hard-reload"' in html
+
+    def test_hard_reload_clears_caches_and_sw_but_keeps_token(self):
+        js = _read("app.js")
+        chunk = js.split("function hardReload()")[1].split('$("pairing-connect")')[0]
+        assert "caches.delete(" in chunk
+        assert "unregister()" in chunk
+        assert "location.replace(" in chunk
+        assert "removeItem(LS_TOKEN)" not in chunk

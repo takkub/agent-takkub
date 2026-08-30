@@ -231,6 +231,11 @@
       // installed PWA / plain reload under the secret path, no fragment.
       state.base = location.origin + dirOf(location.pathname);
     }
+    // hardReload() appends ?_r=<ts> purely as a cache-buster — drop it so the
+    // address bar / next SW shell cache key stay canonical.
+    if (/[?&]_r=/.test(location.search)) {
+      try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+    }
   }
 
   bootstrapFromLocation();
@@ -454,6 +459,42 @@
   // ---------------------------------------------------------------
   // Pairing screen
   // ---------------------------------------------------------------
+
+  // "ล้างแคช & โหลดใหม่": drop the service-worker shell cache and the SW
+  // registration itself, then reload — the phone re-fetches index.html/app.js
+  // from the cockpit. Token/session/base stay in localStorage on purpose so
+  // this never forces a re-pair; it only guarantees the *code* is current.
+  function hardReload() {
+    var steps = [];
+    try {
+      if (window.caches && caches.keys) {
+        steps.push(caches.keys().then(function (keys) {
+          return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+        }));
+      }
+    } catch (e) { /* storage blocked — still reload */ }
+    try {
+      if ("serviceWorker" in navigator) {
+        steps.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+          return Promise.all(regs.map(function (r) { return r.unregister(); }));
+        }));
+      }
+    } catch (e) { /* ignore */ }
+    Promise.all(steps).catch(function () {}).then(function () {
+      var u = new URL(location.href);
+      u.searchParams.set("_r", String(Date.now()));
+      location.replace(u.toString());
+    });
+  }
+  ["pairing-hard-reload", "projects-hard-reload"].forEach(function (id) {
+    var el = $(id);
+    if (!el) return;
+    el.addEventListener("click", function () {
+      el.disabled = true;
+      el.textContent = "กำลังล้าง…";
+      hardReload();
+    });
+  });
 
   $("pairing-connect").addEventListener("click", function () {
     var raw = $("pairing-url").value.trim();
