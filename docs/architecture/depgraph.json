@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 321,
+  "module_count": 322,
   "modules": [
     {
       "module": "agent_takkub",
@@ -3028,6 +3028,7 @@
         "agent_takkub.role_messages",
         "agent_takkub.roles",
         "agent_takkub.routing_planner",
+        "agent_takkub.secret_redact",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
         "agent_takkub.task_delivery",
@@ -3044,7 +3045,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 48
+      "fan_out": 49
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3754,6 +3755,7 @@
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.config",
+        "agent_takkub.secret_redact",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
       ],
@@ -3762,7 +3764,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.remote.reports",
@@ -3936,6 +3938,16 @@
       ],
       "fan_in": 3,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.secret_redact",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.orchestrator",
+        "agent_takkub.remote.notify"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.service_spawner",

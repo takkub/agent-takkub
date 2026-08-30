@@ -86,6 +86,12 @@ class _FakeMgr:
     def merge_conflicts_with_base(self, git_root, branch):
         return self._merge_conflicts
 
+    def merge_conflict_files(self, git_root, branch):
+        # mirror the real API (#442): [] clean, [files] conflict, None unknown
+        if self._merge_conflicts is None:
+            return None
+        return ["docker/nginx.conf"] if self._merge_conflicts else []
+
     def diffstat(self, info):
         return " src/x.ts | 3 +++"
 

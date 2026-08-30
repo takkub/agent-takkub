@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -208,6 +209,7 @@ class TestInspect:
     def test_merge_conflicts_with_base_true_when_markers_present(self):
         r = FakeRunner(
             [
+                (["merge-tree", "--write-tree"], _fail("unknown option", 129)),  # #442 probe n/a
                 (["merge-base", "HEAD"], _ok("mergebase123\n")),
                 (["merge-tree"], _ok("<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> wt/x-1\n")),
             ]
@@ -224,7 +226,12 @@ class TestInspect:
         assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is False
 
     def test_merge_conflicts_with_base_none_when_merge_base_fails(self):
-        r = FakeRunner([(["merge-base", "HEAD"], _fail())])
+        r = FakeRunner(
+            [
+                (["merge-tree", "--write-tree"], _fail("unknown option", 129)),
+                (["merge-base", "HEAD"], _fail()),
+            ]
+        )
         assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is None
 
     def test_merge_conflicts_with_base_none_when_merge_tree_fails(self):
@@ -240,9 +247,16 @@ class TestInspect:
         """#244: must diff against git_root's HEAD *now*, not the worktree's
         creation-time base_sha — proven by asserting the merge-base call
         targets HEAD."""
-        r = FakeRunner([(["merge-base", "HEAD", "wt/x-1"], _ok("cur\n"))])
+        r = FakeRunner(
+            [
+                (["merge-tree", "--write-tree"], _fail("unknown option", 129)),
+                (["merge-base", "HEAD", "wt/x-1"], _ok("cur\n")),
+            ]
+        )
         WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1")
         assert r.ran("merge-base", "HEAD", "wt/x-1")
+        # the #442 probe itself also targets HEAD-now, never base_sha
+        assert r.ran("merge-tree", "--write-tree", "HEAD", "wt/x-1")
 
 
 # ── rediscover_worktree — #410 (lost PaneState.worktree bookkeeping) ────────
@@ -1988,3 +2002,109 @@ class TestDirExpansionIsBatched:
         assert "big/1.txt" not in snapshot
         # `small/` is unaffected.
         assert "small/ok.txt" in snapshot
+
+
+class TestMergeConflictFiles:
+    """#442 — the proposal and `merge --check` name the conflicting files."""
+
+    _PORC: ClassVar[list] = [(["worktree", "list", "--porcelain"], _ok(_PORCELAIN))]
+
+    def test_clean_merge_returns_empty_list(self):
+        r = FakeRunner([(["merge-tree", "--write-tree"], _ok("abc123\n"))])
+        assert WorktreeManager(r).merge_conflict_files("/repo", "wt/frontend-9") == []
+        assert r.ran("merge-tree", "--write-tree", "--name-only", "HEAD", "wt/frontend-9")
+
+    def test_conflict_lists_paths_after_tree_oid(self):
+        res = GitResult(1, "abc123\ndocker/nginx.conf\nsrc/app.ts\n", "")
+        r = FakeRunner([(["merge-tree", "--write-tree"], res)])
+        files = WorktreeManager(r).merge_conflict_files("/repo", "wt/frontend-9")
+        assert files == ["docker/nginx.conf", "src/app.ts"]
+
+    def test_other_exit_code_is_unknown(self):
+        r = FakeRunner([(["merge-tree", "--write-tree"], _fail("unknown option", 129))])
+        assert WorktreeManager(r).merge_conflict_files("/repo", "wt/frontend-9") is None
+
+    def test_merge_conflicts_with_base_prefers_file_probe(self):
+        res = GitResult(1, "abc123\ndocker/nginx.conf\n", "")
+        r = FakeRunner([(["merge-tree", "--write-tree"], res)])
+        assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/frontend-9") is True
+        assert not r.ran("merge-base")  # legacy probe never needed
+
+    def test_merge_isolated_refuses_by_name_before_merging(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        res = GitResult(1, "abc123\ndocker/nginx.conf\n", "")
+        r = FakeRunner(
+            [
+                *self._PORC,
+                (["rev-list", "--count"], _ok("1\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["merge-tree", "--write-tree"], res),
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert not ok
+        assert "docker/nginx.conf" in msg and "ยังไม่ได้ merge" in msg
+        assert not r.ran("merge", "--no-ff")
+
+    def test_check_only_reports_without_merging(self):
+        r = FakeRunner(
+            [
+                *self._PORC,
+                (["rev-list", "--count"], _ok("2\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["merge-tree", "--write-tree"], _ok("abc\n")),
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9", check_only=True)
+        assert ok
+        assert "clean" in msg and "ยังไม่ได้ merge" in msg and "2 commit" in msg
+        assert not r.ran("merge", "--no-ff")
+
+    def test_proposal_names_conflict_files(self):
+        from agent_takkub.worktree_manager import WorktreeInfo, build_merge_proposal
+
+        info = WorktreeInfo(
+            path="/repo/worktrees/p/backend-2",
+            branch="wt/backend-2",
+            base_sha="aaaa",
+            git_root="/repo",
+        )
+        text = build_merge_proposal(
+            "backend#2",
+            info,
+            1,
+            " docker/nginx.conf | 2 +-",
+            merge_conflicts=True,
+            conflict_files=["docker/nginx.conf"],
+        )
+        assert "⚠ conflict" in text and "`docker/nginx.conf`" in text
+        assert "--check" in text
+
+
+class TestCleanIsolatedBranchFilter:
+    """#439 — `takkub worktree clean --branch wt/x` touches only that one."""
+
+    def test_branch_filter_only_removes_named_worktree(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        monkeypatch.setattr(wm, "remove_worktree_tree", lambda p: (True, "", ""))
+        monkeypatch.setattr(wm, "repair_editable_pth_if_stale", lambda *a: "")
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo", branch="wt/frontend-9")
+        assert lines == ["REMOVED wt/frontend-9"]
+        assert r.ran("branch", "-D", "wt/frontend-9")
+
+    def test_unknown_branch_reports_not_found(self):
+        r = FakeRunner([(["worktree", "list", "--porcelain"], _ok(_PORCELAIN))])
+        lines = WorktreeManager(r).clean_isolated("/repo", branch="wt/ghost-1")
+        assert lines == ["NOT FOUND  wt/ghost-1 — ไม่ใช่ wt/* worktree ที่ git รู้จัก"]
+        assert not r.ran("worktree", "remove")

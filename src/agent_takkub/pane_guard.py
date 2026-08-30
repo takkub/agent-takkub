@@ -218,7 +218,9 @@ GIT_LEAD_ONLY_RULE_TEXT = (
     '`takkub done "พร้อม commit: <ไฟล์ที่แก้>"` แล้วรอ Lead review + commit '
     "ข้อยกเว้นเดียว: pane ที่ spawn ด้วย `--isolation worktree` (branch แยกของตัวเอง) "
     "ต้อง `git commit` บน branch นั้นเอง และดึง base ล่าสุดเข้า branch ตัวเองได้ด้วย "
-    "`git merge <base>` ภายใน worktree นั้น (แต่ยังห้าม push/rebase/checkout — "
+    "`git merge <base>` ภายใน worktree นั้น และ push ได้**เฉพาะ branch wt/<role>-* ของตัวเอง "
+    "แบบระบุชื่อ** (`git push -u origin wt/<role>-<ts>` — ห้าม force/delete, #438) "
+    "เพื่อให้ CI ตรวจ branch ได้ก่อน done (แต่ยังห้าม rebase/checkout — "
     "merge กลับเข้า base เป็นงาน Lead) ตามที่ task prompt บอกไว้ตอน spawn — "
     "ถ้า Lead ต้องการให้ pane นี้ commit เองจริงๆ ต้องสั่ง assign ใหม่ด้วย `--isolation worktree`."
 )
@@ -605,6 +607,96 @@ def _is_worktree_cwd(cwd: str | None) -> bool:
     return bool(cwd) and bool(_WORKTREE_CWD.search(cwd))
 
 
+# #438 case 2: the hook payload's cwd is the pane's *session* cwd. A pane
+# respawned without `--isolation worktree` that keeps working inside its old
+# checkout does so with `git -C <wt> …` / `cd <wt> && git …` — the command
+# itself names the worktree even though cwd is the shared tree. Honour that
+# the same way cwd is honoured: what matters is where the git command runs.
+_WORKTREE_TARGET = re.compile(
+    r"""(?:(?<![\w-])-C\s+|(?:^|[|;&]\s*)cd\s+)["']?[^\s"'|;&]*[/\\]worktrees[/\\][^\s"'|;&]*""",
+    re.I | re.M,
+)
+
+
+def _command_targets_worktree(cmd: str) -> bool:
+    """True when *cmd* explicitly runs git inside a cockpit worktree checkout
+    (`git -C …/worktrees/… <sub>` or `cd …/worktrees/… && git <sub>`)."""
+    return bool(_WORKTREE_TARGET.search(cmd))
+
+
+def _in_worktree(cmd: str, cwd: str | None) -> bool:
+    return _is_worktree_cwd(cwd) or _command_targets_worktree(cmd)
+
+
+# #438 case 1: a worktree pane may push ITS OWN `wt/<role>-<ts>` branch so CI
+# can verify it before `takkub done` — the one thing it could not do without
+# a Lead round-trip. Strictly shaped: the branch must be named explicitly (a
+# bare `git push` would push whatever HEAD is, which the guard can't see),
+# must carry the pane's own role slug, and force/delete/mirror/all forms are
+# never allowed. Everything else about `push` stays Lead-only.
+_GIT_PUSH_TAIL = re.compile(
+    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
+)
+_PUSH_FORBIDDEN_FLAGS = frozenset(
+    {
+        "-f",
+        "--force",
+        "--force-with-lease",
+        "--delete",
+        "-d",
+        "--mirror",
+        "--all",
+        "--tags",
+        "--prune",
+    }
+)
+_PUSH_OK_FLAGS = frozenset(
+    {"-u", "--set-upstream", "--no-verify", "-q", "--quiet", "-v", "--verbose"}
+)
+_WT_BRANCH_RE = re.compile(r"^wt/([A-Za-z0-9_.-]+?)-\d+$")
+
+
+def _role_slug(role: str | None) -> str:
+    """Mirror of worktree_manager.sanitize_ref_component for the role part of
+    a `wt/<role>-<ts>` branch (kept local — this module is a stdlib leaf):
+    `backend#3` → `backend-3`."""
+    raw = (role or "").strip().lower()
+    return re.sub(r"[^a-z0-9_.-]+", "-", raw).strip("-")
+
+
+def _push_is_own_worktree_branch(cmd: str, role: str | None) -> bool:
+    """Every `git push` in *cmd* names only the pane's own `wt/<slug>-<ts>`
+    branch with benign flags — see `_GIT_PUSH_TAIL`'s note."""
+    slug = _role_slug(role)
+    if not slug:
+        return False
+    hits = list(_GIT_PUSH_TAIL.finditer(cmd))
+    if not hits:
+        return False
+    for m in hits:
+        positionals: list[str] = []
+        for tok in m.group("tail").split():
+            if tok.startswith("-"):
+                if tok.startswith("--force") or tok in _PUSH_FORBIDDEN_FLAGS:
+                    return False
+                if tok not in _PUSH_OK_FLAGS:
+                    return False
+                continue
+            positionals.append(tok)
+        # `git push <remote> <refspec>…` — the remote is never a refspec; a
+        # bare `git push` / `git push origin` pushes an unnamed HEAD → deny.
+        remote, refspecs = positionals[:1], positionals[1:]
+        if not remote or not refspecs or "/" in remote[0] or ":" in remote[0]:
+            return False
+        for ref in refspecs:
+            if ref.startswith("+") or ":" in ref:
+                return False
+            wm = _WT_BRANCH_RE.match(ref)
+            if not wm or wm.group(1) != slug:
+                return False
+    return True
+
+
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
 # still use its isolated Playwright MCP, but must never drive mb's one shared
 # Chrome session (#92).
@@ -742,14 +834,16 @@ def classify(
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
             )
 
-    if not _is_worktree_cwd(cwd) and _GIT_COMMIT_PATTERN.search(cmd):
+    in_worktree = _in_worktree(cmd, cwd)
+
+    if not in_worktree and _GIT_COMMIT_PATTERN.search(cmd):
         return Verdict(
             False,
             rule="git_lead_only:commit",
             reason=(f"role `{name}` commit เองไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
         )
 
-    if not _is_worktree_cwd(cwd) and _GIT_MERGE_PATTERN.search(cmd):
+    if not in_worktree and _GIT_MERGE_PATTERN.search(cmd):
         return Verdict(
             False,
             rule="git_lead_only:merge",
@@ -757,6 +851,8 @@ def classify(
         )
 
     for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
+        if rule == "push" and in_worktree and _push_is_own_worktree_branch(cmd, role):
+            continue  # #438: own wt/<role>-<ts> branch, named explicitly, no force
         if pattern.search(cmd):
             return Verdict(
                 False,

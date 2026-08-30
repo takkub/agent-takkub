@@ -729,13 +729,38 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
             if not cands:
                 return {"ok": False, "msg": f"ไม่พบ worktree branch ของ role '{args.role}'"}
             cands.sort()
+            if len(cands) > 1 and not getattr(args, "latest", False):
+                # #439: "newest" is a guess, and the newest one is usually
+                # the pane still working — refuse and make the caller name
+                # the branch instead of merging the wrong worktree (or
+                # failing on its dirty tree with no way to pick the other).
+                by_branch = {r["branch"]: r for r in mgr.list_isolated(root)}
+                rows = []
+                for _ts, b in cands:
+                    r = by_branch.get(b, {})
+                    flag = "dirty" if r.get("dirty") else f"{r.get('ahead', 0)} commit ahead"
+                    rows.append(f"  --branch {b}    ({flag})")
+                listing = "\n".join(rows)
+                return {
+                    "ok": False,
+                    "msg": (
+                        f"role '{args.role}' มี {len(cands)} worktree — ระบุ branch ที่จะ merge:\n"
+                        f"{listing}\n(หรือ --latest เพื่อเอาตัวใหม่สุดจริงๆ)"
+                    ),
+                }
             branch = cands[-1][1]  # highest ts = newest
             if len(cands) > 1:
                 multi_note = (
-                    f" (พบ {len(cands)} worktree ของ role '{args.role}' — เลือกตัวล่าสุด {branch})"
+                    f" (พบ {len(cands)} worktree ของ role '{args.role}' — --latest เลือก {branch})"
                 )
         live_paths = _live_worktree_paths_best_effort()
-        ok, msg = mgr.merge_isolated(root, branch, keep=bool(args.keep), live_paths=live_paths)
+        ok, msg = mgr.merge_isolated(
+            root,
+            branch,
+            keep=bool(args.keep),
+            live_paths=live_paths,
+            check_only=bool(getattr(args, "check", False)),
+        )
         return {"ok": ok, "msg": f"{msg}{multi_note}"}
 
     if sub == "clean":
@@ -745,7 +770,12 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
             return {"ok": False, "msg": "ใช้ --orphans หรือ --orphans-node-modules-only อย่างเดียว"}
 
         live_paths = _live_worktree_paths_best_effort()
-        lines = mgr.clean_isolated(root, force=bool(args.force), live_paths=live_paths)
+        lines = mgr.clean_isolated(
+            root,
+            force=bool(args.force),
+            live_paths=live_paths,
+            branch=getattr(args, "branch", None) or None,
+        )
         # #411 — `.trash-*` staging dirs `remove_worktree_tree` leaves behind
         # after a partial/failed delete are our own already-vetted trash
         # (never a real checkout with work of unknown value), so they're
@@ -3660,8 +3690,24 @@ def main(argv: list[str] | None = None) -> int:
         "merge",
         help="merge --no-ff an isolated branch into the main tree, then clean it up",
     )
-    swm.add_argument("--role", default=None, help="merge the NEWEST wt/<role>-* branch")
+    swm.add_argument(
+        "--role",
+        default=None,
+        help="merge the wt/<role>-* branch of this role (refuses to guess when the role "
+        "has several — pass --branch, or --latest to take the newest, #439)",
+    )
     swm.add_argument("--branch", default=None, help="merge this exact wt/* branch")
+    swm.add_argument(
+        "--latest",
+        action="store_true",
+        help="with --role: when several worktrees exist, take the newest instead of refusing",
+    )
+    swm.add_argument(
+        "--check",
+        action="store_true",
+        help="dry-run (#442): report dirty state + files that would conflict with the "
+        "current base, merge nothing",
+    )
     swm.add_argument("--keep", action="store_true", help="merge but keep the worktree")
     swm.add_argument("--cwd", default=None, help="project dir (default: current dir)")
     swc = swt_sub.add_parser(
@@ -3673,6 +3719,12 @@ def main(argv: list[str] | None = None) -> int:
         "--force",
         action="store_true",
         help="also remove dirty / unmerged worktrees (their work is LOST)",
+    )
+    swc.add_argument(
+        "--branch",
+        default=None,
+        help="clean only this wt/* branch (#439 — a role with several worktrees); "
+        "safety rules unchanged",
     )
     swc.add_argument(
         "--orphans",

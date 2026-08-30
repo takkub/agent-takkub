@@ -49,6 +49,7 @@ from .config import ensure_runtime as _ensure_runtime_default
 from .delivery_readiness import can_accept_input
 from .digest_facts import DigestFacts, format_digest_fact_line
 from .lead_draft_state import (
+    DRAFT_HOLD_FORCE_RESET_S,
     LeadDraftState,
     advance_draft_state,
     draft_hold_expired,
@@ -984,9 +985,68 @@ class LeadInboxMixin:
 
     def _lead_can_accept_injection(self, project_ns: str) -> bool:
         """True when the Lead pane's input line reads empty — safe to paste
-        an engine-originated message without dragging in an unsubmitted draft."""
+        an engine-originated message without dragging in an unsubmitted draft.
+
+        (#440) The draft tracker is a byte-level guess with known false
+        positives (an Up/Down arrow or a user-side paste parks it in
+        "unknown_nonempty" until an explicit submit/cancel byte arrives).
+        When that guess is contradicted by the screen — claude's bordered
+        composer visibly EMPTY — or has been held for an implausibly long
+        time at an idle prompt, the state is reset here and the caller
+        proceeds. Without this, two done digests sat in the durable queue
+        for 7h39m (tunnel, 2026-08-29) with Lead idle the whole time, until
+        the user happened to type.
+        """
         state = getattr(self, "_lead_draft_state", {}).get(project_ns)
-        return draft_state_allows_injection(state)
+        if draft_state_allows_injection(state):
+            return True
+        reason = self._stale_draft_hold_reason(project_ns, state)
+        if reason is None:
+            return False
+        held_s = round(time.time() - float(getattr(state, "pending_since", 0.0) or 0.0))
+        self._lead_draft_state[project_ns] = LeadDraftState()
+        _log_event(
+            "lead_draft_state_reset",
+            project=project_ns,
+            reason=reason,
+            held_s=held_s,
+            prev_state=getattr(state, "state", "?"),
+        )
+        return True
+
+    def _stale_draft_hold_reason(self, project_ns: str, state) -> str | None:
+        """(#440) Why a non-empty draft state is provably (or overwhelmingly
+        likely) stale — ``None`` when it may well be a real unsent draft.
+
+        * ``"empty_composer"`` — claude's own input box renders with a bare
+          prompt (`PtySession.is_at_claude_empty_composer`, #343). A real
+          draft would show its text there, so the tracker is simply wrong.
+          Structural, claude-only by nature; other providers fall through.
+        * ``"hold_cap"`` — held past `DRAFT_HOLD_FORCE_RESET_S` while the
+          Lead sits at its ready prompt. #118's rule (never clobber a live
+          draft) is kept for the normal window — this cap only triggers on
+          a draft nobody has touched for half an hour, where a late notice
+          is the far smaller harm.
+        """
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        sess = getattr(lead, "session", None) if lead is not None else None
+        if sess is None or not getattr(sess, "is_alive", False):
+            return None
+        probe = getattr(sess, "is_at_claude_empty_composer", None)
+        try:
+            if callable(probe) and probe() is True:
+                return "empty_composer"
+        except Exception:
+            pass
+        pending_since = float(getattr(state, "pending_since", 0.0) or 0.0)
+        if pending_since and time.time() - pending_since >= DRAFT_HOLD_FORCE_RESET_S:
+            ready = getattr(sess, "is_at_ready_prompt", None)
+            try:
+                if callable(ready) and ready() is True:
+                    return "hold_cap"
+            except Exception:
+                pass
+        return None
 
     def _lead_draft_hold_expired(self, project_ns: str) -> bool:
         """True once a held draft has blocked injection long enough that the
@@ -3747,6 +3807,10 @@ class LeadInboxMixin:
         whole point of stamping it.
         """
         occurred_ts = queued_ts if queued_ts is not None else time.time()
+        # #441: done notes / proposals / CCs are the cockpit's own copy of
+        # whatever the pane printed — scrub credential values before the
+        # text lands in the Lead transcript or the durable inbox file.
+        body = self._redact_forwarded_text(body, project_ns, hop="notify_lead", from_role=from_role)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
             window_ms = _inbox_digest_window_ms()

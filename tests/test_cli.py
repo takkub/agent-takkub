@@ -1105,6 +1105,8 @@ class TestWorktreeCli:
         merge_result: ClassVar[tuple] = (True, "merged wt/frontend-9 + cleanup เรียบร้อย")
         clean_lines: ClassVar[list] = ["REMOVED wt/qa-7"]
         merge_calls: ClassVar[list] = []
+        check_calls: ClassVar[list] = []
+        clean_branches: ClassVar[list] = []
         merge_live_paths_calls: ClassVar[list] = []
         clean_live_paths_calls: ClassVar[list] = []
         orphans: ClassVar[list] = []
@@ -1121,12 +1123,16 @@ class TestWorktreeCli:
         def list_isolated(self, root):
             return type(self).rows
 
-        def merge_isolated(self, root, branch, keep=False, live_paths=frozenset()):
+        def merge_isolated(
+            self, root, branch, keep=False, live_paths=frozenset(), check_only=False
+        ):
             type(self).merge_calls.append((branch, keep))
+            type(self).check_calls.append(check_only)
             type(self).merge_live_paths_calls.append(set(live_paths))
             return type(self).merge_result
 
-        def clean_isolated(self, root, force=False, live_paths=frozenset()):
+        def clean_isolated(self, root, force=False, live_paths=frozenset(), branch=None):
+            type(self).clean_branches.append(branch)
             type(self).clean_live_paths_calls.append(set(live_paths))
             return type(self).clean_lines
 
@@ -1148,6 +1154,8 @@ class TestWorktreeCli:
 
         self._FakeWtMgr.rows = []
         self._FakeWtMgr.merge_calls = []
+        self._FakeWtMgr.check_calls = []
+        self._FakeWtMgr.clean_branches = []
         self._FakeWtMgr.merge_live_paths_calls = []
         self._FakeWtMgr.clean_lines = ["REMOVED wt/qa-7"]
         self._FakeWtMgr.clean_live_paths_calls = []
@@ -1182,7 +1190,7 @@ class TestWorktreeCli:
             {"path": "/w2", "branch": "wt/frontend-200", "sha": "b", "ahead": 1, "dirty": False},
             {"path": "/w3", "branch": "wt/qa-300", "sha": "c", "ahead": 0, "dirty": False},
         ]
-        rc = cli.main(["worktree", "merge", "--role", "frontend"])
+        rc = cli.main(["worktree", "merge", "--role", "frontend", "--latest"])
         assert rc == 0
         assert self._FakeWtMgr.merge_calls == [("wt/frontend-200", False)]  # newest ts
 
@@ -1272,18 +1280,46 @@ class TestWorktreeCli:
         assert rc == 0
         assert self._FakeWtMgr.merge_calls == [("wt/backend-2-1787712041", False)]
 
-    def test_merge_role_multiple_candidates_noted_in_output(self, capsys):
+    def test_merge_role_multiple_candidates_refuses_and_lists_branches(self, capsys):
+        # #439: the newest worktree is usually the one still being worked on
+        # — guessing merged the wrong one (or failed on its dirty tree with
+        # no way to pick the finished sibling). Refuse, list, point at
+        # --branch / --latest.
+        self._FakeWtMgr.rows = [
+            {"path": "/w1", "branch": "wt/backend-100", "sha": "a", "ahead": 1, "dirty": False},
+            {"path": "/w2", "branch": "wt/backend-200", "sha": "b", "ahead": 0, "dirty": True},
+        ]
+        rc = cli.main(["worktree", "merge", "--role", "backend"])
+        assert rc != 0
+        assert self._FakeWtMgr.merge_calls == []
+        out = capsys.readouterr().out + capsys.readouterr().err
+        assert "--branch wt/backend-100" in out and "--branch wt/backend-200" in out
+        assert "dirty" in out and "1 commit ahead" in out
+        assert "--latest" in out
+
+    def test_merge_role_multiple_candidates_latest_flag_takes_newest(self, capsys):
         self._FakeWtMgr.rows = [
             {"path": "/w1", "branch": "wt/backend-100", "sha": "a", "ahead": 1, "dirty": False},
             {"path": "/w2", "branch": "wt/backend-200", "sha": "b", "ahead": 1, "dirty": False},
         ]
         self._FakeWtMgr.merge_result = (True, "merged wt/backend-200 + cleanup เรียบร้อย")
-        rc = cli.main(["worktree", "merge", "--role", "backend"])
+        rc = cli.main(["worktree", "merge", "--role", "backend", "--latest"])
         assert rc == 0
         assert self._FakeWtMgr.merge_calls == [("wt/backend-200", False)]
         out = capsys.readouterr().out
         assert "wt/backend-200" in out
         assert "2 worktree" in out
+
+    def test_merge_check_flag_forwards_check_only(self):
+        self._FakeWtMgr.merge_result = (True, "wt/qa-300: 1 commit ahead · merge-tree clean")
+        rc = cli.main(["worktree", "merge", "--branch", "wt/qa-300", "--check"])
+        assert rc == 0
+        assert self._FakeWtMgr.check_calls == [True]
+
+    def test_clean_branch_flag_forwards_branch(self):
+        rc = cli.main(["worktree", "clean", "--branch", "wt/frontend-100"])
+        assert rc == 0
+        assert self._FakeWtMgr.clean_branches == ["wt/frontend-100"]
 
     def test_merge_exact_branch_and_keep(self):
         rc = cli.main(["worktree", "merge", "--branch", "wt/qa-300", "--keep"])

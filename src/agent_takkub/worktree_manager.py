@@ -989,6 +989,9 @@ class WorktreeManager:
         callers must treat that as "couldn't verify", never as a green
         light.
         """
+        files = self.merge_conflict_files(git_root, branch)
+        if files is not None:
+            return bool(files)
         base = self._run(["-C", git_root, "merge-base", "HEAD", branch], None)
         base_sha = base.stdout.strip() if base.ok else ""
         if not base_sha:
@@ -997,6 +1000,38 @@ class WorktreeManager:
         if not mt.ok:
             return None
         return "<<<<<<<" in mt.stdout
+
+    def merge_conflict_files(self, git_root: str, branch: str) -> list[str] | None:
+        """Paths that a 3-way merge of *branch* into the CURRENT base HEAD
+        would leave conflicted (#442) — ``[]`` when the merge is clean,
+        ``None`` when it could not be determined.
+
+        Uses ``git merge-tree --write-tree --name-only`` (git ≥ 2.38):
+        read-only, never touches index or worktree, exit 0 = clean, exit 1 =
+        conflicts with the conflicted paths listed after the tree oid.
+        Any other exit (older git, bad ref) is "unknown" so the caller falls
+        back to :meth:`merge_conflicts_with_base`'s legacy probe.
+        """
+        res = self._run(
+            [
+                "-C",
+                git_root,
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                "HEAD",
+                branch,
+            ],
+            None,
+        )
+        if res.ok:
+            return []
+        if res.returncode != 1:
+            return None
+        lines = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+        # first line is the (partial) tree oid; the rest are conflicted paths
+        return lines[1:] if lines else None
 
     def collect_done_git_facts(
         self,
@@ -1039,15 +1074,22 @@ class WorktreeManager:
             commits = self.commit_count(info)
             dirty = self.is_dirty(info)
             uncommitted = self.uncommitted_count(info) if dirty else 0
-            merge_conflicts = (
-                self.merge_conflicts_with_base(info.git_root, info.branch) if commits > 0 else None
-            )
+            conflict_files: list[str] | None = None
+            merge_conflicts: bool | None = None
+            if commits > 0:
+                conflict_files = self.merge_conflict_files(info.git_root, info.branch)
+                merge_conflicts = (
+                    bool(conflict_files)
+                    if conflict_files is not None
+                    else self.merge_conflicts_with_base(info.git_root, info.branch)
+                )
             out = {
                 "kind": "worktree",
                 "commits": commits,
                 "dirty": dirty,
                 "uncommitted": uncommitted,
                 "merge_conflicts": merge_conflicts,
+                "conflict_files": conflict_files,
                 "diffstat": self.diffstat(info),
             }
             if rediscovered is not None:
@@ -1309,9 +1351,15 @@ class WorktreeManager:
         branch: str,
         keep: bool = False,
         live_paths: frozenset[str] | set[str] = frozenset(),
+        check_only: bool = False,
     ) -> tuple[bool, str]:
         """``merge --no-ff`` an isolated branch into the main tree's HEAD, then
         (unless *keep*) remove its worktree + branch.
+
+        *check_only* (#442): report dirty state + the files a merge would
+        conflict on, without merging anything. The same conflict probe runs
+        before every real merge too, so a conflicting branch is refused by
+        name instead of discovered from an aborted merge.
 
         On a merge conflict the merge is aborted and the worktree left intact —
         the caller reports the conflict instead of leaving the main tree in a
@@ -1333,6 +1381,21 @@ class WorktreeManager:
             return False, (
                 f"worktree ของ {branch} มี uncommitted changes — ให้ pane commit ก่อน "
                 f"หรือเข้าไปเก็บงานที่ {row['path']}"
+            )
+        conflict_files = self.merge_conflict_files(git_root, branch)
+        if conflict_files:
+            shown = ", ".join(conflict_files[:10])
+            more = f" +{len(conflict_files) - 10}" if len(conflict_files) > 10 else ""
+            return False, (
+                f"{branch} จะ conflict กับ base ปัจจุบัน {len(conflict_files)} ไฟล์: {shown}{more} — "
+                f"ยังไม่ได้ merge; ให้ pane `git merge <base>` ใน worktree แล้ว resolve "
+                f"(หรือ Lead resolve เองที่ {row['path']}) แล้วสั่ง merge ใหม่"
+            )
+        if check_only:
+            state = "clean" if conflict_files == [] else "ตรวจ conflict ไม่ได้ (git เก่า?)"
+            return (
+                True,
+                f"{branch}: {row['ahead']} commit ahead · merge-tree {state} — ยังไม่ได้ merge",
             )
         merge = self._run(["-C", git_root, "merge", "--no-ff", "--no-edit", branch], None)
         if not merge.ok:
@@ -1375,8 +1438,14 @@ class WorktreeManager:
         git_root: str,
         force: bool = False,
         live_paths: frozenset[str] | set[str] = frozenset(),
+        branch: str | None = None,
     ) -> list[str]:
         """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
+
+        *branch* (#439): restrict the sweep to that one ``wt/*`` branch — the
+        way to drop a specific finished worktree when the same role has
+        several. Same safety rules apply; a branch that isn't an isolated
+        worktree yields a single ``NOT FOUND`` line.
 
         Default: remove only SAFE leftovers — clean tree AND no commits ahead
         (nothing of value can be lost). ``force=True`` removes every wt/*
@@ -1405,7 +1474,12 @@ class WorktreeManager:
         """
         live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
-        for row in self.list_isolated(git_root):
+        rows = self.list_isolated(git_root)
+        if branch is not None:
+            rows = [r for r in rows if r["branch"] == branch]
+            if not rows:
+                return [f"NOT FOUND  {branch} — ไม่ใช่ wt/* worktree ที่ git รู้จัก"]
+        for row in rows:
             if str(Path(row["path"]).resolve()) in live:
                 out.append(
                     f"KEEP  {row['branch']} — pane ยังใช้งาน worktree นี้อยู่ (live pane); "
@@ -1810,6 +1884,7 @@ def build_merge_proposal(
     dirty: bool = False,
     uncommitted: int = 0,
     merge_conflicts: bool | None = None,
+    conflict_files: list[str] | None = None,
 ) -> str:
     """Lead-facing PROPOSAL when an isolated pane finishes with commits to merge.
 
@@ -1838,7 +1913,16 @@ def build_merge_proposal(
             "ของจริงอาจยังไม่อยู่ใน branch — ยังไม่พร้อมให้ merge"
         )
     elif merge_conflicts is True:
-        readiness = "⚠ merge-tree เจอ conflict กับ base ปัจจุบัน — ต้อง resolve ก่อน merge"
+        # #442: name the files so the Lead (or the pane, if still open) can
+        # rebase/resolve BEFORE `takkub worktree merge` fails on it.
+        names = ", ".join(f"`{f}`" for f in (conflict_files or [])[:8])
+        more = f" +{len(conflict_files) - 8}" if conflict_files and len(conflict_files) > 8 else ""
+        where = f": {names}{more}" if names else ""
+        readiness = (
+            f"⚠ conflict กับ base ปัจจุบัน{where} — ให้ pane `git merge <base>` ใน worktree "
+            "แล้ว resolve ก่อน หรือ Lead resolve ตอน merge "
+            "(ดูรายชื่อไฟล์อีกครั้งได้ด้วย `takkub worktree merge --check --branch <b>`)"
+        )
     elif merge_conflicts is False:
         readiness = f"✅ {commits} commit พร้อม merge กลับ base (merge-tree clean กับ base ปัจจุบัน)"
     else:

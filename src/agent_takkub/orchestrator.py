@@ -3144,11 +3144,17 @@ class Orchestrator(
                     dirty = precomputed["dirty"]
                     uncommitted = precomputed["uncommitted"]
                     merge_conflicts = precomputed["merge_conflicts"]
+                    conflict_files = precomputed.get("conflict_files")
                     diffstat_text = precomputed["diffstat"]
                 else:
                     dirty = mgr.is_dirty(info)
                     uncommitted = mgr.uncommitted_count(info) if dirty else 0
-                    merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                    conflict_files = mgr.merge_conflict_files(info.git_root, info.branch)
+                    merge_conflicts = (
+                        bool(conflict_files)
+                        if conflict_files is not None
+                        else mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                    )
                     diffstat_text = mgr.diffstat(info)
                 proposal = build_merge_proposal(
                     from_role,
@@ -3158,6 +3164,7 @@ class Orchestrator(
                     dirty=dirty,
                     uncommitted=uncommitted,
                     merge_conflicts=merge_conflicts,
+                    conflict_files=conflict_files,
                 )
                 _log_event(
                     "worktree_merge_proposed",
@@ -3167,6 +3174,7 @@ class Orchestrator(
                     commits=commits,
                     dirty=dirty,
                     merge_conflicts=merge_conflicts,
+                    conflict_files=(conflict_files or [])[:20],
                 )
                 self._notify_lead(project_ns, proposal, from_role=from_role, note="")
                 return
@@ -3300,6 +3308,28 @@ class Orchestrator(
                 "send_queued_no_pane_flushed", project=project_ns, role=role_name, count=delivered
             )
 
+    def _redact_forwarded_text(
+        self, text: str, project_ns: str, *, hop: str, from_role: str | None = None
+    ) -> str:
+        """(#441) Scrub credential-shaped values from text the cockpit is
+        about to copy somewhere new (Lead transcript, inbox file, phone).
+        Logs one event per hit so the audit trail shows a value WAS
+        forwarded and stripped, without ever logging the value itself."""
+        from .secret_redact import redact_secrets
+
+        out, names = redact_secrets(text)
+        if not names:
+            return text
+        _log_event(
+            "forwarded_secret_redacted",
+            project=project_ns,
+            hop=hop,
+            role=from_role or "",
+            names=names[:10],
+        )
+        shown = ", ".join(names[:6]) + (" …" if len(names) > 6 else "")
+        return f"{out}\n⚠ cockpit redacted {len(names)} secret value(s): {shown} (#441)"
+
     def send(
         self,
         to_role: str,
@@ -3312,6 +3342,9 @@ class Orchestrator(
         except ValueError as exc:
             return False, str(exc)
         project_ns = self._resolve_project(project)
+        # #441: a pane that just `cat`-ed an env file forwards the values
+        # verbatim in its message — scrub at the cockpit hop, every provider.
+        msg = self._redact_forwarded_text(msg, project_ns, hop="send", from_role=from_role)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:

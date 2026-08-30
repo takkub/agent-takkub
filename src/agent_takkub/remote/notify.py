@@ -1791,17 +1791,38 @@ def read_recent_lead_messages(
     provider: str = "claude",
     project_ns: str = "",
 ) -> list[dict]:
-    """Provider-dispatched history reader; unsupported providers return []."""
+    """Provider-dispatched history reader; unsupported providers return [].
+
+    (#441) Every message text is passed through `secret_redact` before it
+    leaves for the phone — the transcript on disk may hold a value a pane
+    printed from an env file, and the mirror must not copy it further.
+    """
     v2_messages = _read_from_conversation_store_v2(project_ns, limit)
     if v2_messages is not None:
-        return v2_messages
+        return _redact_messages(v2_messages)
     scanner = history_scanner(provider)
     if scanner is None:
         return []
     try:
-        return scanner.read_messages(path, limit, project_ns)
+        return _redact_messages(scanner.read_messages(path, limit, project_ns))
     except (OSError, ValueError, TypeError):
         return []
+
+
+def _redact_messages(messages: list[dict]) -> list[dict]:
+    """(#441) Scrub credential-shaped values from each message's ``text``;
+    rows without a string ``text`` pass through untouched."""
+    from ..secret_redact import redact_with_notice
+
+    out: list[dict] = []
+    for m in messages:
+        text = m.get("text") if isinstance(m, dict) else None
+        if isinstance(text, str):
+            cleaned = redact_with_notice(text)
+            if cleaned is not text:
+                m = {**m, "text": cleaned}
+        out.append(m)
+    return out
 
 
 def list_recent_lead_sessions(

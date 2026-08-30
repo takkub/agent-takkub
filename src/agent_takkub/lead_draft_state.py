@@ -49,6 +49,12 @@ UNKNOWN_NONEMPTY = "unknown_nonempty"
 # instead of holding an injection indefinitely.
 DRAFT_HOLD_TIMEOUT_S = 180.0
 
+# (#440) Ceiling on how long a held draft may block delivery while the Lead
+# sits idle at its ready prompt before the tracker is assumed wrong and
+# reset. Far above any real typing pause; far below the 7h39m a stuck
+# "unknown_nonempty" once parked two done digests for.
+DRAFT_HOLD_FORCE_RESET_S = 30 * 60.0
+
 # General CSI/SS3 stripper: matches a whole escape sequence as one token so
 # its parameter bytes (digits, ';') are never mis-counted as printable
 # keystrokes. Covers arrows, Home/End/Delete/PageUp/Down, and the bracketed
