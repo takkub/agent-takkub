@@ -281,7 +281,15 @@
         // path, bad/expired token) answers with a bare 404 — never a 401.
         // A 404 on an /api/ call while we believe we hold a token means the
         // token is no longer valid (server restarted, rotated, revoked).
-        if (res.status === 404 && hadToken && /^api\//.test(path.replace(/^\/+/, ""))) {
+        // Exception (#445): a route that legitimately answers 404 for a
+        // *resource* miss (`/api/image` — path outside a project root, file
+        // gone, pasted screenshot living in the CLI's own cache) must opt
+        // out via `allow404`, or one stale <img> in another project's
+        // history logs the whole phone out.
+        if (
+          res.status === 404 && hadToken && !opts.allow404 &&
+          /^api\//.test(path.replace(/^\/+/, ""))
+        ) {
           forgetToken();
           throw new Error("unauthorized");
         }
@@ -849,7 +857,9 @@
     if (imageBlobCache[key]) return Promise.resolve(imageBlobCache[key]);
     var q = "api/image?path=" + encodeURIComponent(pth);
     if (project) q += "&project=" + encodeURIComponent(project);
-    return apiFetch(q).then(function (res) {
+    // allow404: a missing/unservable image is a per-card miss, never proof
+    // the token died (#445) — apiFetch must not forgetToken() on it.
+    return apiFetch(q, { allow404: true }).then(function (res) {
       if (!res.ok) throw new Error("image_" + res.status);
       return res.blob();
     }).then(function (blob) {

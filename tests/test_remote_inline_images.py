@@ -287,6 +287,17 @@ class TestResumePickerOneShotSpawnFilter:
 
 
 class TestPwaWiring:
+    def test_image_404_never_logs_the_phone_out(self):
+        # #445: `/api/image` answers a bare 404 for any unservable path
+        # (outside a project root, file gone, a pasted screenshot in the
+        # CLI's own cache). `apiFetch` otherwise reads "404 while holding a
+        # token" as "token revoked" and wipes the pairing — so switching to
+        # a project whose history carries one stale image sent the user
+        # back to the QR screen. The image fetch must opt out.
+        js = (_STATIC / "app.js").read_text(encoding="utf-8")
+        assert "apiFetch(q, { allow404: true })" in js
+        assert "res.status === 404 && hadToken && !opts.allow404" in js
+
     def test_app_js_has_image_cards_and_lightbox(self):
         js = (_STATIC / "app.js").read_text(encoding="utf-8")
         assert "api/image?path=" in js
