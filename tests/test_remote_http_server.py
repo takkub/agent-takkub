@@ -1241,3 +1241,40 @@ class TestRejectBreadcrumb:
         assert last["reason"] == "bad_secret_path"
         assert "wrong-secret" not in json.dumps(last)
         assert "abc" not in json.dumps(last)
+
+
+class TestUrlOnlyAuth:
+    """User request 2026-08-30: plain `https://host/<secret>/` link, no
+    `#token=`. Server skips the bearer check when `url_only_auth` is on —
+    secret path + (mandatory) password remain the gate. Default off keeps
+    every existing pairing unchanged."""
+
+    @pytest.fixture
+    def url_only_server(self, monkeypatch):
+        monkeypatch.setattr(api, "pulse", lambda orch, project: {"working": 0, "total": 0})
+        monkeypatch.setattr(api, "usage", lambda: {"providers": []})
+        config = RemoteConfig(
+            bind_port=0, secret_path="sek", token="tok", mode="view", url_only_auth=True
+        )
+        srv = http_server.start_server(config, _FakeOrch())
+        yield srv
+        srv.stop()
+
+    def test_bootstrap_without_bearer_answers_200_and_flags_url_only(self, url_only_server):
+        status, body = _get_status(_url(url_only_server, "/sek/api/bootstrap"))
+        assert status == 200
+        assert json.loads(body) == {"password_required": False, "url_only": True}
+
+    def test_wrong_secret_path_is_still_a_bare_404(self, url_only_server):
+        status, _ = _get_status(_url(url_only_server, "/nope/api/bootstrap"))
+        assert status == 404
+
+    def test_default_config_still_requires_bearer(self, server):
+        status, _ = _get_status(_url(server, "/sek/api/bootstrap"))
+        assert status == 404
+
+    def test_pairing_url_drops_fragment_in_url_only_mode(self):
+        cfg = RemoteConfig(public_url="https://h.example", secret_path="s", token="t")
+        assert cfg.pairing_url() == "https://h.example/s/#token=t"
+        cfg.url_only_auth = True
+        assert cfg.pairing_url() == "https://h.example/s/"

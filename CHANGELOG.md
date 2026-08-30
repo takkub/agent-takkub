@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **โหมด URL-only สำหรับ remote — เปิดลิงก์เปล่าแล้วกรอกรหัสผ่านเลย ไม่ต้องมี `#token=` (user request 2026-08-30)** — `RemoteConfig.url_only_auth` (default off) · เปิดใน Remote settings: checkbox "URL-only access" · server ข้าม bearer check (secret path ยังต้องตรง, **รหัสผ่านยังบังคับเหมือนเดิม**) · `/api/bootstrap` ตอบ `url_only: true` ให้ PWA รู้ว่า link คือ credential — เปิดแอปไม่มี token จะถาม bootstrap ก่อน ไม่เด้งหน้า pairing ทันที; หน้า pairing รับลิงก์เปล่าได้ · `pairing_url()`/QR เป็นลิงก์เปล่าในโหมดนี้ · bump SW cache v32
+
 ## [v1.6.18] - 2026-08-30
 
 ### Added (เพิ่ม)

@@ -49,6 +49,7 @@ import yaml
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -153,6 +154,7 @@ def build_config(
     secret_path: str = "",
     token: str = "",
     idle_expire_min: int = _IDLE_EXPIRE_MIN,
+    url_only_auth: bool = False,
 ) -> RemoteConfig:
     """Assemble a `RemoteConfig` from the dialog's inputs plus the fixed
     "middle of the road" defaults from task spec §2 — the user never has
@@ -196,6 +198,7 @@ def build_config(
         idle_expire_min=idle_expire_min,
         lockout_after_fails=_LOCKOUT_AFTER_FAILS,
         password_hash=password_hash,
+        url_only_auth=url_only_auth,
     )
 
 
@@ -417,6 +420,21 @@ class RemoteSettingsDialog(QDialog):
         self._idle_expire_spin.setSpecialValueText("off (never auto-suspend)")
         self._idle_expire_spin.setValue(current.idle_expire_min)
         self._form.addRow("Idle auto-suspend after:", self._idle_expire_spin)
+
+        # URL-only access (user request 2026-08-30): open the plain link on the
+        # phone, no `#token=` fragment, no pairing screen. Password stays
+        # mandatory, so the gate is secret-path + password instead of
+        # secret-path + token + password.
+        self._url_only_check = QCheckBox(
+            "URL-only access — plain link, no #token= (password still required)"
+        )
+        self._url_only_check.setChecked(bool(getattr(current, "url_only_auth", False)))
+        self._url_only_check.setToolTip(
+            "The phone just opens https://host/<secret>/ and goes straight to the "
+            "password prompt. Anyone holding the link + password can get in — keep "
+            "the link private. Off = the link carries a per-pairing token as well."
+        )
+        self._form.addRow("", self._url_only_check)
 
         pairing_policy_note = QLabel(
             "Idle auto-suspend keeps this pairing link, so the phone can reconnect after "
@@ -661,6 +679,7 @@ class RemoteSettingsDialog(QDialog):
             secret_path=self._current.secret_path,
             token=self._current.token,
             idle_expire_min=self._idle_expire_spin.value(),
+            url_only_auth=self._url_only_check.isChecked(),
         )
         ok, msg, pairing_url = self._on_apply(config, True)
         if not ok:

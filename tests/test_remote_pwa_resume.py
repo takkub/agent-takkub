@@ -296,3 +296,22 @@ class TestHardReloadButton:
         assert "unregister()" in chunk
         assert "location.replace(" in chunk
         assert "removeItem(LS_TOKEN)" not in chunk
+
+
+class TestUrlOnlyPwa:
+    def test_tokenless_boot_asks_bootstrap_before_showing_pairing(self):
+        js = _read("app.js")
+        chunk = js.split("function init()")[1]
+        assert 'apiFetch("api/bootstrap")' in chunk
+        assert "state.urlOnly = !!(data && data.url_only)" in chunk
+        assert "tokenless && !state.urlOnly" in chunk
+
+    def test_url_only_still_treats_bare_404_as_revoked(self):
+        js = _read("app.js")
+        assert "var hadToken = !!state.token || !!state.urlOnly;" in js
+
+    def test_pairing_input_accepts_a_plain_link(self):
+        js = _read("app.js")
+        chunk = js.split('$("pairing-connect")')[1]
+        assert "localStorage.removeItem(LS_TOKEN)" in chunk
+        assert "localStorage.setItem(LS_BASE, state.base)" in chunk

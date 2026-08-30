@@ -509,6 +509,13 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def _check_bearer(self) -> bool:
+        if self.server.config.url_only_auth:
+            # URL-only mode: the secret path already matched (`_match_secret_path`
+            # runs before every route) and the password gate still applies —
+            # a bearer is neither required nor checked. Still counts as
+            # activity for idle-expire, same as a successful token check.
+            self.server.auth.touch()
+            return True
         header = self.headers.get("Authorization", "")
         token = header[7:] if header.startswith("Bearer ") else None
         if not self.server.auth.check_token(token):
@@ -556,7 +563,13 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                     self.server.config.password_hash
                     and not self.server.auth.password_ok(session_token)
                 )
-                self._send_json(200, {"password_required": password_required})
+                payload: dict = {"password_required": password_required}
+                if self.server.config.url_only_auth:
+                    # Tells the PWA it is authenticated by the link alone, so
+                    # a later bare 404 is read as "link revoked" even though
+                    # it never held a token (see app.js `apiFetch`).
+                    payload["url_only"] = True
+                self._send_json(200, payload)
         elif rest == "/api/pulse":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("pulse", {"project": query.get("project")})

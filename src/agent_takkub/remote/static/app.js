@@ -14,6 +14,9 @@
 
   var state = {
     token: localStorage.getItem(LS_TOKEN) || "",
+    // URL-only access: server said the plain link authenticates (no token
+    // ever issued). Learned from /api/bootstrap, never persisted.
+    urlOnly: false,
     base: localStorage.getItem(LS_BASE) || "",
     session: localStorage.getItem(LS_SESSION) || "",
     mode: "view",
@@ -253,7 +256,7 @@
   function apiFetch(path, opts) {
     opts = opts || {};
     var headers = Object.assign({}, opts.headers || {});
-    var hadToken = !!state.token;
+    var hadToken = !!state.token || !!state.urlOnly;
     if (state.token) headers["Authorization"] = "Bearer " + state.token;
     if (state.session) headers["X-Session"] = state.session;
     return fetch(apiUrl(path), Object.assign({}, opts, { headers: headers }))
@@ -504,7 +507,23 @@
     }
     var parsed = parsePairingUrl(raw);
     if (!parsed) {
-      $("pairing-error").textContent = "ลิงก์ไม่ถูกต้อง ต้องมี #token=...";
+      // Plain link (URL-only cockpit): keep the base, no token — init()
+      // asks /api/bootstrap and lands on the password prompt if it's real.
+      var plain = null;
+      try {
+        var u = new URL(raw);
+        plain = u.origin + dirOf(u.pathname);
+      } catch (e) { plain = null; }
+      if (!plain) {
+        $("pairing-error").textContent = "ลิงก์ไม่ถูกต้อง";
+        return;
+      }
+      state.token = "";
+      state.base = plain;
+      localStorage.removeItem(LS_TOKEN);
+      localStorage.setItem(LS_BASE, state.base);
+      $("pairing-error").textContent = "";
+      init();
       return;
     }
     state.token = parsed.token;
@@ -2987,23 +3006,36 @@
 
   function init() {
     wireLightbox();
-    if (!state.token) {
-      showPairing();
-      return;
-    }
+    // No token: either never paired, or the cockpit runs URL-only access
+    // (plain https://host/<secret>/ link, no #token=). Ask /api/bootstrap
+    // first — a URL-only cockpit answers 200 {url_only:true} without a
+    // bearer; a token cockpit answers a bare 404 and we fall to pairing.
+    var tokenless = !state.token;
     // Check the optional password gate before opening history, SSE and project
     // requests. Previously all three raced ahead and produced expected 403s
     // on every reload before the password prompt appeared.
     apiFetch("api/bootstrap")
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (tokenless && !r.ok) throw new Error("no_token");
+        return r.json();
+      })
       .then(function (data) {
+        state.urlOnly = !!(data && data.url_only);
+        if (tokenless && !state.urlOnly) {
+          showPairing();
+          return;
+        }
         if (data && data.password_required) {
           showPasswordPrompt();
           return;
         }
         enterAuthenticatedApp();
       })
-      .catch(function () {
+      .catch(function (err) {
+        if (tokenless) {
+          showPairing();
+          return;
+        }
         // forgetToken() already switched to pairing on an auth 404. Keep the
         // normal retry behavior for a transient network failure.
         //
