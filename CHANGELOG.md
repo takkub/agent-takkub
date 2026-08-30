@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **แถบ "cockpit ออฟไลน์" บอกแล้วว่า request ไหนล้ม** — ต่อท้าย route + status/content-type (edge 5xx) หรือ error ของ fetch (`api/lead/say: Load failed`) ให้ screenshot เดียววินิจฉัยได้ · แตะแถบ = ลองเชื่อมต่อทันที · bump SW cache v34
+
 ## [v1.6.20] - 2026-08-30
 
 ### Fixed (แก้)

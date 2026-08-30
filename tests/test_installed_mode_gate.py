@@ -331,7 +331,7 @@ class TestInstalledRemoteAssets:
                 "has_sessions_api": "api/lead/sessions" in app,
                 "has_resume_api": "api/lead/resume" in app,
                 "has_upload_api": "api/lead/upload" in app,
-                "has_cache_v33": "takkub-remote-shell-v33" in sw,
+                "has_cache_v34": "takkub-remote-shell-v34" in sw,
             }))
             """,
         )
@@ -340,7 +340,7 @@ class TestInstalledRemoteAssets:
             "has_sessions_api": True,
             "has_resume_api": True,
             "has_upload_api": True,
-            "has_cache_v33": True,
+            "has_cache_v34": True,
         }
 
 

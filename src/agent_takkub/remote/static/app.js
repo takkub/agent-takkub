@@ -288,6 +288,7 @@
             setOffline(false);
             throw new Error("cockpit_unresponsive");
           }
+          offlineDetail = res.status + " " + path.replace(/^\/+/, "").split("?")[0] + " (" + (ct || "no content-type").split(";")[0] + ")";
           setOffline(true);
           throw new Error("cockpit_unreachable");
         }
@@ -331,7 +332,10 @@
         return res;
       })
       .catch(function (err) {
-        if (err instanceof TypeError) setOffline(true);
+        if (err instanceof TypeError) {
+          offlineDetail = path.replace(/^\/+/, "").split("?")[0] + ": " + (err && err.message ? err.message : "TypeError");
+          setOffline(true);
+        }
         throw err;
       });
   }
@@ -360,13 +364,30 @@
   var statusConn = $("status-conn");
   var statusConnText = $("status-conn-text");
   var isOffline = false;
+  // Diagnostics (2026-08-30): the banner names the request that flipped us
+  // Offline (route + status/error) so a screenshot says *what* failed, not
+  // just that something did. Tapping the banner retries immediately.
+  var offlineDetail = "";
   function setOffline(v) {
-    if (v === isOffline) return;
+    if (!v) offlineDetail = "";
+    if (v === isOffline) {
+      if (v) renderOfflineBanner();
+      return;
+    }
     isOffline = v;
+    renderOfflineBanner();
     offlineBanner.classList.toggle("show", v);
     statusConn.classList.toggle("offline", v);
     statusConnText.textContent = v ? "Offline" : "Online";
   }
+  function renderOfflineBanner() {
+    offlineBanner.textContent =
+      "cockpit ออฟไลน์ — กำลังลองเชื่อมต่อใหม่ (แตะเพื่อลองเลย)" +
+      (offlineDetail ? " · " + offlineDetail : "");
+  }
+  offlineBanner.addEventListener("click", function () {
+    apiFetch("api/bootstrap").then(function () { fetchPulse(); }).catch(function () {});
+  });
 
   // #252: distinguishes "can't reach cockpit at all" (tunnel down / edge
   // error / real network failure) from an ordinary app-level error (bad
