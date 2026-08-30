@@ -322,3 +322,18 @@ class TestPwaWiring:
     def test_no_inline_script_added(self):
         html = (_STATIC / "index.html").read_text(encoding="utf-8")
         assert html.count("<script") == 1
+
+
+class TestServiceWorkerShippedTheAllow404Fix:
+    """#445 follow-up: the shell cache is cache-first (`cached || network`), so
+    a fix to app.js never reaches an already-installed phone until CACHE_NAME
+    changes. 1.6.15 shipped the allow404 fix under the same v28 key the broken
+    build used, and the phone kept logging out. Pin the key past v28."""
+
+    def test_cache_key_bumped_past_the_broken_build(self):
+        import re
+
+        sw = (_STATIC / "sw.js").read_text(encoding="utf-8")
+        m = re.search(r'CACHE_NAME = "takkub-remote-shell-v(\d+)"', sw)
+        assert m is not None
+        assert int(m.group(1)) >= 29

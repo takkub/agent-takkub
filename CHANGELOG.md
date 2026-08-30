@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **fix #445 (1.6.15) ไม่ถึงมือถือ — remote ยังเด้งไปหน้า token หลังอัป (#445 follow-up)** — service worker ของ PWA เป็น cache-first (`cached || network`) และ 1.6.15 แก้ `app.js` โดยไม่ bump `CACHE_NAME` (ค้าง v28 ตัวเดียวกับ build ที่พัง) → มือถือที่ติดตั้งไว้แล้วรัน app.js เก่าจาก cache ต่อไป · bump เป็น v29 ให้ SW install ใหม่ดึง shell สดจาก server + เพิ่ม test pin ว่า key ต้อง ≥ v29 · กฎ: แตะ `app.js`/`index.html` ต้อง bump `CACHE_NAME` ทุกครั้ง
+
 ## [v1.6.15] - 2026-08-30
 
 ### Fixed (แก้)
