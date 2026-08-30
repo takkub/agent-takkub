@@ -4,9 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.14] - 2026-08-30
+
 ### Fixed (แก้)
 
+- **claude trust dialog default เป็น "No, exit" แล้ว auto-trust กด Enter ปิด pane ทิ้ง (#443)** — claude รุ่นใหม่ตั้ง cursor ที่ "No, exit" เมื่อโฟลเดอร์มี `.claude/settings.local.json` ที่ pre-approve permission (ทุกโปรเจคที่ import ใหม่) → `_auto_trust` เคยกด Enter เปล่าๆ = เลือก No แล้ว claude ปิดตัว หน้าจอค้างเป็นภาพ dialog กดอะไรไม่ไป · เพิ่ม `PtySession.trust_prompt_selects_no()` ตรวจแถวที่ cursor อยู่ แล้วกด ↓ ก่อน Enter ใน tick ถัดไป
+- **done digest ค้างใน durable queue 7 ชม. จน user พิมพ์เอง (#440)** — draft-state ของ Lead pane ค้าง non-empty (Up/Down/paste ฝั่ง user ทำให้เข้า `unknown_nonempty` แล้วไม่มีทางออกจนกว่าจะมี Enter/Esc) → `_flush_pending_done_notices` ปฏิเสธตลอด · `_lead_can_accept_injection` reset state เมื่อหน้าจอแย้ง (claude composer ว่างจริงตาม #343 structural check) หรือค้างเกิน `DRAFT_HOLD_FORCE_RESET_S` (30 นาที) ที่ ready prompt + log `lead_draft_state_reset`
+- **pane guard บล็อก push branch ของ worktree ตัวเอง + ตัดสิน isolation จาก cwd ของ hook อย่างเดียว (#438)** — worktree pane push ได้เฉพาะ `wt/<role>-<ts>` ของตัวเองแบบระบุชื่อ (`git push -u origin wt/...` ห้าม force/delete/`:`/`+`) เพื่อให้ CI ตรวจก่อน done · คำสั่งที่ระบุ `git -C <worktree>` หรือ `cd <worktree> &&` นับเป็น worktree แม้ cwd เป็น shared tree (pane ที่ respawn ไม่มี flag แต่ทำงานใน checkout เดิม)
+- **`takkub worktree merge --role` เดา "ล่าสุด" เองเมื่อ role มีหลาย worktree (#439)** — ปฏิเสธแล้ว list `--branch` ให้เลือก (พร้อม dirty/commit ahead) · `--latest` ถ้าจะเอาใหม่สุดจริง · `takkub worktree clean --branch wt/...` ลบตัวเดียว
+- **merge proposal ไม่เตือน conflict กับ base — Lead รู้ตอน merge ล้มแล้ว (#442)** — `merge_conflict_files()` (`git merge-tree --write-tree --name-only`) ใส่ชื่อไฟล์ที่จะชนใน proposal ตอน done · `takkub worktree merge` ปฏิเสธพร้อมชื่อไฟล์ก่อนแตะ tree · `--check` = dry-run
 - **UI ค้าง 1.5–18 s จาก psutil บน Qt main thread (#437)** — console sweeper (ซ่อนหน้าต่าง console ของ process ลูก) เคยเป็น QTimer 250 ms บน main thread แล้วเดิน parent chain ผ่าน psutil ทีละ hop; ตอน process แตกเยอะ (codex เปิด pwsh ทุก tool call, pytest-xdist, pre-commit) = 5/8 stack dump ของ main_thread_stall → ย้ายเป็น daemon thread `console-sweeper` (หยุดที่ aboutToQuit) + จำกัด 16 หน้าต่างใหม่ต่อรอบ · resource governor เคยเรียก `psutil.cpu_percent`+`psutil.pids()` (เดิน process table ทั้งเครื่อง) ใน tick ของ GUI → `BackgroundSampler` อ่านบน worker thread ทุก 2 s, tick อ่านค่า cache อย่างเดียว
+
+### Added (เพิ่ม)
+
+- **redact secret ที่ cockpit ส่งต่อ (#441)** — module ใหม่ `secret_redact.py` (pure, ทุก provider): ค่าใน `KEY=value` ที่ชื่อ key เข้า pattern `*SECRET/*PASSWORD/*TOKEN/*API_KEY/*PRIVATE_KEY/*_KEY` และ literal ทรง JWT/`ghp_`/`sk-`/`xox?-`/`AKIA`/PEM ถูกแทนเป็น `<redacted:NAME>` (เก็บชื่อ key ไว้ debug) ก่อนเข้า done digest / merge proposal / `takkub send` / remote mirror · ต่อท้ายบรรทัดเตือน + event `forwarded_secret_redacted` (ไม่ log ค่า) · placeholder อย่าง `${VAR}`/`<paste-here>`/`changeme` ไม่โดน
 
 ## [v1.6.13] - 2026-08-29
 
