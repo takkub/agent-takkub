@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.20] - 2026-08-30
+
 ### Fixed (แก้)
 
 - **เปิดลิงก์ URL-only บนมือถือแล้วยังเจอหน้า pairing** — PWA ใช้ `base` เก่าจาก localStorage (secret path จากการจับคู่รอบก่อน) ยิง `/api/bootstrap` → 404 → pairing ทั้งที่ลิงก์ที่เปิดถูกต้อง · ตอนนี้ path ที่หน้าถูกเสิร์ฟอยู่เป็น base เสมอ (ไม่มี token หรือ base ไม่ตรงกับที่เปิด) · bump SW cache v33
