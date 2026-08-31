@@ -686,6 +686,31 @@ class TestStallTracker:
         assert t.should_snapshot_stack(1.5) is False  # not yet doubled
         assert t.should_snapshot_stack(2.0) is True  # exactly doubled
 
+    # ── #452 follow-up: busy_threads plumbing ───────────────────────
+
+    def test_no_busy_threads_recorded_means_no_busy_threads_key(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        t.record_stack(["app.py:main:1018"], 1.0)  # no busy_threads arg
+        rec = t.update(0.0, False)
+        assert "busy_threads" not in rec
+
+    def test_recorded_busy_threads_are_attached_to_the_episode_record(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        t.record_stack(["app.py:main:1018"], 1.0, ["worker-1: orchestrator.py:_run:42"])
+        rec = t.update(0.0, False)
+        assert rec["busy_threads"] == ["worker-1: orchestrator.py:_run:42"]
+
+    def test_busy_threads_resets_between_episodes(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        t.record_stack(["app.py:main:1018"], 1.0, ["worker-1: orchestrator.py:_run:42"])
+        t.update(0.0, False)  # episode 1 ends, consuming busy_threads
+        t.update(1.0, False)  # episode 2 — no snapshot taken this time
+        rec = t.update(0.0, False)
+        assert "busy_threads" not in rec
+
 
 class TestFormatMainThreadFrames:
     """`_format_main_thread_frames` (#452) — best-effort top frames of the
@@ -714,6 +739,79 @@ class TestFormatMainThreadFrames:
     def test_returns_empty_list_when_current_frames_lookup_fails(self) -> None:
         with patch.object(app_mod.sys, "_current_frames", side_effect=RuntimeError("wedged")):
             assert app_mod._format_main_thread_frames() == []
+
+
+class TestFormatStallThreads:
+    """`_format_stall_threads` (#452 follow-up): a snapshot of every OTHER
+    thread's top frame(s) at the moment of a stall, so a GIL-starvation
+    episode (main thread parked at `app.exec()`, culprit elsewhere) still
+    points at the actual busy thread."""
+
+    def _spawn_busy_thread(self, name: str = "cpu-busy-test-thread"):
+        stop = threading.Event()
+
+        def _spin() -> None:
+            while not stop.is_set():
+                pass  # genuinely holds the GIL — no wait frame anywhere
+
+        t = threading.Thread(target=_spin, name=name, daemon=True)
+        t.start()
+        return t, stop
+
+    def _spawn_waiting_thread(self, name: str = "event-wait-test-thread"):
+        stop = threading.Event()
+        parked = threading.Event()
+
+        def _wait() -> None:
+            parked.set()
+            stop.wait(timeout=30)
+
+        t = threading.Thread(target=_wait, name=name, daemon=True)
+        t.start()
+        parked.wait(timeout=5)
+        return t, stop
+
+    def test_returns_a_thread_genuinely_running_python(self) -> None:
+        t, stop = self._spawn_busy_thread()
+        try:
+            # give the spinner a moment to actually be scheduled/running
+            time.sleep(0.05)
+            entries = app_mod._format_stall_threads()
+            assert any("cpu-busy-test-thread" in e for e in entries)
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+    def test_excludes_a_thread_parked_on_event_wait(self) -> None:
+        t, stop = self._spawn_waiting_thread()
+        try:
+            entries = app_mod._format_stall_threads()
+            assert not any("event-wait-test-thread" in e for e in entries)
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+    def test_excludes_the_main_thread_and_the_calling_thread_itself(self) -> None:
+        # Called directly from the test's own thread (pytest's main thread
+        # here doubles as "main" — the exclusion is on ident, not name).
+        entries = app_mod._format_stall_threads()
+        assert not any(threading.current_thread().name in e for e in entries)
+
+    def test_max_threads_is_respected(self) -> None:
+        spun = [self._spawn_busy_thread(name=f"cpu-busy-{i}") for i in range(4)]
+        try:
+            time.sleep(0.05)
+            entries = app_mod._format_stall_threads(max_threads=2)
+            assert len(entries) <= 2
+        finally:
+            for _t, stop in spun:
+                stop.set()
+            for t, _stop in spun:
+                t.join(timeout=5)
+
+    def test_returns_empty_list_when_current_frames_lookup_fails(self) -> None:
+        with patch.object(app_mod.sys, "_current_frames", side_effect=RuntimeError("wedged")):
+            assert app_mod._format_stall_threads() == []
 
 
 # ─────────────────────────────────────────────────────────────
