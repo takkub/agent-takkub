@@ -250,6 +250,95 @@ class TestOnPaneInputFiltersTerminalAutoReplies:
         assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is not None
 
 
+class TestLeadInputStampedEvent:
+    """#449: every `_on_pane_input` stamp of `_lead_last_user_input_ts` must
+    log a `lead_input_stamped` event — the old `lead_user_input_stamp` only
+    fired for a short ESC-led chunk, so a stamp from plain typed text (the
+    common case) left no trace at all, making a spurious `takkub wait`
+    interrupt undiagnosable after the fact."""
+
+    def test_printable_keystroke_logs_event_with_printable_true(self, orch: Orchestrator) -> None:
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        with patch("agent_takkub.orchestrator._log_event") as log_spy:
+            orch._on_pane_input("lead", b"hello")
+
+        stamps = [c for c in log_spy.call_args_list if c.args[0] == "lead_input_stamped"]
+        assert len(stamps) == 1
+        assert stamps[0].kwargs["chunk_len"] == 5
+        assert stamps[0].kwargs["printable"] is True
+        assert orch._lead_last_user_input_printable[TEST_PROJECT] is True
+
+    def test_unrecognized_escape_chunk_logs_printable_true_too(self, orch: Orchestrator) -> None:
+        """An ESC-led chunk that got PAST the auto-reply denylist (so it did
+        stamp) but isn't a recognized structural escape sequence either —
+        e.g. a real arrow-key/F-key press, or an unknown terminal reply —
+        must read `printable=True`: `_ANSI_SEQ_RE` doesn't recognize it, so
+        it counts as "content survives stripping", the same conservative
+        default as plain text."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        with patch("agent_takkub.orchestrator._log_event") as log_spy:
+            orch._on_pane_input("lead", b"\x1b!")  # not in _ANSI_SEQ_RE's shapes
+
+        stamps = [c for c in log_spy.call_args_list if c.args[0] == "lead_input_stamped"]
+        assert len(stamps) == 1
+        assert stamps[0].kwargs["printable"] is True
+        assert orch._lead_last_user_input_printable[TEST_PROJECT] is True
+
+    def test_recognized_escape_sequence_that_still_stamps_logs_printable_false(
+        self, orch: Orchestrator
+    ) -> None:
+        """A chunk that fully parses as a RECOGNIZED escape sequence (per
+        the wider `_ANSI_SEQ_RE`, e.g. a genuine arrow-key SS3/CSI code) but
+        wasn't on the narrower auto-reply denylist (so `_on_pane_input`
+        still stamped it) must read `printable=False` — nothing is left
+        once the recognized structure is stripped out."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        with patch("agent_takkub.orchestrator._log_event") as log_spy:
+            orch._on_pane_input("lead", b"\x1b[A")  # up-arrow — CSI, final byte 'A'
+
+        stamps = [c for c in log_spy.call_args_list if c.args[0] == "lead_input_stamped"]
+        assert len(stamps) == 1
+        assert stamps[0].kwargs["printable"] is False
+        assert orch._lead_last_user_input_printable[TEST_PROJECT] is False
+
+    def test_escape_repr_never_leaks_plain_typed_text(self, orch: Orchestrator) -> None:
+        """The forensic log line must be safe to write unconditionally — a
+        password or sensitive path mid-type must never appear in it, only
+        the structural escape-sequence bytes (if any)."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+        secret = b"hunter2-super-secret-path/etc/shadow"
+
+        with patch("agent_takkub.orchestrator._log_event") as log_spy:
+            orch._on_pane_input("lead", b"\x1b[A" + secret)
+
+        stamps = [c for c in log_spy.call_args_list if c.args[0] == "lead_input_stamped"]
+        assert len(stamps) == 1
+        assert b"hunter2" not in stamps[0].kwargs["escape_repr"].encode()
+        assert stamps[0].kwargs["printable"] is True  # secret bytes do survive detection
+        assert stamps[0].kwargs["chunk_len"] == len(b"\x1b[A" + secret)
+
+    def test_pure_auto_reply_chunk_never_logs_lead_input_stamped(self, orch: Orchestrator) -> None:
+        """A chunk filtered out entirely by `_is_terminal_auto_reply_chunk`
+        (the narrower denylist) never reaches the stamping branch at all —
+        no `lead_input_stamped` event, same as it never stamps the
+        timestamp."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        with patch("agent_takkub.orchestrator._log_event") as log_spy:
+            orch._on_pane_input("lead", b"\x1b[?1;2c")  # DA1 reply
+
+        stamps = [c for c in log_spy.call_args_list if c.args[0] == "lead_input_stamped"]
+        assert stamps == []
+
+
 class TestProjectNsForPane:
     def test_finds_owning_project_by_identity(self, orch: Orchestrator) -> None:
         pane_a = _make_pane("lead")

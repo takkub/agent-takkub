@@ -659,6 +659,45 @@ class TestPollWaitUserInputInterrupt:
         assert "backend" in result["pending"]
         assert PROJECT not in orch._active_waits
 
+    def test_interrupt_carries_printable_flag_from_the_stamped_chunk(
+        self, orch: Orchestrator
+    ) -> None:
+        """#449: the interrupt dict must surface whether the chunk that
+        stamped `_lead_last_user_input_ts` had any real content left after
+        stripping recognizable escape sequences — `cli.cmd_wait` uses this
+        to tell confirmed typing apart from an unrecognized terminal-echo/
+        digest-artifact structure instead of asserting "you typed
+        something" either way."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        started_ts = orch._active_waits[PROJECT]["started_ts"]
+        orch._lead_last_user_input_ts[PROJECT] = started_ts + 1.0
+        orch._lead_last_user_input_printable[PROJECT] = False
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"]["printable"] is False
+        assert "byte แปลกๆ" in result["interrupt"]["detail"]
+        assert "มีข้อความ/คำสั่งใหม่จากคุณเข้ามา" not in result["interrupt"]["detail"], (
+            "an unconfirmed chunk must never be worded as confirmed typing"
+        )
+
+    def test_interrupt_defaults_to_printable_true_when_unset(self, orch: Orchestrator) -> None:
+        """Back-compat / conservative default: if `_lead_last_user_input_printable`
+        has no entry for this project (older code path, direct test call),
+        the interrupt must default to `printable=True` — #265's "never
+        suppress a genuine keystroke" call — rather than silently downgrading
+        a real interrupt to the ambiguous wording."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        started_ts = orch._active_waits[PROJECT]["started_ts"]
+        orch._lead_last_user_input_ts[PROJECT] = started_ts + 1.0
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"]["printable"] is True
+        assert "มีข้อความ/คำสั่งใหม่จากคุณเข้ามา" in result["interrupt"]["detail"]
+
     def test_input_before_wait_started_does_not_interrupt(self, orch: Orchestrator) -> None:
         """A draft/keystroke the owner typed BEFORE calling `takkub wait`
         (e.g. the very command that spawned this wait) must not immediately

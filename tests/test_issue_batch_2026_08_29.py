@@ -204,6 +204,125 @@ class TestWaitRoles:
         assert out["roles"] == ["devops", "backend"]
 
 
+# ── #449 ───────────────────────────────────────────────────────────────────
+class TestAmbiguousUserInputInterruptAutoResumes:
+    """#449: a `user_input` interrupt whose stamped chunk had no real text
+    left after stripping recognizable escape sequences (`printable: False`
+    — a digest-triggered terminal echo the #357/#420/#428/#431 denylist
+    didn't catch) must never end a multi-role wait as an error. The role
+    that already resolved is reported live; the rest keep being watched."""
+
+    def test_ambiguous_echo_auto_resumes_instead_of_erroring(self, monkeypatch):
+        calls: list[dict] = []
+        state = {"n": 0}
+
+        def _fake_request(payload, **kw):
+            calls.append(payload)
+            cmd = payload["cmd"]
+            if cmd == "wait-begin":
+                wid = "w1" if state["n"] == 0 else "w2"
+                return {"ok": True, "wait_id": wid, "roles": payload["roles"]}
+            if cmd == "wait-poll":
+                state["n"] += 1
+                if state["n"] == 1:
+                    return {
+                        "ok": True,
+                        "pending": {"backend": "working", "frontend": "working"},
+                        "done": {},
+                        "failed": {},
+                        "gone": {},
+                        "elapsed": 1,
+                        "expired": False,
+                        "interrupt": None,
+                    }
+                if state["n"] == 2:
+                    # backend just resolved; the SAME poll tick also carries
+                    # an ambiguous (non-printable) user_input interrupt —
+                    # exactly the #449 incident shape.
+                    return {
+                        "ok": True,
+                        "pending": {"frontend": "working"},
+                        "done": {"backend": "delivered"},
+                        "failed": {},
+                        "gone": {},
+                        "elapsed": 5,
+                        "expired": False,
+                        "interrupt": {
+                            "role": "lead",
+                            "detail": "มี byte แปลกๆ เข้ามาที่ pane ระหว่างรอ ไม่ใช่ข้อความที่คุณพิมพ์",
+                            "reason": "user_input",
+                            "printable": False,
+                        },
+                    }
+                return {
+                    "ok": True,
+                    "pending": {},
+                    "done": {"frontend": "delivered"},
+                    "failed": {},
+                    "gone": {},
+                    "elapsed": 8,
+                    "expired": False,
+                    "interrupt": None,
+                }
+            return {"ok": True}
+
+        monkeypatch.setattr(cli, "_request", _fake_request)
+        monkeypatch.setattr(cli, "_request_with_retry", _fake_request)
+        monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+        args = argparse.Namespace(
+            role=["backend", "frontend"], timeout=60, cancel=False, no_interrupt=False
+        )
+        out = cli.cmd_wait(args)
+
+        assert out["ok"] is True, "must resolve cleanly, not as an interrupted error"
+        assert out["exit_code"] == 0
+        assert out["interrupt"] is None, (
+            "the ambiguous echo must not surface as the final interrupt"
+        )
+        # A fresh wait-begin was issued for the still-pending role(s) only.
+        rebegins = [c for c in calls if c["cmd"] == "wait-begin"]
+        assert len(rebegins) == 2
+        assert rebegins[1]["roles"] == ["frontend"]
+
+    def test_confirmed_typing_still_stops_the_wait(self, monkeypatch):
+        """A `printable: True` interrupt (confirmed real typing) must keep
+        stopping the wait exactly as before — only the ambiguous case rides
+        out automatically."""
+
+        def _fake_request(payload, **kw):
+            cmd = payload["cmd"]
+            if cmd == "wait-begin":
+                return {"ok": True, "wait_id": "w1", "roles": payload["roles"]}
+            if cmd == "wait-poll":
+                return {
+                    "ok": True,
+                    "pending": {"frontend": "working"},
+                    "done": {},
+                    "failed": {},
+                    "gone": {},
+                    "elapsed": 3,
+                    "expired": False,
+                    "interrupt": {
+                        "role": "lead",
+                        "detail": "มีข้อความ/คำสั่งใหม่จากคุณเข้ามาระหว่างที่ wait กำลังรออยู่",
+                        "reason": "user_input",
+                        "printable": True,
+                    },
+                }
+            return {"ok": True}
+
+        monkeypatch.setattr(cli, "_request", _fake_request)
+        monkeypatch.setattr(cli, "_request_with_retry", _fake_request)
+        monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+        args = argparse.Namespace(role=["frontend"], timeout=60, cancel=False, no_interrupt=False)
+        out = cli.cmd_wait(args)
+
+        assert out["ok"] is False
+        assert out["exit_code"] == 1
+        assert out["interrupt"] is not None
+        assert "interrupted by user input" in out["msg"]
+
+
 class TestPostInjectTerminalReply:
     def test_esc_chunk_right_after_engine_write_is_not_user_input(self, orch):
         session = MagicMock()

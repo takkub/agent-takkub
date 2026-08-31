@@ -2072,7 +2072,30 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 last_heartbeat = now_t
             last_pending_keys = pending_keys
             interrupt = poll.get("interrupt")
-            if interrupt and interrupt.get("reason") == "user_input" and no_interrupt:
+            # #449: a "user_input" interrupt whose stamped chunk had no
+            # content left after stripping recognizable escape sequences
+            # (`printable is False` — see `_pending_user_input_interrupt`)
+            # is exactly the digest/terminal-echo false-positive this issue
+            # is about, NOT confirmed typing — ride it out unconditionally,
+            # same as the explicit `--no-interrupt` opt-in below, instead of
+            # ending a multi-role wait (and reading as an error) over a role
+            # that already resolved cleanly one poll tick earlier.
+            ambiguous_echo = (
+                interrupt is not None
+                and interrupt.get("reason") == "user_input"
+                and interrupt.get("printable") is False
+            )
+            if (
+                interrupt
+                and interrupt.get("reason") == "user_input"
+                and (no_interrupt or ambiguous_echo)
+            ):
+                if ambiguous_echo and not no_interrupt:
+                    print(
+                        "[wait] เห็น byte แปลกๆ ที่ไม่ใช่ข้อความที่คุณพิมพ์ (โครงสร้างเหมือน "
+                        "terminal echo/digest artifact ที่ยังกรองไม่หมด) — ไม่นับเป็น interrupt, "
+                        f"resume watching {len(pending_keys)} role(s) ที่เหลือต่อ"
+                    )
                 # #357: caller asked to ride out this specific interrupt
                 # reason — the server already tore down the registration
                 # (poll_wait ends it on ANY interrupt), so transparently
