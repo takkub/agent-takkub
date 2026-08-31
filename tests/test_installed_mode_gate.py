@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -318,6 +319,13 @@ class TestInstalledRemoteAssets:
     def test_wheel_ships_resume_and_project_stream_assets(
         self, installed_venv: Path, installed_home: Path
     ) -> None:
+        source_sw = (_REPO_ROOT / "src" / "agent_takkub" / "remote" / "static" / "sw.js").read_text(
+            encoding="utf-8"
+        )
+        source_cache_name_match = re.search(r'CACHE_NAME\s*=\s*"([^"]+)"', source_sw)
+        assert source_cache_name_match, "CACHE_NAME not found in source sw.js"
+        source_cache_name = source_cache_name_match.group(1)
+
         out = _run_in_venv(
             installed_venv,
             installed_home,
@@ -336,16 +344,23 @@ class TestInstalledRemoteAssets:
                 "has_sessions_api": "api/lead/sessions" in app,
                 "has_resume_api": "api/lead/resume" in app,
                 "has_upload_api": "api/lead/upload" in app,
-                "has_cache_v36": "takkub-remote-shell-v36" in sw,
+                "sw": sw,
             }))
             """,
         )
-        assert out == {
+        result = {
+            "has_project_state": out["has_project_state"],
+            "has_sessions_api": out["has_sessions_api"],
+            "has_resume_api": out["has_resume_api"],
+            "has_upload_api": out["has_upload_api"],
+            "has_current_cache_name": source_cache_name in out["sw"],
+        }
+        assert result == {
             "has_project_state": True,
             "has_sessions_api": True,
             "has_resume_api": True,
             "has_upload_api": True,
-            "has_cache_v36": True,
+            "has_current_cache_name": True,
         }
 
 
