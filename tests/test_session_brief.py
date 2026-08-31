@@ -75,10 +75,18 @@ def _write_done(
 
 
 def _write_done_note(
-    runtime: pathlib.Path, project: str, day: str, role: str, time_str: str, note: str
+    runtime: pathlib.Path,
+    project: str,
+    day: str,
+    role: str,
+    time_str: str,
+    note: str,
+    failed: bool = False,
 ) -> pathlib.Path:
     """Helper: write a teammate done file with a real `## Note` block,
-    matching `_render_decision_note`'s on-disk layout."""
+    matching `_render_decision_note`'s on-disk layout. `failed=True` matches
+    the `outcome: failed` frontmatter line `_render_decision_note` stamps for
+    a `done(failed=True)` report (#448)."""
     target_dir = runtime / "sessions" / day / project
     target_dir.mkdir(parents=True, exist_ok=True)
     body = (
@@ -87,7 +95,8 @@ def _write_done_note(
         f"project: {project}\n"
         f"date: {day}T{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}\n"
         f"tags: [session, {role}, {project}]\n"
-        f"---\n\n"
+        + ("outcome: failed\n" if failed else "")
+        + "---\n\n"
         f"# {role} done\n\n"
         f"**Project:** [[01-Projects/{project}|{project}]]\n"
         f"**Role:** {role}\n\n"
@@ -204,6 +213,37 @@ class TestRecentSessionBrief:
         assert brief.index("NEWER substantive note here") < brief.index(
             "OLDER substantive note here"
         )
+
+    def test_failed_done_tagged_not_listed_as_finished_work(
+        self, runtime_tmp: pathlib.Path
+    ) -> None:
+        """#448: a synthetic `[boot-timeout]` done (task never delivered) must
+        never read like ordinary finished work in the brief — it must carry a
+        visible ❌ tag instead of appearing bare like a real done note."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        _write_done_note(
+            runtime_tmp,
+            TEST_PROJECT,
+            today,
+            "reviewer",
+            "112750",
+            "[boot-timeout] pane ของ reviewer ไม่เคยผ่าน boot phase เลยภายใน 300s",
+            failed=True,
+        )
+        brief = _recent_session_brief(TEST_PROJECT)
+        assert brief is not None
+        assert "❌" in brief
+        assert "[boot-timeout]" in brief
+
+    def test_ordinary_done_not_tagged_failed(self, runtime_tmp: pathlib.Path) -> None:
+        """A normal successful done note must NOT get the ❌ failure tag."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        _write_done_note(
+            runtime_tmp, TEST_PROJECT, today, "backend", "090000", "added rate-limit middleware"
+        )
+        brief = _recent_session_brief(TEST_PROJECT)
+        assert brief is not None
+        assert "❌" not in brief
 
     def test_ignores_other_projects(self, runtime_tmp: pathlib.Path) -> None:
         """Done events under a *different* project don't leak into the brief."""

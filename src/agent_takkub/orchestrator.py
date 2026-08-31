@@ -2096,7 +2096,7 @@ class Orchestrator(
                 "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-done"
             )
 
-        session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+        session_path = self._save_decision_note(project_ns, role_name, note, now=now, failed=failed)
 
         # Core V2 Conversation hook (#309 Phase 6) — see done()'s identical
         # comment. Subagents have no pane/PTY, so there is no cwd/session_id
@@ -5124,7 +5124,7 @@ class Orchestrator(
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
         transcript_path = getattr(pane, "_transcript_path", None)
         session_md_path = self._save_decision_note(
-            project_ns, from_role, note, now=now, transcript_path=transcript_path
+            project_ns, from_role, note, now=now, transcript_path=transcript_path, failed=failed
         )
 
         # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
@@ -5671,6 +5671,7 @@ class Orchestrator(
         note: str,
         now: datetime | None = None,
         transcript_path: str | None = None,
+        failed: bool = False,
     ) -> str | None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
@@ -5711,7 +5712,9 @@ class Orchestrator(
             return None
         if now is None:
             now = datetime.now()
-        body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
+        body = _render_decision_note(
+            project, role, note, now, transcript_path=transcript_path, failed=failed
+        )
         try:
             safe_project = validate_name(project, "project")
         except ValueError:

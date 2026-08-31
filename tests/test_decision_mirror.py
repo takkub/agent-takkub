@@ -123,6 +123,19 @@ class TestRenderDecisionNote:
         # No microseconds — the format is `isoformat(timespec='seconds')`.
         assert ".000000" not in body
 
+    def test_failed_flag_stamps_outcome_frontmatter(self) -> None:
+        """#448: `failed=True` must stamp an `outcome: failed` frontmatter
+        line so `lead_context._recent_session_brief` can tell a real failure
+        (a synthetic boot-timeout close included) apart from finished work."""
+        now = dt.datetime(2026, 5, 17, 14, 30, 45)
+        body = _render_decision_note("p", "r", "long enough note body", now, failed=True)
+        assert "outcome: failed" in body
+
+    def test_ordinary_note_has_no_outcome_line(self) -> None:
+        now = dt.datetime(2026, 5, 17, 14, 30, 45)
+        body = _render_decision_note("p", "r", "long enough note body", now)
+        assert "outcome:" not in body
+
     def test_note_is_stripped_of_outer_whitespace(self) -> None:
         # `takkub done "  text  "` shouldn't produce a body with leading
         # or trailing blank lines around the note block — those break
