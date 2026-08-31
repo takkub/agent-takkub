@@ -594,6 +594,41 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if cr is not None and hasattr(cr, "CUSTOM_AGENTS_DIR"):
         monkeypatch.setattr(cr, "CUSTOM_AGENTS_DIR", _custom_agents_dir, raising=False)
 
+    # user_profile._DEFAULT_CONFIG_DIR = config.default_claude_config_dir()
+    # is ANOTHER import-time-bound constant (same shape as the SETTINGS_HOME
+    # ones above, just not itself SETTINGS_HOME-rooted) — on a dev checkout
+    # it's the real `~/.claude`. worktree_manager.pre_trust_worktrees_root
+    # (#444) derives the default-profile `.claude.json` location from it, so
+    # an unpatched test exercising that path (any `--isolation worktree`
+    # assign through a real, un-mocked Orchestrator._assign_with_worktree —
+    # confirmed live via test_worktree_assign.py before this fix) wrote a
+    # stray trust entry into the REAL `~/.claude.json` on the machine
+    # running the suite. Same fix shape as CUSTOM_AGENTS_DIR above; a test
+    # with its own `monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", ...)`
+    # (the test_user_profile.py `isolate` fixture's convention) still wins.
+    up_mod = _maybe_module("agent_takkub.user_profile", force=True)
+    if up_mod is not None and hasattr(up_mod, "_DEFAULT_CONFIG_DIR"):
+        monkeypatch.setattr(
+            up_mod,
+            "_DEFAULT_CONFIG_DIR",
+            tmp_path / "_isolated_takkub" / "dot-claude",
+            raising=False,
+        )
+
+    # worktree_manager.DATA_HOME = config.DATA_HOME is likewise bound by
+    # value at import time (`from .config import DATA_HOME`), so patching
+    # `cfg.DATA_HOME` above (kept equal to `cfg.REPO_ROOT` for the "dev
+    # checkout" identity other code branches on) does not reach it. Every
+    # worktree-managed-root computation (`worktree_root`,
+    # `worktrees_managed_root`, `pre_trust_worktrees_root`) otherwise
+    # resolves against the REAL DATA_HOME of whatever checkout runs the
+    # suite instead of an isolated tmp dir. A test with its own
+    # `monkeypatch.setattr(wm, "DATA_HOME", ...)` (the existing
+    # test_worktree_manager.py convention) still wins.
+    wm_mod = _maybe_module("agent_takkub.worktree_manager", force=True)
+    if wm_mod is not None and hasattr(wm_mod, "DATA_HOME") and "_isolated_repo_root" in locals():
+        monkeypatch.setattr(wm_mod, "DATA_HOME", _isolated_repo_root, raising=False)
+
     # Several modules deliberately resolve their state path lazily from
     # `config.SETTINGS_HOME` at CALL time instead of binding a module-level
     # constant, specifically so a test that monkeypatches `config.SETTINGS_

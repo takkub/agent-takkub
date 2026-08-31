@@ -89,6 +89,72 @@ def installed_mode_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) 
     return assets_root
 
 
+class TestRewriteHelperIdempotent:
+    """#447: the rewrite must not re-match its own output on repeated runs,
+    and must self-heal text already corrupted by the old non-idempotent
+    str.replace()."""
+
+    def test_repeated_calls_converge_after_first(self) -> None:
+        from agent_takkub.lead_context import _rewrite_docs_lead_refs
+
+        docs_lead_dir = (
+            "C:/Users/monch/.agent-takkub/venv/Lib/site-packages/agent_takkub/_assets/docs/lead"
+        )
+        text = "See `docs/lead/patterns.md` and `docs/lead/cli-reference.md`.\n"
+
+        once = _rewrite_docs_lead_refs(text, docs_lead_dir)
+        twice = _rewrite_docs_lead_refs(once, docs_lead_dir)
+        thrice = _rewrite_docs_lead_refs(twice, docs_lead_dir)
+
+        assert once == twice == thrice
+        assert once.count(docs_lead_dir) == 2
+        assert f"{docs_lead_dir}/patterns.md" in once
+        assert f"{docs_lead_dir}/cli-reference.md" in once
+
+    def test_repeated_calls_converge_posix_path(self) -> None:
+        from agent_takkub.lead_context import _rewrite_docs_lead_refs
+
+        docs_lead_dir = "/Users/someone/.agent-takkub/venv/lib/agent_takkub/_assets/docs/lead"
+        text = "See `docs/lead/patterns.md`.\n"
+
+        once = _rewrite_docs_lead_refs(text, docs_lead_dir)
+        twice = _rewrite_docs_lead_refs(once, docs_lead_dir)
+
+        assert once == twice
+        assert once.count(docs_lead_dir) == 1
+
+    def test_normalizes_already_corrupted_nested_prefix(self) -> None:
+        """A file already on disk from a prior buggy install — the prefix
+        nested 3x before a single trailing docs/lead/ — must collapse to one
+        copy, not grow a 4th."""
+        from agent_takkub.lead_context import _rewrite_docs_lead_refs
+
+        docs_lead_dir = "C:/site-packages/agent_takkub/_assets/docs/lead"
+        prefix = "C:/site-packages/agent_takkub/_assets/"
+        corrupted = f"See `{prefix * 3}docs/lead/role-and-workflow.md`.\n"
+
+        fixed = _rewrite_docs_lead_refs(corrupted, docs_lead_dir)
+
+        assert fixed == f"See `{docs_lead_dir}/role-and-workflow.md`.\n"
+        assert fixed.count(prefix) == 1
+        # And re-running it again must be a true no-op (real idempotency).
+        assert _rewrite_docs_lead_refs(fixed, docs_lead_dir) == fixed
+
+    def test_docs_lead_inside_unrelated_absolute_path_untouched(self) -> None:
+        """A `docs/lead/` substring that is part of some other absolute path
+        (not our own staged-docs prefix) must be left alone — it's already
+        preceded by a path character, so the guarded regex must not treat it
+        as a relative reference to prepend onto."""
+        from agent_takkub.lead_context import _rewrite_docs_lead_refs
+
+        docs_lead_dir = "C:/site-packages/agent_takkub/_assets/docs/lead"
+        text = "unrelated: /opt/other/docs/lead/notes.md stays put\n"
+
+        fixed = _rewrite_docs_lead_refs(text, docs_lead_dir)
+
+        assert fixed == text
+
+
 class TestDevModeUnchanged:
     def test_docs_lead_reference_left_relative(self, dev_mode_env: pathlib.Path) -> None:
         from agent_takkub.lead_context import _build_lead_context_text
@@ -120,6 +186,25 @@ class TestInstalledModeRewrite:
         # — proves this isn't just string surgery pointing at nothing.
         assert pathlib.Path(rewritten_patterns).is_file()
         assert pathlib.Path(rewritten_cli_ref).is_file()
+
+    def test_three_spawns_produce_identical_text_and_staged_files(
+        self, installed_mode_env: pathlib.Path
+    ) -> None:
+        """#447: simulate 3 Lead spawns in a row (each re-reads/rewrites the
+        staged docs from disk, as a real upgrade-then-spawn cycle does) — the
+        3rd spawn's rendered text and the staged files on disk must be
+        identical to the 1st, not carry a growing nested prefix."""
+        from agent_takkub.lead_context import _build_lead_context_text
+
+        first = _build_lead_context_text()
+        second = _build_lead_context_text()
+        third = _build_lead_context_text()
+
+        assert first == second == third
+
+        docs_lead = installed_mode_env / "docs" / "lead"
+        patterns_text = (docs_lead / "patterns.md").read_text(encoding="utf-8")
+        assert patterns_text == "# patterns doc"
 
     def test_rendered_context_written_to_runtime_points_at_real_files(
         self, installed_mode_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch

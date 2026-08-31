@@ -829,11 +829,16 @@ class PaneState:
     proactive_compact_idle_since: float | None = None
     proactive_compact_sent_ts: float = 0.0
     # proactive_compact_baseline_bytes: the session's `output_bytes_total`
-    # observed when the last `/compact` settled (pane back at ready). -1 =
-    # never compacted. A later idle episode only earns another `/compact`
-    # when the pane produced at least PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES
-    # past this — nothing new in the conversation means nothing new to
-    # compact, however many idle episodes the footer redraws split it into.
+    # observed when the last `/compact` settled (pane back at ready), OR
+    # (#450) the first `output_bytes_total` this watchdog ever observed for
+    # the pane if no `/compact` has settled yet — seeded on the watchdog's
+    # very first tick for this pane so a freshly-spawned, still-idle pane
+    # (never assigned anything) isn't read as "never compacted" and doesn't
+    # bypass the min-new-output gate below on its first idle episode. -1 =
+    # not yet seeded. A later idle episode only earns another `/compact` when
+    # the pane produced at least PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES past
+    # this — nothing new in the conversation means nothing new to compact,
+    # however many idle episodes the footer redraws split it into.
     proactive_compact_baseline_bytes: int = -1
     # proactive_compact_pending: True from the moment `/compact` is injected
     # until the pane is next observed back at its ready prompt. While True,

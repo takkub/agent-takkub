@@ -7,6 +7,7 @@ injected fake git runner, so nothing here shells out to a real repository
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -2108,3 +2109,111 @@ class TestCleanIsolatedBranchFilter:
         lines = WorktreeManager(r).clean_isolated("/repo", branch="wt/ghost-1")
         assert lines == ["NOT FOUND  wt/ghost-1 — ไม่ใช่ wt/* worktree ที่ git รู้จัก"]
         assert not r.ran("worktree", "remove")
+
+
+class TestPreTrustWorktreesRoot:
+    """#444: pre-trusting the shared worktrees root in Claude Code's own
+    ``.claude.json`` so a fresh `--isolation worktree` cwd never hits the
+    interactive folder-trust dialog (whose auto-answer gives up after 90s,
+    leaving the pane stuck with no task ever delivered)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        from agent_takkub import user_profile as up
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path / "data-home")
+        # Same isolation convention as test_user_profile.py's `isolate`
+        # fixture — never touch the real ~/.takkub profile registry.
+        monkeypatch.setattr(up, "_BASE_DIR", tmp_path / "settings-home")
+        monkeypatch.setattr(up, "_REGISTRY_PATH", tmp_path / "settings-home" / "user-profiles.json")
+        # Default profile branch of pre_trust_worktrees_root derives the
+        # default `.claude.json` location from `_DEFAULT_CONFIG_DIR.parent`
+        # (a sibling of `~/.claude/`, not inside it, mirroring Claude Code's
+        # own un-overridden layout) — pin `_DEFAULT_CONFIG_DIR` itself under
+        # tmp_path so nothing touches the real `~/.claude.json`.
+        monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", tmp_path / "home" / ".claude")
+        self.tmp_path = tmp_path
+
+    def _worktrees_root_str(self):
+        from agent_takkub.worktree_manager import worktrees_managed_root
+
+        return str(worktrees_managed_root())
+
+    def test_creates_missing_file_with_trust_entry(self):
+        from agent_takkub.worktree_manager import pre_trust_worktrees_root
+
+        pre_trust_worktrees_root("myproject")
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["projects"][self._worktrees_root_str()]["hasTrustDialogAccepted"] is True
+
+    def test_preserves_other_keys_and_other_projects(self):
+        from agent_takkub.worktree_manager import pre_trust_worktrees_root
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {"email": "user@example.com"},
+                    "projects": {"/some/other/repo": {"hasTrustDialogAccepted": True}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        pre_trust_worktrees_root("myproject")
+
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["oauthAccount"] == {"email": "user@example.com"}
+        assert data["projects"]["/some/other/repo"]["hasTrustDialogAccepted"] is True
+        assert data["projects"][self._worktrees_root_str()]["hasTrustDialogAccepted"] is True
+
+    def test_already_trusted_is_a_true_no_op(self):
+        from agent_takkub.worktree_manager import pre_trust_worktrees_root
+
+        pre_trust_worktrees_root("myproject")  # first call creates + trusts
+        json_path = self.tmp_path / "home" / ".claude.json"
+        before = json_path.read_text(encoding="utf-8")
+        before_mtime = json_path.stat().st_mtime_ns
+
+        pre_trust_worktrees_root("myproject")  # second call: already trusted
+
+        assert json_path.read_text(encoding="utf-8") == before
+        assert json_path.stat().st_mtime_ns == before_mtime
+
+    def test_malformed_json_is_skipped_and_logged(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text("{not valid json", encoding="utf-8")
+        before = json_path.read_text(encoding="utf-8")
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(wm, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+
+        wm.pre_trust_worktrees_root("myproject")
+
+        # File left exactly as it was — never overwritten on a parse failure.
+        assert json_path.read_text(encoding="utf-8") == before
+        assert len(events) == 1
+        assert events[0][0] == "worktree_pretrust_skip"
+
+    def test_non_default_profile_writes_inside_config_dir(self):
+        from agent_takkub import user_profile as up
+        from agent_takkub.worktree_manager import pre_trust_worktrees_root
+
+        custom_dir = self.tmp_path / "custom-claude-config"
+        up.add_profile("work", str(custom_dir))
+        up.set_profile("myproject", "work")
+
+        pre_trust_worktrees_root("myproject")
+
+        json_path = custom_dir / ".claude.json"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["projects"][self._worktrees_root_str()]["hasTrustDialogAccepted"] is True
+        # The default-profile location must be untouched.
+        assert not (self.tmp_path / "home" / ".claude.json").exists()

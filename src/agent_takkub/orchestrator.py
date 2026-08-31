@@ -3052,6 +3052,27 @@ class Orchestrator(
             from_role=role_name,
             note="",
         )
+        # #444: a fresh `--isolation worktree` cwd is a path Claude Code has
+        # never seen before, and its folder-trust dialog's auto-answer gives
+        # up after 90s — leaving the pane parked with no task ever
+        # delivered. Pre-trust the shared managed root (never each
+        # individual worktree) here, before dispatch spawns the pane, so
+        # this cwd — and every sibling worktree under it — is already
+        # trusted. Claude-only: other providers have no such file. Uses the
+        # same override-or-role-default resolution as `_assign_dispatch`
+        # (a worktree assign's `pane_is_running` is effectively always
+        # False — the worktree just got created above). Best-effort; never
+        # blocks the spawn on failure.
+        from .provider_config import CLAUDE, effective_provider_for
+
+        resolved_provider = (provider or "").strip() or effective_provider_for(
+            role_name, project=project_ns
+        )
+        if resolved_provider == CLAUDE:
+            from .worktree_manager import pre_trust_worktrees_root
+
+            pre_trust_worktrees_root(project_ns)
+
         # postCreate runs in the pane's own shell via the task hint (visible,
         # off the Qt thread — pnpm install can take minutes).
         from .worktree_manager import load_worktree_config
@@ -8779,6 +8800,23 @@ class Orchestrator(
                         continue
                     key = f"{project_name}::{role}"
                     ps = self._ps(key)
+                    if ps.proactive_compact_baseline_bytes < 0:
+                        # #450: seed the baseline the very first tick this
+                        # watchdog observes the pane, not only after its
+                        # first `/compact` settles. Without this, a pane that
+                        # spawns and then just sits idle (no task ever sent)
+                        # falls through to the "nothing new since baseline"
+                        # gate below with baseline still -1, which reads as
+                        # "never compacted" and bypasses that gate entirely
+                        # -> fires `/compact` into an empty conversation the
+                        # moment PROACTIVE_COMPACT_IDLE_AFTER_S elapses.
+                        # Seeded here, before the ready/not-ready branch
+                        # below, so a pane that gets a task immediately after
+                        # spawn still anchors near spawn-time output rather
+                        # than after the task's own output already landed.
+                        _seed_total = getattr(sess, "output_bytes_total", None)
+                        if isinstance(_seed_total, int):
+                            ps.proactive_compact_baseline_bytes = _seed_total
                     try:
                         _has_bg_work = sess.has_background_work()
                     except Exception:
