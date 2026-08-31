@@ -2921,7 +2921,12 @@
     } else if (p.status === "unsupported") {
       noteText = p.error || "provider นี้ยังไม่มีข้อมูล usage ให้ดู";
     } else if (p.status === "error") {
-      noteText = "ดึงข้อมูลไม่สำเร็จ" + (p.error ? " — " + p.error : "");
+      // #454: `p.error` is already a short, human sentence (cause + fix,
+      // e.g. "codex: login หมดอายุ ... รัน codex login ใหม่") — never a raw
+      // subprocess/HTTP error body. The raw text (if any) rides in
+      // `p.detail`, tucked inside a collapsed <details> so it never crowds
+      // out the actionable line by default.
+      noteText = p.error || "ดึงข้อมูลไม่สำเร็จ";
     } else if (p.status === "stale" && p.error) {
       // #423: a stale snapshot ships WHY it is stale (gemini: agy never
       // writes the Antigravity quota cache, only the desktop app does) —
@@ -2940,6 +2945,22 @@
     if (noteText) {
       note.textContent = noteText;
       card.appendChild(note);
+    }
+
+    // #454: raw error text (subprocess stderr, an HTTP body) only ever goes
+    // in this collapsed section — never in `noteText` above, which must
+    // stay a short actionable sentence a phone user can read at a glance.
+    if (p.status === "error" && p.detail) {
+      var details = document.createElement("details");
+      details.className = "usage-card-detail";
+      var summary = document.createElement("summary");
+      summary.textContent = "รายละเอียด";
+      details.appendChild(summary);
+      var detailBody = document.createElement("div");
+      detailBody.className = "usage-card-detail-body";
+      detailBody.textContent = p.detail;
+      details.appendChild(detailBody);
+      card.appendChild(details);
     }
 
     return card;

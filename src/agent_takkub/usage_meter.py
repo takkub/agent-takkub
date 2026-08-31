@@ -140,7 +140,12 @@ def _provider_body_entries(
     if u.status == "loading":
         return [("text", "กำลังโหลด…", cockpit_theme.TEXT_MUTED)]
     if u.status == "error":
-        return [("text", "ดึงข้อมูลไม่สำเร็จ", cockpit_theme.STATE_ERROR_BRIGHT)]
+        # #454: `u.error` is a short, human-readable cause+fix sentence (see
+        # provider_usage.classify_codex_error) — never a raw subprocess/HTTP
+        # error body, so it is safe to show directly instead of the old
+        # generic "ดึงข้อมูลไม่สำเร็จ". The raw text (if any) stays in
+        # `u.detail`, which only ever reaches the tooltip, never this card.
+        return [("text", u.error or "ดึงข้อมูลไม่สำเร็จ", cockpit_theme.STATE_ERROR_BRIGHT)]
 
     entries: list[tuple[str, str, str] | tuple[str, str, float, str, bool]] = []
     stale = u.status == "stale"
@@ -506,7 +511,9 @@ class UsageMeter(QWidget):
             elif u.status == "loading":
                 lines.append(f"{label}: กำลังโหลด…")
             elif u.status == "error":
-                lines.append(f"{label}: ดึงข้อมูลไม่สำเร็จ")
+                lines.append(f"{label}: {u.error or 'ดึงข้อมูลไม่สำเร็จ'}")
+                if u.detail:
+                    lines.append(f"  {u.detail}")
             elif u.spend:
                 total_tok = (u.spend.get("input_tokens") or 0) + (u.spend.get("output_tokens") or 0)
                 lines.append(f"{label}: ใช้ไป {total_tok:,} tok (ไม่ใช่โควต้า)")
