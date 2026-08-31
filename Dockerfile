@@ -14,12 +14,20 @@ FROM node:20-bookworm-slim AS base
 # mode uses a bare QCoreApplication, not the offscreen QPA plugin the test
 # suite uses, so no libEGL/xcb is required — but the WebEngine .so's own
 # dlopen()'d Chromium dependencies still are).
+# The original list here (pre-#457) was written by inspection, never
+# actually built — it was missing 8 libs PyQt6.QtGui/QtWebEngineWidgets
+# dlopen() even with no window ever shown. This list is verified by a real
+# `docker build` + `python3.11 -c "from PyQt6 import QtWebEngineWidgets"` on
+# this image (#457); don't trim it back down from inspection alone.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3-pip git ca-certificates \
         libnss3 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
         libxkbcommon0 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxfixes3 libxi6 libxtst6 libdbus-1-3 \
-        libglib2.0-0 fonts-liberation \
+        libglib2.0-0 libgl1 libegl1 libopengl0 libxcb-cursor0 \
+        libxshmfence1 libxcursor1 libfontconfig1 libfreetype6 \
+        libx11-xcb1 libsm6 libice6 libatomic1 libxkbfile1 \
+        fonts-liberation socat \
     && rm -rf /var/lib/apt/lists/*
 
 # claude + codex CLIs (agy/Antigravity has no scripted Linux install — see
@@ -29,11 +37,26 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 WORKDIR /app
 COPY pyproject.toml ./
-COPY src/ ./src/
 RUN python3.11 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN pip install --no-cache-dir . \
+
+# Deps layer split from src (ponytail): editing src/ (the common case) must
+# not re-resolve/re-download every dependency on each rebuild. pyproject.toml
+# has no [build-system] deps-only install mode, so extract the dependency
+# list with stdlib tomllib and pip-install just that before src/ ever enters
+# the build context.
+RUN python3.11 -c "import tomllib, pathlib; d = tomllib.load(open('pyproject.toml', 'rb')); pathlib.Path('requirements.txt').write_text(chr(10).join(d['project']['dependencies']) + chr(10))" \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+RUN pip install --no-cache-dir --no-deps . \
     && takkub --help > /dev/null  # sanity: console-script entry points resolve
+
+# Sandbox entrypoint (docker/entrypoint-sim.sh + seed_sim.py) — inert for the
+# prod ENTRYPOINT below, only invoked when docker-compose.yml's `takkub-sim`
+# service overrides `entrypoint:` to it. See docs/guides/2026-08-31-docker-sandbox.md.
+COPY docker/entrypoint-sim.sh docker/seed_sim.py ./docker/
+RUN chmod +x ./docker/entrypoint-sim.sh
 
 # Runtime state — mount a named volume here (see docker-compose.yml) so
 # projects.json / runtime/ / role-providers.json survive container restarts.
