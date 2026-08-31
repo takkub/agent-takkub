@@ -2767,13 +2767,26 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # here (not inline JSON) to sidestep Windows argv-quoting risk for a
         # JSON string (see hook_wiring.py docstring). Applies to every claude-
         # backed pane (Lead + teammates); codex/gemini/shell panes returned
-        # earlier and never reach this branch.
+        # earlier and never reach this branch. Same file also stamps
+        # `remoteControlAtStartup` (#458) — without it Claude Code 2.1.251
+        # defaults rc to on for every pane, not just Lead.
         settings_argv: list[str] = []
         try:
-            from .hook_wiring import ensure_hook_settings_file, role_wants_concise
+            from .hook_wiring import (
+                ensure_hook_settings_file,
+                role_wants_concise,
+                role_wants_remote_control,
+            )
 
-            _concise = role_wants_concise(role_name, is_lead=role_name == LEAD.name)
-            settings_argv.extend(["--settings", ensure_hook_settings_file(concise=_concise)])
+            _is_lead_role = role_name == LEAD.name
+            _concise = role_wants_concise(role_name, is_lead=_is_lead_role)
+            _remote_control = role_wants_remote_control(role_name, is_lead=_is_lead_role)
+            settings_argv.extend(
+                [
+                    "--settings",
+                    ensure_hook_settings_file(concise=_concise, remote_control=_remote_control),
+                ]
+            )
         except Exception:
             pass  # hook wiring must never block a spawn
 

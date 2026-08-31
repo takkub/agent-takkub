@@ -86,6 +86,45 @@ def role_wants_concise(role_name: str, *, is_lead: bool) -> bool:
     return role_name in (roles or ())
 
 
+# #458: Claude Code 2.1.251 turns Remote Control on by default whenever
+# nothing in the settings stack says otherwise (rollout
+# "remote-control-auto-on" — the CLI's resolver falls back to a GB default of
+# `true` once --remote-control/project/local/policy/flag/user/legacy all
+# leave it unset). Cockpit never passed `--remote-control`, so every pane —
+# not just Lead — was picking up that GB default. `remoteControlAtStartup`
+# in the flag-tier `--settings` file (this module's existing injection
+# point) is the one layer that can force it either way, so every spawn now
+# stamps an explicit true/false here instead of leaving it to inherit.
+#
+# Same allowlist shape as `role_wants_concise` above, but the default and
+# the empty-string case are both inverted: rc defaults to Lead ONLY (not a
+# pilot roster), and an explicit empty override turns it off for EVERY role
+# including Lead (concise's empty override still excludes only teammates,
+# since Lead is hard-excluded from concise regardless). TAKKUB_REMOTE_
+# CONTROL_ROLES: comma-separated role names, "*" for every role, "" to
+# disable for everyone, unset = Lead only.
+_DEFAULT_REMOTE_CONTROL_ROLES = frozenset({"lead"})
+
+
+def role_wants_remote_control(role_name: str, *, is_lead: bool) -> bool:
+    """Whether *role_name* should get `remoteControlAtStartup: true` this
+    spawn. Unlike `role_wants_concise`, Lead is not hard-coded: the default
+    (env unset) grants it via ``is_lead`` so it survives a role rename, but
+    an explicit ``TAKKUB_REMOTE_CONTROL_ROLES`` override matches by name —
+    including "" turning it off for Lead too, for a deliberate full-off
+    test/debug run."""
+    raw = os.environ.get("TAKKUB_REMOTE_CONTROL_ROLES")
+    if raw is None:
+        return is_lead
+    raw = raw.strip()
+    if not raw:
+        return False
+    if raw == "*":
+        return True
+    roles = {r.strip() for r in raw.split(",") if r.strip()}
+    return role_name in roles
+
+
 _HOOK_SETTINGS: dict = {
     "hooks": {
         "Stop": [{"hooks": [{"type": "command", "command": HOOK_COMMAND}]}],
@@ -115,7 +154,7 @@ def guard_hook_fragment() -> dict:
     }
 
 
-def _rendered_settings(*, concise: bool = False) -> dict:
+def _rendered_settings(*, concise: bool = False, remote_control: bool = True) -> dict:
     """The hook settings for this spawn: the static Stop/Notification/
     SessionStart wiring, the always-on PreToolUse Bash guard, plus rtk's
     PreToolUse Bash hook when rtk is enabled centrally AND on PATH
@@ -132,7 +171,14 @@ def _rendered_settings(*, concise: bool = False) -> dict:
 
     ``concise=True`` (#318) adds ``outputStyle: "Concise"`` — see
     `role_wants_concise` for who gets it and why this rides `--settings`
-    instead of a shared settings file."""
+    instead of a shared settings file.
+
+    ``remote_control`` (#458) is always stamped as an explicit
+    ``remoteControlAtStartup: true/false`` — never omitted — so this layer
+    never falls through to Claude Code's own GB-rollout default (which is
+    what caused rc to be on for every role in the first place). Defaults to
+    ``True`` so `doctor.check_hook_wiring()`'s no-arg call keeps behaving
+    like it always has."""
     settings = copy.deepcopy(_HOOK_SETTINGS)
     pre_tool_use: list[dict] = [guard_hook_fragment()]
     try:
@@ -147,10 +193,11 @@ def _rendered_settings(*, concise: bool = False) -> dict:
     settings["hooks"]["PreToolUse"] = pre_tool_use
     if concise:
         settings["outputStyle"] = _CONCISE_OUTPUT_STYLE
+    settings["remoteControlAtStartup"] = remote_control
     return settings
 
 
-def ensure_hook_settings_file(*, concise: bool = False) -> str:
+def ensure_hook_settings_file(*, concise: bool = False, remote_control: bool = True) -> str:
     """Write the hook-wiring settings file if missing/stale and return its
     path as a string (for `--settings <path>`).
 
@@ -160,10 +207,13 @@ def ensure_hook_settings_file(*, concise: bool = False) -> str:
     enabling rtk mid-session is picked up on the next spawn without a
     cockpit restart.
 
-    ``concise`` picks between two on-disk files (`hook-settings.json` /
-    `hook-settings-concise.json`) rather than mutating one shared file in
-    place — Lead and a Concise-enabled teammate can spawn back-to-back
-    without one clobbering the other's `--settings` content mid-race.
+    ``concise`` and ``remote_control`` each pick a distinct on-disk file
+    (`hook-settings[-concise][-norc].json`) rather than mutating one shared
+    file in place — panes with different combinations can spawn back-to-back
+    without one clobbering another's `--settings` content mid-race. The
+    all-default combo (concise=False, remote_control=True) keeps the
+    original bare `hook-settings.json` name so `doctor.check_hook_wiring()`'s
+    no-arg call and any external reference to that path stay unaffected.
 
     Resolves ``config.RUNTIME_DIR`` at call time (not import time) so tests
     that monkeypatch it (as several spawn-argv tests already do) land the
@@ -171,9 +221,17 @@ def ensure_hook_settings_file(*, concise: bool = False) -> str:
     whichever test happened to import this module first.
     """
     config.ensure_runtime()
-    name = "hook-settings-concise.json" if concise else "hook-settings.json"
-    settings_path = config.RUNTIME_DIR / name
-    rendered = json.dumps(_rendered_settings(concise=concise), indent=2, ensure_ascii=False)
+    name = "hook-settings"
+    if concise:
+        name += "-concise"
+    if not remote_control:
+        name += "-norc"
+    settings_path = config.RUNTIME_DIR / f"{name}.json"
+    rendered = json.dumps(
+        _rendered_settings(concise=concise, remote_control=remote_control),
+        indent=2,
+        ensure_ascii=False,
+    )
     try:
         current = settings_path.read_text(encoding="utf-8")
     except OSError:

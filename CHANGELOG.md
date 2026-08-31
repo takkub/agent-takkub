@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **Remote Control badge ขึ้นทุก claude pane ไม่ใช่แค่ Lead (#458)** — Claude Code 2.1.251 เปิด rc auto-on by default เมื่อไม่มี layer ไหนตั้งค่านี้ไว้ · `hook_wiring.py` stamp `remoteControlAtStartup` explicit true/false ลงไฟล์ `--settings` ของทุก pane เสมอ (Lead = true, role อื่น = false) ผ่าน `TAKKUB_REMOTE_CONTROL_ROLES` (default = lead เท่านั้น, คู่กับ `TAKKUB_CONCISE_ROLES`)
+
 ## [v1.6.25] - 2026-08-31
 
 ### Fixed (แก้)
