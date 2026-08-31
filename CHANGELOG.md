@@ -4,6 +4,28 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.23] - 2026-08-31
+
+### Added (เพิ่ม)
+
+- **Token meter ทำงานกับทุก provider — ทั้ง cockpit และ Remote (user request, #103)** — เดิม badge context ต่อ pane อ่านได้แค่ Claude JSONL; pane codex/gemini/opencode/kimi/cursor ว่างเงียบๆ · ตอนนี้ `token_meter.py` เป็น dispatcher ต่อ provider: **codex** parse `token_count` จาก rollout JSONL (อ่านจากท้ายไฟล์ ไม่ stream ทั้งไฟล์ — ยืนยันสดกับ codex-cli 0.151.0) · **opencode** อ่าน tokens จาก `opencode.db` (ยืนยันสด) · **kimi** parse ตาม typed source ที่ติดตั้ง · **gemini/agy** = unsupported จริง (transcript/sqlite ไม่มี token field — ยืนยันแล้ว) · **cursor** = unsupported (ยังไม่มี session จริงให้จับ schema) — ทั้งสองแสดง badge "n/a" + เหตุผล ไม่ปล่อยว่าง · badge/สี tab/status bar ใช้ shape เดียวกันทุก provider · Remote `/api/activity` ส่ง `context {prompt, limit, pct, status}` ต่อ pane (ตัวเลขล้วน DATA-MIN) → มือถือเห็น % context ต่อ chip · schema-drift guard: field หาย → `no_data` + event `token_meter_schema_drift` ครั้งเดียวต่อ provider · bump SW cache v35 · รายละเอียด format ต่อ provider → `docs/audit/2026-08-31-token-meter-providers.md`
+
+### Fixed (แก้)
+
+- **`takkub` บน macOS ปฏิเสธ venv python ที่ใช้ได้จริง (#446)** — health check ตัดสินจากขนาดไฟล์ (<40KB = พัง) ทำให้ pyenv/python.org framework-build stub (Mach-O เล็กๆ ที่ re-exec เข้า framework) โดนบล็อกทั้งที่รันได้ · เปลี่ยนเป็นเช็ค magic bytes ทุก platform (PE `MZ` / ELF / Mach-O thin+fat ทั้ง 2 endianness / shebang) + floor แค่กัน truncation (1KB) — ตรงกันทั้ง `npm/scripts/lib.js`, `bin/takkub`, `bin/takkub.cmd`, `doctor.py` · ข้อความ error บอกว่าเช็คอะไรไม่ผ่าน
+- **`role-and-workflow.md` ที่ติดตั้งมี prefix absolute ซ้อน 11 ชั้น (#447)** — rewrite `docs/lead/` → absolute ตอน Lead spawn ไม่ idempotent (`str.replace` match ซ้ำใน path ที่แทนไปแล้ว) · ใช้ regex lookbehind ที่ข้าม path ที่ absolute แล้ว + ยุบ prefix ที่ซ้อนอยู่ในไฟล์ที่พังไปแล้วให้เหลือชั้นเดียว (self-heal)
+- **proactive `/compact` ยิงใส่ pane ที่ยังไม่มีบทสนทนา (#450)** — baseline `-1` ข้าม gate "ไม่มี output ใหม่" ในรอบ idle แรกหลัง spawn → Claude ตอบ "Not enough messages to compact" ค้างเป็น turn แรก · seed baseline จาก `output_bytes_total` ตั้งแต่ tick แรกที่ watchdog เห็น pane
+- **pane ใน worktree ใหม่ติด folder-trust modal จน auto-answer ยอมแพ้ 90s (#444)** — pre-trust root `<DATA_HOME>/worktrees` (root เดียวคุมทุก worktree/ทุกโปรเจค เพราะ Claude Code เช็ค trust ไล่ขึ้น parent) ลง `.claude.json` ของ profile ที่ pane ใช้ ก่อน spawn pane แบบ `--isolation worktree` · read-merge-write atomic ไม่ทับ key อื่น · claude-only (#103 gap: provider อื่นไม่มี dialog นี้) · conftest กัน test เขียน `~/.claude.json` จริง
+- **codex pane boot-timeout 300s โดยไม่เคย re-probe (#448)** — re-probe ready marker ที่ ceiling เคยผูกกับ "main thread กำลัง stall ณ วินาทีนั้น" (heartbeat > 0.5s) ซึ่งแทบไม่เคยตรงเวลา → `reprobed=false` ตลอด · ตอนนี้ re-probe เสมอ 1 tick ก่อนตัดสิน fail · synthetic done `[boot-timeout]` ติด frontmatter `outcome: failed` และ session brief แสดง `❌ [FAILED]` แทนที่จะดูเหมือนงานเสร็จ · auto-failover provider ยังไม่ทำ (เว้นไว้)
+- **`takkub wait` ถูกตัด "interrupted by user input" ทั้งที่ user ไม่ได้พิมพ์ (#449)** — chunk ที่เหลือแต่ escape sequence (ไม่มี printable) ไม่นับเป็นการพิมพ์อีกต่อไป: wait resume role ที่เหลือต่ออัตโนมัติ (multi-role ไม่ exit err) + ข้อความบอกชัดว่าเป็น byte แปลก ไม่ใช่ "คุณพิมพ์" · event `lead_input_stamped` (chunk_len/printable/escape_repr — ตัด text จริงออก) ลง events.log ทุกครั้งที่ stamp เพื่อไล่ต้นตอครั้งหน้าได้
+- **Remote Report links ตายเงียบเมื่อ `secret_path` เปลี่ยน (#451)** — request `/<secret>/r/...` ที่ secret ไม่ตรง log เป็น `report_stale_secret` (แยกจาก `bad_secret_path`) · `takkub report relink [--project p]` พิมพ์ลิงก์ปัจจุบันของ report ที่ยัง active · `report list` เตือน report ที่ publish ก่อน `remote.json` ถูกแก้ล่าสุด · ปิด Remote/rotate → event `remote_secret_rotated reports_affected=N` + แจ้ง Lead 1 บรรทัด
+- **UI ค้าง: `main_thread_stall` บอกจุดที่ค้างแล้ว (#452)** — event มี `stack` (top-5 frame ของ main thread, path relative ไม่รั่ว home) + `busy_threads` (thread อื่นที่กำลังรัน Python จริง ณ ตอน stall — ข้าม thread ที่นั่ง wait/select/queue) · `takkub ma` สรุป "ส่วนใหญ่ค้างที่ …" จาก stall ≥2s · context builder ที่ timeout 0.3s แล้วถูกทิ้ง ตอนนี้เช็ค cancel flag ระหว่าง disk-read หนักแล้ว bail (ไม่แย่ง GIL กับ spawn ถัดไป) · หลักฐาน: SOFT-stall dump ทุกตัวใน boot.log main thread อยู่ที่ `app.exec()` = GIL starvation จาก worker ไม่ใช่ call ค้างบน UI thread
+- **รูปจาก Lead ไม่ขึ้นบนมือถือ — `/api/image` 404 `image_unservable` (#453)** — relative path ลอง lead cwd → worktree ของโปรเจค → `RUNTIME_DIR` ตามลำดับ · `_image_roots` เพิ่ม worktree root ของทุกโปรเจค (magic-bytes/size cap/suffix whitelist เดิมยังอยู่ ตอบ 404 เปล่าเหมือนเดิม) · `remote_reject` แยก reason `not_found` / `not_under_root` / `bad_suffix` / `bad_magic` ใน events.log
+
+### Security (ความปลอดภัย)
+
+- **CodeQL #44–#46 `py/path-injection` ใน `_serve_static` (remote static route)** — comment `# codeql[...]` ไม่ใช่ suppression จริง (alert ยังเปิด) · เปลี่ยนเป็น idiom ที่ CodeQL รู้จักเป็น barrier: `os.path.realpath` + `startswith(root + sep)` (แบบเดียวกับ `reports.py._contained_path`) — behavior เท่าเดิม (`..`/drive-anchored/symlink escape → 404)
+
 ## [v1.6.22] - 2026-08-30
 
 ### Fixed (แก้)
