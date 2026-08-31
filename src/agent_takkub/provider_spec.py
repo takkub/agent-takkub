@@ -742,7 +742,11 @@ codex_spec = ProviderSpec(
     # local. The session id in the rollout metadata is also the stable id used
     # by ``codex resume <SESSION_ID>`` and the Remote picker.
     produces_jsonl_transcript=True,
-    supports_token_meter=False,
+    # #103 (2026-08-31): confirmed real `event_msg.payload.type=="token_count"`
+    # rollout events against codex-cli 0.151.0 — see
+    # docs/audit/2026-08-31-token-meter-providers.md. token_meter.read_pane_usage
+    # dispatches to codex_helper.read_codex_token_usage for this provider.
+    supports_token_meter=True,
     supports_remote_history=True,
     auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
     early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
@@ -903,7 +907,14 @@ gemini_spec = ProviderSpec(
     # baked into gemini's own model slugs (gemini-3.1-pro-high, etc.).
     effort_levels=("low", "medium", "high"),
     produces_jsonl_transcript=True,
-    supports_token_meter=False,
+    # #103 (2026-08-31): armed True even though agy/Antigravity is CONFIRMED
+    # to carry no token/usage field anywhere (neither transcript layout, nor
+    # the sqlite conversation store — opaque protobuf blobs) — see
+    # docs/audit/2026-08-31-token-meter-providers.md. token_meter.read_pane_usage
+    # always answers "unsupported" with a reason for this provider, so the
+    # pane badge shows an explicit "tokens n/a" instead of staying silently
+    # blank the way an armed=False provider does.
+    supports_token_meter=True,
     supports_remote_history=True,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
@@ -1041,7 +1052,12 @@ opencode_spec = ProviderSpec(
     # flag. Keep None so the generic spawn path cannot pass an invented option.
     effort_flag=None,
     produces_jsonl_transcript=False,
-    supports_token_meter=False,
+    # #103 (2026-08-31): confirmed real `message.data.tokens` block
+    # ({total,input,output,reasoning,cache:{write,read}}) on a live
+    # `opencode.db` — see docs/audit/2026-08-31-token-meter-providers.md.
+    # token_meter.read_pane_usage dispatches to
+    # opencode_helper.read_opencode_token_usage for this provider.
+    supports_token_meter=True,
     supports_remote_history=True,
     prepend_bin_dir_to_path=False,
     auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
@@ -1140,7 +1156,15 @@ kimi_spec = ProviderSpec(
     # not low|medium|high. Do not collapse three role tiers into that toggle.
     effort_flag=None,
     produces_jsonl_transcript=False,
-    supports_token_meter=False,
+    # #103 (2026-08-31): confirmed real `StatusUpdate` wire message
+    # (context_tokens/max_context_tokens/token_usage) against kimi-cli's own
+    # installed typed source (kimi_cli/wire/types.py, kosong/chat_provider) —
+    # see docs/audit/2026-08-31-token-meter-providers.md for the caveat that
+    # no LIVE line has been captured yet (this machine's kimi has no default
+    # model configured). token_meter.read_pane_usage dispatches to
+    # kimi_helper.read_kimi_token_usage, which fails soft to "no_data" rather
+    # than trusting the guess if the schema turns out wrong.
+    supports_token_meter=True,
     # GAP (#103): same remote-mirror gap as opencode_spec's note above — no
     # _HistoryScanner entry exists for kimi, so a kimi Lead pane never
     # mirrors a reply to Remote Mobile even though delivery itself works.
@@ -1237,7 +1261,16 @@ cursor_spec = ProviderSpec(
     # ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<session-uuid>/<session-uuid>.jsonl.
     # The cursor_helper module resolves and parses these records for Remote Mobile mirroring.
     produces_jsonl_transcript=True,
-    supports_token_meter=False,
+    # #103 (2026-08-31): armed True despite no confirmed schema — no cursor
+    # session exists on any machine checked (binary not installed here) to
+    # verify a token/usage field name against, and this codebase's policy is
+    # never to guess one from docs alone (same discipline every other
+    # ⚠ NOT yet verified marker in this file follows). token_meter.read_pane_usage
+    # always answers "unsupported" with that reason, so the pane badge shows
+    # an explicit "tokens n/a" instead of staying silently blank. Flip to a
+    # real parser once a live cursor-agent transcript is captured — see
+    # docs/audit/2026-08-31-token-meter-providers.md.
+    supports_token_meter=True,
     supports_remote_history=True,
     prepend_bin_dir_to_path=False,
     auto_trust=False,

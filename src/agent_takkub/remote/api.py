@@ -204,6 +204,22 @@ def pulse(orch, from_project: str | None) -> dict:
     return {"working": working, "total": len(status), "provider": provider}
 
 
+def _pane_context(pane) -> dict | None:
+    """DATA-MIN-safe (§7.3) context-window summary for one pane's `activity`
+    entry: numbers + a coarse status tag only, via
+    `AgentPaneModel.token_meter_context()` — never task text, cwd, or a raw
+    model id/path. `pane.model` exists on both `AgentPane` and
+    `HeadlessPane` (#105 Phase A/B), so this works for either build."""
+    model = getattr(pane, "model", None)
+    getter = getattr(model, "token_meter_context", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
 def activity(orch) -> dict:
     """Pulse page (project-grouped open panes). DATA-MIN (§7.3, same bar as
     `pulse`): role + project + state + runtime only — never task text, cwd,
@@ -232,7 +248,14 @@ def activity(orch) -> dict:
     three chips, not zero. When `config.PULSE_SHOW_TEAM` is off, `roles` is
     always `[]`: the phone mirrors Lead and nothing else (pre-#200 default).
     The key is still emitted either way — dropping it would break every PWA
-    build that reads `p.roles.length`."""
+    build that reads `p.roles.length`.
+
+    `context` (#103, 2026-08-31): an optional `{prompt, limit, pct, status}`
+    block from `_pane_context` — numbers and a coarse status tag
+    ("ok"/"unsupported"/"no_data") only, never a raw model id or path
+    (DATA-MIN §7.3). Omitted entirely when the pane's provider never armed
+    the token meter or no session has resolved yet, same as `roles`/`lead`
+    being absent when there's nothing to report."""
     now = time.time()
     show_team = _remote_config.PULSE_SHOW_TEAM
     projects_out: list[dict] = []
@@ -247,23 +270,27 @@ def activity(orch) -> dict:
             started = getattr(pane, "_working_start", None) if working else None
             runtime_sec = max(0, int(now - started)) if started is not None else 0
             state_out = "working" if working else "idle"
+            context = _pane_context(pane)
             if role == LEAD.name:
                 lead_out = {
                     "state": state_out,
                     "runtime_sec": runtime_sec,
                     "provider": notify.pane_provider_name(orch, project_ns, role, pane),
                 }
+                if context is not None:
+                    lead_out["context"] = context
                 continue
             if not show_team:
                 continue
-            roles.append(
-                {
-                    "role": role,
-                    "state": state_out,
-                    "runtime_sec": runtime_sec,
-                    "provider": notify.pane_provider_name(orch, project_ns, role, pane),
-                }
-            )
+            role_out = {
+                "role": role,
+                "state": state_out,
+                "runtime_sec": runtime_sec,
+                "provider": notify.pane_provider_name(orch, project_ns, role, pane),
+            }
+            if context is not None:
+                role_out["context"] = context
+            roles.append(role_out)
         # #225: `done()` auto-closes its own pane ~2.5s after reporting, well
         # before the done-notice necessarily finishes its trip through the
         # digest/live/durable queues to Lead — a role can vanish from this

@@ -37,7 +37,7 @@ from .pty_session import PtySession
 from .roles import LEAD, USER_DRIVEN_ROLES, Role
 from .session_cap import SESSION_CAP_SETTING, resolve_session_cap_threshold
 from .terminal_widget import TerminalWidget
-from .token_meter import find_session_by_uuid, read_last_usage
+from .token_meter import read_pane_usage, resolve_pane_session
 
 # Pane state → dot color, using cockpit_theme state tokens (semantic — never
 # gold). "empty" is a neutral faint grey; the rest are the ok/warn/info/exit/
@@ -605,20 +605,21 @@ class AgentPane(QFrame):
         self._terminal.set_idle(False)
 
         # Token-meter: remember when we spawned + which cwd to scan, then
-        # start polling. The very first claude turn won't land for a few
-        # seconds, so the label stays hidden until read_last_usage returns.
+        # start polling. The very first turn won't land for a few seconds, so
+        # the label stays hidden until token_meter.read_pane_usage returns.
         self._spawn_ts = time.time()
         self._session_cwd = cwd
         # let the terminal resolve clicked relative paths against this cwd
         self._terminal.set_cwd(cwd)
         self._session_jsonl = None
         self._last_usage = None
+        self.model.last_usage_raw = None
         self._token_label.hide()
         self.model.set_session_uuid(session_uuid)
-        # #103 gap: only Claude currently has a JSONL transcript compatible
-        # with token_meter.read_last_usage. Keep both the badge and watchdog
-        # behind ProviderSpec.supports_token_meter so a non-Claude pane cannot
-        # accidentally pick up an unrelated Claude JSONL under the same cwd.
+        # #103: every registered provider now has a token_meter.read_pane_usage
+        # branch (some confirmed "unsupported" rather than parsed — see that
+        # module's dispatcher docstring). ProviderSpec.supports_token_meter
+        # gates whether the timer/watchdog arm at all for this provider.
         from .provider_spec import PROVIDER_REGISTRY
 
         spec = PROVIDER_REGISTRY.get(provider_name)
@@ -737,6 +738,7 @@ class AgentPane(QFrame):
         self._token_timer.stop()
         self._session_jsonl = None
         self._last_usage = None
+        self.model.last_usage_raw = None
         self.model.set_session_uuid(None)
         self.model.reset_session_cap_watchdog()
         self._token_label.hide()
@@ -773,53 +775,65 @@ class AgentPane(QFrame):
     # token meter
     # ──────────────────────────────────────────────────────────────
     def _refresh_token_meter(self) -> None:
-        """Poll this pane's own claude session JSONL for the latest usage
-        block and update the header badge. Runs every 5 s.
+        """Poll this pane's own session for the latest usage block and update
+        the header badge. Runs every 5 s.
 
-        The exact-uuid resolve (`find_session_by_uuid`) + JSONL read
-        (`read_last_usage`) run on a background thread — on a large/active
-        session file this was a proven main_thread_stall source at the 5 s
-        tick. The badge itself is updated back on the GUI thread via
-        _tokenMeterReady → _apply_token_meter.
+        The resolve (`token_meter.resolve_pane_session`) + read
+        (`token_meter.read_pane_usage`) run on a background thread — on a
+        large/active session file this was a proven main_thread_stall source
+        at the 5 s tick. The badge itself is updated back on the GUI thread
+        via _tokenMeterReady → _apply_token_meter.
         """
         if self.session is None or not self._session_cwd:
             return
         # Coalesce: skip if the previous off-thread read is still in flight.
         if getattr(self, "_token_refreshing", False):
             return
+        provider = self.model.provider_name
         # Read fresh every tick (not cached at attach time): a manual
         # /resume or /clear inside claude rolls over to a different
         # transcript uuid, and consume_session_report() updates
         # model.session_uuid live as soon as the SessionStart hook reports
-        # it — so the next tick follows the rollover automatically.
+        # it — so the next tick follows the rollover automatically. Every
+        # other provider's generic spawn branch never mints/passes a session
+        # id (codex/gemini/opencode/kimi/cursor all choose their own after
+        # boot), so this is normally None for them — resolve_pane_session
+        # falls back to a newest-for-cwd resolve bounded by this pane's own
+        # spawn timestamp in that case (see its own docstring).
         session_uuid = self.model.session_uuid
-        if not session_uuid:
+        if provider == "claude" and not session_uuid:
             # Unknown uuid: showing nothing beats guessing. Issue #129 — a
             # newest-mtime-in-cwd fallback here would surface a sibling
             # pane's transcript on this pane's badge whenever panes share
             # a cwd (routine for a single-repo project with every role
-            # pointed at the same project root).
+            # pointed at the same project root). Non-claude providers don't
+            # have this exact-uuid identity to lose in the first place, so
+            # this early-out is claude-only.
             return
         # Scope to this pane's Claude config home (per-profile panes write
-        # under <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/).
+        # under <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/) —
+        # meaningless for every other provider, whose resolvers ignore it.
         cwd = self._session_cwd
         cfg_dir = getattr(self.session, "_claude_config_dir", None)
         project_dir_name = getattr(self.session, "_claude_project_dir_name", None)
+        spawn_ts = self._spawn_ts
         self._token_refreshing = True
 
         def _worker() -> None:
             cand = None
             usage = None
             try:
-                cand = find_session_by_uuid(
+                cand = resolve_pane_session(
+                    provider,
                     cwd,
-                    session_uuid,
+                    session_uuid=session_uuid,
+                    not_before=spawn_ts,
                     config_dir=cfg_dir,
                     project_dir_name=project_dir_name,
                 )
                 if cand is not None:
                     try:
-                        usage = read_last_usage(cand)
+                        usage = read_pane_usage(provider, cand)
                     except Exception:
                         usage = None
             finally:
@@ -864,12 +878,29 @@ class AgentPane(QFrame):
             # first assistant turn (otherwise the header keeps the old "128%").
             self._session_jsonl = cand
             self._last_usage = None
+            self.model.last_usage_raw = None
             self.model.reset_session_cap_watchdog()
             self._token_label.setText("")
             self._token_label.hide()
         if usage is None:
             return
-        self._last_usage = usage
+        self.model.record_token_meter_result(usage)
+        status = usage.get("status", "ok")
+        if status != "ok":
+            # "unsupported" (confirmed no data for this provider) or
+            # "no_data" (this pane hasn't logged a turn yet) — show
+            # informational chrome instead of a number. record_token_meter_result
+            # above already left last_usage/observe_session_cap untouched for
+            # this branch: current_usage() (status-bar tab-color aggregation)
+            # and the session-cap watchdog both require a numeric prompt, and
+            # must keep reading None here exactly like a provider whose meter
+            # never armed at all.
+            badge = self.model.format_unsupported_badge(usage)
+            self._token_label.setText(badge["text"])
+            self._token_label.setStyleSheet(f"color: {badge['color']}; font-size: 11px;")
+            self._token_label.setToolTip(badge["tooltip"])
+            self._token_label.show()
+            return
         badge = self.model.format_token_badge(usage)
         self._token_label.setText(badge["text"])
         self._token_label.setStyleSheet(f"color: {badge['color']}; font-size: 11px;")

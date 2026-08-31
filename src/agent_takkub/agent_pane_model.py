@@ -55,6 +55,13 @@ class AgentPaneModel:
         self.session_cwd: str | None = None
         self.session_jsonl: object | None = None
         self.last_usage: dict | None = None
+        # #103: the raw token_meter.read_pane_usage() result of every status
+        # ("ok"/"unsupported"/"no_data"), for remote/api.py's DATA-MIN-safe
+        # /api/activity "context" field via token_meter_context() below.
+        # `last_usage` above stays "ok"-only — status_header's tab-color
+        # aggregation and the session-cap watchdog must keep seeing exactly
+        # the pre-#103 contract (numeric usage or None), never a status dict.
+        self.last_usage_raw: dict | None = None
         # This pane's own Claude session transcript uuid (PaneState.session_uuid
         # mirror — see AgentPane.attach_session). The token meter resolves its
         # JSONL by this exact uuid, never by newest-mtime-in-cwd, so panes
@@ -91,6 +98,35 @@ class AgentPaneModel:
         if self.session is None:
             return None
         return self.last_usage
+
+    def record_token_meter_result(self, usage: dict | None) -> None:
+        """Store the latest `token_meter.read_pane_usage()` result of ANY
+        status for `token_meter_context()` below, and — only when
+        `status == "ok"` — additionally mirror it into `last_usage` the way
+        `current_usage()`/status-bar aggregation/the session-cap watchdog
+        already require (numeric usage or None, never a status dict)."""
+        self.last_usage_raw = usage
+        if usage is not None and usage.get("status", "ok") == "ok":
+            self.last_usage = usage
+
+    def token_meter_context(self) -> dict | None:
+        """DATA-MIN-safe summary of the latest token-meter read — numbers and
+        a coarse status tag only, no path/model text — for remote/api.py's
+        `/api/activity` "context" field. None when this pane's provider never
+        armed the meter or no session has resolved yet (same "nothing to
+        show" meaning `current_usage()` already has)."""
+        if self.session is None or self.last_usage_raw is None:
+            return None
+        usage = self.last_usage_raw
+        status = usage.get("status", "ok")
+        if status != "ok":
+            return {"prompt": None, "limit": None, "pct": None, "status": status}
+        prompt = usage["prompt"]
+        limit = usage.get("limit") or effective_context_limit(
+            usage["model"], prompt, base=self.context_limit
+        )
+        pct = round((prompt / limit) * 100) if limit else None
+        return {"prompt": prompt, "limit": limit, "pct": pct, "status": "ok"}
 
     def set_worktree_branch(self, branch: str | None) -> None:
         self.worktree_branch = branch or None
@@ -143,9 +179,23 @@ class AgentPaneModel:
 
     def format_token_badge(self, usage: dict) -> dict:
         """Pure formatting for the header token badge — factored out of the
-        view so it's unit-testable without a QLabel."""
+        view so it's unit-testable without a QLabel.
+
+        Caller must only pass a usage dict whose `status` is `"ok"` (or a
+        pre-#103 claude dict with no `status` key at all — same thing).
+        `"unsupported"`/`"no_data"` go through `format_unsupported_badge`
+        instead; this method assumes every numeric key is present.
+        """
         prompt = usage["prompt"]
-        limit = effective_context_limit(usage["model"], prompt, base=self.context_limit)
+        # A provider-reported `limit` (codex's model_context_window, kimi's
+        # max_context_tokens) is authoritative — trust it over the per-model
+        # table, which only knows claude model ids and would otherwise cap a
+        # 258k-context codex turn at the wrong 200k default. None (claude,
+        # and any provider with no live cap to report) falls through to the
+        # table exactly as before #103.
+        limit = usage.get("limit") or effective_context_limit(
+            usage["model"], prompt, base=self.context_limit
+        )
         pct = (prompt / limit) if limit else 0.0
         return {
             "text": f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%",
@@ -158,4 +208,16 @@ class AgentPaneModel:
                 f"output: {usage['output']:,} tokens\n"
                 f"context limit: {limit:,}"
             ),
+        }
+
+    def format_unsupported_badge(self, usage: dict) -> dict:
+        """Pure formatting for a pane whose provider armed the token meter
+        (`ProviderSpec.supports_token_meter=True`) but this poll came back
+        `"unsupported"` (confirmed no token data exists for this provider) or
+        `"no_data"` (this pane hasn't logged a turn yet). Faint/neutral by
+        design — this is informational chrome, not a warning."""
+        return {
+            "text": "tokens n/a",
+            "color": usage_color(0.0),  # neutral grey — same tier as <50% fill
+            "tooltip": usage.get("reason") or "token usage unavailable for this provider",
         }
