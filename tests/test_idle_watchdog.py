@@ -1350,12 +1350,13 @@ class TestProactiveIdleCompact:
         monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
         monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", 1000)
         pane = _make_pane(state="done", at_ready_prompt=True)
-        pane.session.output_bytes_total = 50_000  # a real int, like PtySession
+        pane.session.output_bytes_total = 0  # nothing yet, watchdog's first-ever look (#450)
         orch.panes["backend"] = pane
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
-        orch._check_idle_teammates()
+        orch._check_idle_teammates()  # seeds baseline at 0, idle episode starts
+        pane.session.output_bytes_total = 50_000  # a real int, like PtySession
         clock[0] += 101
         orch._check_idle_teammates()
         assert pane.session.write.call_count == 1  # first compact of the session
@@ -1477,6 +1478,73 @@ class TestProactiveIdleCompact:
         clock[0] += 101
         orch._check_idle_teammates()
 
+        pane.session.write.assert_called_once_with("/compact")
+
+    def test_freshly_spawned_pane_with_no_output_is_not_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#450: a Lead/teammate pane that spawns and then just sits idle
+        (never assigned anything, no `send`/`assign` ever landed on it) must
+        NOT get `/compact` fired at it the moment
+        PROACTIVE_COMPACT_IDLE_AFTER_S elapses — there is no conversation yet
+        to compact. Before the fix, `proactive_compact_baseline_bytes`
+        started at -1 ("never compacted"), which bypassed the
+        nothing-new-since-baseline gate entirely on the pane's first idle
+        episode and fired unconditionally."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", 1000)
+        pane = _make_pane(state="active", at_ready_prompt=True)
+        pane.session.output_bytes_total = 500  # spawn banner only, no conversation
+        orch.panes["lead"] = pane
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(orch_mod, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # first-ever tick: seeds baseline at 500
+        clock[0] += 101  # crosses PROACTIVE_COMPACT_IDLE_AFTER_S with zero new output
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+        skips = [kw for ev, kw in events if ev == "proactive_idle_compact_skipped"]
+        assert len(skips) == 1
+
+        # Stays quiet on later ticks too, not just the crossing tick.
+        clock[0] += 500
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+    def test_pane_with_real_output_after_spawn_still_compacts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Companion to the above: the seeded baseline must not suppress a
+        genuinely busy pane's first-ever compact — once real conversation
+        (>= PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES past the spawn-time
+        baseline) has landed, the idle episode still earns its `/compact`."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", 1000)
+        pane = _make_pane(state="active", at_ready_prompt=True)
+        pane.session.output_bytes_total = 500  # spawn banner only
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # seeds baseline at 500
+
+        # A task lands and the pane does real work before going idle again.
+        pane.session.is_at_ready_prompt.return_value = False
+        pane.session.output_bytes_total = 40_000
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()  # fresh idle episode starts
+
+        clock[0] += 101
+        orch._check_idle_teammates()
         pane.session.write.assert_called_once_with("/compact")
 
 
