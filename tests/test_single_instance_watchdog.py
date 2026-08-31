@@ -646,6 +646,75 @@ class TestStallTracker:
         assert rec2["duration_ms"] == 900
         assert rec2["spawn_in_progress"] is False
 
+    # ── #452: stack snapshot plumbing ───────────────────────────────
+
+    def test_no_stack_recorded_means_no_stack_key(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        rec = t.update(0.0, False)
+        assert "stack" not in rec
+
+    def test_recorded_stack_is_attached_to_the_episode_record(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        t.record_stack(["app.py:main:1018"], 1.0)
+        t.update(1.2, False)
+        rec = t.update(0.0, False)
+        assert rec["stack"] == ["app.py:main:1018"]
+
+    def test_stack_resets_between_episodes(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        t.record_stack(["app.py:main:1018"], 1.0)
+        t.update(0.0, False)  # episode 1 ends, consuming the stack
+        t.update(1.0, False)  # episode 2 — no snapshot taken this time
+        rec = t.update(0.0, False)
+        assert "stack" not in rec
+
+    def test_should_snapshot_stack_false_below_threshold(self) -> None:
+        t = self._t(threshold=0.75)
+        assert t.should_snapshot_stack(0.5) is False
+        assert t.should_snapshot_stack(0.75) is False
+
+    def test_should_snapshot_stack_true_on_first_crossing(self) -> None:
+        t = self._t(threshold=0.75)
+        assert t.should_snapshot_stack(0.8) is True
+
+    def test_should_snapshot_stack_false_until_age_doubles(self) -> None:
+        t = self._t(threshold=0.75)
+        t.record_stack(["frame"], 1.0)
+        assert t.should_snapshot_stack(1.5) is False  # not yet doubled
+        assert t.should_snapshot_stack(2.0) is True  # exactly doubled
+
+
+class TestFormatMainThreadFrames:
+    """`_format_main_thread_frames` (#452) — best-effort top frames of the
+    main thread's Python stack, path-trimmed so events.log never carries an
+    absolute path (which would leak the user's home directory)."""
+
+    def test_returns_frames_for_the_current_process_main_thread(self) -> None:
+        # The test runner itself IS the main thread, so this reads a real,
+        # live frame chain — no mocking of sys._current_frames needed.
+        frames = app_mod._format_main_thread_frames()
+        assert frames, "must find at least one frame for the real main thread"
+        for f in frames:
+            assert f.count(":") >= 2  # "path:function:line"
+
+    def test_frames_never_carry_an_absolute_path(self) -> None:
+        frames = app_mod._format_main_thread_frames()
+        home = str(Path.home())
+        for f in frames:
+            assert not f.startswith(("/", "C:", "c:"))
+            assert home not in f
+
+    def test_max_frames_is_respected(self) -> None:
+        frames = app_mod._format_main_thread_frames(max_frames=2)
+        assert len(frames) <= 2
+
+    def test_returns_empty_list_when_current_frames_lookup_fails(self) -> None:
+        with patch.object(app_mod.sys, "_current_frames", side_effect=RuntimeError("wedged")):
+            assert app_mod._format_main_thread_frames() == []
+
 
 # ─────────────────────────────────────────────────────────────
 # 4. MainWindow heartbeat attribute

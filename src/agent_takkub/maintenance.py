@@ -346,6 +346,7 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     warn: Counter[str] = Counter()
     worst_stall = 0
     stall_callouts: list[str] = []
+    stall_top_frames: Counter[str] = Counter()  # #452: closest frame of ≥2s stalls
     recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
     total = 0
     try:
@@ -376,6 +377,9 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                         stall_callouts.append(
                             f"{ts:%H:%M} UI ค้าง {ms / 1000:.1f}s (pane {rec.get('active_panes')})"
                         )
+                        stack = rec.get("stack")
+                        if isinstance(stack, list) and stack:
+                            stall_top_frames[str(stack[0])] += 1
     except OSError as exc:
         return Check("logs", "Log ของ cockpit ที่รันอยู่", "error", f"อ่าน log ไม่ได้: {exc}")
 
@@ -394,6 +398,9 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
         )
     details += [f"🟡 {_WARN_EVENTS[k]} ×{v}" for k, v in warn.most_common()]
     details += stall_callouts[-5:]
+    if stall_top_frames:
+        frame, count = stall_top_frames.most_common(1)[0]
+        details.append(f"ส่วนใหญ่ค้างที่ {frame} (×{count}/{sum(stall_top_frames.values())})")
     if worst_stall:
         details.append(f"UI ค้างนานสุด {worst_stall / 1000:.1f}s")
     status = "attention" if (severe or warn) else "ok"

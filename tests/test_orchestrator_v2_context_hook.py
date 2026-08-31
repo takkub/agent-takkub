@@ -90,6 +90,35 @@ def test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller(monkey
         release.set()  # let the background thread finish, don't leak it
 
 
+def test_timeout_sets_cancel_event_so_worker_can_bail_early(monkeypatch):
+    """#452: an abandoned worker must be told to stop, not just outlive the
+    timeout unattended — the hook sets `cancel_event` right when it gives up
+    waiting, before the worker (still running under `wait=False`) has any
+    chance to reach its own heavy steps."""
+    monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
+    import agent_takkub.core.brain.facade as facade
+
+    entered = threading.Event()
+    release = threading.Event()
+    seen: dict = {}
+
+    def slow(*a, cancel_event=None, **kw):
+        seen["cancel_event"] = cancel_event
+        entered.set()
+        release.wait(timeout=10)
+        return ""
+
+    monkeypatch.setattr(facade, "build_context_for_assign", slow)
+    try:
+        _inject_v2_context(_TASK, "proj", "backend", "backend", "claude")
+        assert entered.wait(timeout=5)
+        cancel_event = seen["cancel_event"]
+        assert isinstance(cancel_event, threading.Event)
+        assert cancel_event.is_set(), "hook must cancel the abandoned worker on timeout"
+    finally:
+        release.set()
+
+
 def test_exception_in_facade_call_fails_open(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
     import agent_takkub.core.brain.facade as facade

@@ -1042,6 +1042,12 @@ def _inject_v2_context(
 
         supports_file_read = PROVIDER_REGISTRY[effective_provider].supports_agent_file_read
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # #452: set once this call gives up waiting, so the worker — which
+        # `wait=False` below leaves running unattended, its return value
+        # already discarded — checks in at its own heavy steps and bails
+        # early instead of continuing to burn CPU/GIL time a Qt main thread
+        # may right then be waiting on (e.g. mid pane-spawn).
+        cancel_event = threading.Event()
         try:
             future = executor.submit(
                 build_context_for_assign,
@@ -1050,11 +1056,13 @@ def _inject_v2_context(
                 task,
                 file_read_supported=supports_file_read,
                 retry_count=retry_count,
+                cancel_event=cancel_event,
             )
             try:
                 context_block = future.result(timeout=0.3)
             except concurrent.futures.TimeoutError:
                 context_block = ""
+                cancel_event.set()
                 _log_event("context_builder_timeout", role=role_name, project=project_ns)
             else:
                 _log_context_gate_inefficient(role_name, project_ns)

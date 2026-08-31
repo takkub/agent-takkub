@@ -95,6 +95,53 @@ class TestScanEvents:
         # The 0.3s one is noise on a busy box — counted, never named.
         assert not any("0.3s" in d for d in check.details)
 
+    def test_most_common_stall_frame_is_called_out(self, tmp_path: Path) -> None:
+        """#452: when ≥2s stall records carry a `stack`, the most-frequent
+        top frame across them gets its own one-line callout so `takkub ma`
+        stops requiring a manual boot.log dig for the common case."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(minutes=5)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 2400,
+                    "stack": ["orchestrator.py:_check_x:100", "app.py:main:1018"],
+                },
+                {
+                    "ts": (now - timedelta(minutes=4)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 3000,
+                    "stack": ["orchestrator.py:_check_x:100", "app.py:main:1018"],
+                },
+                {
+                    # below the ≥2s callout threshold — must not count toward the tally
+                    "ts": (now - timedelta(minutes=3)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 300,
+                    "stack": ["somewhere_else.py:other:1"],
+                },
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert any("orchestrator.py:_check_x:100" in d and "×2/2" in d for d in check.details)
+
+    def test_no_stack_data_omits_the_frame_callout(self, tmp_path: Path) -> None:
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(minutes=5)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 2400,
+                }
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert not any("ส่วนใหญ่ค้างที่" in d for d in check.details)
+
     def test_corrupt_lines_do_not_abort_the_scan(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = tmp_path / "events.log"

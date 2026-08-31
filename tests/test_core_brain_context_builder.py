@@ -4,6 +4,8 @@ the Conversation rolling summary."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from agent_takkub.core.brain import context_builder
@@ -213,6 +215,56 @@ def test_tiny_budget_still_keeps_the_top_hit(runtime):
     assert "matching keyword" in out
 
 
+# ── build_context: cancel_event (#452) ──────────────────────────────────
+#
+# The caller (orchestrator._inject_v2_context) abandons this call on its own
+# 0.3s timeout but leaves the worker thread running (`wait=False`) — these
+# check that an already-cancelled worker bails BEFORE paying for the heavy
+# disk reads, rather than merely discarding a result it computed anyway.
+
+
+def test_cancel_event_set_before_call_skips_recall_entirely(monkeypatch, runtime):
+    BrainStore("proj").append_event(_rec(id="a", content="matching keyword hit"))
+
+    def boom(*a, **kw):
+        raise AssertionError("RetrievalEngine.recall must not run once cancelled")
+
+    monkeypatch.setattr(context_builder.RetrievalEngine, "recall", boom)
+    cancel_event = threading.Event()
+    cancel_event.set()
+    out = context_builder.build_context(
+        "proj", "backend", "matching keyword", 2000, cancel_event=cancel_event
+    )
+    assert out == ""
+
+
+def test_cancel_event_set_between_scoped_and_global_recall_skips_global(monkeypatch, runtime):
+    BrainStore("proj").append_event(_rec(id="a", content="matching keyword hit"))
+    cancel_event = threading.Event()
+    real_recall = context_builder.RetrievalEngine.recall
+    calls: list[str] = []
+
+    def spy_recall(self, *a, **kw):
+        calls.append("recall")
+        cancel_event.set()  # cancelled mid-flight, right after the first (scoped) call
+        return real_recall(self, *a, **kw)
+
+    monkeypatch.setattr(context_builder.RetrievalEngine, "recall", spy_recall)
+    out = context_builder.build_context(
+        "proj", "backend", "matching keyword", 2000, cancel_event=cancel_event
+    )
+    assert calls == ["recall"], "global recall must be skipped once cancelled mid-episode"
+    assert out == "", "an already-cancelled result must never reach the caller"
+
+
+def test_cancel_event_not_set_reproduces_prior_behaviour(runtime):
+    BrainStore("proj").append_event(_rec(id="a", content="matching keyword hit"))
+    out = context_builder.build_context(
+        "proj", "backend", "matching keyword", 2000, cancel_event=threading.Event()
+    )
+    assert "matching keyword hit" in out
+
+
 # ── build_context: conversation rolling summary ─────────────────────────
 
 
@@ -297,7 +349,7 @@ def test_facade_build_context_cuts_budget_when_file_read_unsupported(monkeypatch
     monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
     seen: dict = {}
 
-    def spy(project, role, task_text, budget_tokens):
+    def spy(project, role, task_text, budget_tokens, **kw):
         seen["budget"] = budget_tokens
         return ""
 
