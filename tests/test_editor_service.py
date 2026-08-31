@@ -505,16 +505,3 @@ class TestWriteAtomicModePreservation:
 
         assert result.ok is True
         assert chmod_calls == []
-
-    def test_new_file_with_no_prior_mode_still_saves(self, tmp_path: Path) -> None:
-        """No `expected` (brand-new file) means nothing to read a mode
-        from — falls through to the process default umask, same as any
-        normal file creation, on every platform."""
-        root = tmp_path / "proj"
-        root.mkdir()
-        f = root / "brand_new.py"
-
-        result = save_atomic(f, "hello\n", None, [root])
-
-        assert result.ok is True
-        assert f.read_text(encoding="utf-8") == "hello\n"

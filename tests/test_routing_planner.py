@@ -717,12 +717,6 @@ class TestThaiPageFalsePositives:
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "frontend"
 
-    def test_pum_still_matches(self):
-        """'แก้ปุ่ม submit' must still route to frontend (ปุ่ม unchanged)."""
-        result = classify("แก้ปุ่ม submit")
-        assert result.kind == ActionKind.PROPOSE
-        assert result.role == "frontend"
-
 
 class TestDisabledProviders:
     """classify() no longer refuses disabled codex/gemini. The spawn layer

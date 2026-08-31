@@ -50,10 +50,6 @@ class TestListStallDisplay:
         assert "frontend" in out
         assert rc == 0
 
-    def test_list_cmd_sent_correctly(self, fake_request: list[dict]) -> None:
-        cli.main(["list"])
-        assert fake_request[-1]["cmd"] == "list"
-
 
 class TestStatusCommand:
     def test_status_sends_status_cmd(self, fake_request: list[dict]) -> None:

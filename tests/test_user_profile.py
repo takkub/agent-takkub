@@ -143,11 +143,6 @@ class TestProfileFor:
 
 
 class TestSetProfile:
-    def test_set_registered_profile(self) -> None:
-        up.add_profile("work", "/a")
-        up.set_profile("myproject", "work")
-        assert up.profile_for("myproject") == "work"
-
     def test_set_default_is_allowed(self) -> None:
         up.add_profile("work", "/a")
         up.set_profile("myproject", "work")

@@ -195,19 +195,6 @@ def git_available() -> bool:
 
 
 class TestGitNativeIgnoreParity:
-    def test_non_repo_directory_falls_back_to_handwritten_chain(self, tmp_path: Path) -> None:
-        # tmp_path is never a git repo — every TestListDirSync test above
-        # already exercises this path implicitly; this test just names it.
-        root = tmp_path / "proj"
-        root.mkdir()
-        (root / ".gitignore").write_text("*.log\n")
-        (root / "debug.log").write_text("x")
-        (root / "keep.txt").write_text("x")
-
-        names = {e.name for e in list_dir_sync(root, [root])}
-        assert "debug.log" not in names
-        assert "keep.txt" in names
-
     def test_git_check_ignore_hides_a_doublestar_pattern_the_handwritten_chain_cannot(
         self, tmp_path: Path, git_available
     ) -> None:
