@@ -7,7 +7,7 @@
 >
 > คู่กับ: `depgraph.json` (import map ระดับ module — ground truth, auto-refresh ทุก commit).
 >
-> **Core V2** (`agent_takkub.core.*`, epic #309): ไม่ใช่ god-file, เป็น package ใหม่ที่ยังไม่มีใครเรียก —
+> **Core V2** (`agent_takkub.core.*`, epic #309): ไม่ใช่ god-file, เป็น package ที่ **V1 runtime import ตรงอยู่แล้ว 26 module** (secrets/provider-config/brain facade ฯลฯ — ตรวจ 2026-08-31 test-diet audit; ที่ยังไม่สลับคือ `TAKKUB_V2_AUTHORITY` dual-write flag ใน core/storage/v2_authority.py เท่านั้น #362) —
 > ดู `docs/v2/` (`V2_IMPLEMENTATION_PLAN.md` §1 module tree + §3 Phase 1) ไม่ใช่แผนที่นี้.
 
 ## สถานะ (refreshed 2026-07-11 — verified against source, not the old 2026-06-21 claim)
