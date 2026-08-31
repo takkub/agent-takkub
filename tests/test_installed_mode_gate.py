@@ -37,6 +37,11 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Real `python -m build` + `pip install` + subprocess-per-assertion — not
+# deselected by default (still runs in the batch gate), just tagged so the
+# cost is visible and `-m "not slow"` is available for a fast local loop.
+pytestmark = pytest.mark.slow
+
 # The `installed_venv` session fixture (real wheel build + throwaway venv)
 # lives in conftest.py, shared with test_installed_cli_bin_integration.py —
 # see conftest.py's `installed_venv` docstring for why (#388: two separate,

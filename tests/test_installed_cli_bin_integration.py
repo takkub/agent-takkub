@@ -27,6 +27,11 @@ import pytest
 
 from agent_takkub import config
 
+# Real `python -m build` + `pip install` + subprocess-per-assertion — not
+# deselected by default (still runs in the batch gate), just tagged so the
+# cost is visible and `-m "not slow"` is available for a fast local loop.
+pytestmark = pytest.mark.slow
+
 
 class TestNpmWrapperConsoleScriptParity:
     def test_takkub_console_script_exists_next_to_python(self, installed_venv: Path) -> None:

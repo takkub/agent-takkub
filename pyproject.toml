@@ -144,6 +144,9 @@ addopts = "-q"
 # (stderr is left inherited straight through). See qa_gate.py's
 # _pytest_cmd() docstring for the full mechanism.
 faulthandler_timeout = 280
+markers = [
+    "slow: real subprocess integration (python -m build, pip install, git) — not deselected by default, kept in the batch gate; marked so `-m \"not slow\"` is available for a fast local loop without changing what the gate runs",
+]
 
 # ──────────────────────────────────────────────────────────────────
 # import-linter: architecture guardrails
