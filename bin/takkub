@@ -16,8 +16,10 @@ REPO="$(cd "$HERE/.." && pwd)"
 # POSIX venv layout in case someone bootstrapped on macOS/Linux later.
 if [ -x "$REPO/.venv/Scripts/python.exe" ]; then
   PY="$REPO/.venv/Scripts/python.exe"
+  PY_KIND=pe
 elif [ -x "$REPO/.venv/bin/python" ]; then
   PY="$REPO/.venv/bin/python"
+  PY_KIND=posix
 else
   echo "agent-takkub .venv not found under $REPO/.venv" >&2
   echo "Launch the cockpit once with scripts\\run.bat to provision it." >&2
@@ -26,12 +28,40 @@ fi
 
 # #341: a python that EXISTS but was overwritten/truncated by something
 # outside agent-takkub must never be launched — every command built on top
-# of it then fails silently (empty output, no diagnostic). A real
-# interpreter (copy or symlink target) is comfortably >90KB; catch anything
-# wildly smaller before ever spawning it.
+# of it then fails silently (empty output, no diagnostic). This mirrors
+# npm/scripts/lib.js's pythonExecutableProblem(): a small size floor that
+# only rules out truncation (a real venv python is at least a few KB), plus
+# a magic-byte check, since #446 showed a size-only floor rejects a real,
+# runnable pyenv/python.org framework-build stub (a tiny Mach-O re-exec
+# shim) just for being smaller than an arbitrary threshold.
 PYSIZE=$(wc -c <"$PY" 2>/dev/null || echo 0)
-if [ "${PYSIZE:-0}" -lt 40960 ]; then
-  echo "[takkub] $PY looks broken (only ${PYSIZE:-0} byte(s) — a real interpreter is much larger)." >&2
+if [ "${PYSIZE:-0}" -lt 1024 ]; then
+  echo "[takkub] $PY looks broken (only ${PYSIZE:-0} byte(s) — too small to be a real interpreter)." >&2
+  echo "Something outside agent-takkub overwrote this file. Recreate the venv:" >&2
+  echo "  rm -rf \"$REPO/.venv\" && scripts/run.bat" >&2
+  exit 1
+fi
+
+PYMAGIC=$(dd if="$PY" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+case "$PY_KIND" in
+  pe)
+    # Windows PE executables always start with the 'MZ' DOS-header magic.
+    PYMAGIC_OK=0
+    case "$PYMAGIC" in 4d5a*) PYMAGIC_OK=1 ;; esac
+    ;;
+  posix)
+    # Accept a real ELF or Mach-O binary (thin or fat/universal, either
+    # endianness), or a shebang script — a pyenv shim / venv `python`
+    # wrapper is a text file starting with '#!', not a compiled executable.
+    PYMAGIC_OK=0
+    case "$PYMAGIC" in
+      7f454c46*|feedface*|cefaedfe*|feedfacf*|cffaedfe*|cafebabe*|bebafeca*) PYMAGIC_OK=1 ;;
+      2321*) PYMAGIC_OK=1 ;;
+    esac
+    ;;
+esac
+if [ "$PYMAGIC_OK" != "1" ]; then
+  echo "[takkub] $PY looks broken (header '$PYMAGIC' matches no known executable format)." >&2
   echo "Something outside agent-takkub overwrote this file. Recreate the venv:" >&2
   echo "  rm -rf \"$REPO/.venv\" && scripts/run.bat" >&2
   exit 1

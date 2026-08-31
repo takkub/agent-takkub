@@ -1196,6 +1196,56 @@ def check_projects() -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 
+# #341/#446: floor + magic-byte check for a venv python that EXISTS but was
+# overwritten/truncated by something outside agent-takkub. Mirrors
+# npm/scripts/lib.js's pythonExecutableProblem() so the cockpit's own
+# `doctor` and the npm launcher agree on what counts as broken. The floor
+# only needs to catch truncation (#341's 29-byte case) — a pyenv/python.org
+# framework build's `bin/pythonX.Y` is a tiny Mach-O re-exec stub that can be
+# well under the old 40KB floor while still being completely runnable
+# (#446); magic-byte sniffing is what actually distinguishes it from
+# garbage.
+_MIN_PYTHON_EXE_BYTES = 1024
+_ELF_MAGIC = b"\x7f\x45\x4c\x46"
+_MACHO_MAGICS = frozenset(
+    {
+        b"\xfe\xed\xfa\xce",  # MH_MAGIC (32-bit)
+        b"\xce\xfa\xed\xfe",  # MH_CIGAM (32-bit, byte-swapped)
+        b"\xfe\xed\xfa\xcf",  # MH_MAGIC_64
+        b"\xcf\xfa\xed\xfe",  # MH_CIGAM_64 (byte-swapped)
+        b"\xca\xfe\xba\xbe",  # FAT_MAGIC (universal/fat binary)
+        b"\xbe\xba\xfe\xca",  # FAT_CIGAM (universal/fat binary, byte-swapped)
+    }
+)
+
+
+def _python_executable_problem(py_path: Path) -> str | None:
+    """None when `py_path` looks like a real, runnable interpreter, else a
+    short machine-readable reason ('too-small' or 'bad-magic')."""
+    try:
+        size = py_path.stat().st_size
+    except OSError:
+        return "missing"
+    if size < _MIN_PYTHON_EXE_BYTES:
+        return "too-small"
+    try:
+        with open(py_path, "rb") as f:
+            header = f.read(4)
+    except OSError:
+        return "read-error"
+    if sys.platform == "win32":
+        # Windows PE executables always start with the 'MZ' DOS-header magic.
+        return None if header[:2] == b"MZ" else "bad-magic"
+    # POSIX: accept a real ELF or Mach-O binary, or a shebang script — a
+    # pyenv shim / venv `python` wrapper is a text file starting with '#!',
+    # not a compiled executable, and is just as valid an interpreter path.
+    if header[:2] == b"#!":
+        return None
+    if header == _ELF_MAGIC or header in _MACHO_MAGICS:
+        return None
+    return "bad-magic"
+
+
 def check_installed_integrity() -> list[Finding]:
     """[installed] — installed-build-only sanity checks (Phase D gate).
 
@@ -1299,7 +1349,6 @@ def check_installed_integrity() -> list[Finding]:
     # bin launchers guard that case before ever spawning the interpreter).
     py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
     py_path = CLI_BIN_DIR / py_name
-    min_python_exe_bytes = 40 * 1024  # a real venv interpreter is comfortably >90KB
     fix_hint = (
         "close every running cockpit/takkub process for this install, then "
         "`npm install -g agent-takkub --force` to reprovision the venv "
@@ -1310,15 +1359,9 @@ def check_installed_integrity() -> list[Finding]:
             Finding("installed", "venv-python", Status.FAIL, f"missing: {py_path}", fix_hint)
         )
     else:
-        size = py_path.stat().st_size
-        looks_broken = size < min_python_exe_bytes
-        if not looks_broken and sys.platform == "win32":
-            try:
-                with open(py_path, "rb") as f:
-                    looks_broken = f.read(2) != b"MZ"
-            except OSError:
-                looks_broken = True
-        if looks_broken:
+        problem = _python_executable_problem(py_path)
+        if problem == "too-small":
+            size = py_path.stat().st_size
             findings.append(
                 Finding(
                     "installed",
@@ -1326,6 +1369,18 @@ def check_installed_integrity() -> list[Finding]:
                     Status.FAIL,
                     f"{py_path} is only {size} byte(s) and does not look like a real "
                     "interpreter — something outside agent-takkub overwrote it",
+                    fix_hint,
+                )
+            )
+        elif problem is not None:
+            findings.append(
+                Finding(
+                    "installed",
+                    "venv-python",
+                    Status.FAIL,
+                    f"{py_path}'s header does not match a known executable format "
+                    "(PE/ELF/Mach-O) or a shebang script — something outside "
+                    "agent-takkub overwrote it",
                     fix_hint,
                 )
             )

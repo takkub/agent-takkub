@@ -4,7 +4,7 @@
 const { spawnSync } = require('child_process');
 const {
   venvPythonIfExists,
-  pythonLooksExecutable,
+  pythonExecutableProblem,
   brokenInterpreterMessage,
   agentTakkubHome,
 } = require('../scripts/lib');
@@ -14,8 +14,9 @@ if (!py) {
   console.error('agent-takkub is not provisioned. Run: npm install -g agent-takkub');
   process.exit(1);
 }
-if (!pythonLooksExecutable(py)) {
-  console.error(brokenInterpreterMessage(py, agentTakkubHome()));
+const problem = pythonExecutableProblem(py);
+if (problem) {
+  console.error(brokenInterpreterMessage(py, agentTakkubHome(), problem));
   process.exit(1);
 }
 const r = spawnSync(py, ['-m', 'agent_takkub', ...process.argv.slice(2)], { stdio: 'inherit' });

@@ -908,7 +908,7 @@ class TestCheckInstalledIntegrity:
         (cli_bin_dir / script_name).write_text("", encoding="utf-8")
 
         py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
-        py_bytes = b"MZ" if sys.platform == "win32" else b"\x00"
+        py_bytes = b"MZ" if sys.platform == "win32" else b"\x7fELF"
         (cli_bin_dir / py_name).write_bytes(py_bytes.ljust(41 * 1024, b"\x00"))
         monkeypatch.setattr(
             "agent_takkub.doctor._run", lambda argv: (0, "Python 3.11.8"), raising=False
@@ -1048,18 +1048,83 @@ class TestCheckInstalledIntegrity:
     def test_venv_python_fails_when_wrong_magic_bytes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        if sys.platform != "win32":
-            pytest.skip("PE magic-byte check is Windows-only")
         self._fake_installed_layout(monkeypatch, tmp_path)
         import agent_takkub.config as config_mod
 
-        # Right size, but doesn't start with the PE 'MZ' header.
-        (config_mod.CLI_BIN_DIR / "python.exe").write_bytes(b"\x00" * (41 * 1024))
+        py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+        # Right size, but the header matches no known executable format
+        # (PE/ELF/Mach-O) on either platform.
+        (config_mod.CLI_BIN_DIR / py_name).write_bytes(b"\x00" * (41 * 1024))
 
         findings = check_installed_integrity()
 
         f = next(x for x in findings if x.name == "venv-python")
         assert f.status == Status.FAIL
+
+    # -- #446: a size-only floor rejects a real, runnable pyenv/python.org
+    # -- framework-build interpreter (a tiny Mach-O re-exec stub). These
+    # -- monkeypatch sys.platform so the POSIX magic-byte branch is exercised
+    # -- deterministically in CI regardless of the runner's actual OS. -------
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            b"\x7fELF",  # ELF
+            b"\xfe\xed\xfa\xce",  # Mach-O MH_MAGIC (32-bit)
+            b"\xce\xfa\xed\xfe",  # Mach-O MH_CIGAM (32-bit swapped)
+            b"\xfe\xed\xfa\xcf",  # Mach-O MH_MAGIC_64
+            b"\xcf\xfa\xed\xfe",  # Mach-O MH_CIGAM_64 (swapped)
+            b"\xca\xfe\xba\xbe",  # Mach-O FAT_MAGIC (universal binary)
+            b"\xbe\xba\xfe\xca",  # Mach-O FAT_CIGAM (universal, swapped)
+            b"#!/usr/bin/env python3\n",  # pyenv shim / venv wrapper shebang
+        ],
+        ids=[
+            "elf",
+            "macho32",
+            "macho32-swap",
+            "macho64",
+            "macho64-swap",
+            "fat",
+            "fat-swap",
+            "shebang",
+        ],
+    )
+    def test_venv_python_ok_on_posix_when_small_but_a_real_interpreter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, header: bytes
+    ) -> None:
+        """Reproduces #446: well under the old 40KB floor, but a completely
+        real and runnable interpreter — must not be rejected on size alone."""
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        import agent_takkub.config as config_mod
+
+        py_name = Path(sys.executable).name
+        # Well under the old 40KB floor, but a real, comfortably-above-1KB
+        # sized file with a real interpreter's magic header.
+        (config_mod.CLI_BIN_DIR / py_name).write_bytes(header.ljust(2 * 1024, b"\x90"))
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.OK
+
+    def test_venv_python_fails_when_too_small_even_with_good_magic(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The lowered floor still catches #341-style truncation — a magic
+        header alone is not enough if the file is implausibly tiny."""
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+        header = b"MZ" if sys.platform == "win32" else b"\x7fELF"
+        (config_mod.CLI_BIN_DIR / py_name).write_bytes(header.ljust(10, b"\x00"))
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "venv-python")
+        assert f.status == Status.FAIL
+        assert "byte" in f.detail
 
     def test_venv_python_warns_when_static_check_passes_but_version_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
