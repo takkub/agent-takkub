@@ -479,6 +479,20 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         rest = "/" + segments[2] if len(segments) > 2 else "/"
         return rest, dict(urllib.parse.parse_qsl(parsed.query))
 
+    def _bad_secret_reason(self) -> str:
+        """#451: a `/<secret>/r/<ns>/<name>` shape whose secret segment just
+        failed `_match_secret_path` is very likely a previously-published
+        report link whose `secret_path` has since rotated (re-pair, Settings
+        edit, ...) — logged as `report_stale_secret` instead of the generic
+        `bad_secret_path` so `takkub ma`/events.log can tell "report links
+        died" apart from every other wrong-secret hit (scanners, a stale
+        pairing link, ...). Never changes the response — still a bare 404
+        either way."""
+        segments = urllib.parse.urlsplit(self.path).path.split("/", 2)
+        if len(segments) > 2 and segments[2].split("/", 1)[0] == "r":
+            return "report_stale_secret"
+        return "bad_secret_path"
+
     def _reject(self, reason: str = "") -> None:
         """§7.5: unauthenticated (wrong secret-path OR wrong token) always
         gets a bare 404 — never a 401, never a hint that anything exists.
@@ -553,7 +567,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         matched = self._match_secret_path()
         if matched is None:
-            self._reject("bad_secret_path")
+            self._reject(self._bad_secret_reason())
             return
         rest, query = matched
         if rest == "/api/lead":

@@ -10,6 +10,8 @@ needed. `RUNTIME_DIR`/`remote.config._PATH` are isolated per test by
 
 from __future__ import annotations
 
+import json
+import time
 import urllib.error
 import urllib.request
 
@@ -140,6 +142,97 @@ class TestList:
         code = cli.main(["report", "list", "--project", "no-reports-here"])
         assert code == 0
         assert "no published reports" in capsys.readouterr().out
+
+    def test_list_hints_relink_when_report_predates_a_config_edit(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """#451: a link published before `remote.json`'s last edit may carry
+        a secret_path that's since been rotated out from under it."""
+        src = tmp_path / "status.html"
+        src.write_text("<html>x</html>", encoding="utf-8")
+        cli.main(["report", "publish", str(src), "--project", "demo"])
+        capsys.readouterr()
+
+        monkeypatch.setattr(reports, "remote_config_mtime", lambda: time.time() + 3600)
+        code = cli.main(["report", "list", "--project", "demo"])
+        assert code == 0
+        assert "relink" in capsys.readouterr().out
+
+    def test_list_has_no_hint_when_report_is_newer_than_the_config(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(reports, "remote_config_mtime", lambda: 0.0)
+        src = tmp_path / "status.html"
+        src.write_text("<html>x</html>", encoding="utf-8")
+        cli.main(["report", "publish", str(src), "--project", "demo"])
+        capsys.readouterr()
+
+        code = cli.main(["report", "list", "--project", "demo"])
+        assert code == 0
+        assert "relink" not in capsys.readouterr().out
+
+
+class TestRelink:
+    def test_relink_prints_current_link_for_active_reports(self, tmp_path, capsys, live_server):
+        src = tmp_path / "status.html"
+        src.write_text("<html>x</html>", encoding="utf-8")
+        cli.main(["report", "publish", str(src), "--name", "status.html", "--project", "demo"])
+        capsys.readouterr()
+
+        code = cli.main(["report", "relink", "--project", "demo"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "status.html" in out
+        record = reports.list_shares("demo")[0]
+        assert f"k={record.token}" in out
+
+    def test_relink_skips_expired_reports(self, tmp_path, capsys, live_server):
+        src = tmp_path / "status.html"
+        src.write_text("<html>x</html>", encoding="utf-8")
+        cli.main(["report", "publish", str(src), "--name", "status.html", "--project", "demo"])
+        capsys.readouterr()
+
+        shares_path = reports.reports_root("demo") / "_shares.json"
+        data = json.loads(shares_path.read_text(encoding="utf-8"))
+        data["status.html"]["expires"] = "2000-01-01T00:00:00+00:00"
+        shares_path.write_text(json.dumps(data), encoding="utf-8")
+
+        code = cli.main(["report", "relink", "--project", "demo"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "status.html" not in out
+        assert "no active" in out
+
+    def test_relink_after_secret_rotation_prints_a_link_that_works(
+        self, tmp_path, capsys, live_server
+    ):
+        """#451 end-to-end: the old link (minted with the old secret_path)
+        404s once the secret rotates; `relink` prints one built from the
+        current secret_path, which resolves."""
+        src = tmp_path / "status.html"
+        src.write_text("<html>x</html>", encoding="utf-8")
+        cli.main(["report", "publish", str(src), "--name", "status.html", "--project", "demo"])
+        old_url = _extract_url(capsys.readouterr().out)
+        assert _get_status(old_url) == 200
+
+        # Simulate a secret_path rotation (Disable/re-pair, #451): both the
+        # live server's auth gate and the on-disk config `relink` reads from
+        # must agree on the new value.
+        live_server.config.secret_path = "rotated-secret"
+        RemoteConfig(
+            enabled=True,
+            public_url=f"http://127.0.0.1:{live_server.port}",
+            secret_path="rotated-secret",
+            token="tok",
+        ).save()
+        assert _get_status(old_url) == 404
+
+        code = cli.main(["report", "relink", "--project", "demo"])
+        assert code == 0
+        out = capsys.readouterr().out
+        new_url = next(line.strip() for line in out.splitlines() if line.strip().startswith("http"))
+        assert new_url != old_url
+        assert _get_status(new_url) == 200
 
 
 class TestRevokeRotate:

@@ -61,6 +61,7 @@ takkub report publish <file> [--name n] [--project p] [--expires 30d|12h|none] [
 takkub report list [--project p]                       # ดูรายการ report ที่ publish แล้ว + URL แต่ละอัน
 takkub report revoke <name> [--project p] [--delete]    # ตัดลิงก์ (token ตาย) — ไฟล์ยังอยู่เว้นแต่ใส่ --delete
 takkub report rotate <name> [--project p]               # ออก token ใหม่ — ลิงก์เก่าตายทันที ลิงก์ใหม่ใช้ได้
+takkub report relink [--project p]                      # (#451) พิมพ์ลิงก์ปัจจุบัน (secret_path ตอนนี้) ของทุก report ที่ยัง active — ใช้เมื่อ Remote ถูก Disable/re-pair แล้ว secret เปลี่ยน
 ```
 
 **ข้อจำกัดสำคัญของ `takkub report`:** ลิงก์เปิดจากนอกเครื่องได้ **เฉพาะตอน Remote เปิดอยู่จริง** (Settings → Remote enabled + tunnel connect ขึ้น) — ปิด Remote อยู่ = publish/list ยังทำงาน (เขียนไฟล์ + คืน token ปกติ) แต่ลิงก์ที่ได้ยังเปิดจากนอกไม่ได้ ทุกครั้งที่ `publish`/`list`/`rotate` จะพิมพ์บรรทัดสถานะ Remote ให้ชัดเสมอ (`Remote: เปิดอยู่ (tunnel up) → URL ใช้ได้` หรือ `Remote: ปิดอยู่ → ...`) — คำสั่งนี้**ไม่เปิด Remote ให้อัตโนมัติ**, ต้องไปเปิดเองที่ Settings → Remote ก่อน (ยังไม่มีคำสั่ง CLI สำหรับเปิด/ปิด Remote)

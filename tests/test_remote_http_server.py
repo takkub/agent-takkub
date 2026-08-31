@@ -1274,6 +1274,16 @@ class TestRejectBreadcrumb:
         assert "wrong-secret" not in json.dumps(last)
         assert "abc" not in json.dumps(last)
 
+    def test_stale_report_link_gets_its_own_reason(self, server):
+        """#451: a `/<old-secret>/r/<ns>/<name>` shape gets a distinct
+        breadcrumb from every other wrong-secret 404 — the response is still
+        the same bare 404 either way (never distinguishable to the client)."""
+        status, _ = _get_status(_url(server, "/wrong-secret/r/demo/status.html?k=tok"))
+        assert status == 404
+        last = self._reject_lines()[-1]
+        assert last["reason"] == "report_stale_secret"
+        assert "wrong-secret" not in json.dumps(last)
+
 
 class TestUrlOnlyAuth:
     """User request 2026-08-30: plain `https://host/<secret>/` link, no

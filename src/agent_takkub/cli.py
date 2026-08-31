@@ -1439,7 +1439,7 @@ def _push_report_to_mobile(
 
 
 def cmd_report(args: argparse.Namespace) -> dict:
-    """`takkub report publish|list|revoke|rotate` (#367 Remote Reports) —
+    """`takkub report publish|list|revoke|rotate|relink` (#367 Remote Reports) —
     direct filesystem I/O against `remote/reports.py`'s store, no IPC to the
     running cockpit: the store lives under `RUNTIME_DIR/exports/<ns>/
     reports/`, and `remote/http_server.py`'s `/r/` route re-reads
@@ -1528,10 +1528,13 @@ def cmd_report(args: argparse.Namespace) -> dict:
                     lines.append(f"push: {status} — {push_msg}")
             return {"ok": True, "msg": "\n".join(lines), "name": record.name, "url": url}
         if action == "list":
+            from datetime import datetime
+
             records = reports_mod.list_shares(project)
             lines = [status_line]
             if not records:
                 lines.append("(no published reports)")
+            cfg_mtime = reports_mod.remote_config_mtime()
             for r in records:
                 lines.append(
                     f"  {r.name}  label={r.label or '-'}  created={r.created}  "
@@ -1540,6 +1543,31 @@ def cmd_report(args: argparse.Namespace) -> dict:
                 url = _url(r.name, r.token)
                 if url:
                     lines.append(f"    {url}")
+                # #451: a link minted before remote.json's last edit may have
+                # been rotated out from under it (secret_path change, re-pair).
+                # `remote_config_mtime` only ever exposes a timestamp — never
+                # secret_path itself.
+                try:
+                    created_ts = datetime.fromisoformat(r.created).timestamp()
+                except (ValueError, TypeError):
+                    created_ts = None
+                if cfg_mtime is not None and created_ts is not None and created_ts < cfg_mtime:
+                    lines.append(
+                        "    ⚠ publish ก่อนการตั้งค่า remote แก้ล่าสุด — ลิงก์นี้อาจตายแล้ว "
+                        "ลอง `takkub report relink`"
+                    )
+            return {"ok": True, "msg": "\n".join(lines)}
+        if action == "relink":
+            records = [r for r in reports_mod.list_shares(project) if reports_mod.is_active(r)]
+            lines = [status_line]
+            if not records:
+                lines.append("(no active published reports)")
+            for r in records:
+                url = _url(r.name, r.token)
+                if not url:
+                    continue
+                lines.append(f"  {r.name}  label={r.label or '-'}")
+                lines.append(f"    {url}")
             return {"ok": True, "msg": "\n".join(lines)}
         if action == "revoke":
             existed = reports_mod.revoke(args.name, project, delete=bool(args.delete))
@@ -4049,6 +4077,13 @@ def main(argv: list[str] | None = None) -> int:
     sr_rotate.add_argument("name")
     sr_rotate.add_argument("--project", default=None)
     sr_rotate.set_defaults(func=cmd_report)
+    sr_relink = sr_sub.add_parser(
+        "relink",
+        help="print every active report's current link (#451 — old links can go stale "
+        "when secret_path rotates without anyone rotating tokens)",
+    )
+    sr_relink.add_argument("--project", default=None)
+    sr_relink.set_defaults(func=cmd_report)
 
     # Removal cleanup (docs/plans/remove-openviking-2026-08-24/) — reclaim a
     # leftover managed-runtime install an older Takkub version left behind.
