@@ -38,6 +38,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -284,11 +285,109 @@ def branch_name(role: str, ts: int) -> str:
     return f"{_BRANCH_PREFIX}/{sanitize_ref_component(role)}-{ts}"
 
 
+def worktrees_managed_root() -> Path:
+    """Root directory holding every project's worktrees: ``<DATA_HOME>/
+    worktrees`` — the shared parent every :func:`worktree_root` path lives
+    under. Claude Code's folder-trust check walks UP parent directories, so
+    pre-trusting this one shared root (see :func:`pre_trust_worktrees_root`)
+    covers every worktree, current and future, across every project (#444)."""
+    return (DATA_HOME / "worktrees").resolve()
+
+
 def worktree_root(project_ns: str) -> Path:
     """Managed root that holds every worktree for a project, OUTSIDE the repo
     working tree (so dev-server file watchers / git status of the main tree
     never see it): ``<DATA_HOME>/worktrees/<project>``."""
-    return (DATA_HOME / "worktrees" / sanitize_ref_component(project_ns)).resolve()
+    return (worktrees_managed_root() / sanitize_ref_component(project_ns)).resolve()
+
+
+def _log_event(event: str, **details) -> None:
+    """Proxy to orchestrator._log_event (lazy import to dodge a cycle — same
+    pattern as lead_context._log_event). Best-effort; the real implementation
+    swallows its own errors."""
+    _orch = sys.modules.get("agent_takkub.orchestrator")
+    if _orch is not None:
+        _orch._log_event(event, **details)
+
+
+def pre_trust_worktrees_root(project: str) -> None:
+    """Mark :func:`worktrees_managed_root` as trusted in Claude Code's own
+    ``.claude.json`` for *project*'s effective claude profile, so a pane
+    spawned into a brand-new ``--isolation worktree`` cwd never hits the
+    interactive folder-trust dialog (#444 — the auto-answer path gives up
+    after 90s, leaving the pane parked with no task ever delivered).
+
+    Claude Code walks UP parent directories when checking a cwd's trust, so
+    pre-trusting this ONE shared root — not each individual worktree —
+    covers every current and future worktree under it with a single write.
+    Caller is responsible for only calling this for a claude-backed pane;
+    other providers have no such file.
+
+    Read-merge-write, atomic (tempfile + ``os.replace``), and never clobbers
+    any other key already in the file. Best-effort: a missing/unparseable
+    ``.claude.json`` is skipped (logged), never raised — this must not block
+    a pane from spawning.
+    """
+    from . import config, user_profile
+
+    try:
+        name = user_profile.profile_for(project)
+        # Mirrors pane_env.inject_user_profile_env's own condition for when
+        # CLAUDE_CONFIG_DIR is actually set for a pane: when it would be,
+        # Claude Code keeps `.claude.json` INSIDE that directory instead of
+        # beside $HOME; otherwise it's at the OS-default `~/.claude.json`, a
+        # sibling of `~/.claude/` rather than inside it — derived from the
+        # SAME `_DEFAULT_CONFIG_DIR` constant every other CLAUDE_CONFIG_DIR
+        # decision in the codebase already keys off, rather than a fresh
+        # `Path.home()` call, so a test that isolates `_DEFAULT_CONFIG_DIR`
+        # (the established convention — see test_user_profile.py's
+        # `isolate` fixture) isolates this too instead of writing into the
+        # real `~/.claude.json` on whatever machine runs the suite.
+        if name != user_profile.DEFAULT_PROFILE or config.DATA_HOME != config.REPO_ROOT:
+            json_path = user_profile.config_dir_for(project) / ".claude.json"
+        else:
+            json_path = user_profile._DEFAULT_CONFIG_DIR.parent / ".claude.json"
+        key = str(worktrees_managed_root())
+
+        try:
+            raw = json_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            data: dict = {}
+        else:
+            data = json.loads(raw) if raw.strip() else {}
+            if not isinstance(data, dict):
+                data = {}
+
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+        entry = projects.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+        if entry.get("hasTrustDialogAccepted") is True:
+            return  # already trusted — nothing to write
+        entry["hasTrustDialogAccepted"] = True
+        projects[key] = entry
+        data["projects"] = projects
+
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=json_path.parent, prefix=".tmp-claude-json-")
+        try:
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, json_path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        _log_event(
+            "worktree_pretrust_skip",
+            project=project,
+            err=f"{type(e).__name__}: {e}",
+        )
 
 
 def worktree_dest(project_ns: str, role: str, ts: int) -> Path:
@@ -377,7 +476,7 @@ def _candidate_project_worktree_dirs(git_root: Path, registered_paths: set[Path]
     from_registered = {p.parent for p in registered_paths}
     if from_registered:
         return from_registered
-    root = DATA_HOME / "worktrees"
+    root = worktrees_managed_root()
     if not root.is_dir():
         return set()
     slug = sanitize_ref_component(git_root.name).lower()
@@ -1268,7 +1367,7 @@ class WorktreeManager:
         root = Path(git_root).resolve()
         registered_isolated = _registered_isolated_worktree_paths(git_root, self._run)
         live = {str(Path(p).resolve()) for p in live_paths}
-        managed_root = (DATA_HOME / "worktrees").resolve()
+        managed_root = worktrees_managed_root()
         orphans: list[dict] = []
         for project_dir in _candidate_project_worktree_dirs(root, registered_isolated):
             if project_dir != managed_root and managed_root not in project_dir.parents:
@@ -1322,7 +1421,7 @@ class WorktreeManager:
         root = Path(git_root).resolve()
         registered_isolated = _registered_isolated_worktree_paths(git_root, self._run)
         live = {str(Path(p).resolve()) for p in live_paths}
-        managed_root = (DATA_HOME / "worktrees").resolve()
+        managed_root = worktrees_managed_root()
         out: list[str] = []
         for project_dir in _candidate_project_worktree_dirs(root, registered_isolated):
             if project_dir != managed_root and managed_root not in project_dir.parents:

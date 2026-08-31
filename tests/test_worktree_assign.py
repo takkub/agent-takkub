@@ -160,6 +160,67 @@ class TestAssignWithWorktree:
         assert orch._notify_lead.called
 
 
+class TestPreTrustOnWorktreeAssign:
+    """#444: `_assign_with_worktree` pre-trusts the shared worktrees root
+    before dispatching into a fresh worktree cwd, but only for a
+    claude-backed pane (other providers have no `.claude.json`)."""
+
+    def test_claude_pane_pre_trusts_before_dispatch(self, orch, monkeypatch):
+        fake = _FakeMgr(info=_info())
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        pretrust = MagicMock()
+        monkeypatch.setattr(wm_mod, "pre_trust_worktrees_root", pretrust)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+        orch._tag_pane_worktree = MagicMock()  # type: ignore[assignment]
+
+        orch._assign_with_worktree(
+            "frontend", "/repo/web", "build X", False, False, 0, False, "proj"
+        )
+
+        pretrust.assert_called_once_with("proj")
+
+    def test_non_claude_pane_never_pre_trusts(self, orch, monkeypatch):
+        fake = _FakeMgr(info=_info())
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        pretrust = MagicMock()
+        monkeypatch.setattr(wm_mod, "pre_trust_worktrees_root", pretrust)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+        orch._tag_pane_worktree = MagicMock()  # type: ignore[assignment]
+
+        orch._assign_with_worktree(
+            "backend", "/repo/api", "build Y", False, False, 0, False, "proj"
+        )
+
+        pretrust.assert_not_called()
+
+    def test_fallback_path_never_pre_trusts(self, orch, monkeypatch):
+        """No worktree ever got created (fallback to shared cwd) — nothing
+        to pre-trust."""
+        fake = _FakeMgr(info=None, reason="ไม่ใช่ git repo — ใช้ shared cwd แทน")
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+        pretrust = MagicMock()
+        monkeypatch.setattr(wm_mod, "pre_trust_worktrees_root", pretrust)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+
+        orch._assign_with_worktree(
+            "backend", "/repo/api", "build Y", False, False, 0, False, "proj"
+        )
+
+        pretrust.assert_not_called()
+
+
 class TestBareRoleWorktreeCollision:
     """#162: `assign --isolation worktree` fired 3x back-to-back at the same
     bare role name (no `#N`) used to silently collide — the 2nd/3rd calls

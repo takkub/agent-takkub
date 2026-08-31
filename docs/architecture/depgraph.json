@@ -4881,9 +4881,10 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
-        "agent_takkub.user_actions"
+        "agent_takkub.user_actions",
+        "agent_takkub.worktree_manager"
       ],
-      "fan_in": 15,
+      "fan_in": 16,
       "fan_out": 4
     },
     {
@@ -4931,7 +4932,8 @@
       "module": "agent_takkub.worktree_manager",
       "imports": [
         "agent_takkub._win_console",
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -4947,7 +4949,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 11,
-      "fan_out": 2
+      "fan_out": 3
     }
   ]
 }
