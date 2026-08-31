@@ -280,10 +280,13 @@ _PERMISSION_MENU_TAIL_ROWS = 12
 # its own trust modal "enter Confirm" with no "to" (#186). Tolerate both so
 # is_at_trust_prompt() doesn't silently miss the agy variant.
 _ENTER_CONFIRM_RE = re.compile(r"enter\s+(?:to\s+)?confirm", re.IGNORECASE)
-# Trust modal whose highlighted row is the decline option ("❯ No, exit").
-# Claude defaults here when the folder pre-approves permissions via
-# .claude/settings.local.json; Enter alone would exit instead of trusting.
-_TRUST_CURSOR_ON_NO_RE = re.compile(r"^\s*[❯>]\s*No\b", re.IGNORECASE | re.MULTILINE)
+# Trust modal whose highlighted row is the decline option ("❯ No, exit" or,
+# on claude's numbered variant — e.g. its "Bypass Permissions mode" one-time
+# disclaimer, #457 — "❯ 1. No, exit"). Claude defaults to the decline option
+# both when the folder pre-approves permissions via .claude/settings.local.json
+# AND on that disclaimer's very first showing per profile; Enter alone would
+# exit instead of proceeding.
+_TRUST_CURSOR_ON_NO_RE = re.compile(r"^\s*[❯>]\s*(?:\d+\.\s*)?No\b", re.IGNORECASE | re.MULTILINE)
 
 
 # ── Ready-prompt detection markers (M4#17) ──────────────────────────────────
@@ -2138,9 +2141,19 @@ class PtySession(QObject):
                     spawn sat on the modal until someone noticed and sent a
                     bare Enter by hand. _ENTER_CONFIRM_RE tolerates the
                     missing "to" instead of requiring the exact phrase.
+          - claude: "Bypass Permissions mode" one-time disclaimer — shown the
+                    first time a given CLAUDE_CONFIG_DIR profile launches
+                    with --dangerously-skip-permissions (every cockpit pane
+                    spawn passes it). A brand-new profile — e.g. a freshly
+                    seeded sandbox container, #457 — hits this before it
+                    ever reaches the trust-directory modal above; with no
+                    auto-press it sits there forever since headless has no
+                    human to answer it.
         """
         text = "\n".join(self.display_lines()).lower()
         if "trust this folder" in text and _ENTER_CONFIRM_RE.search(text):
+            return True
+        if "bypass permissions mode" in text and _ENTER_CONFIRM_RE.search(text):
             return True
         if "do you trust the contents of this directory" in text:
             return True
@@ -2151,11 +2164,13 @@ class PtySession(QObject):
 
         Newer claude builds flip the default to ``❯ No, exit`` whenever the
         folder ships a ``.claude/settings.local.json`` that pre-approves tool
-        permissions (a freshly-imported project is exactly that case). A bare
-        Enter there does not accept — it exits the CLI. ``_auto_trust`` must
-        move the cursor down first. Matches the ``❯``/``>`` cursor glyph
-        followed by ``No`` at the start of a line; codex/agy keep Yes as the
-        default and never match.
+        permissions (a freshly-imported project is exactly that case), and
+        the "Bypass Permissions mode" disclaimer always defaults to its
+        numbered ``❯ 1. No, exit`` row. A bare Enter there does not accept —
+        it exits the CLI. ``_auto_trust`` must move the cursor down first.
+        Matches the ``❯``/``>`` cursor glyph, tolerating an optional leading
+        ``N.`` numbering, followed by ``No`` at the start of a line;
+        codex/agy keep Yes as the default and never match.
         """
         text = "\n".join(self.display_lines())
         return _TRUST_CURSOR_ON_NO_RE.search(text) is not None

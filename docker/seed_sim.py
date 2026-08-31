@@ -59,6 +59,50 @@ def _seed_project() -> None:
     )
 
 
+def _seed_claude_onboarding() -> None:
+    """Pre-answer claude's two interactive first-launch gates: the
+    theme/onboarding wizard, and the per-directory "do you trust this
+    folder?" prompt for DEMO_PROJECT_PATH. With no TTY input, a headless
+    Lead pane spawned before either has been answered once just sits there
+    forever — confirmed by a real hang in this image (#457): the pty
+    transcript stayed empty until a `takkub send` happened to trigger a
+    repaint, which revealed the trust dialog underneath (claude itself had
+    already written a partial .claude.json with a real oauthAccount by
+    then, proving the seeded OAuth token IS valid — this isn't an auth
+    problem). Only ever adds the two missing flags; never touches any
+    other key a real login/session has written.
+    """
+    import json
+
+    from agent_takkub import config
+
+    claude_config_dir = config.default_claude_config_dir()
+    claude_json = claude_config_dir / ".claude.json"
+    if claude_json.exists():
+        data = json.loads(claude_json.read_text(encoding="utf-8") or "{}")
+    else:
+        claude_config_dir.mkdir(parents=True, exist_ok=True)
+        data = {}
+
+    changed = False
+    if not data.get("hasCompletedOnboarding"):
+        data["hasCompletedOnboarding"] = True
+        changed = True
+
+    projects = data.setdefault("projects", {})
+    demo_entry = projects.setdefault(DEMO_PROJECT_PATH, {})
+    if not demo_entry.get("hasTrustDialogAccepted"):
+        demo_entry["hasTrustDialogAccepted"] = True
+        changed = True
+
+    if changed:
+        claude_json.write_text(json.dumps(data), encoding="utf-8")
+        print(
+            f"seed_sim: pre-answered claude onboarding + trust dialog at {claude_json}",
+            file=sys.stderr,
+        )
+
+
 def _seed_remote() -> None:
     from agent_takkub.remote.auth import hash_password
     from agent_takkub.remote.config import RemoteConfig
@@ -94,6 +138,7 @@ def _seed_remote() -> None:
 
 def main() -> int:
     _seed_project()
+    _seed_claude_onboarding()
     _seed_remote()
     return 0
 

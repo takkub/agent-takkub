@@ -67,6 +67,18 @@ ENV AGENT_TAKKUB_HOME=/data
 ENV HOME=/root
 RUN mkdir -p "$AGENT_TAKKUB_HOME"
 
+# `claude` hard-refuses --dangerously-skip-permissions (which every cockpit
+# pane spawn passes — pane_guard.py's hook interception is the safety net
+# instead) when the process EUID is 0 — confirmed by a real crash in this
+# image (#457): Lead's transcript was just "--dangerously-skip-permissions
+# cannot be used with root/sudo privileges". Reuse /root as this user's
+# home (instead of creating /home/takkub) so HOME=/root and every path this
+# codebase resolves from it (codex's $HOME/.codex, the volume mounts below)
+# stays unchanged for both services in docker-compose.yml.
+RUN useradd --uid 1001 --home-dir /root --no-create-home --shell /bin/bash takkub \
+    && chown -R takkub:takkub /root /app "$AGENT_TAKKUB_HOME"
+USER takkub
+
 # remote/config.py's RemoteConfig.bind_port default (8899) — the
 # remote-control HTTP server the PWA talks to. cli_server's own TCP port
 # (the `takkub` CLI protocol) binds ephemeral and loopback-only; it's used

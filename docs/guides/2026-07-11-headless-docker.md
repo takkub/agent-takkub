@@ -7,6 +7,10 @@ a `HeadlessWindow` (`src/agent_takkub/headless_window.py`) in place of
 `MainWindow`. The PWA (remote-control) is the only UI surface. See
 `docs/design/2026-07-11-105-phaseB-headless.md` for the architecture.
 
+> Want to just try the cockpit in a container without touching your real
+> `~/.agent-takkub`? See [`docs/guides/2026-08-31-docker-sandbox.md`](2026-08-31-docker-sandbox.md)
+> (`docker compose --profile sim up`) instead of this page.
+
 ## Prerequisites
 
 - An existing desktop cockpit login you can copy credentials from: a
