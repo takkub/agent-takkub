@@ -961,6 +961,16 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         entirely) — harmless here because that only changes what
         `candidate_str` resolves to, and the containment check below still
         catches it precisely like any other escape.
+
+        Every sink below (`os.path.isfile`, `open`, `os.path.splitext`)
+        takes `candidate_str` itself — the exact string the containment
+        check above ran against. Wrapping it in `Path(candidate_str)` first
+        (as this used to) hands the query a freshly constructed value that
+        the check above no longer visibly covers, so CodeQL treats each
+        `Path` method call on it (`.is_file()`, `.read_bytes()`) as a new,
+        unchecked sink — alerts #48/#49. Passing the checked string straight
+        into stdlib `os.path`/`open` keeps it the one value the barrier
+        actually applies to.
         """
         rel = rest.lstrip("/") or "index.html"
         root_str = os.path.realpath(str(_STATIC_ROOT))
@@ -968,17 +978,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if candidate_str != root_str and not candidate_str.startswith(root_str + os.sep):
             self._reject("static_escape")
             return
-        candidate = Path(candidate_str)
-        if not candidate.is_file():
+        if not os.path.isfile(candidate_str):
             self._reject("static_not_found")
             return
         try:
-            data = candidate.read_bytes()
+            with open(candidate_str, "rb") as fh:
+                data = fh.read()
         except OSError:
             self._reject("static_read_failed")
             return
         self.send_response(200)
-        self.send_header("Content-Type", _content_type(candidate.suffix))
+        self.send_header("Content-Type", _content_type(os.path.splitext(candidate_str)[1]))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Security-Policy", _CSP_HEADER)
         # Cloudflare Web Analytics otherwise auto-injects beacon.min.js into
