@@ -256,6 +256,28 @@ for line in sys.stdin:
     pass
 """
 
+_FAKE_CODEX_401 = r"""
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": msg["id"], "result": {"ok": True}}))
+        sys.stdout.flush()
+    elif method == "account/rateLimits/read":
+        raw = (
+            "failed to fetch codex rate limits: "
+            "GET https://chatgpt.com/backend-api/wham/usage failed: "
+            "401 Unauthorized; content-type=text/plain; "
+            'body={ "error": { "code": "token_invalidated" }, "status": 401 }'
+        )
+        print(json.dumps({"id": msg["id"], "error": {"code": -1, "message": raw}}))
+        sys.stdout.flush()
+"""
+
 
 class TestCodexAdapter:
     def test_no_binary_is_unsupported(self, monkeypatch):
@@ -287,7 +309,8 @@ class TestCodexAdapter:
         finally:
             pu._terminate_quietly(proc)
         assert result.status == "error"
-        assert "initialize error" in result.error
+        assert result.error.startswith("codex: ดึงข้อมูล usage ไม่สำเร็จ")
+        assert "initialize error" in result.detail
 
     def test_rpc_roundtrip_times_out_without_raising(self):
         proc = _spawn_fake_codex_server(_FAKE_CODEX_SILENT)
@@ -296,7 +319,18 @@ class TestCodexAdapter:
         finally:
             pu._terminate_quietly(proc)
         assert result.status == "error"
-        assert "did not respond" in result.error
+        assert "ไม่ตอบสนอง" in result.error
+        assert "did not respond" in result.detail
+
+    def test_rpc_roundtrip_401_gets_login_hint_and_raw_detail(self):
+        proc = _spawn_fake_codex_server(_FAKE_CODEX_401)
+        try:
+            result = pu._codex_rpc_roundtrip(proc, timeout=10.0)
+        finally:
+            pu._terminate_quietly(proc)
+        assert result.status == "error"
+        assert "codex login" in result.error
+        assert "token_invalidated" in result.detail
 
     def test_parse_codex_rate_limits_handles_missing_fields(self):
         result = pu._parse_codex_rate_limits({})
@@ -343,7 +377,53 @@ class TestCodexAdapter:
         monkeypatch.setattr(pu, "_codex_rpc_roundtrip", _boom)
         result = pu.fetch_codex_usage(timeout=2.0)
         assert result.status == "error"
-        assert result.error == "app-server RPC failed"
+        assert result.detail == "app-server RPC failed"
+
+
+_CODEX_401_RAW = (
+    "account/rateLimits/read error: failed to fetch codex rate limits: "
+    "GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; "
+    'content-type=text/plain; body={ "error": { "code": "token_invalidated" }, "status": 401 }'
+)
+
+
+class TestClassifyCodexError:
+    """#454: a raw codex error must never be the UI's headline verbatim —
+    `short` names cause+fix in Thai, `detail` keeps the raw text (bounded)."""
+
+    def test_401_token_invalidated_gets_login_hint(self):
+        short, detail = pu.classify_codex_error(_CODEX_401_RAW)
+        assert "codex login" in short
+        assert len(detail) <= 300
+        assert detail == _CODEX_401_RAW[:300]
+
+    def test_timeout_message_gets_retry_hint(self):
+        short, detail = pu.classify_codex_error("app-server did not respond to initialize")
+        assert "ไม่ตอบสนอง" in short
+        assert detail == "app-server did not respond to initialize"
+
+    def test_unmatched_message_still_short_and_never_raises(self):
+        short, detail = pu.classify_codex_error("some completely novel RPC failure shape")
+        assert short.startswith("codex:")
+        assert detail == "some completely novel RPC failure shape"
+
+    def test_empty_message_never_raises(self):
+        short, detail = pu.classify_codex_error("")
+        assert short.startswith("codex:")
+        assert detail == ""
+
+    def test_long_message_detail_truncated_to_300_chars(self):
+        raw = "x" * 1000
+        _short, detail = pu.classify_codex_error(raw)
+        assert len(detail) == 300
+
+
+def test_usage_to_dict_includes_detail_field():
+    data = pu.ProviderUsage(
+        provider="codex", status="error", error="codex: ดึงข้อมูลไม่สำเร็จ", detail="raw body here"
+    )
+    out = pu.usage_to_dict(data)
+    assert out["detail"] == "raw body here"
 
 
 class TestCodexAdapterConfigDir:
