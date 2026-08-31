@@ -703,6 +703,32 @@ class TestUsage:
         result = api.usage()
         assert len(result["providers"]) == len(provider_usage.PROVIDER_NAMES)
 
+    def test_error_payload_carries_short_error_and_raw_detail_separately(self, monkeypatch):
+        """#454: the remote payload must expose the short human error and the
+        raw detail as separate fields — a phone client renders `error` by
+        default and only reveals `detail` on request."""
+        from agent_takkub import provider_usage
+
+        raw = "account/rateLimits/read error: ... 401 Unauthorized ... body={...}"
+        short, detail = provider_usage.classify_codex_error(raw)
+
+        class _FakeStore:
+            def get_all(self):
+                return {
+                    "codex": provider_usage.ProviderUsage(
+                        provider="codex", status="error", error=short, detail=detail
+                    )
+                }
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        result = api.usage()
+        by_provider = {p["provider"]: p for p in result["providers"]}
+        codex = by_provider["codex"]
+        assert codex["error"] == short
+        assert "codex login" in codex["error"]
+        assert "body=" not in codex["error"]
+        assert codex["detail"] == detail
+
     def test_reports_cockpit_version(self, monkeypatch):
         """#192: the phone had no way to tell whether it's talking to an old
         cockpit build — rides along on this already-polled endpoint."""

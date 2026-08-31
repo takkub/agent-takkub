@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from agent_takkub.provider_usage import ProviderUsage
 from agent_takkub.usage_meter import UsageMeter
 
@@ -82,3 +84,23 @@ def test_compact_meter_claude_primary_without_windows_falls_back_to_utilization(
         primary_provider="claude",
     )
     assert meter._label.text().startswith("Claude 55%")
+
+
+def test_tooltip_shows_short_error_and_raw_detail_separately() -> None:
+    # #454: the quick hover tooltip shows the short human error line plus
+    # the raw detail on its own line — never a generic "ดึงข้อมูลไม่สำเร็จ"
+    # when a real cause+fix message is available.
+    meter = UsageMeter()
+    meter.set_usages(
+        [
+            ProviderUsage(
+                provider="codex",
+                status="error",
+                error="codex: login หมดอายุ — รัน codex login ใหม่",
+                detail="401 Unauthorized; body={...token_invalidated...}",
+            ),
+        ],
+    )
+    tooltip = meter._quick_tooltip(datetime.now(tz=UTC))
+    assert "codex: login หมดอายุ" in tooltip
+    assert "token_invalidated" in tooltip

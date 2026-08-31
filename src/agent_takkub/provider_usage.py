@@ -86,6 +86,14 @@ class ProviderUsage:
     what the desktop chip already shows — never change their meaning); a
     provider with only one meaningful window, or none, leaves this `None`
     and callers fall back to the headline fields, same as before #204.
+
+    `error` is the short, human-readable line a UI shows by default (Thai,
+    one sentence, states the cause and — when there is one — the fix, e.g.
+    "codex: login หมดอายุ ... รัน codex login ใหม่"). `detail` (2026-08-31
+    #454) carries the untouched raw error text (subprocess stderr, an HTTP
+    body, a provider SDK exception) for a collapsed "รายละเอียด" section —
+    never the headline, since a raw stack trace or JSON body means nothing
+    to a phone user staring at a red usage card.
     """
 
     provider: str
@@ -96,6 +104,7 @@ class ProviderUsage:
     fetched_at: datetime | None = None
     raw_data: dict[str, Any] | None = None
     error: str | None = None
+    detail: str | None = None
     spend: dict[str, Any] | None = None
     windows: list[dict[str, Any]] | None = None
 
@@ -122,6 +131,7 @@ def usage_to_dict(data: ProviderUsage) -> dict[str, Any]:
         "resets_at": data.resets_at.isoformat() if data.resets_at else None,
         "fetched_at": data.fetched_at.isoformat() if data.fetched_at else None,
         "error": data.error,
+        "detail": data.detail,
         "spend": data.spend,
         "raw_data": data.raw_data,
         "windows": data.windows,
@@ -231,6 +241,56 @@ def _codex_executable() -> str | None:
     return find_codex_executable()
 
 
+# #454: a raw codex app-server/RPC error (subprocess stderr framing, an HTTP
+# body echoed straight from `chatgpt.com/backend-api/...`, a JSON-RPC error
+# object) landed verbatim in `ProviderUsage.error`, which the cockpit/PWA
+# usage cards render as their headline line — a phone user saw a wall of
+# "401 Unauthorized; content-type=...; body={...}" with no indication that
+# the fix is `codex login`. This never re-raises: an unmatched message just
+# falls into the generic branch, still short and still carrying `detail`.
+_CODEX_AUTH_ERROR_MARKERS = (
+    "401",
+    "token_invalidated",
+    "unauthorized",
+    "not logged in",
+    "refresh token",
+)
+_CODEX_DETAIL_MAX_LEN = 300
+
+
+def classify_codex_error(msg: str) -> tuple[str, str]:
+    """Classify a raw codex app-server/RPC error string into `(short, detail)`.
+
+    `short` is one Thai sentence naming the cause and, when known, the fix —
+    what a UI shows by default. `detail` is *msg* unchanged except truncated
+    to `_CODEX_DETAIL_MAX_LEN` chars, meant for a collapsed "รายละเอียด"
+    section, never the headline.
+    """
+    raw = msg or ""
+    detail = raw[:_CODEX_DETAIL_MAX_LEN]
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _CODEX_AUTH_ERROR_MARKERS):
+        short = (
+            "codex: login หมดอายุ (token_invalidated) — รัน codex login ใหม่ใน terminal "
+            "ที่ CODEX_HOME ชี้ codex-home ของ cockpit"
+        )
+    elif "did not respond" in lowered or "timeout" in lowered:
+        short = "codex: app-server ไม่ตอบสนอง (timeout) — ลองใหม่อีกครั้ง หรือรีสตาร์ท codex CLI"
+    elif "could not start" in lowered:
+        short = "codex: เปิด app-server ไม่สำเร็จ — เช็คว่าติดตั้ง/PATH ของ codex CLI ถูกต้อง"
+    else:
+        short_raw = raw.strip() or "ไม่ทราบสาเหตุ"
+        if len(short_raw) > 100:
+            short_raw = short_raw[:100] + "…"
+        short = f"codex: ดึงข้อมูล usage ไม่สำเร็จ — {short_raw}"
+    return short, detail
+
+
+def _codex_error(raw_msg: str) -> ProviderUsage:
+    short, detail = classify_codex_error(raw_msg)
+    return ProviderUsage(provider="codex", status=STATUS_ERROR, error=short, detail=detail)
+
+
 def _terminate_quietly(proc: subprocess.Popen) -> None:
     try:
         proc.terminate()
@@ -290,23 +350,23 @@ def _codex_rpc_roundtrip(proc: subprocess.Popen, timeout: float) -> ProviderUsag
     )
     init_resp = _wait_for(1, deadline)
     if init_resp is None:
-        return _error("codex", "app-server did not respond to initialize")
+        return _codex_error("app-server did not respond to initialize")
     if "error" in init_resp:
-        return _error("codex", f"initialize error: {init_resp['error']}")
+        return _codex_error(f"initialize error: {init_resp['error']}")
 
     _send({"id": 2, "method": "account/rateLimits/read", "params": None})
     rl_resp = _wait_for(2, deadline)
     if rl_resp is None:
-        return _error("codex", "app-server did not respond to account/rateLimits/read")
+        return _codex_error("app-server did not respond to account/rateLimits/read")
     if "error" in rl_resp:
         err = rl_resp["error"]
         msg = err.get("message") if isinstance(err, dict) else str(err)
-        return _error("codex", f"account/rateLimits/read error: {msg}")
+        return _codex_error(f"account/rateLimits/read error: {msg}")
 
     result = rl_resp.get("result")
     rate_limits = result.get("rateLimits") if isinstance(result, dict) else None
     if not isinstance(rate_limits, dict):
-        return _error("codex", "account/rateLimits/read returned no rateLimits")
+        return _codex_error("account/rateLimits/read returned no rateLimits")
     return _parse_codex_rate_limits(rate_limits)
 
 
@@ -404,12 +464,12 @@ def fetch_codex_usage(
             creationflags=SUBPROCESS_NO_WINDOW,
         )
     except OSError as exc:
-        return _error("codex", f"could not start app-server: {exc}")
+        return _codex_error(f"could not start app-server: {exc}")
     try:
         return _codex_rpc_roundtrip(proc, timeout)
     except Exception:
         _log.exception("codex usage fetch failed")
-        return _error("codex", "app-server RPC failed")
+        return _codex_error("app-server RPC failed")
     finally:
         _terminate_quietly(proc)
 

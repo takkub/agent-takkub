@@ -145,7 +145,17 @@ def test_stale_snapshot_without_a_hint_keeps_the_plain_expiry_line():
 def test_error_status_never_reaches_the_hint_line():
     # `status == "error"` short-circuits well before the hint block — an
     # error must render as a failure, never as a stale-but-usable snapshot.
+    # #454: the card shows `error` verbatim (already a short, human
+    # cause+fix sentence) rather than a generic "ดึงข้อมูลไม่สำเร็จ" — the raw
+    # detail, if any, never reaches this line, only the tooltip.
     now = datetime.now(tz=UTC)
     usage = ProviderUsage(provider="gemini", status="error", error="boom")
+    texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
+    assert texts == ["boom"]
+
+
+def test_error_status_with_no_error_message_falls_back_to_generic_text():
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(provider="gemini", status="error")
     texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
     assert texts == ["ดึงข้อมูลไม่สำเร็จ"]
