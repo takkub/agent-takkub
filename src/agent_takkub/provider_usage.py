@@ -511,6 +511,15 @@ GEMINI_STALE_HINT = (
 )
 
 
+def _gemini_stale_hint(fetched_at: datetime | None) -> str:
+    """`GEMINI_STALE_HINT` plus the cache file's own date, so the UI shows
+    *how* stale the number is instead of just "stale" (#456 audit follow-up).
+    """
+    if fetched_at is None:
+        return GEMINI_STALE_HINT
+    return f"{GEMINI_STALE_HINT} (cache {fetched_at.date().isoformat()})"
+
+
 def _antigravity_authorized_cache_dirs() -> list[Path]:
     """Candidate cache directories where Antigravity / Gemini quota files may be written."""
     home = Path.home()
@@ -662,7 +671,7 @@ def fetch_gemini_usage() -> ProviderUsage:
         fetched_at=fetched_at,
         raw_data={"email": raw.get("email"), "model_count": len(models)},
         windows=windows_out,
-        error=GEMINI_STALE_HINT if status == STATUS_STALE else None,
+        error=_gemini_stale_hint(fetched_at) if status == STATUS_STALE else None,
     )
 
 
