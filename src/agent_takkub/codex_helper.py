@@ -144,6 +144,188 @@ def resolve_codex_jsonl_for_cwd(
     return None
 
 
+def resolve_newest_codex_session_for_cwd(
+    cwd: str,
+    *,
+    not_before: float = 0.0,
+    root: Path | None = None,
+) -> Path | None:
+    """Newest codex rollout file recorded against *cwd*, with no known session
+    id yet — the token meter's per-pane resolution path.
+
+    Unlike claude, codex chooses its own session id after boot (there is no
+    `--session-id`-equivalent flag the cockpit can pass at spawn, see
+    `spawn_engine.py`'s generic provider branch), so a fresh pane has nothing
+    exact to look up by. `not_before` (the pane's spawn timestamp) bounds the
+    day-sharded walk so a stale prior run in the same cwd is never mistaken
+    for the live one.
+
+    Same isolation caveat as `token_meter.find_latest_session` (issue #129):
+    a newest-match heuristic can't tell two panes sharing one cwd apart. A
+    provider pane spawned into its own worktree (the common case in this
+    cockpit) is unaffected.
+    """
+    wanted_cwd = normalize_codex_cwd(cwd)
+    if not wanted_cwd:
+        return None
+    base = root if root is not None else codex_sessions_root()
+    if not base.is_dir():
+        return None
+
+    from datetime import date as _date
+    from datetime import datetime
+
+    cutoff_date = None
+    if not_before:
+        cutoff_date = datetime.fromtimestamp(max(0.0, float(not_before) - 86400.0)).date()
+
+    try:
+        years = sorted((d for d in base.iterdir() if d.is_dir() and d.name.isdigit()), reverse=True)
+    except OSError:
+        return None
+    for year in years:
+        try:
+            months = sorted(
+                (d for d in year.iterdir() if d.is_dir() and d.name.isdigit()), reverse=True
+            )
+        except OSError:
+            continue
+        for month in months:
+            try:
+                days = sorted(
+                    (d for d in month.iterdir() if d.is_dir() and d.name.isdigit()), reverse=True
+                )
+            except OSError:
+                continue
+            for day in days:
+                if cutoff_date is not None:
+                    try:
+                        stamp = _date(int(year.name), int(month.name), int(day.name))
+                    except ValueError:
+                        stamp = None
+                    if stamp is not None and stamp < cutoff_date:
+                        return None
+                try:
+                    files = sorted(
+                        day.glob("rollout-*.jsonl"),
+                        key=lambda p: p.stat().st_mtime if p.is_file() else 0.0,
+                        reverse=True,
+                    )
+                except OSError:
+                    continue
+                for f in files:
+                    meta = read_codex_session_meta(f)
+                    if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
+                        return f
+    return None
+
+
+# The token badge refreshes every 5 s per pane and only needs the most recent
+# `token_count` event, which sits near EOF. Rollout files reach several MB on
+# a long-running pane, so — same rationale as token_meter._TAIL_SCAN_BYTES —
+# scan only the tail and fall back to a full scan only on a miss.
+_CODEX_TAIL_SCAN_BYTES = 512 * 1024
+
+
+def _scan_lines_for_codex_token_count(lines) -> dict | None:
+    """Return the last `event_msg.payload.info` block seen in `lines`, or None."""
+    last_info: dict | None = None
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            j = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if j.get("type") != "event_msg":
+            continue
+        payload = j.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        if isinstance(info, dict):
+            last_info = info
+    return last_info
+
+
+def read_codex_token_usage(jsonl: Path) -> dict | None:
+    """Return the unified token_meter usage dict for the most recent
+    `token_count` event in a codex rollout JSONL.
+
+    Verified against a real rollout (codex-cli 0.151.0, 2026-08-30):
+    `{"type":"event_msg","payload":{"type":"token_count","info":
+    {"last_token_usage":{"input_tokens","cached_input_tokens",
+    "cache_write_input_tokens","output_tokens","reasoning_output_tokens",
+    "total_tokens"},"model_context_window":<int>}}}`.
+
+    `prompt` = `last_token_usage.input_tokens + .cached_input_tokens` — the
+    tokens actually sent in the most recent turn's request, mirroring
+    claude's `input + cache_creation + cache_read` (context occupancy), NOT
+    `total_token_usage` (that key is the whole session's cumulative sum).
+    `limit` comes straight from the event's own `model_context_window` —
+    codex reports it live, so no static per-model table is needed the way
+    claude's is (see token_meter._MODEL_LIMITS).
+
+    Returns `{"status": "no_data", ...}` when the file has no token_count
+    event yet (fresh session, first turn still in flight), and
+    `{"status": "no_data", ...}` with a schema-drift reason if a future codex
+    release renames `last_token_usage`/`model_context_window` — never raises.
+    """
+    try:
+        size = jsonl.stat().st_size
+    except OSError:
+        return None
+
+    last_info: dict | None = None
+    if size > _CODEX_TAIL_SCAN_BYTES:
+        try:
+            with open(jsonl, "rb") as f:
+                f.seek(size - _CODEX_TAIL_SCAN_BYTES)
+                raw = f.read()
+            nl = raw.find(b"\n")
+            if nl != -1:
+                raw = raw[nl + 1 :]
+            last_info = _scan_lines_for_codex_token_count(
+                raw.decode("utf-8", "replace").splitlines()
+            )
+        except OSError:
+            last_info = None
+
+    if last_info is None:
+        try:
+            with jsonl.open("r", encoding="utf-8", errors="replace") as f:
+                last_info = _scan_lines_for_codex_token_count(f)
+        except OSError:
+            return None
+
+    if not last_info:
+        return {"status": "no_data", "model": "codex", "reason": "no token_count event logged yet"}
+
+    last = last_info.get("last_token_usage")
+    if not isinstance(last, dict):
+        return {
+            "status": "no_data",
+            "model": "codex",
+            "reason": "token_count event missing last_token_usage (schema drift)",
+        }
+    inp = int(last.get("input_tokens") or 0)
+    cr = int(last.get("cached_input_tokens") or 0)
+    out = int(last.get("output_tokens") or 0)
+    prompt = inp + cr
+    limit = last_info.get("model_context_window")
+    return {
+        "status": "ok",
+        "model": "codex",
+        "input": inp,
+        "cache_creation": 0,
+        "cache_read": cr,
+        "output": out,
+        "prompt": prompt,
+        "total": prompt + out,
+        "limit": int(limit) if isinstance(limit, (int, float)) and limit else None,
+    }
+
+
 def find_codex_executable() -> str | None:
     """Return the absolute path to the `codex` binary, or None when
     it isn't on PATH. Caller surfaces a friendly "install with

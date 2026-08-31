@@ -469,9 +469,10 @@
         "agent_takkub.provider_spec",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.token_meter"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     },
     {
@@ -2325,9 +2326,10 @@
       ],
       "imported_by": [
         "agent_takkub.core.conversation.ingest.cursor_adapter",
-        "agent_takkub.remote.notify"
+        "agent_takkub.remote.notify",
+        "agent_takkub.token_meter"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {
@@ -2528,9 +2530,10 @@
         "agent_takkub.core.conversation.ingest.gemini_adapter",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.notify",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.token_meter"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {
@@ -2674,9 +2677,10 @@
       "module": "agent_takkub.kimi_helper",
       "imports": [],
       "imported_by": [
-        "agent_takkub.core.conversation.ingest.kimi_adapter"
+        "agent_takkub.core.conversation.ingest.kimi_adapter",
+        "agent_takkub.token_meter"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -2967,9 +2971,10 @@
         "agent_takkub.core.conversation.ingest.opencode_adapter",
         "agent_takkub.core.versioning.probe",
         "agent_takkub.provider_spec",
-        "agent_takkub.remote.notify"
+        "agent_takkub.remote.notify",
+        "agent_takkub.token_meter"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 2
     },
     {
@@ -4747,7 +4752,13 @@
     },
     {
       "module": "agent_takkub.token_meter",
-      "imports": [],
+      "imports": [
+        "agent_takkub.codex_helper",
+        "agent_takkub.cursor_helper",
+        "agent_takkub.gemini_helper",
+        "agent_takkub.kimi_helper",
+        "agent_takkub.opencode_helper"
+      ],
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.agent_pane_model",
@@ -4760,7 +4771,7 @@
         "agent_takkub.task_dock"
       ],
       "fan_in": 9,
-      "fan_out": 0
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.tutorial_overlay",

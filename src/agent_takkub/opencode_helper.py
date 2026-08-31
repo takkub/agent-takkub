@@ -314,6 +314,77 @@ def read_opencode_session_messages(
         conn.close()
 
 
+def read_opencode_token_usage(db_path: Path, session_id: str) -> dict | None:
+    """Return the unified token_meter usage dict for the most recent
+    assistant message in *session_id*.
+
+    Verified against a real `opencode.db` (opencode-ai, 2026-08-30): an
+    assistant `message.data` row carries `tokens: {total, input, output,
+    reasoning, cache: {write, read}}` and `modelID` directly — no separate
+    event stream to scan, unlike codex/claude's JSONL turn logs. `prompt` =
+    `input + cache.write + cache.read` (context occupancy), mirroring the
+    same `input + cache_creation + cache_read` shape token_meter.read_last_usage
+    uses for claude.
+
+    OpenCode reports no context-window size in this row, so `limit` is
+    always None here — `token_meter.format_token_badge` falls back to its
+    own per-model table default in that case (no per-backend table added
+    here: opencode fans out to 75+ model backends via `-m provider/model`,
+    and inventing sizes per backend is exactly the kind of guess the
+    schema-drift policy forbids).
+    """
+    conn = _connect_ro(db_path)
+    if conn is None:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT data FROM message
+            WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'
+            ORDER BY time_created DESC LIMIT 1
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+    except (sqlite3.Error, OSError):
+        return None
+    finally:
+        conn.close()
+
+    if row is None:
+        return {"status": "no_data", "model": None, "reason": "no assistant message logged yet"}
+    try:
+        data = json.loads(row["data"])
+    except (json.JSONDecodeError, TypeError):
+        return {"status": "no_data", "model": None, "reason": "assistant message row unparseable"}
+
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict):
+        return {
+            "status": "no_data",
+            "model": data.get("modelID") if isinstance(data, dict) else None,
+            "reason": "assistant message missing tokens block (schema drift)",
+        }
+    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+    inp = int(tokens.get("input") or 0)
+    cache_write = int(cache.get("write") or 0)
+    cache_read = int(cache.get("read") or 0)
+    out = int(tokens.get("output") or 0)
+    prompt = inp + cache_write + cache_read
+    return {
+        "status": "ok",
+        "model": data.get("modelID") or "opencode",
+        "input": inp,
+        "cache_creation": cache_write,
+        "cache_read": cache_read,
+        "output": out,
+        "prompt": prompt,
+        "total": prompt + out,
+        "limit": None,
+    }
+
+
 def list_recent_opencode_sessions(
     cwd: str,
     limit: int = 10,

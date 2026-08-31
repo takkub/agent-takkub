@@ -342,6 +342,199 @@ def read_last_usage(jsonl: Path) -> dict | None:
     }
 
 
+# ── provider-neutral dispatcher (issue #103) ─────────────────────────────────
+# Claude was the only provider with a compatible transcript when the rest of
+# this module was written (see the "None fields indicate no change" and
+# "single source of truth" comments scattered above); the dispatch below
+# extends the same badge/watchdog machinery to codex/gemini/opencode/kimi/
+# cursor without touching claude's own `find_session_by_uuid`/`read_last_usage`
+# contract at all — every claude call site keeps working unchanged.
+#
+# Unified usage-dict contract every `read_pane_usage` branch returns:
+#   status: "ok" | "unsupported" | "no_data"
+#   model:  str | None
+#   reason: str            (present when status != "ok")
+#   -- when status == "ok", also:
+#   input, cache_creation, cache_read, output, prompt, total: int
+#   limit: int | None      (provider-reported context cap; None = let
+#                            `effective_context_limit`'s per-model table decide)
+#
+# "unsupported" = confirmed structurally absent (verified against a real
+# session on this machine — see docs/audit/2026-08-31-token-meter-providers.md)
+# — never a guess. "no_data" = the data COULD exist but this pane hasn't
+# logged a turn yet (fresh spawn, or a schema-drift miss on an otherwise
+# supported provider) — same "nothing to show yet" meaning `None` already
+# has for claude, kept distinct from "unsupported" only because the caller
+# needs to tell "will never have a number" from "doesn't have one YET".
+_GEMINI_UNSUPPORTED_REASON = (
+    "agy/Antigravity's transcript carries no token/usage field — confirmed "
+    "empty on a real session (chats/session-*.jsonl AND the current "
+    "antigravity-cli/brain/*/transcript.jsonl layout, 2026-08-31). The sqlite "
+    "conversation store's gen_metadata/steps tables exist but hold opaque "
+    "protobuf blobs with no available schema. See issue #103."
+)
+_CURSOR_UNSUPPORTED_REASON = (
+    "cursor-agent's JSONL transcript schema has not been captured on any "
+    "machine yet — no token/usage field name is confirmed, and guessing one "
+    "risks silently misreading real data. See issue #103."
+)
+
+# (provider, field) pairs already logged this process — caps the schema-drift
+# event to once per pane (a pane's resolved session identity is stable across
+# poll ticks, so keying on it is equivalent to keying on the pane) instead of
+# firing every 5 s.
+_SCHEMA_DRIFT_LOGGED: set[tuple[str, str]] = set()
+
+
+def _log_event(event: str, **details) -> None:
+    """Best-effort proxy to orchestrator._log_event via sys.modules — never a
+    static import, so this stays a leaf module (import-linter
+    'leaf-modules-pure' contract) and never triggers loading the engine just
+    to log. Mirrors the identical pattern in lead_context.py/orchestrator_text.py."""
+    import sys
+
+    _orch = sys.modules.get("agent_takkub.orchestrator")
+    if _orch is not None:
+        try:
+            _orch._log_event(event, **details)
+        except Exception:
+            pass
+
+
+def _note_schema_drift(provider: str, missing: str) -> None:
+    key = (provider, missing)
+    if key in _SCHEMA_DRIFT_LOGGED:
+        return
+    _SCHEMA_DRIFT_LOGGED.add(key)
+    _log_event("token_meter_schema_drift", provider=provider, missing=missing)
+
+
+def resolve_pane_session(
+    provider: str,
+    cwd: str | Path,
+    *,
+    session_uuid: str | None = None,
+    not_before: float = 0.0,
+    config_dir: str | Path | None = None,
+    project_dir_name: str | None = None,
+) -> object | None:
+    """Resolve this pane's live session identity for `provider`, or None if
+    not resolvable yet (fresh spawn, first turn still in flight).
+
+    The return value is opaque — callers (agent_pane.py) use it only for
+    equality, to detect a session rollover (`/clear`, `/resume`, a fresh
+    `/new`), never to interpret its shape: a `Path` for claude/codex/gemini/
+    kimi, a `(db_path, session_id)` tuple for opencode.
+
+    Every non-claude provider pane is spawned by spawn_engine.py's generic
+    spec-driven branch, which — unlike claude's `--session-id` — never mints
+    or passes a session id at spawn (codex/gemini/opencode/kimi all choose
+    their own id internally, after boot). So `session_uuid` is normally None
+    here for every provider except claude, and each branch below falls back
+    to a newest-session-for-`cwd` resolve bounded by `not_before` (the pane's
+    own spawn timestamp) instead.
+    """
+    if provider == "claude":
+        if not session_uuid:
+            return None
+        return find_session_by_uuid(
+            cwd, session_uuid, config_dir, project_dir_name=project_dir_name
+        )
+
+    if provider == "codex":
+        from .codex_helper import resolve_codex_jsonl_for_cwd, resolve_newest_codex_session_for_cwd
+
+        if session_uuid:
+            found = resolve_codex_jsonl_for_cwd(str(cwd), session_uuid)
+            if found is not None:
+                return found
+        return resolve_newest_codex_session_for_cwd(str(cwd), not_before=not_before)
+
+    if provider == "gemini":
+        from .gemini_helper import resolve_antigravity_transcript, resolve_gemini_jsonl_for_cwd
+
+        found = resolve_antigravity_transcript(str(cwd), session_uuid or None)
+        if found is not None:
+            return found
+        return resolve_gemini_jsonl_for_cwd(str(cwd), session_uuid or None)
+
+    if provider == "opencode":
+        from .opencode_helper import resolve_opencode_session
+
+        return resolve_opencode_session(str(cwd), session_uuid, not_before)
+
+    if provider == "kimi":
+        from .kimi_helper import resolve_kimi_session_dir
+
+        return resolve_kimi_session_dir(str(cwd), session_uuid or None)
+
+    if provider == "cursor":
+        from .cursor_helper import resolve_cursor_jsonl_for_cwd
+
+        return resolve_cursor_jsonl_for_cwd(str(cwd), session_uuid, not_before)
+
+    return None
+
+
+def read_pane_usage(provider: str, cand: object) -> dict | None:
+    """Read the unified usage dict at an already-resolved `cand` (from
+    `resolve_pane_session`). Returns None only when `cand` itself is falsy —
+    callers should skip this call entirely in that case, same as before.
+
+    Every branch is best-effort: a read/parse failure degrades to a
+    `"no_data"` dict (or, for a provider confirmed to never carry the data,
+    `"unsupported"`), never raises into the token-meter's QTimer-driven
+    background thread.
+    """
+    if not cand:
+        return None
+
+    if provider == "claude":
+        usage = read_last_usage(cand)
+        if usage is None:
+            return None
+        return {**usage, "status": "ok", "limit": None}
+
+    if provider == "codex":
+        from .codex_helper import read_codex_token_usage
+
+        usage = read_codex_token_usage(cand)
+        if (
+            usage is not None
+            and usage.get("status") == "no_data"
+            and "schema drift" in usage.get("reason", "")
+        ):
+            _note_schema_drift("codex", "last_token_usage/model_context_window")
+        return usage
+
+    if provider == "gemini":
+        return {"status": "unsupported", "model": None, "reason": _GEMINI_UNSUPPORTED_REASON}
+
+    if provider == "opencode":
+        from .opencode_helper import read_opencode_token_usage
+
+        db_path, session_id = cand
+        usage = read_opencode_token_usage(db_path, session_id)
+        if (
+            usage is not None
+            and usage.get("status") == "no_data"
+            and "schema drift" in usage.get("reason", "")
+        ):
+            _note_schema_drift("opencode", "message.data.tokens")
+        return usage
+
+    if provider == "kimi":
+        from .kimi_helper import read_kimi_token_usage
+
+        usage = read_kimi_token_usage(cand)
+        return usage
+
+    if provider == "cursor":
+        return {"status": "unsupported", "model": None, "reason": _CURSOR_UNSUPPORTED_REASON}
+
+    return None
+
+
 def format_tokens(n: int) -> str:
     """Human-friendly token count: 1234 → '1.2k', 147500 → '147k'."""
     if n < 1000:

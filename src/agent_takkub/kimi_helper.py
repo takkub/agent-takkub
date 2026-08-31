@@ -198,6 +198,118 @@ def parse_kimi_wire_record(rec: object) -> tuple[str, str] | None:
     return None
 
 
+_KIMI_TAIL_SCAN_BYTES = 512 * 1024
+
+
+def _scan_lines_for_kimi_status(lines) -> dict:
+    """Fold every `StatusUpdate` message in `lines` into the latest known
+    context/token state.
+
+    `kimi_cli.wire.types.StatusUpdate`'s own docstring: "None fields indicate
+    no change from the previous status" — so the single most recent
+    StatusUpdate line can have `context_tokens: null` if only e.g.
+    `plan_mode` changed on that step. Each field must therefore track its own
+    last-seen-non-null value across every StatusUpdate in the log, not just
+    read the last line.
+    """
+    state: dict = {"context_tokens": None, "max_context_tokens": None, "token_usage": None}
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        message = rec.get("message")
+        if not isinstance(message, dict) or message.get("type") != "StatusUpdate":
+            continue
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        for key in ("context_tokens", "max_context_tokens", "token_usage"):
+            val = payload.get(key)
+            if val is not None:
+                state[key] = val
+    return state
+
+
+def read_kimi_token_usage(session_dir: Path) -> dict | None:
+    """Return the unified token_meter usage dict for the newest `StatusUpdate`
+    state in *session_dir*'s `wire.jsonl`.
+
+    Confirmed against kimi-cli's own installed, typed wire-protocol source
+    (`kimi_cli/wire/types.py::StatusUpdate`, `kosong/chat_provider/__init__.py
+    ::TokenUsage`) rather than a captured live line — this machine's kimi has
+    no default model configured (see this module's own docstring GAP note),
+    so no real StatusUpdate has been observed to verify against yet. Treat
+    the field names as provisional until a real line is captured; the
+    fail-soft `no_data` path below means a wrong guess costs a missing badge,
+    never a crash or a misleading number.
+
+    `context_tokens`/`max_context_tokens` are StatusUpdate's own purpose-built
+    "current context fill" fields (used directly as `prompt`/`limit`) rather
+    than reconstructed from `token_usage`, which the type's docstring scopes
+    to "the current step" only (i.e. one turn's API cost, not the running
+    context total) — the same distinction claude's `prompt` (this-turn
+    context occupancy) vs `output` (this-turn response) draws, but kimi
+    reports the context total directly instead of requiring it be summed.
+    """
+    wire = session_dir / "wire.jsonl"
+    try:
+        size = wire.stat().st_size
+    except OSError:
+        return None
+
+    state: dict = {"context_tokens": None, "max_context_tokens": None, "token_usage": None}
+    if size > _KIMI_TAIL_SCAN_BYTES:
+        try:
+            with open(wire, "rb") as f:
+                f.seek(size - _KIMI_TAIL_SCAN_BYTES)
+                raw = f.read()
+            nl = raw.find(b"\n")
+            if nl != -1:
+                raw = raw[nl + 1 :]
+            state = _scan_lines_for_kimi_status(raw.decode("utf-8", "replace").splitlines())
+        except OSError:
+            state = {"context_tokens": None, "max_context_tokens": None, "token_usage": None}
+
+    if state["context_tokens"] is None and state["token_usage"] is None:
+        try:
+            with wire.open("r", encoding="utf-8", errors="replace") as f:
+                state = _scan_lines_for_kimi_status(f)
+        except OSError:
+            return None
+
+    context_tokens = state["context_tokens"]
+    token_usage = state["token_usage"] if isinstance(state["token_usage"], dict) else None
+    if context_tokens is None and token_usage is None:
+        return {"status": "no_data", "model": None, "reason": "no StatusUpdate logged yet"}
+
+    inp_other = int((token_usage or {}).get("input_other") or 0)
+    cache_read = int((token_usage or {}).get("input_cache_read") or 0)
+    cache_creation = int((token_usage or {}).get("input_cache_creation") or 0)
+    out = int((token_usage or {}).get("output") or 0)
+    prompt = (
+        int(context_tokens)
+        if isinstance(context_tokens, (int, float))
+        else inp_other + cache_read + cache_creation
+    )
+    max_tokens = state["max_context_tokens"]
+    return {
+        "status": "ok",
+        "model": "kimi",
+        "input": inp_other,
+        "cache_creation": cache_creation,
+        "cache_read": cache_read,
+        "output": out,
+        "prompt": prompt,
+        "total": prompt + out,
+        "limit": int(max_tokens) if isinstance(max_tokens, (int, float)) and max_tokens else None,
+    }
+
+
 def read_recent_kimi_messages(path: Path, limit: int = 200) -> list[dict]:
     """Read recent user/assistant text turns from a Kimi `wire.jsonl`."""
     try:
