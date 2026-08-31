@@ -138,6 +138,11 @@ class HeadlessPane(QObject):
         self.model.tp_total_bytes = 0
         self.model.session_generation += 1
         gen = self.model.session_generation
+        # Bind the PTY-side generation to this pane's generation, mirroring
+        # AgentPane.attach_session (agent_pane.py:584). Without this, queued
+        # writes tagged with the pane's generation never match the session's
+        # (stuck at 0) and are silently dropped by the writer (#457).
+        session.session_generation = gen
         session.bytesIn.connect(self._mark_output_ts)
         self._exit_conn = session.processExited.connect(lambda code, g=gen: self._on_exit(code, g))
         self.model.spawn_ts = time.time()

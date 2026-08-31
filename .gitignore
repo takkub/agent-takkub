@@ -93,6 +93,23 @@ vscode-extension/*.vsix
 # checkout DATA_HOME == repo root, so isolated worktrees land here; never track them.
 worktrees/
 
+# takkub-sim Docker sandbox (#457) — bind-mounted state (projects.json,
+# runtime/, credentials copied in by docker/seed-creds.*). Only the demo
+# project and directory placeholders are real source; everything else is
+# per-machine runtime state, same reasoning as runtime/ above. Each dir is
+# ignored by its *contents* (never the dir itself) so the negated .gitkeep/
+# demo/ patterns don't need to fight git's "won't descend into an ignored
+# dir" rule.
+/volumes/data/*
+!/volumes/data/.gitkeep
+/volumes/auth/claude/*
+!/volumes/auth/claude/.gitkeep
+/volumes/auth/codex/*
+!/volumes/auth/codex/.gitkeep
+/volumes/projects/*
+!/volumes/projects/demo/
+.env
+
 # graphify knowledge-graph output (generated)
 graphify-out/
 

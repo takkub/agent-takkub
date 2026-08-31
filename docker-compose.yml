@@ -27,5 +27,31 @@ services:
       - ${HOME}/.codex:/root/.codex
     restart: unless-stopped
 
+  # Sandbox for trying out the cockpit without touching the real ~/.agent-takkub
+  # instance (#457) — bind-mounted (not a named volume) so the whole
+  # `volumes/` folder can move to a VPS as-is later. Never started by a bare
+  # `docker compose up` (profile-gated) — see
+  # docs/guides/2026-08-31-docker-sandbox.md.
+  takkub-sim:
+    build: .
+    profiles: ["sim"]
+    entrypoint: ["/app/docker/entrypoint-sim.sh"]
+    environment:
+      - AGENT_TAKKUB_HOME=/data
+      - HOME=/root
+      - TAKKUB_SIM_PASSWORD=${TAKKUB_SIM_PASSWORD:-sandbox}
+      - TAKKUB_SIM_PUBLIC_URL=${TAKKUB_SIM_PUBLIC_URL:-http://localhost:${TAKKUB_BIND_PORT:-8899}}
+    ports:
+      - "${TAKKUB_BIND_PORT:-8899}:8899"
+    volumes:
+      - ./volumes/data:/data
+      # config.provider_home_env("codex") = DATA_HOME/codex-home (#455) — NOT
+      # ~/.codex like the prod service above; codex CLI reads $CODEX_HOME,
+      # injected by pane_env.inject_provider_home_env at spawn time.
+      - ./volumes/auth/claude:/data/claude-config
+      - ./volumes/auth/codex:/data/codex-home
+      - ./volumes/projects:/projects
+    restart: unless-stopped
+
 volumes:
   data:

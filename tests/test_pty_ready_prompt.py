@@ -1097,3 +1097,34 @@ class TestTrustPromptSelectsNo:
     def test_prose_mentioning_no_does_not_match(self) -> None:
         s = self._session(["> Nothing to see here", "❯ Note: retry"])
         assert not s.trust_prompt_selects_no()
+
+    # #457: claude's "Bypass Permissions mode" one-time disclaimer — shown
+    # the first time a given CLAUDE_CONFIG_DIR profile launches with
+    # --dangerously-skip-permissions (every cockpit pane spawn passes it).
+    # A brand-new sandbox profile hit this before ever reaching the
+    # trust-directory modal above; with nothing recognizing it, headless had
+    # no way to answer it and the pane hung forever at boot.
+    _BYPASS_PERMISSIONS_NO_DEFAULT = (
+        "WARNING: Claude Code running in Bypass Permissions mode",
+        "By proceeding, you accept all responsibility for actions taken while",
+        "running in Bypass Permissions mode.",
+        "❯ 1. No, exit",
+        "  2. Yes, I accept",
+        "Enter to confirm · Esc to cancel",
+    )
+    _BYPASS_PERMISSIONS_YES_SELECTED = (
+        "WARNING: Claude Code running in Bypass Permissions mode",
+        "❯ 1. Yes, I accept",
+        "  2. No, exit",
+        "Enter to confirm · Esc to cancel",
+    )
+
+    def test_bypass_permissions_dialog_cursor_on_no_detected(self) -> None:
+        s = self._session(self._BYPASS_PERMISSIONS_NO_DEFAULT)
+        assert s.is_at_trust_prompt()
+        assert s.trust_prompt_selects_no()
+
+    def test_bypass_permissions_dialog_cursor_on_yes_not_flagged(self) -> None:
+        s = self._session(self._BYPASS_PERMISSIONS_YES_SELECTED)
+        assert s.is_at_trust_prompt()
+        assert not s.trust_prompt_selects_no()

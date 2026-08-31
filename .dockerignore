@@ -1,0 +1,28 @@
+# Build context excludes for the headless/sandbox Docker image.
+# Keep this narrow: `pip install .` only needs pyproject.toml + src/.
+.git/
+.github/
+.venv/
+venv/
+.venv-qa/
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+runtime/
+worktrees/
+volumes/
+tests/
+docs/
+.agents/
+.rtk/
+.serena/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+*.log
+scratch/
+claude-config/
