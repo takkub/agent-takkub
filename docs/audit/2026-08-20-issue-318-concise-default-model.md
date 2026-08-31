@@ -149,6 +149,8 @@ CLI surface required:
   `""` = disabled). Default: `{"qa"}` — the pilot role for §3.
 - `spawn_engine.py`'s existing `--settings` injection site now resolves `concise` and
   passes it through; no new argv flag, no new call site.
+- #458 added a same-shaped sibling lever on that injection site: `TAKKUB_REMOTE_CONTROL_ROLES`
+  (`hook_wiring.role_wants_remote_control`) stamps `remoteControlAtStartup`, default Lead-only.
 
 ## 3. A/B measurement — method (not run in this task's scope)
 

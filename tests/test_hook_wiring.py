@@ -252,17 +252,86 @@ class TestConciseOutputStyle:
         assert pathlib.Path(concise).exists()
 
 
+class TestRemoteControlStartup:
+    """#458: Claude Code 2.1.251 defaults Remote Control to on for every pane
+    unless `remoteControlAtStartup` is stamped explicitly. Default roster is
+    Lead only — the opposite default from concise's opt-in pilot."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_REMOTE_CONTROL_ROLES", raising=False)
+
+    def test_default_is_lead_only(self) -> None:
+        assert hook_wiring.role_wants_remote_control("lead", is_lead=True) is True
+        assert hook_wiring.role_wants_remote_control("backend", is_lead=False) is False
+
+    def test_wildcard_env_enables_every_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_REMOTE_CONTROL_ROLES", "*")
+        assert hook_wiring.role_wants_remote_control("backend", is_lead=False) is True
+        assert hook_wiring.role_wants_remote_control("qa", is_lead=False) is True
+
+    def test_empty_env_disables_even_lead(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_REMOTE_CONTROL_ROLES", "")
+        assert hook_wiring.role_wants_remote_control("lead", is_lead=True) is False
+
+    def test_custom_roster_replaces_default_and_matches_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_REMOTE_CONTROL_ROLES", "backend,devops")
+        assert hook_wiring.role_wants_remote_control("backend", is_lead=False) is True
+        assert hook_wiring.role_wants_remote_control("lead", is_lead=True) is False
+
+    def test_settings_file_always_carries_explicit_bool(self, tmp_env: pathlib.Path) -> None:
+        on = json.loads(
+            pathlib.Path(hook_wiring.ensure_hook_settings_file(remote_control=True)).read_text(
+                encoding="utf-8"
+            )
+        )
+        off = json.loads(
+            pathlib.Path(hook_wiring.ensure_hook_settings_file(remote_control=False)).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert on["remoteControlAtStartup"] is True
+        assert off["remoteControlAtStartup"] is False
+
+    def test_default_call_keeps_original_bare_filename(self, tmp_env: pathlib.Path) -> None:
+        # doctor.check_hook_wiring() calls ensure_hook_settings_file() with no
+        # args and must keep resolving to the same path it always has.
+        path = hook_wiring.ensure_hook_settings_file()
+        assert pathlib.Path(path).name == "hook-settings.json"
+
+    def test_norc_file_is_a_separate_path_from_default(self, tmp_env: pathlib.Path) -> None:
+        default_path = hook_wiring.ensure_hook_settings_file()
+        norc_path = hook_wiring.ensure_hook_settings_file(remote_control=False)
+        assert default_path != norc_path
+        assert pathlib.Path(norc_path).name == "hook-settings-norc.json"
+        assert pathlib.Path(default_path).exists()
+        assert pathlib.Path(norc_path).exists()
+
+    def test_concise_and_norc_combine_into_their_own_file(self, tmp_env: pathlib.Path) -> None:
+        path = hook_wiring.ensure_hook_settings_file(concise=True, remote_control=False)
+        assert pathlib.Path(path).name == "hook-settings-concise-norc.json"
+
+
 class TestClaudeSpawnArgvIncludesSettings:
     def test_teammate_spawn_gets_settings_flag(self, orch: Orchestrator) -> None:
         argv = _spawn_capture(orch, "backend")
         assert "--settings" in argv
         settings_path = argv[argv.index("--settings") + 1]
-        assert settings_path.endswith("hook-settings.json")
+        # backend is a non-Lead role: concise stays off by default (#318)
+        # but so does remote control now (#458) -> the "-norc" file.
+        assert settings_path.endswith("hook-settings-norc.json")
         assert pathlib.Path(settings_path).exists()
+        data = json.loads(pathlib.Path(settings_path).read_text(encoding="utf-8"))
+        assert data["remoteControlAtStartup"] is False
 
     def test_lead_spawn_gets_settings_flag(self, orch: Orchestrator) -> None:
         argv = _spawn_capture(orch, "lead")
         assert "--settings" in argv
+        settings_path = argv[argv.index("--settings") + 1]
+        data = json.loads(pathlib.Path(settings_path).read_text(encoding="utf-8"))
+        assert data["remoteControlAtStartup"] is True
 
     def test_shell_pane_does_not_get_settings_flag(self, orch: Orchestrator) -> None:
         # shell is a plain terminal pane — never runs claude, so it must not
@@ -274,9 +343,11 @@ class TestClaudeSpawnArgvIncludesSettings:
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("TAKKUB_CONCISE_ROLES", raising=False)
+        monkeypatch.delenv("TAKKUB_REMOTE_CONTROL_ROLES", raising=False)
         argv = _spawn_capture(orch, "qa")
         settings_path = argv[argv.index("--settings") + 1]
-        assert settings_path.endswith("hook-settings-concise.json")
+        # qa is concise (default pilot) and non-Lead (rc off by default).
+        assert settings_path.endswith("hook-settings-concise-norc.json")
 
     def test_lead_spawn_never_gets_concise_settings_file(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
