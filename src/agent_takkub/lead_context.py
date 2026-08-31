@@ -307,6 +307,31 @@ def _claude_autoloads(claude_cwd: pathlib.Path, md_dir: pathlib.Path) -> bool:
     return md_dir == claude_cwd or md_dir in claude_cwd.parents
 
 
+_DOCS_LEAD_REF_RE = re.compile(r"(?<![\w/\\.-])docs/lead/")
+
+
+def _rewrite_docs_lead_refs(text: str, docs_lead_dir: str) -> str:
+    """Rewrite relative ``docs/lead/...`` cross-references onto the
+    installed build's absolute, Read-able docs/lead directory (#447).
+
+    Idempotent: once a reference is rewritten it's preceded by a path
+    character (the last char of the absolute prefix itself), which the
+    lookbehind skips, so re-running this on already-fixed text is a no-op —
+    unlike the plain ``str.replace("docs/lead/", ...)`` this replaces, which
+    re-matched its own output and nested the prefix once per Lead spawn.
+
+    Also collapses text corrupted by that old bug (the prefix repeated N
+    times before a single ``docs/lead/``) back down to one copy first, so
+    files already on disk from prior installs self-heal instead of staying
+    stuck with a runaway prefix.
+    """
+    prefix = docs_lead_dir[: -len("docs/lead")] if docs_lead_dir.endswith("docs/lead") else ""
+    if prefix:
+        nested_re = re.compile(rf"(?:{re.escape(prefix)})+docs/lead/")
+        text = nested_re.sub(f"{prefix}docs/lead/", text)
+    return _DOCS_LEAD_REF_RE.sub(f"{docs_lead_dir}/", text)
+
+
 def _build_lead_context_text(
     project: str | None = None,
     post_compact_brief: str | None = None,
@@ -364,10 +389,10 @@ def _build_lead_context_text(
         )
         for _doc in _staged_docs:
             _doc_text = _doc.read_text(encoding="utf-8")
-            _doc_fixed = _doc_text.replace("docs/lead/", f"{_docs_lead_dir}/")
+            _doc_fixed = _rewrite_docs_lead_refs(_doc_text, _docs_lead_dir)
             if _doc_fixed != _doc_text:
                 _doc.write_text(_doc_fixed, encoding="utf-8")
-        base = base.replace("docs/lead/", f"{_docs_lead_dir}/")
+        base = _rewrite_docs_lead_refs(base, _docs_lead_dir)
         # Surface the resolved bundle directly in Lead's rendered context
         # too — not just fixed inside the files Lead may or may not go on to
         # Read — so an installed Lead has one authoritative, absolute map of
