@@ -955,7 +955,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         collapse AND symlink dereference in one call), and `startswith` on
         that exact final string is the check — no further
         `.resolve()`/normalization happens afterwards, which would count as
-        a fresh, unchecked sink to the query and reopen the alert.
+        a fresh, unchecked sink to the query and reopen the alert. The guard
+        is written as `== root_str or not startswith(...)` (reject-shape, the
+        same one `_contained_path` uses) rather than `!= root_str and not
+        startswith(...)` (accept-shape): CodeQL can't prove the `and`'s right
+        operand is true when the left is false, so it won't treat that form
+        as a barrier at all (alerts #50/#51) — an `or` only goes false when
+        both operands are false, so reaching the code after it proves
+        `startswith` was true. This also means the root itself (`rel="."` or
+        `""`) is now rejected as `static_escape` up front instead of falling
+        through to `static_not_found` — root is always a directory, never a
+        servable file, so the observable behavior is unchanged.
         `os.path.join` resets to an absolute/drive-anchored operand when
         `rel` supplies one (e.g. `rel="C:/secret"` discards `root_str`
         entirely) — harmless here because that only changes what
@@ -975,7 +985,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         rel = rest.lstrip("/") or "index.html"
         root_str = os.path.realpath(str(_STATIC_ROOT))
         candidate_str = os.path.realpath(os.path.join(root_str, rel))
-        if candidate_str != root_str and not candidate_str.startswith(root_str + os.sep):
+        if candidate_str == root_str or not candidate_str.startswith(root_str + os.sep):
             self._reject("static_escape")
             return
         if not os.path.isfile(candidate_str):
