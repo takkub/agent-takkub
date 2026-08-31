@@ -543,7 +543,11 @@ class TestGeminiAdapter:
         # app is opened — `agy` never writes this cache — so the adapter must
         # ship the hint that says so, not leave the UI implying a poll is
         # still on its way (usage_meter renders `error` for stale snapshots).
-        assert result.error == pu.GEMINI_STALE_HINT
+        # The hint also carries the cache file's own date so the UI shows how
+        # stale the number actually is, not just "stale".
+        assert result.error.startswith(pu.GEMINI_STALE_HINT)
+        expected_date = (datetime.now(tz=UTC) - timedelta(days=180)).date().isoformat()
+        assert expected_date in result.error
 
     def test_picks_newest_file_when_multiple_accounts_cached(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
