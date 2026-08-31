@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import limit_status
+from agent_takkub import codex_helper, config, limit_status
 from agent_takkub import provider_usage as pu
 
 # ── ProviderUsage / serialization ────────────────────────────────────────
@@ -447,10 +447,16 @@ class TestCodexAdapterConfigDir:
         assert result.status == "error"
         assert captured["env"]["CODEX_HOME"] == str(tmp_path)
 
-    def test_no_config_dir_inherits_process_env(self, monkeypatch):
+    def test_no_config_dir_resolves_via_codex_helper_codex_home(self, monkeypatch, tmp_path):
+        """#455: a probe with no explicit `config_dir` must not fall through
+        to whatever `CODEX_HOME` this process happened to inherit (almost
+        always unset on an installed build, so codex itself defaults to
+        `~/.codex`) — it must resolve the cockpit's real codex-home the same
+        way `codex_helper.codex_home()` does everywhere else."""
         captured = self._capture_popen_env(monkeypatch)
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: tmp_path)
         pu.fetch_codex_usage()
-        assert captured["env"] is None
+        assert captured["env"]["CODEX_HOME"] == str(tmp_path)
 
 
 # ── gemini/agy adapter ────────────────────────────────────────────────────
@@ -618,6 +624,44 @@ class TestOpencodeAdapter:
         monkeypatch.setattr(pu.subprocess, "run", _fake_run)
         result = pu.fetch_opencode_usage()
         assert result.status == "error"
+
+    def test_isolated_build_scopes_subprocess_to_cockpit_opencode_home(self, monkeypatch, tmp_path):
+        """#455 follow-up: same isolation gap as codex — an installed
+        build's spawned `opencode db` query must read the cockpit's
+        isolated XDG dirs, not whatever this process inherited."""
+        monkeypatch.setattr(pu, "_opencode_executable", lambda: "opencode")
+        home_env = {
+            "XDG_DATA_HOME": str(tmp_path / "opencode-home" / "data"),
+            "XDG_CONFIG_HOME": str(tmp_path / "opencode-home" / "config"),
+        }
+        monkeypatch.setattr(config, "provider_home_env", lambda provider: home_env)
+        captured: dict = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(pu.subprocess, "run", _fake_run)
+        pu.fetch_opencode_usage()
+        assert captured["env"]["XDG_DATA_HOME"] == home_env["XDG_DATA_HOME"]
+        assert captured["env"]["XDG_CONFIG_HOME"] == home_env["XDG_CONFIG_HOME"]
+
+    def test_dev_checkout_leaves_subprocess_env_untouched(self, monkeypatch):
+        """A dev checkout (`config.provider_home_env` returns `{}`) must not
+        force an `env` override the process didn't have before — same
+        no-op-when-nothing-to-isolate contract as codex's explicit `None`
+        path used to be."""
+        monkeypatch.setattr(pu, "_opencode_executable", lambda: "opencode")
+        monkeypatch.setattr(config, "provider_home_env", lambda provider: {})
+        captured: dict = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(pu.subprocess, "run", _fake_run)
+        pu.fetch_opencode_usage()
+        assert captured["env"] is None
 
 
 # ── kimi / cursor (statically unsupported) ────────────────────────────────
