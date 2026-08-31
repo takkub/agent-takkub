@@ -445,11 +445,25 @@ def fetch_codex_usage(
     `config.provider_home_env` already use) instead of whatever CODEX_HOME
     this process inherited — the per-account counterpart of
     `fetch_claude_usage`'s `config_dir` param.
+
+    `config_dir=None` (the normal call from `_FETCHERS`) resolves the
+    cockpit's real `CODEX_HOME` via `codex_helper.codex_home()` rather than
+    letting the subprocess inherit whatever `CODEX_HOME` this process
+    happened to have — #455: the cockpit process itself never gets that env
+    var (only `pane_env.inject_provider_home_env` injects it, into spawned
+    panes), so an installed build's probe fell through to codex's own
+    `~/.codex` default and reported a false "login expired" even though the
+    cockpit's isolated codex-home was logged in fine. Mirrors
+    `fetch_claude_usage`/`_resolve_claude_config_dir`'s same fix for #203.
     """
     exe = _codex_executable()
     if not exe:
         return _unsupported("codex", "codex binary not found on PATH")
-    env = {**os.environ, "CODEX_HOME": str(config_dir)} if config_dir is not None else None
+    if config_dir is None:
+        from .codex_helper import codex_home
+
+        config_dir = codex_home()
+    env = {**os.environ, "CODEX_HOME": str(config_dir)}
     try:
         proc = subprocess.Popen(
             [exe, "app-server"],
@@ -686,10 +700,23 @@ def fetch_opencode_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
     read-only `opencode db` query. Blocking (subprocess, bounded by
     *timeout*) — run off the Qt main thread. Result always lands in `spend`,
     never `utilization` — see module docstring.
+
+    #455 follow-up: same isolation gap as codex — an installed build's
+    cockpit process never inherits `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed
+    at DATA_HOME (only `pane_env.inject_provider_home_env` injects those,
+    into spawned panes), so the spawned `opencode` binary would otherwise
+    resolve its OS-default `opencode.db` instead of the cockpit's isolated
+    one (see `opencode_helper.opencode_db_path`'s own isolation-first
+    resolution). Passing `config.provider_home_env("opencode")` here keeps
+    this probe reading the same database the pane writes.
     """
     exe = _opencode_executable()
     if not exe:
         return _unsupported("opencode", "opencode binary not found on PATH")
+    from . import config
+
+    home_env = config.provider_home_env("opencode")
+    env = {**os.environ, **home_env} if home_env else None
     try:
         result = subprocess.run(
             [exe, "db", _OPENCODE_STATS_QUERY, "--format", "json"],
@@ -699,6 +726,7 @@ def fetch_opencode_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
             errors="replace",
             timeout=timeout,
             check=False,
+            env=env,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError) as exc:
