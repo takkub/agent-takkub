@@ -13,6 +13,14 @@ docker compose --profile sim logs takkub-sim | grep pairing      # เอาล�
 
 `claude login` พิมพ์ URL ให้เปิดในเบราว์เซอร์ + โค้ดให้ paste กลับ — ทำครั้งเดียวต่อ `volumes/auth/claude/` (bind-mount ทับ container restart ก็ยังจำได้). ถ้ามี `~/.claude/.credentials.json` อยู่แล้วบนเครื่อง โฟลเดอร์ `docker/` มี `seed-creds.ps1` / `seed-creds.sh` ให้ copy เข้ามาแทนการ login ใหม่ (best-effort — ไม่เจอไฟล์ก็ข้ามเงียบๆ ให้ไป `claude login` เอง); codex เลือก `~/.agent-takkub/codex-home/auth.json` ก่อนเสมอ ถ้าไม่มีค่อย fallback `~/.codex/auth.json`.
 
+## ทดสอบว่าตอบได้จริง
+
+```bash
+docker compose --profile sim exec -T takkub-sim takkub status   # ["lead] ready" = boot สำเร็จ
+docker compose --profile sim exec -T takkub-sim takkub send --to lead "ping"   # ผ่าน CLI ในคอนเทนเนอร์ — เทียบเท่าพิมพ์ผ่าน PWA (#457)
+```
+เช็คคำตอบจริงจาก Claude ผ่าน `/api/lead/history` (ไม่ใช่แค่ `{"ok": true}` จาก `/api/lead/say`) — ถ้าคำตอบไม่ขึ้นหรือติด `pending` นาน แปลว่า write ถูกทิ้งเงียบ ไม่ใช่ boot สำเร็จแล้วจบ.
+
 ## เข้า shell ในคอนเทนเนอร์
 
 ```bash

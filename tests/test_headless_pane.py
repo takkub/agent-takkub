@@ -67,6 +67,23 @@ def test_attach_session_binds_session_and_marks_active(qapp: QCoreApplication) -
     session.processExited.connect.assert_called_once()
 
 
+def test_attach_session_binds_pty_session_generation(qapp: QCoreApplication) -> None:
+    """#457: the PtySession's own generation must match the pane's, or
+    writer_thread rejects every queued write as stale (silent drop)."""
+    pane = HeadlessPane(by_name("backend"))
+    session = _mock_session()
+
+    pane.attach_session(session, cwd="/tmp/project")
+
+    assert session.session_generation == pane._session_generation
+
+    # Re-attaching a replacement session must rebind the new generation too.
+    session2 = _mock_session()
+    pane.attach_session(session2, cwd="/tmp/project")
+    assert session2.session_generation == pane._session_generation
+    assert session2.session_generation != session.session_generation
+
+
 def test_mark_output_ts_bumps_last_output_ts(qapp: QCoreApplication) -> None:
     pane = HeadlessPane(by_name("backend"))
     pane._last_output_ts = 0.0
