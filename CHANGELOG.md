@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.25] - 2026-08-31
+
+### Fixed (แก้)
+
+- **การ์ด Usage ของ codex ยัง "login หมดอายุ" ทั้งที่ `codex login` ใน codex-home ของ cockpit แล้ว (#455)** — probe ตัว default ไม่ส่ง `CODEX_HOME` → app-server ใช้ค่าที่ process cockpit สืบทอด (installed build ไม่มี) → ตกไป `~/.codex` ซึ่ง auth เก่าถูก invalidate; pane codex จริงใช้ codex-home ผ่าน pane_env จึงต่างกัน · resolve ผ่าน `codex_helper.codex_home()` เสมอ (isolation-first เหมือน claude #203) · gap เดียวกันที่ opencode probe (`opencode db` ไม่ได้ XDG home ของ cockpit) แก้ด้วย `config.provider_home_env("opencode")` · kimi ไม่มี home knob (PROVIDER_ISOLATION_GAPS)
+- **การ์ด Usage ของ gemini บอกวันที่ของ cache (#456)** — hint `stale` ต่อท้าย "(cache 2026-02-27)" ให้เห็นว่าเก่าแค่ไหน · ล่า live quota channel ของ agy ครบ 4 ทางแล้วไม่มีทางที่ใช้ได้ (agy `doRefreshQuota` ไม่ log payload/ไม่เขียนไฟล์, local server port สุ่มต่อ process, endpoint `v1internal:retrieveUserQuota` มีจริงแต่ credential อยู่ใน Windows keyring ไม่ใช่ไฟล์) — `docs/audit/2026-08-31-gemini-quota-hunt.md`
+
 ## [v1.6.24] - 2026-08-31
 
 ### Fixed (แก้)
