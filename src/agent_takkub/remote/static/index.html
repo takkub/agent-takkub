@@ -522,6 +522,9 @@
   .project-row .hint {
     font-size: 0.7rem;
     color: var(--faint);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    min-width: 0;
   }
   .project-row .tag {
     flex: 0 0 auto;
@@ -1290,20 +1293,21 @@
     box-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.8);
   }
   .toast.show { opacity: 1; }
-    .btn-clear-cache {
-      margin-top: 14px;
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.18);
+    #view-pairing .btn-clear-cache {
+      display: block;
+      margin: 18px auto 0;
+      width: auto;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
       background: transparent;
-      color: inherit;
+      color: var(--faint);
       opacity: 0.85;
-      font-size: 14px;
+      font-size: 0.72rem;
+      min-height: 0;
+      font-weight: 400;
     }
-    .btn-clear-cache:active { opacity: 0.6; }
-    #projects-footer { padding: 18px 14px 28px; }
-    #projects-footer-note { margin-top: 8px; font-size: 12px; opacity: 0.55; line-height: 1.4; }
+    #view-pairing .btn-clear-cache:active { opacity: 0.6; background: transparent; color: var(--faint); }
 </style>
 </head>
 <body>
@@ -1335,7 +1339,7 @@
         <input id="pairing-url" type="text" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://.../&lt;secret&gt;/#token=...">
         <button id="pairing-connect">เชื่อมต่อ</button>
         <div id="pairing-error"></div>
-        <button id="pairing-hard-reload" type="button" class="btn-clear-cache">🧹 ล้างแคช &amp; โหลดใหม่</button>
+        <button id="pairing-hard-reload" type="button" class="btn-clear-cache" title="ล้าง token/session แล้วกลับมาที่หน้านี้ใหม่" aria-label="ล้างแคช & เข้าใหม่">ล้างแคช &amp; เข้าใหม่</button>
       </div>
     </section>
 
@@ -1355,10 +1359,6 @@
     <!-- projects -->
     <section id="view-projects" class="view">
       <div id="projects-list"></div>
-      <div id="projects-footer">
-        <button id="projects-hard-reload" type="button" class="btn-clear-cache">🧹 ล้างแคช &amp; โหลดใหม่</button>
-        <div id="projects-footer-note">ถ้าแอปทำตัวแปลกหรืออัป cockpit แล้วยังเหมือนเดิม กดปุ่มนี้ — ไม่ต้องสแกน QR ใหม่</div>
-      </div>
     </section>
 
     <!-- lead console -->
