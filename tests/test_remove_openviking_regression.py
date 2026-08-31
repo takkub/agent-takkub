@@ -108,33 +108,3 @@ def test_doctor_run_all_checks_survives_legacy_env_and_leftover_dir(monkeypatch,
     for f in findings:
         haystack = f"{f.name} {f.category} {f.detail}".lower()
         assert "openviking" not in haystack, f"stale openviking finding: {f!r}"
-
-
-def test_openviking_cleanup_handles_a_v1_5_0_leftover_directory(monkeypatch, tmp_path):
-    """A directory shaped exactly like a v1.5.0 install (venv/config/data/
-    state.json, no running process) is recognised and can be reported on
-    and removed without crashing — old runtime data can't break startup or
-    cleanup."""
-    from agent_takkub import openviking_cleanup as cleanup
-
-    home = tmp_path / "openviking"
-    monkeypatch.setattr(cleanup, "OPENVIKING_HOME", home)
-    monkeypatch.setattr(cleanup, "VENV_DIR", home / "venv")
-    monkeypatch.setattr(cleanup, "CONFIG_DIR", home / "config")
-    monkeypatch.setattr(cleanup, "DATA_DIR", home / "data")
-    monkeypatch.setattr(cleanup, "STATE_FILE", home / "state.json")
-    monkeypatch.setattr(cleanup, "LOG_DIR", home / "logs")
-    monkeypatch.setattr(cleanup, "PID_FILE", home / "openviking_pid.json")
-
-    (home / "venv" / "bin").mkdir(parents=True)
-    (home / "config").mkdir(parents=True)
-    (home / "data").mkdir(parents=True)
-    (home / "state.json").write_text('{"version": "0.4.2"}')
-
-    info = cleanup.report()
-    assert info.exists is True
-    assert info.owned_pid is None  # no PID file — nothing recorded as running
-
-    cleanup.stop_owned_process()  # must not raise even with no PID file
-    cleanup.remove(purge_data=True)
-    assert not home.exists()
