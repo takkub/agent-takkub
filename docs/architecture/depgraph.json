@@ -3677,13 +3677,14 @@
         "agent_takkub.remote.config",
         "agent_takkub.remote.notify",
         "agent_takkub.roles",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.remote.auth",
@@ -4942,11 +4943,12 @@
         "agent_takkub.editor_service",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.remote.api",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 2
     }
   ]

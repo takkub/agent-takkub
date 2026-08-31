@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import threading
 import time
@@ -1158,6 +1159,37 @@ class TestStaticFileTraversal:
         status, _ = _get_status(_url(server, "/sek/does-not-exist.js"))
         assert status == 404
 
+    def test_drive_anchored_rel_is_rejected(self, server):
+        """#44-#46: `os.path.join` resets to an absolute/drive-anchored
+        operand when `rel` supplies one (Windows-only vector — a POSIX
+        absolute path can never reach here since `rest.lstrip("/")` always
+        strips the leading slash first) — the realpath+startswith
+        containment check still catches it like any other escape."""
+        if os.name != "nt":
+            pytest.skip("drive-anchored path escape is a Windows-only vector")
+        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+            sock.sendall(b"GET /sek/C:/Windows/win.ini HTTP/1.0\r\n\r\n")
+            resp = sock.recv(4096)
+        assert resp.startswith(b"HTTP/1.0 404")
+
+    def test_symlink_escape_is_rejected(self, server, tmp_path, monkeypatch):
+        """`os.path.realpath` dereferences symlinks as part of the same
+        normalization step the containment check runs against — a symlink
+        planted inside the static root pointing outside it must not resolve
+        to a servable file."""
+        static_root = tmp_path / "static_root"
+        static_root.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        link = static_root / "escape.txt"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation not permitted on this machine")
+        monkeypatch.setattr(http_server, "_STATIC_ROOT", static_root)
+        status, _ = _get_status(_url(server, "/sek/escape.txt"))
+        assert status == 404
+
 
 class TestStaticSecurityHeaders:
     """L2: a network-exposed page that innerHTMLs Lead-authored text should
@@ -1241,6 +1273,16 @@ class TestRejectBreadcrumb:
         assert last["reason"] == "bad_secret_path"
         assert "wrong-secret" not in json.dumps(last)
         assert "abc" not in json.dumps(last)
+
+    def test_stale_report_link_gets_its_own_reason(self, server):
+        """#451: a `/<old-secret>/r/<ns>/<name>` shape gets a distinct
+        breadcrumb from every other wrong-secret 404 — the response is still
+        the same bare 404 either way (never distinguishable to the client)."""
+        status, _ = _get_status(_url(server, "/wrong-secret/r/demo/status.html?k=tok"))
+        assert status == 404
+        last = self._reject_lines()[-1]
+        assert last["reason"] == "report_stale_secret"
+        assert "wrong-secret" not in json.dumps(last)
 
 
 class TestUrlOnlyAuth:

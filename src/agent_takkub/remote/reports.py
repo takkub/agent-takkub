@@ -238,6 +238,13 @@ def _is_expired(expires_iso: str) -> bool:
     return datetime.now(UTC) >= exp
 
 
+def is_active(record: ShareRecord) -> bool:
+    """Not yet expired — #451's `takkub report relink` prints only these
+    (an already-expired report's link is dead for a reason relink can't
+    fix, so listing it there would be misleading)."""
+    return not (isinstance(record.expires, str) and _is_expired(record.expires))
+
+
 def _parse_expires(expires: str | None) -> str | None:
     """`"30d"`, `"12h"`, `"none"`/empty -> `None` (no expiry). Raises on
     anything else rather than silently treating a typo as "never expires"."""
@@ -493,6 +500,20 @@ def build_url(project_ns: str, name: str, token: str) -> str:
     if not (cfg.public_url and cfg.secret_path):
         return ""
     return f"{cfg.public_url.rstrip('/')}/{cfg.secret_path}/r/{project_ns}/{name}?k={token}"
+
+
+def remote_config_mtime() -> float | None:
+    """`remote.json`'s mtime, epoch seconds — `None` if it doesn't exist yet
+    (remote control never configured) or can't be read. #451: `takkub report
+    list` uses this to warn that a link published before the config file's
+    last edit (secret_path rotation, re-pairing, ...) may already be dead —
+    `secret_path` itself is never read or logged, only the file's mtime."""
+    from .config import path as _config_path
+
+    try:
+        return _config_path().stat().st_mtime
+    except OSError:
+        return None
 
 
 def remote_status_text() -> str:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import http.server
 import json
 import logging
+import os
 import queue
 import socketserver
 import threading
@@ -291,7 +292,12 @@ class _Bridge(QObject):
                         )
                     )
                 except api.RemoteApiError as exc:
-                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+                    # #453: `reason` is a finer-grained events.log breadcrumb,
+                    # scoped to this one action — never sent past `_serve_image`
+                    # (the client body stays the bare "not found"/404 it always was).
+                    pending.reply.put(
+                        (exc.status, {"ok": False, "msg": exc.msg, "reason": exc.reason})
+                    )
             elif pending.action == "activity":
                 pending.reply.put((200, api.activity(self._orch)))
             elif pending.action == "usage":
@@ -473,6 +479,20 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         rest = "/" + segments[2] if len(segments) > 2 else "/"
         return rest, dict(urllib.parse.parse_qsl(parsed.query))
 
+    def _bad_secret_reason(self) -> str:
+        """#451: a `/<secret>/r/<ns>/<name>` shape whose secret segment just
+        failed `_match_secret_path` is very likely a previously-published
+        report link whose `secret_path` has since rotated (re-pair, Settings
+        edit, ...) — logged as `report_stale_secret` instead of the generic
+        `bad_secret_path` so `takkub ma`/events.log can tell "report links
+        died" apart from every other wrong-secret hit (scanners, a stale
+        pairing link, ...). Never changes the response — still a bare 404
+        either way."""
+        segments = urllib.parse.urlsplit(self.path).path.split("/", 2)
+        if len(segments) > 2 and segments[2].split("/", 1)[0] == "r":
+            return "report_stale_secret"
+        return "bad_secret_path"
+
     def _reject(self, reason: str = "") -> None:
         """§7.5: unauthenticated (wrong secret-path OR wrong token) always
         gets a bare 404 — never a 401, never a hint that anything exists.
@@ -547,7 +567,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         matched = self._match_secret_path()
         if matched is None:
-            self._reject("bad_secret_path")
+            self._reject(self._bad_secret_reason())
             return
         rest, query = matched
         if rest == "/api/lead":
@@ -804,9 +824,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         referenced by a Lead message so the phone can render it inline.
         Bearer + password gated like every other `/api/*` read; the path is
         validated on the Qt main thread (`api.lead_image_path` — extension
-        whitelist, must live under a project cwd or RUNTIME_DIR, magic bytes,
-        size cap) and the bytes are read here on the worker thread. Any
-        rejection is the same bare 404 as an unknown route."""
+        whitelist, must live under a project cwd, its worktree root, or
+        RUNTIME_DIR, magic bytes, size cap) and the bytes are read here on
+        the worker thread. Any rejection is the same bare 404 as an unknown
+        route."""
         status, payload = self._bridge_call(
             "image_path", {"project": query.get("project"), "path": query.get("path")}
         )
@@ -814,7 +835,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             if status >= 500:
                 self._send_json(status, payload)
             else:
-                self._reject("image_unservable")
+                # #453: log the finer-grained reason (not_found / not_under_root /
+                # bad_suffix / bad_magic) when `api.lead_image_path` supplied one —
+                # the response itself is still the same bare 404 either way.
+                self._reject(payload.get("reason") or "image_unservable")
             return
         try:
             data = Path(str(payload["path"])).read_bytes()
@@ -919,34 +943,37 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     # ── static PWA shell ─────────────────────────────────────────────────
     def _serve_static(self, rest: str) -> None:
         """`rel` is attacker-controlled (URL path segment). Traversal is
-        blocked by canonicalize-then-check-containment, the standard-safe
-        pattern (not string-prefix filtering, which is bypassable by `..`,
-        symlinks, and — on Windows — drive-relative overrides): `.resolve()`
-        collapses `..` and symlinks into an absolute path *first*, then
-        `is_relative_to()` verifies that absolute path is `_STATIC_ROOT`
-        itself or strictly inside it before any filesystem read happens.
-        `PurePath.__truediv__` resets to an absolute/drive-anchored operand
-        when `rel` supplies one (e.g. `rel="C:/secret"` discards
-        `_STATIC_ROOT` entirely) — harmless here because that only changes
-        what `candidate` resolves to, and the containment check below still
+        blocked by canonicalize-then-check-containment — the same
+        `os.path.realpath()` + `str.startswith()` idiom `reports.py`'s
+        `_contained_path` uses (CodeQL's `py/path-injection` query does not
+        recognize `Path.resolve()` + `is_relative_to()` as a barrier, which
+        is why the equivalent, functionally identical check using those
+        instead still left alerts #44-#46 open; a bare `# codeql[...]`
+        comment isn't recognized suppression syntax either — GitHub's own
+        inline form is `# lgtm[query-id]`, and even that wasn't applied
+        here). `os.path.realpath` is the normalization step (lexical `..`
+        collapse AND symlink dereference in one call), and `startswith` on
+        that exact final string is the check — no further
+        `.resolve()`/normalization happens afterwards, which would count as
+        a fresh, unchecked sink to the query and reopen the alert.
+        `os.path.join` resets to an absolute/drive-anchored operand when
+        `rel` supplies one (e.g. `rel="C:/secret"` discards `root_str`
+        entirely) — harmless here because that only changes what
+        `candidate_str` resolves to, and the containment check below still
         catches it precisely like any other escape.
         """
         rel = rest.lstrip("/") or "index.html"
-        # codeql[py/path-injection]: sink is unavoidable — resolving the
-        # candidate path (incl. following symlinks) is the first step of
-        # the containment check itself; there is no way to validate
-        # containment without first computing the canonical path.
-        candidate = (_STATIC_ROOT / rel).resolve()
-        if not candidate.is_relative_to(_STATIC_ROOT):
+        root_str = os.path.realpath(str(_STATIC_ROOT))
+        candidate_str = os.path.realpath(os.path.join(root_str, rel))
+        if candidate_str != root_str and not candidate_str.startswith(root_str + os.sep):
             self._reject("static_escape")
             return
-        # codeql[py/path-injection]: `candidate` is proven contained by the
-        # `is_relative_to()` guard above — safe to stat/read.
+        candidate = Path(candidate_str)
         if not candidate.is_file():
             self._reject("static_not_found")
             return
         try:
-            data = candidate.read_bytes()  # codeql[py/path-injection]: see guard above
+            data = candidate.read_bytes()
         except OSError:
             self._reject("static_read_failed")
             return

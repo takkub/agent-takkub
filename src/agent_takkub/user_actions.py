@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
-from .config import REPO_ROOT, active_project
+from .config import REPO_ROOT, active_project, list_project_names
 from .orchestrator import _log_event
 
 
@@ -784,6 +784,41 @@ class UserActionsMixin:
         self._remote_url_poll_timer = timer
         timer.start()
 
+    def _warn_reports_need_relink(self) -> None:
+        """#451: Disable is the one place `secret_path` is actually cleared
+        (see the comment above this call) — every previously-published
+        Remote Report link is dead from this instant, silently, until
+        someone runs `takkub report relink`. Best-effort and never raises:
+        a failure here must never turn a successful Disable into a reported
+        error. Counts only, never logs/notifies `secret_path` itself."""
+        try:
+            import importlib
+
+            reports_mod = importlib.import_module("agent_takkub.remote.reports")
+            affected = sum(
+                1
+                for name in list_project_names()
+                for r in reports_mod.list_shares(name)
+                if reports_mod.is_active(r)
+            )
+        except Exception:
+            return
+        if not affected:
+            return
+        _log_event("remote_secret_rotated", reports_affected=affected)
+        try:
+            project_ns, _ = active_project()
+        except Exception:
+            project_ns = None
+        if project_ns:
+            self.orch._notify_lead(
+                project_ns,
+                f"⚠ ปิด Remote รีเซ็ต secret แล้ว — Report link เก่า {affected} ฉบับตายหมด "
+                "รัน `takkub report relink` เพื่อออกลิงก์ใหม่",
+                from_role="system",
+                note="remote_secret_rotated",
+            )
+
     def _apply_remote_config(self, config, enable: bool) -> tuple[bool, str, str]:
         """Enable/disable the live remote-control server. Injected into
         `RemoteSettingsDialog` as `on_apply` so `remote/` never needs to
@@ -828,6 +863,7 @@ class UserActionsMixin:
                 # anyway (see session_store.py's module docstring) — "ปิด
                 # remote" is its own explicit invalidation trigger.
                 _session_store_mod.clear()
+                self._warn_reports_need_relink()
             except ModuleNotFoundError:
                 pass
             return True, "", ""
