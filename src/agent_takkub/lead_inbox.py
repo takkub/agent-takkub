@@ -2033,8 +2033,23 @@ class LeadInboxMixin:
                     # is genuinely still stuck before paying the cost of
                     # failing the whole delivery. A machine that stays
                     # stalled past the extra tick still fails out normally.
+                    #
+                    # #448: this used to gate the re-probe on
+                    # `heartbeat_age > _STALL_DEFER_AGE_S` — i.e. only when
+                    # the main thread was stalled AT THE EXACT INSTANT the
+                    # ceiling fired. A real incident's events.log showed a
+                    # `main_thread_stall` 49s before the ceiling check, but
+                    # by the time the ceiling ran the heartbeat had already
+                    # recovered, so the gate read `heartbeat_age≈0` and the
+                    # re-probe never fired (`reprobed=false`) even though a
+                    # backlog HAD delayed delivery of the stale
+                    # `_still_booting` read moments earlier. The re-probe is
+                    # one extra `_READY_POLL_INTERVAL_MS` tick either way —
+                    # cheap enough to always spend once per delivery rather
+                    # than trying to catch the stall at the one instant that
+                    # happens to line up with the ceiling.
                     heartbeat_age = _orch_attr("_main_thread_heartbeat_age", lambda: 0.0)()
-                    if heartbeat_age > _STALL_DEFER_AGE_S and not boot_ceiling_reprobed[0]:
+                    if not boot_ceiling_reprobed[0]:
                         boot_ceiling_reprobed[0] = True
                         _log_event(
                             "task_deliver_boot_ceiling_reprobe",

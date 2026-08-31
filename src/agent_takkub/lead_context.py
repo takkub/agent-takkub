@@ -148,6 +148,15 @@ _LEAD_SUMMARY_CAP = 1600  # chars for the latest lead end-session note
 # stopping at the next `##` section (e.g. `## Transcript`) or end of file.
 _NOTE_BODY_RE = re.compile(r"## Note\s*\n+(?P<note>.+?)(?:\n##\s|\Z)", re.DOTALL)
 
+# #448: `_render_decision_note` stamps this frontmatter line for a
+# `done(failed=True)` report (a synthetic boot-timeout close included) — lets
+# the brief tell a genuine finished task apart from one that never ran.
+_NOTE_FAILED_RE = re.compile(r"^outcome:\s*failed\s*$", re.MULTILINE)
+
+
+def _note_is_failed(text: str) -> bool:
+    return bool(_NOTE_FAILED_RE.search(text))
+
 
 def _extract_note_body(text: str) -> str:
     """Pull the substantive note text out of a session-mirror markdown file.
@@ -209,7 +218,7 @@ def _recent_session_brief(project: str) -> str | None:
     # Injecting the note *content* (not just the filename) is what actually
     # lets a fresh Lead recall what teammates did — the old version listed
     # bare filenames, so the substantive work was stored but never recalled.
-    recent_notes: list[tuple[str, str, str]] = []  # (day, stem, note body)
+    recent_notes: list[tuple[str, str, str, bool]] = []  # (day, stem, note body, failed)
     for day_dir in sorted(sessions_root.iterdir(), reverse=True):
         if not day_dir.is_dir():
             continue
@@ -220,12 +229,13 @@ def _recent_session_brief(project: str) -> str | None:
             if f.suffix != ".md" or f.name.startswith("lead-"):
                 continue
             try:
-                note = _extract_note_body(f.read_text(encoding="utf-8"))
+                raw_text = f.read_text(encoding="utf-8")
             except OSError:
                 continue
+            note = _extract_note_body(raw_text)
             if _is_junk_note(note):
                 continue
-            recent_notes.append((day_dir.name, f.stem, note))
+            recent_notes.append((day_dir.name, f.stem, note, _note_is_failed(raw_text)))
             if len(recent_notes) >= _BRIEF_MAX_NOTES:
                 break
         if len(recent_notes) >= _BRIEF_MAX_NOTES:
@@ -267,11 +277,14 @@ def _recent_session_brief(project: str) -> str | None:
     if recent_notes:
         lines.append("### recent teammate done (newest first)")
         lines.append("")
-        for day, stem, note in recent_notes:
+        for day, stem, note, failed in recent_notes:
             snippet = note if len(note) <= _BRIEF_NOTE_CAP else note[:_BRIEF_NOTE_CAP] + "…"
             # Collapse newlines/runs of whitespace so each note stays one line.
             snippet = " ".join(snippet.split())
-            lines.append(f"- `{day}` **{stem}** — {snippet}")
+            # #448: a failed report (synthetic boot-timeout close included)
+            # must never read like finished work in this list.
+            tag = "❌ **[FAILED]** " if failed else ""
+            lines.append(f"- `{day}` **{stem}** — {tag}{snippet}")
         lines.append("")
 
     brief = "\n".join(lines)

@@ -154,6 +154,7 @@ def _render_decision_note(
     note: str,
     now: datetime,
     transcript_path: str | None = None,
+    failed: bool = False,
 ) -> str:
     """Render the markdown body shared by the local session log and the
     vault mirror. Single source of truth so the two copies don't drift.
@@ -172,6 +173,11 @@ def _render_decision_note(
       - Optional `## Transcript` section with a relative path to the raw
         PTY byte-stream file (ANSI included) so the full pane output is
         one `less -R` away.
+      - `outcome: failed` frontmatter line when `failed=True` (#448) — a
+        `done(failed=True)` report (synthetic boot-timeout included) never
+        looks like ordinary finished work to `lead_context._recent_session_brief`,
+        which reads this line back and tags the snippet with ❌ instead of
+        listing it bare under "recent teammate done".
     """
     iso = now.isoformat(timespec="seconds")
     scrubbed = _scrub_note(note)
@@ -189,6 +195,7 @@ def _render_decision_note(
         f"project: {project}\n"
         f"date: {iso}\n"
         f"tags: [session, {role}, {project}]\n"
+        + ("outcome: failed\n" if failed else "")
         + "".join(f"{line}\n" for line in meta.frontmatter_lines())
         + "---\n\n"
         f"# {role} done · {iso}\n\n"

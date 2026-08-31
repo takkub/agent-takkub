@@ -1537,6 +1537,16 @@ class Orchestrator(
         # `LeadWaitMixin.poll_wait` needs "did the owner type ANYTHING
         # after this wait started", not "is a draft currently held".
         self._lead_last_user_input_ts: dict[str, float] = {}
+        # #449: whether the MOST RECENT stamp above had any content left
+        # after stripping every recognizable escape sequence (see
+        # `_chunk_has_non_escape_content`) — i.e. whether it looks like real
+        # typed/pasted text rather than a terminal auto-reply structure the
+        # #357/#420/#428/#431 denylist doesn't recognize yet. A bare special
+        # key (arrow/F-key) also reads False here, same as an unrecognized
+        # auto-reply — both are genuinely ambiguous, which is exactly why
+        # `LeadWaitMixin._pending_user_input_interrupt` hedges its wording on
+        # this instead of asserting "you typed something" outright.
+        self._lead_last_user_input_printable: dict[str, bool] = {}
         # #428/#431: when the owner's own keystroke last reached the Lead
         # PTY, per project. Compared against `session.last_write_ts` (stamped
         # by EVERY write, engine-originated included) so `_on_pane_input`
@@ -2104,7 +2114,7 @@ class Orchestrator(
                 "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-done"
             )
 
-        session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+        session_path = self._save_decision_note(project_ns, role_name, note, now=now, failed=failed)
 
         # Core V2 Conversation hook (#309 Phase 6) — see done()'s identical
         # comment. Subagents have no pane/PTY, so there is no cwd/session_id
@@ -5132,7 +5142,7 @@ class Orchestrator(
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
         transcript_path = getattr(pane, "_transcript_path", None)
         session_md_path = self._save_decision_note(
-            project_ns, from_role, note, now=now, transcript_path=transcript_path
+            project_ns, from_role, note, now=now, transcript_path=transcript_path, failed=failed
         )
 
         # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
@@ -5679,6 +5689,7 @@ class Orchestrator(
         note: str,
         now: datetime | None = None,
         transcript_path: str | None = None,
+        failed: bool = False,
     ) -> str | None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
@@ -5719,7 +5730,9 @@ class Orchestrator(
             return None
         if now is None:
             now = datetime.now()
-        body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
+        body = _render_decision_note(
+            project, role, note, now, transcript_path=transcript_path, failed=failed
+        )
         try:
             safe_project = validate_name(project, "project")
         except ValueError:
@@ -10375,6 +10388,38 @@ class Orchestrator(
     # going to be one, so bail before the scanner ever looks at it.
     _TERMINAL_AUTO_REPLY_MAX_LEN = 512
 
+    # #449 forensics: a GENERIC (not just the known auto-reply tokens above)
+    # ANSI escape-sequence matcher, used only to build a redacted repr for
+    # `lead_input_stamped` below — never to decide filtering. Wide on purpose
+    # (any CSI/OSC/DCS shape, or a bare two-byte ESC sequence like arrow-key
+    # SS3 codes) so the redaction below can strip every recognizable escape
+    # span and leave behind only what a human could actually have typed.
+    _ANSI_SEQ_RE = re.compile(
+        rb"\x1b\[[0-9;:<>=?]*[A-Za-z~^`]"
+        rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+        rb"|\x1bP[^\x1b]*\x1b\\"
+        rb"|\x1b[A-Za-z0-9]"
+    )
+
+    @classmethod
+    def _escape_only_repr(cls, data: bytes, limit: int = 64) -> str:
+        """`repr()` of *only* the recognizable escape-sequence bytes in
+        *data*, with every other byte dropped — used so a forensic log line
+        can show the STRUCTURE of a stamped chunk (which escape sequences it
+        contained) without ever risking a leak of whatever the owner was
+        actually typing (a password mid-entry, a sensitive path, etc.)."""
+        spans = [m.group(0) for m in cls._ANSI_SEQ_RE.finditer(data)]
+        return repr(b"".join(spans)[:limit])
+
+    @classmethod
+    def _chunk_has_non_escape_content(cls, data: bytes) -> bool:
+        """True if *data* still has visible content once every recognizable
+        escape sequence is stripped out — i.e. this chunk cannot be fully
+        explained as terminal chrome and likely carries real typed/pasted
+        text. Used only for the `printable` field on `lead_input_stamped`."""
+        remainder = cls._ANSI_SEQ_RE.sub(b"", data)
+        return any(b >= 0x20 for b in remainder)
+
     # (#428/#431) The auto-reply token list above is a denylist — every new
     # TUI feature that queries the terminal (#420 added five in one go)
     # slips through until someone catches it in `lead_user_input_stamp`.
@@ -10464,18 +10509,24 @@ class Orchestrator(
                 # leaving the owner queued behind up to --timeout of
                 # teammate polling.
                 self._lead_last_user_input_ts[project_ns] = time.time()
-                if data[:1] == b"\x1b" and len(data) <= 256:
-                    # #420 forensics: an ESC-led chunk that got past the
-                    # auto-reply filter is either a real special key (arrow,
-                    # F-key) or a terminal reply the filter doesn't know yet.
-                    # A wait cut short with nothing typed was undiagnosable
-                    # without the bytes — log a bounded repr.
-                    _log_event(
-                        "lead_user_input_stamp",
-                        project=project_ns,
-                        size=len(data),
-                        sample=repr(data[:64]),
-                    )
+                self._lead_last_user_input_printable[project_ns] = (
+                    self._chunk_has_non_escape_content(data)
+                )
+                # #449 forensics: logged on EVERY stamp, not just an ESC-led
+                # one (the old `lead_user_input_stamp` below #420 only fired
+                # for those) — a `takkub wait` cut short with "interrupted by
+                # user input" while the owner typed nothing was otherwise
+                # undiagnosable: nothing on record said WHAT stamped the
+                # timestamp. `escape_repr` never carries plain typed text
+                # (see `_escape_only_repr`), so this is safe to log
+                # unconditionally.
+                _log_event(
+                    "lead_input_stamped",
+                    project=project_ns,
+                    chunk_len=len(data),
+                    printable=self._chunk_has_non_escape_content(data),
+                    escape_repr=self._escape_only_repr(data),
+                )
         pane.session.write(data)
         if user_project_ns is not None:
             # Stamped AFTER the write so the owner's own keystroke never

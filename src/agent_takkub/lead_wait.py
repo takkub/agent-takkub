@@ -342,6 +342,18 @@ class LeadWaitMixin:
         `max(started_ts, ack_ts)`; a genuinely NEW keystroke always stamps
         a fresh, strictly later `last_input_ts`, so it still interrupts
         normally.
+
+        #449: the returned dict also carries ``"printable"`` —
+        `Orchestrator._chunk_has_non_escape_content`'s verdict on the exact
+        chunk that produced `last_input_ts` (see
+        `_lead_last_user_input_printable`). This does NOT change whether the
+        interrupt fires (any byte still counts, per #265's "conservative:
+        never suppress a genuine keystroke" call) — it only tells
+        `cli.cmd_wait` whether to word the notice as confirmed typing or as
+        an unconfirmed terminal-echo/digest-artifact structure, so a Lead
+        reading the transcript is never told "you typed something" when
+        what actually got through the #357/#420/#428/#431 denylist was a
+        chunk with no real text in it at all.
         """
         last_input_ts = getattr(self, "_lead_last_user_input_ts", {}).get(project_ns, 0.0)
         ack_ts = getattr(self, "_wait_user_input_ack_ts", {}).get(project_ns, 0.0)
@@ -349,13 +361,23 @@ class LeadWaitMixin:
             return None
         if hasattr(self, "_wait_user_input_ack_ts"):
             self._wait_user_input_ack_ts[project_ns] = last_input_ts
-        return {
-            "role": LEAD.name,
-            "detail": (
+        printable = getattr(self, "_lead_last_user_input_printable", {}).get(project_ns, True)
+        detail = (
+            (
                 "มีข้อความ/คำสั่งใหม่จากคุณเข้ามาระหว่างที่ wait กำลังรออยู่ — "
                 "ไปอ่าน/จัดการก่อน แล้วค่อยเรียก `takkub wait` ใหม่เพื่อ resume watching role ที่เหลือ"
-            ),
+            )
+            if printable
+            else (
+                "มี byte แปลกๆ เข้ามาที่ pane ระหว่างรอ ไม่ใช่ข้อความที่คุณพิมพ์ — โครงสร้างเหมือน "
+                "terminal echo/digest artifact ที่ยังกรองไม่หมด (ไม่ยืนยันว่าคุณพิมพ์จริง)"
+            )
+        )
+        return {
+            "role": LEAD.name,
+            "detail": detail,
             "reason": "user_input",
+            "printable": printable,
         }
 
     def poll_wait(self, project_ns: str, wait_id: str) -> dict:
