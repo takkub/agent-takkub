@@ -347,6 +347,7 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     worst_stall = 0
     stall_callouts: list[str] = []
     stall_top_frames: Counter[str] = Counter()  # #452: closest frame of ≥2s stalls
+    stall_top_busy_thread: Counter[str] = Counter()  # #452 follow-up: culprit thread
     recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
     total = 0
     try:
@@ -377,6 +378,9 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                         stall_callouts.append(
                             f"{ts:%H:%M} UI ค้าง {ms / 1000:.1f}s (pane {rec.get('active_panes')})"
                         )
+                        busy_threads = rec.get("busy_threads")
+                        if isinstance(busy_threads, list) and busy_threads:
+                            stall_top_busy_thread[str(busy_threads[0])] += 1
                         stack = rec.get("stack")
                         if isinstance(stack, list) and stack:
                             stall_top_frames[str(stack[0])] += 1
@@ -398,7 +402,16 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
         )
     details += [f"🟡 {_WARN_EVENTS[k]} ×{v}" for k, v in warn.most_common()]
     details += stall_callouts[-5:]
-    if stall_top_frames:
+    if stall_top_busy_thread:
+        entry, count = stall_top_busy_thread.most_common(1)[0]
+        thread_name, sep, frame = entry.partition(": ")
+        if not sep:
+            thread_name, frame = "?", entry
+        details.append(
+            f"ส่วนใหญ่ค้างเพราะ thread {thread_name} ที่ {frame}"
+            f" (×{count}/{sum(stall_top_busy_thread.values())})"
+        )
+    elif stall_top_frames:
         frame, count = stall_top_frames.most_common(1)[0]
         details.append(f"ส่วนใหญ่ค้างที่ {frame} (×{count}/{sum(stall_top_frames.values())})")
     if worst_stall:

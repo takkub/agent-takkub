@@ -127,6 +127,38 @@ class TestScanEvents:
         check = maintenance.scan_events(log, since_hours=1, now=now)
         assert any("orchestrator.py:_check_x:100" in d and "×2/2" in d for d in check.details)
 
+    def test_busy_thread_callout_is_preferred_over_stack_callout(self, tmp_path: Path) -> None:
+        """#452 follow-up: when a ≥2s stall record carries `busy_threads`
+        (the main thread was just parked at app.exec() while a worker held
+        the GIL), the callout should name the actual busy thread instead of
+        the uninformative main-thread frame."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(minutes=5)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 2400,
+                    "stack": ["app.py:main:1018"],
+                    "busy_threads": ["worker-1: orchestrator.py:_scan_repo:200"],
+                },
+                {
+                    "ts": (now - timedelta(minutes=4)).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 3000,
+                    "stack": ["app.py:main:1018"],
+                    "busy_threads": ["worker-1: orchestrator.py:_scan_repo:200"],
+                },
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert any(
+            "worker-1" in d and "orchestrator.py:_scan_repo:200" in d and "×2/2" in d
+            for d in check.details
+        )
+        assert not any("app.py:main:1018" in d for d in check.details)
+
     def test_no_stack_data_omits_the_frame_callout(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = _write_events(

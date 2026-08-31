@@ -339,6 +339,9 @@ class _StallTracker:
     agnostic and testable without touching real threads): once on entering an
     episode, then again only if `age` has at least doubled since the last
     snapshot — chasing the peak without sampling on every ~250ms poll tick.
+    `record_stack`'s optional `busy_threads` (#452 follow-up) rides the same
+    snapshot timing to attach the other threads found genuinely running
+    Python at the same moment — see `_format_stall_threads`.
     """
 
     def __init__(self, log_threshold_s: float) -> None:
@@ -348,6 +351,7 @@ class _StallTracker:
         self._saw_spawn = False
         self._stack: list[str] = []
         self._stack_age = 0.0
+        self._busy_threads: list[str] = []
 
     def update(self, age: float, spawn_in_progress: bool) -> dict | None:
         if age > self._th:
@@ -362,11 +366,14 @@ class _StallTracker:
             }
             if self._stack:
                 rec["stack"] = self._stack
+            if self._busy_threads:
+                rec["busy_threads"] = self._busy_threads
             self._active = False
             self._peak = 0.0
             self._saw_spawn = False
             self._stack = []
             self._stack_age = 0.0
+            self._busy_threads = []
             return rec
         return None
 
@@ -381,9 +388,13 @@ class _StallTracker:
             return True
         return age >= self._stack_age * 2
 
-    def record_stack(self, frames: list[str], age: float) -> None:
+    def record_stack(
+        self, frames: list[str], age: float, busy_threads: list[str] | None = None
+    ) -> None:
         self._stack = frames
         self._stack_age = age
+        if busy_threads:
+            self._busy_threads = busy_threads
 
 
 def _arm_hard_stall_deadman() -> None:
@@ -444,6 +455,96 @@ def _format_main_thread_frames(max_frames: int = _STALL_STACK_MAX_FRAMES) -> lis
             frames.append(f"{rel}:{frame.f_code.co_name}:{frame.f_lineno}")
             frame = frame.f_back
         return frames
+    except Exception:
+        return []
+
+
+# Frame markers (filename, function-name-or-None) that identify a thread
+# parked in a known blocking wait rather than actually running Python — the
+# `_wait_for_tstate_lock`/`Condition.wait` machinery `threading.py` shares
+# under Event.wait(), Queue.get(), and (so) concurrent.futures' pool workers;
+# selectors/select's poll loop under blocking socket I/O. A None function
+# name matches any function in that file (the whole module is wait-shaped).
+_STALL_KNOWN_WAIT_FRAMES: tuple[tuple[str, str | None], ...] = (
+    ("threading.py", "wait"),
+    ("threading.py", "_wait_for_tstate_lock"),
+    ("selectors.py", None),
+    ("select.py", None),
+    ("queue.py", "get"),
+    ("socket.py", "recv"),
+    ("socket.py", "recvfrom"),
+    ("socket.py", "recv_into"),
+    ("socket.py", "accept"),
+)
+# Threads other than the watchdog itself that are named, not this-thread
+# excluded — kept as a name fallback in case this is ever called from a
+# thread other than the watchdog daemon (e.g. a future caller / a test).
+_STALL_SELF_THREAD_NAMES = frozenset({"cockpit-deadman"})
+
+_STALL_THREAD_MAX = 6
+_STALL_THREAD_MAX_DEPTH = 2
+
+
+def _is_known_wait_frame(frame) -> bool:
+    filename = Path(frame.f_code.co_filename).name
+    func = frame.f_code.co_name
+    if func == "sleep":  # time.sleep has no Python frame of its own; belt & suspenders
+        return True
+    for fname, wanted_func in _STALL_KNOWN_WAIT_FRAMES:
+        if filename == fname and (wanted_func is None or func == wanted_func):
+            return True
+    return False
+
+
+def _format_stall_threads(
+    max_threads: int = _STALL_THREAD_MAX, max_depth: int = _STALL_THREAD_MAX_DEPTH
+) -> list[str]:
+    """Best-effort top frame(s) of every NON-main thread that is genuinely
+    running Python right now, as "<thread name>: rel/path.py:func:line".
+
+    `_format_main_thread_frames` only ever shows the main thread parked at
+    `app.exec()` during a stall (#452) — that's Qt's C event loop blocked on
+    a worker thread holding the GIL, not the culprit itself. This closes
+    that gap: a snapshot of every OTHER thread's top frame(s), skipping the
+    main thread, the watchdog thread calling this, and any thread whose top
+    frame is a known blocking wait (`threading.py` Condition/Event wait —
+    which is what Queue.get() and a concurrent.futures pool worker idle on
+    too — or a selectors/socket poll loop) so what's left is only threads
+    plausibly holding the GIL. Capped at `max_threads` threads and
+    `max_depth` frames each. Thread names come from `threading.enumerate()`
+    on a best-effort basis (an ident with no matching Thread object falls
+    back to its bare ident). Returns [] on any failure — same fail-safe
+    contract as `_format_main_thread_frames`.
+    """
+    try:
+        root = Path(__file__).resolve().parent.parent
+        current_frames = sys._current_frames()
+        main_ident = threading.main_thread().ident
+        self_ident = threading.current_thread().ident
+        names_by_ident = {t.ident: t.name for t in threading.enumerate()}
+        results: list[str] = []
+        for ident, frame in current_frames.items():
+            if frame is None or ident in (main_ident, self_ident):
+                continue
+            name = names_by_ident.get(ident, f"thread-{ident}")
+            if name in _STALL_SELF_THREAD_NAMES:
+                continue
+            if _is_known_wait_frame(frame):
+                continue
+            chain: list[str] = []
+            f = frame
+            while f is not None and len(chain) < max_depth:
+                path = Path(f.f_code.co_filename)
+                try:
+                    rel = path.resolve().relative_to(root).as_posix()
+                except ValueError:
+                    rel = path.name
+                chain.append(f"{rel}:{f.f_code.co_name}:{f.f_lineno}")
+                f = f.f_back
+            results.append(f"{name}: " + " < ".join(chain))
+            if len(results) >= max_threads:
+                break
+        return results
     except Exception:
         return []
 
@@ -539,7 +640,8 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                 if stall_tracker.should_snapshot_stack(age):
                     frames = _format_main_thread_frames()
                     if frames:
-                        stall_tracker.record_stack(frames, age)
+                        busy_threads = _format_stall_threads()
+                        stall_tracker.record_stack(frames, age, busy_threads)
                 rec = stall_tracker.update(age, spawn_active)
                 if rec is not None:
                     try:
