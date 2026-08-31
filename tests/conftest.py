@@ -205,48 +205,72 @@ def installed_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
     this one instead.
 
     Session-scoped, but under pytest-xdist ``scope="session"`` only means
-    "once per worker *process*" — loadscope distributes test classes across
-    workers, so without coordination every worker would run its own
-    `python -m build` concurrently into the same repo_root/build/ staging
-    dir. One worker's rmtree could delete the tree out from under another
-    worker's in-flight build. The lock + shared wheel-cache dir (both
-    anchored at ``getbasetemp().parent`` — the root all workers in this run
-    share, one level up from each worker's own ``.../popen-gwN``) make
-    exactly one worker build per pytest run; the rest reuse its wheel.
+    "once per worker *process*" — and `--dist loadscope`'s scheduling unit
+    is the enclosing test *class*, not the module, so
+    test_installed_mode_gate.py's several classes can land on several
+    different workers. Without sharing the finished venv itself (not just
+    the wheel), every one of those workers would separately pay a real
+    `venv.create(with_pip=True)` + `pip install` (~30-45s observed) even
+    though only one worker's wheel build actually needs to be exclusive —
+    the venv is read-only from every test's point of view (console-script
+    path checks, subprocess invocations of the installed CLI; nothing here
+    installs into or mutates it further), so it is safe to build once and
+    have every worker reuse the same directory. Both the wheel-cache dir
+    and the venv dir are anchored at ``getbasetemp().parent`` — the root
+    all workers in this run share, one level up from each worker's own
+    ``.../popen-gwN`` — and both the build and the venv-creation happen
+    inside the SAME lock, so exactly one worker per pytest run does the
+    ~30-45s of real work; every other worker's fixture call is a lock
+    acquire + an existence check.
     """
     shared_root = tmp_path_factory.getbasetemp().parent
     wheel_cache_dir = shared_root / "installed-mode-wheel-cache"
     wheel_cache_dir.mkdir(exist_ok=True)
+    venv_dir = shared_root / "installed-mode-shared-venv"
     lock_path = shared_root / "installed-mode-wheel-build.lock"
+    vpy = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
     with _cross_process_wheel_lock(lock_path):
         wheel = _build_or_reuse_wheel(wheel_cache_dir)
 
-    venv_dir = tmp_path_factory.mktemp("venv-target") / "venv"
-    venv.create(venv_dir, with_pip=True)
-    vpy = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    assert vpy.exists(), f"venv python missing at {vpy}"
+        # A stamp file records which wheel (by mtime) the shared venv was
+        # last built from — if a source change produced a fresher wheel
+        # since, the venv holds stale console-script/package state and must
+        # be rebuilt, not silently reused.
+        stamp_path = venv_dir / ".built-from-wheel-mtime"
+        wheel_mtime = str(wheel.stat().st_mtime)
+        stale = not vpy.exists() or (
+            not stamp_path.exists() or stamp_path.read_text(encoding="utf-8") != wheel_mtime
+        )
+        if stale:
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            venv.create(venv_dir, with_pip=True)
+            assert vpy.exists(), f"venv python missing at {vpy}"
 
-    # A caller's own PYTHONPATH (e.g. a worktree pane's documented workaround
-    # for this file's own `_assert_agent_takkub_matches_this_checkout` guard
-    # below) makes `agent_takkub` importable straight off source, with no
-    # dist-info — pip then treats the target as already-satisfied and skips
-    # writing its console-script entry points, producing a venv with NO
-    # `takkub`/`agent-takkub` scripts even though `pip install` itself
-    # reports success (reproduced directly: identical wheel, only the
-    # installing process's PYTHONPATH differed). Strip it so this fixture
-    # always yields a real, fully-installed venv regardless of the parent
-    # process's own PYTHONPATH.
-    install_env = dict(os.environ)
-    install_env.pop("PYTHONPATH", None)
-    result = subprocess.run(
-        [str(vpy), "-m", "pip", "install", "--no-deps", "--quiet", str(wheel)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        env=install_env,
-    )
-    assert result.returncode == 0, f"pip install failed:\n{result.stdout}\n{result.stderr}"
+            # A caller's own PYTHONPATH (e.g. a worktree pane's documented
+            # workaround for this file's own
+            # `_assert_agent_takkub_matches_this_checkout` guard below) makes
+            # `agent_takkub` importable straight off source, with no
+            # dist-info — pip then treats the target as already-satisfied
+            # and skips writing its console-script entry points, producing a
+            # venv with NO `takkub`/`agent-takkub` scripts even though `pip
+            # install` itself reports success (reproduced directly:
+            # identical wheel, only the installing process's PYTHONPATH
+            # differed). Strip it so this fixture always yields a real,
+            # fully-installed venv regardless of the parent process's own
+            # PYTHONPATH.
+            install_env = dict(os.environ)
+            install_env.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [str(vpy), "-m", "pip", "install", "--no-deps", "--quiet", str(wheel)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=install_env,
+            )
+            assert result.returncode == 0, f"pip install failed:\n{result.stdout}\n{result.stderr}"
+            stamp_path.write_text(wheel_mtime, encoding="utf-8")
+
     return venv_dir
 
 
