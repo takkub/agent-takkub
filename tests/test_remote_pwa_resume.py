@@ -280,22 +280,26 @@ class TestMobileViewportLayout:
 
 
 class TestHardReloadButton:
-    """Phone-side "ล้างแคช & โหลดใหม่": drops SW caches + registration and
-    reloads without touching the pairing token — the user's escape hatch
-    when an installed PWA keeps running a stale shell (#445 follow-up)."""
+    """Phone-side "ล้างแคช & เข้าใหม่": drops SW caches + registration, clears
+    the login state (token/session) and reloads — the user's escape hatch
+    when an installed PWA keeps running a stale shell (#445 follow-up), moved
+    to the pairing/login screen only per user feedback (2026-08-31 button was
+    cluttering the Projects list and didn't force a re-login)."""
 
-    def test_buttons_exist_on_pairing_and_projects_views(self):
+    def test_button_exists_only_on_pairing_view(self):
         html = _read("index.html")
         assert 'id="pairing-hard-reload"' in html
-        assert 'id="projects-hard-reload"' in html
+        assert 'id="projects-hard-reload"' not in html
+        assert 'id="projects-footer"' not in html
 
-    def test_hard_reload_clears_caches_and_sw_but_keeps_token(self):
+    def test_hard_reload_clears_caches_sw_and_login_state(self):
         js = _read("app.js")
         chunk = js.split("function hardReload()")[1].split('$("pairing-connect")')[0]
         assert "caches.delete(" in chunk
         assert "unregister()" in chunk
         assert "location.replace(" in chunk
-        assert "removeItem(LS_TOKEN)" not in chunk
+        assert "removeItem(LS_TOKEN)" in chunk
+        assert "removeItem(LS_SESSION)" in chunk
 
 
 class TestUrlOnlyPwa:

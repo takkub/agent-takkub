@@ -491,11 +491,22 @@
   // Pairing screen
   // ---------------------------------------------------------------
 
-  // "ล้างแคช & โหลดใหม่": drop the service-worker shell cache and the SW
-  // registration itself, then reload — the phone re-fetches index.html/app.js
-  // from the cockpit. Token/session/base stay in localStorage on purpose so
-  // this never forces a re-pair; it only guarantees the *code* is current.
+  // "ล้างแคช & เข้าใหม่": drop the SW shell cache + registration AND the
+  // login state (token/session, plus a stale base), then reload. The URL
+  // itself is left untouched (only the _r= cache-buster is appended) — a
+  // QR-paired link still carries #token= and re-authenticates on its own,
+  // but a URL-only cockpit has nothing left to auto-login with and lands
+  // back on the password prompt, which is the whole point of this button.
   function hardReload() {
+    try { localStorage.removeItem(LS_TOKEN); } catch (e) {}
+    try { localStorage.removeItem(LS_SESSION); } catch (e) {}
+    try {
+      var here = location.origin + dirOf(location.pathname);
+      if (localStorage.getItem(LS_BASE) !== here) localStorage.removeItem(LS_BASE);
+    } catch (e) {}
+    try { sessionStorage.clear(); } catch (e) {}
+    state.token = "";
+    state.session = "";
     var steps = [];
     try {
       if (window.caches && caches.keys) {
@@ -517,15 +528,15 @@
       location.replace(u.toString());
     });
   }
-  ["pairing-hard-reload", "projects-hard-reload"].forEach(function (id) {
-    var el = $(id);
+  (function () {
+    var el = $("pairing-hard-reload");
     if (!el) return;
     el.addEventListener("click", function () {
       el.disabled = true;
       el.textContent = "กำลังล้าง…";
       hardReload();
     });
-  });
+  })();
 
   $("pairing-connect").addEventListener("click", function () {
     var raw = $("pairing-url").value.trim();
