@@ -18,6 +18,7 @@ from __future__ import annotations
 import http.server
 import json
 import logging
+import os
 import queue
 import socketserver
 import threading
@@ -919,34 +920,37 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     # ── static PWA shell ─────────────────────────────────────────────────
     def _serve_static(self, rest: str) -> None:
         """`rel` is attacker-controlled (URL path segment). Traversal is
-        blocked by canonicalize-then-check-containment, the standard-safe
-        pattern (not string-prefix filtering, which is bypassable by `..`,
-        symlinks, and — on Windows — drive-relative overrides): `.resolve()`
-        collapses `..` and symlinks into an absolute path *first*, then
-        `is_relative_to()` verifies that absolute path is `_STATIC_ROOT`
-        itself or strictly inside it before any filesystem read happens.
-        `PurePath.__truediv__` resets to an absolute/drive-anchored operand
-        when `rel` supplies one (e.g. `rel="C:/secret"` discards
-        `_STATIC_ROOT` entirely) — harmless here because that only changes
-        what `candidate` resolves to, and the containment check below still
+        blocked by canonicalize-then-check-containment — the same
+        `os.path.realpath()` + `str.startswith()` idiom `reports.py`'s
+        `_contained_path` uses (CodeQL's `py/path-injection` query does not
+        recognize `Path.resolve()` + `is_relative_to()` as a barrier, which
+        is why the equivalent, functionally identical check using those
+        instead still left alerts #44-#46 open; a bare `# codeql[...]`
+        comment isn't recognized suppression syntax either — GitHub's own
+        inline form is `# lgtm[query-id]`, and even that wasn't applied
+        here). `os.path.realpath` is the normalization step (lexical `..`
+        collapse AND symlink dereference in one call), and `startswith` on
+        that exact final string is the check — no further
+        `.resolve()`/normalization happens afterwards, which would count as
+        a fresh, unchecked sink to the query and reopen the alert.
+        `os.path.join` resets to an absolute/drive-anchored operand when
+        `rel` supplies one (e.g. `rel="C:/secret"` discards `root_str`
+        entirely) — harmless here because that only changes what
+        `candidate_str` resolves to, and the containment check below still
         catches it precisely like any other escape.
         """
         rel = rest.lstrip("/") or "index.html"
-        # codeql[py/path-injection]: sink is unavoidable — resolving the
-        # candidate path (incl. following symlinks) is the first step of
-        # the containment check itself; there is no way to validate
-        # containment without first computing the canonical path.
-        candidate = (_STATIC_ROOT / rel).resolve()
-        if not candidate.is_relative_to(_STATIC_ROOT):
+        root_str = os.path.realpath(str(_STATIC_ROOT))
+        candidate_str = os.path.realpath(os.path.join(root_str, rel))
+        if candidate_str != root_str and not candidate_str.startswith(root_str + os.sep):
             self._reject("static_escape")
             return
-        # codeql[py/path-injection]: `candidate` is proven contained by the
-        # `is_relative_to()` guard above — safe to stat/read.
+        candidate = Path(candidate_str)
         if not candidate.is_file():
             self._reject("static_not_found")
             return
         try:
-            data = candidate.read_bytes()  # codeql[py/path-injection]: see guard above
+            data = candidate.read_bytes()
         except OSError:
             self._reject("static_read_failed")
             return
