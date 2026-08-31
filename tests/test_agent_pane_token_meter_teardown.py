@@ -116,8 +116,9 @@ def test_worker_routes_through_the_guard(qapp, monkeypatch) -> None:
     pane.session = MagicMock()
     pane._session_cwd = "C:/repo"
     pane.model.session_uuid = "abc-123"
+    pane.model.provider_name = "claude"
     pane._token_refreshing = False
-    monkeypatch.setattr(agent_pane_mod, "find_session_by_uuid", lambda *a, **k: None)
+    monkeypatch.setattr(agent_pane_mod, "resolve_pane_session", lambda *a, **k: None)
 
     calls: list[tuple] = []
     monkeypatch.setattr(pane, "_emit_token_meter", lambda *a: calls.append(a))
