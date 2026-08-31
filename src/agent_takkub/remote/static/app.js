@@ -2598,7 +2598,31 @@
       .catch(function () { /* keep last known value on transient failure */ });
   }
 
-  function makeRoleChip(role, runtimeSec, idle, provider) {
+  // #103 (2026-08-31): `context` is the optional {prompt, limit, pct, status}
+  // block /api/activity's DATA-MIN summary carries — see remote/api.py's
+  // `_pane_context`. Omitted/None (a pane whose provider never armed the
+  // token meter, or hasn't resolved a session yet) renders nothing extra;
+  // "unsupported" (a provider confirmed to carry no token data) renders a
+  // muted "n/a" rather than staying silent, mirroring the cockpit pane
+  // header's own badge treatment for the same status.
+  function makeContextChip(context) {
+    if (!context || !context.status) return null;
+    var el = document.createElement("span");
+    el.className = "role-chip-ctx";
+    if (context.status === "ok" && typeof context.pct === "number") {
+      el.textContent = context.pct + "%";
+      if (context.pct >= 95) el.classList.add("danger");
+      else if (context.pct >= 80) el.classList.add("warn");
+    } else if (context.status === "unsupported") {
+      el.textContent = "n/a";
+      el.classList.add("muted");
+    } else {
+      return null; // "no_data" — first turn hasn't landed yet, nothing to show
+    }
+    return el;
+  }
+
+  function makeRoleChip(role, runtimeSec, idle, provider, context) {
     var chip = document.createElement("div");
     chip.className = "role-chip" + (idle ? " idle" : "");
     chip.style.setProperty("--role-color", provider ? providerMeta(provider).color : roleColor(role));
@@ -2614,6 +2638,9 @@
     badge.className = "role-chip-time";
     badge.textContent = idle ? "idle" : fmtRuntime(runtimeSec);
     chip.appendChild(badge);
+
+    var ctxChip = makeContextChip(context);
+    if (ctxChip) chip.appendChild(ctxChip);
 
     return chip;
   }
@@ -2672,11 +2699,11 @@
       chips.className = "pulse-chips";
 
       if (p.lead && p.lead.state) {
-        chips.appendChild(makeRoleChip("lead", p.lead.runtime_sec, p.lead.state !== "working", p.lead.provider));
+        chips.appendChild(makeRoleChip("lead", p.lead.runtime_sec, p.lead.state !== "working", p.lead.provider, p.lead.context));
       }
       roles.forEach(function (r) {
         if (!r || !r.role) return;
-        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, r.state !== "working", r.provider));
+        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, r.state !== "working", r.provider, r.context));
       });
       card.appendChild(chips);
 

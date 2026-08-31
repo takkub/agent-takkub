@@ -26,7 +26,10 @@ class TestRenderPulseShowsTeamState:
         # rendered as "working" because `roles` only ever contained working
         # panes. Now the server sends idle panes too, so the chip must read
         # the per-role state instead of assuming.
-        assert 'makeRoleChip(r.role, r.runtime_sec, r.state !== "working", r.provider)' in body
+        assert (
+            'makeRoleChip(r.role, r.runtime_sec, r.state !== "working", r.provider, r.context)'
+            in body
+        )
         assert "makeRoleChip(r.role, r.runtime_sec, false, r.provider)" not in body
 
     def test_visible_count_no_longer_requires_working_roles(self):
