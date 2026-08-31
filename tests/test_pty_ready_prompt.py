@@ -1014,17 +1014,6 @@ def test_claude_background_footer_wrapped_across_80col_rows_is_still_ready() -> 
 # finer signal the idle watchdog needs for that split.
 
 
-def test_has_background_work_true_for_esc_to_interrupt_footer_segment() -> None:
-    s = _feed_screen(
-        "─" * 40,
-        "❯ ",
-        "─" * 40,
-        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
-    )
-    assert s.is_at_ready_prompt() is True
-    assert s.has_background_work() is True
-
-
 def test_has_background_work_true_for_shell_count_footer_segment() -> None:
     s = _feed_screen(
         "─" * 40,

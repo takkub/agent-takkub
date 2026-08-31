@@ -63,6 +63,8 @@ def orch(qapp, monkeypatch) -> Orchestrator:
 
 class TestCancelTaskDelivery:
     def test_cancels_pending_delivery_for_current_generation(self, orch: Orchestrator) -> None:
+        # Also pins #295: explicit `takkub cancel` must drop the delivery
+        # however far it got, unlike `send`'s softer supersede handling.
         backend = _pane(_live_session(), generation=1)
         orch._panes_by_project["P"] = {"backend": backend}
         manager = DeliveryManager(default_ttl_sec=120)
@@ -217,25 +219,6 @@ class TestSendAutoCancelsStaleDelivery:
         # Nor the plain pending wording, which promises it will land on its
         # own; an uncertain delivery is not re-pasted (#134/#328).
         assert not any("[delivery-pending]" in m for m in notices)
-
-    def test_explicit_cancel_verb_still_cancels_an_undelivered_delivery(
-        self, orch: Orchestrator
-    ) -> None:
-        """`takkub cancel` states the intent outright — unlike `send`, it must
-        drop the delivery however far it got (#295 must not weaken it)."""
-        backend = _pane(_live_session(), generation=1)
-        orch._panes_by_project["P"] = {"backend": backend}
-        manager = DeliveryManager(default_ttl_sec=120)
-        delivery = manager.create(
-            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
-        )
-        orch._delivery_manager = manager
-
-        ok, msg = orch.cancel_task_delivery("backend", project="P")
-
-        assert ok is True
-        assert "cancelled 1" in msg
-        assert delivery.state.value == "cancelled"
 
     def test_peer_send_does_not_cancel_delivery(self, orch: Orchestrator) -> None:
         """A teammate messaging another teammate (from_role != lead/None)

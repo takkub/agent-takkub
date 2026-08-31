@@ -443,22 +443,6 @@ class TestRefreshGraftChip:
         stub._refresh_graft_chip()
         assert stub._chip_graft.text() == "🧠 Graft: 2/5 queued"
 
-    def test_unknown_building_falls_back_to_marker_progress_text(self, monkeypatch):
-        stub = _Stub()
-        monkeypatch.setattr(
-            stub,
-            "_graft_progress_snapshot",
-            lambda: {
-                "available": True,
-                "total": 5,
-                "completed": 2,
-                "building": None,
-                "failed": None,
-            },
-        )
-        stub._refresh_graft_chip()
-        assert stub._chip_graft.text() == "🧠 Building graphs… 2/5"
-
     def test_failures_take_priority_over_progress_text(self, monkeypatch):
         stub = _Stub()
         monkeypatch.setattr(

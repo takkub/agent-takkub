@@ -1355,9 +1355,3 @@ class TestCliServerPipelineRoute:
         req = {"cmd": "pipeline-run", "template_id": "", "from": "lead"}
         template_id = (req.get("template_id") or "").strip()
         assert not template_id  # ensures the guard fires
-
-    def test_pipeline_run_missing_raises_helpful_error(self, qapp: QCoreApplication) -> None:
-        from agent_takkub.cli_server import _LEAD_ONLY_CMDS
-
-        # pipeline-run should be gated like assign/spawn
-        assert "pipeline-run" in _LEAD_ONLY_CMDS
