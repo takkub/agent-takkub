@@ -20,6 +20,7 @@ own flag check happens first so it stays a true no-op independent of
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import replace
 
@@ -109,12 +110,19 @@ def build_context_for_assign(
     file_read_supported: bool = True,
     flags: Mapping[str, object] | None = None,
     retry_count: int = 0,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     """Context-Injection hook (#309 Phase 7c) — `orchestrator._assign_
     dispatch`'s call site. Meant to run inside a timeout-bounded background
     thread (a stuck/slow recall must never delay a spawn — see the hook's
     own comment in orchestrator.py); this function itself is plain sync so
     it stays trivially unit-testable without a thread pool in the loop.
+
+    `cancel_event` (#452): the caller sets this once its own `future.result
+    (timeout=...)` has already given up on this call — its return value is
+    discarded either way, so every heavy step below checks it and bails
+    early rather than keep burning CPU/GIL time behind the caller's back.
+    `None` (every caller before #452) reproduces the exact prior behaviour.
 
     Closeout #C (`context_gate.py`) sits in front of the assembly below:
     `TAKKUB_CONTEXT_GATE=0` skips it entirely and reproduces the exact
@@ -170,13 +178,17 @@ def build_context_for_assign(
             budget = context_gate.gate_budget(complexity.size, base_budget, retry_count=retry_count)
         else:
             budget = base_budget
-        text = context_builder.build_context(project, role, task_text, budget)
+        text = context_builder.build_context(
+            project, role, task_text, budget, cancel_event=cancel_event
+        )
     except Exception:
         _log.exception(
             "core.brain.facade.build_context_for_assign failed role=%r project=%r (fail-open)",
             role,
             project,
         )
+        return ""
+    if cancel_event is not None and cancel_event.is_set():
         return ""
     if gate_on:
         _save_gate_trace(

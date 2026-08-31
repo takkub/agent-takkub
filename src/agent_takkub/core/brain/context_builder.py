@@ -19,6 +19,7 @@ read is a single `summary.json`, never the raw message log.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from agent_takkub.bm25_search import tokenize
@@ -92,8 +93,15 @@ def _base_role(name: str | None) -> str | None:
 
 
 def _recall_records(
-    project: str | None, role: str, task_text: str, budget_tokens: int
+    project: str | None,
+    role: str,
+    task_text: str,
+    budget_tokens: int,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> list[MemoryRecord]:
+    if cancel_event is not None and cancel_event.is_set():
+        return []
     scoped = RetrievalEngine(BrainStore(project)).recall(
         task_text, scope=Scope.PROJECT, budget_tokens=budget_tokens
     )[:_RECALL_LIMIT_SCOPED]
@@ -120,6 +128,8 @@ def _recall_records(
         if r.scope is not Scope.AGENT or _base_role(r.agent_id) in (None, base_role)
     ]
 
+    if cancel_event is not None and cancel_event.is_set():
+        return scoped
     global_recs = RetrievalEngine(BrainStore(None)).recall(
         task_text, scope=Scope.GLOBAL, budget_tokens=budget_tokens
     )[:_RECALL_LIMIT_GLOBAL]
@@ -209,20 +219,42 @@ def _recent_summary_lines(project: str | None, role: str) -> list[str]:
     return lines
 
 
-def build_context(project: str | None, role: str, task_text: str, budget_tokens: int) -> str:
+def build_context(
+    project: str | None,
+    role: str,
+    task_text: str,
+    budget_tokens: int,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> str:
     """Pure text assembly. Empty input (`budget_tokens<=0` or a blank
     `task_text`) or nothing found yields `""` — never raises for those
     caller-controllable reasons. A genuine I/O failure inside a store read
     propagates to the caller (`facade.build_context_for_assign` is the
     fail-open boundary, same layering as `pipeline.py`/`retrieval.py`
-    versus `facade.recall`/`submit`)."""
+    versus `facade.recall`/`submit`).
+
+    `cancel_event` (#452) is set by the caller once its own hard timeout on
+    this call has already fired — the result is going to be discarded either
+    way (`facade`'s caller runs this in a background thread with `future.
+    result(timeout=...)`, and `wait=False` on shutdown lets the thread run to
+    completion regardless), so checking it between the disk-read steps below
+    lets an abandoned worker bail out instead of continuing to burn CPU/GIL
+    time a Qt main thread may be waiting on. `None` (every existing caller)
+    reproduces the exact unconditional behaviour."""
     if budget_tokens <= 0 or not (task_text or "").strip():
+        return ""
+    if cancel_event is not None and cancel_event.is_set():
         return ""
 
     records = _fit_to_budget(
-        _recall_records(project, role, task_text, budget_tokens), budget_tokens
+        _recall_records(project, role, task_text, budget_tokens, cancel_event=cancel_event),
+        budget_tokens,
     )
     memory_lines = _memory_lines(records)
+
+    if cancel_event is not None and cancel_event.is_set():
+        return ""
 
     used = sum(_token_cost(r.content) for r in records)
     remaining = budget_tokens - used

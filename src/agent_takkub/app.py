@@ -333,6 +333,12 @@ class _StallTracker:
     read would miss). When `age` falls back below the threshold the episode
     ends and `update()` returns a record dict to log exactly once; otherwise
     returns None.
+
+    `should_snapshot_stack`/`record_stack` (#452) let the impure caller decide
+    WHEN to pay for a `sys._current_frames()` sample (this class stays frame-
+    agnostic and testable without touching real threads): once on entering an
+    episode, then again only if `age` has at least doubled since the last
+    snapshot — chasing the peak without sampling on every ~250ms poll tick.
     """
 
     def __init__(self, log_threshold_s: float) -> None:
@@ -340,6 +346,8 @@ class _StallTracker:
         self._active = False
         self._peak = 0.0
         self._saw_spawn = False
+        self._stack: list[str] = []
+        self._stack_age = 0.0
 
     def update(self, age: float, spawn_in_progress: bool) -> dict | None:
         if age > self._th:
@@ -348,15 +356,34 @@ class _StallTracker:
             self._saw_spawn = self._saw_spawn or bool(spawn_in_progress)
             return None
         if self._active:
-            rec = {
+            rec: dict = {
                 "duration_ms": round(self._peak * 1000),
                 "spawn_in_progress": self._saw_spawn,
             }
+            if self._stack:
+                rec["stack"] = self._stack
             self._active = False
             self._peak = 0.0
             self._saw_spawn = False
+            self._stack = []
+            self._stack_age = 0.0
             return rec
         return None
+
+    def should_snapshot_stack(self, age: float) -> bool:
+        """True when a stack sample is worth taking right now: the first
+        moment `age` crosses the log threshold, or a later sample whose age
+        has at least doubled the last one captured. Never true once the
+        episode is no longer active (age back at/under threshold)."""
+        if age <= self._th:
+            return False
+        if not self._stack:
+            return True
+        return age >= self._stack_age * 2
+
+    def record_stack(self, frames: list[str], age: float) -> None:
+        self._stack = frames
+        self._stack_age = age
 
 
 def _arm_hard_stall_deadman() -> None:
@@ -379,6 +406,46 @@ def _arm_hard_stall_deadman() -> None:
 
 
 _arm_hard_stall_deadman()
+
+
+# Top-N frames captured per stall episode (#452) — enough to see WHERE the
+# main thread was without the record ballooning; every retained SOFT-stall
+# dump so far shows the main thread parked at `main()`'s `app.exec()` call
+# with nothing deeper (Qt's C event loop, invisible to Python frame
+# introspection), so 5 is already generous, not a tuning knob to raise.
+_STALL_STACK_MAX_FRAMES = 5
+
+
+def _format_main_thread_frames(max_frames: int = _STALL_STACK_MAX_FRAMES) -> list[str]:
+    """Best-effort top frames of the MAIN thread's Python stack as
+    "relative/path.py:function:line" strings, closest frame first.
+
+    Called from the watchdog daemon thread via `sys._current_frames()` — a
+    read of the main thread's existing frame chain, not a call that runs
+    bytecode ON the main thread, so it's safe (and cheap: a handful of
+    attribute reads, no traceback formatting) even while that thread is
+    genuinely wedged. Paths are trimmed relative to this package's parent
+    directory (falling back to a bare filename for anything outside it, e.g.
+    stdlib) so a captured frame never leaks the user's home directory into
+    events.log. Returns [] on any failure — e.g. the interpreter is wedged
+    badly enough that even `sys._current_frames()` can't be trusted — never
+    raises into the watchdog loop.
+    """
+    try:
+        root = Path(__file__).resolve().parent.parent
+        frame = sys._current_frames().get(threading.main_thread().ident)
+        frames: list[str] = []
+        while frame is not None and len(frames) < max_frames:
+            path = Path(frame.f_code.co_filename)
+            try:
+                rel = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                rel = path.name
+            frames.append(f"{rel}:{frame.f_code.co_name}:{frame.f_lineno}")
+            frame = frame.f_back
+        return frames
+    except Exception:
+        return []
 
 
 def _dump_main_stack(header: str) -> None:
@@ -469,6 +536,10 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                 spawn_active = bool(
                     getattr(getattr(window, "orch", None), "_spawn_in_progress", False)
                 )
+                if stall_tracker.should_snapshot_stack(age):
+                    frames = _format_main_thread_frames()
+                    if frames:
+                        stall_tracker.record_stack(frames, age)
                 rec = stall_tracker.update(age, spawn_active)
                 if rec is not None:
                     try:
