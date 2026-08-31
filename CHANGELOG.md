@@ -22,9 +22,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **UI ค้าง: `main_thread_stall` บอกจุดที่ค้างแล้ว (#452)** — event มี `stack` (top-5 frame ของ main thread, path relative ไม่รั่ว home) + `busy_threads` (thread อื่นที่กำลังรัน Python จริง ณ ตอน stall — ข้าม thread ที่นั่ง wait/select/queue) · `takkub ma` สรุป "ส่วนใหญ่ค้างที่ …" จาก stall ≥2s · context builder ที่ timeout 0.3s แล้วถูกทิ้ง ตอนนี้เช็ค cancel flag ระหว่าง disk-read หนักแล้ว bail (ไม่แย่ง GIL กับ spawn ถัดไป) · หลักฐาน: SOFT-stall dump ทุกตัวใน boot.log main thread อยู่ที่ `app.exec()` = GIL starvation จาก worker ไม่ใช่ call ค้างบน UI thread
 - **รูปจาก Lead ไม่ขึ้นบนมือถือ — `/api/image` 404 `image_unservable` (#453)** — relative path ลอง lead cwd → worktree ของโปรเจค → `RUNTIME_DIR` ตามลำดับ · `_image_roots` เพิ่ม worktree root ของทุกโปรเจค (magic-bytes/size cap/suffix whitelist เดิมยังอยู่ ตอบ 404 เปล่าเหมือนเดิม) · `remote_reject` แยก reason `not_found` / `not_under_root` / `bad_suffix` / `bad_magic` ใน events.log
 
+- **Remote PWA หน้า Projects (user feedback จาก screenshot)** — path ที่ไม่มีจุดตัดคำ (เช่น `customer_centric_web`) เคยล้นไปใต้ปุ่ม × → ตอนนี้ขึ้นบรรทัดใหม่ (`overflow-wrap: anywhere`) · ปุ่ม "ล้างแคช" เอาออกจากหน้า Projects (เกะกะ) เหลือไว้เฉพาะหน้าใส่รหัสผ่านเป็นปุ่มเล็กจางๆ และกดแล้ว**ล้างจริง** (token/session/sessionStorage + SW cache) กลับมาหน้าใส่รหัสใหม่ — ไม่แตะ URL/#token จึงไม่ต้องสแกน QR ใหม่ · bump SW cache v36
+
 ### Security (ความปลอดภัย)
 
-- **CodeQL #44–#46 `py/path-injection` ใน `_serve_static` (remote static route)** — comment `# codeql[...]` ไม่ใช่ suppression จริง (alert ยังเปิด) · เปลี่ยนเป็น idiom ที่ CodeQL รู้จักเป็น barrier: `os.path.realpath` + `startswith(root + sep)` (แบบเดียวกับ `reports.py._contained_path`) — behavior เท่าเดิม (`..`/drive-anchored/symlink escape → 404)
+- **CodeQL #44–#51 `py/path-injection` ใน `_serve_static` (remote static route)** — comment `# codeql[...]` ไม่ใช่ suppression จริง (alert ยังเปิด) · เปลี่ยนเป็น idiom ที่ CodeQL รู้จักเป็น barrier: `os.path.realpath` + `startswith(root + sep)` (แบบเดียวกับ `reports.py._contained_path`) — behavior เท่าเดิม (`..`/drive-anchored/symlink escape → 404)
 
 ## [v1.6.22] - 2026-08-30
 
