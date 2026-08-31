@@ -292,7 +292,12 @@ class _Bridge(QObject):
                         )
                     )
                 except api.RemoteApiError as exc:
-                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+                    # #453: `reason` is a finer-grained events.log breadcrumb,
+                    # scoped to this one action — never sent past `_serve_image`
+                    # (the client body stays the bare "not found"/404 it always was).
+                    pending.reply.put(
+                        (exc.status, {"ok": False, "msg": exc.msg, "reason": exc.reason})
+                    )
             elif pending.action == "activity":
                 pending.reply.put((200, api.activity(self._orch)))
             elif pending.action == "usage":
@@ -805,9 +810,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         referenced by a Lead message so the phone can render it inline.
         Bearer + password gated like every other `/api/*` read; the path is
         validated on the Qt main thread (`api.lead_image_path` — extension
-        whitelist, must live under a project cwd or RUNTIME_DIR, magic bytes,
-        size cap) and the bytes are read here on the worker thread. Any
-        rejection is the same bare 404 as an unknown route."""
+        whitelist, must live under a project cwd, its worktree root, or
+        RUNTIME_DIR, magic bytes, size cap) and the bytes are read here on
+        the worker thread. Any rejection is the same bare 404 as an unknown
+        route."""
         status, payload = self._bridge_call(
             "image_path", {"project": query.get("project"), "path": query.get("path")}
         )
@@ -815,7 +821,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             if status >= 500:
                 self._send_json(status, payload)
             else:
-                self._reject("image_unservable")
+                # #453: log the finer-grained reason (not_found / not_under_root /
+                # bad_suffix / bad_magic) when `api.lead_image_path` supplied one —
+                # the response itself is still the same bare 404 either way.
+                self._reject(payload.get("reason") or "image_unservable")
             return
         try:
             data = Path(str(payload["path"])).read_bytes()

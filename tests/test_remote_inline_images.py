@@ -42,6 +42,9 @@ def roots(tmp_path, monkeypatch):
     monkeypatch.setattr(
         api._config, "lead_cwd", lambda name=None: str(cwd) if name == "proj-a" else ""
     )
+    # #453: the managed worktree root for each project — tests create their
+    # own pane subdirectory under `tmp_path / "worktrees" / <ns>` as needed.
+    monkeypatch.setattr(api, "worktree_root", lambda ns: (tmp_path / "worktrees" / ns).resolve())
     return cwd, runtime
 
 
@@ -120,6 +123,69 @@ class TestLeadImagePath:
     def test_relative_path_without_known_project_is_404(self, roots):
         with pytest.raises(api.RemoteApiError):
             api.lead_image_path("unknown", "shot.png")
+
+    def test_relative_path_resolves_against_active_worktree(self, roots, tmp_path):
+        """#453: a UI self-verification screenshot taken in an isolated
+        worktree pane (`--isolation worktree`) resolves even though it
+        hasn't merged back into the project's Lead cwd yet."""
+        pane_dir = tmp_path / "worktrees" / "proj-a" / "frontend-1788055242"
+        (pane_dir / "docs" / "qa" / "screens").mkdir(parents=True)
+        f = pane_dir / "docs" / "qa" / "screens" / "desktop-1440.png"
+        f.write_bytes(_PNG)
+        out = api.lead_image_path("proj-a", "docs/qa/screens/desktop-1440.png")
+        assert out["ok"] is True
+        assert Path(out["path"]) == f.resolve()
+
+    def test_relative_path_falls_back_to_runtime_dir(self, roots):
+        _, runtime = roots
+        f = runtime / "exports" / "2026-08-30" / "tunnel" / "screenshots" / "settings-375.png"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(_PNG)
+        out = api.lead_image_path(
+            "proj-a", "exports/2026-08-30/tunnel/screenshots/settings-375.png"
+        )
+        assert out["ok"] is True
+
+    def test_lead_cwd_wins_over_worktree_when_both_have_the_name(self, roots, tmp_path):
+        cwd, _ = roots
+        (cwd / "shot.png").write_bytes(_PNG)
+        pane_dir = tmp_path / "worktrees" / "proj-a" / "frontend-1"
+        pane_dir.mkdir(parents=True)
+        (pane_dir / "shot.png").write_bytes(b"<html>not a png</html>")
+        out = api.lead_image_path("proj-a", "shot.png")
+        assert Path(out["path"]) == (cwd / "shot.png").resolve()
+
+    def test_absolute_path_into_another_projects_worktree_is_404(self, roots, tmp_path):
+        other_pane = tmp_path / "worktrees" / "other-proj" / "backend-9"
+        other_pane.mkdir(parents=True)
+        f = other_pane / "shot.png"
+        f.write_bytes(_PNG)
+        with pytest.raises(api.RemoteApiError):
+            api.lead_image_path("proj-a", str(f))
+
+    def test_reject_reasons_for_events_log(self, roots, tmp_path):
+        """#453: `RemoteApiError.reason` is a finer-grained events.log
+        breadcrumb — every case still surfaces to the client as a bare 404
+        (unchanged; only the internal reason distinguishes them)."""
+        cwd, _ = roots
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.lead_image_path("proj-a", "notes.txt")
+        assert exc.value.reason == "bad_suffix"
+
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.lead_image_path("proj-a", str(cwd / "nope.png"))
+        assert exc.value.reason == "not_found"
+
+        outside = tmp_path / "elsewhere.png"
+        outside.write_bytes(_PNG)
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.lead_image_path("proj-a", str(outside))
+        assert exc.value.reason == "not_under_root"
+
+        (cwd / "fake.png").write_bytes(b"<html>not a png</html>")
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.lead_image_path("proj-a", str(cwd / "fake.png"))
+        assert exc.value.reason == "bad_magic"
 
 
 class _FakeOrch:
@@ -205,6 +271,28 @@ class TestImageRoute:
             lambda: _get(server, "/sek/api/image?path=secret.png", {"Authorization": "Bearer tok"})
         )
         assert status == 404
+
+    def test_reject_reason_reaches_events_log_body_stays_bare(self, server, monkeypatch):
+        """#453: the sub-reason (`not_under_root`/`bad_suffix`/`bad_magic`/
+        `not_found`) is logged, but the client still sees the exact same
+        bare 404 either way."""
+        from agent_takkub import config as _config
+
+        def _fake(project, path):
+            raise api.RemoteApiError(404, "not found", reason="not_under_root")
+
+        monkeypatch.setattr(api, "lead_image_path", _fake)
+        status, _, body = _run_pumped(
+            lambda: _get(server, "/sek/api/image?path=outside.png", {"Authorization": "Bearer tok"})
+        )
+        assert status == 404
+        assert body == b""
+        lines = [
+            json.loads(line)
+            for line in _config.EVENTS_LOG.read_text(encoding="utf-8").splitlines()
+            if '"remote_reject"' in line
+        ]
+        assert lines[-1]["reason"] == "not_under_root"
 
     def test_shell_csp_allows_blob_images(self):
         assert "img-src 'self' data: blob:" in http_server._CSP_HEADER

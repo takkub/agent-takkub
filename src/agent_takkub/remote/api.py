@@ -37,6 +37,7 @@ from pathlib import Path
 
 from .. import config as _config
 from ..roles import LEAD
+from ..worktree_manager import worktree_root
 from . import config as _remote_config
 from . import notify
 
@@ -123,12 +124,17 @@ def _pulse_project(from_project: str | None) -> str | None:
 
 
 class RemoteApiError(Exception):
-    """Carries an HTTP status alongside the message the client should see."""
+    """Carries an HTTP status alongside the message the client should see.
 
-    def __init__(self, status: int, msg: str) -> None:
+    `reason` (#453) is an optional finer-grained breadcrumb for
+    `events.log` only — never surfaced in `msg`/the response body, which
+    stays the bare client-facing message it always was."""
+
+    def __init__(self, status: int, msg: str, reason: str | None = None) -> None:
         super().__init__(msg)
         self.status = status
         self.msg = msg
+        self.reason = reason
 
 
 def _lead_frame(orch, payload: dict, timeout: float = 5.0) -> dict:
@@ -404,7 +410,10 @@ def answer_picker(orch, from_project: str | None, answers: object) -> dict:
 # #424 inline image preview on the phone: which on-disk images the Remote may
 # serve back. Only raster types the PWA can render inline (SVG is excluded on
 # purpose — it can carry active content) and only from roots the cockpit
-# already owns: every configured project's Lead cwd plus RUNTIME_DIR (where
+# already owns: every configured project's Lead cwd, that project's managed
+# worktree root (#453 — `--isolation worktree` panes write self-verification
+# screenshots there, and #433 makes that the common case for UI work, well
+# before the branch merges back into the Lead cwd), plus RUNTIME_DIR (where
 # `lead_upload_image` and the export pipeline write). Anything else — even a
 # real image — answers 404, indistinguishable from "no such file".
 _IMAGE_SUFFIXES = {
@@ -425,13 +434,36 @@ def _image_roots() -> list[Path]:
         pass
     for name in _config.list_project_names():
         cwd = _config.lead_cwd(name)
-        if not cwd:
-            continue
+        if cwd:
+            try:
+                roots.append(Path(cwd).resolve())
+            except OSError:
+                pass
         try:
-            roots.append(Path(cwd).resolve())
+            roots.append(worktree_root(name))
         except OSError:
-            continue
+            pass
     return roots
+
+
+def _relative_image_bases(project: object) -> list[Path]:
+    """Ordered directories a *relative* image path may be rooted at (#453):
+    the named project's Lead cwd, then each of its active isolated worktree
+    checkouts (newest-looking name last is fine — every candidate is tried),
+    then RUNTIME_DIR for a `runtime/exports/...`-relative reference. Returns
+    plain, unresolved paths; the caller resolves and root-checks each one."""
+    bases: list[Path] = []
+    project_ns = project if isinstance(project, str) else None
+    if project_ns:
+        cwd = _config.lead_cwd(project_ns)
+        if cwd:
+            bases.append(Path(cwd))
+        try:
+            bases.extend(p for p in worktree_root(project_ns).iterdir() if p.is_dir())
+        except OSError:
+            pass
+    bases.append(_config.RUNTIME_DIR)
+    return bases
 
 
 def lead_image_path(project: object, path: object) -> dict:
@@ -443,40 +475,51 @@ def lead_image_path(project: object, path: object) -> dict:
 
     Every rejection is a bare 404 (§7.5): a bearer holder must not be able
     to probe the workstation's filesystem for existence of arbitrary files.
-    A relative path resolves against the named project's Lead cwd."""
+    A relative path is tried against each of `_relative_image_bases`, in
+    order, stopping at the first candidate that both exists and resolves
+    under an allowed root (`RemoteApiError.reason` records which check
+    actually failed, for `events.log` only — the response body never
+    changes)."""
     if not isinstance(path, str) or not path.strip() or len(path) > 1024:
-        raise RemoteApiError(404, "not found")
+        raise RemoteApiError(404, "not found", reason="not_found")
     raw = path.strip().strip(_IMAGE_PATH_QUOTES)
     if not raw or "\x00" in raw:
-        raise RemoteApiError(404, "not found")
+        raise RemoteApiError(404, "not found", reason="not_found")
     candidate = Path(raw)
-    if not candidate.is_absolute():
-        base = _config.lead_cwd(project) if isinstance(project, str) else ""
-        if not base:
-            raise RemoteApiError(404, "not found")
-        candidate = Path(base) / candidate
     fmt = _IMAGE_SUFFIXES.get(candidate.suffix.lower())
     if fmt is None:
-        raise RemoteApiError(404, "not found")
+        raise RemoteApiError(404, "not found", reason="bad_suffix")
+    if candidate.is_absolute():
+        attempts = [candidate]
+    else:
+        attempts = [base / candidate for base in _relative_image_bases(project)]
+    roots = _image_roots()
+    resolved: Path | None = None
+    escaped = False
+    for attempt in attempts:
+        try:
+            hit = attempt.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not hit.is_file():
+            continue
+        if any(root == hit or root in hit.parents for root in roots):
+            resolved = hit
+            break
+        escaped = True
+    if resolved is None:
+        raise RemoteApiError(404, "not found", reason="not_under_root" if escaped else "not_found")
     try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise RemoteApiError(404, "not found") from None
-    if not any(root == resolved or root in resolved.parents for root in _image_roots()):
-        raise RemoteApiError(404, "not found")
-    try:
-        if not resolved.is_file():
-            raise RemoteApiError(404, "not found")
         size = resolved.stat().st_size
         with resolved.open("rb") as fh:
             head = fh.read(16)
     except OSError:
-        raise RemoteApiError(404, "not found") from None
+        raise RemoteApiError(404, "not found", reason="not_found") from None
     if size == 0 or size > _MAX_REMOTE_IMAGE_BYTES:
-        raise RemoteApiError(404, "not found")
+        raise RemoteApiError(404, "not found", reason="not_found")
     _, matches_magic = _IMAGE_FORMATS[fmt]
     if not matches_magic(head):
-        raise RemoteApiError(404, "not found")
+        raise RemoteApiError(404, "not found", reason="bad_magic")
     return {"ok": True, "path": str(resolved), "mime": f"image/{fmt}", "size": size}
 
 
