@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtCore import QCoreApplication, QObject
+from PyQt6.QtCore import QCoreApplication, QObject, QTimer
 
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub import worktree_manager as wm_mod
@@ -479,7 +479,19 @@ class TestRequestRestart:
             qapp.processEvents()
         assert fired == [True]
 
-    def test_replies_ok_and_emits_deferred(self, orch, qapp):
+    def test_replies_ok_and_emits_deferred(self, orch, qapp, monkeypatch):
+        # Real QTimer.singleShot(200, ...) makes this deferred-but-eventually-
+        # fires assertion depend on 200ms of real wall-clock time under a
+        # CPU-starved xdist worker — flaky (and slow) the same way
+        # test_orchestrator_v2_context_hook's timing assert was (see
+        # docs/audit test-diet notes). Keep the timer genuinely async (0ms
+        # still routes through the Qt event loop, so `fired == []` right
+        # after the call is still a real assertion, not a tautology of the
+        # patch) but drop the real-time deadline for a bounded event-pump
+        # loop instead.
+        real_single_shot = QTimer.singleShot
+        monkeypatch.setattr(QTimer, "singleShot", lambda ms, cb: real_single_shot(0, cb))
+
         fired: list[bool] = []
         orch.restartRequested.connect(lambda: fired.append(True))
 
@@ -488,10 +500,10 @@ class TestRequestRestart:
         assert "restart" in msg.lower()
         # Deferred: NOT emitted synchronously — the IPC reply must flush first.
         assert fired == []
-        # Fires on the event loop after the 200 ms timer.
-        import time as _time
-
-        deadline = _time.monotonic() + 2.0
-        while not fired and _time.monotonic() < deadline:
+        # Fires on the event loop on the next tick(s) — bounded by iteration
+        # count, not wall-clock time.
+        for _ in range(200):
             qapp.processEvents()
+            if fired:
+                break
         assert fired == [True]
