@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.24] - 2026-08-31
+
+### Fixed (แก้)
+
+- **การ์ด Usage โชว์ error ดิบของ codex ทั้งก้อน — user เห็นแค่ "401" คิดว่า Remote login พัง (#454)** — ต้นเหตุจริงคือ auth.json ใน codex-home ของ cockpit ถูก OpenAI invalidate (`token_invalidated`) ต้อง `codex login` ใหม่ แต่การ์ดบน cockpit + PWA แสดง HTTP body ทั้งก้อนแทนที่จะบอกอย่างนั้น · `provider_usage.classify_codex_error` → `error` = ประโยคสั้นบอกสาเหตุ+วิธีแก้ (auth หมดอายุ / app-server timeout / เปิดไม่ติด / อื่นๆ) · raw text ไปอยู่ field ใหม่ `detail` (≤300 ตัวอักษร) — PWA ซ่อนใน "รายละเอียด" (พับไว้) · cockpit popup โชว์ short, tooltip โชว์ detail · claude/gemini path ไม่เปลี่ยน (gemini `stale` + hint เดิมตาม #423 คือพฤติกรรมที่ถูกแล้ว — agy ไม่มี usage API) · bump SW cache v37
+- **Test suite เร็วขึ้น ~9% (`docs/audit/2026-08-31-test-speed.md`)** — `installed_venv` fixture สร้าง venv + pip install ซ้ำทุก xdist worker (3–4 ครั้ง/รอบ ~30–50s ต่อครั้ง) → build ครั้งเดียวใน lock เดิม แชร์ทุก worker (stamp ด้วย wheel mtime กัน stale) · `test_replies_ok_and_emits_deferred` เลิกรอ wall-clock 2s (deterministic) · marker `slow` ลงทะเบียน (ไม่ deselect โดย default) · จำนวน test/coverage เท่าเดิม
+
 ## [v1.6.23] - 2026-08-31
 
 ### Added (เพิ่ม)
