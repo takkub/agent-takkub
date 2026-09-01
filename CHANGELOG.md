@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`takkub status`/`list` โชว์ pane "working" ค้างหลัง turn จบแล้ว (#463)** — claude 2.1.252 ทิ้ง spinner text (`✽ Mulling… running stop hook · Ns`) ค้างบนจอหลัง Stop hook จบ ทำให้ PTY-scrape ยึดว่ายังทำงาน · เพิ่ม display tier `waiting-lead`: `PaneState.last_turn_end_ts` stamp โดย `consume_pane_hook` เฉพาะตอน Stop hook ผ่าน (ไม่ block) และต้อง `>= blocked_on_lead_ts` (จาก `takkub progress`/`send --to lead`) — progress กลางงานที่ยังทำต่อไม่นับ · Lead `send` เข้า pane/spawn ใหม่ล้าง flag · `progress()` mark delivery RUNNING ทันที ตัด notice `delivery-superseded` ปลอมตอน Lead ส่ง GO (#255/#392) · provider ไม่มี Stop hook (codex/gemini-agy/opencode) ไม่แตะ ตก scrape เดิม (claude-only by construction, #103)
+
 ## [v1.6.26] - 2026-09-01
 
 ### Fixed (แก้)
