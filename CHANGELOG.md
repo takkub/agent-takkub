@@ -7,6 +7,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ### Fixed (แก้)
 
 - **`takkub worktree merge`/`clean` ทิ้ง branch ขยะบน origin หลัง pane push (#462)** — worker-isolated pane push `wt/<role>-*` ของตัวเองได้ตั้งแต่ #438 (ตั้งใจ, เพื่อยืนยัน CI เอง) แต่ merge/clean ไม่เคยลบ remote copy ตาม — ตอนนี้ลบ `origin/wt/<role>-*` ให้อัตโนมัติหลัง local branch ลบสำเร็จ (best-effort, ไม่ fetch/force, ข้ามเงียบถ้าไม่มี remote หรือไม่เคย push) · digest bullet ตอน `done()` ก็โชว์ `pushed:origin/wt/...` เมื่อ branch ถูก push แล้ว · แก้ comment เก่าใน `pane_guard.py` ที่ยังเขียนว่า push ไม่มี worktree carve-out (ขัดกับ behavior จริงตั้งแต่ #438)
+- **Stop hook บังคับ `takkub done` ทุกครั้งแม้เพิ่ง `takkub progress` — pane ที่ต้องหยุดรอ input จบ turn ไม่ได้ (#461)** — `progress()` ไม่เคยแตะ `blocked_on_lead_ts` เลย ทั้งที่ `consume_pane_hook`'s Stop-gate ใช้ field เดียวกันนี้ยกเว้นให้ `takkub send --to lead` อยู่แล้ว (30 นาที) → เพิ่ม 1 บรรทัดให้ `progress()` stamp field เดิมด้วย ไม่เพิ่ม state ใหม่ · pane เงียบเกิน 30 นาทีไม่มี progress/done ใหม่ยัง block เหมือนเดิม
 - **Remote Control badge ขึ้นทุก claude pane ไม่ใช่แค่ Lead (#458)** — Claude Code 2.1.251 เปิด rc auto-on by default เมื่อไม่มี layer ไหนตั้งค่านี้ไว้ · `hook_wiring.py` stamp `remoteControlAtStartup` explicit true/false ลงไฟล์ `--settings` ของทุก pane เสมอ (Lead = true, role อื่น = false) ผ่าน `TAKKUB_REMOTE_CONTROL_ROLES` (default = lead เท่านั้น, คู่กับ `TAKKUB_CONCISE_ROLES`)
 
 ## [v1.6.25] - 2026-08-31

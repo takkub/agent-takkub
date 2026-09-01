@@ -185,6 +185,42 @@ class TestDoneGateSuppressions:
 
         assert block is False
 
+    def test_progress_call_suppresses_the_next_stop(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#461: `takkub progress` (e.g. reporting it's waiting on
+        credentials from Lead) must let the very next Stop event end the
+        turn instead of forcing `takkub done` — same 30-min grace the
+        blocked-on-lead suppression above already gives a direct
+        `takkub send --to lead`."""
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        _assign_task(orch, "backend")
+
+        ok, _msg = orch.progress("backend", note="waiting on credentials", project=TEST_PROJECT)
+        assert ok is True
+
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is False
+
+    def test_progress_grace_expires_then_blocks_again(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flip side of #461: a pane that reported progress once but then
+        goes silent past the grace window must still get nudged — progress()
+        is not a permanent done-gate bypass."""
+        clock = [10_000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch.panes["backend"] = _make_pane(state="working")
+        _assign_task(orch, "backend")
+        orch.progress("backend", note="waiting on credentials", project=TEST_PROJECT)
+
+        clock[0] = 10_000.0 + (31 * 60)  # past the 30-min grace window
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is True
+
 
 class TestIdleStateSignalIdempotency:
     def test_first_idle_ts_set_once(

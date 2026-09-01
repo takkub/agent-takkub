@@ -5556,7 +5556,17 @@ class Orchestrator(
         # Counts as evidence of life for the same reason a peer send() does
         # (spawn_engine._ps) — a long build/test run that only ever talks to
         # Lead via progress() must not look idle to the stall watchdog.
-        self._ps(f"{project_ns}::{from_role}").last_send_ts = time.time()
+        _ps_self = self._ps(f"{project_ns}::{from_role}")
+        _ps_self.last_send_ts = time.time()
+        # #461: reuse the exact suppression `takkub send --to lead` already
+        # gets (consume_pane_hook's blocked_on_lead_ts check, same 30-min
+        # window as the idle-watchdog's forgot-done reminder) — a pane that
+        # just called progress() (e.g. "waiting on credentials") is telling
+        # Lead the same thing a direct send would, and must not have the
+        # Stop-hook done-gate force it into `takkub done` on the very next
+        # turn end. Each progress() call refreshes the window; a pane that
+        # goes silent past it still gets nudged, same as today.
+        _ps_self.blocked_on_lead_ts = time.time()
 
         origin_pane_token = self._current_pane_identity(project_ns, from_role)
         body = f"[{from_role} progress] {note}"
@@ -5629,6 +5639,9 @@ class Orchestrator(
         now = time.time()
         # Same 30-minute window _check_idle_teammates uses to suppress the
         # forgot-done reminder while genuinely waiting on Lead's reply.
+        # #461: progress() stamps this same field, so a pane that just
+        # reported status (e.g. waiting on credentials) gets the same grace
+        # here as one that used `takkub send --to lead` directly.
         if ps.blocked_on_lead_ts is not None and (now - ps.blocked_on_lead_ts) < 30 * 60:
             return True, False, ""
         if ps.rate_limited_until > now:
@@ -5637,7 +5650,12 @@ class Orchestrator(
             return True, False, ""
 
         ps.stop_gate_notified = True
-        return True, True, "รายงานผลด้วย takkub done ก่อนจบ"
+        return (
+            True,
+            True,
+            'ยังไม่จบ → `takkub progress "<สถานะ>"` แล้วจบ turn รอ takkub send จาก Lead ได้ '
+            "· จบแล้ว → รายงานผลด้วย takkub done ก่อนจบ",
+        )
 
     def consume_session_report(
         self,
