@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.26] - 2026-09-01
+
 ### Fixed (แก้)
 
 - **`takkub worktree merge`/`clean` ทิ้ง branch ขยะบน origin หลัง pane push (#462)** — worker-isolated pane push `wt/<role>-*` ของตัวเองได้ตั้งแต่ #438 (ตั้งใจ, เพื่อยืนยัน CI เอง) แต่ merge/clean ไม่เคยลบ remote copy ตาม — ตอนนี้ลบ `origin/wt/<role>-*` ให้อัตโนมัติหลัง local branch ลบสำเร็จ (best-effort, ไม่ fetch/force, ข้ามเงียบถ้าไม่มี remote หรือไม่เคย push) · digest bullet ตอน `done()` ก็โชว์ `pushed:origin/wt/...` เมื่อ branch ถูก push แล้ว · แก้ comment เก่าใน `pane_guard.py` ที่ยังเขียนว่า push ไม่มี worktree carve-out (ขัดกับ behavior จริงตั้งแต่ #438)
