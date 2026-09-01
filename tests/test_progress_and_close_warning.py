@@ -186,7 +186,17 @@ class TestProgressMarksDeliveryRunning:
     def test_send_no_longer_reports_superseded_after_progress(self, orch: Orchestrator) -> None:
         """End-to-end proof: once progress() has run, `send()`'s
         `supersede_for_session` sweep finds nothing left in an unconfirmed/
-        cancel-worthy state for this delivery."""
+        cancel-worthy state for this delivery.
+
+        #463 follow-up (real e2e incident, 2026-09-01 11:24-11:25): a RUNNING
+        delivery is NOT "harmless bookkeeping" to cancel — nothing in
+        `task_delivery._RESEND_ELIGIBLE_STATES` still resends/re-pastes it, so
+        cancelling it only flips a delivery whose task IS running to
+        CANCELLED, and `orchestrator.send()` also drops `_last_delivery_ids`
+        for it once `cancelled` is non-empty — leaving the teammate's own
+        later `done()` with no delivery_id to call `mark_done()` on. RUNNING
+        must be left alone: neither cancelled nor reported as kept/pending.
+        """
         _register(orch, LEAD.name, _make_alive_session())
         _register(orch, "qa", _make_alive_session())
         manager = DeliveryManager()
@@ -203,15 +213,14 @@ class TestProgressMarksDeliveryRunning:
         with patch("agent_takkub.orchestrator.QTimer.singleShot"):
             orch.progress("qa", note="e2e: waiting for GO", project=PROJECT)
 
-        _cancelled, kept = manager.supersede_for_session(PROJECT, "qa", 0)
+        cancelled, kept = manager.supersede_for_session(PROJECT, "qa", 0)
         assert delivery not in kept
-        # RUNNING is non-terminal, so it IS still cancelled by an explicit
-        # Lead send (harmless bookkeeping, #255) — the point of this fix is
-        # that it's no longer left ambiguous/UNCERTAIN, never that it stops
-        # existing. Assert the state actually observed by supersede was
-        # RUNNING, not the pre-fix UNCERTAIN.
-        assert delivery.state == DeliveryState.CANCELLED
+        assert delivery not in cancelled
+        assert delivery.state == DeliveryState.RUNNING
         assert delivery.enter_retries == 0  # never resent/re-pasted
+        # And `_last_delivery_ids` must survive untouched, or the teammate's
+        # later `done()` has nothing to call `mark_done()` on.
+        assert orch._last_delivery_ids[(PROJECT, "qa")] == delivery.delivery_id
 
     def test_missing_delivery_id_is_a_no_op(self, orch: Orchestrator) -> None:
         _register(orch, LEAD.name, _make_alive_session())

@@ -5648,11 +5648,17 @@ class Orchestrator(
         # stronger evidence than the ready-marker scrape `_on_settled`
         # (lead_inbox.py) uses to resolve ACCEPTED/UNCERTAIN. Advance any
         # still-in-flight delivery for this role straight to RUNNING so it
-        # drops out of `_UNCONFIRMED_STATES`/self-heal-resend eligibility —
-        # a later `send()` into this pane then has nothing ambiguous left to
-        # cancel (no more confusing "delivery-superseded" notice for a task
-        # Lead already knows landed, #255/#392). Best-effort: a missing or
-        # already-terminal delivery is a no-op, never raises.
+        # drops out of `_UNCONFIRMED_STATES`/self-heal-resend eligibility AND
+        # (task_delivery._RESEND_ELIGIBLE_STATES, #463 follow-up)
+        # `supersede_for_session`'s cancel-worthy set — a later `send()` into
+        # this pane then has nothing left to touch at all: no ambiguous
+        # confirmation to cancel, and no live-but-cancellable delivery either,
+        # so the delivery stays RUNNING for this role's own later `done()` to
+        # `mark_done()` (no more confusing "delivery-superseded" notice for a
+        # task Lead already knows landed, and no delivery silently flipped to
+        # CANCELLED out from under a task that is actually still running,
+        # #255/#392). Best-effort: a missing or already-terminal delivery is
+        # a no-op, never raises.
         try:
             _delivery_id = getattr(self, "_last_delivery_ids", {}).get((project_ns, from_role))
             _delivery_mgr = getattr(self, "_delivery_manager", None)
