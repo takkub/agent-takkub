@@ -3086,7 +3086,10 @@ def cmd_hook(_: argparse.Namespace) -> dict:
             )
         )
         if resp and resp.get("block"):
-            reason = resp.get("msg") or "รายงานผลด้วย takkub done ก่อนจบ"
+            reason = resp.get("msg") or (
+                'ยังไม่จบ → `takkub progress "<สถานะ>"` แล้วจบ turn รอ takkub send จาก Lead ได้ '
+                "· จบแล้ว → รายงานผลด้วย takkub done ก่อนจบ"
+            )
             print(
                 json.dumps(
                     {
