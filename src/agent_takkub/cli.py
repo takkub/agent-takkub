@@ -16,6 +16,7 @@ Output is human readable on stdout. Exit 0 on success, 1 on error.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -190,14 +191,41 @@ def _connect() -> socket.socket:
     return s
 
 
-# #464: the "other cockpit instance is also running" line used to print on
-# EVERY `takkub status`/`inbox`/`list` call — pure noise once Lead has seen it
-# once. Marker is keyed on the parent shell's PID (stable across every
-# `takkub <cmd>` subprocess spawned from the same pane for its whole
-# lifetime, unlike our own PID which is fresh every invocation) so it shows
-# again after the pane itself restarts.
+# #464 follow-up: keying the marker on os.getppid() (below) was meant to be
+# "stable across every `takkub <cmd>` subprocess spawned from the same pane
+# for its whole lifetime, unlike our own PID which is fresh every
+# invocation" — but on Windows (confirmed live: two back-to-back `takkub
+# status` calls from the SAME pane produced TWO marker files,
+# other-instance-14156-54147 and other-instance-2232-54147) a Claude pane
+# spawns a brand-new child shell per command, so the *parent* PID changes
+# just as often as ours does. macOS panes were reported to do the same.
+# Result: the ppid-keyed marker never actually deduped anything — the
+# banner this whole mechanism exists to silence kept reprinting on every
+# single command, the exact noise #464 was filed to remove.
+#
+# TAKKUB_ROLE / TAKKUB_PROJECT / the pane's own auth token, by contrast, are
+# stamped into the pane's env once at spawn time and never change for that
+# pane's entire lifetime regardless of how many child shells it spawns —
+# see _from_role/_from_project and _request's token comment. Hash those
+# together instead when a pane env is present. The token is included (not
+# just role+project) so two concurrent same-role panes in the same project
+# (sharded specialists) still get independent markers rather than silently
+# sharing one. Only a bare user shell with no TAKKUB_ROLE at all (manual
+# `takkub` use outside any cockpit pane) has no such env to key off — that
+# case falls back to the parent PID, the best signal available there, same
+# as before.
+def _pane_identity_key() -> str:
+    role = os.environ.get("TAKKUB_ROLE")
+    if not role:
+        return f"ppid-{os.getppid()}"
+    project = os.environ.get("TAKKUB_PROJECT") or ""
+    token = os.environ.get("TAKKUB_LEAD_TOKEN") or os.environ.get("TAKKUB_PANE_TOKEN") or ""
+    digest = hashlib.sha256(f"{role}\x00{project}\x00{token}".encode()).hexdigest()[:12]
+    return f"pane-{digest}"
+
+
 def _other_instance_warned_marker(other_port: int) -> Path:
-    return config.RUNTIME_DIR / "cli-warned" / f"other-instance-{os.getppid()}-{other_port}"
+    return config.RUNTIME_DIR / "cli-warned" / f"other-instance-{_pane_identity_key()}-{other_port}"
 
 
 def _already_warned_other_instance(other_port: int) -> bool:

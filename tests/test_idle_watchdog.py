@@ -49,6 +49,14 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
         "_resolve_project",
         staticmethod(lambda project: project or TEST_PROJECT),
     )
+    # #465: `_check_proactive_compact` reads the REAL cross-process usage
+    # cache file for whatever config dir `TEST_PROJECT` resolves to (falls
+    # back to the real `~/.claude` — this test project is never a
+    # registered profile). Without this default, whether these tests hit
+    # the base or overage threshold would depend on the actual dev
+    # machine's real Claude account usage state at the moment the suite
+    # runs. Deterministically "not in overage" unless a test overrides it.
+    monkeypatch.setattr("agent_takkub.limit_status.load_shared_state", lambda cd: {"data": None})
     o = Orchestrator()
     # We drive _check_idle_teammates by hand; the auto-firing timers (#344:
     # not just _idle_watchdog — _resource_timer/_hot_md_timer too) would
@@ -1544,6 +1552,186 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()  # fresh idle episode starts
 
         clock[0] += 101
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
+
+
+class TestProactiveCompactOrchestrateGate:
+    """#465: Lead/specialist "not really idle" gates on top of the plain
+    idle-at-ready-prompt check `TestProactiveIdleCompact` covers, plus the
+    overage-aware threshold and the "nothing new" skip's sent_ts bug fix."""
+
+    def _claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+
+    def test_lead_not_compacted_while_specialist_working(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        lead = _make_pane(state="active", at_ready_prompt=True)
+        backend = _make_pane(state="working", at_ready_prompt=False)
+        orch.panes["lead"] = lead
+        orch.panes["backend"] = backend
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000  # far past the threshold
+        orch._check_idle_teammates()
+
+        lead.session.write.assert_not_called()
+
+    def test_lead_resumes_idle_count_once_specialist_finishes(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        lead = _make_pane(state="active", at_ready_prompt=True)
+        backend = _make_pane(state="working", at_ready_prompt=False)
+        orch.panes["lead"] = lead
+        orch.panes["backend"] = backend
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 500  # Lead looks idle throughout, but backend is working
+        orch._check_idle_teammates()
+        lead.session.write.assert_not_called()
+
+        backend.state = "done"  # specialist finishes
+        clock[0] += 1
+        orch._check_idle_teammates()  # Lead's idle clock starts fresh HERE
+        lead.session.write.assert_not_called()
+
+        clock[0] += 99  # just under a fresh threshold from that point
+        orch._check_idle_teammates()
+        lead.session.write.assert_not_called()
+
+        clock[0] += 2  # crosses the fresh threshold
+        orch._check_idle_teammates()
+        lead.session.write.assert_called_once_with("/compact")
+
+    def test_lead_not_compacted_with_active_wait_pending(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        lead = _make_pane(state="active", at_ready_prompt=True)
+        orch.panes["lead"] = lead
+        orch._active_waits[TEST_PROJECT] = {"wait_id": "x", "roles": ["backend"]}
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+        lead.session.write.assert_not_called()
+
+        # `takkub wait` resolves — Lead is free again, from a fresh episode.
+        orch._active_waits.pop(TEST_PROJECT, None)
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        lead.session.write.assert_called_once_with("/compact")
+
+    def test_lead_not_compacted_with_unread_inbox_digest(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        lead = _make_pane(state="active", at_ready_prompt=True)
+        orch.panes["lead"] = lead
+        orch._lead_digest_queue[TEST_PROJECT] = [("[backend] done", "backend")]
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+        lead.session.write.assert_not_called()
+
+    def test_specialist_waiting_for_lead_not_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        ps = orch._ps(_key("backend"))
+        ps.blocked_on_lead_ts = clock[0]
+        ps.last_turn_end_ts = clock[0] + 0.5
+
+        orch._check_idle_teammates()
+        clock[0] += 500  # past the 100s threshold, well under the 30min window
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        # Lead replies (send()/progress() path clears blocked_on_lead_ts) —
+        # the pane is genuinely idle now, so a fresh episode can compact.
+        ps.blocked_on_lead_ts = None
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
+
+    def test_overage_uses_shorter_threshold(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 10_000)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S", 50)
+        monkeypatch.setattr("agent_takkub.limit_status.is_in_overage", lambda data: True)
+        monkeypatch.setattr(
+            "agent_takkub.limit_status.load_shared_state", lambda cd: {"data": object()}
+        )
+        monkeypatch.setattr("agent_takkub.user_profile.config_dir_for", lambda project: None)
+        pane = _make_pane(state="active", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 51  # past the 50s overage threshold, nowhere near 10_000s
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
+
+    def test_nothing_new_skip_still_fires_once_real_output_arrives_same_episode(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#465 follow-up: the "nothing new" skip must not permanently block
+        the rest of the idle episode. Before the fix, the skip stamped
+        `proactive_compact_sent_ts` (the same field an actual `/compact`
+        stamps), which made the "already compacted this idle episode" guard
+        true for good — so real output that arrived later in the SAME
+        episode (pane never leaving its ready prompt, e.g. a notice written
+        straight into it) could never fire, contradicting the code's own
+        "never re-fires until real output arrives" comment."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", 1000)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        pane.session.output_bytes_total = 0
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # seeds baseline at 0, idle episode starts
+        clock[0] += 101  # crosses the threshold, but nothing new -> skipped
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        # Real output lands while the pane STAYS at its ready prompt.
+        pane.session.output_bytes_total = 5_000
+        clock[0] += 1
         orch._check_idle_teammates()
         pane.session.write.assert_called_once_with("/compact")
 

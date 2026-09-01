@@ -2815,11 +2815,12 @@
         "agent_takkub.doctor",
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
+        "agent_takkub.orchestrator",
         "agent_takkub.provider_usage",
         "agent_takkub.status_header",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 1
     },
     {
@@ -3015,6 +3016,7 @@
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
+        "agent_takkub.limit_status",
         "agent_takkub.notice_facts",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
@@ -3038,6 +3040,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.task_delivery",
         "agent_takkub.task_ledger",
+        "agent_takkub.user_profile",
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
@@ -3050,7 +3053,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 49
+      "fan_out": 51
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -4887,6 +4890,7 @@
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
         "agent_takkub.main_window",
+        "agent_takkub.orchestrator",
         "agent_takkub.pane_env",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
@@ -4896,7 +4900,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 16,
+      "fan_in": 17,
       "fan_out": 4
     },
     {

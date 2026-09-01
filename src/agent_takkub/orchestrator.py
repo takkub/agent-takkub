@@ -253,8 +253,31 @@ HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
 # confirmed equivalent on codex/gemini/opencode/kimi/cursor — a known
 # multi-provider gap, tracked under #103 rather than silently assumed to work
 # everywhere. See _check_proactive_compact's provider gate.
+#
+# #465 (user directive 2026-09-01): the real TTL is ~1h, not 25min — the old
+# 25min default fired long before the cache was ever at risk, paying the
+# summarize cost + losing context for zero TTL benefit whenever anyone talked
+# to the pane before the hour was up. 55min sits close to that 1h cliff
+# without routinely crossing it. See PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S
+# right below for the shortened threshold used during the ~5min-TTL overage
+# window instead of this one.
 PROACTIVE_COMPACT_IDLE_AFTER_S = int(
-    os.environ.get("TAKKUB_PROACTIVE_COMPACT_IDLE_AFTER_S", str(25 * 60))
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_IDLE_AFTER_S", str(55 * 60))
+)
+
+# #465 (user directive): Anthropic's server-side prompt-cache TTL collapses
+# from its normal ~1h down to ~5min while the account's five-hour usage
+# window is fully exhausted (see limit_status.is_in_overage) — PROACTIVE_
+# COMPACT_IDLE_AFTER_S's 55min default would let an overage pane cross that
+# much shorter cliff and eat a full-transcript cache-write anyway.
+# `_check_proactive_compact` reads the project's cached usage state each
+# tick (best-effort, cross-process shared file — limit_status.
+# load_shared_state, no network fetch of its own) and swaps in this much
+# shorter threshold whenever that state reports overage. 0 = disable
+# proactive compaction specifically while in overage (the base threshold
+# above still governs the normal, non-overage case).
+PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S = int(
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S", str(4 * 60))
 )
 
 # Follow-up to #190: `proactive_compact_pending` is trusted as "our own
@@ -291,6 +314,17 @@ PROACTIVE_COMPACT_PENDING_CEILING_S = int(
 # otherwise the episode is marked handled without writing anything. 8 KiB
 # comfortably exceeds idle footer/clock redraws and is far below the output
 # of even a one-tool work turn. 0 = disable the gate.
+#
+# #465 follow-up: the skip used to also stamp proactive_compact_sent_ts, the
+# same field an ACTUAL `/compact` stamps — which made
+# `proactive_compact_sent_ts >= proactive_compact_idle_since` (the "already
+# compacted this idle episode" guard above) true for the rest of the
+# episode, so real output arriving later in the SAME idle episode (while the
+# pane never left its ready prompt, e.g. a live-delivered notice) could
+# never re-trigger the check again, contradicting this comment's own "never
+# re-fires until real output arrives" claim. The skip below now leaves
+# sent_ts untouched — only `proactive_compact_skip_logged_bytes` dedupes
+# its logging — so every later tick keeps re-evaluating this gate fresh.
 PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES = int(
     os.environ.get("TAKKUB_PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES", str(8 * 1024))
 )
@@ -8903,6 +8937,52 @@ class Orchestrator(
         except Exception:
             pass
 
+    def _lead_orchestrate_busy_reason(
+        self, project_ns: str, project_panes: dict[str, AgentPane]
+    ) -> str | None:
+        """#465: why Lead must not be proactively compacted right now, or
+        `None` if the whole project is genuinely idle and Lead is free to.
+
+        Lead sitting at its own ready prompt while a specialist is still
+        working, a `takkub wait` registration is still open, or an inbox
+        digest hasn't reached Lead's pane yet all look identical to genuine
+        idle to the PTY-scrape check in `_check_proactive_compact` — but
+        Lead is actively orchestrating in every one of those states, and
+        compacting away the context it needs the moment that work resolves
+        (the spec it assigned, what it reviewed, the merge plan) was the
+        exact reported failure. Checked in this order only for a stable,
+        single-cause `reason` string — all three can be true at once."""
+        for other_role, other_pane in project_panes.items():
+            if other_role == LEAD.name:
+                continue
+            if other_pane.state == "working":
+                return "lead-specialist-working"
+        if getattr(self, "_active_waits", {}).get(project_ns):
+            return "lead-wait-pending"
+        if (
+            getattr(self, "_lead_digest_queue", {}).get(project_ns)
+            or getattr(self, "_lead_notify_queue", {}).get(project_ns)
+            or getattr(self, "_pending_done_notices", {}).get(project_ns)
+        ):
+            return "lead-inbox-unread"
+        return None
+
+    def _pane_waiting_for_lead(self, ps: PaneState | None, now: float) -> bool:
+        """#465 item 2 / #463: True when `ps` is in the "waiting-lead" tier
+        (see `_derive_display_state`'s docstring) — the pane's turn
+        genuinely ended while it was blocked on Lead's reply, so it is not
+        idle, it's blocked on a decision only Lead can make. Both a recent
+        `blocked_on_lead_ts` stamp AND a `last_turn_end_ts` at least as new
+        are required — `progress()` alone stamps `blocked_on_lead_ts`
+        mid-turn too, before the turn has actually ended."""
+        return bool(
+            ps is not None
+            and ps.blocked_on_lead_ts is not None
+            and (now - ps.blocked_on_lead_ts) < 30 * 60
+            and ps.last_turn_end_ts is not None
+            and ps.last_turn_end_ts >= ps.blocked_on_lead_ts
+        )
+
     def _check_proactive_compact(self, now: float) -> None:
         """Inject `/compact` into a Claude pane that's been continuously idle
         at its ready prompt for PROACTIVE_COMPACT_IDLE_AFTER_S — see that
@@ -8954,12 +9034,45 @@ class Orchestrator(
         PROACTIVE_COMPACT_PENDING_CEILING_S: once a not-ready stretch outlives
         it, `pending` is treated as stale and the not-ready branch falls back
         to the ordinary new-work path (clear pending, reset idle_since).
+
+        Issue #465: a pane sitting at its own ready prompt is not always
+        actually idle. Two extra gates run once the pane clears every check
+        above (ready, not booting/TTY-blocked/rate-limited, Claude-only) but
+        before the idle clock is allowed to accumulate — both reset
+        `idle_since` to None (the same "not idle, don't count it" treatment
+        the not-ready branch above already gives busy/booting panes) rather
+        than merely skipping the fire, so the full threshold must elapse
+        again fresh once the project genuinely settles:
+
+        - **Lead** (`_lead_orchestrate_busy_reason`): a specialist in the
+          same project still `pane.state == "working"`, an open `takkub
+          wait` registration, or an inbox digest still queued (not yet
+          written into Lead's pane) all mean Lead is actively orchestrating
+          even though its own screen looks idle. Confirmed live
+          (runtime/events.log 2026-09-01 09:39:26 / 10:36:31): Lead got
+          `/compact`ed mid-orchestration while backend was still working
+          #463/#464, summarizing away the spec/review/merge-plan context
+          Lead needed the moment backend's `done()` landed 35s later.
+        - **Specialist** (`_pane_waiting_for_lead`): the #463 "waiting-lead"
+          tier — turn genuinely ended while blocked on Lead's reply, not
+          done with the task, so it isn't idle either.
+
+        Overage-aware threshold: `PROACTIVE_COMPACT_IDLE_AFTER_S` (base) vs
+        `PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S` (short, used once the
+        project's cached usage state reports `limit_status.is_in_overage`) —
+        see those constants' comments. Read once per project per tick
+        (cheap best-effort local file read, never a network fetch) and
+        reused for every pane in that project this tick.
         """
-        if PROACTIVE_COMPACT_IDLE_AFTER_S <= 0:
+        if PROACTIVE_COMPACT_IDLE_AFTER_S <= 0 and PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S <= 0:
             return
+        from .limit_status import is_in_overage, load_shared_state
         from .provider_config import CLAUDE, effective_provider_for
+        from .user_profile import config_dir_for
 
         for project_name, project_panes in list(self._panes_by_project.items()):
+            _overage_loaded = False
+            _project_in_overage = False
             for role, pane in list(project_panes.items()):
                 try:
                     sess = pane.session
@@ -9022,6 +9135,7 @@ class Orchestrator(
                         # fresh episode once the pane settles.
                         ps.proactive_compact_pending = False
                         ps.proactive_compact_idle_since = None
+                        ps.proactive_compact_skip_logged_bytes = -1
                         continue
                     if ps.proactive_compact_pending:
                         # Pane is back at its ready prompt for the first time
@@ -9036,13 +9150,54 @@ class Orchestrator(
                         total = getattr(sess, "output_bytes_total", None)
                         if isinstance(total, int):
                             ps.proactive_compact_baseline_bytes = total
+                        # Baseline moved — any prior "nothing new" dedupe
+                        # value is stale.
+                        ps.proactive_compact_skip_logged_bytes = -1
                     if effective_provider_for(role, project=project_name) != CLAUDE:
                         continue
+
+                    # #465: Lead/specialist "not really idle" gates — see the
+                    # docstring above. Reset (not just skip) idle_since so a
+                    # fresh full threshold is required once genuinely settled.
+                    if role == LEAD.name:
+                        _busy_reason = self._lead_orchestrate_busy_reason(
+                            project_name, project_panes
+                        )
+                    else:
+                        _busy_reason = (
+                            "waiting-lead" if self._pane_waiting_for_lead(ps, now) else None
+                        )
+                    if _busy_reason is not None:
+                        ps.proactive_compact_idle_since = None
+                        if ps.proactive_compact_busy_logged != _busy_reason:
+                            ps.proactive_compact_busy_logged = _busy_reason
+                            _log_event(
+                                "proactive_idle_compact_skipped",
+                                role=role,
+                                project=project_name,
+                                reason=_busy_reason,
+                            )
+                        continue
+                    ps.proactive_compact_busy_logged = ""
+
                     if ps.proactive_compact_idle_since is None:
                         ps.proactive_compact_idle_since = now
                         continue
                     idle_for = now - ps.proactive_compact_idle_since
-                    if idle_for < PROACTIVE_COMPACT_IDLE_AFTER_S:
+                    if not _overage_loaded:
+                        try:
+                            _project_in_overage = is_in_overage(
+                                load_shared_state(config_dir_for(project_name))["data"]
+                            )
+                        except Exception:
+                            _project_in_overage = False
+                        _overage_loaded = True
+                    threshold = (
+                        PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S
+                        if _project_in_overage
+                        else PROACTIVE_COMPACT_IDLE_AFTER_S
+                    )
+                    if threshold <= 0 or idle_for < threshold:
                         continue
                     if ps.proactive_compact_sent_ts >= ps.proactive_compact_idle_since:
                         continue  # already compacted this idle episode
@@ -9055,27 +9210,31 @@ class Orchestrator(
                         < PROACTIVE_COMPACT_MIN_NEW_OUTPUT_BYTES
                     ):
                         # Nothing new to compact since the last one settled.
-                        # Mark this episode handled (sent_ts) WITHOUT writing
-                        # anything, so it is not re-evaluated every tick and
-                        # never re-fires until real output arrives.
-                        ps.proactive_compact_sent_ts = now
-                        _log_event(
-                            "proactive_idle_compact_skipped",
-                            role=role,
-                            project=project_name,
-                            idle_for=round(idle_for),
-                            new_bytes=total - ps.proactive_compact_baseline_bytes,
-                        )
+                        # Dedupe logging to once per distinct byte count
+                        # (not every 5s tick) WITHOUT stamping sent_ts — see
+                        # this gate's #465 follow-up comment above for why.
+                        if ps.proactive_compact_skip_logged_bytes != total:
+                            ps.proactive_compact_skip_logged_bytes = total
+                            _log_event(
+                                "proactive_idle_compact_skipped",
+                                role=role,
+                                project=project_name,
+                                reason="nothing-new",
+                                idle_for=round(idle_for),
+                                new_bytes=total - ps.proactive_compact_baseline_bytes,
+                            )
                         continue
                     sess.write("/compact")
                     _delayed_enter(pane, sess, 150)
                     ps.proactive_compact_sent_ts = now
                     ps.proactive_compact_pending = True
+                    ps.proactive_compact_skip_logged_bytes = -1
                     _log_event(
                         "proactive_idle_compact",
                         role=role,
                         project=project_name,
                         idle_for=round(idle_for),
+                        overage=_project_in_overage,
                     )
                 except Exception as e:
                     _log_event(

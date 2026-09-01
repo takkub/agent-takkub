@@ -861,6 +861,24 @@ class PaneState:
     # orchestrator.PROACTIVE_COMPACT_PENDING_CEILING_S, past which it's
     # treated as stale and cleared like any other new-work not-ready.
     proactive_compact_pending: bool = False
+    # proactive_compact_skip_logged_bytes (#465): the `output_bytes_total`
+    # value the "nothing new since last compact" gate last logged a skip
+    # for. Dedupes `proactive_idle_compact_skipped` logging to once per
+    # distinct byte count instead of every 5s watchdog tick while the gate
+    # keeps failing — WITHOUT stamping proactive_compact_sent_ts the way an
+    # actual `/compact` does, so real output arriving later in the SAME
+    # idle episode is still re-evaluated fresh and can still fire (a prior
+    # version stamped sent_ts on skip too, which made the skip permanent
+    # for the rest of the episode no matter how much new output arrived —
+    # see orchestrator._check_proactive_compact). -1 = nothing logged yet.
+    proactive_compact_skip_logged_bytes: int = -1
+    # proactive_compact_busy_logged (#465): the reason string last logged
+    # for "Lead is still orchestrating" / "specialist is waiting-lead" —
+    # dedupes proactive_idle_compact_skipped logging to once per busy
+    # stretch (not every 5s tick a specialist stays working) while still
+    # giving `takkub ma` one line per stretch to explain the skip. Cleared
+    # back to "" the moment the pane is no longer in either blocked state.
+    proactive_compact_busy_logged: str = ""
     # ── stuck-tool watchdog (#308) ───────────────────────────────────────
     # tool_stuck_escalated: True from the tick a ProviderSpec.tool_running_
     # markers hit has sat on screen for TOOL_STUCK_TIMEOUT_SEC with no other
