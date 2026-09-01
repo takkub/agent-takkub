@@ -708,6 +708,33 @@ class TestInstanceBanner:
         assert "⚠ dev · checkout ก็รันอยู่ด้วย (port 43124)" in banner
         assert "คำสั่งนี้คุม v9.9.9 เท่านั้น" in banner
 
+    def test_banner_warns_only_once_per_session(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#464 item 4: the 'other cockpit also running' line used to print
+        on every `takkub status`/`inbox`/`list` call — the first call in a
+        pane's lifetime (same parent shell PID) still shows it, every
+        following call from that same shell must not repeat it. The own
+        identity line stays every time regardless."""
+        repo_root, port_file = self._mock_prod_instance(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli.config, "RUNTIME_DIR", tmp_path / "prod" / "runtime")
+        other_port_file = repo_root / "runtime" / "port"
+        other_port_file.parent.mkdir(parents=True)
+        other_port_file.write_text("43124", encoding="utf-8")
+
+        class _FakeSocket:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+
+        first = cli._instance_banner()
+        second = cli._instance_banner()
+
+        assert "ก็รันอยู่ด้วย" in first
+        assert f"▸ v9.9.9   (port 43123 · {port_file.parent})" == second
+        assert "ก็รันอยู่ด้วย" not in second
+
     def test_banner_is_silent_when_other_instance_is_unreachable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:

@@ -113,7 +113,7 @@ class _FakeOrch:
             self._pane_state[key] = ps
             return ps
 
-    def _notify_lead(self, project, notice, from_role=None, note="") -> None:
+    def _notify_lead(self, project, notice, from_role=None, note="", **_kwargs) -> None:
         self.notify_calls.append((project, notice, from_role))
 
 

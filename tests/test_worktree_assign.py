@@ -297,8 +297,10 @@ class TestFinalizeWorktree:
         assert fake.safe_remove_calls == 0  # never removed — Lead merges first
         msg = orch._notify_lead.call_args[0][1]
         assert "merge --no-ff wt/frontend-1" in msg
-        assert "3 commit" in msg
         assert "พร้อม merge" in msg  # clean + merge-tree-clean → readiness claim allowed
+        # #464 — commit/file counts already sit in the digest bullet `done()`
+        # sends for the same event; the proposal must not repeat them.
+        assert "digest" in msg.lower()
 
     def test_dirty_worktree_with_commits_never_claims_ready_to_merge(self, orch, monkeypatch):
         """#244 near-miss: a branch can carry accepted commits AND still hold

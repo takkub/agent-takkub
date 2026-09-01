@@ -3704,4 +3704,5 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"auto-answer พยายามมา {seconds:.0f}s แล้วเลิก — pane นี้ "
             f"**ยังไม่เคยได้รับใบงาน** (ไม่ใช่กำลังทำงานอยู่) กดตอบใน pane เอง หรือ close "
             f"แล้ว assign ใหม่ (เปลี่ยน provider ก็ได้) — issue #330",
+            kind="trust-prompt-stuck",
         )

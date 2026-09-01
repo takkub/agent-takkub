@@ -542,6 +542,46 @@ class TestForceDeliverWriteFailureDoesNotLoseItems:
         assert not orch._pending_done_notices.get(TEST_PROJECT)
 
 
+class TestLeadNoticeKindLogging:
+    """#464 — every `_notify_lead` call must log a countable `lead_notice`
+    event; a call site that omits `kind` falls back to
+    `unknown:<file>:<line>` naming the exact call site so it stays
+    individually addressable instead of vanishing into one opaque bucket."""
+
+    def test_explicit_kind_is_logged(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox._log_event") as mock_log,
+        ):
+            orch._notify_lead(TEST_PROJECT, "hello", kind="my-test-kind")
+
+        calls = [c for c in mock_log.call_args_list if c.args and c.args[0] == "lead_notice"]
+        assert len(calls) == 1
+        assert calls[0].kwargs["kind"] == "my-test-kind"
+        assert calls[0].kwargs["project"] == TEST_PROJECT
+        assert calls[0].kwargs["preview"] == "hello"
+
+    def test_missing_kind_falls_back_to_unknown_with_call_site(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox._log_event") as mock_log,
+        ):
+            orch._notify_lead(TEST_PROJECT, "hello")  # this exact line is the emitter
+
+        calls = [c for c in mock_log.call_args_list if c.args and c.args[0] == "lead_notice"]
+        assert len(calls) == 1
+        kind = calls[0].kwargs["kind"]
+        emitter = calls[0].kwargs["emitter"]
+        assert kind == f"unknown:{emitter}"
+        assert "test_orchestrator_notify_lead.py:" in emitter
+
+
 class TestReapPendingDoneNotices:
     """Periodic reaper flushes durable done-notices when Lead returns to idle.
 
