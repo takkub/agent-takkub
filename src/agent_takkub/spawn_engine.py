@@ -573,6 +573,12 @@ class PaneState:
     task_id: str | None = None
     # _blocked_on_lead: ts when teammate last sent to Lead (suppresses idle nag)
     blocked_on_lead_ts: float | None = None
+    # #463 follow-up: ts of the last Stop hook that passed (turn genuinely
+    # ended) for this pane. `waiting-lead` display_state requires this to be
+    # >= blocked_on_lead_ts — a progress() call mid-turn stamps
+    # blocked_on_lead_ts but the pane keeps working, so that alone must not
+    # read as "waiting on Lead" (see orchestrator._derive_display_state).
+    last_turn_end_ts: float | None = None
     # _rate_limited_until: epoch at which the usage-rate limit resets (0 = no limit)
     rate_limited_until: float = 0.0
     # quota_marker / quota_provider (#301): which phrase + provider tripped
@@ -1755,6 +1761,7 @@ class SpawnEngineMixin:
         _ps_spawn_clear = getattr(self, "_pane_state", {}).get(key)
         if _ps_spawn_clear is not None:
             _ps_spawn_clear.blocked_on_lead_ts = None
+            _ps_spawn_clear.last_turn_end_ts = None
             # A fresh session (manual spawn OR auto-respawn) gets its own
             # one-shot Stop-hook done-gate budget — a prior session's block
             # must not suppress a nudge in the new one.

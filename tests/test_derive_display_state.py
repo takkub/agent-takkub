@@ -613,6 +613,8 @@ class TestListStatusDetailedWiring:
     ) -> None:
         """#463 end-to-end wiring: a pane whose `PaneState.blocked_on_lead_ts`
         was just stamped (by `progress()` or `send()`'s sent-to-lead path)
+        AND whose turn has genuinely ended since (`last_turn_end_ts` stamped
+        by a non-blocking Stop hook, `consume_pane_hook`, #463 follow-up)
         must read `display_state == "waiting-lead"` from `takkub status`,
         even while the raw `"state"` stays the unchanged "working" every
         other consumer depends on — this is the fix for the real incident
@@ -626,7 +628,8 @@ class TestListStatusDetailedWiring:
         orch._panes_by_project[project] = {"qa": pane}
         orch._lead_digest_queue[project] = collections.deque()
         orch._lead_notify_queue[project] = collections.deque()
-        orch._pane_state[f"{project}::qa"] = PaneState(blocked_on_lead_ts=_time.time())
+        now = _time.time()
+        orch._pane_state[f"{project}::qa"] = PaneState(blocked_on_lead_ts=now, last_turn_end_ts=now)
 
         detailed = orch.list_status_detailed(project=project)
 
@@ -644,7 +647,64 @@ class TestListStatusDetailedWiring:
         orch._panes_by_project[project] = {"qa": pane}
         orch._lead_digest_queue[project] = collections.deque()
         orch._lead_notify_queue[project] = collections.deque()
-        orch._pane_state[f"{project}::qa"] = PaneState(blocked_on_lead_ts=_time.time() - 31 * 60)
+        stale = _time.time() - 31 * 60
+        orch._pane_state[f"{project}::qa"] = PaneState(
+            blocked_on_lead_ts=stale, last_turn_end_ts=stale
+        )
+
+        detailed = orch.list_status_detailed(project=project)
+
+        assert detailed["qa"]["display_state"] == "working"
+
+    def test_progress_call_mid_turn_without_a_later_stop_hook_stays_working(
+        self, orch: Orchestrator
+    ) -> None:
+        """#463 follow-up: `progress()` stamps `blocked_on_lead_ts`
+        immediately, but a pane can call `takkub progress "..."` mid-task and
+        keep working for several more minutes before its turn actually ends
+        (real incident: this exact backend pane did so on 2026-09-01,
+        `progress()` at 09:45 followed by 12 more minutes of work). Without a
+        `last_turn_end_ts` stamped by a non-blocking Stop hook AFTER that
+        `progress()` call, `display_state` must stay plain "working" — not
+        `waiting-lead`, which would otherwise lie for up to 30 minutes."""
+        import time as _time
+
+        project = "display-state-wiring"
+        session = _StubSession()
+        pane = _pane("working", session=session, provider="claude")
+        orch._panes_by_project[project] = {"qa": pane}
+        orch._lead_digest_queue[project] = collections.deque()
+        orch._lead_notify_queue[project] = collections.deque()
+        # progress() just stamped blocked_on_lead_ts; no Stop hook has fired
+        # since (last_turn_end_ts left at its default None) — the pane is
+        # still mid-turn.
+        orch._pane_state[f"{project}::qa"] = PaneState(blocked_on_lead_ts=_time.time())
+
+        detailed = orch.list_status_detailed(project=project)
+
+        assert detailed["qa"]["display_state"] == "working"
+
+    def test_stop_hook_older_than_progress_after_lead_resend_stays_working(
+        self, orch: Orchestrator
+    ) -> None:
+        """#463 follow-up: a `last_turn_end_ts` from a PRIOR turn (before
+        Lead sent new instructions and the pane started a fresh turn ending
+        in a new `progress()` call) must not count as proof the CURRENT turn
+        ended. `last_turn_end_ts` older than `blocked_on_lead_ts` must read
+        as still-working, same as no `last_turn_end_ts` at all."""
+        import time as _time
+
+        project = "display-state-wiring"
+        session = _StubSession()
+        pane = _pane("working", session=session, provider="claude")
+        orch._panes_by_project[project] = {"qa": pane}
+        orch._lead_digest_queue[project] = collections.deque()
+        orch._lead_notify_queue[project] = collections.deque()
+        earlier = _time.time() - 60
+        later = _time.time()
+        orch._pane_state[f"{project}::qa"] = PaneState(
+            last_turn_end_ts=earlier, blocked_on_lead_ts=later
+        )
 
         detailed = orch.list_status_detailed(project=project)
 
