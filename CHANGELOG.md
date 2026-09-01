@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.27] - 2026-09-01
+
 ### Added (เพิ่ม)
 
 - **Lead noise audit (#464)** — ทุก `_notify_lead` มี `kind` + log event `lead_notice` {kind, role, project, emitter=file:line, preview} (call site ที่ไม่ส่ง kind → `unknown:<file:line>`) · `takkub ma` section ใหม่ "Lead noise (24h)": top-10 kind, ครั้ง/ชม., emitter, ตัวอย่าง, flag ⚠ บ่อย (> `TAKKUB_NOISE_PER_HOUR` default 4 หรือ `--noise-threshold`) พร้อมบรรทัด `takkub issue` สั่งเปิดใบสำเร็จรูป · กฎ Lead ใน `docs/lead/role-and-workflow.md`: notice ที่บอกบ่อยแล้วไม่จำเป็น = เปิดใบชี้ emitter ตรงๆ · ตัด noise ทันที: `delivery-superseded` ("ปลอดภัย ไม่ต้องทำอะไร") เลิกส่งเข้า Lead เหลือ events.log · worktree merge-proposal เหลือ verdict + คำสั่งเดียว (ไม่ซ้ำ digest)
