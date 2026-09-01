@@ -4838,6 +4838,11 @@ class Orchestrator(
                 if gf is not None and gf.get("kind") == "worktree"
                 else mgr.diffstat(info)
             )
+            pushed = (
+                bool(gf.get("pushed", False))
+                if gf is not None and gf.get("kind") == "worktree"
+                else mgr.remote_branch_exists(info.git_root, info.branch)
+            )
             files_touched, dirs = summarize_diffstat(diffstat)
             facts = DigestFacts(
                 role=from_role,
@@ -4847,6 +4852,7 @@ class Orchestrator(
                 uncommitted=uncommitted,
                 merge_conflicts=merge_conflicts,
                 merge_note=merge_note,
+                pushed=pushed,
                 files_touched=files_touched,
                 files_dirs=tuple(dirs),
                 report_path=report_path,
@@ -4858,6 +4864,7 @@ class Orchestrator(
                 "uncommitted": uncommitted,
                 "merge_conflicts": merge_conflicts,
                 "diffstat": diffstat,
+                "pushed": pushed,
             }
             return facts, precomputed
 

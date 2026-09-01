@@ -1792,6 +1792,150 @@ class TestCleanIsolated:
         assert "branch -D wt/frontend-9" in by_branch["wt/frontend-9"]
 
 
+# ── remote branch cleanup after merge/clean (#462) ──────────────────────────
+#
+# #438 let a worktree-isolated pane push its own `wt/<role>-<ts>` branch to
+# origin so it can verify CI without Lead's help. #462: once Lead merges or
+# cleans that branch locally, the pushed copy became remote debris nobody
+# deleted. `remote_branch_exists` decides via a local ref check only (never
+# `git fetch`), and `merge_isolated`/`clean_isolated` delete the remote copy
+# right after their own successful local `branch -d`/`-D`.
+
+
+class TestRemoteBranchExists:
+    def test_true_when_ref_verifies(self):
+        r = FakeRunner([(["rev-parse", "--verify"], _ok("abc123\n"))])
+        assert WorktreeManager(r).remote_branch_exists("/repo", "wt/frontend-9") is True
+        assert r.ran("rev-parse", "--verify", "refs/remotes/origin/wt/frontend-9")
+        assert not r.ran("fetch")  # never fetches — local ref cache only
+
+    def test_false_when_ref_missing(self):
+        r = FakeRunner([(["rev-parse", "--verify"], _fail("unknown revision", 1))])
+        assert WorktreeManager(r).remote_branch_exists("/repo", "wt/frontend-9") is False
+
+
+class TestMergeIsolatedRemoteCleanup:
+    def _runner(self, extra=None):
+        rules = (extra or []) + [
+            (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+            (["rev-list", "--count"], _ok("1\n")),
+            (["status", "--porcelain"], _ok("")),
+        ]
+        return FakeRunner(rules)
+
+    def test_deletes_remote_branch_when_pushed(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(
+            extra=[
+                (["rev-parse", "--verify"], _ok("abc123\n")),
+                (["push", "origin", "--delete"], _ok()),
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok, msg
+        assert r.ran("push", "origin", "--delete", "wt/frontend-9")
+        assert "pushed:origin/wt/frontend-9" in msg
+
+    def test_skips_remote_delete_when_never_pushed(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(extra=[(["rev-parse", "--verify"], _fail("unknown revision", 1))])
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok, msg
+        assert not r.ran("push", "origin", "--delete")
+        assert "pushed:" not in msg
+
+    def test_remote_delete_failure_is_reported_not_silent(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(
+            extra=[
+                (["rev-parse", "--verify"], _ok("abc123\n")),
+                (["push", "origin", "--delete"], _fail("remote rejected", 1)),
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok, msg
+        assert "⚠" in msg
+        assert "push origin --delete wt/frontend-9" in msg
+
+    def test_keep_never_touches_remote(self, monkeypatch):
+        """`--keep` leaves the local worktree+branch alone entirely — the
+        remote-delete step must never run since the local branch was never
+        deleted either."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(extra=[(["rev-parse", "--verify"], _ok("abc123\n"))])
+        ok, _ = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9", keep=True)
+        assert ok
+        assert not r.ran("push", "origin", "--delete")
+
+
+class TestCleanIsolatedRemoteCleanup:
+    def test_deletes_remote_branch_for_removed_worktrees(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["rev-parse", "--verify"], _ok("abc123\n")),
+                (["push", "origin", "--delete"], _ok()),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert all("pushed:origin/" in line for line in lines), lines
+        assert r.ran("push", "origin", "--delete", "wt/frontend-9")
+        assert r.ran("push", "origin", "--delete", "wt/qa-7")
+
+    def test_no_remote_delete_when_branch_was_never_pushed(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["rev-parse", "--verify"], _fail("unknown revision", 1)),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert not r.ran("push", "origin", "--delete")
+
+    def test_no_remote_delete_when_local_branch_delete_failed(self, monkeypatch):
+        """The remote branch must never be dropped when the LOCAL `branch -D`
+        itself failed — deleting origin's copy while the local branch still
+        dangles would strand the pane's work with no copy anywhere but the
+        (now-orphaned) local ref."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+
+        def runner(args, _cwd):
+            if "branch" in args and "-D" in args:
+                return _fail("cannot lock ref", 128)
+            if "worktree" in args and "list" in args:
+                return _ok(_PORCELAIN)
+            if "rev-list" in args:
+                return _ok("0\n")
+            if "status" in args:
+                return _ok("")
+            return _ok()
+
+        lines = WorktreeManager(runner).clean_isolated("/repo")
+        assert not any("pushed:origin/" in line for line in lines), lines
+
+
 # ── repair_editable_pth_if_stale (#202) ─────────────────────────────────────
 
 
@@ -2098,6 +2242,7 @@ class TestCleanIsolatedBranchFilter:
                 (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
                 (["rev-list", "--count"], _ok("0\n")),
                 (["status", "--porcelain"], _ok("")),
+                (["rev-parse", "--verify"], _fail("unknown revision", 1)),  # never pushed (#462)
             ]
         )
         lines = WorktreeManager(r).clean_isolated("/repo", branch="wt/frontend-9")

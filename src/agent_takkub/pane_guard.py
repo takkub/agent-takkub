@@ -110,9 +110,14 @@ cmd_guard`, via the same `progress` IPC path `takkub progress` uses) — the
 severity here (user loses internet access with no warning) warrants Lead
 knowing immediately, not just the blocked pane.
 
-One carve-out: `git commit` (only — never push/reset/rebase/merge/checkout)
-is allowed when the pane's cwd is inside a cockpit-managed
-`.../worktrees/...` checkout. That is `--isolation worktree` (issue #81):
+Carve-outs for `--isolation worktree`: `git commit` is allowed unconditionally
+when the pane's cwd is inside a cockpit-managed `.../worktrees/...` checkout;
+`git push` is allowed ONLY when every target it names is that pane's own
+`wt/<role>-<ts>` branch (#438 — see `_push_is_own_worktree_branch`), never a
+bare/unnamed push and never any other branch. `reset --hard`/`rebase`/
+`checkout` stay Lead-only with no exception; `merge` has its own narrow
+carve-out (merging the CURRENT base into the pane's own branch only — see
+`_GIT_MERGE_PATTERN`). That is `--isolation worktree` (issue #81):
 the pane owns a private branch nobody else touches, and
 `orchestrator_text._append_worktree_hint` already instructs it to commit
 there itself — "the 'wait for Lead' policy is for the shared tree only".
@@ -546,11 +551,16 @@ _GIT_COMMIT_PATTERN = re.compile(
     rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit{_SUBCMD_END}", re.M
 )
 
-# No allowlist, no cwd exception — push/reset --hard/branch -D/tag -d/rebase/
-# checkout stay Lead-only even from an isolated worktree branch (the
-# worktree carve-out is "commit your own branch", never "push it" or
-# "rewrite/switch it"). `merge` is the one rule with a worktree carve-out
-# (#385, `_GIT_MERGE_PATTERN` below).
+# reset --hard/branch -D/tag -d/rebase/checkout stay Lead-only with NO
+# exception even from an isolated worktree branch (the worktree carve-out
+# never means "rewrite/switch it"). `push` and `merge` are the two rules
+# that DO carve out a worktree exception, each gated narrowly in `classify()`
+# rather than here: `push` only when every target is the pane's own
+# `wt/<role>-<ts>` branch by name (#438, `_push_is_own_worktree_branch`),
+# `merge` only against the current base into that same branch (#385,
+# `_GIT_MERGE_PATTERN` below). Kept as full deny patterns in this tuple —
+# `classify()` overrides the verdict for those two rules when the carve-out
+# actually applies, so this list itself needs no per-rule cwd branching.
 _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}", re.M)),
     (
