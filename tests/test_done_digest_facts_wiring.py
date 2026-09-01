@@ -88,17 +88,20 @@ class _FakeMgr:
         uncommitted: int = 0,
         merge_conflicts: bool | None = False,
         diffstat: str = " src/x.ts | 3 +++",
+        pushed: bool = False,
     ):
         self.commits = commits
         self.dirty = dirty
         self.uncommitted = uncommitted
         self.merge_conflicts = merge_conflicts
         self.diffstat_text = diffstat
+        self.pushed = pushed
         self.commit_count_calls = 0
         self.is_dirty_calls = 0
         self.merge_calls = 0
         self.diffstat_calls = 0
         self.uncommitted_calls = 0
+        self.remote_branch_exists_calls = 0
 
     def commit_count(self, info):
         self.commit_count_calls += 1
@@ -119,6 +122,10 @@ class _FakeMgr:
     def diffstat(self, info):
         self.diffstat_calls += 1
         return self.diffstat_text
+
+    def remote_branch_exists(self, git_root, branch):
+        self.remote_branch_exists_calls += 1
+        return self.pushed
 
 
 def _wt_info() -> WorktreeInfo:
@@ -158,6 +165,7 @@ class TestWorktreePaneDigestFacts:
         assert facts.uncommitted == 0
         assert facts.merge_conflicts is False
         assert facts.files_touched == 1  # " src/x.ts | 3 +++" → 1 file
+        assert facts.pushed is False
 
         # `_finalize_worktree` (fired later in done()) must reuse the SAME
         # git reads instead of re-running them — each probe ran exactly once
@@ -167,6 +175,31 @@ class TestWorktreePaneDigestFacts:
         assert fake.is_dirty_calls == 1
         assert fake.merge_calls == 1
         assert fake.diffstat_calls == 1
+        assert fake.remote_branch_exists_calls == 1
+
+    def test_pushed_branch_surfaces_as_pushed_true(self, orch, monkeypatch):
+        """#462 — a worktree pane may push its own `wt/*` branch (#438); the
+        digest bullet must say so."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="fix issue #245 please",
+            worktree=_wt_info().as_dict(),
+        )
+
+        fake = _FakeMgr(commits=2, dirty=False, merge_conflicts=False, pushed=True)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("backend", note="แก้เสร็จแล้ว", project=proj)
+
+        done_calls = [c for c in captured if c[0].startswith("[backend done]")]
+        facts = done_calls[0][1]["digest_facts"]
+        assert facts.pushed is True
+        assert facts.branch == "wt/backend-1"
 
     def test_failed_report_never_carries_digest_facts(self, orch, monkeypatch):
         proj = "proj"

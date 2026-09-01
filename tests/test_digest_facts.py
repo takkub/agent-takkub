@@ -59,6 +59,26 @@ class TestFormatDigestFactLine:
         assert "[ref" not in line
         assert "[mobile] done" in line
 
+    def test_pushed_branch_shows_remote_bit(self):
+        """#462 — a worktree pane may push its own `wt/*` branch (#438); the
+        digest bullet must surface that so Lead knows to delete the remote
+        copy after merge/clean instead of finding it as later debris."""
+        facts = DigestFacts(role="backend", branch="wt/backend-1-123", pushed=True)
+        line = format_digest_fact_line(facts)
+        assert "pushed:origin/wt/backend-1-123" in line
+
+    def test_not_pushed_omits_remote_bit(self):
+        facts = DigestFacts(role="backend", branch="wt/backend-1-123", pushed=False)
+        line = format_digest_fact_line(facts)
+        assert "pushed:" not in line
+
+    def test_pushed_without_branch_omits_remote_bit(self):
+        """`pushed=True` alone can never render — there is no branch name to
+        show `origin/<branch>` for (shared-tree panes never set this)."""
+        facts = DigestFacts(role="backend", pushed=True)
+        line = format_digest_fact_line(facts)
+        assert "pushed:" not in line
+
 
 class TestUnionFilesTouched:
     def test_combines_committed_and_uncommitted_paths(self):

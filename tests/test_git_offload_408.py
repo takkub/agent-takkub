@@ -74,6 +74,7 @@ def test_collect_done_git_facts_worktree_shape() -> None:
             "merge-base": GitResult(0, "abc\n", ""),
             "merge-tree": GitResult(0, "clean tree", ""),
             "diff --stat": GitResult(0, " a.py | 1 +\n", ""),
+            "rev-parse --verify": GitResult(0, "deadbeef\n", ""),
         }
     )
     mgr = WorktreeManager(runner=run)
@@ -86,6 +87,7 @@ def test_collect_done_git_facts_worktree_shape() -> None:
     assert facts["uncommitted"] == 1
     assert facts["merge_conflicts"] is False
     assert facts["diffstat"].strip() == "a.py | 1 +"
+    assert facts["pushed"] is True  # #462 — origin/<branch> ref found
 
 
 def test_collect_done_git_facts_shared_shape_skips_diff_when_status_fails() -> None:
@@ -189,16 +191,19 @@ def test_compute_digest_facts_uses_worktree_git_facts_without_git(monkeypatch) -
             "uncommitted": 0,
             "merge_conflicts": False,
             "diffstat": " a.py | 2 ++",
+            "pushed": True,
         },
     )
     assert facts.commits_ahead == 3
     assert facts.merge_conflicts is False
+    assert facts.pushed is True
     assert precomputed == {
         "commits": 3,
         "dirty": False,
         "uncommitted": 0,
         "merge_conflicts": False,
         "diffstat": " a.py | 2 ++",
+        "pushed": True,
     }
 
 

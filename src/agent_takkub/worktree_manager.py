@@ -1051,6 +1051,23 @@ class WorktreeManager:
         except ValueError:
             return 0
 
+    def remote_branch_exists(self, git_root: str, branch: str) -> bool:
+        """True when ``origin/<branch>`` is present in *git_root*'s local ref
+        cache (#462 — a worktree-isolated pane is allowed to push its own
+        ``wt/*`` branch, #438, so Lead needs to know one landed on origin
+        before it becomes remote debris after merge/clean).
+
+        Checks ``refs/remotes/origin/<branch>`` only — this NEVER runs ``git
+        fetch``, so it reflects the remote as of the last fetch/push this
+        repo saw, not necessarily this instant, and stays cheap enough to
+        call from a hot path (``done()`` digest, every merge/clean row).
+        """
+        res = self._run(
+            ["-C", git_root, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"],
+            None,
+        )
+        return res.ok
+
     def diffstat_since(self, cwd: str, base_sha: str) -> str:
         """Generic form of :meth:`diffstat` — diff summary of *cwd*'s HEAD vs
         *base_sha*, for a plain checkout path with no :class:`WorktreeInfo`
@@ -1190,6 +1207,7 @@ class WorktreeManager:
                 "merge_conflicts": merge_conflicts,
                 "conflict_files": conflict_files,
                 "diffstat": self.diffstat(info),
+                "pushed": self.remote_branch_exists(info.git_root, info.branch),
             }
             if rediscovered is not None:
                 out["rediscovered_worktree"] = info.as_dict()
@@ -1254,6 +1272,35 @@ class WorktreeManager:
         }
 
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
+
+    def _delete_pushed_remote_branch(self, git_root: str, branch: str) -> str:
+        """Best-effort ``git push origin --delete <branch>`` for a ``wt/*``
+        branch whose LOCAL copy was just removed by ``merge``/``clean`` (#462).
+
+        A worktree-isolated pane may push its own branch to origin (#438
+        carve-out, CI verification) without Lead ever seeing it — left alone,
+        that turns into remote debris the moment the branch is merged/cleaned
+        locally. Only ever called with a ``wt/*`` branch (the sole kind
+        `merge_isolated`/`clean_isolated` operate on); the guard below is
+        paranoia, not a real gate. Never force-pushes, never touches any
+        other branch, and is silent (empty string) whenever there is nothing
+        to do — no ``origin`` remote, offline, or the branch was never
+        pushed — so a missing remote never blocks the local cleanup that
+        already succeeded.
+        """
+        if not branch.startswith(f"{_BRANCH_PREFIX}/"):
+            return ""
+        if not self.remote_branch_exists(git_root, branch):
+            return ""
+        push = self._run(["-C", git_root, "push", "origin", "--delete", branch], None)
+        if push.ok:
+            return f"pushed:origin/{branch} ลบแล้ว (เคย push ขึ้น remote — #462)"
+        tail = (push.stderr or push.stdout).strip().splitlines()
+        detail = tail[-1] if tail else f"exit {push.returncode}"
+        return (
+            f"⚠ ลบ origin/{branch} ไม่สำเร็จ ({detail}) — "
+            f"รัน `git -C {git_root} push origin --delete {branch}` เอง"
+        )
 
     def safe_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Remove the worktree WITHOUT ``--force``, refusing to drop
@@ -1526,11 +1573,15 @@ class WorktreeManager:
                 f"({detail}) — รัน `git -C {git_root} worktree prune` เอง"
             )
         self._run(["-C", git_root, "branch", "-d", branch], None)
+        remote_note = self._delete_pushed_remote_branch(git_root, branch)
         repair_note = repair_editable_pth_if_stale(git_root, row["path"])
         msg = f"merged {branch} + cleanup เรียบร้อย"
         if leftover:
             msg += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
-        return True, f"{msg} · {repair_note}" if repair_note else msg
+        for extra in (remote_note, repair_note):
+            if extra:
+                msg += f" · {extra}"
+        return True, msg
 
     def clean_isolated(
         self,
@@ -1621,6 +1672,9 @@ class WorktreeManager:
                 # a failure here silently left the branch dangling forever
                 # after `--force` had already destroyed its worktree).
                 branch_rm = self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+            remote_note = (
+                self._delete_pushed_remote_branch(git_root, row["branch"]) if branch_rm.ok else ""
+            )
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
             if leftover:
@@ -1632,6 +1686,8 @@ class WorktreeManager:
                     f" (⚠ ลบ branch ไม่สำเร็จ: {b_detail} — รัน "
                     f"`git -C {git_root} branch -D {row['branch']}` เอง)"
                 )
+            if remote_note:
+                note += f" · {remote_note}"
             if repair_note:
                 note += f" · {repair_note}"
             out.append(note)

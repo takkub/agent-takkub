@@ -43,6 +43,11 @@ class DigestFacts:
     branch: str | None = None
     commits_ahead: int | None = None  # None = not computed
     uncommitted: int | None = None  # None = couldn't check
+    # True = `branch` is currently present as `origin/<branch>` (#462 — a
+    # worktree-isolated pane may push its own `wt/*` branch, #438). Only ever
+    # meaningful for a worktree pane; a shared-tree pane commits directly on
+    # a branch Lead already sees, so this stays False there.
+    pushed: bool = False
     # True = merge-tree conflicts with the CURRENT base, False = clean,
     # None = not applicable (nothing to merge) or genuinely unverifiable —
     # `merge_note` explains which.
@@ -105,6 +110,8 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
         bits.append(
             f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit" if facts.uncommitted else "0 ไฟล์ค้าง commit"
         )
+    if facts.pushed and facts.branch:
+        bits.append(f"pushed:origin/{facts.branch}")
     bits.append(_merge_bit(facts))
     bits.append(_files_bit(facts))
     line = f"• {stamp}" + " · ".join(bits)
