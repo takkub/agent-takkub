@@ -735,6 +735,54 @@ class TestInstanceBanner:
         assert f"▸ v9.9.9   (port 43123 · {port_file.parent})" == second
         assert "ก็รันอยู่ด้วย" not in second
 
+    def test_banner_warns_only_once_per_pane_despite_changing_ppid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#464 follow-up: on Windows (and reportedly macOS) a Claude pane
+        spawns a brand-new child shell for every `takkub <cmd>` invocation,
+        so os.getppid() changes on every single call from the SAME pane —
+        keying the warned-once marker on it never actually deduped anything
+        (real incident: two `takkub status` calls from one pane produced two
+        different marker files, other-instance-14156-54147 and
+        other-instance-2232-54147, so the banner reprinted every command).
+        Inside a cockpit pane (TAKKUB_ROLE set), the marker must instead key
+        off the pane's own spawn-time env, which never changes for that
+        pane's lifetime — so dedup must hold even when getppid() changes
+        between calls."""
+        repo_root, _ = self._mock_prod_instance(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli.config, "RUNTIME_DIR", tmp_path / "prod" / "runtime")
+        other_port_file = repo_root / "runtime" / "port"
+        other_port_file.parent.mkdir(parents=True)
+        other_port_file.write_text("43124", encoding="utf-8")
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        monkeypatch.setenv("TAKKUB_PROJECT", "demo")
+        monkeypatch.setenv("TAKKUB_PANE_TOKEN", "tok-abc")
+
+        class _FakeSocket:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+
+        monkeypatch.setattr(cli.os, "getppid", lambda: 14156)
+        first = cli._instance_banner()
+        monkeypatch.setattr(cli.os, "getppid", lambda: 2232)
+        second = cli._instance_banner()
+
+        assert "ก็รันอยู่ด้วย" in first
+        assert "ก็รันอยู่ด้วย" not in second
+
+    def test_banner_warned_marker_falls_back_to_ppid_outside_a_pane(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """No TAKKUB_ROLE at all (manual `takkub` use from a bare user
+        shell, not a cockpit pane) — there is no pane-lifetime env to key
+        off, so the marker falls back to the parent PID, same as before."""
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        monkeypatch.setattr(cli.os, "getppid", lambda: 9999)
+
+        assert cli._pane_identity_key() == "ppid-9999"
+
     def test_banner_is_silent_when_other_instance_is_unreachable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:

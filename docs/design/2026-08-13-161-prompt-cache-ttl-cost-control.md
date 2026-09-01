@@ -155,9 +155,54 @@ committed).
 ## Known gaps / follow-ups
 
 - Non-Claude panes get no proactive-compaction mitigation at all (#103).
-- `PROACTIVE_COMPACT_IDLE_AFTER_S`'s default (25 min) is a judgment call, not
-  measured against real cache-write cost data — there's no telemetry yet
-  tying idle duration to actual re-cache token cost. Worth revisiting once
-  `proactive_idle_compact` log events accumulate.
 - No UI surface for *how often* proactive compaction has fired — it's
   log-only (`events.log`, event `proactive_idle_compact`) today.
+
+## 2026-09-01 update (#465)
+
+Real-world `runtime/events.log` evidence (09:39:26 / 10:36:31) showed Lead
+getting `/compact`ed while a specialist was still mid-task — the "idle at
+ready prompt" check above says nothing about whether Lead is actually done
+orchestrating. `_check_proactive_compact` now runs two extra "not really
+idle" gates before letting the idle clock accumulate at all, both resetting
+`proactive_compact_idle_since` (not merely skipping the fire) so a full
+fresh threshold is required once the project genuinely settles:
+
+- **Lead** (`_lead_orchestrate_busy_reason`): blocked while any other role
+  in the project is still `pane.state == "working"`, an open `takkub wait`
+  registration exists, or an inbox digest is still queued (not yet written
+  into Lead's pane).
+- **Specialist** (`_pane_waiting_for_lead`): the #463 "waiting-lead" tier —
+  turn genuinely ended while blocked on Lead's reply.
+
+Each skip logs `proactive_idle_compact_skipped` with a `reason` (deduped to
+once per busy stretch, not every 5s tick) so `takkub ma` can show why a
+compact didn't fire.
+
+This session also resolved the previous entry's "default is a judgment
+call" gap: the base default moved from 25min to 55min (close to the real
+~1h TTL without routinely crossing it — the old 25min value compacted panes
+long before they were ever at risk, paying the summarize cost + losing
+context for zero TTL benefit), and a separate, much shorter
+`PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S` (default 4min) is used instead
+whenever the project's cached usage state reports
+`limit_status.is_in_overage` — the state the TTL itself collapses to ~5min
+under. Read via `limit_status.load_shared_state` (cross-process shared
+file, already written by the usage-overage chip's own poller) once per
+project per tick — no new network fetch. Both thresholds independently
+disable via `=0`.
+
+Also fixed in the same pass: the "nothing new since last compact" gate's
+skip used to stamp `proactive_compact_sent_ts`, the same field an actual
+`/compact` stamps — which made the episode's "already handled" guard true
+for the rest of that idle episode regardless of how much real output
+arrived afterward (while the pane never left its ready prompt), directly
+contradicting that gate's own "never re-fires until real output arrives"
+comment. The skip now leaves `sent_ts` untouched and dedupes its logging
+via a separate `proactive_compact_skip_logged_bytes` field instead, so a
+later tick with enough new output still fires.
+
+Targeted tests: `tests/test_idle_watchdog.py::TestProactiveCompactOrchestrateGate`
+(7 tests — Lead blocked by a working specialist/open wait/unread digest and
+resuming its idle count once each clears, specialist waiting-lead, the
+overage threshold, and the nothing-new-skip re-fire fix).
