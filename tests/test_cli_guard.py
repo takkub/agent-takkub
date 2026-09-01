@@ -279,10 +279,13 @@ class TestPermissionEngineWiring:
         resp = cli.cmd_guard(None)
 
         assert resp["exit_code"] == 2
+        # #466: a deny now logs TWO lines — this engine's own
+        # `capability.shell_command_denied` (Capability Hub audit fields)
+        # AND `cli._log_guard_denied`'s `pane_guard_denied` (see
+        # TestPaneGuardDeniedLogging below for that one's own contract).
         lines = events_log.read_text(encoding="utf-8").splitlines()
-        assert len(lines) == 1
-        payload = json.loads(lines[0])
-        assert payload["event"] == "capability.shell_command_denied"
+        events = [json.loads(line) for line in lines]
+        payload = next(e for e in events if e["event"] == "capability.shell_command_denied")
         assert payload["who"] == "backend"
         assert payload["rule"].startswith("browser_driver")
 
@@ -298,6 +301,100 @@ class TestPermissionEngineWiring:
 
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
         assert not events_log.exists()
+
+
+class TestPaneGuardDeniedLogging:
+    """#466: every guard deny must leave a `pane_guard_denied` line in
+    events.log — before this, the only trace of a denial was the blocked
+    pane's own stderr, which the #466 report's Lead could not check
+    afterwards (screen redraw meant even the transcript log didn't reliably
+    keep the `git push` line)."""
+
+    def _events(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        # `_log_guard_denied` goes through `orchestrator_text._log_event`,
+        # which reads EVENTS_LOG via `_orch_attr` — the `agent_takkub.
+        # orchestrator` re-export façade if already loaded, else
+        # orchestrator_text's own module-level copy (see conftest.
+        # _isolate_runtime's own `_EVENTS_LOG_MODULES` list) — never
+        # `config.EVENTS_LOG` fresh the way `log_capability_event` does.
+        # Never force-import `orchestrator` here — it pulls in `agent_pane`
+        # -> `terminal_widget` -> PyQt6 QtWebEngineWidgets, which blows up
+        # outside a QApplication when this file runs standalone; only patch
+        # it if some earlier test in this session already paid that cost.
+        import sys
+
+        from agent_takkub import config as config_mod
+        from agent_takkub import orchestrator_text
+
+        events_log = tmp_path / "events.log"
+        mods = [config_mod, orchestrator_text]
+        loaded_orchestrator = sys.modules.get("agent_takkub.orchestrator")
+        if loaded_orchestrator is not None:
+            mods.append(loaded_orchestrator)
+        for mod in mods:
+            monkeypatch.setattr(mod, "EVENTS_LOG", events_log, raising=False)
+            monkeypatch.setattr(mod, "RUNTIME_DIR", tmp_path, raising=False)
+        return events_log
+
+    def test_deny_logs_pane_guard_denied_with_role_project_rule_cmd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        events_log = self._events(tmp_path, monkeypatch)
+        _run(
+            monkeypatch,
+            _payload("taskkill /F /T /IM node.exe"),
+            TAKKUB_ROLE="backend",
+            TAKKUB_PROJECT="agent-takkub",
+        )
+
+        resp = cli.cmd_guard(None)
+
+        assert resp["exit_code"] == 2
+        events = [json.loads(line) for line in events_log.read_text(encoding="utf-8").splitlines()]
+        entry = next(e for e in events if e["event"] == "pane_guard_denied")
+        assert entry["role"] == "backend"
+        assert entry["project"] == "agent-takkub"
+        assert entry["rule"].startswith("host_destructive")
+        assert entry["cmd"] == "taskkill /F /T /IM node.exe"
+
+    def test_cmd_truncated_to_200_chars(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        events_log = self._events(tmp_path, monkeypatch)
+        long_cmd = "taskkill /F /T /IM node.exe " + ("x" * 400)
+        _run(monkeypatch, _payload(long_cmd), TAKKUB_ROLE="backend")
+
+        cli.cmd_guard(None)
+
+        events = [json.loads(line) for line in events_log.read_text(encoding="utf-8").splitlines()]
+        entry = next(e for e in events if e["event"] == "pane_guard_denied")
+        assert len(entry["cmd"]) == 200
+        assert entry["cmd"] == long_cmd[:200]
+
+    def test_allowed_command_logs_nothing(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        events_log = self._events(tmp_path, monkeypatch)
+        _run(monkeypatch, _payload("npm run build"), TAKKUB_ROLE="backend")
+
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+        assert not events_log.exists()
+
+    def test_logging_failure_does_not_break_the_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same fail-open contract as every other best-effort log call in
+        `cmd_guard` — a crash in the underlying event-log write must never
+        turn a real deny into a silent allow (`_log_guard_denied`'s own
+        try/except must swallow it, same pattern as
+        `TestNotifyLeadOfGuardBlock.test_notify_failure_does_not_break_the_guard`
+        mocking `_hook_request` rather than the safe wrapper around it)."""
+        from agent_takkub import orchestrator_text
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(orchestrator_text, "_log_event", boom)
+        _run(monkeypatch, _payload("taskkill /F /T /IM node.exe"), TAKKUB_ROLE="backend")
+
+        resp = cli.cmd_guard(None)
+        assert resp["exit_code"] == 2
 
 
 class TestCliDispatch:

@@ -335,7 +335,23 @@ _DISK_SCAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # separator, or after `sudo`) — same as _BROWSER_PATTERNS' "bare-invoke" rule
 # — so `echo 'use taskkill /PID not /IM'` (naming it, not running it) stays
 # allowed.
-_CMD_START = r"(?:^|[|;&]\s*|\bsudo\s+)"
+#
+# `rtk` is the mandated command-runner prefix for every pane's Bash call —
+# root CLAUDE.md: "Golden rule — always prefix shell commands with `rtk`"
+# (it applies its own filter to commands it recognises and passes everything
+# else through unchanged; `rtk proxy <cmd>` explicitly bypasses filtering
+# for debugging). Every rule sharing this constant only ever recognised a
+# command at true start-of-string, right after a shell separator, or right
+# after `sudo ` — never after that mandated prefix. #466: confirmed this let
+# `rtk git push origin main --force`, `rtk taskkill /F /T /IM node.exe`,
+# `rtk pip install -e .` etc sail straight through unblocked — the
+# org-mandated prefix silently defeated host_destructive (#169),
+# host_network (#400), pip_editable (#202) and git_lead_only (#314/#438)
+# alike, for every guarded role that actually followed the golden rule.
+# `_RTK_PREFIX` lets one optional `rtk [proxy] ` wrapper sit between the
+# anchor and the real verb, exactly like `sudo ` already does.
+_RTK_PREFIX = r"(?:rtk(?:\.(?:exe|cmd|bat|ps1))?(?![\w-])\s+(?:proxy(?![\w-])\s+)?)?"
+_CMD_START = rf"(?:^|[|;&]\s*|\bsudo\s+){_RTK_PREFIX}"
 _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "taskkill-im",
@@ -531,11 +547,25 @@ _PIP_EDITABLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 # git subcommand gate (#314): "only Lead commits" — see module docstring for
 # why prose alone wasn't enough. Flags between `git` and the subcommand are
-# skipped ONLY when they look like bare flags (`-c foo=bar` style values are
-# not consumed), so `git log --grep=commit` never matches (`log` sits where
-# the subcommand is expected, "commit" only appears deep inside a flag
-# value) while `git commit -m "..."` and `git -C dir commit` both do.
-_GIT_SUBCMD_GAP = r"(?:\s+-{1,2}[\w-]+)*\s+"
+# skipped ONLY when they look like bare flags (`-c foo=bar` style two-token
+# values are NOT consumed), so `git log --grep=commit` never matches (`log`
+# sits where the subcommand is expected, "commit" only appears deep inside a
+# flag value) while `git commit -m "..."` matches.
+#
+# `-C <path>` is the one deliberate exception to "no two-token flags" (#466):
+# #438 case 2's own worktree-target detection (`_command_targets_worktree`
+# below) is built entirely around a pane running `git -C <worktree> <sub>`
+# instead of `cd`-ing there first — but before this fix `-C <path>` silently
+# broke the subcommand match for every gated rule that used this gap, not
+# just push. `git -C <wt> reset --hard`, `git -C <wt> push origin main
+# --force`, `git -C <wt> commit -m x` were all allowed outright, because
+# neither the deny pattern NOR the #438 own-branch-push validator could find
+# the subcommand past the unconsumed path argument — a silent bypass, not
+# even a false deny (confirmed: `tests/test_pane_guard_worktree_push.py`'s
+# `git -C . push -u origin wt/...` case was "passing" only because the
+# guard couldn't see `push` at all, not because it validated the branch —
+# `git -C . push origin main --force` was equally allowed until this fix).
+_GIT_SUBCMD_GAP = r"(?:\s+-C\s+\S+|\s+-{1,2}[\w-]+)*\s+"
 
 # `git commit` alone is the one carve-out for a worktree-isolated pane (see
 # module docstring) — kept separate from the no-exception rules below so
@@ -864,6 +894,28 @@ def classify(
         if rule == "push" and in_worktree and _push_is_own_worktree_branch(cmd, role):
             continue  # #438: own wt/<role>-<ts> branch, named explicitly, no force
         if pattern.search(cmd):
+            if rule == "push" and in_worktree:
+                # #466 point 3: a push that's already inside the pane's own
+                # worktree is the ONE `git_lead_only` case with a real carve-out
+                # — the generic "Lead only" text alone doesn't say what WOULD
+                # have passed. Spell out the exact expected shape with this
+                # pane's own role slug substituted in, so the reply is
+                # copy-pasteable rather than something the pane has to reverse-
+                # engineer from GIT_LEAD_ONLY_RULE_TEXT's prose.
+                slug = _role_slug(role)
+                return Verdict(
+                    False,
+                    rule="git_lead_only:push",
+                    reason=(
+                        f"role `{name}` push แบบนี้ไม่ได้ (#438). ใน worktree ของตัวเอง push ได้"
+                        f"เฉพาะรูปแบบนี้เท่านั้น: `git push -u origin wt/{slug}-<ts>` — "
+                        "remote ต้องเป็น `origin` เดี่ยวๆ (ไม่ใช่ URL), refspec ต้องเป็นชื่อ branch "
+                        f"`wt/{slug}-<ts>` ของตัวเองตรงๆ (ห้ามรูปแบบ `HEAD:wt/...` หรือ branch อื่น), "
+                        "ห้าม `--force`/`-f`/`--force-with-lease`/`--delete`/`-d`/`--mirror`/"
+                        "`--all`/`--tags`/`--prune`. "
+                        f"{GIT_LEAD_ONLY_RULE_TEXT}"
+                    ),
+                )
             return Verdict(
                 False,
                 rule=f"git_lead_only:{rule}",

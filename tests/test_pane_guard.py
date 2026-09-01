@@ -550,6 +550,59 @@ class TestGitLeadOnlyWorktreeCarveOut:
         assert not pane_guard.classify('git commit -m "x"', "backend", cwd=shared).allowed
 
 
+class TestRtkPrefixSeenThrough:
+    """#466: root CLAUDE.md's own "Golden rule — always prefix shell commands
+    with `rtk`" silently defeated every `_CMD_START`-anchored rule, because
+    none of them recognised a command starting right after that mandated
+    wrapper — only at true start-of-string, after a shell separator, or
+    after `sudo `. Confirmed live before the fix: `rtk git push origin main
+    --force`, `rtk taskkill /F /T /IM node.exe`, `rtk pip install -e .` were
+    all silently ALLOWED for a guarded role, not even denied for the wrong
+    reason — the rule simply never fired."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rtk git commit -m x",
+            "rtk git push origin main --force",
+            "rtk git reset --hard HEAD~1",
+            "rtk git branch -D main",
+            "rtk taskkill /F /T /IM node.exe",
+            "rtk pkill node",
+            "rtk netsh wlan connect name=Guest",
+            "rtk pip install -e .",
+            "rtk proxy git commit -m x",
+            "rtk proxy pip install -e .",
+        ],
+    )
+    def test_still_denied_behind_rtk_prefix(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, f"rtk prefix must not bypass the guard: {command}"
+
+    def test_own_worktree_push_still_allowed_behind_rtk_prefix(self) -> None:
+        """The mandated prefix must not cost the pane its own #438 carve-out
+        either — only widen what a bare `rtk` shell command can smuggle
+        past, never narrow the legitimate path."""
+        wt = r"C:\Users\dev\.agent-takkub\worktrees\tunnel\backend-1787986742"
+        assert pane_guard.classify(
+            "rtk git push -u origin wt/backend-1787986742", "backend", cwd=wt
+        ).allowed
+        assert pane_guard.classify(
+            "rtk proxy git push -u origin wt/backend-1787986742", "backend", cwd=wt
+        ).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo 'rtk git commit is still just a suggestion'",
+            "cat notes-about-rtk.md",
+            "grep -rn 'rtk git' docs/",
+        ],
+    )
+    def test_unrelated_rtk_mentions_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+
 class TestFailOpen:
     """The guard must never be able to wedge a pane or police a human."""
 

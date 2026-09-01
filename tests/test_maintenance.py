@@ -61,6 +61,28 @@ class TestScanEvents:
         assert check.status == "ok"
         assert "ไม่มี event" in check.summary
 
+    def test_pane_guard_denied_counted_as_warn(self, tmp_path: Path) -> None:
+        """#466: `cli.cmd_guard` logs `pane_guard_denied` on every deny (see
+        `cli._log_guard_denied`) — this pins that `takkub ma` actually counts
+        it, not just that the event gets written somewhere."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(minutes=5)).isoformat(),
+                    "event": "pane_guard_denied",
+                    "role": "backend",
+                    "project": "agent-takkub",
+                    "rule": "git_lead_only:push",
+                    "cmd": "rtk git push origin main --force",
+                },
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert check.status == "attention"
+        assert check.data["warn"] == {"pane_guard_denied": 1}
+
     def test_healthy_window_is_ok(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = _write_events(

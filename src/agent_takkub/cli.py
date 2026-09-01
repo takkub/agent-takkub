@@ -3215,6 +3215,41 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
 _GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit")
 
 
+def _log_guard_denied(role: str, command: str, verdict: object) -> None:
+    """Append a `pane_guard_denied` line to events.log for EVERY guard deny
+    (#466) — before this, a denial only ever reached the blocked pane's own
+    stderr, which nobody ever went back to read; the transcript log doesn't
+    reliably keep it either (screen redraw). Lead had no way to check
+    afterwards what the actual command was or why it got blocked (the #466
+    report: a `backend` pane's push was denied and Lead could not
+    reconstruct the command from anything on disk).
+
+    Separate from (not a replacement for) `PermissionEngine.
+    evaluate_shell_command`'s own `capability.shell_command_denied` audit
+    line (`core.capabilities.audit.log_capability_event`) — that one carries
+    the Capability Hub's who/agent/provider/account fields for a different
+    audience (matrix §5 Observability); this one is `pane_guard_denied`,
+    registered in `maintenance._WARN_EVENTS` so `takkub ma` counts it under
+    the same #464 Lead-noise tally as every other loud event kind, and
+    carries the actual command text (truncated to 200 chars — long enough
+    to identify the command, short enough that a giant heredoc can't blow up
+    the line) so Lead can read exactly what ran without a transcript dig.
+
+    Best-effort: never raises, mirrors every other `_log_event` call site."""
+    try:
+        from .orchestrator_text import _log_event
+
+        _log_event(
+            "pane_guard_denied",
+            role=role,
+            project=_from_project(),
+            rule=getattr(verdict, "rule", "") or "",
+            cmd=(command or "")[:200],
+        )
+    except Exception:
+        pass
+
+
 def _notify_lead_of_guard_block(role: str, verdict: object) -> None:
     """Best-effort, fire-and-forget notice to Lead when a high-severity guard
     rule fires — reuses the existing `progress` IPC path (`takkub progress`),
@@ -3291,6 +3326,7 @@ def cmd_guard(_: argparse.Namespace) -> dict:
         if verdict.allowed:
             return {"ok": True, "msg": ""}
         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
+        _log_guard_denied(role, command, verdict)
         _notify_lead_of_guard_block(role, verdict)
         return {"ok": True, "msg": "", "exit_code": 2}
     except Exception:
