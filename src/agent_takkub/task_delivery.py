@@ -103,6 +103,31 @@ _UNDELIVERED_STATES = {
 # minutes.
 _UNCONFIRMED_STATES = _UNDELIVERED_STATES | {DeliveryState.UNCERTAIN}
 
+# States `supersede_for_session` (only_delivered=True) actually cancels: the
+# ones where the self-heal/verify loop in lead_inbox._send_when_ready
+# (WRITING/WRITTEN/SUBMITTING while `_delayed_enter_verified` is still
+# polling, ACCEPTED once `_on_settled` resolves it) could otherwise re-paste
+# or re-submit the ORIGINAL task on top of whatever Lead just sent (#255).
+#
+# RUNNING and SPAWNED_IDLE are deliberately excluded even though they are
+# NOT in `_UNCONFIRMED_STATES` (i.e. `has_reached_pane` says True for them
+# too, #463 follow-up). Both mean the teammate already confirmed the task
+# and is acting on it — RUNNING via an explicit `progress()` call, SPAWNED_
+# IDLE via the pane settling back to idle after pickup — so there is no
+# resend left to suppress. Cancelling them anyway (real incident, #463 e2e
+# 2026-09-01 11:24-11:25) flips a delivery whose work is genuinely underway
+# straight to CANCELLED, and orchestrator.send() also drops its
+# `_last_delivery_ids` entry once `cancelled` is non-empty — so the
+# teammate's own later `done()` has no delivery_id left to call
+# `mark_done()` on, and the ledger shows CANCELLED for a task that actually
+# finished.
+_RESEND_ELIGIBLE_STATES = {
+    DeliveryState.WRITING,
+    DeliveryState.WRITTEN,
+    DeliveryState.SUBMITTING,
+    DeliveryState.ACCEPTED,
+}
+
 
 @dataclass(slots=True)
 class TaskDelivery:
@@ -381,6 +406,13 @@ class DeliveryManager:
         at all, and from Lead's side the "superseded" notice looked identical
         to the harmless case. Those are left armed so the task still lands;
         the caller is handed them so it can say so instead of staying quiet.
+
+        #463 follow-up: RUNNING/SPAWNED_IDLE are neither cancelled NOR
+        returned in `kept_undelivered` — see `_RESEND_ELIGIBLE_STATES`. They
+        are not "pending" (the task already reached the pane and the
+        teammate is on it) so reporting them as kept-undelivered would be as
+        misleading as cancelling them; they are simply left alone for the
+        teammate's own `done()`/`mark_done` to close out later.
         """
         return self._cancel_for_session(
             project_id, pane_id, session_generation, only_delivered=True
@@ -404,7 +436,12 @@ class DeliveryManager:
                     and delivery.session_generation == int(session_generation)
                     and delivery.state not in _TERMINAL_STATES
                 ):
-                    if only_delivered and not has_reached_pane(delivery):
+                    if only_delivered and delivery.state not in _RESEND_ELIGIBLE_STATES:
+                        if has_reached_pane(delivery):
+                            # RUNNING/SPAWNED_IDLE (#463 follow-up): already
+                            # confirmed delivered and being acted on, nothing
+                            # to supersede — leave it for `done()` to close.
+                            continue
                         kept.append(delivery)
                         continue
                     delivery.state = DeliveryState.CANCELLED
