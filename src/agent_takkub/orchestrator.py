@@ -3580,6 +3580,7 @@ class Orchestrator(
             _ps_to = self._pane_state.get(f"{project_ns}::{to_role}")
             if _ps_to is not None:
                 _ps_to.blocked_on_lead_ts = None
+                _ps_to.last_turn_end_ts = None
                 # Lead sending new instructions counts as new real work —
                 # give the Stop-hook done-gate a fresh one-shot budget.
                 _ps_to.stop_gate_notified = False
@@ -5568,6 +5569,24 @@ class Orchestrator(
         # goes silent past it still gets nudged, same as today.
         _ps_self.blocked_on_lead_ts = time.time()
 
+        # #463: a `progress()` call is unambiguous proof the task text
+        # already reached this pane and it engaged with it — strictly
+        # stronger evidence than the ready-marker scrape `_on_settled`
+        # (lead_inbox.py) uses to resolve ACCEPTED/UNCERTAIN. Advance any
+        # still-in-flight delivery for this role straight to RUNNING so it
+        # drops out of `_UNCONFIRMED_STATES`/self-heal-resend eligibility —
+        # a later `send()` into this pane then has nothing ambiguous left to
+        # cancel (no more confusing "delivery-superseded" notice for a task
+        # Lead already knows landed, #255/#392). Best-effort: a missing or
+        # already-terminal delivery is a no-op, never raises.
+        try:
+            _delivery_id = getattr(self, "_last_delivery_ids", {}).get((project_ns, from_role))
+            _delivery_mgr = getattr(self, "_delivery_manager", None)
+            if _delivery_id and _delivery_mgr is not None:
+                _delivery_mgr.mark_running(_delivery_id)
+        except Exception:
+            pass
+
         origin_pane_token = self._current_pane_identity(project_ns, from_role)
         body = f"[{from_role} progress] {note}"
         self._notify_lead(
@@ -5627,14 +5646,27 @@ class Orchestrator(
             return True, False, ""
 
         pane = self._project_panes(project_ns).get(from_role)
-        if pane is None or pane.session is None or not pane.session.is_alive:
-            return True, False, ""
-        if pane.state != "working":
+        ps = getattr(self, "_pane_state", {}).get(key)
+
+        def _pass() -> tuple[bool, bool, str]:
+            # #463 follow-up: every non-blocking return below means the Stop
+            # hook genuinely ended this turn (Claude Code isn't being nudged
+            # to keep going) — stamp it so `_derive_display_state`'s
+            # waiting-lead tier can tell a `progress()` call mid-turn (the
+            # pane keeps working right after) apart from one after the turn
+            # actually ended. See `blocked_on_lead_ts`/`waiting_for_lead` in
+            # this same method's caller.
+            if ps is not None:
+                ps.last_turn_end_ts = time.time()
             return True, False, ""
 
-        ps = getattr(self, "_pane_state", {}).get(key)
+        if pane is None or pane.session is None or not pane.session.is_alive:
+            return _pass()
+        if pane.state != "working":
+            return _pass()
+
         if ps is None or not ps.last_assigned_task or ps.stop_gate_notified:
-            return True, False, ""
+            return _pass()
 
         now = time.time()
         # Same 30-minute window _check_idle_teammates uses to suppress the
@@ -5643,11 +5675,11 @@ class Orchestrator(
         # reported status (e.g. waiting on credentials) gets the same grace
         # here as one that used `takkub send --to lead` directly.
         if ps.blocked_on_lead_ts is not None and (now - ps.blocked_on_lead_ts) < 30 * 60:
-            return True, False, ""
+            return _pass()
         if ps.rate_limited_until > now:
-            return True, False, ""
+            return _pass()
         if ps.tty_blocked_since is not None:
-            return True, False, ""
+            return _pass()
 
         ps.stop_gate_notified = True
         return (
@@ -6441,6 +6473,7 @@ class Orchestrator(
         delivery_unconfirmed: bool,
         quota_stalled: bool = False,
         resource_wait_reason: str | None = None,
+        waiting_for_lead: bool = False,
     ) -> str:
         """(#263) Combine the 3 disagreeing sources of truth the issue names —
         `pane.state` (orchestrator-declared at dispatch), the ready-marker
@@ -6511,6 +6544,37 @@ class Orchestrator(
              is "printed a banner, still not at its own ready prompt".
              Deliberately NOT the wider `shows_startup_marker()`, which also
              matches a pane that is mid-turn with a queued message (#281).
+          2b. **waiting-lead** (#463) — `base_state == "working"` and
+             `waiting_for_lead` is True, i.e. this role's `PaneState.
+             blocked_on_lead_ts` was stamped recently (`send()`'s
+             sent-to-lead path, or `progress()` — #461) and hasn't expired,
+             *and* `PaneState.last_turn_end_ts` (stamped by a non-blocking
+             Stop hook in `consume_pane_hook`) is not None and is `>=`
+             `blocked_on_lead_ts` (#463 follow-up). The second half of that
+             AND matters: `progress()` alone is NOT proof the turn ended — a
+             pane can call `takkub progress "..."` mid-task and keep working
+             for several more minutes before really stopping, and without
+             requiring a Stop hook *after* that call, this tier would read
+             "waiting-lead" for up to 30 minutes while the pane is still
+             actively working (real incident: this exact backend pane did
+             so on 2026-09-01, `progress()` at 09:45 followed by 12 more
+             minutes of work). This is a HOOK/API-signalled fact (the pane
+             itself just told the cockpit it ended its turn waiting on
+             Lead), trusted ahead of the live PTY-scrape-derived tiers below
+             it: real evidence was a claude 2.1.252 pane whose bottom status
+             line kept rendering its own trailing spinner text ("✽
+             Mulling…"/"running stop hook · Ns") for minutes after the Stop
+             hook had already fired and `progress()` had already been
+             called, so `takkub status` kept reporting bare "working" long
+             after the pane was genuinely idle waiting on Lead's reply
+             (#463). Checked ahead of `waiting-delivery` because a pane that
+             just self-reported via `progress()`/`send()` is stronger, more
+             current proof its delivery reached it than an older, ambiguous
+             health-notice signal. A provider with no Stop hook
+             (codex/gemini-agy/opencode/…) never stamps `last_turn_end_ts`,
+             so this tier never fires for it — falls back to the
+             PTY-scrape tiers below, unchanged (claude-only by
+             construction, #103).
           3. **waiting-delivery** — `base_state == "working"` and
              `delivery_unconfirmed` is True: the orchestrator declared the
              task dispatched, but the delivery layer's own health notice
@@ -6595,6 +6659,9 @@ class Orchestrator(
             booting = False
         if booting:
             return "booting"
+
+        if base_state == "working" and waiting_for_lead:
+            return "waiting-lead"
 
         if base_state == "working":
             return "waiting-delivery" if delivery_unconfirmed else base_state
@@ -6703,6 +6770,31 @@ class Orchestrator(
                 resource_wait = self._resource_wait_for_role(project_ns, role)
             except Exception:
                 resource_wait = None
+            # #463: `progress()`/`send()`'s "sent to lead" path stamps this
+            # the moment the pane reports it's waiting on Lead — a hook/API
+            # signal that must outrank a live PTY-scrape reading that can
+            # still be showing a stale spinner tail past turn-end (see
+            # `_derive_display_state`'s "waiting-lead" tier docstring).
+            #
+            # #463 follow-up: `blocked_on_lead_ts` alone is not proof the
+            # turn actually ended — `progress()` stamps it mid-turn too (a
+            # pane can call `takkub progress "..."` and keep working for
+            # several more minutes before really stopping). Require
+            # `last_turn_end_ts` (stamped by a non-blocking Stop hook,
+            # `consume_pane_hook`) to be present AND at least as new as
+            # `blocked_on_lead_ts`, i.e. the turn genuinely ended *after*
+            # the pane last reported waiting on Lead. A provider with no
+            # Stop hook (codex/gemini-agy/opencode/…) never stamps
+            # `last_turn_end_ts`, so this tier never fires for it — it falls
+            # back to the PTY-scrape tiers below, unchanged (claude-only by
+            # construction, tracked under #103).
+            waiting_for_lead = bool(
+                ps is not None
+                and ps.blocked_on_lead_ts is not None
+                and (now - ps.blocked_on_lead_ts) < 30 * 60
+                and ps.last_turn_end_ts is not None
+                and ps.last_turn_end_ts >= ps.blocked_on_lead_ts
+            )
             try:
                 display_state = self._derive_display_state(
                     pane,
@@ -6710,6 +6802,7 @@ class Orchestrator(
                     delivery_unconfirmed,
                     quota_stalled,
                     resource_wait_reason=(resource_wait["reason"] if resource_wait else None),
+                    waiting_for_lead=waiting_for_lead,
                 )
             except Exception:
                 display_state = display_state_base

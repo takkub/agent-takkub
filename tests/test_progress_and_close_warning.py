@@ -18,6 +18,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import cli
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import LEAD, Orchestrator, PaneState
+from agent_takkub.task_delivery import DeliveryManager, DeliveryState
 
 
 @pytest.fixture(scope="module")
@@ -150,6 +151,76 @@ class TestProgressDoesNotTeardown:
             orch.progress("devops", note="still building", project=PROJECT)
 
         devops_session.terminate.assert_not_called()
+
+
+class TestProgressMarksDeliveryRunning:
+    """#463/#255/#392: a `progress()` call is unambiguous proof the task
+    text already reached the pane and it engaged with it — stronger evidence
+    than the ready-marker scrape `_on_settled` uses to resolve
+    ACCEPTED/UNCERTAIN. progress() must advance the pane's still-in-flight
+    delivery straight to RUNNING so it can never again be treated as
+    "unconfirmed" — the next `send()` into this pane then has nothing
+    ambiguous left to cancel, so Lead never sees a "delivery-superseded"
+    notice for a task it already knows landed."""
+
+    def test_uncertain_delivery_advances_to_running(self, orch: Orchestrator) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        _register(orch, "qa", _make_alive_session())
+        manager = DeliveryManager()
+        delivery = manager.create(
+            task_id="t1", project_id=PROJECT, pane_id="qa", session_generation=0, payload="task"
+        )
+        manager.begin_write(delivery.delivery_id, 0)
+        manager.mark_written(delivery.delivery_id)
+        manager.begin_submit(delivery.delivery_id, 0)
+        manager.mark_uncertain(delivery.delivery_id)
+        orch._delivery_manager = manager
+        orch._last_delivery_ids = {(PROJECT, "qa"): delivery.delivery_id}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            ok, _msg = orch.progress("qa", note="e2e: waiting for GO", project=PROJECT)
+
+        assert ok is True
+        assert manager.get(delivery.delivery_id).state == DeliveryState.RUNNING
+
+    def test_send_no_longer_reports_superseded_after_progress(self, orch: Orchestrator) -> None:
+        """End-to-end proof: once progress() has run, `send()`'s
+        `supersede_for_session` sweep finds nothing left in an unconfirmed/
+        cancel-worthy state for this delivery."""
+        _register(orch, LEAD.name, _make_alive_session())
+        _register(orch, "qa", _make_alive_session())
+        manager = DeliveryManager()
+        delivery = manager.create(
+            task_id="t1", project_id=PROJECT, pane_id="qa", session_generation=0, payload="task"
+        )
+        manager.begin_write(delivery.delivery_id, 0)
+        manager.mark_written(delivery.delivery_id)
+        manager.begin_submit(delivery.delivery_id, 0)
+        manager.mark_uncertain(delivery.delivery_id)
+        orch._delivery_manager = manager
+        orch._last_delivery_ids = {(PROJECT, "qa"): delivery.delivery_id}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch.progress("qa", note="e2e: waiting for GO", project=PROJECT)
+
+        _cancelled, kept = manager.supersede_for_session(PROJECT, "qa", 0)
+        assert delivery not in kept
+        # RUNNING is non-terminal, so it IS still cancelled by an explicit
+        # Lead send (harmless bookkeeping, #255) — the point of this fix is
+        # that it's no longer left ambiguous/UNCERTAIN, never that it stops
+        # existing. Assert the state actually observed by supersede was
+        # RUNNING, not the pre-fix UNCERTAIN.
+        assert delivery.state == DeliveryState.CANCELLED
+        assert delivery.enter_retries == 0  # never resent/re-pasted
+
+    def test_missing_delivery_id_is_a_no_op(self, orch: Orchestrator) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        _register(orch, "qa", _make_alive_session())
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            ok, _msg = orch.progress("qa", note="no delivery on record", project=PROJECT)
+
+        assert ok is True
 
 
 class TestProgressCli:

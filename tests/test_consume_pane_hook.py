@@ -222,6 +222,139 @@ class TestDoneGateSuppressions:
         assert block is True
 
 
+class TestLastTurnEndTsStamping:
+    """#463 follow-up: a non-blocking Stop hook is the only proof a turn
+    genuinely ended — `last_turn_end_ts` must be stamped on every
+    `(ok=True, block=False)` return for a real Stop event, and left alone
+    (None) whenever the hook actually blocks (the turn is being forced to
+    continue, not ending)."""
+
+    def test_non_blocking_stop_stamps_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+        ps.blocked_on_lead_ts = 10_000.0 - 60  # inside the 30-min grace window
+
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is False
+        assert ps.last_turn_end_ts == 10_000.0
+
+    def test_blocking_stop_does_not_stamp_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The done-gate nudge means the turn is being forced to continue
+        # (Claude Code is told to keep going), not that it genuinely ended.
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is True
+        assert ps.last_turn_end_ts is None
+
+    def test_no_outstanding_task_still_stamps_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No assign() ever happened, but `_ps()` lazily creates a PaneState
+        # for the role the first time anything touches it (e.g. spawn) — if
+        # one already exists, a genuinely-ended turn is still real evidence
+        # even with no outstanding task.
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = orch._ps(_key("backend"))
+
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is False
+        assert ps.last_turn_end_ts == 10_000.0
+
+    def test_notification_event_does_not_stamp_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Notification is not a turn-end signal — only Stop is.
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Notification")
+
+        assert ps.last_turn_end_ts is None
+
+    def test_progress_mid_turn_with_no_stop_hook_yet_leaves_last_turn_end_ts_unset(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end #463 follow-up scenario 1: `progress()` is called mid-
+        turn and the pane keeps working — no Stop hook follows. `waiting-lead`
+        needs `last_turn_end_ts`, and it must stay unset."""
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        ok, _ = orch.progress("backend", note="กำลังแก้ X", project=TEST_PROJECT)
+
+        assert ok is True
+        assert ps.blocked_on_lead_ts == 10_000.0
+        assert ps.last_turn_end_ts is None
+
+    def test_progress_then_stop_hook_makes_last_turn_end_ts_catch_up(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end #463 follow-up scenario 2: `progress()` mid-turn,
+        followed later by a genuine (non-blocking) Stop hook — the turn has
+        now really ended, so `last_turn_end_ts` must catch up to (or pass)
+        `blocked_on_lead_ts`, satisfying the `waiting-lead` tier's ordering
+        check in `_derive_display_state`."""
+        clock = [10_000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        orch.progress("backend", note="กำลังแก้ X", project=TEST_PROJECT)
+        clock[0] = 10_000.0 + 12 * 60  # 12 more minutes of real work, then it stops
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is False
+        assert ps.last_turn_end_ts == clock[0]
+        assert ps.last_turn_end_ts >= ps.blocked_on_lead_ts
+
+    def test_stop_hook_before_a_fresh_progress_call_does_not_predate_it(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end #463 follow-up scenario 3: a Stop hook ends one turn
+        (stamping `last_turn_end_ts`), Lead sends new instructions (clearing
+        both fields — new one-shot budget), and the pane's fresh turn calls
+        `progress()` again. The old `last_turn_end_ts` must not leak forward
+        and satisfy the new `blocked_on_lead_ts` — it's None again until a
+        Stop hook fires for THIS turn."""
+        clock = [10_000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        orch.progress("backend", note="รอบแรก", project=TEST_PROJECT)
+        clock[0] = 10_000.0 + 60
+        orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+        assert ps.last_turn_end_ts == clock[0]
+
+        # Lead replies with new instructions — clears both fields (orchestrator.py's
+        # send() path) — and the pane starts a fresh turn, reporting progress again.
+        clock[0] = 10_000.0 + 120
+        orch.send("backend", "ลองอีกทีนะ", from_role="lead", project=TEST_PROJECT)
+        assert ps.blocked_on_lead_ts is None
+        assert ps.last_turn_end_ts is None
+
+        clock[0] = 10_000.0 + 180
+        _assign_task(orch, "backend")
+        orch.progress("backend", note="รอบสอง", project=TEST_PROJECT)
+
+        assert ps.blocked_on_lead_ts == clock[0]
+        assert ps.last_turn_end_ts is None
+
+
 class TestIdleStateSignalIdempotency:
     def test_first_idle_ts_set_once(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
