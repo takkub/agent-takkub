@@ -505,7 +505,7 @@ class PipelineMixin:
             "\n"
             "Do NOT add --auto-chain on the devops or QA fire (terminal hops)."
         )
-        self._notify_lead(project_ns, prompt)
+        self._notify_lead(project_ns, prompt, kind="auto-chain-handoff")
         _log_event("auto_chain_handoff", project=project_ns)
 
     @staticmethod
@@ -572,7 +572,7 @@ class PipelineMixin:
                 lines.append(f"  {path} ← shard {', '.join(str(i) for i in idxs)}")
 
         message = "\n".join(lines)
-        self._notify_lead(project_ns, message)
+        self._notify_lead(project_ns, message, kind="shard-fanout-complete")
         _log_event(
             "shard_fanout_complete",
             project=project_ns,
@@ -751,6 +751,7 @@ class PipelineMixin:
                 project_ns,
                 f"⚠️ [qa plan fallback] อ่าน plan ไม่ได้ ({parse_err or 'no buckets'}) — "
                 f"degrade เป็น {k}-shard self-split (modulo). fan-out: {', '.join(fired)}",
+                kind="qa-plan-fallback",
             )
         else:
             lines = [
@@ -760,7 +761,7 @@ class PipelineMixin:
             for n, (scope, _focus) in enumerate(buckets, start=1):
                 lines.append(f"  {base_role}#{n}: {scope[:90]}")
             lines.append("รอ consolidated handoff เมื่อทุก shard report done")
-            self._notify_lead(project_ns, "\n".join(lines))
+            self._notify_lead(project_ns, "\n".join(lines), kind="qa-plan-ready")
         _log_event(
             "qa_plan_fanout",
             project=project_ns,

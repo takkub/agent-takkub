@@ -2011,6 +2011,7 @@ class Orchestrator(
                     f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → subagent ใช้ shared cwd · {warning}",
                     from_role=role_name,
                     note="",
+                    kind="worktree-fallback-subagent",
                 )
 
         task = self._apply_session_goal(task, project_ns)
@@ -2060,7 +2061,9 @@ class Orchestrator(
                 parent_provider,
             )
             if warning:
-                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+                self._notify_lead(
+                    project_ns, warning, from_role=role_name, note="", kind="ledger-warning"
+                )
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event(
@@ -2107,7 +2110,9 @@ class Orchestrator(
 
             warning = mark_done(project_ns, role_name, "fail" if failed else "ok", ts=now)
             if warning:
-                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+                self._notify_lead(
+                    project_ns, warning, from_role=role_name, note="", kind="ledger-warning"
+                )
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event(
@@ -2175,7 +2180,9 @@ class Orchestrator(
         # Match pane done semantics: clean shard reports are consolidated;
         # failures surface immediately as blocking notices.
         if failed or shard_total == 0:
-            self._notify_lead(project_ns, notice, from_role=role_name, note=note)
+            self._notify_lead(
+                project_ns, notice, from_role=role_name, note=note, kind="subagent-done"
+            )
         if state.get("requires_commit") and not state.get("worktree") and state.get("cwd"):
             self._check_uncommitted_async(project_ns, role_name, state["cwd"])
         if state.get("worktree"):
@@ -2340,7 +2347,11 @@ class Orchestrator(
                     )
                     if ledger_warning_q:
                         self._notify_lead(
-                            project_ns, ledger_warning_q, from_role=role_name, note=""
+                            project_ns,
+                            ledger_warning_q,
+                            from_role=role_name,
+                            note="",
+                            kind="ledger-warning",
                         )
                     self.ledgerChanged.emit(project_ns)
                 except Exception:
@@ -2594,6 +2605,7 @@ class Orchestrator(
                 "provider เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
                 from_role=role_name,
                 note="",
+                kind="assign-override-ignored",
             )
             _log_event(
                 "assign_provider_override_ignored",
@@ -2666,6 +2678,7 @@ class Orchestrator(
                 "model เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
                 from_role=role_name,
                 note="",
+                kind="assign-override-ignored",
             )
             _log_event(
                 "assign_model_override_ignored",
@@ -2686,6 +2699,7 @@ class Orchestrator(
                 "effort เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
                 from_role=role_name,
                 note="",
+                kind="assign-override-ignored",
             )
             _log_event(
                 "assign_effort_override_ignored",
@@ -2768,7 +2782,9 @@ class Orchestrator(
                 effective_provider,
             )
             if ledger_warning:
-                self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+                self._notify_lead(
+                    project_ns, ledger_warning, from_role=role_name, note="", kind="ledger-warning"
+                )
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="assign")
@@ -2989,6 +3005,7 @@ class Orchestrator(
                 f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → รันแบบ shared cwd แทน · {reason}",
                 from_role=role_name,
                 note="",
+                kind="worktree-fallback",
             )
             return self._assign_dispatch(
                 role_name,
@@ -3051,6 +3068,7 @@ class Orchestrator(
             f"{linked_note}{env_note}",
             from_role=role_name,
             note="",
+            kind="worktree-spawn",
         )
         # #444: a fresh `--isolation worktree` cwd is a path Claude Code has
         # never seen before, and its folder-trust dialog's auto-answer gives
@@ -3215,7 +3233,9 @@ class Orchestrator(
                     merge_conflicts=merge_conflicts,
                     conflict_files=(conflict_files or [])[:20],
                 )
-                self._notify_lead(project_ns, proposal, from_role=from_role, note="")
+                self._notify_lead(
+                    project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
+                )
                 return
             dirty = precomputed["dirty"] if precomputed is not None else mgr.is_dirty(info)
             _log_event(
@@ -3237,6 +3257,7 @@ class Orchestrator(
                 f"ตรวจสอบแล้วค่อยลบเองด้วย `takkub worktree clean`",
                 from_role=from_role,
                 note="",
+                kind="worktree-no-commit-kept",
             )
         except Exception as exc:  # never let worktree cleanup break done()
             _log_event(
@@ -3428,22 +3449,19 @@ class Orchestrator(
                         f'{d.pane_id}#{d.task_id[:8]} "{_truncate_at_word_boundary(d.payload, 30)}"'
                         for d in cancelled_list
                     )
-                    replacement_desc = _truncate_at_word_boundary(msg, 30)
-                    self._notify_lead(
-                        project_ns,
-                        f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ "
-                        f"**paste ไปถึง {to_role} แล้ว** เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — "
-                        f'ที่ยกเลิก: {cancelled_desc} · แทนที่ด้วย: "{replacement_desc}" '
-                        f"ที่ยกเลิกคือ re-paste ซ้ำของ task เดิม ไม่ใช่ใบงาน **ปลอดภัย ไม่ต้องทำอะไร** "
-                        f"(issue #255/#392)",
-                        from_role="system",
-                        note="delivery_superseded",
-                    )
+                    # #464: this used to also `_notify_lead` a paragraph
+                    # ending in its own "ปลอดภัย ไม่ต้องทำอะไร" (safe, nothing
+                    # to do) — a message that names itself actionless has no
+                    # business interrupting Lead. The audit trail below is
+                    # enough; `takkub inbox`/events.log still has the detail
+                    # (cancelled_desc/replacement_desc) if anyone needs it.
                     _log_event(
                         "delivery_superseded_by_send",
                         role=to_role,
                         project=project_ns,
                         cancelled=superseded,
+                        cancelled_desc=cancelled_desc,
+                        replacement_desc=_truncate_at_word_boundary(msg, 30),
                     )
                 if kept_undelivered:
                     # #336: "not yet delivered" and "we cannot tell" need
@@ -3470,6 +3488,7 @@ class Orchestrator(
                             f"ให้ส่งซ้ำหลัง pane รับงานแล้ว",
                             from_role="system",
                             note="delivery_pending_not_cancelled",
+                            kind="delivery-pending-not-cancelled",
                         )
                     if unconfirmed:
                         task_ids = ", ".join(sorted({d.task_id[:8] for d in unconfirmed}))
@@ -3481,6 +3500,7 @@ class Orchestrator(
                             f"ถ้าไม่เห็น ให้ `takkub assign` ใหม่ทั้งใบ อย่าส่งข้อความแก้ทีละจุด",
                             from_role="system",
                             note="delivery_unconfirmed_on_send",
+                            kind="delivery-unconfirmed-on-send",
                         )
                     _log_event(
                         "delivery_kept_undelivered_on_send",
@@ -3553,7 +3573,7 @@ class Orchestrator(
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
             lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                self._notify_lead(project_ns, f"[CC] {body}")
+                self._notify_lead(project_ns, f"[CC] {body}", kind="peer-cc")
             else:
                 ts = datetime.now().isoformat(timespec="seconds")
                 self._pending_lead_cc.setdefault(project_ns, []).append(
@@ -3843,6 +3863,7 @@ class Orchestrator(
                     ),
                     from_role="system",
                     note="message_replayed",
+                    kind="message-replayed",
                 )
 
     def kill_pane_children(
@@ -4030,6 +4051,7 @@ class Orchestrator(
             f"`takkub progress` next time instead of `done` until it is.",
             from_role=role_name,
             note="subprocess_kill_warning",
+            kind="subprocess-kill-warning",
         )
         _log_event(
             "close_kills_live_children",
@@ -4149,7 +4171,13 @@ class Orchestrator(
 
                 ledger_warning = mark_done(project_ns, role_name, "closed")
                 if ledger_warning:
-                    self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+                    self._notify_lead(
+                        project_ns,
+                        ledger_warning,
+                        from_role=role_name,
+                        note="",
+                        kind="ledger-warning",
+                    )
                 self.ledgerChanged.emit(project_ns)
             except Exception:
                 _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="close")
@@ -4167,6 +4195,7 @@ class Orchestrator(
                     f"🔚 [{role_name} closed] ปิดโดยไม่มีรายงาน done\n{close_health}",
                     from_role=role_name,
                     note="close_health",
+                    kind="close-health",
                 )
 
         self._idle_state.pop(key, None)
@@ -4442,7 +4471,9 @@ class Orchestrator(
                 reason="dirty_tree",
                 files=warning[-200:],
             )
-            self._notify_lead(project_ns, warning, from_role=from_role, note="")
+            self._notify_lead(
+                project_ns, warning, from_role=from_role, note="", kind="done-with-uncommitted"
+            )
 
         proc.finished.connect(lambda _code, _status: _settle(None))
         proc.errorOccurred.connect(lambda _e: _settle("git_proc_error"))
@@ -5165,7 +5196,9 @@ class Orchestrator(
 
             ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
             if ledger_warning:
-                self._notify_lead(project_ns, ledger_warning, from_role=from_role, note="")
+                self._notify_lead(
+                    project_ns, ledger_warning, from_role=from_role, note="", kind="ledger-warning"
+                )
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
@@ -5386,6 +5419,7 @@ class Orchestrator(
                     note=note,
                     pane_token=origin_pane_token,
                     digest_facts=digest_facts,
+                    kind="failed" if failed else "done",
                 )
             else:
                 _log_event(
@@ -5464,7 +5498,13 @@ class Orchestrator(
                     f"shard group already closed (timeout or all-failed). "
                     f"note: {note!r:.120}"
                 )
-                self._notify_lead(project_ns, late_msg, from_role=from_role, note="late-complete")
+                self._notify_lead(
+                    project_ns,
+                    late_msg,
+                    from_role=from_role,
+                    note="late-complete",
+                    kind="shard-late-complete",
+                )
                 _log_event(
                     "shard_late_complete",
                     project=project_ns,
@@ -5590,7 +5630,12 @@ class Orchestrator(
         origin_pane_token = self._current_pane_identity(project_ns, from_role)
         body = f"[{from_role} progress] {note}"
         self._notify_lead(
-            project_ns, body, from_role=from_role, note="progress", pane_token=origin_pane_token
+            project_ns,
+            body,
+            from_role=from_role,
+            note="progress",
+            pane_token=origin_pane_token,
+            kind="progress",
         )
         _log_event("progress", role=from_role, project=project_ns, note=note[:200])
         return True, f"{from_role} progress reported"
@@ -7164,6 +7209,7 @@ class Orchestrator(
             f'✅ [design] artifact {artifact_id} approved — "{artifact.title}"',
             from_role="system",
             note="design-approve",
+            kind="design-approve",
         )
         target_role = self._live_design_feedback_role(project_ns, artifact.created_by_role)
         if target_role:
@@ -7205,7 +7251,9 @@ class Orchestrator(
                 f"🔁 [design] revision requested for artifact {artifact_id} — "
                 f'"{artifact.title}"{feedback_note} (no live designer pane — Lead fallback)'
             )
-        self._notify_lead(project_ns, lead_note, from_role="system", note="design-revise")
+        self._notify_lead(
+            project_ns, lead_note, from_role="system", note="design-revise", kind="design-revise"
+        )
         return True, f"revision requested for artifact {artifact_id}", artifact.as_dict()
 
     def record_main_thread_stall(self, details: dict) -> None:
@@ -8480,7 +8528,7 @@ class Orchestrator(
                                     f"(last output {_out_age_str}s ago, last progress "
                                     f"{_prog_age_str}s ago, ready=True)"
                                 )
-                                self._notify_lead(project_name, hint_msg)
+                                self._notify_lead(project_name, hint_msg, kind="harvest-hint")
                                 _log_event("harvest_hint", role=name, project=project_name)
                                 self._ps(key).harvest_hint_ts = now
                 except Exception as e:
@@ -8850,6 +8898,7 @@ class Orchestrator(
                 f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
                 f"จับไม่ได้เลยติดกัน) — อาจเป็น provider ค้าง/ล่มเงียบ, ไม่ใช่แค่ idle ปกติ "
                 f"(#343). provider={provider} footer: {tail[:150] or '(ว่าง)'}",
+                kind="ready-marker-stale",
             )
         except Exception:
             pass
@@ -9108,6 +9157,7 @@ class Orchestrator(
                     "แล้วเตือน pane ให้ใช้ Read/Grep tool อ่านไฟล์แทน shell one-liner",
                     from_role=role,
                     note="",
+                    kind="shell-open-dialog",
                 )
 
             QTimer.singleShot(0, _finish)
@@ -9355,6 +9405,7 @@ class Orchestrator(
                 "watchdog เลื่อนการ respawn ออกไปแทนที่จะฆ่าทิ้ง งานยังเดินอยู่",
                 from_role=role,
                 note="stuck_recover_deferred",
+                kind="stuck-recover-deferred",
             )
         # The pane is demonstrably alive, so give the content clock a fresh
         # window instead of letting it keep accumulating — otherwise the very
@@ -9435,6 +9486,7 @@ class Orchestrator(
                                 f"✅ [system] {role} หลุดจาก shell tool ที่ค้างแล้ว กลับมาทำงานต่อเอง",
                                 from_role=role,
                                 note="tool_stuck_recovered",
+                                kind="tool-stuck-recovered",
                             )
                         ps.tool_stuck_escalated = False
                         ps.tool_stuck_esc_sent_ts = 0.0
@@ -9464,6 +9516,7 @@ class Orchestrator(
                             f'{int(TOOL_STUCK_TIMEOUT_SEC // 60)} นาที (จอโชว์: "{marker}") ' + tail,
                             from_role=role,
                             note="tool_stuck",
+                            kind="tool-stuck",
                         )
                         ps.tool_stuck_escalated = True
                         if auto_esc:
@@ -9490,6 +9543,7 @@ class Orchestrator(
                             f"แนะนำ `takkub close --role {role}` แล้ว assign งานใหม่",
                             from_role=role,
                             note="tool_stuck_esc_failed",
+                            kind="tool-stuck-esc-failed",
                         )
                         ps.tool_stuck_close_recommended = True
                 except Exception:
@@ -9758,7 +9812,7 @@ class Orchestrator(
                 f"อัตโนมัติ (กัน loop + pipeline stall) — เช็ค `takkub list` แล้ว "
                 f"close + assign ใหม่ถ้าต้องการให้ทำต่อ"
             )
-            self._notify_lead(project, msg)
+            self._notify_lead(project, msg, kind="stuck-capped")
 
     def _warn_lead_runaway_pane(self, role: str, project: str, rate_bps: float) -> None:
         """Inject a one-line warning into Lead's input when a teammate pane has
@@ -9776,7 +9830,7 @@ class Orchestrator(
             f"ต่อเนื่อง > {int(RUNAWAY_DURATION_S)}s — อาจติดลูป. "
             f"ตรวจสอบ pane /{role} หรือ `takkub close --role {role}` ถ้าต้องการหยุด"
         )
-        self._notify_lead(project, msg)
+        self._notify_lead(project, msg, kind="runaway-output")
         _log_event("runaway_pane_warn", role=role, project=project, rate_kb=int(rate_kb))
 
     def _warn_lead_over_cap(self, role: str, project: str) -> None:
@@ -9819,7 +9873,7 @@ class Orchestrator(
                 f"เกินที่เครื่องนี้รับไหวสบายๆ (~{cap} panes) · เสี่ยงช้า/ค้าง/RAM พุ่ง. "
                 f"พิจารณาแบ่งงานเป็น waves หรือ `takkub close` pane ที่ไม่ใช้แล้ว"
             )
-            self._notify_lead(project, msg)
+            self._notify_lead(project, msg, kind="over-capacity")
             _log_event("over_capacity_warn", role=role, project=project, active=active, cap=cap)
         except Exception:
             # A capacity advisory must never prevent a pane from spawning.
@@ -10155,7 +10209,7 @@ class Orchestrator(
         model_note = f" · model now: {model}" if model else ""
         marker_note = f' ("{marker}")' if marker else ""
         msg = f"[system] {role} ({provider}) hit quota{marker_note} — resets in {human}{model_note}"
-        self._notify_lead(project, msg)
+        self._notify_lead(project, msg, kind="quota-hit")
 
     def _schedule_rate_limit_notice(self, project: str, role: str, reset_at: float) -> None:
         """Fire a single reset notice when the usage limit lifts."""
@@ -10213,7 +10267,7 @@ class Orchestrator(
             f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
             f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"
         )
-        self._notify_lead(project, msg)
+        self._notify_lead(project, msg, kind="rate-limit-reset")
         _log_event("rate_limit_reset", role=role, project=project)
         self.statusChanged.emit()
 
@@ -10273,7 +10327,7 @@ class Orchestrator(
                 f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
                 f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
             )
-        self._notify_lead(project, msg)
+        self._notify_lead(project, msg, kind=f"tty-block-{kind}")
         _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line, kind=kind)
 
     def _inject_idle_reminder(

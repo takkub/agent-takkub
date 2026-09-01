@@ -2050,57 +2050,43 @@ def build_merge_proposal(
     "ready to merge" — the branch can carry accepted commits AND still hold
     fresh uncommitted work on top, and this used to unconditionally open
     with "N commit พร้อม merge กลับ base" regardless. `dirty`/`uncommitted`
-    gate the readiness claim and demote the merge command out of the first
-    actionable step; `merge_conflicts` (``None`` when undetermined —
+    gate the readiness claim; `merge_conflicts` (``None`` when undetermined —
     see :meth:`WorktreeManager.merge_conflicts_with_base`) reports whether a
     3-way merge against the CURRENT base would conflict.
+
+    #464: this used to repeat branch/commits/merge-status/files-touched —
+    every one of them already sits in the digest bullet `done()` sends
+    for the same event a moment earlier (`DigestFacts` — see
+    `digest_facts.py`). Kept to exactly what the digest can't say: whether
+    it's actually safe to merge right now, and the one command to run.
     """
-    stat = diffstat.strip() or "(diffstat ว่าง)"
-    files_touched, top_dirs = summarize_diffstat(diffstat)
-    dirs_note = f" ({', '.join(top_dirs[:5])})" if top_dirs else ""
-    header = (
-        f"🌿 [{role} worktree] ทำงานบน branch `{info.branch}` (isolated) — "
-        f"{commits} commit ahead ของ base"
-    )
     if dirty:
-        readiness = (
-            f"⚠ ยังมี {uncommitted} ไฟล์ที่ยังไม่ commit ใน worktree — "
-            "ของจริงอาจยังไม่อยู่ใน branch — ยังไม่พร้อมให้ merge"
+        return (
+            f"🌿 [{role} worktree] `{info.branch}` — ⚠ {uncommitted} ไฟล์ที่ยังไม่ commit ใน "
+            f"worktree — ยังไม่พร้อมให้ merge (digest ด้านบนมีรายละเอียดอื่นแล้ว) — ให้ pane "
+            f"commit ให้ครบก่อนที่ {info.path}"
         )
-    elif merge_conflicts is True:
+    if merge_conflicts is True:
         # #442: name the files so the Lead (or the pane, if still open) can
         # rebase/resolve BEFORE `takkub worktree merge` fails on it.
         names = ", ".join(f"`{f}`" for f in (conflict_files or [])[:8])
         more = f" +{len(conflict_files) - 8}" if conflict_files and len(conflict_files) > 8 else ""
         where = f": {names}{more}" if names else ""
-        readiness = (
-            f"⚠ conflict กับ base ปัจจุบัน{where} — ให้ pane `git merge <base>` ใน worktree "
-            "แล้ว resolve ก่อน หรือ Lead resolve ตอน merge "
-            "(ดูรายชื่อไฟล์อีกครั้งได้ด้วย `takkub worktree merge --check --branch <b>`)"
+        return (
+            f"🌿 [{role} worktree] `{info.branch}` — ⚠ conflict กับ base ปัจจุบัน{where} — "
+            "resolve ก่อน merge (ดูรายชื่อไฟล์อีกครั้งด้วย "
+            f"`takkub worktree merge --check --branch {info.branch}`)"
         )
-    elif merge_conflicts is False:
-        readiness = f"✅ {commits} commit พร้อม merge กลับ base (merge-tree clean กับ base ปัจจุบัน)"
-    else:
-        readiness = f"{commits} commit — merge-tree ตรวจสถานะไม่ได้ (unknown) · review diff ก่อน merge"
-    lines = [
-        header,
-        readiness,
-        "",
-        f"ไฟล์ที่แตะ: {files_touched} ไฟล์{dirs_note}",
-        "",
-        f"diffstat:\n{stat}",
-        "",
-        "เสนอ merge (propose-then-fire, ห้าม auto):",
-        f"1. review: `git -C {info.git_root} diff {info.base_sha}..{info.branch}`",
-    ]
-    if dirty:
-        lines.append(f"2. ให้ pane commit ให้ครบก่อนที่ {info.path} — merge/cleanup รอหลังจากนั้น")
-    else:
-        lines.append(f"2. merge:  `git -C {info.git_root} merge --no-ff {info.branch}`")
-        lines.append(
-            f"3. cleanup: `takkub worktree clean` (long-path-safe — "
-            f"ห้ามใช้ `git worktree remove` ดิบ พังกับ node_modules ซ้อนบน Windows, #226/#358) "
-            f"· หรือรวมข้อ 2-3 เป็นคำสั่งเดียว: `takkub worktree merge --role {role}`"
-        )
-    lines.append("worktree ยังอยู่จนกว่าจะ merge — อย่าลบก่อน · render proposal ให้ user confirm ก่อน fire")
-    return "\n".join(lines)
+    readiness = (
+        "✅ พร้อม merge (merge-tree clean กับ base ปัจจุบัน)"
+        if merge_conflicts is False
+        else "merge-tree ตรวจสถานะไม่ได้ (unknown) — review diff ก่อน merge"
+    )
+    return (
+        f"🌿 [{role} worktree] `{info.branch}` — {readiness} (digest ด้านบนมี branch/commits/"
+        "files แล้ว)\n"
+        f"merge: `git -C {info.git_root} merge --no-ff {info.branch}` แล้ว cleanup: "
+        "`takkub worktree clean` (long-path-safe — ห้ามใช้ `git worktree remove` ดิบ, "
+        f"#226/#358) — หรือรวมเป็นคำสั่งเดียว: `takkub worktree merge --role {role}` "
+        "(propose-then-fire — ให้ user confirm ก่อน fire)"
+    )

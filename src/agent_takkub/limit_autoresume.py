@@ -264,7 +264,9 @@ class AutoResumeMixin:
             dump.append(f"📄 status dump เต็ม: {marker_path}")
         msg = "\n".join(dump)
 
-        self._notify_lead(project, msg, from_role=role, note=reason)
+        self._notify_lead(
+            project, msg, from_role=role, note=reason, kind="limit-autoresume-stopped"
+        )
         _log_event("pane_limit_autoresume_stopped", role=role, project=project, reason=reason)
         if cwd:
             # Non-blocking (QProcess, not subprocess.run) — reuses the same
@@ -347,7 +349,7 @@ class AutoResumeMixin:
             f"(รอบ {ps.limit_park_rounds}/{auto_resume.MAX_PARK_ROUNDS}) "
             "ปลุกทำงานต่ออัตโนมัติตอน quota reset"
         )
-        self._notify_lead(project, msg, from_role=role, note="limit_parked")
+        self._notify_lead(project, msg, from_role=role, note="limit_parked", kind="limit-parked")
         delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - time.time()) * 1000))
         QTimer.singleShot(delay_ms, lambda: self._wake_parked_pane(project, role))
 
@@ -403,7 +405,9 @@ class AutoResumeMixin:
                 f"🌙 [auto-resume] {role} ({project}) — Claude ทำงานต่อเองแล้วก่อน cockpit ปลุก "
                 "(auto-continue, claude 2.1.234+) — ไม่ต้อง nudge ซ้ำ"
             )
-            self._notify_lead(project, lead_msg, from_role=role, note="limit_resumed_self")
+            self._notify_lead(
+                project, lead_msg, from_role=role, note="limit_resumed_self", kind="limit-resumed"
+            )
             return
         # #158: mark the on-disk snapshot resumed rather than deleting it —
         # cheap audit trail of the park→wake cycle, harmless if it's
@@ -417,4 +421,6 @@ class AutoResumeMixin:
         _log_event("pane_limit_resumed", role=role, project=project, round=ps.limit_park_rounds)
 
         lead_msg = f"🌙 [auto-resume] {role} ({project}) ปลุกทำงานต่อแล้ว (task ค้าง resume)"
-        self._notify_lead(project, lead_msg, from_role=role, note="limit_resumed")
+        self._notify_lead(
+            project, lead_msg, from_role=role, note="limit_resumed", kind="limit-resumed"
+        )

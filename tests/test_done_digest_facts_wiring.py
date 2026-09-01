@@ -275,7 +275,9 @@ class TestWorktreeRediscoveryAfterRestart:
         )
 
         proposal = next(n for n, _kw in captured if "merge --no-ff wt/backend-1" in n)
-        assert "2 commit" in proposal
+        # #464: the proposal no longer repeats the commit count — the digest
+        # bullet above (facts.commits_ahead, asserted already) carries it.
+        assert "พร้อม merge" in proposal
 
         # Everything came from git_facts / the rediscovered dict — the fake
         # manager must never have been asked to compute anything itself.

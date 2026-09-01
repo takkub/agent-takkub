@@ -137,7 +137,7 @@ class _FakeOrch:
         # transcript-tail read + dedupe + _notify_lead call are exercised.
         Orchestrator._check_shell_open_dialog(self, project_name, role, pane, key, now)  # type: ignore[arg-type]
 
-    def _notify_lead(self, project, notice, from_role=None, note="") -> None:
+    def _notify_lead(self, project, notice, from_role=None, note="", **_kwargs) -> None:
         self.notify_calls.append((project, notice, from_role))
 
     def _live_non_scaffolding_children(self, project_ns, role_name, session) -> list[str]:

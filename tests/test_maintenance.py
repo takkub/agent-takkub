@@ -13,6 +13,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from agent_takkub import maintenance
 
 
@@ -225,6 +227,16 @@ class TestBuildActions:
         assert "CI" in actions[-1]
 
 
+@pytest.fixture(autouse=True)
+def _no_other_cockpit(monkeypatch):
+    """Every test in this file runs on a real dev machine that may itself
+    have a live ~/.agent-takkub/runtime/events.log — without this, the Lead
+    noise check (#464) would silently merge in that real, non-deterministic
+    data. Individual tests that specifically exercise the two-cockpit merge
+    override this back with monkeypatch.setattr(...)."""
+    monkeypatch.setattr(maintenance, "_other_cockpit_events_log", lambda _log: None)
+
+
 class TestRunMaintenance:
     def test_no_net_skips_the_network_checks_but_still_reads_the_log(self, tmp_path: Path) -> None:
         log = _write_events(tmp_path / "events.log", [])
@@ -250,6 +262,7 @@ class TestRunMaintenance:
             "code_scanning",
             "logs",
             "local_issues",
+            "lead_noise",
             "repo",
         }
 
@@ -403,3 +416,148 @@ class TestCheckCodeScanning:
         report = maintenance.run_maintenance(tmp_path, include_network=False, log_path=log)
         cs = [c for c in report.checks if c.key == "code_scanning"]
         assert cs and cs[0].status == "skip"
+
+
+class TestCheckLeadNoise:
+    """#464 — the countable half of the Lead noise audit: tally
+    `lead_notice` events by `kind` and flag any averaging more than the
+    threshold per hour."""
+
+    def test_missing_log_is_skip_not_ok(self, tmp_path: Path) -> None:
+        check = maintenance.check_lead_noise(tmp_path / "nope.log")
+        assert check.status == "skip"
+
+    def test_no_lead_notice_events_is_ok(self, tmp_path: Path) -> None:
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        log = _write_events(tmp_path / "events.log", [{"ts": now.isoformat(), "event": "assign"}])
+        check = maintenance.check_lead_noise(log, since_hours=24, now=now)
+        assert check.status == "ok"
+
+    def test_counts_by_kind_and_orders_by_frequency(self, tmp_path: Path) -> None:
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        records = [
+            {
+                "ts": (now - timedelta(minutes=i)).isoformat(),
+                "event": "lead_notice",
+                "kind": "delivery-superseded",
+                "emitter": "orchestrator.py:3432",
+                "preview": "ยกเลิก 1 pending delivery",
+            }
+            for i in range(3)
+        ] + [
+            {
+                "ts": (now - timedelta(minutes=1)).isoformat(),
+                "event": "lead_notice",
+                "kind": "progress",
+                "emitter": "orchestrator.py:5630",
+            }
+        ]
+        check = maintenance.check_lead_noise(
+            _write_events(tmp_path / "events.log", records), since_hours=24, now=now
+        )
+        assert check.data["counts"] == {"delivery-superseded": 3, "progress": 1}
+        # Loudest kind leads the detail list.
+        assert check.details[0].startswith("delivery-superseded ×3")
+        assert "orchestrator.py:3432" in check.details[0]
+        assert "ยกเลิก 1 pending delivery" in check.details[0]
+
+    def test_rate_above_threshold_is_attention_and_flagged(self, tmp_path: Path) -> None:
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        # 5 in 1 hour = 5/hr, above the default 4/hr threshold.
+        records = [
+            {
+                "ts": (now - timedelta(minutes=i * 10)).isoformat(),
+                "event": "lead_notice",
+                "kind": "worktree-spawn",
+                "emitter": "orchestrator.py:3062",
+            }
+            for i in range(5)
+        ]
+        check = maintenance.check_lead_noise(
+            _write_events(tmp_path / "events.log", records), since_hours=1, now=now
+        )
+        assert check.status == "attention"
+        assert check.data["loud_kinds"] == ["worktree-spawn"]
+        assert any("⚠ บ่อย" in d for d in check.details)
+        assert any('takkub issue "notice worktree-spawn' in d for d in check.details)
+
+    def test_rate_at_or_below_threshold_is_ok(self, tmp_path: Path) -> None:
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        records = [
+            {
+                "ts": (now - timedelta(minutes=i * 20)).isoformat(),
+                "event": "lead_notice",
+                "kind": "progress",
+                "emitter": "orchestrator.py:5630",
+            }
+            for i in range(3)  # 3/hr — at the default threshold, not above it
+        ]
+        check = maintenance.check_lead_noise(
+            _write_events(tmp_path / "events.log", records), since_hours=1, now=now
+        )
+        assert check.status == "ok"
+        assert not check.data["loud_kinds"]
+
+    def test_explicit_threshold_overrides_default(self, tmp_path: Path) -> None:
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        records = [
+            {
+                "ts": now.isoformat(),
+                "event": "lead_notice",
+                "kind": "progress",
+                "emitter": "orchestrator.py:5630",
+            }
+        ]
+        log = _write_events(tmp_path / "events.log", records)
+        check = maintenance.check_lead_noise(log, since_hours=1, now=now, threshold_per_hour=0.5)
+        assert check.status == "attention"
+        assert check.data["threshold_per_hour"] == 0.5
+
+    def test_env_threshold_used_when_no_explicit_override(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_NOISE_PER_HOUR", "0.5")
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        records = [
+            {
+                "ts": now.isoformat(),
+                "event": "lead_notice",
+                "kind": "progress",
+                "emitter": "orchestrator.py:5630",
+            }
+        ]
+        log = _write_events(tmp_path / "events.log", records)
+        check = maintenance.check_lead_noise(log, since_hours=1, now=now)
+        assert check.data["threshold_per_hour"] == 0.5
+        assert check.status == "attention"
+
+    def test_reads_both_cockpits_events_log(self, tmp_path: Path, monkeypatch) -> None:
+        """#464: dev + a packaged/prod cockpit each keep their own
+        events.log — a kind noisy only on the OTHER instance must still
+        surface here (#two-cockpits-two-data-homes)."""
+        now = datetime(2026, 9, 1, 12, 0, 0)
+        this_log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": now.isoformat(),
+                    "event": "lead_notice",
+                    "kind": "progress",
+                    "emitter": "orchestrator.py:5630",
+                }
+            ],
+        )
+        other_log = _write_events(
+            tmp_path / "other-events.log",
+            [
+                {
+                    "ts": now.isoformat(),
+                    "event": "lead_notice",
+                    "kind": "progress",
+                    "emitter": "orchestrator.py:5630",
+                }
+            ],
+        )
+        monkeypatch.setattr(maintenance, "_other_cockpit_events_log", lambda _log: other_log)
+        check = maintenance.check_lead_noise(this_log, since_hours=1, now=now)
+        assert check.data["counts"]["progress"] == 2

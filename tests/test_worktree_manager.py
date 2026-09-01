@@ -804,9 +804,7 @@ class TestMergeProposal:
         info = WorktreeInfo(path="/w/p", branch="wt/frontend-9", base_sha="base9", git_root="/repo")
         msg = build_merge_proposal("frontend", info, 4, " src/x.ts | 10 +++")
         assert "wt/frontend-9" in msg
-        assert "4 commit" in msg
         assert "merge --no-ff wt/frontend-9" in msg
-        assert "src/x.ts" in msg  # diffstat carried through
         # propose-then-fire doctrine — must tell Lead to confirm, not auto-merge
         assert "confirm" in msg.lower()
 
@@ -855,12 +853,18 @@ class TestMergeProposal:
         assert "takkub worktree clean" in msg
         assert "takkub worktree merge --role frontend" in msg
 
-    def test_files_touched_summary_included(self):
+    def test_diffstat_and_file_list_not_duplicated_from_digest(self):
+        """#464 — the digest bullet `done()` sends for the same event already
+        carries branch/commits/merge-status/files-touched (`DigestFacts`);
+        the proposal message must not repeat the diffstat body or a
+        files-touched count, only what the digest can't say (mergeability +
+        the command to run)."""
         info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
         stat = " src/api/users.py | 5 +++--\n docs/readme.md | 1 +\n"
         msg = build_merge_proposal("backend", info, 1, stat, dirty=False, merge_conflicts=False)
-        assert "ไฟล์ที่แตะ: 2 ไฟล์" in msg
-        assert "src" in msg and "docs" in msg
+        assert "src/api/users.py" not in msg
+        assert "ไฟล์ที่แตะ" not in msg
+        assert "digest" in msg.lower()
 
 
 # ── Env-propagation config (P2.1) ───────────────────────────────────────────

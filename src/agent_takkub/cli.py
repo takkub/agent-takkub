@@ -190,6 +190,41 @@ def _connect() -> socket.socket:
     return s
 
 
+# #464: the "other cockpit instance is also running" line used to print on
+# EVERY `takkub status`/`inbox`/`list` call — pure noise once Lead has seen it
+# once. Marker is keyed on the parent shell's PID (stable across every
+# `takkub <cmd>` subprocess spawned from the same pane for its whole
+# lifetime, unlike our own PID which is fresh every invocation) so it shows
+# again after the pane itself restarts.
+def _other_instance_warned_marker(other_port: int) -> Path:
+    return config.RUNTIME_DIR / "cli-warned" / f"other-instance-{os.getppid()}-{other_port}"
+
+
+def _already_warned_other_instance(other_port: int) -> bool:
+    try:
+        return _other_instance_warned_marker(other_port).exists()
+    except Exception:
+        return False
+
+
+def _mark_warned_other_instance(other_port: int) -> None:
+    try:
+        marker = _other_instance_warned_marker(other_port)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        # Best-effort prune of stale markers (dead shells never clean up
+        # after themselves) so this directory doesn't grow forever.
+        cutoff = time.time() - 86400
+        for f in marker.parent.iterdir():
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _instance_banner() -> str:
     """Return a best-effort identity banner for the active cockpit instance."""
     try:
@@ -213,6 +248,9 @@ def _instance_banner() -> str:
             return "\n".join(lines)
 
         other_port = int(other_port_file.read_text(encoding="utf-8").strip())
+        if _already_warned_other_instance(other_port):
+            return "\n".join(lines)
+
         probe = socket.create_connection(("127.0.0.1", other_port), timeout=0.3)
         close = getattr(probe, "close", None)
         if callable(close):
@@ -223,6 +261,7 @@ def _instance_banner() -> str:
         else:
             other_label = f"dev · {Path(config.REPO_ROOT).name}"
         lines.append(f"  ⚠ {other_label} ก็รันอยู่ด้วย (port {other_port}) — คำสั่งนี้คุม {label} เท่านั้น")
+        _mark_warned_other_instance(other_port)
     except Exception:
         pass
 
@@ -1077,10 +1116,12 @@ def cmd_ma(args: argparse.Namespace) -> dict:
 
     from .maintenance import render_report, run_maintenance
 
+    noise_threshold = getattr(args, "noise_threshold", None)
     report = run_maintenance(
         Path.cwd(),
         since_hours=float(getattr(args, "since_hours", 24.0)),
         include_network=not bool(getattr(args, "no_net", False)),
+        noise_threshold_per_hour=(float(noise_threshold) if noise_threshold is not None else None),
     )
     if getattr(args, "json", False):
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
@@ -3930,6 +3971,15 @@ def main(argv: list[str] | None = None) -> int:
         help="ข้ามส่วนที่ต้องใช้เครือข่าย (gh issue/pr/run) — ดูเฉพาะ log ในเครื่อง",
     )
     sma.add_argument("--json", action="store_true", help="พิมพ์เป็น JSON แทนรายงานอ่านง่าย")
+    sma.add_argument(
+        "--noise-threshold",
+        type=float,
+        default=None,
+        help=(
+            "ครั้ง/ชม. ที่ถือว่า lead_notice kind หนึ่งๆ 'บ่อยเกินไป' ใน section "
+            "Lead noise (default 4, หรือ env TAKKUB_NOISE_PER_HOUR)"
+        ),
+    )
     sma.set_defaults(func=cmd_ma)
 
     spg = sub.add_parser(

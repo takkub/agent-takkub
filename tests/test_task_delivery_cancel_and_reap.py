@@ -120,7 +120,7 @@ class TestSendAutoCancelsStaleDelivery:
         manager.mark_written(delivery.delivery_id)
         orch._delivery_manager = manager
         with (
-            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._log_event") as mock_log_event,
             patch("agent_takkub.lead_inbox._log_event"),
         ):
             ok, _msg = orch.send(
@@ -129,16 +129,24 @@ class TestSendAutoCancelsStaleDelivery:
 
         assert ok is True
         assert delivery.state.value == "cancelled"
+        # #464: this used to also interrupt Lead with a paste ending in its
+        # own "ปลอดภัย ไม่ต้องทำอะไร" (safe, nothing to do) — a message that
+        # names itself actionless must not reach Lead at all anymore.
         notices = _written_strings(lead.session)
-        assert any("[delivery-superseded]" in m and "#255" in m for m in notices)
-        # #392: the notice must name the cancelled task (role#task_id + a
-        # preview of its text) and the message that replaced it, not just a
-        # bare count Lead has to cross-check against the transcript by hand.
-        superseded_notice = next(m for m in notices if "[delivery-superseded]" in m)
-        assert "backend#t1" in superseded_notice
-        assert "do X" in superseded_notice
-        assert "hey, doing this myself now" in superseded_notice
-        assert "#392" in superseded_notice
+        assert not any("delivery-superseded" in m for m in notices)
+        # #392: the audit trail must still name the cancelled task
+        # (role#task_id + a preview of its text) and the message that
+        # replaced it, not just a bare count — now via events.log instead
+        # of a Lead-facing notice.
+        superseded_call = next(
+            c
+            for c in mock_log_event.call_args_list
+            if c.args and c.args[0] == "delivery_superseded_by_send"
+        )
+        assert superseded_call.kwargs["cancelled"] == 1
+        assert "backend#t1" in superseded_call.kwargs["cancelled_desc"]
+        assert "do X" in superseded_call.kwargs["cancelled_desc"]
+        assert "hey, doing this myself now" in superseded_call.kwargs["replacement_desc"]
 
     def test_lead_send_keeps_a_delivery_that_never_reached_the_pane(
         self, orch: Orchestrator

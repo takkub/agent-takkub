@@ -451,6 +451,33 @@ def _notice_role_tag(body: str) -> str | None:
     return None
 
 
+def _log_lead_notice(kind: str | None, *, from_role: str, project_ns: str, body: str = "") -> None:
+    """Log one `_notify_lead` call as a countable `lead_notice` event (#464 —
+    Lead noise audit). *emitter* is the immediate caller's own file:line
+    (two frames up: this function, then `_notify_lead`), computed here
+    rather than passed in so every call site is attributable even when it
+    never sends *kind* at all — the fallback below turns that omission
+    itself into a distinct, file:line-addressable bucket instead of one
+    catch-all "unknown". *preview* is the first line of *body*, capped short —
+    enough for `takkub ma`'s noise report to show a recognisable example
+    without ballooning events.log with full notice text."""
+    frame = inspect.currentframe()
+    caller = frame.f_back.f_back if frame is not None and frame.f_back is not None else None
+    if caller is not None:
+        emitter = f"{os.path.basename(caller.f_code.co_filename)}:{caller.f_lineno}"
+    else:
+        emitter = "unknown:unknown"
+    preview = (body or "").strip().splitlines()[0][:160] if (body or "").strip() else ""
+    _log_event(
+        "lead_notice",
+        kind=kind or f"unknown:{emitter}",
+        role=from_role,
+        project=project_ns,
+        emitter=emitter,
+        preview=preview,
+    )
+
+
 def _unwrap_notice_item(item) -> tuple[str, str | None, float | None]:
     """Normalise one `_lead_digest_queue`/`_lead_notify_queue` entry to
     ``(body, pane_token, queued_ts)``.
@@ -961,7 +988,7 @@ class LeadInboxMixin:
     ) -> None:
         """Write *message* to the Lead pane. If Lead is absent, queue it in
         _pending_done_notices so it is delivered when Lead next spawns."""
-        self._notify_lead(project_ns, message)
+        self._notify_lead(project_ns, message, kind=log_event)
         _log_event(log_event, project=project_ns)
 
     # ------------------------------------------------------------------
@@ -1072,7 +1099,7 @@ class LeadInboxMixin:
         project_ns = self._resolve_project(project)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
-            self._notify_lead(project_ns, prompt)
+            self._notify_lead(project_ns, prompt, kind="inject-lead-prompt")
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
@@ -2242,6 +2269,7 @@ class LeadInboxMixin:
                 f"เฉพาะตอนที่ยืนยันแล้วว่า pane ไม่ได้รับ task จริงๆ (issue #255)",
                 from_role="system",
                 note="delivery_stale_reap",
+                kind="delivery-stale-reap",
             )
             _log_event(
                 "delivery_stale_reaped",
@@ -2288,7 +2316,7 @@ class LeadInboxMixin:
             f"ที่ต้องกดตอบก่อนถึงจะรับ task ได้ — cockpit กำลัง auto-answer อยู่ "
             f"ถ้ายังไม่เคลียร์เองให้เข้าไปดู pane ตรงๆ (issue #186)"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="delivery-blocked-prompt")
         _log_event(
             "delivery_blocked_prompt_warned",
             role=role_name,
@@ -2341,7 +2369,7 @@ class LeadInboxMixin:
             f"อยู่ (`takkub status`) ไม่ต้อง assign ใหม่ — เปิด pane ดูตรงๆ ก่อน แล้ว assign "
             f"ใหม่เฉพาะตอนที่ยืนยันแล้วว่าไม่ถึงมือจริง"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="delivery-uncertain")
         _log_event("delivery_uncertain_warned", role=role_name, project=project_ns)
 
     def _warn_lead_delivery_blocked(self, role_name: str, project: str | None) -> None:
@@ -2369,7 +2397,7 @@ class LeadInboxMixin:
             f"pane นี้ยังมีใบก่อนหน้าเขียนค้างอยู่ (single-flight) ใบใหม่เลยถูกทิ้ง "
             f"ทั้งที่ `takkub assign` ตอบ ok ไปแล้ว · รอให้ใบเดิมจบแล้ว assign ซ้ำอีกครั้ง"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="delivery-blocked")
         _log_event("delivery_blocked_warned", role=role_name, project=project_ns)
 
     def _warn_lead_delivery_busy_wait(
@@ -2410,7 +2438,7 @@ class LeadInboxMixin:
             f"delivery รอ ready prompt (เงียบ {seconds_since_output:.0f}s)",
             live_body=msg,
         ):
-            self._notify_lead(project_ns, msg)
+            self._notify_lead(project_ns, msg, kind="delivery-busy-wait")
         _log_event(
             "delivery_busy_wait_warned",
             role=role_name,
@@ -2515,7 +2543,12 @@ class LeadInboxMixin:
                 project=project_ns,
                 error=str(exc)[:200],
             )
-            self._notify_lead(project_ns, f"⛔ [{role_name} FAILED] {note}", from_role="system")
+            self._notify_lead(
+                project_ns,
+                f"⛔ [{role_name} FAILED] {note}",
+                from_role="system",
+                kind="delivery-boot-timeout-failed",
+            )
 
     def _warn_lead_delivery_boot_stall(
         self, role_name: str, project: str | None, elapsed_sec: float
@@ -2607,7 +2640,7 @@ class LeadInboxMixin:
             f"boot ช้า {elapsed_sec:.0f}s (ยังโชว์ startup marker)",
             live_body=msg,
         ):
-            self._notify_lead(project_ns, msg)
+            self._notify_lead(project_ns, msg, kind="delivery-boot-stall")
         _log_event(
             "delivery_boot_stall_warned",
             role=role_name,
@@ -2714,7 +2747,9 @@ class LeadInboxMixin:
             if self._record_pane_health(
                 project_ns, role_name, "boot-diagnostic", first_line, live_body=notice_text
             ):
-                self._notify_lead(project_ns, notice_text, from_role=role_name)
+                self._notify_lead(
+                    project_ns, notice_text, from_role=role_name, kind="boot-diagnostic"
+                )
             _log_event(
                 "boot_diagnostic_reported",
                 role=role_name,
@@ -2773,7 +2808,7 @@ class LeadInboxMixin:
             f'🔒 [auth-failure] {role_name} pane ({display}) ติด auth error: "{reason}" — '
             f"{login_hint} แล้วสั่งงานใหม่อีกครั้ง (#248/#247)"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="auth-failure")
         _log_event(
             "auth_failure_warned",
             role=role_name,
@@ -2818,7 +2853,7 @@ class LeadInboxMixin:
             f"{display} auth ไม่ผ่าน → degrade เป็น claude แล้ว spawn ใหม่",
             live_body=msg,
         ):
-            self._notify_lead(project_ns, msg)
+            self._notify_lead(project_ns, msg, kind="auth-failure-degrade")
         _log_event(
             "auth_failure_degrade_warned",
             role=role_name,
@@ -2867,7 +2902,7 @@ class LeadInboxMixin:
             f"ของ cockpit เอง รอสักครู่แล้ว assign ใหม่ หรือสลับ provider ไปก่อน "
             f"— cockpit degrade เป็น claude substitute แล้ว spawn ใหม่ให้ (#346)"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="account-pending")
         _log_event(
             "account_pending_warned",
             role=role_name,
@@ -2913,7 +2948,9 @@ class LeadInboxMixin:
             ),
             live_body=msg,
         ):
-            self._notify_lead(project_ns, msg)
+            self._notify_lead(
+                project_ns, msg, kind="no-content-degrade" if degrade else "no-content-retry"
+            )
         _log_event(
             "no_content_pane_warned",
             role=role_name,
@@ -3185,7 +3222,7 @@ class LeadInboxMixin:
             f"task ถูก paste แบบ blind (ไม่ถึง ready ใน {wait_label})",
             live_body=msg,
         ):
-            self._notify_lead(project_ns, msg)
+            self._notify_lead(project_ns, msg, kind="delivery-unconfirmed")
         _log_event(
             "delivery_unconfirmed_busy_ceiling" if busy_ceiling else "delivery_unconfirmed",
             role=role_name,
@@ -3209,7 +3246,7 @@ class LeadInboxMixin:
             f"ลอง assign {role_name} ใหม่อีกครั้ง (ถ้ายิง parallel ลองยิงทีละตัว) — "
             f"อย่าถือว่า 'task queued' = สำเร็จ (issue #26)"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="spawn-failed")
         _log_event("spawn_failed_warned", role=role_name, project=project_ns)
 
     def _warn_lead_spawn_stuck(self, role_name: str, project: str | None, age_sec: float) -> None:
@@ -3234,7 +3271,7 @@ class LeadInboxMixin:
             f"ณ ตอนนี้. เช็คด้วย takkub list — ถ้ายังไม่ขึ้นให้ลอง assign {role_name} "
             f"ใหม่อีกครั้ง (issue #139/#140)"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="spawn-stuck")
         _log_event(
             "spawn_stuck_warned",
             role=role_name,
@@ -3286,7 +3323,7 @@ class LeadInboxMixin:
             f"(crash {auto_respawn_max} ครั้งติด) — pane ดับถาวรจนกว่า Lead จะ assign ใหม่ "
             f"ถ้า pane นี้อยู่ใน auto-chain verify hop อาจค้างได้ — ตรวจสอบ takkub list"
         )
-        self._notify_lead(project_ns, msg)
+        self._notify_lead(project_ns, msg, kind="respawn-capped")
         _log_event("respawn_capped_warned", role=role_name, project=project_ns)
 
     def _warn_lead_pane_exited(
@@ -3326,7 +3363,7 @@ class LeadInboxMixin:
             f"เช็คด้วย takkub list — ถ้า auto-respawn อยู่รอรอบถัดไปได้ ไม่ก็ "
             f"assign {role_name} ใหม่ (issue #397)"
         )
-        self._notify_lead(project_ns, msg, from_role="system")
+        self._notify_lead(project_ns, msg, from_role="system", kind="pane-exited-without-done")
         _log_event(
             "pane_exited_without_done",
             role=role_name,
@@ -3453,6 +3490,7 @@ class LeadInboxMixin:
                         body,
                         from_role=item.get("from_role", "system"),
                         note="cc_flush",
+                        kind="cc-flush",
                     )
                 delivered += 1  # a malformed item is dropped, not retried forever
         finally:
@@ -3777,6 +3815,7 @@ class LeadInboxMixin:
         pane_token: str | None = None,
         digest_facts: DigestFacts | None = None,
         queued_ts: float | None = None,
+        kind: str | None = None,
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
@@ -3820,8 +3859,18 @@ class LeadInboxMixin:
         it default — otherwise every requeue hop resets "when did this
         happen" to "whenever it happened to be re-processed", defeating the
         whole point of stamping it.
+
+        *kind* (#464): a short label for the noise-audit report (`takkub ma`
+        "Lead noise" section) to bucket by — e.g. `"worktree-proposal"`,
+        `"progress"`. Every call is logged as a `lead_notice` event
+        regardless of whether the caller passes one; an omitted *kind*
+        falls back to `unknown:<caller file>:<caller line>` (computed from
+        the immediate caller's frame) so every un-labelled call site still
+        shows up as its own countable bucket pointing at the exact line to
+        fix, instead of disappearing into one opaque "unknown" pile.
         """
         occurred_ts = queued_ts if queued_ts is not None else time.time()
+        _log_lead_notice(kind, from_role=from_role, project_ns=project_ns, body=body)
         # #441: done notes / proposals / CCs are the cockpit's own copy of
         # whatever the pane printed — scrub credential values before the
         # text lands in the Lead transcript or the durable inbox file.
@@ -4259,6 +4308,7 @@ class LeadInboxMixin:
                     item["body"],
                     pane_token=item.get("pane_token"),
                     queued_ts=item.get("queued_ts"),
+                    kind="pending-done-flush",
                 )
             except Exception:
                 self._pending_done_notices.setdefault(project_ns, []).insert(0, item)

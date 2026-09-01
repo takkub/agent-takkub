@@ -20,6 +20,7 @@ process — the `cli-ipc-boundary` contract in `pyproject.toml`.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -30,6 +31,14 @@ from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import EVENTS_LOG
+
+# #464: default `⚠ บ่อย` (too frequent) callout threshold for the Lead noise
+# report below — a `lead_notice` kind averaging more than this many
+# occurrences per hour gets flagged with the ready-to-run `takkub issue`
+# command. Override with the env var when a project's normal traffic runs
+# hotter/cooler than this default.
+_DEFAULT_NOISE_PER_HOUR = 4.0
+_NOISE_TOP_N = 10
 
 # Events that mean "something went wrong", grouped by how loudly they should be
 # read. Names are taken from what the running cockpit actually writes (verified
@@ -475,6 +484,133 @@ def check_local_issue_backlog() -> Check:
     )
 
 
+# ── 3c. Lead noise (24h) ──────────────────────────────────────────────────────
+
+
+def _noise_threshold_per_hour(explicit: float | None) -> float:
+    if explicit is not None:
+        return explicit
+    try:
+        return float(os.environ.get("TAKKUB_NOISE_PER_HOUR", _DEFAULT_NOISE_PER_HOUR))
+    except ValueError:
+        return _DEFAULT_NOISE_PER_HOUR
+
+
+def _other_cockpit_events_log(this_log: Path) -> Path | None:
+    """The other cockpit's events.log, when this checkout can run two at once
+    (a dev checkout + a packaged/prod install each get their own DATA_HOME —
+    see #two-cockpits-two-data-homes) — mirrors `cli._instance_banner`'s own
+    dev/prod pairing so a kind noisy only on the OTHER instance still shows
+    up here. `None` when there is no meaningful "other" (this IS the paired
+    path, or already the same file)."""
+    from .config import DATA_HOME
+    from .config import REPO_ROOT as _REPO_ROOT
+
+    is_dev = DATA_HOME == _REPO_ROOT
+    other = (
+        (Path.home() / ".agent-takkub" / "runtime" / "events.log")
+        if is_dev
+        else (Path(_REPO_ROOT) / "runtime" / "events.log")
+    )
+    return None if other == this_log else other
+
+
+def check_lead_noise(
+    log_path: Path,
+    since_hours: float = 24.0,
+    *,
+    threshold_per_hour: float | None = None,
+    now: datetime | None = None,
+) -> Check:
+    """Count every `lead_notice` event (#464) by `kind` over *since_hours* —
+    the countable half of the Lead noise audit. `_notify_lead` logs one of
+    these on every call it makes (see `lead_inbox._log_lead_notice`), so this
+    is a direct tally of what actually interrupted Lead, not a guess. Reads
+    BOTH cockpits' events.log when both exist, since a Lead pane can be alive
+    in either one."""
+    candidates = {log_path, _other_cockpit_events_log(log_path)}
+    logs = [p for p in candidates if p is not None and p.is_file()]
+    if not logs:
+        return Check("lead_noise", "Lead noise (24h)", "skip", f"ไม่มีไฟล์ {log_path}")
+
+    cutoff = (now or datetime.now()) - timedelta(hours=since_hours)
+    counts: Counter[str] = Counter()
+    emitters: dict[str, Counter[str]] = {}
+    previews: dict[str, str] = {}
+    total = 0
+    for path in logs:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("event") != "lead_notice":
+                        continue
+                    ts = _parse_ts(rec.get("ts"))
+                    if ts is None or ts < cutoff:
+                        continue
+                    kind = str(rec.get("kind") or "unknown")
+                    counts[kind] += 1
+                    total += 1
+                    emitters.setdefault(kind, Counter())[str(rec.get("emitter") or "?")] += 1
+                    preview = str(rec.get("preview") or "")
+                    if preview:
+                        previews[kind] = preview
+        except OSError:
+            continue
+
+    if total == 0:
+        return Check(
+            "lead_noise",
+            "Lead noise (24h)",
+            "ok",
+            f"ไม่มี lead_notice ใน {since_hours:.0f} ชม.ล่าสุด",
+        )
+
+    threshold = _noise_threshold_per_hour(threshold_per_hour)
+    hours = max(since_hours, 1e-9)
+    details: list[str] = []
+    loud: list[tuple[str, str, int]] = []
+    for kind, count in counts.most_common(_NOISE_TOP_N):
+        rate = count / hours
+        top_emitters = emitters.get(kind)
+        emitter = top_emitters.most_common(1)[0][0] if top_emitters else "?"
+        preview = previews.get(kind, "")
+        preview_note = f' — "{preview}"' if preview else ""
+        is_loud = rate > threshold
+        if is_loud:
+            loud.append((kind, emitter, count))
+        flag = " ⚠ บ่อย" if is_loud else ""
+        details.append(f"{kind} ×{count} ({rate:.1f}/ชม.) @ {emitter}{preview_note}{flag}")
+    for kind, emitter, count in loud:
+        details.append(
+            f'  → takkub issue "notice {kind} ที่ {emitter} บอกบ่อย '
+            f'({count}/{since_hours:.0f}h) ไม่จำเป็น เพราะ <ระบุเหตุผล>"'
+        )
+
+    status = "attention" if loud else "ok"
+    summary = f"{total} notice / {since_hours:.0f} ชม. ({len(counts)} kind)"
+    if loud:
+        summary += f" — {len(loud)} kind เกิน {threshold:g}/ชม."
+    return Check(
+        "lead_noise",
+        "Lead noise (24h)",
+        status,
+        summary,
+        details,
+        {
+            "counts": dict(counts),
+            "threshold_per_hour": threshold,
+            "loud_kinds": [k for k, _e, _c in loud],
+        },
+    )
+
+
 # ── 4. repo shippability ─────────────────────────────────────────────────────
 
 
@@ -589,6 +725,12 @@ def build_actions(checks: list[Check]) -> list[str]:
     backlog = by_key.get("local_issues")
     if backlog is not None and backlog.status == "attention":
         steps.append("ส่ง issue ที่ค้างในเครื่องขึ้น GitHub ก่อน — ตอนนี้ยังไม่มีใครนอกเครื่องนี้เห็น")
+    noise = by_key.get("lead_noise")
+    if noise is not None and noise.status == "attention":
+        steps.append(
+            "อ่าน 'Lead noise' — kind ที่ขึ้น ⚠ บ่อย เปิดใบด้วยคำสั่งที่พิมพ์ไว้ให้แล้ว "
+            "ชี้ emitter ตรงๆ ห้ามแค่บ่น (ดู docs/lead/role-and-workflow.md)"
+        )
     issues = by_key.get("issues")
     if issues is not None and issues.status == "attention":
         steps.append("เลือก issue ที่จะปิดรอบนี้ — พิสูจน์ก่อนแก้ ทุกใบต้องมีหลักฐาน")
@@ -608,6 +750,7 @@ def run_maintenance(
     since_hours: float = 24.0,
     include_network: bool = True,
     log_path: Path | None = None,
+    noise_threshold_per_hour: float | None = None,
 ) -> MaintenanceReport:
     checks: list[Check] = []
     if include_network:
@@ -620,6 +763,13 @@ def run_maintenance(
         checks.append(Check("code_scanning", _CS_TITLE, "skip", "ข้าม (--no-net)"))
     checks.append(scan_events(log_path or EVENTS_LOG, since_hours=since_hours))
     checks.append(check_local_issue_backlog())
+    checks.append(
+        check_lead_noise(
+            log_path or EVENTS_LOG,
+            since_hours=since_hours,
+            threshold_per_hour=noise_threshold_per_hour,
+        )
+    )
     checks.append(
         check_repo(repo_dir)
         if include_network
