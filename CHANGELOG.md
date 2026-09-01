@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **Lead noise audit (#464)** — ทุก `_notify_lead` มี `kind` + log event `lead_notice` {kind, role, project, emitter=file:line, preview} (call site ที่ไม่ส่ง kind → `unknown:<file:line>`) · `takkub ma` section ใหม่ "Lead noise (24h)": top-10 kind, ครั้ง/ชม., emitter, ตัวอย่าง, flag ⚠ บ่อย (> `TAKKUB_NOISE_PER_HOUR` default 4 หรือ `--noise-threshold`) พร้อมบรรทัด `takkub issue` สั่งเปิดใบสำเร็จรูป · กฎ Lead ใน `docs/lead/role-and-workflow.md`: notice ที่บอกบ่อยแล้วไม่จำเป็น = เปิดใบชี้ emitter ตรงๆ · ตัด noise ทันที: `delivery-superseded` ("ปลอดภัย ไม่ต้องทำอะไร") เลิกส่งเข้า Lead เหลือ events.log · worktree merge-proposal เหลือ verdict + คำสั่งเดียว (ไม่ซ้ำ digest)
+
 ### Fixed (แก้)
 
 - **`⚠ vX.X.X ก็รันอยู่ด้วย` โผล่ทุกคำสั่งแทนที่จะเตือนครั้งเดียว (#464 follow-up)** — marker กันเตือนซ้ำ (#464) key ด้วย `os.getppid()` โดยหวังว่ามันคงที่ตลอดอายุ pane แต่ Windows pane ของ Claude spawn shell ลูกใหม่ทุกคำสั่ง → parent PID เปลี่ยนทุกครั้งพอๆกับ PID ของตัวเอง (พิสูจน์แล้ว: `takkub status` 2 ครั้งติดจาก pane เดียวกันได้ marker คนละไฟล์ `other-instance-14156-54147` / `other-instance-2232-54147`; macOS รายงานมาเหมือนกัน) → banner เตือนซ้ำทุกคำสั่งจริงๆ ไม่เคย dedupe เลย · เปลี่ยนไป key ด้วย hash ของ `TAKKUB_ROLE` + `TAKKUB_PROJECT` + auth token ของ pane เอง — ค่าที่ stamp เข้า env ตอน spawn ครั้งเดียวและไม่เปลี่ยนตลอดอายุ pane ไม่ว่าจะ spawn shell ลูกกี่ตัว — shell มือ user ที่ไม่มี `TAKKUB_ROLE` เลยยัง fallback ไป ppid เหมือนเดิม
