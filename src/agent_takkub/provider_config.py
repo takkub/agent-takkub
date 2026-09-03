@@ -120,16 +120,11 @@ def load_providers(project: str | None = None) -> dict[str, str]:
     sanitizer either way. A project with no v2 entry AT ALL falls back to
     the V2 global (mirrors V1's "no per-project file -> inherit global").
     A project WITH an entry (even ``{}``) resolves from it directly, no
-    inheritance — this can't perfectly distinguish V1's "file exists and
-    is empty" (no inheritance) from "file never existed" (inherit) the way
-    V1 itself does, because `dual_write_routing` re-derives every known
-    project's scope on every save via a fail-open JSON read that already
-    collapses "missing" and "empty" to the same `{}` (wave 1's own
-    limitation, not something this reader can recover). In practice this
-    only matters for a project created after the last routing save, before
-    the next dual-write refresh — falls back to V1 the moment that gap
-    shows up as an actual override mismatch, since flag-off is always one
-    env var away.
+    inheritance — matching V1, because `dual_write_routing`'s caller
+    (`save_providers`, and the migration ladder's `RoleAgentMigrationStep`)
+    only ever write a project entry for a project whose per-project V1
+    file actually exists (#480); a project with no per-project file simply
+    gets no key in the mirror, same as V1's own existence check.
     """
     from .core.storage.v2_authority import read_routing, v2_authority_enabled
 
@@ -185,7 +180,11 @@ def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
 
     dual_write_routing(
         read_json(config_path(None)),
-        {name: read_json(config_path(name)) for name in _config.list_project_names()},
+        {
+            name: read_json(config_path(name))
+            for name in _config.list_project_names()
+            if config_path(name).exists()
+        },
     )
 
 

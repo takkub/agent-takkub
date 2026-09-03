@@ -319,6 +319,70 @@ class TestSaveProviders:
         assert written["global"] == {"backend": "codex"}
         assert written["projects"] == {"proj-a": {"qa": "gemini"}}
 
+    def test_save_dual_write_omits_projects_with_no_v1_file(
+        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    ) -> None:
+        """#480: a project known to `config.list_project_names()` but that
+        has never saved its own `role-providers.json` must get NO key in the
+        v2 mirror — not a `{}` entry. A `{}` entry would make
+        `load_providers()` (flag ON) treat the project as "has its own
+        empty override" and skip global inheritance, instead of falling
+        back to global the way the flag-OFF/V1 path does (`config_path
+        (project).exists()` is False -> `load_providers(None)`)."""
+        from agent_takkub import config
+        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+        from agent_takkub.core.storage.legacy_reader import read_json
+
+        data_home = tmp_path / "data_home"
+        (data_home / "v2").mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.core.storage.dual_write._effective_data_home",
+            lambda dh=None: data_home,
+        )
+        # "proj-a" has a real per-project file; "proj-b" is a known project
+        # (e.g. from projects.json) that never saved role-providers.json.
+        proj_dir = tmp_path / "projects" / "proj-a"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "role-providers.json").write_text(
+            json.dumps({"qa": "gemini"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a", "proj-b"])
+
+        provider_config.save_providers({"backend": "codex"})
+
+        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
+        written = read_json(target)
+        assert written["projects"] == {"proj-a": {"qa": "gemini"}}
+        assert "proj-b" not in written["projects"]
+
+    def test_save_dual_write_keeps_genuinely_empty_project_file(
+        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A project WITH a per-project file that is genuinely empty (`{}`,
+        e.g. the user cleared all overrides) must still get a `{}` entry in
+        the mirror — that's real "no inheritance" state, distinct from
+        "file never existed"."""
+        from agent_takkub import config
+        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+        from agent_takkub.core.storage.legacy_reader import read_json
+
+        data_home = tmp_path / "data_home"
+        (data_home / "v2").mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.core.storage.dual_write._effective_data_home",
+            lambda dh=None: data_home,
+        )
+        proj_dir = tmp_path / "projects" / "proj-a"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "role-providers.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
+
+        provider_config.save_providers({"backend": "codex"})
+
+        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
+        written = read_json(target)
+        assert written["projects"] == {"proj-a": {}}
+
 
 class TestRoleProviderMap:
     def test_maps_each_role_to_its_cli(self, redirect_config_path: Path) -> None:
