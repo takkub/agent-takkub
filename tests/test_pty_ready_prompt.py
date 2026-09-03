@@ -161,6 +161,40 @@ class TestIsAtTrustPrompt:
         s = _feed_screen("Type your message or @path/to/file")
         assert s.is_at_trust_prompt() is False
 
+    def test_ready_footer_below_stale_modal_rows_wins(self) -> None:
+        """#330 regression (2026-09-02→03, saas_admin_amb): agy's Antigravity
+        CLI exits the trust modal's alt-screen buffer and erases only from
+        the cursor down, so the modal's own rows never get cleared — they
+        sit above the real idle footer forever. Verbatim shape replayed from
+        the live transcript via pyte: modal text in the top rows, "Antigravity
+        CLI ..." banner + empty ">" composer + "? for shortcuts" footer below
+        it, all in the SAME screen. A ready footer must win — the pane really
+        is idle and already answered its own modal, not stuck on it."""
+        s = _feed_screen(
+            "Accessing workspace:",
+            "",
+            "Do you trust the contents of this project?",
+            "",
+            "Antigravity CLI requires permission to read, edit, and execute files here.",
+            "",
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "",
+            "  up/down Navigate . enter Confirm",
+            "",
+            "     Antigravity CLI 1.1.23",
+            "     monchai500@gmail.com",
+            "     Gemini 3.7 Flash (High)",
+            "     ~/WebstormProjects/saas_admin_amb",
+            "",
+            "-" * 40,
+            ">",
+            "-" * 40,
+            "? for shortcuts",
+        )
+        assert s.is_at_ready_prompt() is True
+        assert s.is_at_trust_prompt() is False
+
 
 class TestShowsPendingInput:
     """#79: distinguish a swallowed paste (input box empty) from a swallowed

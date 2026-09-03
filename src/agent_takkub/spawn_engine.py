@@ -544,6 +544,16 @@ _CORRUPT_SPAWN_BACKOFF_MS = 300
 _AUTO_TRUST_MAX_PRESSES = 5
 _AUTO_TRUST_RETRY_EVERY_MS = 1_500
 
+# (#330 item 2) Once `_auto_trust` gives up and warns Lead the pane "never
+# received a task", nothing was left watching for the modal to clear anyway
+# (a human answering it in the pane, or — before the #330 root-cause fix
+# above — a slow real clear that simply outlasted the budget). Poll far more
+# gently than the main watcher (this is a long-tail safety net, not the
+# primary responder) for a generous window: long enough to cover a human
+# actually noticing the `trust-prompt-stuck` notice and clicking through.
+_TRUST_LATE_CLEAR_POLL_MS = 3_000
+_TRUST_LATE_CLEAR_MAX_MS = 300_000
+
 
 @dataclass
 class PaneState:
@@ -3690,6 +3700,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if elapsed[0] >= max_ms:
                 if at_prompt:
                     self._warn_lead_trust_prompt_stuck(role_name, project, elapsed[0] / 1000.0)
+                    self._watch_for_late_trust_clear(role_name, project)
                 return
             QTimer.singleShot(500, _check)
 
@@ -3724,3 +3735,85 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"แล้ว assign ใหม่ (เปลี่ยน provider ก็ได้) — issue #330",
             kind="trust-prompt-stuck",
         )
+
+    def _watch_for_late_trust_clear(
+        self, role_name: str, project: str | None, max_ms: int = _TRUST_LATE_CLEAR_MAX_MS
+    ) -> None:
+        """(#330 item 2, regression 2026-09-02→03) `_auto_trust` just spent its
+        whole budget and gave up — but the pane's session is still alive, and
+        the modal it was watching can still clear afterward (a human answers
+        it directly in the pane, or — for a case the #330 root-cause fix
+        above does not cover — a genuinely slow-clearing modal that simply
+        outlasts the budget). Nothing was left polling for that: the Lead's
+        last word stayed "pane never received a task" forever, even once the
+        pane reached a perfectly idle ready prompt, and the observed recovery
+        (production, 2026-09-02) was a human closing the pane and reassigning
+        the work from scratch.
+
+        Gentler cadence and a much longer window than `_auto_trust` itself —
+        this is a long-tail safety net, not the primary responder, and by the
+        time it is even running the pane has already been sitting stuck for
+        `max_ms` (the give-up budget) once.
+        """
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is None:
+            return
+        elapsed = [0]
+
+        def _check() -> None:
+            cur_pane = self._project_panes(project_ns).get(role_name)
+            if cur_pane is not pane:
+                return  # pane closed/replaced — a fresh spawn owns delivery now
+            if pane.session is None or not pane.session.is_alive:
+                return
+            if pane.session.is_at_ready_prompt() and not pane.session.is_at_trust_prompt():
+                _log_event(
+                    "trust_prompt_cleared_late",
+                    role=role_name,
+                    project=project_ns,
+                    after_s=round(elapsed[0] / 1000.0, 1),
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"✅ [trust-prompt-cleared-late] {role_name} pane เคลียร์ trust/onboarding "
+                    f"modal ได้แล้ว (หลังจาก auto-answer เลิกเฝ้าไปก่อนหน้านี้) — "
+                    f"resume ส่งใบงานเดิมให้อัตโนมัติ — issue #330",
+                    kind="trust-prompt-cleared-late",
+                )
+                self._resume_blocked_delivery(role_name, project_ns)
+                return
+            elapsed[0] += _TRUST_LATE_CLEAR_POLL_MS
+            if elapsed[0] >= max_ms:
+                return
+            QTimer.singleShot(_TRUST_LATE_CLEAR_POLL_MS, _check)
+
+        QTimer.singleShot(_TRUST_LATE_CLEAR_POLL_MS, _check)
+
+    def _resume_blocked_delivery(self, role_name: str, project: str | None) -> None:
+        """(#330 item 2) Re-deliver the task cached for *role_name* once its
+        pane's trust modal is confirmed cleared late (see
+        `_watch_for_late_trust_clear`).
+
+        Same source of truth `_auto_respawn`'s post-crash replay already
+        trusts (`PaneState.last_assigned_task`) — the pane never got far
+        enough to paste it (the whole point of being stuck on the modal), so
+        there is nothing to supersede. `_send_when_ready` re-checks the live
+        screen itself and only pastes once genuinely ready, so a narrow race
+        against a delivery that landed by some other path in the meantime
+        costs at most a harmless duplicate paste — never a silent second
+        loss, the failure mode this whole path exists to close."""
+        project_ns = self._resolve_project(project)
+        ps = self._pane_state.get(_exit_key(project_ns, role_name))
+        cached_task = ps.last_assigned_task if ps is not None else None
+        if not cached_task:
+            return
+        _log_event(
+            "trust_prompt_resume_delivery",
+            role=role_name,
+            project=project_ns,
+            task_preview=cached_task[:120],
+        )
+        self._send_when_ready(role_name, cached_task, project=project_ns)

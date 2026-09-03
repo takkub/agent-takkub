@@ -2195,7 +2195,25 @@ class PtySession(QObject):
                     ever reaches the trust-directory modal above; with no
                     auto-press it sits there forever since headless has no
                     human to answer it.
-        """
+
+        (#330 regression, 2026-09-03) A ready footer takes precedence over a
+        modal match found anywhere else on screen. Root-caused via a live
+        incident: agy's Antigravity CLI exits the trust modal's alternate
+        screen buffer (``CSI ?1049l``) and then erases only from the cursor
+        DOWN (``CSI J``, not a full ``CSI 2J`` from the top) before drawing
+        its ready banner+prompt below. Replaying the actual PTY bytes through
+        the same pyte ``Screen`` this class uses proved the modal's own rows
+        ("Do you trust the contents of this project?", "Yes, I trust this
+        folder", "enter Confirm") never get erased and sit forever above the
+        real idle footer ("? for shortcuts") once the CLI reaches its main
+        prompt — a permanent false positive, not a timing race. Without this
+        guard both `_auto_trust` and `_send_when_ready` treat an idle pane
+        that already answered its own modal as stuck on it forever (observed:
+        auto_trust polled for its full 90s budget and gave up, warning Lead
+        the pane had never received its task, while the pane had reached a
+        genuinely empty ready prompt within ~11s of spawning)."""
+        if self.is_at_ready_prompt():
+            return False
         text = "\n".join(self.display_lines()).lower()
         if "trust this folder" in text and _ENTER_CONFIRM_RE.search(text):
             return True
