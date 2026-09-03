@@ -147,6 +147,11 @@ class StepResult:
     # True (an env gap must not fail the gate the same way a red test does)
     # — `env_gap` is what a caller checks to still surface it distinctly.
     env_gap: bool = False
+    # #477: a step that found something worth a human's attention but that
+    # must not fail the gate on its own (tidy — misplaced test/scratch files)
+    # — `ok` stays True so it never trips `GateReport.ok`; `warn` is what a
+    # renderer checks to still show it as WARN rather than a bare PASS.
+    warn: bool = False
 
 
 @dataclass
@@ -1236,6 +1241,18 @@ def _tier_step(tier: DiffTier) -> StepResult:
     return StepResult("auto-tier", True, False, 0.0, detail)
 
 
+def _tidy_step(root: Path, env: dict | None = None) -> StepResult:
+    """#477: repo-tidiness WARN — misplaced test files / scratch files that
+    leaked into the diff. Every tier that has a real git diff to look at gets
+    this (`--auto`'s style/targeted/full sub-tiers, and an explicit full
+    gate) except an explicit `--targeted <paths>` call, which the caller
+    never routes here (see `run_gate`'s `explicit_targeted` gate)."""
+    from .tidy_gate import check_tidy
+
+    finding = check_tidy(root, env)
+    return StepResult("tidy", finding.ok, finding.skipped, 0.0, finding.detail, warn=finding.warn)
+
+
 def _non_python_gate(
     kind: str,
     root: Path,
@@ -1441,6 +1458,14 @@ def run_gate(
     the full gate. The chosen tier and its reason are the first row of the
     table so nobody has to trust the choice blindly.
 
+    Every tier with a real git diff to look at (every `auto` sub-tier, and
+    an explicit full gate) also runs a `tidy` step (#477): a WARN-only check
+    for a test file that landed somewhere the project's OWN existing tests
+    don't, or a scratch/debug file that leaked into the diff. Only an
+    explicit `--targeted <paths>` call skips it. `TAKKUB_QA_TIDY=strict`
+    turns its WARN into a real gate FAIL; `TAKKUB_QA_TIDY=0` disables the
+    step outright. See `tidy_gate.py`.
+
     `exec_prefix` (#401): e.g. ``["docker", "compose", "exec", "-T",
     "gateway"]`` — delegates every tool invocation to that prefix instead of
     resolving a local `.venv`, for a project whose tests are designed to run
@@ -1465,6 +1490,13 @@ def run_gate(
     bin_dir = shared_venv_bin(cwd)
     kind = detect_project_kind(wroot)
 
+    # #477: an explicit `--targeted <paths>` call is the one tier the tidy
+    # check skips (team policy — mid-flight tier stays cheap); captured
+    # BEFORE auto's own targeted-tier classification reassigns `targeted`
+    # below, so that sub-tier still gets the check like every other auto
+    # sub-tier does.
+    explicit_targeted = targeted is not None
+
     tier: DiffTier | None = None
     node_only: set[str] | None = None
     if auto and targeted is None:
@@ -1473,6 +1505,7 @@ def run_gate(
             if kind == "python":
                 report = GateReport(v2_flags=v2_flags, targeted=[])
                 report.steps.append(_tier_step(tier))
+                report.steps.append(_tidy_step(wroot))
                 report.steps.append(_skip("pytest", "auto-tier: no logic changed"))
                 report.steps.append(_skip("ruff", "auto-tier: no logic changed"))
                 report.steps.append(_skip("lint-imports", "auto-tier: no logic changed"))
@@ -1495,6 +1528,12 @@ def run_gate(
     report = GateReport(v2_flags=v2_flags, targeted=list(targeted) if targeted else None)
     if tier is not None:
         report.steps.append(_tier_step(tier))
+
+    # #477: every remaining tier has a real git diff to look at (auto's
+    # style/targeted/full sub-tiers, and an explicit full gate) — only an
+    # explicit `--targeted <paths>` call skips this.
+    if not explicit_targeted:
+        report.steps.append(_tidy_step(wroot, env))
 
     # #471: worktree checkouts don't carry gitignored .env files — close that
     # gap (or say plainly that it's open) before anything that might need
@@ -1647,7 +1686,9 @@ def _step_result_label(s: StepResult) -> str:
         return "skip"
     if s.env_gap:  # #401 — distinct from PASS: nothing actually ran
         return "GAP"
-    return "PASS" if s.ok else "FAIL"
+    if not s.ok:
+        return "FAIL"
+    return "WARN" if s.warn else "PASS"  # #477 — tidy findings, never fail the gate alone
 
 
 def render_table(report: GateReport) -> str:

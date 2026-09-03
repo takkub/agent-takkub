@@ -94,11 +94,17 @@ def test_venv_check_refuses_when_python_itself_is_missing(repo, monkeypatch):
 
     report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-    assert [s.name for s in report.steps] == ["venv-check", "pytest", "ruff", "lint-imports"]
-    vc = report.steps[0]
+    assert [s.name for s in report.steps] == [
+        "tidy",
+        "venv-check",
+        "pytest",
+        "ruff",
+        "lint-imports",
+    ]
+    vc = report.steps[1]
     assert vc.ok is False
     assert "refuse" in vc.detail
-    assert all(s.skipped for s in report.steps[1:])
+    assert all(s.skipped for s in report.steps[2:])
     assert report.ok is False
     # the footgun is refused before any tool is ever shelled out to
     assert recorder == []
@@ -110,8 +116,8 @@ def test_venv_check_passes_when_no_local_venv(repo, monkeypatch):
 
     report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-    assert report.steps[0].ok is True
-    assert "no shared .venv" in report.steps[0].detail
+    assert report.steps[1].ok is True
+    assert "no shared .venv" in report.steps[1].detail
 
 
 def test_fail_fast_skips_later_steps_and_preserves_exact_returncode(repo, monkeypatch):
@@ -123,12 +129,18 @@ def test_fail_fast_skips_later_steps_and_preserves_exact_returncode(repo, monkey
 
     report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-    assert [s.name for s in report.steps] == ["venv-check", "pytest", "ruff", "lint-imports"]
-    pytest_step = report.steps[1]
+    assert [s.name for s in report.steps] == [
+        "tidy",
+        "venv-check",
+        "pytest",
+        "ruff",
+        "lint-imports",
+    ]
+    pytest_step = report.steps[2]
     assert pytest_step.ok is False
     assert pytest_step.returncode == 127
-    assert report.steps[2].skipped is True
     assert report.steps[3].skipped is True
+    assert report.steps[4].skipped is True
     assert report.ok is False
     assert report.exit_code == 127
     # ruff/lint-imports were never actually invoked — fail-fast really stops work
@@ -142,7 +154,13 @@ def test_full_gate_success_runs_all_three_steps_in_order(repo, monkeypatch):
 
     report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-    assert [s.name for s in report.steps] == ["venv-check", "pytest", "ruff", "lint-imports"]
+    assert [s.name for s in report.steps] == [
+        "tidy",
+        "venv-check",
+        "pytest",
+        "ruff",
+        "lint-imports",
+    ]
     assert report.ok is True
     assert report.exit_code == 0
     assert len(recorder) == 3
@@ -447,7 +465,7 @@ class TestNodeProjectGate:
         report = qa_gate.run_gate(cwd=node_repo, write_report=False)
 
         assert not report.ok
-        assert "refuse" in report.steps[0].detail
+        assert any("refuse" in s.detail for s in report.steps)
 
 
 # ── #469: Node gate wiring for the Prisma drift/checksum checks ───────────
@@ -743,7 +761,7 @@ def test_memory_log_written_alongside_step_log(repo, monkeypatch):
 
     report = qa_gate.run_gate(cwd=repo, write_report=True)
 
-    pytest_step = report.steps[1]
+    pytest_step = next(s for s in report.steps if s.name == "pytest")
     assert pytest_step.memory_log_path is not None
     assert pytest_step.memory_log_path.exists()
     content = pytest_step.memory_log_path.read_text(encoding="utf-8")
@@ -758,7 +776,7 @@ def test_no_memory_log_when_report_not_written(repo, monkeypatch):
 
     report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-    assert report.steps[1].memory_log_path is None
+    assert next(s for s in report.steps if s.name == "pytest").memory_log_path is None
 
 
 def test_sample_memory_line_never_raises(monkeypatch):
@@ -794,7 +812,7 @@ class TestSilentAbortDetection:
 
         report = qa_gate.run_gate(cwd=repo, write_report=False)
 
-        pytest_step = report.steps[1]
+        pytest_step = next(s for s in report.steps if s.name == "pytest")
         assert pytest_step.ok is False
         assert pytest_step.returncode == 127
         assert "NATIVE ABORT" in pytest_step.detail
@@ -813,7 +831,7 @@ class TestUnknownProjectGate:
         report = qa_gate.run_gate(cwd=root, write_report=False)
 
         assert not report.ok
-        detail = report.steps[0].detail
+        detail = next(s for s in report.steps if s.name == "detect").detail
         assert "refuse" in detail
         assert "pyproject.toml" in detail and "package.json" in detail
 
@@ -1056,8 +1074,9 @@ def test_auto_style_only_diff_runs_no_test_suite(repo, monkeypatch):
     assert report.ok
     assert report.steps[0].name == "auto-tier"
     assert report.steps[0].detail.startswith("style:")
+    assert report.steps[1].name == "tidy"
     assert recorder == []  # no pytest/ruff/lint-imports launched at all
-    assert all(s.skipped for s in report.steps[1:])
+    assert all(s.skipped for s in report.steps[2:])
     assert report.report_path is None
 
 
@@ -1074,7 +1093,7 @@ def test_auto_module_logic_runs_only_the_mapped_tests(repo, monkeypatch):
     report = qa_gate.run_gate(cwd=repo, auto=True)
 
     assert report.steps[0].detail.startswith("targeted:")
-    assert [s.name for s in report.steps] == ["auto-tier", "venv-check", "pytest"]
+    assert [s.name for s in report.steps] == ["auto-tier", "tidy", "venv-check", "pytest"]
     assert recorder[0][0][-1] == "tests/test_widget.py"
     assert report.report_path is None
 
@@ -1092,6 +1111,7 @@ def test_auto_source_without_a_test_widens_to_full(repo, monkeypatch):
     assert report.steps[0].detail.startswith("full:")
     assert [s.name for s in report.steps] == [
         "auto-tier",
+        "tidy",
         "venv-check",
         "pytest",
         "ruff",
