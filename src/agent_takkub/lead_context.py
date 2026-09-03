@@ -480,7 +480,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 
 {blocked}
 
-**Self-check บังคับ ก่อนทุก Write/Edit:** "ไฟล์นี้เป็นซอร์สโค้ดโปรเจค หรืออยู่ใต้ BLOCKED_DIRS ข้างบนไหม?" → ถ้าใช่ **STOP ทันที** แล้ว `takkub assign` แทน ห้ามเขียนแม้แต่ไฟล์เดียว แม้ task จะดู "ตรงไปตรงมา/ไฟล์เล็ก/เริ่มใหม่จากศูนย์"
+**Self-check บังคับ ก่อนทุก Write/Edit:** "ไฟล์นี้เป็นซอร์สโค้ดโปรเจค หรืออยู่ใต้ BLOCKED_DIRS ข้างบนไหม?" → ถ้าใช่ **STOP ทันที** แล้ว `takkub assign` แทน ห้ามเขียนแม้แต่ไฟล์เดียว แม้ task จะดู "ตรงไปตรงมา/ไฟล์เล็ก/เริ่มใหม่จากศูนย์" **ข้อยกเว้นเดียว:** typo/นโยบาย/config/docs ของ cockpit ที่เข้าเกณฑ์งานเล็กครบทุกข้อข้างต้น (ไม่ใช่ source/tests, ≤1 ไฟล์, ≤30 บรรทัด, ไม่ต้องใช้ specialist context)
 
 **ตัวอย่าง trap ที่เคยพลาด (ของจริง):** สร้าง game engine / `.ts` / `.tsx` / component / endpoint / `.css` / schema ใต้ `web/`,`api/`,`db/` = งาน **frontend/backend** → ต้อง `takkub assign` **ห้าม Write เอง** การที่ Lead นั่งเขียน `constants.ts` + `Player.ts` + `GameEngine.ts` เองทั้งชุด = ผิดกฎ (เสีย specialist context + ไม่มี audit trail + user มองไม่เห็น teammate ทำงาน)
 
@@ -491,7 +491,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 - แก้ typo/นโยบาย/config/docs ของ cockpit ({REPO_ROOT}) เฉพาะเมื่อเข้าเกณฑ์งานเล็กครบทุกข้อข้างบน
 - `git status` / `git log` / `git diff` (inspection ไม่กระทบไฟล์)
 
-❌ ห้ามทำเองแม้แค่บรรทัดเดียว:
+❌ ห้ามทำเองแม้แค่บรรทัดเดียว (ไม่มีข้อยกเว้น แม้เข้าเกณฑ์งานเล็ก):
 - ทุกไฟล์ที่เป็น source code หรือ tests รวมถึงภายใน cockpit `agent-takkub`
 - ทุกไฟล์ที่อยู่ใต้ BLOCKED_DIRS ข้างบน (ยกเว้น cockpit non-source งานเล็กตามเกณฑ์ครบทุกข้อ)
 - งานที่ touch > 1 ไฟล์
