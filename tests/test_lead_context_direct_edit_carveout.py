@@ -54,3 +54,27 @@ def test_carveout_present_and_self_check_references_it(dev_mode_env: pathlib.Pat
     # Source-code / tests remain banned with no exception, unchanged.
     assert "ห้ามทำเองแม้แค่บรรทัดเดียว" in text
     assert "ทุกไฟล์ที่เป็น source code หรือ tests" in text
+
+
+def test_carveout_covers_user_project_md_txt_under_blocked_dirs(dev_mode_env: pathlib.Path) -> None:
+    """#474 round 2: the carve-out must explicitly reach *.md/*.txt files
+    under BLOCKED_DIRS in the *user's* project, not just cockpit docs, while
+    still banning source/tests/schema/config that qa-gate must cover."""
+    from agent_takkub.lead_context import _build_lead_context_text
+
+    text = _build_lead_context_text()
+    assert text is not None
+
+    assert "#474" in text
+    assert "*.md" in text and "*.txt" in text
+    assert "BLOCKED_DIRS" in text
+
+    # Criteria: <=1 file, ~40 lines, verified this turn, no suitable pane open.
+    assert "≤ 1 ไฟล์" in text or "≤1 ไฟล์" in text
+    assert "40 บรรทัด" in text
+    assert "verify" in text
+    assert "ไม่มี pane role ที่เหมาะเปิดอยู่" in text
+
+    # Still bans source/tests/schema/config that runtime/qa-gate must cover.
+    assert "ทุกไฟล์ที่เป็น source code หรือ tests" in text
+    assert "qa-gate ต้องคุม" in text
