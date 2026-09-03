@@ -4,6 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **qa-gate ตรวจ Prisma schema↔migration drift บน Node project (#469)** — module ใหม่ `prisma_gate.py`: `prisma migrate diff --from-migrations … --to-schema-datamodel … --exit-code` (exit 2 = schema เปลี่ยนแต่ไม่มี migration → FAIL · exit อื่น = ไม่มี shadow DB/env → skip แบบพิมพ์บอก ไม่ใช่ FAIL เงียบ) + migration.sql ที่มีอยู่แล้วที่ merge-base กับ main แล้วถูกแก้ = FAIL (checksum drift ระเบิดเวลาตอน `migrate deploy` บน VPS) · ตรวจทุก workspace package ที่มี `prisma/schema.prisma` · style-only tier ไม่รัน · smoke-test บน running stack แยกเป็น #475
+- **qa-gate full tier ถือ machine-level lock (#472)** — full gate รันได้ทีละ `TAKKUB_QA_GATE_SLOTS` (default 1) ต่อเครื่อง ตัวอื่นเข้าคิวพิมพ์ "waiting… (queue position N)" ทุก 30s · lock = `DATA_HOME/runtime/locks/qa-gate-full/slot-N` mkdir-atomic (ไม่ใช้ fcntl ใช้ได้ทั้ง Windows/macOS) reclaim เองเมื่อ pid ตายหรือ heartbeat เงียบ >90s · targeted tier ไม่รอคิว แต่ step ที่ fail ด้วย pattern timeout ขณะมี full gate ตัวอื่นรันอยู่ → retry 1 ครั้งหลังคิวว่างพร้อม hint "อาจเป็น contention"
+- **Lead เขียนไฟล์ doc/note ล้วนในโปรเจค user เองได้ (#474, user directive)** — carve-out ใน `docs/lead/role-and-workflow.md` + template `lead_context.py`: `*.md`/`*.txt` ที่ไม่ใช่ source/config/test/schema · ≤1 ไฟล์ ≤~40 บรรทัด · เนื้อหา Lead verify เองแล้วในเทิร์นนั้น · ไม่มี pane role ที่เหมาะเปิดอยู่ — เคสจริง `user-test.md` 25 บรรทัดถูกบังคับ spawn pane เสียหลายหมื่น token
+
+### Fixed (แก้)
+
+- **เปิด tab โปรเจคจากโฟลเดอร์ชื่อมีช่องว่าง crash `ValueError: invalid project: 'Claude Work'` (#467)** — wizard ใช้ `Path.name` ดิบเป็น project key แล้ว `validate_name` ปฏิเสธลึกใน `register_pane` · เพิ่ม `config.slugify_project_name` (lowercase, อักขระไม่ปลอดภัย → `-`, ไม่เหลืออะไร → `project-<hash>`) ใช้ทุกจุดที่ wizard derive ชื่อจากโฟลเดอร์ · ชื่อที่ valid อยู่แล้ว round-trip ไม่เปลี่ยน · ชื่อโฟลเดอร์จริงเก็บเป็น description
+- **watchdog "เงียบ = อาจค้าง" paging Lead ทั้งที่ codex pane ทำงานอยู่จริง (#468)** — ก่อน escalate เช็ค liveness จริง 2 แกน: transcript ของ provider (ผ่าน `token_meter.resolve_pane_session` ครบ 6 provider) mtime < 120s หรือมี child process ที่ไม่ใช่ scaffolding (#288) → alive = log `watchdog_quiet_but_alive` (🟡 ใน `takkub ma`) ไม่ส่งถึง Lead · ไม่ alive = paging แต่แยก wording: claude "อาจค้างจริง" / provider ที่ไม่มี marker "มองไม่เห็น ไม่ใช่ค้าง — เช็ค transcript ก่อนตัดสิน"
+- **done digest "ไฟล์ที่แตะ:0 ยังไม่มีอะไรเปลี่ยน" หลอกกับงาน ops/deploy (#470)** — role devops หรือ note มีสัญญาณ ops (deploy/docker/migrate/vps/ssh/backup/seed) → บรรทัดกลาง "ไฟล์ใน repo ที่แตะ: 0 (งาน ops — side-effect นอก repo)" + สรุป side-effect ที่ detect ได้ · role อื่นยัง ⚠️ เดิม (guard ที่จับ #473 ได้)
+- **qa-gate ใน worktree pane ไม่มี `.env` ของ repo หลัก → real-DB spec fail หลอก (#471)** — หา main checkout จาก `git worktree list --porcelain` แล้ว inject `.env`/`.env.local` (root + package ลึก 2 ชั้น) เข้า env ของ subprocess เท่านั้น ไม่ override key เดิม ไม่ copy ไฟล์ลง worktree พิมพ์แค่จำนวน key · ไม่มี .env เลย → step `env-inject` บอกว่าเป็น env gap ของ worktree ไม่ใช่ diff
+- **message ที่ queue ตอน pane ปิด ถูกส่งให้ pane ใหม่ที่ assign task คนละเรื่อง → pane ตอบของเก่าแล้ว done ทิ้ง task จริง (#473)** — flush หลัง spawn เช็ค `PaneState.task_id` (assign ใหม่ stamp เสมอก่อน spawn, close pop ทิ้ง) → มี task ใหม่ = deliver พร้อม prefix `[stale — ส่งไว้ก่อน task ปัจจุบัน … ห้ามตอบแล้ว done]` (ledger `flushed_stale_after_new_assign`) · `takkub assign` พิมพ์เตือน Lead ทันทีถ้า role นั้นมี message ค้างจากรอบก่อน · replay #276/#277 ไม่แตะ
+
 ## [v1.6.27] - 2026-09-01
 
 ### Added (เพิ่ม)
