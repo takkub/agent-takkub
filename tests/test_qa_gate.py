@@ -450,6 +450,98 @@ class TestNodeProjectGate:
         assert "refuse" in report.steps[0].detail
 
 
+# ── #469: Node gate wiring for the Prisma drift/checksum checks ───────────
+# `prisma_gate.py` itself is unit-tested in `test_prisma_gate.py`; these only
+# prove `_non_python_gate` calls into it at the right time and the result
+# actually fails/passes the overall report.
+
+
+@pytest.fixture
+def node_repo_with_prisma(tmp_path):
+    """Same shape as `node_repo`, plus one already-"applied" migration — on a
+    branch literally named `main` so `check_migration_integrity`'s
+    merge-base lookup is deterministic regardless of the machine's
+    `init.defaultBranch`."""
+    root = tmp_path / "node-prisma-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+    (root / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
+    (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (root / "prisma").mkdir()
+    (root / "prisma" / "schema.prisma").write_text("// v1\n", encoding="utf-8")
+    mig_dir = root / "prisma" / "migrations" / "20260101000000_init"
+    mig_dir.mkdir(parents=True)
+    (mig_dir / "migration.sql").write_text("CREATE TABLE x (id INT);\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    return root
+
+
+class TestNodePrismaGate:
+    def test_no_prisma_project_has_no_prisma_steps_at_all(self, node_repo, monkeypatch) -> None:
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not any(s.name.startswith("prisma-") for s in report.steps)
+
+    def test_schema_drift_fails_the_gate(self, node_repo_with_prisma, monkeypatch) -> None:
+        # rc sequence for non-git calls: prisma-drift=2 (diff detected), then
+        # typecheck/test default to 0 via the empty-list fallback.
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], [2]))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_prisma, write_report=False)
+
+        drift = next(s for s in report.steps if s.name == "prisma-drift")
+        assert drift.ok is False
+        assert drift.skipped is False
+        assert not report.ok
+
+    def test_modified_applied_migration_fails_the_gate(
+        self, node_repo_with_prisma, monkeypatch
+    ) -> None:
+        mig_file = (
+            node_repo_with_prisma
+            / "prisma"
+            / "migrations"
+            / "20260101000000_init"
+            / "migration.sql"
+        )
+        mig_file.write_text("CREATE TABLE x (id INT, extra TEXT);\n", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], [0]))  # prisma-drift passes
+
+        report = qa_gate.run_gate(cwd=node_repo_with_prisma, write_report=False)
+
+        integrity = next(s for s in report.steps if s.name == "prisma-migration-integrity")
+        assert integrity.ok is False
+        assert not report.ok
+
+    def test_clean_prisma_project_passes_with_both_checks_present(
+        self, node_repo_with_prisma, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_prisma, write_report=False)
+
+        assert report.ok
+        assert any(s.name == "prisma-drift" for s in report.steps)
+        assert any(s.name == "prisma-migration-integrity" for s in report.steps)
+
+    def test_style_only_auto_tier_never_runs_prisma_checks(
+        self, node_repo_with_prisma, monkeypatch
+    ) -> None:
+        """#436 auto-tier: a style-only diff (untouched schema/migrations)
+        must not even attempt the prisma checks."""
+        (node_repo_with_prisma / "README.md").write_text("hello\n", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_prisma, auto=True, write_report=False)
+
+        assert not any(s.name.startswith("prisma-") for s in report.steps)
+
+
 # ── #349: PYTHONFAULTHANDLER default, memory sampling, native-abort detail ─
 
 
