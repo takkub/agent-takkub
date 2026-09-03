@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.28] - 2026-09-03
+
 ### Added (เพิ่ม)
 
 - **qa-gate ตรวจ Prisma schema↔migration drift บน Node project (#469)** — module ใหม่ `prisma_gate.py`: `prisma migrate diff --from-migrations … --to-schema-datamodel … --exit-code` (exit 2 = schema เปลี่ยนแต่ไม่มี migration → FAIL · exit อื่น = ไม่มี shadow DB/env → skip แบบพิมพ์บอก ไม่ใช่ FAIL เงียบ) + migration.sql ที่มีอยู่แล้วที่ merge-base กับ main แล้วถูกแก้ = FAIL (checksum drift ระเบิดเวลาตอน `migrate deploy` บน VPS) · ตรวจทุก workspace package ที่มี `prisma/schema.prisma` · style-only tier ไม่รัน · smoke-test บน running stack แยกเป็น #475
