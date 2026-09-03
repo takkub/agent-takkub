@@ -401,6 +401,20 @@ class CliServer(QObject):
         ).hexdigest()
         return (project_ns or "default", role, task_hash, mode)
 
+    def _queued_no_pane_suffix(self, project_ns: str, role: str) -> str:
+        """#479: the async assign ack below replies to the client BEFORE the
+        deferred `orch.assign()` runs — its own `_queued_no_pane_notice`
+        append (see `Orchestrator.assign`) never reaches this socket because
+        the reply is already sent by the time it would fire. Compute the
+        same notice here instead, synchronously: it only reads already-queued
+        role messages off disk, so it doesn't need the pane to actually spawn
+        first. `getattr` degrades to no notice for a fake/older orchestrator
+        that doesn't have the method (see tests/test_cli_server.py)."""
+        notice_fn = getattr(self._orch, "_queued_no_pane_notice", None)
+        if not callable(notice_fn):
+            return ""
+        return notice_fn(project_ns, role) or ""
+
     def _on_ready_read(self, sock: QTcpSocket) -> None:
         # Reject connections whose buffered data exceeds the frame cap without a
         # terminating newline — canReadLine() will be False while bytesAvailable()
@@ -813,6 +827,9 @@ class CliServer(QObject):
                     ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
                     if cmd == "assign" and auto_mode_note:
                         ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
+                    queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)
+                    if queued_notice:
+                        ack_msg = f"{ack_msg}\n{queued_notice}"
                     self._reply(sock, ok=True, msg=ack_msg)
                 return
             elif cmd == "send":
