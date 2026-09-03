@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 324,
+  "module_count": 325,
   "modules": [
     {
       "module": "agent_takkub",
@@ -96,13 +96,14 @@
         "agent_takkub.skill_scan",
         "agent_takkub.smoke_gate",
         "agent_takkub.status_header",
+        "agent_takkub.tidy_gate",
         "agent_takkub.update_helper",
         "agent_takkub.update_panel",
         "agent_takkub.update_worker",
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 42,
+      "fan_in": 43,
       "fan_out": 0
     },
     {
@@ -3649,13 +3650,14 @@
         "agent_takkub.config",
         "agent_takkub.prisma_gate",
         "agent_takkub.smoke_gate",
+        "agent_takkub.tidy_gate",
         "agent_takkub.verify"
       ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.ram_report",
@@ -4778,6 +4780,17 @@
       ],
       "imported_by": [
         "agent_takkub.agent_pane"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.tidy_gate",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.qa_gate"
       ],
       "fan_in": 1,
       "fan_out": 1
