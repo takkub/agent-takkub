@@ -1290,6 +1290,11 @@ class LeadInboxMixin:
         # crosses BOOT_STALL_GRACE_SEC.
         boot_stall_elapsed = [0]
         boot_stall_warned = [False]
+        # #276 round 3: logged once, the first poll that overrides a
+        # `_still_booting` verdict because of the codex 0.152.0 stuck-`model:`
+        # -field quirk (see `_pane_ready_now`/`shows_stuck_model_field_marker`
+        # below) rather than a genuine boot stall.
+        model_field_stuck_logged = [False]
         # #387: gates the ONE bounded re-probe at the boot-marker ceiling
         # (see the ceiling check below) — set the instant that re-probe is
         # used so a machine that stays stalled indefinitely still fails out
@@ -1751,6 +1756,50 @@ class LeadInboxMixin:
                 _provider_ap = getattr(pane.model, "provider_name", None) or "claude"
             except Exception:
                 _provider_ap = "claude"
+            # (#276 round 3, 2026-09-02) codex-cli 0.152.0's banner box can
+            # leave its `model:` field stuck at "loading" FOREVER while
+            # `directory:`/`permissions:` resolve normally and the composer
+            # underneath is already genuinely interactive — live-captured
+            # across 3 independent panes (reviewer/codex/critic,
+            # saas_admin_amb), none of which ever recovered before the
+            # ceiling gave up. `_still_booting`'s wide window (#284)
+            # correctly reads `model: loading` as a boot marker — right for
+            # the genuine #380 fresh-boot race, where `directory:` ALSO
+            # still reads "loading" — but this quirk keeps `_still_booting`
+            # true forever for a pane that is plainly answering input, and
+            # the ceiling below would fail it out loud.
+            # `shows_stuck_model_field_marker` only fires once `directory:`
+            # has ALREADY resolved, so it cannot fire during the #380 race
+            # this override must not reopen. Gated on the pane's OWN ready
+            # verdict (`_pane_ready_now`, tight window — the composer really
+            # is accepting input) AND the same settle window as the MCP-
+            # splash paste above (`_splash_paste_after_ms`, codex-only,
+            # 10s — 0 everywhere else, so this is a pure no-op for every
+            # other provider) so it never overrides a screen that has not
+            # had a moment to genuinely settle.
+            if _still_booting and _pane_ready_now and _splash_paste_after_ms > 0:
+                try:
+                    _model_field_stuck = pane.session.shows_stuck_model_field_marker(
+                        rows=_BOOT_MARKER_TAIL_ROWS
+                    )
+                    if not isinstance(_model_field_stuck, bool):
+                        # Defensive: same unconfigured-mock guard as
+                        # `_still_booting` above.
+                        _model_field_stuck = False
+                except Exception:
+                    _model_field_stuck = False
+                if _model_field_stuck:
+                    _stuck_field_elapsed_ms = elapsed[0] - (elapsed_at_session_alive[0] or 0)
+                    if _stuck_field_elapsed_ms >= _splash_paste_after_ms:
+                        if not model_field_stuck_logged[0]:
+                            model_field_stuck_logged[0] = True
+                            _log_event(
+                                "ready_marker_stuck_field_override",
+                                project=self._resolve_project(project),
+                                role=role_name,
+                                elapsed_sec=round(_stuck_field_elapsed_ms / 1000, 1),
+                            )
+                        _still_booting = False
             # (#376) Ungated — unlike `account_pending_reason()` below, which
             # is deliberately gated on `AUTH_TRANSIENT_GRACE_SEC` +
             # `_AUTH_FAILURE_CONFIRM_POLLS` to answer "has this been stuck
