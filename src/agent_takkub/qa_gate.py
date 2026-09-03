@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -217,6 +218,153 @@ def shared_venv_bin(cwd: Path | None = None) -> Path | None:
         if candidate.is_dir():
             return candidate
     return None
+
+
+# ── #471: a linked worktree's .env is gitignored, so it never checks out —
+# a spec that needs a real DATABASE_URL fails there every time even when the
+# diff never touched apps/api. `git worktree list` always lists the main
+# working tree first (git's own documented ordering), so that's the one
+# reliable way to find "the checkout that actually has the gitignored env
+# files" without hardcoding a path.
+_ENV_FILE_NAMES = (".env", ".env.local")
+# Skip directories that could contain a stray/irrelevant .env two levels
+# down (vendored deps, build output) — matched against any path segment
+# between the main checkout root and the file itself.
+_ENV_SCAN_SKIP_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".turbo",
+        "coverage",
+        ".cache",
+        "out",
+    }
+)
+
+
+def _find_main_checkout(cwd: Path) -> Path | None:
+    """The repo's main (non-linked) working tree, or `None` when `git
+    worktree list` fails (not a worktree setup, git missing, etc.)."""
+    try:
+        out = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            cwd=cwd,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except Exception:
+        return None
+    for line in out.stdout.splitlines():
+        if line.startswith("worktree "):
+            return Path(line[len("worktree ") :].strip())
+    return None
+
+
+def _find_env_files(root: Path) -> list[Path]:
+    """`.env`/`.env.local` at *root* plus up to two levels down (workspace
+    packages: `apps/api/.env`, `packages/x/.env`) — never deeper, and never
+    inside a vendored/build directory (`_ENV_SCAN_SKIP_DIRS`)."""
+    found: list[Path] = []
+    for name in _ENV_FILE_NAMES:
+        p = root / name
+        if p.is_file():
+            found.append(p)
+    for depth in (1, 2):
+        glob_prefix = "/".join(["*"] * depth)
+        for name in _ENV_FILE_NAMES:
+            for p in root.glob(f"{glob_prefix}/{name}"):
+                parts = p.relative_to(root).parts[:-1]
+                if any(part in _ENV_SCAN_SKIP_DIRS for part in parts):
+                    continue
+                found.append(p)
+    return found
+
+
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    """Minimal `KEY=value` parser — no interpolation, no multiline values;
+    enough for the plain `.env` files this project and typical Node
+    monorepos actually write. Never raises: a malformed line is skipped, not
+    a reason to fail the whole gate."""
+    result: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return result
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
+def _inject_worktree_env(wroot: Path, env: dict) -> StepResult | None:
+    """#471: when *wroot* is a linked worktree (not the main checkout),
+    load `.env`/`.env.local` from the main checkout into *env* in place —
+    never overriding a key *env* already has (an explicit override, or
+    something the worktree's own gitignore-exempt env already set, always
+    wins). Returns `None` when this isn't a worktree at all (nothing to do,
+    stay silent) — otherwise a `StepResult` reporting how many keys were
+    injected, or that the env gap couldn't be closed (so a FAIL downstream
+    reads as "not your diff" instead of a silent mystery). Never logs a
+    value, only counts and file names.
+    """
+    main_root = _find_main_checkout(wroot)
+    if main_root is None:
+        return None
+    try:
+        same = main_root.resolve() == wroot.resolve()
+    except OSError:
+        same = str(main_root) == str(wroot)
+    if same:
+        return None
+    env_files = _find_env_files(main_root)
+    if not env_files:
+        return StepResult(
+            "env-inject",
+            True,
+            False,
+            0.0,
+            f"no .env/.env.local found in main checkout ({main_root}) to inject into this "
+            "worktree — an env-dependent FAIL below is likely a worktree env gap (#471), not "
+            f"this diff. Verify separately from the main checkout: cd {main_root} && "
+            "<your normal test command>",
+        )
+    injected = 0
+    for f in env_files:
+        for key, value in _parse_dotenv(f).items():
+            if key in env:
+                continue
+            env[key] = value
+            injected += 1
+    return StepResult(
+        "env-inject",
+        True,
+        False,
+        0.0,
+        f"injected {injected} env key(s) from main checkout {main_root} "
+        f"({len(env_files)} file(s)) — #471",
+    )
 
 
 def _resolve_tool(bin_dir: Path | None, name: str) -> str | None:
@@ -455,6 +603,284 @@ def _log_stem(step_name: str) -> str:
     """
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", step_name).strip("-.")
     return stem or "step"
+
+
+# ── #472: machine-level lock/queue for the full tier ────────────────────────
+#
+# Four panes running the full gate at once starved the CPU hard enough that a
+# genuinely-passing test (a 5s timeout in client-boundary.test.ts) failed on
+# nothing but contention — and each pane's own retry made the pile-up worse.
+# The full tier now takes a machine-wide lock (default 1 slot — override with
+# `TAKKUB_QA_GATE_SLOTS`) so only N full gates ever run at once on this box;
+# everyone else queues with a periodic status line instead of free-for-all.
+# The targeted tier stays parallel by design (team policy: it's meant to run
+# mid-flight, often from several panes at once) but still gets a
+# contention-aware retry (see `_run_step_contended`) for the specific failure
+# mode this issue names: a real full gate running elsewhere caused a bogus
+# timeout in a *targeted* run.
+#
+# No `fcntl` on Windows, so the primitive is `Path.mkdir()` — atomic on both
+# platforms (raises `FileExistsError` if another process already created it,
+# never a torn/partial state) — rather than a third-party lock package this
+# project doesn't already depend on.
+
+_LOCK_HEARTBEAT_INTERVAL_S = 30.0
+# 3x the heartbeat cadence: long enough that a live, merely-slow gate never
+# gets reclaimed out from under itself, short enough that a genuinely dead
+# process's lock doesn't sit stale for the rest of the day.
+_LOCK_STALE_AFTER_S = _LOCK_HEARTBEAT_INTERVAL_S * 3
+_QUEUE_ANNOUNCE_INTERVAL_S = 30.0
+_TIMEOUT_HINT_RE = re.compile(r"\btimeout\b|\btimed out\b|\btime[- ]?out\b", re.IGNORECASE)
+
+
+def _qa_gate_lock_dir() -> Path:
+    """`DATA_HOME/runtime/locks/qa-gate-full` — runtime state, never inside
+    a repo (this lock is machine-wide, not per-project: two different
+    projects' full gates still contend for the same CPU)."""
+    return _runtime_dir() / "locks" / "qa-gate-full"
+
+
+def _full_gate_slots() -> int:
+    try:
+        n = int(os.environ.get("TAKKUB_QA_GATE_SLOTS", "1"))
+        if n < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        n = 1
+    return n
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:
+        # Can't tell — assume alive so a healthy lock is never reclaimed on
+        # a psutil hiccup; staleness still falls back to heartbeat age below.
+        return True
+
+
+def _lock_slot_is_stale(slot_dir: Path) -> bool:
+    """A slot is stale (safe to reclaim) when its holder process is
+    confirmed dead, OR its heartbeat has gone silent for
+    `_LOCK_STALE_AFTER_S` (a hung/killed-without-cleanup process)."""
+    try:
+        pid = int((slot_dir / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None and not _pid_alive(pid):
+        return True
+    try:
+        heartbeat = float((slot_dir / "heartbeat").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        try:
+            heartbeat = slot_dir.stat().st_mtime
+        except OSError:
+            return True
+    return (time.time() - heartbeat) > _LOCK_STALE_AFTER_S
+
+
+@dataclass
+class _LockHandle:
+    path: Path
+    slot: int
+    waited_s: float = 0.0
+    _stop: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _thread: threading.Thread | None = field(default=None, repr=False, compare=False)
+
+    def _write_heartbeat(self) -> None:
+        try:
+            (self.path / "heartbeat").write_text(str(time.time()), encoding="utf-8")
+        except OSError:
+            pass
+
+    def start_heartbeat(self) -> None:
+        def loop() -> None:
+            while not self._stop.wait(_LOCK_HEARTBEAT_INTERVAL_S):
+                self._write_heartbeat()
+
+        self._thread = threading.Thread(target=loop, name="qa-gate-lock-heartbeat", daemon=True)
+        self._thread.start()
+
+    def release(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        shutil.rmtree(self.path, ignore_errors=True)
+
+
+def _try_acquire_slot(base: Path, slot: int) -> _LockHandle | None:
+    slot_dir = base / f"slot-{slot}"
+    try:
+        slot_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        if not _lock_slot_is_stale(slot_dir):
+            return None
+        # Reclaim: the holder is confirmed dead or silent past the stale
+        # window. Remove and retry once — if another process wins the race
+        # to recreate it first, this attempt simply loses the slot this
+        # round (caller's polling loop tries again).
+        shutil.rmtree(slot_dir, ignore_errors=True)
+        try:
+            slot_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            return None
+    (slot_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    handle = _LockHandle(slot_dir, slot)
+    handle._write_heartbeat()
+    handle.start_heartbeat()
+    return handle
+
+
+def _active_full_gate_count(base: Path, exclude: _LockHandle | None = None) -> int:
+    """How many full-gate slots are currently held by a live process, not
+    counting *exclude* (this process's own slot, if it holds one) — the
+    signal a targeted run checks to explain a timeout as contention."""
+    count = 0
+    for slot in range(_full_gate_slots()):
+        slot_dir = base / f"slot-{slot}"
+        if exclude is not None and slot_dir == exclude.path:
+            continue
+        if slot_dir.is_dir() and not _lock_slot_is_stale(slot_dir):
+            count += 1
+    return count
+
+
+def _register_waiter(base: Path) -> Path:
+    waiters_dir = base / "waiters"
+    waiters_dir.mkdir(parents=True, exist_ok=True)
+    ticket = waiters_dir / f"{time.time_ns()}-{os.getpid()}"
+    ticket.write_text(str(os.getpid()), encoding="utf-8")
+    return ticket
+
+
+def _queue_position(base: Path, ticket: Path) -> int:
+    """1-based position of *ticket* among still-live waiters, oldest first —
+    dead waiters (pid gone, e.g. a Ctrl-C'd pane) are pruned as they're seen
+    rather than counted forever."""
+    waiters_dir = base / "waiters"
+    try:
+        entries = sorted(waiters_dir.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return 1
+    live: list[Path] = []
+    for entry in entries:
+        try:
+            pid = int(entry.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if not _pid_alive(pid):
+            entry.unlink(missing_ok=True)
+            continue
+        live.append(entry)
+    try:
+        return live.index(ticket) + 1
+    except ValueError:
+        return 1
+
+
+def acquire_full_gate_lock(
+    base: Path,
+    *,
+    label: str = "",
+    poll_interval: float = 2.0,
+    print_fn=print,
+) -> _LockHandle:
+    """Block until a full-gate slot is free, printing queue status roughly
+    every `_QUEUE_ANNOUNCE_INTERVAL_S` while waiting. Never times out — a
+    caller that wants a bound should wrap this in its own watchdog; queuing
+    forever is the correct behavior for "run the full gate exactly once,
+    whenever the machine has room" (#472)."""
+    base.mkdir(parents=True, exist_ok=True)
+    slots = _full_gate_slots()
+
+    def _try_any() -> _LockHandle | None:
+        for slot in range(slots):
+            handle = _try_acquire_slot(base, slot)
+            if handle is not None:
+                return handle
+        return None
+
+    start = time.monotonic()
+    handle = _try_any()
+    if handle is not None:
+        return handle
+
+    ticket = _register_waiter(base)
+    try:
+        last_announce = 0.0
+        while handle is None:
+            time.sleep(poll_interval)
+            handle = _try_any()
+            elapsed = time.monotonic() - start
+            if handle is None and elapsed - last_announce >= _QUEUE_ANNOUNCE_INTERVAL_S:
+                position = _queue_position(base, ticket)
+                who = f" of {label}" if label else ""
+                print_fn(
+                    f"qa-gate: waiting for the full gate{who} to get a free slot "
+                    f"(queue position {position}, {int(elapsed)}s so far) — #472"
+                )
+                last_announce = elapsed
+    finally:
+        ticket.unlink(missing_ok=True)
+    handle.waited_s = time.monotonic() - start
+    return handle
+
+
+def _lock_step(handle: _LockHandle) -> StepResult:
+    detail = f"acquired full-gate slot {handle.slot}"
+    if handle.waited_s > 1:
+        detail += f" after waiting {handle.waited_s:.0f}s in queue (#472)"
+    return StepResult("full-gate-lock", True, False, handle.waited_s, detail)
+
+
+def _wait_for_full_gate_clear(
+    base: Path, exclude: _LockHandle | None = None, *, timeout: float = 180.0, poll: float = 3.0
+) -> None:
+    start = time.monotonic()
+    while _active_full_gate_count(base, exclude=exclude) > 0:
+        if time.monotonic() - start > timeout:
+            return
+        time.sleep(poll)
+
+
+def _looks_like_timeout_failure(detail: str) -> bool:
+    return bool(_TIMEOUT_HINT_RE.search(detail))
+
+
+def _run_step_contended(
+    name: str,
+    cmd: list[str],
+    env: dict,
+    cwd: Path,
+    log_dir: Path | None,
+    *,
+    lock_base: Path,
+    exclude: _LockHandle | None = None,
+    print_fn=print,
+) -> StepResult:
+    """Like `_run_step`, but a FAIL that looks like a bare timeout while
+    another full gate is genuinely running elsewhere on this machine is
+    retried once, after waiting for that gate to clear (#472) — the targeted
+    tier stays parallel by design, so this is its safety net against the
+    exact flake the issue reports (a real 5s-timeout test failing only under
+    contention, never alone)."""
+    step = _run_step(name, cmd, env, cwd, log_dir)
+    if step.ok or step.skipped:
+        return step
+    active = _active_full_gate_count(lock_base, exclude=exclude)
+    if active <= 0 or not _looks_like_timeout_failure(step.detail):
+        return step
+    print_fn(
+        f"qa-gate: {name} failed on what looks like a timeout while {active} other full "
+        "gate(s) were running on this machine — likely CPU contention (#472), not a real "
+        f"regression. Waiting for the queue to clear, then retrying {name} once."
+    )
+    _wait_for_full_gate_clear(lock_base, exclude=exclude)
+    retry = _run_step(name, cmd, env, cwd, log_dir)
+    retry.detail = f"[retry after contention, #472] {retry.detail}"
+    return retry
 
 
 def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | None) -> StepResult:
@@ -818,6 +1244,8 @@ def _non_python_gate(
     env: dict,
     log_dir: Path | None,
     only_names: set[str] | None = None,
+    lock_base: Path | None = None,
+    lock_exclude: _LockHandle | None = None,
 ) -> GateReport:
     """Gate a tree that has no Python in it (#329).
 
@@ -908,7 +1336,18 @@ def _non_python_gate(
         )
 
     for index, check in enumerate(checks):
-        step = _run_step(check.name, check.cmd, env, check.cwd or root, log_dir)
+        if lock_base is not None:
+            step = _run_step_contended(
+                check.name,
+                check.cmd,
+                env,
+                check.cwd or root,
+                log_dir,
+                lock_base=lock_base,
+                exclude=lock_exclude,
+            )
+        else:
+            step = _run_step(check.name, check.cmd, env, check.cwd or root, log_dir)
         report.steps.append(step)
         if not step.ok:
             for rest in checks[index + 1 :]:
@@ -984,6 +1423,13 @@ def run_gate(
     if tier is not None:
         report.steps.append(_tier_step(tier))
 
+    # #471: worktree checkouts don't carry gitignored .env files — close that
+    # gap (or say plainly that it's open) before anything that might need
+    # them runs.
+    env_step = _inject_worktree_env(wroot, env)
+    if env_step is not None:
+        report.steps.append(env_step)
+
     def finish() -> GateReport:
         if write_report:
             report.report_path = _maybe_write_report(wroot, report)
@@ -993,90 +1439,133 @@ def run_gate(
     if write_report:
         log_dir = _runtime_dir() / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
 
-    if kind != "python":
-        _non_python_gate(kind, wroot, targeted, report, env, log_dir, only_names=node_only)
-        return finish()
+    # #472: only a full run contends for CPU hard enough to need the
+    # machine-wide lock — `--targeted`/auto-targeted stays parallel by
+    # design, and so does a style-only Node diff (`node_only` — a plain
+    # typecheck, not the test suite). Both still get `lock_base` passed
+    # through so a bogus timeout can be told apart from a real one (see
+    # `_run_step_contended`).
+    lock_base = _qa_gate_lock_dir()
+    lock_handle: _LockHandle | None = None
+    if targeted is None and node_only is None:
+        lock_handle = acquire_full_gate_lock(lock_base, label=str(wroot.name))
+        if lock_handle.waited_s > 1:
+            # Only surface a row when there was actually something to queue
+            # behind — an instant, uncontended acquire (the common case)
+            # would just be noise in a table meant to explain what happened.
+            report.steps.append(_lock_step(lock_handle))
+    try:
+        if kind != "python":
+            _non_python_gate(
+                kind,
+                wroot,
+                targeted,
+                report,
+                env,
+                log_dir,
+                only_names=node_only,
+                lock_base=lock_base,
+                lock_exclude=lock_handle,
+            )
+            return finish()
 
-    if exec_prefix is not None:
-        vc = StepResult(
-            "venv-check",
-            True,
-            False,
-            0.0,
-            f"--exec {' '.join(exec_prefix)!r} — local venv resolution and ENV_GAP "
-            "detection both skipped (#401); the exec target owns its own toolchain",
-        )
-    else:
-        vc = _venv_check(bin_dir)
-    report.steps.append(vc)
-    if not vc.ok:
-        report.steps.append(_skip("pytest", "venv-check failed"))
-        report.steps.append(_skip("ruff", "venv-check failed"))
-        report.steps.append(_skip("lint-imports", "venv-check failed"))
-        return finish()
-
-    py = _resolve_tool(bin_dir, "python") or sys.executable
-
-    # #401: only the LOCAL venv path ever produces an ENV_GAP — --exec trusts
-    # its target to have everything it needs (a missing tool there is a real
-    # subprocess failure, surfaced normally).
-    pytest_missing = (
-        exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "pytest") is None
-    )
-    if pytest_missing:
-        fallback_cmd = _unittest_discover_cmd(py, wroot)
-        if fallback_cmd is None:
-            pytest_step = _env_gap_step(
-                "pytest",
-                extra=" (no tests/test_*.py found for a `python -m unittest discover` fallback either)",
+        if exec_prefix is not None:
+            vc = StepResult(
+                "venv-check",
+                True,
+                False,
+                0.0,
+                f"--exec {' '.join(exec_prefix)!r} — local venv resolution and ENV_GAP "
+                "detection both skipped (#401); the exec target owns its own toolchain",
             )
         else:
-            pytest_step = _run_step("pytest", fallback_cmd, env, wroot, log_dir)
-            note = "[unittest discover fallback — pytest not installed, #401]"
-            if targeted:
-                note += " (unnarrowed — ran the whole tests/ tree, not just --targeted paths)"
-            pytest_step.detail = f"{note} {pytest_step.detail}"
-    else:
-        pytest_step = _run_step(
-            "pytest", _pytest_cmd(bin_dir, py, targeted, exec_prefix), env, wroot, log_dir
+            vc = _venv_check(bin_dir)
+        report.steps.append(vc)
+        if not vc.ok:
+            report.steps.append(_skip("pytest", "venv-check failed"))
+            report.steps.append(_skip("ruff", "venv-check failed"))
+            report.steps.append(_skip("lint-imports", "venv-check failed"))
+            return finish()
+
+        py = _resolve_tool(bin_dir, "python") or sys.executable
+
+        # #401: only the LOCAL venv path ever produces an ENV_GAP — --exec
+        # trusts its target to have everything it needs (a missing tool
+        # there is a real subprocess failure, surfaced normally).
+        pytest_missing = (
+            exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "pytest") is None
         )
-    report.steps.append(pytest_step)
-    if not pytest_step.ok:
-        report.steps.append(_skip("ruff", "pytest failed — fail-fast"))
-        report.steps.append(_skip("lint-imports", "pytest failed — fail-fast"))
-        return finish()
+        if pytest_missing:
+            fallback_cmd = _unittest_discover_cmd(py, wroot)
+            if fallback_cmd is None:
+                pytest_step = _env_gap_step(
+                    "pytest",
+                    extra=" (no tests/test_*.py found for a `python -m unittest discover` fallback either)",
+                )
+            else:
+                pytest_step = _run_step_contended(
+                    "pytest",
+                    fallback_cmd,
+                    env,
+                    wroot,
+                    log_dir,
+                    lock_base=lock_base,
+                    exclude=lock_handle,
+                )
+                note = "[unittest discover fallback — pytest not installed, #401]"
+                if targeted:
+                    note += " (unnarrowed — ran the whole tests/ tree, not just --targeted paths)"
+                pytest_step.detail = f"{note} {pytest_step.detail}"
+        else:
+            pytest_step = _run_step_contended(
+                "pytest",
+                _pytest_cmd(bin_dir, py, targeted, exec_prefix),
+                env,
+                wroot,
+                log_dir,
+                lock_base=lock_base,
+                exclude=lock_handle,
+            )
+        report.steps.append(pytest_step)
+        if not pytest_step.ok:
+            report.steps.append(_skip("ruff", "pytest failed — fail-fast"))
+            report.steps.append(_skip("lint-imports", "pytest failed — fail-fast"))
+            return finish()
 
-    if targeted:
-        # Mid-flight tier stops here by design — ruff/lint-imports are a
-        # full-gate concern (once per wave), not a per-subtask one.
-        return finish()
+        if targeted:
+            # Mid-flight tier stops here by design — ruff/lint-imports are a
+            # full-gate concern (once per wave), not a per-subtask one.
+            return finish()
 
-    ruff_missing = (
-        exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "ruff") is None
-    )
-    if ruff_missing:
-        ruff_step = _env_gap_step("ruff")
-    else:
-        ruff_step = _run_step("ruff", _ruff_cmd(bin_dir, py, exec_prefix), env, wroot, log_dir)
-    report.steps.append(ruff_step)
-    if not ruff_step.ok:
-        report.steps.append(_skip("lint-imports", "ruff failed — fail-fast"))
-        return finish()
-
-    li_missing = (
-        exec_prefix is None
-        and bin_dir is not None
-        and _resolve_tool(bin_dir, "lint-imports") is None
-    )
-    if li_missing:
-        li_step = _env_gap_step("lint-imports")
-    else:
-        li_step = _run_step(
-            "lint-imports", _lint_imports_cmd(bin_dir, exec_prefix), env, wroot, log_dir
+        ruff_missing = (
+            exec_prefix is None and bin_dir is not None and _resolve_tool(bin_dir, "ruff") is None
         )
-    report.steps.append(li_step)
+        if ruff_missing:
+            ruff_step = _env_gap_step("ruff")
+        else:
+            ruff_step = _run_step("ruff", _ruff_cmd(bin_dir, py, exec_prefix), env, wroot, log_dir)
+        report.steps.append(ruff_step)
+        if not ruff_step.ok:
+            report.steps.append(_skip("lint-imports", "ruff failed — fail-fast"))
+            return finish()
 
-    return finish()
+        li_missing = (
+            exec_prefix is None
+            and bin_dir is not None
+            and _resolve_tool(bin_dir, "lint-imports") is None
+        )
+        if li_missing:
+            li_step = _env_gap_step("lint-imports")
+        else:
+            li_step = _run_step(
+                "lint-imports", _lint_imports_cmd(bin_dir, exec_prefix), env, wroot, log_dir
+            )
+        report.steps.append(li_step)
+
+        return finish()
+    finally:
+        if lock_handle is not None:
+            lock_handle.release()
 
 
 def _step_result_label(s: StepResult) -> str:
