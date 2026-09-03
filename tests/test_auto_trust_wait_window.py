@@ -17,7 +17,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import Orchestrator, _exit_key
 
 
 @pytest.fixture(scope="module")
@@ -376,3 +376,112 @@ class TestAutoTrustCursorOnNo:
         _drive_timer_queue(calls)
 
         assert [c.args[0] for c in pane.session.write.call_args_list] == ["\r"]
+
+
+class TestTrustPromptLateClear:
+    """#330 item 2: once `_auto_trust` gives up, something must keep watching
+    for the modal to clear later and resume the task that never got pasted —
+    otherwise the pane sits forever with the Lead's last word being "never
+    received a task", even after it reaches a genuinely idle ready prompt."""
+
+    SAMPLE_TASK = "[ROLE: backend] implement /auth/logout\n\ntakkub done when done"
+
+    def _still_stuck_pane(self) -> MagicMock:
+        p = MagicMock()
+        p.session = MagicMock()
+        p.session.is_alive = True
+        p.session.is_at_ready_prompt.return_value = False
+        p.session.is_at_trust_prompt.return_value = True
+        return p
+
+    def test_never_started_for_lead(self, orch, monkeypatch) -> None:
+        orch._panes_by_project["P"] = {"lead": self._still_stuck_pane()}
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        orch._watch_for_late_trust_clear("lead", project="P")
+
+        assert calls == []
+
+    def test_late_clear_resumes_the_cached_task(self, orch, monkeypatch) -> None:
+        pane = MagicMock()
+        pane.session = MagicMock()
+        pane.session.is_alive = True
+        polled = {"n": 0}
+
+        def _ready() -> bool:
+            polled["n"] += 1
+            return polled["n"] >= 3  # clears on the 3rd late-clear poll
+
+        pane.session.is_at_ready_prompt.side_effect = _ready
+        pane.session.is_at_trust_prompt.return_value = False
+        orch._panes_by_project["P"] = {"frontend": pane}
+        orch._ps(_exit_key("P", "frontend")).last_assigned_task = self.SAMPLE_TASK
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        with (
+            patch.object(orch, "_notify_lead") as mock_notify,
+            patch.object(orch, "_send_when_ready") as mock_send,
+            patch("agent_takkub.spawn_engine._log_event"),
+        ):
+            orch._watch_for_late_trust_clear("frontend", project="P")
+            _drive_timer_queue(calls)
+
+        mock_send.assert_called_once_with("frontend", self.SAMPLE_TASK, project="P")
+        assert mock_notify.called
+
+    def test_gives_up_silently_when_it_never_clears(self, orch, monkeypatch) -> None:
+        pane = self._still_stuck_pane()
+        orch._panes_by_project["P"] = {"frontend": pane}
+        orch._ps(_exit_key("P", "frontend")).last_assigned_task = self.SAMPLE_TASK
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        with (
+            patch.object(orch, "_notify_lead") as mock_notify,
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            orch._watch_for_late_trust_clear("frontend", project="P", max_ms=9_000)
+            ticks = _drive_timer_queue(calls)
+
+        assert ticks == 3  # 9_000 / 3_000
+        mock_send.assert_not_called()
+        mock_notify.assert_not_called()
+
+    def test_stops_watching_once_the_pane_is_replaced(self, orch, monkeypatch) -> None:
+        """A close()+respawn (or a fresh assign) replaces the AgentPane
+        object entirely — a stale closure must not resume delivery against
+        whatever now occupies that role slot."""
+        original = self._still_stuck_pane()
+        orch._panes_by_project["P"] = {"frontend": original}
+        orch._ps(_exit_key("P", "frontend")).last_assigned_task = self.SAMPLE_TASK
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", staticmethod(lambda ms, fn: calls.append((ms, fn)))
+        )
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._watch_for_late_trust_clear("frontend", project="P")
+            # Swap in a fresh pane before the first scheduled tick runs.
+            orch._panes_by_project["P"]["frontend"] = self._still_stuck_pane()
+            _drive_timer_queue(calls)
+
+        mock_send.assert_not_called()
+
+    def test_resume_is_a_noop_without_a_cached_task(self, orch) -> None:
+        orch._panes_by_project["P"] = {"frontend": MagicMock()}
+
+        with (
+            patch.object(orch, "_send_when_ready") as mock_send,
+            patch("agent_takkub.spawn_engine._log_event"),
+        ):
+            orch._resume_blocked_delivery("frontend", "P")
+
+        mock_send.assert_not_called()
