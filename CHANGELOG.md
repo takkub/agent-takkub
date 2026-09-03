@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.30] - 2026-09-03
+
 ### Fixed (แก้)
 
 - **V2 authority: routing ต่อโปรเจคเสีย inheritance ตอน flag ON (#480, บล็อก #362)** — `save_providers`/migration ladder เขียน entry `{}` ใน v2 routing ให้**ทุก**โปรเจคที่รู้จัก ไม่เช็คว่ามีไฟล์ per-project V1 จริงไหม → "ไม่มีไฟล์ (ต้อง inherit global)" ถูกยุบเป็น "override ว่าง" — เจอจาก parity check บน dev DATA จริง: 27 โปรเจคได้ routing ว่างตอน `TAKKUB_V2_AUTHORITY=1` · แก้ทั้ง dual-write และ `RoleAgentMigrationStep` ให้ใส่ entry เฉพาะโปรเจคที่มีไฟล์จริง (ไฟล์ว่างจริงยังคง `{}` ตามเจตนา V1) · `migrate apply` รอบถัดไปล้าง entry ปลอมเองเพราะเป็น full-overwrite · หลังแก้ parity dev = IDENTICAL 320 keys (prod IDENTICAL อยู่แล้ว 259 keys)
