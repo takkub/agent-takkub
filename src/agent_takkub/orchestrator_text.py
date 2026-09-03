@@ -982,6 +982,56 @@ def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
     return project_root is not None and (target == project_root or project_root in target.parents)
 
 
+def _resolve_pane_pretrust_root(cwd: str, project: str) -> pathlib.Path | None:
+    """The narrowest project-registered root that *cwd* resolves under, for
+    pre-trusting a claude-backed pane's spawn cwd (#476 — the generalization
+    of #444 to plain ``assign --cwd``, not just ``--isolation worktree``).
+
+    Only ever returns a root `_cwd_within_project` would already have
+    accepted for *some* role of *project* — one of `_allowed_project_roots`
+    or their common `_project_root_dir` — never the raw *cwd* itself, so a
+    caller writing this into Claude Code's ``.claude.json`` (see
+    `worktree_manager.pre_trust_pane_cwd`) never trusts a path just because a
+    role happened to be pointed at it. Returns None when *cwd* is not under
+    anything registered, or when it falls under this project's managed
+    worktree root — that case is already covered by the wider shared
+    `worktree_manager.pre_trust_worktrees_root`, and an extra narrower write
+    here would only be redundant.
+
+    "Narrowest" (not automatically the widest `_project_root_dir`) matters
+    for a monorepo-style project with several disjoint registered paths —
+    trusting the specific one *cwd* actually falls under is the smaller,
+    more defensible scope."""
+    try:
+        target = pathlib.Path(cwd).resolve()
+    except OSError:
+        return None
+    try:
+        from .worktree_manager import worktree_root
+
+        wt_root = worktree_root(project)
+        if target == wt_root or wt_root in target.parents:
+            return None
+    except Exception:
+        pass
+
+    candidates = list(_allowed_project_roots(project))
+    proot = _project_root_dir(project)
+    if proot is not None:
+        candidates.append(proot)
+
+    best: pathlib.Path | None = None
+    for root in candidates:
+        try:
+            root_r = root.resolve()
+        except OSError:
+            continue
+        if target == root_r or root_r in target.parents:
+            if best is None or len(str(root_r)) > len(str(best)):
+                best = root_r
+    return best
+
+
 def _describe_valid_project_cwds(project: str) -> str:
     """Human-readable list of cwds that are legal for `project` — its
     per-role configured paths plus its own root, if one resolves (see

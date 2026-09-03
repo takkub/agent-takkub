@@ -3236,7 +3236,16 @@ class LeadInboxMixin:
         before the #130 busy-wait absolute ceiling — a different symptom from
         the plain empty/stuck case, so it gets distinct wording (a Lead told
         to look for "pane อาจค้าง empty" would misdiagnose a pane that is
-        visibly full of output) and a separate log event."""
+        visibly full of output) and a separate log event.
+
+        (#476) Checked separately from both of those: whether the pane is
+        STILL sitting on a trust/onboarding modal at the exact moment this
+        fires. A live incident showed this generic wording ("pane อาจค้าง
+        empty") next to a pane whose real problem was a folder-trust modal
+        the blind paste landed on as keystrokes, not a genuinely empty
+        composer — a Lead who only reads "อาจค้าง empty" has no reason to go
+        check for a dialog waiting on a keypress. Distinct wording + a
+        `reason` field on the log event when this is the case."""
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
@@ -3244,7 +3253,21 @@ class LeadInboxMixin:
         if not (lead and lead.session and lead.session.is_alive):
             return
         wait_label = f"{wait_ms / 1000:g}s"
-        if busy_ceiling:
+        pane = self._project_panes(project_ns).get(role_name)
+        trust_blocked = False
+        if pane is not None and pane.session is not None and pane.session.is_alive:
+            try:
+                trust_blocked = bool(pane.session.is_at_trust_prompt())
+            except Exception:
+                trust_blocked = False
+        if trust_blocked:
+            msg = (
+                f"⚠️ [delivery-unconfirmed] {role_name} pane ยังติด trust/onboarding modal อยู่ "
+                f"หลังรอ {wait_label} — task ที่ paste แบบ blind เข้าไปน่าจะตกเป็น keystroke บน "
+                f"modal ไม่ถึง composer จริง (ไม่ใช่ pane ค้าง empty เฉยๆ) — กดตอบใน pane เอง "
+                f"หรือ close แล้ว assign ใหม่ (issue #476)"
+            )
+        elif busy_ceiling:
             msg = (
                 f"⚠️ [delivery-unconfirmed] {role_name} pane มี output ต่อเนื่องมาตลอดแต่ไม่กลับสู่ "
                 f"ready prompt เกิน {wait_label} — "
@@ -3277,6 +3300,7 @@ class LeadInboxMixin:
             role=role_name,
             project=project_ns,
             wait_ms=wait_ms,
+            **({"reason": "trust-modal"} if trust_blocked else {}),
         )
 
     def _warn_lead_spawn_failed(self, role_name: str, project: str | None, reason: str) -> None:

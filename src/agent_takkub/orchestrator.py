@@ -105,6 +105,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _read_tail_bytes,
     _render_daily_digest,
     _render_hot_md,
+    _resolve_pane_pretrust_root,
     _resolve_project_memory,
     _rewrite_task_for_codex,
     _sanitize_pane_text,

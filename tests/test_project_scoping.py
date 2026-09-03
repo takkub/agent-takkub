@@ -148,6 +148,68 @@ class TestCwdWithinProject:
         assert orch_mod._cwd_within_project(unrelated, "default", "backend") is False
 
 
+class TestResolvePanePretrustRoot:
+    """#476: generalizes #444's worktree-only pre-trust to any claude cwd —
+    the root this resolves to is what gets written into Claude Code's own
+    ``.claude.json`` (see `worktree_manager.pre_trust_pane_cwd`), so it must
+    only ever be a path `_cwd_within_project` would already accept, never
+    the raw --cwd itself."""
+
+    def test_exact_registered_path_resolves_to_itself(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        cwd = str(tmp_path / "proj_a" / "api")
+        root = orch_mod._resolve_pane_pretrust_root(cwd, "proj_a")
+        assert root == (tmp_path / "proj_a" / "api").resolve()
+
+    def test_subfolder_resolves_to_its_registered_parent(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        # The live #476 incident shape: --cwd is a subfolder ("pms-web")
+        # never spawned into before, one level under a registered path.
+        cwd = str(tmp_path / "proj_a" / "api" / "sub" / "deep")
+        root = orch_mod._resolve_pane_pretrust_root(cwd, "proj_a")
+        assert root == (tmp_path / "proj_a" / "api").resolve()
+
+    def test_narrowest_registered_root_wins_over_project_root(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        # proj_a's two registered paths (api, web) share a common parent
+        # (_project_root_dir); a cwd under "api" specifically must resolve
+        # to "api" itself, not to the wider shared parent.
+        (tmp_path / "proj_a" / "api").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "proj_a" / "web").mkdir(parents=True, exist_ok=True)
+        cwd = str(tmp_path / "proj_a" / "api" / "src")
+        root = orch_mod._resolve_pane_pretrust_root(cwd, "proj_a")
+        assert root == (tmp_path / "proj_a" / "api").resolve()
+
+    def test_unrelated_path_resolves_to_none(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        cwd = str(tmp_path / "somewhere_else" / "foo")
+        assert orch_mod._resolve_pane_pretrust_root(cwd, "proj_a") is None
+
+    def test_sibling_project_path_resolves_to_none(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        cwd = str(tmp_path / "proj_b" / "api")
+        assert orch_mod._resolve_pane_pretrust_root(cwd, "proj_a") is None
+
+    def test_worktree_cwd_resolves_to_none(
+        self,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Already covered by the wider pre_trust_worktrees_root() shared
+        # root (#444) — must not also get a narrower, redundant entry here.
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path / "data-home")
+        cwd = str(wm.worktree_root("proj_a") / "backend-123")
+        assert orch_mod._resolve_pane_pretrust_root(cwd, "proj_a") is None
+
+
 # ─────────────────────────────────────────────────────────────
 # Fix 1 – spawn() refuses explicit cwd outside project
 # ─────────────────────────────────────────────────────────────

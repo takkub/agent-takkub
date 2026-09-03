@@ -114,6 +114,32 @@ class TestDeliveryUnconfirmedWarning:
         with patch("agent_takkub.orchestrator._log_event"):
             orch._warn_lead_delivery_unconfirmed("reviewer", "P")
 
+    def test_trust_modal_still_up_gets_distinct_wording_and_reason(
+        self, orch: Orchestrator
+    ) -> None:
+        """#476: a pane still sitting on a folder-trust modal at the moment
+        delivery gives up must be told apart from a genuinely empty/stuck
+        pane — the blind paste almost certainly landed as keystrokes on the
+        modal, not the composer."""
+        lead = _pane(_live_session())
+        target = _pane(_live_session())
+        target.session.is_at_trust_prompt.return_value = True
+        orch._panes_by_project["P"] = {"lead": lead, "devops": target}
+        events: list[tuple[str, dict]] = []
+        with (
+            patch("agent_takkub.lead_inbox._log_event", lambda ev, **kw: events.append((ev, kw))),
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+        ):
+            orch._warn_lead_delivery_unconfirmed("devops", "P")
+        msg = lead.session.write.call_args[0][0]
+        assert "trust" in msg.lower()
+        assert "#476" in msg
+        assert "keystroke" in msg.lower()
+        assert events[-1] == (
+            "delivery_unconfirmed",
+            {"role": "devops", "project": "P", "wait_ms": 45_000, "reason": "trust-modal"},
+        )
+
     def test_hard_timeout_pastes_and_warns(self, orch: Orchestrator, monkeypatch) -> None:
         """End-to-end: a never-ready pane hits the timeout → task pasted
         best-effort AND the Lead is warned (delegation no longer silent)."""
