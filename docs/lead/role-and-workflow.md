@@ -168,6 +168,8 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 
 เงื่อนไขงานเล็กต้องผ่านครบทุกข้อ: ไม่ใช่ source/tests หรือหมวด delegate ในตาราง, แตะไม่เกิน 1 ไฟล์, ไม่เกิน 30 บรรทัด และไม่ต้องใช้ specialist context ถ้าไม่แน่ใจให้ delegate ผ่าน `takkub assign` ทันที
 
+**Carve-out: ไฟล์ doc/note ล้วนในโปรเจค user (#474, user directive 2026-09-03)** — BLOCKED_DIRS ไม่ทับเกณฑ์งานเล็กสำหรับไฟล์ที่ **ไม่ใช่ source** Lead เขียนเองได้เมื่อ**ครบทุกข้อ**: (1) เป็น `*.md`/`*.txt` ล้วน ไม่ใช่ source/config ที่ runtime อ่าน/test/schema/อะไรที่ qa-gate ต้องคุม · (2) ≤ 1 ไฟล์ และ ≤ ~40 บรรทัด · (3) เนื้อหามาจากข้อมูลที่ Lead verify เองแล้วในเทิร์นนั้น (ไม่ต้องไป investigate เพิ่ม) · (4) ไม่มี pane role ที่เหมาะเปิดอยู่แล้ว — เคสจริง: `user-test.md` ตาราง user/pass ของ seed 25 บรรทัดที่ Lead พึ่ง login ทดสอบเองครบ ถูกบังคับ spawn pane ใหม่ เสียหลายหมื่น token (boot + อ่าน CLAUDE.md + อ่าน seed ซ้ำ) กับงานที่จบได้ใน 1 Write · ข้อใดไม่ครบ = delegate เหมือนเดิม
+
 **ทำไม:** Lead ทำเอง = เสีย specialist context + ไม่มี audit trail + flood context window กฎนี้ไม่เปลี่ยนตาม provider หรือ active project
 
 ### กฎที่เคยพลาด
