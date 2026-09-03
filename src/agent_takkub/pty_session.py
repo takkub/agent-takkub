@@ -566,10 +566,35 @@ _BOOT_PHASE_MARKERS: tuple[str, ...] = (
 # answered in seconds, so this is purely the boot-window race. The banner
 # pads the value column with a variable run of spaces, hence a regex, not a
 # substring.
+_MODEL_LOADING_RE = re.compile(r"\bmodel:\s+loading\b")
+_DIRECTORY_LOADING_RE = re.compile(r"\bdirectory:\s+loading\b")
 _BOOT_PHASE_MARKER_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bmodel:\s+loading\b"),
-    re.compile(r"\bdirectory:\s+loading\b"),
+    _MODEL_LOADING_RE,
+    _DIRECTORY_LOADING_RE,
 )
+
+
+def _has_stuck_model_field_marker(region: str) -> bool:
+    """*region* is already lowercased by `_tail_region`.
+
+    True only for issue #276's third reopen (2026-09-02, codex-cli 0.152.0,
+    3 independent panes: reviewer/codex/critic — see
+    docs/audit/2026-09-03-issue-276-codex-0152-model-field-stuck.md): the
+    banner's `model:` field can get stuck at "loading" FOREVER while
+    `directory:`/`permissions:` resolve normally and the composer
+    underneath is already genuinely interactive
+    (`› Ask Codex to do anything`). Live capture across all 3 panes never
+    once showed it recover before the delivery ceiling gave up.
+
+    Deliberately requires `directory:` to have ALREADY resolved (not
+    matching `_DIRECTORY_LOADING_RE`) — the #380 fresh-boot race this
+    module's boot-phase marker exists to catch has BOTH fields reading
+    "loading" together, and must keep reading as still-booting. This is
+    the narrower, distinct case: only `model:` is stuck, everything else
+    the banner reports is done."""
+    if _DIRECTORY_LOADING_RE.search(region):
+        return False
+    return _MODEL_LOADING_RE.search(region) is not None
 
 
 def _has_boot_phase_marker(region: str) -> bool:
@@ -865,6 +890,14 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
         True,
         "kimi",
     ),
+    # #276 round 3 (2026-09-02, codex-cli 0.152.0): the composer's own footer
+    # reworded from "? for help" to "? for shortcuts" — a live 3-pane
+    # incident (reviewer/codex/critic, saas_admin_amb) proved the tight
+    # `_ready_region` window never actually sees this pane's `model:`/
+    # `directory:` banner box at all (it scrolls out well above the 6-row
+    # window), so "ask codex" alone already carries this case — this fixture
+    # pins that the reworded footer doesn't silently break it.
+    ("› Ask Codex to do anything\n  ? for shortcuts", True, "codex"),
 )
 
 
@@ -2105,6 +2138,19 @@ class PtySession(QObject):
         false "ready" pastes the task into a pane that cannot receive it.
         """
         return _has_boot_phase_marker(_tail_region(self.display_lines(), rows))
+
+    def shows_stuck_model_field_marker(self, *, rows: int = _BOOT_MARKER_TAIL_ROWS) -> bool:
+        """True only for the #276-round-3 codex 0.152.0 quirk: `model:` stuck
+        at "loading" while `directory:`/`permissions:` have already resolved
+        and the composer below is genuinely interactive. See
+        `_has_stuck_model_field_marker`'s docstring for the full evidence and
+        why it cannot be confused with the genuine #380 fresh-boot race that
+        `shows_boot_phase_marker` exists to catch.
+
+        Callers use this to decide whether a `shows_boot_phase_marker() ==
+        True` verdict is trustworthy or is this specific stuck-field quirk —
+        never on its own."""
+        return _has_stuck_model_field_marker(_tail_region(self.display_lines(), rows))
 
     def boot_phase_detail(self) -> str:
         """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
