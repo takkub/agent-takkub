@@ -16,6 +16,7 @@ _log = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
+_SLUG_INVALID_RUN = re.compile(r"[^a-z0-9._-]+")
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/"
 
 # Plugins cockpit wants spawned agents to inherit (skipping claude-obsidian's broken
@@ -77,6 +78,32 @@ def validate_name(value: str, kind: str) -> str:
     if not _SAFE_NAME.fullmatch(name):
         raise ValueError(f"invalid {kind}: {value!r}")
     return name
+
+
+def slugify_project_name(raw: str) -> str:
+    """Turn an arbitrary display/folder name into a slug ``validate_name`` accepts.
+
+    The project wizard derives project names from ``Path.name`` — a folder
+    called "Claude Work" produces the string ``"Claude Work"``, which
+    ``validate_name`` rejects (space is not in ``_SAFE_NAME``'s charset) and
+    raises ``ValueError`` deep inside ``register_pane`` (#467). Callers that
+    build a project name from a folder/display string should slugify it
+    with this function first so it always round-trips through
+    ``validate_name`` cleanly, instead of validating after the fact.
+
+    An already-valid name is returned unchanged (so existing registered
+    projects never get silently renamed by re-running this). When nothing
+    safe survives (e.g. a folder name that is entirely non-ASCII/symbols),
+    falls back to a short hash of *raw* rather than a fixed literal, so two
+    differently-named unsafe folders don't collide on the same project id.
+    """
+    name = _SLUG_INVALID_RUN.sub("-", (raw or "").strip().lower())
+    name = name.strip("-._")[:64].strip("-._")
+    if _SAFE_NAME.fullmatch(name):
+        return name
+    import hashlib
+
+    return "project-" + hashlib.sha1((raw or "").encode("utf-8")).hexdigest()[:8]
 
 
 def _write_json_atomic(path: Path, data: dict) -> bool:

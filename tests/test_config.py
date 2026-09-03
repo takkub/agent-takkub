@@ -102,6 +102,46 @@ class TestClearActiveProject:
         assert set(data["projects"]) == {"demo", "empty"}
 
 
+class TestSlugifyProjectName:
+    """#467 — wizard-derived project names (from `Path.name`) must always
+    survive `config.validate_name` instead of crashing `register_pane`."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Claude Work",
+            "  Claude Work  ",
+            "My Project!!",
+            "app (v2)",
+            "Résumé Builder",
+        ],
+    )
+    def test_unsafe_names_become_validate_name_safe(self, raw: str) -> None:
+        slug = config.slugify_project_name(raw)
+        assert config.validate_name(slug, "project") == slug
+
+    def test_claude_work_slugifies_to_readable_slug(self) -> None:
+        assert config.slugify_project_name("Claude Work") == "claude-work"
+
+    def test_already_valid_name_is_returned_unchanged(self) -> None:
+        assert config.slugify_project_name("my-project") == "my-project"
+        assert config.slugify_project_name("app2") == "app2"
+
+    def test_all_symbol_names_fall_back_to_deterministic_hash_not_collision(self) -> None:
+        slug_a = config.slugify_project_name("日本語プロジェクト")
+        slug_b = config.slugify_project_name("!!!###???")
+        assert config.validate_name(slug_a, "project") == slug_a
+        assert config.validate_name(slug_b, "project") == slug_b
+        assert slug_a != slug_b  # different raw inputs must not collide
+
+    def test_fallback_is_deterministic_for_same_input(self) -> None:
+        assert config.slugify_project_name("日本語") == config.slugify_project_name("日本語")
+
+    def test_empty_string_falls_back_safely(self) -> None:
+        slug = config.slugify_project_name("")
+        assert config.validate_name(slug, "project") == slug
+
+
 class TestDefaultCwdForRole:
     def test_frontend_picks_web(self, projects_file: Path) -> None:
         assert config.default_cwd_for_role("frontend") == "/tmp/demo/web"

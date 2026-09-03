@@ -2516,7 +2516,30 @@ class Orchestrator(
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
             governor.release_slot(token)
+        else:
+            notice = self._queued_no_pane_notice(project_ns, role_name)
+            if notice:
+                result = (result[0], f"{result[1]}\n{notice}")
         return result
+
+    def _queued_no_pane_notice(self, project_ns: str, role_name: str) -> str:
+        """#473: if `role_name` already has `takkub send` messages queued
+        from a PREVIOUS pane generation (it was closed when they were sent —
+        see `_queue_message_for_unspawned_role`), this fresh `assign()` will
+        cause them to be delivered into the new pane too, marked stale (see
+        `_flush_queued_no_pane_messages`). Surface that to Lead's own stdout
+        at assign time instead of silently, so Lead can `takkub messages
+        --role <r>` and clear/ignore them before they arrive alongside the
+        new task."""
+        from . import role_messages
+
+        pending = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
+        if not pending:
+            return ""
+        return (
+            f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' จะถูกส่งให้ pane "
+            f"ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
+        )
 
     def _latest_queued_task_text(self, detail_path: pathlib.Path | None, fallback: str) -> str:
         """Resolve the text to actually deliver once a gate-blocked assign is
@@ -3383,6 +3406,18 @@ class Orchestrator(
         pane = self._project_panes(project_ns).get(role_name)
         if not (pane and pane.session and pane.session.is_alive):
             return
+        # #473: a message queued while this role's pane was fully closed can
+        # cross a task boundary — Lead may `takkub assign` a brand-new,
+        # unrelated task before this fires (5s after spawn), and the new
+        # pane has no way to know the queued message predates its actual
+        # task. `_assign_dispatch` always stamps a fresh `task_id` onto this
+        # exact PaneState BEFORE spawning; `close()` pops PaneState entirely,
+        # so a closed-then-reopened pane's PaneState starts clean — a truthy
+        # `task_id` here can only mean a NEW assign happened after this
+        # message was queued (a plain manual respawn/reopen with no assign
+        # leaves task_id None, and the message still delivers normally).
+        ps = self._pane_state.get(_exit_key(project_ns, role_name))
+        stale = bool(ps and ps.task_id)
         delivered = 0
         for rec in pending:
             body = rec.get("body")
@@ -3390,16 +3425,31 @@ class Orchestrator(
             if not isinstance(body, str):
                 role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "empty body")
                 continue
-            self.send(role_name, body, from_role=rec.get("from"), project=project_ns)
+            delivery_body = (
+                "[stale — ส่งไว้ก่อน task ปัจจุบัน ตอน pane เดิมปิดอยู่ · "
+                "ถ้าไม่เกี่ยวกับ task นี้ให้ข้าม ห้ามตอบแล้ว done]\n" + body
+                if stale
+                else body
+            )
+            self.send(role_name, delivery_body, from_role=rec.get("from"), project=project_ns)
             # #303: `send()` above already appended a fresh "sent" record for
             # the real delivery — mark the queued placeholder terminal so it
             # is never picked up again, without double-counting it as a
             # second live delivery attempt.
-            role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "flushed_after_spawn")
+            role_messages.mark_abandoned(
+                RUNTIME_DIR,
+                project_ns,
+                msg_id,
+                "flushed_stale_after_new_assign" if stale else "flushed_after_spawn",
+            )
             delivered += 1
         if delivered:
             _log_event(
-                "send_queued_no_pane_flushed", project=project_ns, role=role_name, count=delivered
+                "send_queued_no_pane_flushed",
+                project=project_ns,
+                role=role_name,
+                count=delivered,
+                stale=stale,
             )
 
     def _redact_forwarded_text(
