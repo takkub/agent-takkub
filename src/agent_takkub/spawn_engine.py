@@ -63,6 +63,7 @@ from .orchestrator_text import (
     _exit_key,
     _lead_model_override,
     _log_event,
+    _resolve_pane_pretrust_root,
     _resolve_project_memory,
     _teammate_tier,
 )
@@ -3148,6 +3149,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             denied_tools_argv=denied_tools_argv,
             resume_argv=resume_argv,
         )
+
+        # #476: generalizes #444's worktree-only pre-trust to any claude cwd —
+        # a plain `assign --cwd` into a subfolder of an already-open project
+        # the pane has never spawned into before hits the same folder-trust
+        # modal, and auto_trust's live keypress race is not the only defence
+        # that should exist against it. Best-effort; never blocks the spawn.
+        _pretrust_root = _resolve_pane_pretrust_root(spawn_cwd, project_ns)
+        if _pretrust_root is not None:
+            from .worktree_manager import pre_trust_pane_cwd
+
+            pre_trust_pane_cwd(project_ns, _pretrust_root, role_name)
 
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)

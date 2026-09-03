@@ -310,6 +310,78 @@ def _log_event(event: str, **details) -> None:
         _orch._log_event(event, **details)
 
 
+def _claude_json_path_for(project: str) -> Path:
+    """The ``.claude.json`` path Claude Code reads trust state from for
+    *project*'s effective claude profile — inside ``CLAUDE_CONFIG_DIR`` when
+    the pane gets one, else the OS-default ``~/.claude.json`` sibling of
+    ``~/.claude/``. Shared by every pre-trust writer so they all agree on
+    which file to touch."""
+    from . import config, user_profile
+
+    name = user_profile.profile_for(project)
+    # Mirrors pane_env.inject_user_profile_env's own condition for when
+    # CLAUDE_CONFIG_DIR is actually set for a pane: when it would be,
+    # Claude Code keeps `.claude.json` INSIDE that directory instead of
+    # beside $HOME; otherwise it's at the OS-default `~/.claude.json`, a
+    # sibling of `~/.claude/` rather than inside it — derived from the
+    # SAME `_DEFAULT_CONFIG_DIR` constant every other CLAUDE_CONFIG_DIR
+    # decision in the codebase already keys off, rather than a fresh
+    # `Path.home()` call, so a test that isolates `_DEFAULT_CONFIG_DIR`
+    # (the established convention — see test_user_profile.py's
+    # `isolate` fixture) isolates this too instead of writing into the
+    # real `~/.claude.json` on whatever machine runs the suite.
+    if name != user_profile.DEFAULT_PROFILE or config.DATA_HOME != config.REPO_ROOT:
+        return user_profile.config_dir_for(project) / ".claude.json"
+    return user_profile._DEFAULT_CONFIG_DIR.parent / ".claude.json"
+
+
+def _write_trust_key(project: str, key: str) -> bool:
+    """Read-merge-write *key* as ``hasTrustDialogAccepted: true`` into the
+    ``.claude.json`` for *project*'s claude profile.
+
+    Atomic (tempfile + ``os.replace``), never clobbers any other key already
+    in the file. Returns True on an actual write, False when *key* was
+    already trusted (no-op) — callers use this to decide which log event to
+    emit. Best-effort: a missing/unparseable ``.claude.json`` raises one of
+    the caught exception types below so the caller can log-and-skip; this
+    must never block a pane from spawning."""
+    json_path = _claude_json_path_for(project)
+    try:
+        raw = json_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        data: dict = {}
+    else:
+        data = json.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            data = {}
+
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        projects = {}
+    entry = projects.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+    if entry.get("hasTrustDialogAccepted") is True:
+        return False  # already trusted — nothing to write
+    entry["hasTrustDialogAccepted"] = True
+    projects[key] = entry
+    data["projects"] = projects
+
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=json_path.parent, prefix=".tmp-claude-json-")
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, json_path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
 def pre_trust_worktrees_root(project: str) -> None:
     """Mark :func:`worktrees_managed_root` as trusted in Claude Code's own
     ``.claude.json`` for *project*'s effective claude profile, so a pane
@@ -323,70 +395,58 @@ def pre_trust_worktrees_root(project: str) -> None:
     Caller is responsible for only calling this for a claude-backed pane;
     other providers have no such file.
 
-    Read-merge-write, atomic (tempfile + ``os.replace``), and never clobbers
-    any other key already in the file. Best-effort: a missing/unparseable
-    ``.claude.json`` is skipped (logged), never raised — this must not block
-    a pane from spawning.
+    Best-effort: a missing/unparseable ``.claude.json`` is skipped (logged),
+    never raised.
     """
-    from . import config, user_profile
-
     try:
-        name = user_profile.profile_for(project)
-        # Mirrors pane_env.inject_user_profile_env's own condition for when
-        # CLAUDE_CONFIG_DIR is actually set for a pane: when it would be,
-        # Claude Code keeps `.claude.json` INSIDE that directory instead of
-        # beside $HOME; otherwise it's at the OS-default `~/.claude.json`, a
-        # sibling of `~/.claude/` rather than inside it — derived from the
-        # SAME `_DEFAULT_CONFIG_DIR` constant every other CLAUDE_CONFIG_DIR
-        # decision in the codebase already keys off, rather than a fresh
-        # `Path.home()` call, so a test that isolates `_DEFAULT_CONFIG_DIR`
-        # (the established convention — see test_user_profile.py's
-        # `isolate` fixture) isolates this too instead of writing into the
-        # real `~/.claude.json` on whatever machine runs the suite.
-        if name != user_profile.DEFAULT_PROFILE or config.DATA_HOME != config.REPO_ROOT:
-            json_path = user_profile.config_dir_for(project) / ".claude.json"
-        else:
-            json_path = user_profile._DEFAULT_CONFIG_DIR.parent / ".claude.json"
-        key = str(worktrees_managed_root())
-
-        try:
-            raw = json_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            data: dict = {}
-        else:
-            data = json.loads(raw) if raw.strip() else {}
-            if not isinstance(data, dict):
-                data = {}
-
-        projects = data.get("projects")
-        if not isinstance(projects, dict):
-            projects = {}
-        entry = projects.get(key)
-        if not isinstance(entry, dict):
-            entry = {}
-        if entry.get("hasTrustDialogAccepted") is True:
-            return  # already trusted — nothing to write
-        entry["hasTrustDialogAccepted"] = True
-        projects[key] = entry
-        data["projects"] = projects
-
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=json_path.parent, prefix=".tmp-claude-json-")
-        try:
-            with open(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp, json_path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        _write_trust_key(project, str(worktrees_managed_root()))
     except (OSError, json.JSONDecodeError, ValueError) as e:
         _log_event(
             "worktree_pretrust_skip",
             project=project,
             err=f"{type(e).__name__}: {e}",
+        )
+
+
+def pre_trust_pane_cwd(project: str, root_path: Path, role_name: str) -> None:
+    """Mark *root_path* as trusted in Claude Code's own ``.claude.json`` for
+    *project*'s effective claude profile — the generalization of #444 to any
+    claude-backed pane's ``--cwd``, not just ``--isolation worktree`` (#476):
+    a plain ``assign --cwd`` into a subfolder of an already-open project the
+    pane has never spawned into before hits the SAME interactive folder-
+    trust modal, with the same 90s auto-answer budget and the same "task
+    never delivered, pane parked" failure mode — live-captured 2026-09-03
+    (``assign --role devops --cwd .../pms/pms-web``, a subfolder of the
+    already-registered ``pms`` root).
+
+    *root_path* is the caller's responsibility to resolve to something
+    actually legitimate for *project* — see
+    ``orchestrator_text._resolve_pane_pretrust_root`` for the narrowest-
+    registered-root walk this is paired with in practice (this module stays
+    a dependency-free leaf and must not compute that itself — see the
+    ``worktree-manager-leaf`` import-linter contract). Trusting the
+    project's registered root instead of the exact *cwd* means Claude
+    Code's own "walk up parents" trust check covers every subfolder under it
+    from then on, same shared-root trick as `pre_trust_worktrees_root`.
+
+    Best-effort/no-op on any I/O or parse failure, same contract as
+    `pre_trust_worktrees_root`."""
+    try:
+        wrote = _write_trust_key(project, str(root_path))
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        _log_event(
+            "pane_pretrust_skip",
+            project=project,
+            role=role_name,
+            reason=f"{type(e).__name__}: {e}",
+        )
+        return
+    if wrote:
+        _log_event(
+            "pane_pretrust_written",
+            project=project,
+            role=role_name,
+            path=str(root_path),
         )
 
 

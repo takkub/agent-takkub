@@ -161,6 +161,69 @@ class TestIsAtTrustPrompt:
         s = _feed_screen("Type your message or @path/to/file")
         assert s.is_at_trust_prompt() is False
 
+    def test_quick_safety_check_wording_without_settings_file_is_trust_prompt(self) -> None:
+        """#476: a SECOND real "Quick safety check" variant, distinct from
+        `TestTrustPromptSelectsNo._NO_DEFAULT` below — that one shows a
+        ``.claude/settings.local.json`` pre-approval line; this one (a plain
+        subfolder of an already-open project with no such file, live-
+        captured 2026-09-03: `assign --role devops --cwd .../pms/pms-web`)
+        instead shows generic "created or trust... Security guide" body
+        text. Both must still read as a trust prompt with the cursor
+        defaulted to decline."""
+        s = _feed_screen(
+            "Quick safety check: Is this a project you created or one you trust?",
+            "(Like your own code, a well-known open source project, or work from your team).",
+            "If not, take a moment to review what's in this folder first.",
+            "Claude Code'll be able to read, edit, and execute files here.",
+            "Security guide",
+            "❯ No, exit",
+            "  Yes, I trust this folder",
+            "Enter to confirm · Esc to cancel",
+        )
+        assert s.is_at_trust_prompt() is True
+        assert s.trust_prompt_selects_no() is True
+
+    def test_real_capture_quick_safety_check_dialog_detected(self) -> None:
+        """Verbatim live capture (`runtime/sessions/2026-09-03/pms/
+        devops-100938.transcript.log`, issue #476) of the exact incident this
+        fixture guards: `assign --role devops --cwd .../pms/pms-web` (a
+        subfolder of the already-registered `pms` project, never spawned
+        into before) hitting Claude Code 2.1.259's "Quick safety check"
+        trust modal. Unlike the hand-written fixture above, this replays the
+        raw ConPTY bytes (absolute-column `\\x1b[<N>G` jumps and all) through
+        a real pyte screen at the pane's actual production size — proving
+        the detector against the exact bytes that hung in production, not
+        just a pre-stripped approximation of them."""
+        raw = (
+            b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h\x1b]0;claude\x1b\\\x1b7\x1b[r\x1b8\x1b[?25h"
+            b"\x1b[?25l\x1b[?2004h\x1b[?1004h\x1b[?2031h\x1b[?9001l\x1b[?9001h\r\n"
+            b"\x1b[38;2;255;193;7m" + b"\xe2\x94\x80" * 149 + b"\x1b[39m\r\n"
+            b"\x1b[2G\x1b[38;2;255;193;7m\x1b[1mAccessing\x1b[12Gworkspace:\x1b[22m\x1b[39m\r\n\r\n"
+            b"\x1b[2G\x1b[1mC:\\Users\\monch\\WebstormProjects\\pms\\pms-web\x1b[22m\r\n\r\n"
+            b"\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:\x1b[22GIs\x1b[25Gthis\x1b[30Ga\x1b[32Gproject"
+            b"\x1b[40Gyou\x1b[44Gcreated\x1b[52Gor\x1b[55Gone\x1b[59Gyou\x1b[63Gtrust?\x1b[70G(Like"
+            b"\x1b[76Gyour\x1b[81Gown\x1b[85Gcode,\x1b[91Ga\x1b[93Gwell-known\x1b[104Gopen"
+            b"\x1b[109Gsource\x1b[116Gproject,\x1b[125Gor\x1b[128Gwork\x1b[133Gfrom\x1b[138Gyour"
+            b"\x1b[143Gteam).\r\n"
+            b"\x1b[2GIf\x1b[5Gnot,\x1b[10Gtake\x1b[15Ga\x1b[17Gmoment\x1b[24Gto\x1b[27Greview"
+            b"\x1b[34Gwhat's\x1b[41Gin\x1b[44Gthis\x1b[49Gfolder\x1b[56Gfirst.\r\n\r\n"
+            b"\x1b[2GClaude\x1b[9GCode'll\x1b[17Gbe\x1b[20Gable\x1b[25Gto\x1b[28Gread,\x1b[34Gedit,"
+            b"\x1b[40Gand\x1b[44Gexecute\x1b[52Gfiles\x1b[58Ghere.\r\n\r\n"
+            b"\x1b[2G\x1b[38;2;153;153;153mSecurity\x1b[11Gguide\x1b[39m\r\n\r\n"
+            b"\x1b[2G\x1b[38;2;177;185;249m\xe2\x9d\xaf\x1b[4GNo,\x1b[8Gexit\x1b[39m\r\n"
+            b"\x1b[4GYes,\x1b[9GI\x1b[11Gtrust\x1b[17Gthis\x1b[22Gfolder\r\n\r\n"
+            b"\x1b[2G\x1b[38;2;153;153;153mEnter\x1b[8Gto\x1b[11Gconfirm\x1b[19G\xc2\xb7"
+            b"\x1b[21GEsc\x1b[25Gto\x1b[28Gcancel\x1b[39m\r\n"
+            b"\x1b[1C\x1b[4A\x1b[>0q\x1b[c\x1b(B\x0f\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+            b"\x1b[1D\x1b[4B\x1b(B\x0f\x1b[>4m\x1b[<u\x1b[?1004l\x1b[?1004h\x1b[?2031l\x1b[?2004l"
+            b"\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x1b\\"
+        )
+        s = PtySession(cols=110, rows=36)
+        s._feed_and_log(raw)
+        assert s.is_at_trust_prompt() is True
+        assert s.trust_prompt_selects_no() is True
+        assert s.is_at_ready_prompt() is False
+
     def test_ready_footer_below_stale_modal_rows_wins(self) -> None:
         """#330 regression (2026-09-02→03, saas_admin_amb): agy's Antigravity
         CLI exits the trust modal's alt-screen buffer and erases only from

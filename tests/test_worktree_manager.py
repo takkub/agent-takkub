@@ -2366,3 +2366,98 @@ class TestPreTrustWorktreesRoot:
         assert data["projects"][self._worktrees_root_str()]["hasTrustDialogAccepted"] is True
         # The default-profile location must be untouched.
         assert not (self.tmp_path / "home" / ".claude.json").exists()
+
+
+class TestPreTrustPaneCwd:
+    """#476: generalizes #444 to any claude-backed pane's --cwd, not just
+    --isolation worktree. `pre_trust_pane_cwd` itself only writes the
+    already-resolved root it's given (resolution — which root actually
+    applies — is `orchestrator_text._resolve_pane_pretrust_root`'s job, kept
+    out of this module by the `worktree-manager-leaf` import-linter
+    contract) — these tests exercise the write/log-event half only."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        from agent_takkub import user_profile as up
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path / "data-home")
+        monkeypatch.setattr(up, "_BASE_DIR", tmp_path / "settings-home")
+        monkeypatch.setattr(up, "_REGISTRY_PATH", tmp_path / "settings-home" / "user-profiles.json")
+        monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", tmp_path / "home" / ".claude")
+        self.tmp_path = tmp_path
+
+    def test_writes_given_root_and_logs_written(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(wm, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+        root = self.tmp_path / "projects" / "pms"
+
+        wm.pre_trust_pane_cwd("pms", root, "devops")
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["projects"][str(root)]["hasTrustDialogAccepted"] is True
+        assert events == [
+            ("pane_pretrust_written", {"project": "pms", "role": "devops", "path": str(root)})
+        ]
+
+    def test_preserves_other_keys_and_other_projects(self):
+        from agent_takkub.worktree_manager import pre_trust_pane_cwd
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {"email": "user@example.com"},
+                    "projects": {"/some/other/repo": {"hasTrustDialogAccepted": True}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        root = self.tmp_path / "projects" / "pms"
+
+        pre_trust_pane_cwd("pms", root, "devops")
+
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["oauthAccount"] == {"email": "user@example.com"}
+        assert data["projects"]["/some/other/repo"]["hasTrustDialogAccepted"] is True
+        assert data["projects"][str(root)]["hasTrustDialogAccepted"] is True
+
+    def test_already_trusted_is_a_true_no_op_and_logs_nothing(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        root = self.tmp_path / "projects" / "pms"
+        wm.pre_trust_pane_cwd("pms", root, "devops")  # first call creates + trusts
+        json_path = self.tmp_path / "home" / ".claude.json"
+        before = json_path.read_text(encoding="utf-8")
+        before_mtime = json_path.stat().st_mtime_ns
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(wm, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+        wm.pre_trust_pane_cwd("pms", root, "devops")  # second call: already trusted
+
+        assert json_path.read_text(encoding="utf-8") == before
+        assert json_path.stat().st_mtime_ns == before_mtime
+        assert events == []  # no "written" event on a no-op
+
+    def test_malformed_json_is_skipped_and_logged(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        json_path = self.tmp_path / "home" / ".claude.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text("{not valid json", encoding="utf-8")
+        before = json_path.read_text(encoding="utf-8")
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(wm, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+
+        wm.pre_trust_pane_cwd("pms", self.tmp_path / "projects" / "pms", "devops")
+
+        # File left exactly as it was — never overwritten on a parse failure.
+        assert json_path.read_text(encoding="utf-8") == before
+        assert len(events) == 1
+        assert events[0][0] == "pane_pretrust_skip"
+        assert events[0][1]["role"] == "devops"

@@ -211,6 +211,67 @@ def test_fresh_claude_assign_preloads_task_and_sends_only_tiny_trigger(
     assert state.spawn_initial_task is None
 
 
+def test_fresh_claude_assign_preloaded_path_still_arms_auto_trust(
+    orch: Orchestrator,
+    tmp_path: Path,
+) -> None:
+    """#476 item 2: a system-prompt-preloaded spawn must still arm
+    `_auto_trust` — the task being delivered via preload rather than a
+    composer paste must not skip answering a folder-trust modal that shows
+    up before the CLI ever reads that system prompt."""
+    task = "[ROLE: backend]\n" + ("implement safely\n" * 80)
+    with patch.object(orch, "_auto_trust") as mock_auto_trust:
+        spawn_calls, _mock_send, _role_file = _spawn_claude_assign(orch, tmp_path, task)
+
+    assert len(spawn_calls) == 1
+    mock_auto_trust.assert_called_once_with("backend", project=TEST_PROJECT)
+
+
+def test_fresh_claude_assign_pretrusts_resolved_root_before_native_spawn(
+    orch: Orchestrator,
+    tmp_path: Path,
+) -> None:
+    """#476 item 3: before the native ConPTY spawn, a claude pane's cwd gets
+    pre-trusted via whatever root `_resolve_pane_pretrust_root` resolves —
+    so a subfolder `--cwd` of an already-registered project root never even
+    shows the folder-trust modal in the first place, instead of depending
+    solely on the live `_auto_trust` keypress race."""
+    task = "[ROLE: backend]\n" + ("implement safely\n" * 80)
+    pretrust_root = tmp_path / "registered-root"
+    with (
+        patch(
+            "agent_takkub.spawn_engine._resolve_pane_pretrust_root",
+            return_value=pretrust_root,
+        ) as mock_resolve,
+        patch("agent_takkub.worktree_manager.pre_trust_pane_cwd") as mock_pretrust,
+    ):
+        spawn_calls, _mock_send, _role_file = _spawn_claude_assign(orch, tmp_path, task)
+
+    assert len(spawn_calls) == 1
+    assert mock_resolve.call_count == 1
+    resolved_cwd, resolved_project = mock_resolve.call_args.args
+    assert Path(resolved_cwd).resolve() == tmp_path.resolve()
+    assert resolved_project == TEST_PROJECT
+    mock_pretrust.assert_called_once_with(TEST_PROJECT, pretrust_root, "backend")
+
+
+def test_fresh_claude_assign_skips_pretrust_write_when_cwd_not_registered(
+    orch: Orchestrator,
+    tmp_path: Path,
+) -> None:
+    """The common case in this test file's own harness: a bare tmp_path cwd
+    matches nothing in a real (unmocked) projects registry, so
+    `_resolve_pane_pretrust_root` returns None and the write is skipped —
+    never trusting a path just because a role happened to be pointed at
+    it."""
+    task = "[ROLE: backend]\n" + ("implement safely\n" * 80)
+    with patch("agent_takkub.worktree_manager.pre_trust_pane_cwd") as mock_pretrust:
+        spawn_calls, _mock_send, _role_file = _spawn_claude_assign(orch, tmp_path, task)
+
+    assert len(spawn_calls) == 1
+    mock_pretrust.assert_not_called()
+
+
 def test_fresh_claude_prompt_write_failure_falls_back_once_to_pointer(
     orch: Orchestrator,
     tmp_path: Path,
