@@ -61,6 +61,60 @@ class DigestFacts:
     files_note: str = ""
     report_path: str | None = None
     headline: str = ""  # first line of the agent's own note — CONTEXT ONLY
+    # #470: true when `detect_ops_task` recognised this report as an
+    # ops/infra action (deploy, migrate, restart a service, ...) whose real
+    # effect lives outside the repo's working tree — see `_files_bit`.
+    ops_task: bool = False
+
+
+# #470: a "0 files touched" digest line reads as "nothing happened" — true
+# for a stalled implementation task (#278, the original alarm this must not
+# blunt), but wrong for an ops/infra action whose side effect is a deployed
+# server, a migrated database, or a restarted process, none of which ever
+# touch a file in the repo's own working tree.
+_OPS_SIGNAL_ROLES = {"devops"}
+_OPS_KEYWORDS = (
+    "deploy",
+    "docker",
+    "migrate",
+    "migration",
+    "vps",
+    "ssh",
+    "restart",
+    "backup",
+    "seed",
+    "provision",
+    "container",
+)
+
+
+def detect_ops_task(role: str, note: str) -> bool:
+    """True when *role* or the free-text *note* signals an ops/infra action
+    rather than an in-repo implementation change (#470).
+
+    Role name is the strong signal (devops IS the ops role); the note-text
+    keyword scan is a fallback for another role that ran a one-off ops
+    action (e.g. backend running a production migration) — checked on the
+    full note, not just the digest headline, since the ops verb often isn't
+    the first line.
+    """
+    role_base = (role or "").split("#", 1)[0].strip().lower()
+    if role_base in _OPS_SIGNAL_ROLES:
+        return True
+    text = (note or "").lower()
+    return any(kw in text for kw in _OPS_KEYWORDS)
+
+
+def _ops_side_effects(note: str) -> list[str]:
+    """Which `_OPS_KEYWORDS` the note actually mentions, in first-seen order
+    — feeds `_files_bit`'s one-line side-effect summary. Best-effort/cosmetic
+    only, never affects `detect_ops_task`'s verdict."""
+    text = (note or "").lower()
+    seen: list[str] = []
+    for kw in _OPS_KEYWORDS:
+        if kw in text and kw not in seen:
+            seen.append(kw)
+    return seen
 
 
 def _merge_bit(facts: DigestFacts) -> str:
@@ -77,6 +131,15 @@ def _files_bit(facts: DigestFacts) -> str:
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"
     note = f" · {facts.files_note}" if facts.files_note else ""
     if facts.files_touched == 0:
+        if facts.ops_task:
+            # #470: same measured zero, but for a devops/ops action (deploy,
+            # migrate, restart, ...) whose side effect lives outside the repo
+            # — the ⚠️ "ยังไม่มีอะไรเปลี่ยน" wording is actively misleading
+            # here (a successful deploy legitimately touches 0 repo files),
+            # so this branch reads as neutral status, not an alarm.
+            effects = _ops_side_effects(facts.headline)
+            side_effect = f" — side-effect ที่พบใน note: {', '.join(effects)}" if effects else ""
+            return f"ไฟล์ใน repo ที่แตะ: 0 (งาน ops — side-effect นอก repo{side_effect}){note}"
         # #278: a measured (not unverifiable) zero is the one file count that
         # has to be loud. The incident it comes from: a pane reported done
         # with a complete-looking summary and Lead only found out nothing had

@@ -610,6 +610,23 @@ STALE_MARKER_QUIET_S = 20.0
 STALE_MARKER_COOLDOWN_S = 600.0
 STALE_MARKER_TAIL_ROWS = 4
 
+# (#468) The loud stale-marker escalation below is a PTY-screen-text signal
+# only — it says nothing about whether the pane's underlying provider process
+# is actually still working. A real incident: a codex pane mid-deploy sat
+# "unrecognised" for #343's reasons (codex has no structural fallback the way
+# claude does — see is_at_claude_empty_composer's #343 note) while its own
+# provider transcript file kept growing and a real subprocess was still
+# running underneath it — Lead got paged "อาจค้าง/ล่ม" for a pane doing
+# exactly what it should. A transcript file touched more recently than this
+# (via token_meter.resolve_pane_session — the same per-provider resolver the
+# token badge already relies on, so it already covers claude/codex/gemini/
+# opencode/kimi/cursor) counts as independent proof of life; so does any
+# live non-scaffolding child process (`_live_non_scaffolding_children`, #288's
+# same evidence). Sized well above STALE_MARKER_QUIET_S (a provider CLI can
+# legitimately batch its own transcript writes) but well below
+# STALE_MARKER_COOLDOWN_S (10 min of a genuinely wedged pane must still page).
+WATCHDOG_LIVENESS_FRESH_S = 120.0
+
 # (#343) A pane stuck in the unrecognised-and-quiet state across multiple
 # STALE_MARKER_COOLDOWN_S windows in a row is no longer "one routine 🟡 sweep
 # line" — the real episode this was written for ran ~9h/106 occurrences with
@@ -4894,6 +4911,7 @@ class Orchestrator(
         assign_git_root: str | None,
         assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None,
         git_facts: dict | None = None,
+        ops_task: bool = False,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -4973,6 +4991,7 @@ class Orchestrator(
                 files_dirs=tuple(dirs),
                 report_path=report_path,
                 headline=headline,
+                ops_task=ops_task,
             )
             precomputed = {
                 "commits": commits,
@@ -5009,6 +5028,7 @@ class Orchestrator(
                         "ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ — cwd ไม่ใช่ git repo, "
                         "HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
                     ),
+                    ops_task=ops_task,
                 ),
                 None,
             )
@@ -5034,6 +5054,7 @@ class Orchestrator(
                     report_path=report_path,
                     headline=headline,
                     files_note="ตรวจไม่ได้ (อ่าน git status ตอน done ไม่สำเร็จ)",
+                    ops_task=ops_task,
                 ),
                 None,
             )
@@ -5062,6 +5083,7 @@ class Orchestrator(
             ),
             report_path=report_path,
             headline=headline,
+            ops_task=ops_task,
         )
         return facts, None
 
@@ -5406,6 +5428,9 @@ class Orchestrator(
                 raw_note.strip().splitlines()[0] if raw_note.strip() else "", 200
             )
             pane_cwd = getattr(pane, "_session_cwd", None)
+            from .digest_facts import detect_ops_task
+
+            ops_task = detect_ops_task(from_role, raw_note)
             try:
                 digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
                     from_role,
@@ -5418,6 +5443,7 @@ class Orchestrator(
                     had_assign_git_root,
                     had_assign_dirty_snapshot,
                     git_facts=git_facts,
+                    ops_task=ops_task,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
@@ -5431,6 +5457,7 @@ class Orchestrator(
                     report_path=session_md_path,
                     headline=headline,
                     files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
+                    ops_task=ops_task,
                 )
                 _worktree_digest_precomputed = None
 
@@ -8924,6 +8951,81 @@ class Orchestrator(
             project_name, name, pane, sess, footer_after, quiet_s, streak, now
         )
 
+    def _stale_marker_liveness(
+        self,
+        project_name: str,
+        name: str,
+        pane: AgentPane,
+        sess: PtySession,
+        provider: str,
+        now: float,
+    ) -> tuple[bool, str, float | None, list[str]]:
+        """(#468) Two structural liveness signals, independent of the
+        ready-prompt marker table, consulted before a stale-marker streak is
+        allowed to page Lead as "อาจค้าง/ล่ม":
+
+          * the provider's own transcript/session file, resolved the same
+            way the token-meter badge already does
+            (`token_meter.resolve_pane_session` — covers claude/codex/
+            gemini(-agy)/opencode/kimi/cursor, every provider this cockpit
+            supports), touched more recently than WATCHDOG_LIVENESS_FRESH_S
+          * any live, non-scaffolding child process under the pane
+            (`_live_non_scaffolding_children`, the same #288 evidence the
+            stuck-pane watchdog already trusts for the identical purpose)
+
+        Either firing means the pane is doing real work the marker table
+        just cannot see. An unrecognised provider name (`resolve_pane_session`
+        has no branch for it) resolves to ``None`` there, so this degrades to
+        the child-process signal alone for it — never raises, never blocks
+        the escalation path.
+
+        Returns ``(alive, reason, transcript_age_s, live_children)``.
+        Best-effort end to end, matching this file's surrounding
+        except-Exception-continue style: a failed probe on either axis counts
+        as "no evidence", never as proof of death.
+        """
+        transcript_age_s: float | None = None
+        try:
+            from .token_meter import resolve_pane_session
+
+            cwd = getattr(pane, "_session_cwd", None)
+            if cwd:
+                pane_model = getattr(pane, "model", None)
+                session_uuid = (
+                    getattr(pane_model, "session_uuid", None) if pane_model is not None else None
+                )
+                spawn_ts = getattr(pane, "_spawn_ts", 0.0) or 0.0
+                cfg_dir = getattr(sess, "_claude_config_dir", None)
+                project_dir_name = getattr(sess, "_claude_project_dir_name", None)
+                cand = resolve_pane_session(
+                    provider,
+                    cwd,
+                    session_uuid=session_uuid,
+                    not_before=spawn_ts,
+                    config_dir=cfg_dir,
+                    project_dir_name=project_dir_name,
+                )
+                # opencode's resolver returns (db_path, session_id); every
+                # other provider returns a bare Path — see
+                # resolve_pane_session's own docstring.
+                path = cand[0] if isinstance(cand, tuple) else cand
+                if path is not None:
+                    transcript_age_s = max(0.0, now - pathlib.Path(path).stat().st_mtime)
+        except Exception:
+            transcript_age_s = None
+
+        live_children: list[str] = []
+        try:
+            live_children = self._live_non_scaffolding_children(project_name, name, sess)
+        except Exception:
+            live_children = []
+
+        if transcript_age_s is not None and transcript_age_s < WATCHDOG_LIVENESS_FRESH_S:
+            return True, "transcript_fresh", transcript_age_s, live_children
+        if live_children:
+            return True, "live_children", transcript_age_s, live_children
+        return False, "no_signal", transcript_age_s, live_children
+
     def _escalate_stale_marker(
         self,
         project_name: str,
@@ -8964,6 +9066,32 @@ class Orchestrator(
         except Exception:
             pass
 
+        # (#468) Marker-blind is not the same as hung — check independent
+        # liveness evidence BEFORE paging Lead. A pane that is genuinely still
+        # working (transcript growing, real child process alive) gets logged
+        # quietly instead of escalated loudly.
+        alive, liveness_reason, transcript_age_s, live_children = self._stale_marker_liveness(
+            project_name, name, pane, sess, provider, now
+        )
+        if alive:
+            key = f"{project_name}::{name}"
+            _log_event(
+                "watchdog_quiet_but_alive",
+                role=name,
+                project=project_name,
+                quiet_s=quiet_s,
+                streak=streak,
+                provider=provider,
+                reason=liveness_reason,
+                transcript_age_s=(
+                    round(transcript_age_s, 1) if transcript_age_s is not None else None
+                ),
+                live_children=live_children[:10],
+                footer=tail,
+            )
+            self._stale_marker_streak.pop(key, None)
+            return
+
         last_progress_ts = 0.0
         try:
             last_progress_ts = self._compute_last_progress_ts(name, project_name, pane)
@@ -8981,15 +9109,33 @@ class Orchestrator(
             model=model,
             last_progress_ts=last_progress_ts,
             last_progress_age_s=(round(now - last_progress_ts) if last_progress_ts else None),
+            liveness_checked=True,
         )
         try:
-            self._notify_lead(
-                project_name,
-                f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
-                f"จับไม่ได้เลยติดกัน) — อาจเป็น provider ค้าง/ล่มเงียบ, ไม่ใช่แค่ idle ปกติ "
-                f"(#343). provider={provider} footer: {tail[:150] or '(ว่าง)'}",
-                kind="ready-marker-stale",
-            )
+            # (#468) Two wordings: claude has a structural recovery fallback
+            # this same probe already tries (is_at_claude_empty_composer,
+            # #343) before ever reaching here, so a claude pane that still
+            # lands here really has exhausted every recognition path — "อาจ
+            # ค้างจริง" is warranted. Every other provider (codex/gemini-agy/
+            # opencode/kimi/cursor) has no such fallback — landing here only
+            # proves the marker table can't see it, not that it is stuck, so
+            # the wording says so and points at the transcript instead of
+            # asserting a hang.
+            if provider == "claude":
+                msg = (
+                    f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
+                    f"จับไม่ได้เลยติดกัน, ไม่มีสัญญาณชีวิตอื่นเลย) — อาจค้างจริง: provider ค้าง/"
+                    f"ล่มเงียบ, ไม่ใช่แค่ idle ปกติ (#343). provider={provider} "
+                    f"footer: {tail[:150] or '(ว่าง)'}"
+                )
+            else:
+                msg = (
+                    f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
+                    f"จับไม่ได้เลยติดกัน, ไม่มีสัญญาณชีวิตอื่นเลย) — provider={provider} มองไม่เห็น "
+                    f"ไม่ใช่ค้าง (ยังไม่มี structural fallback ให้ marker กู้ตัวเองแบบ claude, #343) "
+                    f"— เช็ค transcript ก่อนตัดสิน. footer: {tail[:150] or '(ว่าง)'}"
+                )
+            self._notify_lead(project_name, msg, kind="ready-marker-stale")
         except Exception:
             pass
 

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from agent_takkub.digest_facts import DigestFacts, format_digest_fact_line, union_files_touched
+from agent_takkub.digest_facts import (
+    DigestFacts,
+    detect_ops_task,
+    format_digest_fact_line,
+    union_files_touched,
+)
 
 
 class TestFormatDigestFactLine:
@@ -78,6 +83,74 @@ class TestFormatDigestFactLine:
         facts = DigestFacts(role="backend", pushed=True)
         line = format_digest_fact_line(facts)
         assert "pushed:" not in line
+
+
+class TestOpsTaskZeroFiles:
+    """#470: a measured `files_touched:0` on an ops/devops action (deploy,
+    migrate, restart, ...) must not read as the #278 "nothing happened"
+    alarm — its side effect lives outside the repo. A non-ops role's zero
+    must keep the original ⚠️ wording unchanged (#473 depends on that guard
+    staying intact)."""
+
+    def test_devops_role_zero_files_is_neutral_not_warning(self):
+        # ops_task is set by the caller (Orchestrator.done()) via
+        # detect_ops_task on the role + full note — DigestFacts itself never
+        # re-derives it (see the module docstring: facts are pre-computed,
+        # never re-derived by the formatter).
+        facts = DigestFacts(
+            role="devops", files_touched=0, headline="Deployed to VPS; migrate DB", ops_task=True
+        )
+        line = format_digest_fact_line(facts)
+        assert "⚠️" not in line
+        assert "ยังไม่มีอะไรเปลี่ยน" not in line
+        assert "ไฟล์ใน repo ที่แตะ: 0 (งาน ops" in line
+
+    def test_devops_role_zero_files_summarises_side_effects_from_headline(self):
+        facts = DigestFacts(
+            role="devops", files_touched=0, headline="Deployed to VPS; migrate DB", ops_task=True
+        )
+        line = format_digest_fact_line(facts)
+        assert "deploy" in line
+        assert "migrate" in line
+
+    def test_backend_role_zero_files_keeps_warning(self):
+        # Unrelated role, ops_task False (the #278 guard must not soften
+        # for a plain implementation task).
+        facts = DigestFacts(role="backend", files_touched=0, headline="แก้บั๊ก login")
+        line = format_digest_fact_line(facts)
+        assert "⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน" in line
+
+    def test_devops_role_zero_files_without_ops_task_flag_keeps_warning(self):
+        # A caller that never set ops_task=True (or a devops report that
+        # genuinely touched 0 files with no measured ops signal) still gets
+        # the loud #278 wording — ops_task is what actually gates this, not
+        # the role string alone.
+        facts = DigestFacts(role="devops", files_touched=0)
+        line = format_digest_fact_line(facts)
+        assert "⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน" in line
+
+    def test_devops_role_nonzero_files_unaffected(self):
+        facts = DigestFacts(role="devops", files_touched=2, files_dirs=("infra",), ops_task=True)
+        line = format_digest_fact_line(facts)
+        assert "⚠️" not in line
+        assert "ไฟล์ที่แตะ:2 (infra)" in line
+
+
+class TestDetectOpsTask:
+    def test_devops_role_is_always_ops(self):
+        assert detect_ops_task("devops", "") is True
+
+    def test_sharded_devops_role_is_ops(self):
+        assert detect_ops_task("devops#2", "") is True
+
+    def test_other_role_with_ops_keyword_in_note_is_ops(self):
+        assert detect_ops_task("backend", "รัน migration บน production DB") is True
+
+    def test_other_role_without_ops_keyword_is_not_ops(self):
+        assert detect_ops_task("backend", "แก้ endpoint /auth/login") is False
+
+    def test_empty_role_and_note_is_not_ops(self):
+        assert detect_ops_task("", "") is False
 
 
 class TestUnionFilesTouched:
