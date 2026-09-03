@@ -85,5 +85,16 @@ You're playing the slot normally driven by **the Cursor CLI** (`cursor-agent` �
 - Temp files/images/test scripts → store only in `$TAKKUB_ARTIFACTS_DIR`, never in the project's repo (evidence for your own task specifically → `$TAKKUB_ARTIFACTS_DIR/cursor/` recommended, to stop evidence scans from grabbing the wrong pane's images by mistake, #109)
 - Always read files with the **Read tool** — never use a shell one-liner to open a long path (`cat`/`type` on a long file)
 
+## 🧪 กติกาวางเทส (test placement conventions, required, #478)
+
+**ทุกงานที่แตะ logic ต้องมีเทสกันถอยมาด้วยใน diff เดียวกัน** — ไม่ใช่ทำทีหลังหรือข้ามไปเฉยๆ
+
+- **Node/TS**: spec วางข้างไฟล์ที่แก้ ชื่อ `<file>.spec.ts` หรือ `<file>.test.ts` **ตาม pattern ที่โปรเจคใช้อยู่แล้ว** (เช็คจากไฟล์เทสเดิมในโปรเจคก่อนเสมอ — ถ้าโปรเจคใช้ `__tests__/` ก็ตามนั้น) ห้ามสร้างโฟลเดอร์/รูปแบบเทสใหม่ถ้าโปรเจคมีธรรมเนียมอยู่แล้ว · โปรเจคที่ยังไม่มีเทสเลย = ห้ามตั้ง test runner เองโดยพลการ ให้ report Lead ว่า "ไม่มี test runner" แล้วทำงานต่อ
+- **Python**: `tests/test_<module>.py` ตาม module ที่แก้
+- **e2e/browser**: ใช้เฉพาะโฟลเดอร์ e2e ที่โปรเจคมีอยู่แล้วเท่านั้น (`e2e/`, `tests/e2e/`, `playwright/`) — ห้ามสร้างโฟลเดอร์ใหม่
+- **smoke**: script `smoke` ตัวเดียวใน package.json (#475) ไม่มีโฟลเดอร์เพิ่ม
+- **ห้ามทิ้งไฟล์ scratch ใน repo**: `debug_*`, `tmp_*`, `test.js`/`test.py` ลอยๆ, screenshot นอกโฟลเดอร์ที่กำหนด, `*.log`, `.env.*` ที่สร้างเอง — ไฟล์ชั่วคราวใช้ scratchpad/DATA_HOME เท่านั้น
+- **screenshot self-verify (#433)**: เก็บที่ path เดียวที่โปรเจคกำหนด (ถ้าไม่มี = `<DATA_HOME>/runtime/artifacts/<project>/`) ไม่ใช่ใน repo
+
 ## Communication
 - Send/receive peer messages with `takkub send --to <role> "<msg>"` (auto-CCs Lead)

@@ -219,6 +219,32 @@ Even if the work looks done and commit-ready, that decision is not yours to make
 ✅ `git status`, `git diff`, `git log`, `git show`, `git stash`
 ❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`
 
+## Test placement conventions (required, #478)
+
+**Any task that touches logic must ship a regression test in the same
+diff** — not "later", not skipped.
+
+- **Node/TS**: put the spec next to the file you changed, named
+  `<file>.spec.ts` or `<file>.test.ts` **following whatever pattern the
+  project already uses** (check its existing test files first — if the
+  project uses `__tests__/`, follow that). Never invent a new test
+  folder/pattern when the project already has a convention. A project
+  with no tests at all: do not set up a test runner on your own
+  judgment — tell Lead "no test runner" via `takkub send` and continue
+  the rest of the task.
+- **Python**: `tests/test_<module>.py` matching the module you changed.
+- **e2e/browser**: only the e2e folder the project already has (`e2e/`,
+  `tests/e2e/`, `playwright/`) — never a new one.
+- **smoke**: the single `smoke` script in `package.json` (#475), no
+  extra folder.
+- **Never leave scratch files in the repo**: `debug_*`, `tmp_*`, a
+  loose `test.js`/`test.py`, screenshots outside the designated folder,
+  `*.log`, self-created `.env.*` — temp files belong in the scratchpad
+  or `DATA_HOME`, never committed to the project.
+- **Screenshot self-verify (#433)**: save to the one path the project
+  designates (or `<DATA_HOME>/runtime/artifacts/<project>/` if none is
+  set) — never inside the repo.
+
 ## Working directory
 
 The cockpit set your cwd to the project the operator is currently
