@@ -4,6 +4,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.29] - 2026-09-03
+
+### Added (เพิ่ม)
+
+- **กติกาวางเทสในทุก role file (#478, user directive "ระเบียบเรียบร้อย")** — section "🧪 กติกาวางเทส" ใน `.claude/agents/*.md` ทั้ง 16 role + `codex_agents_md` template (provider ที่ไม่ใช่ claude): ทุกงานที่แตะ logic ต้องมีเทสกันถอยใน diff เดียวกัน · Node spec วางข้างไฟล์ตาม pattern ที่โปรเจคใช้อยู่ (ห้ามสร้างรูปแบบใหม่ ห้ามตั้ง runner เองถ้าโปรเจคไม่มี → report Lead) · Python `tests/test_<module>.py` · e2e ใช้โฟลเดอร์ที่มีอยู่ · smoke = script เดียว · ห้ามทิ้งไฟล์ scratch ใน repo · screenshot ไป `<DATA_HOME>/runtime/artifacts/<project>/` · guard test บังคับทุก role file มี section นี้
+- **qa-gate step `tidy` (#477)** — module ใหม่ `tidy_gate.py` เรียน layout เทสจากไฟล์เทสเดิมของโปรเจค (co-located / `tests/` root / `__tests__`) แล้ว WARN ไฟล์เทสใหม่ที่วางผิดที่ + ไฟล์ scratch ใน diff (`debug_*`, `tmp_*`, `test.js` ลอย root, `*.log/.orig/.rej/.bak`, รูปนอก docs/assets/public/screenshots, `.env.*` ใหม่) · ไม่มี convention เดิม = ไม่เตือน placement · WARN ไม่ทำให้ GATE FAIL (StepResult ได้ field `warn`) · `TAKKUB_QA_TIDY=strict` = FAIL, `=0` ปิด · รันทุก tier ที่มี diff (`--targeted` ระบุเอง ข้าม) · digest "⚠ tidy:N" ยังไม่ wire (ต้องแตะ god-file done())
+
+### Fixed (แก้)
+
+- **claude pane ค้างที่ trust-folder modal เมื่อ `assign --cwd` subfolder ที่ยังไม่เคย trust → task expired + pane exited (#476)** — เคสจริง pms `--cwd pms/pms-web` (Claude Code 2.1.259 wording "Quick safety check… ❯ No, exit / Yes, I trust this folder"): พิสูจน์จาก transcript ว่า detection (#443) จับ wording นี้ได้อยู่แล้วและ `_auto_trust` ถูก arm ใน preload path — แต่ transcript หยุดนิ่งหลัง render modal (keypress live ไม่ลง reproduce static ไม่ได้) · แก้ที่ต้นทางแบบ #444 แต่ครอบ `--cwd` ทุกกรณี: `pre_trust_pane_cwd` เขียน `hasTrustDialogAccepted` ของ **root ที่ register ไว้แคบสุด** ที่ cwd อยู่ใต้ (`_resolve_pane_pretrust_root` — ไม่ trust path มั่ว, worktree cwd ให้ #444 คุมต่อ) ลง `.claude.json` ของ profile ที่ pane ใช้ก่อน spawn ทุก claude pane · `delivery_unconfirmed` เช็ค trust modal ตอนจะ give up แล้วบอก `reason=trust-modal` ตรงๆ (provider-agnostic) · pre-trust claude-only (#103 gap)
+
 ## [v1.6.28] - 2026-09-03
 
 ### Added (เพิ่ม)
