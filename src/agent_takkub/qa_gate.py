@@ -1246,6 +1246,7 @@ def _non_python_gate(
     only_names: set[str] | None = None,
     lock_base: Path | None = None,
     lock_exclude: _LockHandle | None = None,
+    tier: DiffTier | None = None,
 ) -> GateReport:
     """Gate a tree that has no Python in it (#329).
 
@@ -1257,6 +1258,11 @@ def _non_python_gate(
     the tool gives. `verify.detect_stack` already knows how to read a Node
     project's own scripts, so this delegates there rather than inventing a
     second detector that would drift from it.
+
+    Node tier order: typecheck (always) -> test -> prisma-drift/migration-
+    integrity (#469, schema/migration checks a running DB) -> smoke (#475,
+    the only step that touches an actual running stack — full tier only,
+    opt-in per project, see `smoke_gate.run_smoke_check`).
     """
     if kind != "node":
         report.steps.append(
@@ -1333,9 +1339,9 @@ def _non_python_gate(
         from .verify import detect_package_manager, load_package_json
 
         pkg = load_package_json(root)
+        pm = detect_package_manager(root, pkg)
         prisma_roots = find_prisma_roots(root, pkg)
         if prisma_roots:
-            pm = detect_package_manager(root, pkg)
             for proot in prisma_roots:
                 label = proot.relative_to(root).as_posix() if proot != root else ""
                 suffix = f":{label}" if label else ""
@@ -1390,6 +1396,26 @@ def _non_python_gate(
             for rest in checks[index + 1 :]:
                 report.steps.append(_skip(rest.name, f"{check.name} failed — fail-fast"))
             break
+
+    # #475: last step, and only on a genuine full-tier run — `only_names`
+    # rules out the style/none tier (a plain typecheck), `targeted` rules out
+    # an explicit `--targeted` call, and `tier.tier == "full"` rules out
+    # auto's node "targeted" classification (which, unlike Python, never sets
+    # `targeted`/`only_names` either — #368, Node can't narrow by path). Skip
+    # entirely — never even shell out to `docker compose ps` — once something
+    # earlier already failed: a real stack hit is expensive, and the gate is
+    # already going to report FAIL either way.
+    if (
+        only_names is None
+        and targeted is None
+        and (tier is None or tier.tier == "full")
+        and report.ok
+    ):
+        from .smoke_gate import run_smoke_check
+
+        smoke = run_smoke_check(root, pkg, pm, env)
+        if smoke is not None:
+            report.steps.append(StepResult("smoke", smoke.ok, smoke.skipped, 0.0, smoke.detail))
     return report
 
 
@@ -1423,6 +1449,16 @@ def run_gate(
     the exec target is trusted to own its own toolchain, so a missing tool
     there surfaces as a normal step FAIL (real subprocess output), not
     ENV_GAP.
+
+    A Node project's full-tier gate runs, in order: typecheck -> test ->
+    prisma-drift/migration-integrity (#469) -> smoke (#475). Smoke only fires
+    on a genuine full-tier run (not `--targeted`, not auto's style/targeted
+    tiers) and only when the project opts in with a `smoke`/`e2e:smoke`/
+    `test:smoke` package.json script; it then runs that script only if a
+    docker-compose stack is already up (never starts one itself), so a FAIL
+    there is a real gate FAIL while "no script"/"stack not running" are both
+    silent no-ops or visible skips, never a FAIL. `TAKKUB_QA_SMOKE=0` turns
+    it off entirely; `TAKKUB_QA_SMOKE_TIMEOUT_S` overrides its 300s timeout.
     """
     cwd = cwd or Path.cwd()
     wroot = worktree_root(cwd)
@@ -1503,6 +1539,7 @@ def run_gate(
                 only_names=node_only,
                 lock_base=lock_base,
                 lock_exclude=lock_handle,
+                tier=tier,
             )
             return finish()
 

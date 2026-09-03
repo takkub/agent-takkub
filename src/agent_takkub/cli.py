@@ -4849,8 +4849,9 @@ def main(argv: list[str] | None = None) -> int:
     sqag = sub.add_parser(
         "qa-gate",
         help="canonical gate: venv-check -> pytest -> ruff check -> lint-imports on a "
-        "Python project, or that project's own checks on a Node one (#329) — one "
-        "entrypoint shared by qa pane / CI / a user's terminal (#325)",
+        "Python project, or typecheck -> test -> prisma drift/migration-integrity "
+        "(#469) -> smoke (#475, opt-in, running stack only) on a Node one (#329) — "
+        "one entrypoint shared by qa pane / CI / a user's terminal (#325)",
     )
     sqag.add_argument(
         "--targeted",
