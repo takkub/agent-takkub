@@ -3040,6 +3040,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.task_delivery",
         "agent_takkub.task_ledger",
+        "agent_takkub.token_meter",
         "agent_takkub.user_profile",
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
@@ -3053,7 +3054,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 51
+      "fan_out": 52
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -4766,6 +4767,7 @@
         "agent_takkub.agent_pane",
         "agent_takkub.agent_pane_model",
         "agent_takkub.core.conversation.ingest.claude_adapter",
+        "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.project_nav",
         "agent_takkub.remote.notify",
@@ -4773,7 +4775,7 @@
         "agent_takkub.status_header",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 5
     },
     {

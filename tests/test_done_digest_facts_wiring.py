@@ -316,6 +316,73 @@ class TestWorktreeRediscoveryAfterRestart:
         assert not any("merge --no-ff" in n for n, _kw in captured)
 
 
+class TestOpsTaskWiring:
+    """#470: `done()` derives `DigestFacts.ops_task` from the reporting
+    role + the FULL note text (not just the truncated headline) via
+    `digest_facts.detect_ops_task`, so a measured `files_touched:0` on a
+    devops/ops action renders as neutral status, not the #278 ⚠️ alarm."""
+
+    class _ZeroDiffFake:
+        def current_branch(self, cwd):
+            return "main"
+
+        def diffstat_since(self, cwd, base_sha):
+            return ""
+
+        def commits_since(self, cwd, base_sha):
+            return 1
+
+        def shared_tree_status_porcelain(self, cwd):
+            return ""
+
+        def dirty_snapshot(self, git_root, porcelain):
+            return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+    def test_devops_role_zero_files_flags_ops_task(self, orch, monkeypatch):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "devops", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::devops"] = PaneState(
+            last_assigned_task="deploy to prod",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: self._ZeroDiffFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("devops", note="Deployed to VPS; migrate DB; restarted service", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[devops"))
+        assert facts.files_touched == 0
+        assert facts.ops_task is True
+
+    def test_backend_role_zero_files_without_ops_keywords_not_flagged(self, orch, monkeypatch):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="fix #245",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: self._ZeroDiffFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("backend", note="แก้บั๊ก login ยังไม่เจอ root cause", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
+        assert facts.files_touched == 0
+        assert facts.ops_task is False
+
+
 class TestSharedTreePaneDigestFacts:
     def test_no_snapshot_reports_unverifiable_not_zero(self, orch):
         proj = "proj"

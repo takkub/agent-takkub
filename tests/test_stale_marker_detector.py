@@ -554,6 +554,176 @@ def test_lead_with_no_teammates_ever_assigned_gets_no_grace(
     assert [e for e in events if e[0] == "ready_marker_stale_prolonged"]
 
 
+# -- #468: independent liveness evidence before paging Lead ------------------
+
+
+def test_liveness_alive_skips_notify_and_logs_quiet_but_alive(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane the marker table cannot recognise but that IS still doing real
+    work (transcript fresh / live child process) must never page Lead as
+    "อาจค้าง" — only a quiet diagnostic log."""
+    key = "projX::backend"
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+    monkeypatch.setattr(
+        Orchestrator,
+        "_stale_marker_liveness",
+        lambda self, *a, **k: (True, "transcript_fresh", 5.0, []),
+    )
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    assert not notify_calls
+    assert not [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    alive_logs = [e for e in events if e[0] == "watchdog_quiet_but_alive"]
+    assert len(alive_logs) == 1
+    assert alive_logs[0][1]["role"] == "backend"
+    assert alive_logs[0][1]["project"] == "projX"
+    assert alive_logs[0][1]["reason"] == "transcript_fresh"
+    assert key not in orch._stale_marker_streak
+
+
+def test_liveness_dead_claude_pane_uses_definitive_wording(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No liveness evidence at all + claude (which has a structural recovery
+    fallback the probe already tried, #343) → the stronger "อาจค้างจริง"
+    wording is warranted."""
+    monkeypatch.setattr(
+        "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
+    )
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+    monkeypatch.setattr(
+        Orchestrator, "_stale_marker_liveness", lambda self, *a, **k: (False, "no_signal", None, [])
+    )
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    assert len(notify_calls) == 1
+    msg = notify_calls[0][0][1]
+    assert "อาจค้างจริง" in msg
+
+
+def test_liveness_dead_non_claude_provider_uses_softer_wording(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider with no structural fallback (codex/gemini-agy/opencode/
+    kimi/cursor) landing here only proves the marker table is blind to it —
+    the wording must not assert a hang, just point at the transcript."""
+    monkeypatch.setattr(
+        "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "codex"
+    )
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+    monkeypatch.setattr(
+        Orchestrator, "_stale_marker_liveness", lambda self, *a, **k: (False, "no_signal", None, [])
+    )
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    assert len(notify_calls) == 1
+    msg = notify_calls[0][0][1]
+    assert "มองไม่เห็น" in msg
+    assert "เช็ค transcript ก่อนตัดสิน" in msg
+    assert "อาจค้างจริง" not in msg
+
+
+class TestStaleMarkerLivenessEvidence:
+    """Direct unit tests for `_stale_marker_liveness` itself — the two
+    structural signals (provider transcript mtime, live child process),
+    each mocked independently of the other."""
+
+    def _pane(self, cwd: str = "C:/proj", spawn_ts: float = 0.0):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            _session_cwd=cwd,
+            model=SimpleNamespace(session_uuid="uuid-1"),
+            _spawn_ts=spawn_ts,
+        )
+
+    def test_fresh_transcript_counts_as_alive(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text("{}")
+        monkeypatch.setattr(
+            "agent_takkub.token_meter.resolve_pane_session", lambda *a, **k: transcript
+        )
+        monkeypatch.setattr(Orchestrator, "_live_non_scaffolding_children", lambda *a, **k: [])
+        import time
+
+        alive, reason, age_s, children = orch._stale_marker_liveness(
+            "projX", "backend", self._pane(), _sess(quiet=30.0), "codex", time.time()
+        )
+        assert alive is True
+        assert reason == "transcript_fresh"
+        assert age_s is not None and age_s < 5.0
+        assert children == []
+
+    def test_stale_transcript_and_no_children_counts_as_dead(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text("{}")
+        old = 1000.0
+        import os as _os
+
+        _os.utime(transcript, (old, old))
+        monkeypatch.setattr(
+            "agent_takkub.token_meter.resolve_pane_session", lambda *a, **k: transcript
+        )
+        monkeypatch.setattr(Orchestrator, "_live_non_scaffolding_children", lambda *a, **k: [])
+
+        alive, reason, _age_s, _children = orch._stale_marker_liveness(
+            "projX", "backend", self._pane(), _sess(quiet=30.0), "codex", old + 10000.0
+        )
+        assert alive is False
+        assert reason == "no_signal"
+
+    def test_live_child_process_counts_as_alive_even_without_transcript(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.token_meter.resolve_pane_session", lambda *a, **k: None)
+        monkeypatch.setattr(Orchestrator, "_live_non_scaffolding_children", lambda *a, **k: ["npm"])
+        import time
+
+        alive, reason, _age_s, children = orch._stale_marker_liveness(
+            "projX", "backend", self._pane(), _sess(quiet=30.0), "codex", time.time()
+        )
+        assert alive is True
+        assert reason == "live_children"
+        assert children == ["npm"]
+
+    def test_resolver_exception_degrades_to_child_process_signal_only(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unresolvable/erroring provider transcript must never raise —
+        it just leaves the child-process axis as the sole signal (#468's
+        'degrade to process-only check' requirement)."""
+
+        def _boom(*a, **k):
+            raise RuntimeError("no resolver for this provider")
+
+        monkeypatch.setattr("agent_takkub.token_meter.resolve_pane_session", _boom)
+        monkeypatch.setattr(
+            Orchestrator, "_live_non_scaffolding_children", lambda *a, **k: ["python"]
+        )
+        import time
+
+        alive, reason, age_s, _children = orch._stale_marker_liveness(
+            "projX", "backend", self._pane(), _sess(quiet=30.0), "unknown", time.time()
+        )
+        assert alive is True
+        assert reason == "live_children"
+        assert age_s is None
+
+
 def test_lead_grace_voided_by_a_still_working_teammate(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:

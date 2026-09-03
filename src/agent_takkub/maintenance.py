@@ -76,6 +76,10 @@ _WARN_EVENTS: dict[str, str] = {
     "stuck_recover_live_children_grace_expired": "หมดเวลาผ่อนผัน แล้ว respawn ทั้งที่ยังมี process",
     "delivery_kept_undelivered_on_send": "send แทรกใบงานที่ยังไม่ถึงมือ",
     "pane_guard_denied": "pane_guard บล็อกคำสั่ง (#466)",
+    "watchdog_quiet_but_alive": (
+        "marker จับ pane ไม่ได้ แต่ liveness (#468) เห็น transcript/child process ยังทำงาน — "
+        "ไม่ส่ง notice ให้ Lead"
+    ),
 }
 # Stall durations at or above this are worth naming individually rather than
 # just counting — below it, a stall is background noise on a busy box.
