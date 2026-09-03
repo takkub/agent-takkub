@@ -542,6 +542,173 @@ class TestNodePrismaGate:
         assert not any(s.name.startswith("prisma-") for s in report.steps)
 
 
+# ── #475: smoke test against a running stack, full tier only ──────────────
+# `smoke_gate.py` itself is unit-tested in `test_smoke_gate.py`; these only
+# prove `_non_python_gate`/`run_gate` call into it at the right time (and
+# only the right time) and that its result actually fails/passes the report.
+
+
+@pytest.fixture
+def node_repo_with_smoke(tmp_path):
+    """Same shape as `node_repo`, plus a `smoke` script and a docker-compose
+    file — the two things #475's opt-in requires."""
+    root = tmp_path / "node-smoke-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+    (root / "package.json").write_text(
+        '{"scripts": {"test": "vitest run", "smoke": "playwright test smoke"}}',
+        encoding="utf-8",
+    )
+    (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (root / "docker-compose.yml").write_text("", encoding="utf-8")
+    (root / "README.md").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    return root
+
+
+def _smoke_fake_run_factory(recorder: list, *, compose_rc=0, compose_stdout="gw\n", script_rc=0):
+    """Like `_fake_run_factory`, but tells `docker compose ps` and the smoke
+    script itself apart from typecheck/test so each can be controlled
+    independently."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return real_run(cmd, **kwargs)
+        recorder.append(cmd)
+        if cmd[0] == "docker":
+            return _FakeCompleted(compose_rc, stdout=compose_stdout)
+        if cmd[-2:] == ["run", "smoke"]:
+            return _FakeCompleted(script_rc, stdout="smoke output\n")
+        return _FakeCompleted(0, stdout="fake tool output\n")
+
+    return fake_run
+
+
+class TestNodeSmokeGate:
+    def test_no_smoke_step_when_no_script(self, node_repo, monkeypatch) -> None:
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not any(s.name == "smoke" for s in report.steps)
+
+    def test_runs_and_passes_when_script_and_stack_present(
+        self, node_repo_with_smoke, monkeypatch
+    ) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, write_report=False)
+
+        smoke = next(s for s in report.steps if s.name == "smoke")
+        assert smoke.ok is True
+        assert smoke.skipped is False
+        assert report.ok
+
+    def test_a_failing_script_fails_the_gate(self, node_repo_with_smoke, monkeypatch) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder, script_rc=1))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, write_report=False)
+
+        smoke = next(s for s in report.steps if s.name == "smoke")
+        assert smoke.ok is False
+        assert smoke.skipped is False
+        assert not report.ok
+
+    def test_skips_not_fails_when_stack_not_running(
+        self, node_repo_with_smoke, monkeypatch
+    ) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder, compose_stdout=""))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, write_report=False)
+
+        smoke = next(s for s in report.steps if s.name == "smoke")
+        assert smoke.ok is True
+        assert smoke.skipped is True
+        assert report.ok
+        assert not any(cmd[-2:] == ["run", "smoke"] for cmd in recorder), (
+            "stack not running — the smoke script itself must never be invoked"
+        )
+
+    def test_manual_targeted_never_runs_smoke(self, node_repo_with_smoke, monkeypatch) -> None:
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder))
+
+        report = qa_gate.run_gate(
+            cwd=node_repo_with_smoke, targeted=["src/x.ts"], write_report=False
+        )
+
+        assert not any(s.name == "smoke" for s in report.steps)
+        assert not any(cmd[0] == "docker" for cmd in recorder)
+
+    def test_auto_targeted_tier_never_runs_smoke(self, node_repo_with_smoke, monkeypatch) -> None:
+        (node_repo_with_smoke / "app").mkdir()
+        (node_repo_with_smoke / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, auto=True, write_report=False)
+
+        tier_row = next(s for s in report.steps if s.name == "auto-tier")
+        assert "targeted" in tier_row.detail
+        assert not any(s.name == "smoke" for s in report.steps)
+        assert not any(cmd[0] == "docker" for cmd in recorder)
+
+    def test_auto_full_tier_runs_smoke(self, node_repo_with_smoke, monkeypatch) -> None:
+        (node_repo_with_smoke / "app" / "api").mkdir(parents=True)
+        (node_repo_with_smoke / "app" / "api" / "route.ts").write_text(
+            "export {}", encoding="utf-8"
+        )
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, auto=True, write_report=False)
+
+        tier_row = next(s for s in report.steps if s.name == "auto-tier")
+        assert "full" in tier_row.detail
+        assert any(s.name == "smoke" for s in report.steps)
+
+    def test_disabled_via_env_var(self, node_repo_with_smoke, monkeypatch) -> None:
+        monkeypatch.setenv("TAKKUB_QA_SMOKE", "0")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _smoke_fake_run_factory(recorder))
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, write_report=False)
+
+        assert not any(s.name == "smoke" for s in report.steps)
+        assert not any(cmd[0] == "docker" for cmd in recorder)
+
+    def test_skips_smoke_when_an_earlier_step_already_failed(
+        self, node_repo_with_smoke, monkeypatch
+    ) -> None:
+        """A real stack hit is expensive — never pay for it once typecheck
+        has already failed the gate."""
+        recorder: list = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            recorder.append(cmd)
+            if cmd[0] == "docker":
+                return _FakeCompleted(0, stdout="gw\n")
+            return _FakeCompleted(1, stdout="", stderr="type error")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo_with_smoke, write_report=False)
+
+        assert not report.ok
+        assert not any(s.name == "smoke" for s in report.steps)
+        assert not any(cmd[0] == "docker" for cmd in recorder)
+
+
 # ── #349: PYTHONFAULTHANDLER default, memory sampling, native-abort detail ─
 
 
