@@ -134,6 +134,17 @@ def pm_exec(pm: str, *args: str) -> list[str]:
     return [_exe("npx"), "--no-install", *args]
 
 
+def load_package_json(cwd: Path) -> dict:
+    """Parsed `package.json` at *cwd*, or `{}` if absent/unparsable — the one
+    place this read happens so `node_checks` and the Prisma gate (#469) never
+    drift on how a malformed file is tolerated."""
+    try:
+        pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pkg = {}
+    return pkg if isinstance(pkg, dict) else {}
+
+
 def _workspace_globs(cwd: Path, pkg: dict) -> list[str]:
     """Workspace package globs from pnpm-workspace.yaml (`packages:` list) or
     package.json `workspaces` (array, or `{"packages": [...]}`). Negations
@@ -163,18 +174,28 @@ def _workspace_globs(cwd: Path, pkg: dict) -> list[str]:
     return [g for g in globs if g and not g.startswith("!")]
 
 
-def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
-    """Every workspace package directory (relative to *cwd*) that carries its
-    own tsconfig.json — the monorepo shape where the root has none, so a root
-    `tsc --noEmit` would typecheck nothing (#368: lottery/turbo)."""
+def workspace_dirs(cwd: Path, pkg: dict) -> list[Path]:
+    """Every workspace package directory (relative to *cwd*), regardless of
+    what it contains — the base glob other detectors (tsconfig, prisma
+    schema, #469) filter further themselves."""
     found: list[Path] = []
     for g in _workspace_globs(cwd, pkg):
         for d in sorted(cwd.glob(g)):
             if not d.is_dir() or "node_modules" in d.parts:
                 continue
-            if (d / "tsconfig.json").exists() and (d / "package.json").exists():
-                found.append(d.relative_to(cwd))
+            found.append(d.relative_to(cwd))
     return found
+
+
+def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
+    """Every workspace package directory (relative to *cwd*) that carries its
+    own tsconfig.json — the monorepo shape where the root has none, so a root
+    `tsc --noEmit` would typecheck nothing (#368: lottery/turbo)."""
+    return [
+        d
+        for d in workspace_dirs(cwd, pkg)
+        if (cwd / d / "tsconfig.json").exists() and (cwd / d / "package.json").exists()
+    ]
 
 
 def node_checks(cwd: Path) -> list[Check]:
@@ -190,12 +211,7 @@ def node_checks(cwd: Path) -> list[Check]:
       4. no TypeScript at all       → `test` alone, as before
     Then `lint` (eslint) if an eslint config exists.
     """
-    try:
-        pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        pkg = {}
-    if not isinstance(pkg, dict):
-        pkg = {}
+    pkg = load_package_json(cwd)
     scripts = pkg.get("scripts") or {}
     if not isinstance(scripts, dict):
         scripts = {}

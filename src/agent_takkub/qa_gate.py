@@ -889,6 +889,43 @@ def _non_python_gate(
             f"node project — delegating to: {', '.join(c.name for c in checks)}",
         )
     )
+
+    # #469: schema/migration drift is invisible to typecheck+test — the tier
+    # that skips them (style-only diff, `only_names` set) is also the tier
+    # that by construction never touched schema.prisma/prisma/migrations
+    # (both are `_FULL_TIER_HINTS`), so there is nothing for these to catch
+    # there and running them would just be noise. #475 tracks the still-open
+    # "prove it against a running stack" half of #469 as a follow-up.
+    if only_names is None:
+        from .prisma_gate import (
+            check_migration_integrity,
+            check_schema_drift,
+            find_prisma_roots,
+        )
+        from .verify import detect_package_manager, load_package_json
+
+        pkg = load_package_json(root)
+        prisma_roots = find_prisma_roots(root, pkg)
+        if prisma_roots:
+            pm = detect_package_manager(root, pkg)
+            for proot in prisma_roots:
+                label = proot.relative_to(root).as_posix() if proot != root else ""
+                suffix = f":{label}" if label else ""
+                drift = check_schema_drift(proot, pm, env)
+                report.steps.append(
+                    StepResult(f"prisma-drift{suffix}", drift.ok, drift.skipped, 0.0, drift.detail)
+                )
+                integrity = check_migration_integrity(proot)
+                report.steps.append(
+                    StepResult(
+                        f"prisma-migration-integrity{suffix}",
+                        integrity.ok,
+                        integrity.skipped,
+                        0.0,
+                        integrity.detail,
+                    )
+                )
+
     if targeted:
         # Never silently swallow them: a Node gate has no generic way to map
         # source paths onto a test selection, and pretending otherwise is how
