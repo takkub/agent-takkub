@@ -369,6 +369,90 @@ class TestAsyncSpawnDispatch:
         assert captured["provider_override"] == "codex"
 
 
+class _FakeOrchWithQueuedNotice(_FakeOrch):
+    """`_FakeOrch` plus a scriptable `_queued_no_pane_notice`, mirroring the
+    real `Orchestrator._queued_no_pane_notice` (#473) so #479's synchronous
+    pre-ack surfacing of it can be exercised without a real orchestrator."""
+
+    def __init__(self, notice: str = "") -> None:
+        super().__init__()
+        self.notice = notice
+        self.queued_notice_calls: list[tuple] = []
+
+    def _queued_no_pane_notice(self, project_ns, role):
+        self.queued_notice_calls.append((project_ns, role))
+        return self.notice
+
+
+class TestQueuedNoPaneAckNotice:
+    """#479 — `Orchestrator.assign()` appends the #473 "message ค้าง" warning
+    to its OWN return value, but that call is deferred (fire_staggered) and
+    its return is discarded: the ack a few lines above already went out. The
+    ack must carry the same warning itself, computed synchronously, or Lead
+    never sees it."""
+
+    def test_ack_carries_notice_when_messages_are_queued(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrchWithQueuedNotice(notice="⚠️ มี message ค้าง 2 ตัว...")
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
+
+        r = _replies(sock)
+        assert len(r) == 1 and r[0]["ok"] is True
+        assert "มี message ค้าง 2 ตัว" in r[0]["msg"]
+        # "default" — no `project` in the request, same fallback the CLI
+        # server uses elsewhere when the orch has no `_resolve_project`.
+        assert orch.queued_notice_calls == [("default", "backend")]
+
+    def test_ack_has_no_notice_when_nothing_queued(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrchWithQueuedNotice(notice="")
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
+
+        r = _replies(sock)
+        assert r[0]["ok"] is True
+        assert "message ค้าง" not in r[0]["msg"]
+
+    def test_ack_degrades_gracefully_without_notice_method(self, qapp: QCoreApplication) -> None:
+        """A stub orchestrator without `_queued_no_pane_notice` (the plain
+        `_FakeOrch` every other test in this file uses) must not crash the
+        ack — same degrade-gracefully pattern as the worktree collision
+        check's missing-method fallback."""
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+
+    def test_notice_also_carried_on_worktree_isolation_request(
+        self, qapp: QCoreApplication
+    ) -> None:
+        """The gap #479 reports was specifically about the deferred/worktree
+        dispatch path being a separate branch from the plain shared-cwd one
+        — confirm the notice survives an `isolation=worktree` request too."""
+        orch = _FakeOrchWithQueuedNotice(notice="⚠️ มี message ค้าง 1 ตัว...")
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "do x", "isolation": "worktree"}),
+        )
+
+        assert "มี message ค้าง 1 ตัว" in _replies(sock)[0]["msg"]
+
+
 class _FakeClock:
     """Shared time.time()/time.monotonic() stand-in so a test can advance
     the dedup window deterministically without a real sleep."""
