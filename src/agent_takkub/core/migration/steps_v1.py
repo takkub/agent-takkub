@@ -213,13 +213,22 @@ class RoleAgentMigrationStep:
         return pairs
 
     def _routing_payload(self) -> dict:
+        # #480: only emit a project entry for a project whose per-project V1
+        # file actually exists — a project with no file must get no key at
+        # all here, so the V2 reader's "no entry -> inherit global" fallback
+        # (see `provider_config.load_providers`) fires for it exactly like
+        # V1's own `config_path(project).exists()` check does. Including an
+        # entry for every KNOWN project name regardless of file existence
+        # (the pre-fix behavior) collapsed "no file" and "empty file" to the
+        # same `{}`, silently losing global-inheritance for every project
+        # that had never saved its own override.
         sources = self._routing_sources()
         global_src = sources.pop("global")
         return {
             "schema": 1,
             "migrated_at": time.time(),
             "global": read_json(global_src),
-            "projects": {name: read_json(p) for name, p in sources.items()},
+            "projects": {name: read_json(p) for name, p in sources.items() if p.exists()},
         }
 
     def inspect(self) -> StepReport:

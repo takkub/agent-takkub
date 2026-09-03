@@ -226,6 +226,75 @@ def test_role_agent_round_trip_with_custom_role_and_project_routing(
     assert routing["projects"]["demo"] == {"qa": "gemini"}
 
 
+def test_role_agent_apply_omits_project_with_no_v1_routing_file(v1_homes, journal_backups):
+    """#480: `projects.json` can list a project that has never saved its own
+    `role-providers.json` (never opened Providers & Roles for that tab).
+    That project must get NO key in `routing.json["projects"]` — not a
+    `{}` entry — so the V2 reader's "no entry -> inherit global" fallback
+    fires for it exactly like V1's own `config_path(project).exists()`
+    check does."""
+    data_home, settings_home = v1_homes
+    journal, backups = journal_backups
+    (settings_home / "role-providers.json").write_text(
+        json.dumps({"backend": "codex"}), encoding="utf-8"
+    )
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "/tmp/web"}}}}),
+        encoding="utf-8",
+    )
+    # No `settings_home/projects/demo/role-providers.json` written — "demo"
+    # is a known project with no per-project override file.
+
+    step = RoleAgentMigrationStep(
+        journal=journal, backups=backups, data_home=data_home, settings_home=settings_home
+    )
+    _apply_only(step)
+
+    layout = storage_layout_v2(data_home)
+    routing = read_json(layout.config_dir / "routing.json")
+    assert routing["global"] == {"backend": "codex"}
+    assert "demo" not in routing["projects"]
+
+
+def test_role_agent_reapply_clears_stale_empty_project_entry(v1_homes, journal_backups):
+    """A prior (pre-#480) apply/dual-write could have left a bogus `{}`
+    entry in `routing.json["projects"]` for a project with no V1 file.
+    Re-running `apply()` (the migration ladder is copy-never-move, always a
+    full overwrite of its target) must clear that stale entry, not merge
+    with it."""
+    data_home, settings_home = v1_homes
+    journal, backups = journal_backups
+    (settings_home / "role-providers.json").write_text(
+        json.dumps({"backend": "codex"}), encoding="utf-8"
+    )
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "/tmp/web"}}}}),
+        encoding="utf-8",
+    )
+    step = RoleAgentMigrationStep(
+        journal=journal, backups=backups, data_home=data_home, settings_home=settings_home
+    )
+    layout = storage_layout_v2(data_home)
+    target = layout.config_dir / "routing.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "migrated_at": 0,
+                "global": {"backend": "codex"},
+                "projects": {"demo": {}},  # stale pre-fix entry
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _apply_only(step)
+
+    routing = read_json(target)
+    assert "demo" not in routing["projects"]
+
+
 def test_role_agent_apply_then_rollback_removes_written_md_file(
     v1_homes, journal_backups, tmp_path
 ):

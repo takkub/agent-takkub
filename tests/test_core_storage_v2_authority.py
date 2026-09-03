@@ -508,6 +508,60 @@ def test_provider_config_routing_reads_v2_project_scope_when_flag_on(monkeypatch
     assert provider_config.load_providers("proj-a") == {"qa": "opencode"}
 
 
+def test_provider_config_routing_project_with_no_v1_file_inherits_global_on_and_off(
+    monkeypatch, tmp_path
+):
+    """#480 regression: a project known to `config.list_project_names()`
+    that has never saved its own `role-providers.json` must inherit the
+    global override identically whether the flag is OFF (reads V1 directly)
+    or ON (reads the dual-written v2 mirror) — the bug was flag ON silently
+    losing the override because the mirror wrote a `{}` entry for the
+    file-less project instead of no entry at all."""
+    from agent_takkub import config, provider_config
+
+    home = _migrated_home(tmp_path)
+    _wire_authority_home(monkeypatch, home)
+    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
+    monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    # "fresh" is a known project (e.g. from projects.json) that never saved
+    # its own per-project role-providers.json.
+    monkeypatch.setattr(config, "list_project_names", lambda: ["fresh"])
+
+    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    provider_config.save_providers({"backend": "codex"})
+    off = provider_config.load_providers("fresh")
+
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    on = provider_config.load_providers("fresh")
+
+    assert off == {"backend": "codex"}
+    assert on == off
+
+
+def test_provider_config_routing_genuinely_empty_project_file_on_and_off(monkeypatch, tmp_path):
+    """A project WITH a per-project file that is genuinely empty (`{}`, the
+    user cleared every override) must resolve to `{}` — no inheritance —
+    identically on and off, distinct from the "no file at all" case above."""
+    from agent_takkub import config, provider_config
+
+    home = _migrated_home(tmp_path)
+    _wire_authority_home(monkeypatch, home)
+    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
+    monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
+
+    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    provider_config.save_providers({"backend": "codex"})
+    provider_config.save_providers({}, project="proj-a")  # writes a genuinely empty file
+    off = provider_config.load_providers("proj-a")
+
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    on = provider_config.load_providers("proj-a")
+
+    assert off == {}
+    assert on == off
+
+
 def test_config_load_projects_reads_from_v2_when_flag_on(monkeypatch, tmp_path):
     from agent_takkub import config
 
