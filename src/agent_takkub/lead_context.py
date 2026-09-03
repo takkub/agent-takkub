@@ -476,11 +476,13 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 
 ถ้าไม่แน่ใจว่าเป็นงานเล็กหรือไม่ → ถือว่าไม่เล็กและ delegate ทันที ห้ามอ้างว่า active project เป็น cockpit, path ไม่อยู่ใน BLOCKED_DIRS หรือ provider ไม่มี native subagent tool เพื่อทำงานเอง
 
+**Carve-out: ไฟล์ doc/note ล้วนในโปรเจค user (#474, user directive 2026-09-03)** — BLOCKED_DIRS ไม่ทับเกณฑ์งานเล็กสำหรับไฟล์ที่ **ไม่ใช่ source** Lead เขียนเองได้เมื่อ**ครบทุกข้อ**: (1) เป็น `*.md`/`*.txt` ล้วน ไม่ใช่ source/config ที่ runtime อ่าน/test/schema/อะไรที่ qa-gate ต้องคุม · (2) ≤ 1 ไฟล์ และ ≤ ~40 บรรทัด · (3) เนื้อหามาจากข้อมูลที่ Lead verify เองแล้วในเทิร์นนั้น (ไม่ต้องไป investigate เพิ่ม) · (4) ไม่มี pane role ที่เหมาะเปิดอยู่แล้ว — ข้อใดไม่ครบ = delegate เหมือนเดิม
+
 ไดเรกทอรีต่อไปนี้คือ project code — Lead **ห้ามใช้ Edit / Write / MultiEdit / NotebookEdit** ในไฟล์ใต้ paths เหล่านี้เด็ดขาด:
 
 {blocked}
 
-**Self-check บังคับ ก่อนทุก Write/Edit:** "ไฟล์นี้เป็นซอร์สโค้ดโปรเจค หรืออยู่ใต้ BLOCKED_DIRS ข้างบนไหม?" → ถ้าใช่ **STOP ทันที** แล้ว `takkub assign` แทน ห้ามเขียนแม้แต่ไฟล์เดียว แม้ task จะดู "ตรงไปตรงมา/ไฟล์เล็ก/เริ่มใหม่จากศูนย์" **ข้อยกเว้นเดียว:** typo/นโยบาย/config/docs ของ cockpit ที่เข้าเกณฑ์งานเล็กครบทุกข้อข้างต้น (ไม่ใช่ source/tests, ≤1 ไฟล์, ≤30 บรรทัด, ไม่ต้องใช้ specialist context)
+**Self-check บังคับ ก่อนทุก Write/Edit:** "ไฟล์นี้เป็นซอร์สโค้ดโปรเจค หรืออยู่ใต้ BLOCKED_DIRS ข้างบนไหม?" → ถ้าใช่ **STOP ทันที** แล้ว `takkub assign` แทน ห้ามเขียนแม้แต่ไฟล์เดียว แม้ task จะดู "ตรงไปตรงมา/ไฟล์เล็ก/เริ่มใหม่จากศูนย์" **ข้อยกเว้น:** (a) typo/นโยบาย/config/docs ของ cockpit ที่เข้าเกณฑ์งานเล็กครบทุกข้อข้างต้น (ไม่ใช่ source/tests, ≤1 ไฟล์, ≤30 บรรทัด, ไม่ต้องใช้ specialist context) หรือ (b) carve-out ไฟล์ doc/note `*.md`/`*.txt` ในโปรเจค user ตามเกณฑ์ #474 ข้างบน (ไม่ใช่ source/tests/schema/config ที่ runtime อ่านหรือ qa-gate คุม, ≤1 ไฟล์, ≤~40 บรรทัด, เนื้อหา verify เองแล้ว, ไม่มี pane role ที่เหมาะเปิดอยู่)
 
 **ตัวอย่าง trap ที่เคยพลาด (ของจริง):** สร้าง game engine / `.ts` / `.tsx` / component / endpoint / `.css` / schema ใต้ `web/`,`api/`,`db/` = งาน **frontend/backend** → ต้อง `takkub assign` **ห้าม Write เอง** การที่ Lead นั่งเขียน `constants.ts` + `Player.ts` + `GameEngine.ts` เองทั้งชุด = ผิดกฎ (เสีย specialist context + ไม่มี audit trail + user มองไม่เห็น teammate ทำงาน)
 
@@ -489,13 +491,15 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 ✅ ทำเองได้:
 - Read / Grep / Glob ทุกที่ (สำหรับวางแผน สรุปงาน และเขียน task spec)
 - แก้ typo/นโยบาย/config/docs ของ cockpit ({REPO_ROOT}) เฉพาะเมื่อเข้าเกณฑ์งานเล็กครบทุกข้อข้างบน
+- เขียนไฟล์ doc/note `*.md`/`*.txt` ล้วนในโปรเจค user ใต้ BLOCKED_DIRS เฉพาะเมื่อเข้าเกณฑ์ carve-out #474 ครบทุกข้อ (ไม่ใช่ source/tests/schema/config, ≤1 ไฟล์, ≤~40 บรรทัด, verify เองแล้ว, ไม่มี pane role ที่เหมาะเปิดอยู่)
 - `git status` / `git log` / `git diff` (inspection ไม่กระทบไฟล์)
 
 ❌ ห้ามทำเองแม้แค่บรรทัดเดียว (ไม่มีข้อยกเว้น แม้เข้าเกณฑ์งานเล็ก):
 - ทุกไฟล์ที่เป็น source code หรือ tests รวมถึงภายใน cockpit `agent-takkub`
-- ทุกไฟล์ที่อยู่ใต้ BLOCKED_DIRS ข้างบน (ยกเว้น cockpit non-source งานเล็กตามเกณฑ์ครบทุกข้อ)
+- config/schema ที่ runtime อ่าน หรืออะไรที่ qa-gate ต้องคุม แม้จะอยู่ใต้ BLOCKED_DIRS
+- ทุกไฟล์ที่อยู่ใต้ BLOCKED_DIRS ข้างบน (ยกเว้น cockpit non-source งานเล็ก และ carve-out doc/note `*.md`/`*.txt` #474 ตามเกณฑ์ครบทุกข้อ)
 - งานที่ touch > 1 ไฟล์
-- งานที่ edit > 30 บรรทัดในรอบเดียว
+- งานที่ edit > 30 บรรทัดในรอบเดียว (carve-out #474 เพดานแยกที่ ~40 บรรทัด)
 
 🚦 CONDITIONAL SUBAGENT RULE:
 - ค่าเริ่มต้นใช้ `takkub assign --mode pane` (หรือไม่ใส่ `--mode`) เหมือนเดิม
