@@ -7,8 +7,10 @@ two-hop "new vs existing" then "new-with-rules vs import" chain.
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QInputDialog, QMessageBox, QWidget
+import pytest
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QWidget
 
+from agent_takkub import config
 from agent_takkub.main_window import MainWindow
 from agent_takkub.project_wizard import ProjectWizardMixin
 
@@ -61,6 +63,65 @@ def test_repo_with_subdir_still_opens_dialog(tmp_path, monkeypatch):
 
     assert calls, "dialog.exec() should be called when a mappable subdir exists"
     assert result is None
+
+
+class _Status:
+    def showMessage(self, *a, **k):
+        pass
+
+
+class _ImportHost(QWidget, ProjectWizardMixin):
+    """Minimal host for `_import_existing_project`, stubbing the MainWindow
+    surface `_save_and_open_project` touches after writing projects.json."""
+
+    def __init__(self):
+        super().__init__()
+        self._status = _Status()
+        self.opened: list[str] = []
+
+    def _refresh_project_list(self):
+        pass
+
+    def _open_projects(self):
+        return []
+
+    def _open_project_tab(self, name):
+        self.opened.append(name)
+
+
+def test_import_folder_name_with_spaces_produces_validate_name_safe_project(tmp_path, monkeypatch):
+    """#467 — a folder like "Claude Work" used to flow its raw `Path.name`
+    (containing a space) straight into the project registry, then crash
+    `register_pane`/`_resolve_project` with `ValueError: invalid project`
+    when the tab opened. The wizard must slugify it first."""
+    folder = tmp_path / "Claude Work"
+    folder.mkdir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+    monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "projects.json")
+
+    host = _ImportHost()
+    host._import_existing_project()
+
+    assert host.opened, "wizard should have proceeded to open a project tab"
+    project_name = host.opened[0]
+    # must not raise — this is exactly what register_pane's _resolve_project does
+    assert config.validate_name(project_name, "project") == project_name
+    data = config.load_projects()
+    assert project_name in data["projects"]
+
+
+@pytest.mark.parametrize("folder_name", ["Claude Work", "MY-APP!!", "app (v2)"])
+def test_import_various_unsafe_folder_names_never_raise(tmp_path, monkeypatch, folder_name):
+    folder = tmp_path / folder_name
+    folder.mkdir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+    monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "projects.json")
+
+    host = _ImportHost()
+    host._import_existing_project()  # must not raise
+
+    assert host.opened
+    assert config.validate_name(host.opened[0], "project") == host.opened[0]
 
 
 class _NewTabHost(QWidget):

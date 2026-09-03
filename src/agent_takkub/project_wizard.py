@@ -68,18 +68,20 @@ class ProjectWizardMixin:
             QFileDialog,
         )
 
+        from .config import slugify_project_name
+
         dir_path = QFileDialog.getExistingDirectory(self, "Select Project Root Folder")
         if not dir_path:
             return
 
         p = Path(dir_path)
-        name = p.name
+        name = slugify_project_name(p.name)
 
-        paths = self._run_map_paths_dialog(p)
+        paths = self._run_map_paths_dialog(p, project_name=name)
         if paths is None:
             return
 
-        self._save_and_open_project(name, p, paths, rules_content=None)
+        self._save_and_open_project(name, p, paths, rules_content=None, description=p.name)
 
     def _new_project_with_rules(self) -> None:
         """New project flow: select folder → prompt → generate rules → preview/edit → map paths → save."""
@@ -90,14 +92,14 @@ class ProjectWizardMixin:
             QMessageBox,
         )
 
-        from .config import load_projects
+        from .config import load_projects, slugify_project_name
 
         dir_path = QFileDialog.getExistingDirectory(self, "Select New Project Root Folder")
         if not dir_path:
             return
 
         p = Path(dir_path)
-        name = p.name
+        name = slugify_project_name(p.name)
 
         # Warn if same project name already exists from a different path
         data = load_projects()
@@ -144,7 +146,7 @@ class ProjectWizardMixin:
                 return
 
         # Step 4: map paths
-        paths = self._run_map_paths_dialog(p)
+        paths = self._run_map_paths_dialog(p, project_name=name)
         if paths is None:
             return
 
@@ -163,7 +165,7 @@ class ProjectWizardMixin:
             if ans == QMessageBox.StandardButton.No:
                 rules_content = None  # keep existing, skip write
 
-        self._save_and_open_project(name, p, paths, rules_content=rules_content)
+        self._save_and_open_project(name, p, paths, rules_content=rules_content, description=p.name)
 
     def _ask_project_description(self, project_name: str, prefill: str = "") -> str | None:
         """Show a multiline prompt dialog. Returns the text or None on cancel."""
@@ -279,8 +281,13 @@ class ProjectWizardMixin:
             QMessageBox.warning(self, "Generation failed", error_holder[0])
         return None
 
-    def _run_map_paths_dialog(self, p: Path) -> dict | None:
+    def _run_map_paths_dialog(self, p: Path, project_name: str | None = None) -> dict | None:
         """Show the subdirectory → role-key mapping dialog.
+
+        *project_name* is the registry key to pre-fill existing path
+        mappings from — pass the caller's already-resolved (slugified)
+        project name, since it may differ from the folder's raw ``p.name``
+        (#467). Defaults to ``p.name`` for callers that don't have one.
 
         Returns a dict of {key: posix_path} on accept, or None on cancel.
         """
@@ -295,7 +302,7 @@ class ProjectWizardMixin:
 
         from .config import load_projects
 
-        name = p.name
+        name = project_name if project_name is not None else p.name
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Configure Project Paths: {name}")
         dialog.resize(400, 300)
@@ -362,11 +369,15 @@ class ProjectWizardMixin:
         paths: dict,
         rules_content: str | None,
         presets: list[str] | None = None,
+        description: str | None = None,
     ) -> None:
         """Write CLAUDE.md (if rules_content given), save projects.json, open tab.
 
         *presets* overrides the stored preset list when provided; otherwise the
         existing list is preserved (import / edit flows that don't touch presets).
+        *description* seeds the description for a brand-new project (e.g. the
+        folder's raw display name when *name* was slugified from it, #467);
+        an existing project's stored description always takes precedence.
         """
         from .config import load_projects, save_projects_json
 
@@ -381,7 +392,7 @@ class ProjectWizardMixin:
 
         existing = (data.get("projects") or {}).get(name, {})
         data["projects"][name] = {
-            "description": existing.get("description", name),
+            "description": existing.get("description", description or name),
             "paths": paths,
             "presets": presets if presets is not None else existing.get("presets", []),
         }
@@ -587,7 +598,7 @@ class ProjectWizardMixin:
         new_desc = desc_edit.text().strip() or existing_desc
 
         # Step 2: paths mapping dialog (pre-fills existing mapping automatically)
-        paths = self._run_map_paths_dialog(p)
+        paths = self._run_map_paths_dialog(p, project_name=proj_name)
         if paths is None:
             return
 

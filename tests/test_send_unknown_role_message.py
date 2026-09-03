@@ -177,3 +177,75 @@ class TestQueuedMessageFlush:
 
         pending = role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, "p", "backend")
         assert len(pending) == 1  # untouched — still queued, retried on the next spawn
+
+
+class TestQueuedMessageStaleAcrossAssign:
+    """#473 — a real incident: Lead `takkub send`s a role with no pane open
+    (queued). Before it flushes, Lead clears that up out-of-band and
+    `takkub assign`s the SAME role a brand-new, unrelated task. The new pane
+    spawns, the stale queued message flushes alongside the real task, and
+    the pane answered the stale message then `takkub done`'d — closing the
+    real task as done with zero work. A flushed message must say clearly
+    when it predates the task the pane was actually just given."""
+
+    def test_flush_marks_stale_and_prefixes_body_when_new_task_assigned_since_queueing(
+        self, orch: Orchestrator
+    ) -> None:
+        from agent_takkub import role_messages
+
+        orch.send("backend", "old clarification", from_role="lead", project="p")
+        # `_assign_dispatch` always stamps a fresh task_id onto PaneState
+        # BEFORE spawning a closed role's pane — simulate that having
+        # happened for a NEW assign made after the message was queued.
+        orch._pane_state["p::backend"] = PaneState(task_id="new-task-uuid")
+        pane = _make_pane(session=_make_alive_session())
+        orch._panes_by_project.setdefault("p", {})["backend"] = pane
+
+        orch._flush_queued_no_pane_messages("p", "backend")
+
+        all_records = role_messages.read(orch_mod.RUNTIME_DIR, "p", role="backend")
+        sent = next(r for r in all_records if r["state"] == "sent")
+        assert "stale" in sent["body"].lower()
+        assert "old clarification" in sent["body"]
+        assert "ห้ามตอบแล้ว done" in sent["body"]
+        abandoned = next(r for r in all_records if r["state"] == "abandoned")
+        assert abandoned["abandoned_reason"] == "flushed_stale_after_new_assign"
+
+    def test_flush_delivers_unmodified_when_no_new_assign_happened(
+        self, orch: Orchestrator
+    ) -> None:
+        """A pane reopened WITHOUT going through assign() (no task_id ever
+        stamped) must still deliver the queued message normally — this is
+        the ordinary #303 flow, and must not regress into always-stale."""
+        from agent_takkub import role_messages
+
+        orch.send("backend", "old clarification", from_role="lead", project="p")
+        pane = _make_pane(session=_make_alive_session())
+        orch._panes_by_project.setdefault("p", {})["backend"] = pane
+
+        orch._flush_queued_no_pane_messages("p", "backend")
+
+        all_records = role_messages.read(orch_mod.RUNTIME_DIR, "p", role="backend")
+        sent = next(r for r in all_records if r["state"] == "sent")
+        assert "old clarification" in sent["body"]
+        assert "stale" not in sent["body"].lower()
+        abandoned = next(r for r in all_records if r["state"] == "abandoned")
+        assert abandoned["abandoned_reason"] == "flushed_after_spawn"
+
+
+class TestQueuedNoPaneNotice:
+    """#473 item 2 — `takkub assign` on a role with queue-stuck messages
+    must warn Lead on the spot (stdout of the assign response), not stay
+    silent until the stale flush quietly lands later."""
+
+    def test_returns_empty_when_nothing_queued(self, orch: Orchestrator) -> None:
+        assert orch._queued_no_pane_notice("p", "backend") == ""
+
+    def test_warns_with_count_and_role_when_messages_are_queued(self, orch: Orchestrator) -> None:
+        orch.send("backend", "note 1", from_role="lead", project="p")
+        orch.send("backend", "note 2", from_role="lead", project="p")
+
+        notice = orch._queued_no_pane_notice("p", "backend")
+
+        assert "2" in notice
+        assert "backend" in notice
