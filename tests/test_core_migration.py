@@ -845,3 +845,101 @@ def test_core_internal_store_step_reapply_never_clobbers_version_marker(tmp_path
         assert all(r.ok for r in validate_reports), [
             (r.step_id, r.summary) for r in validate_reports
         ]
+
+
+def test_core_internal_store_step_reapply_never_clobbers_cursor_file(tmp_path, monkeypatch):
+    """#488 (follow-up #486): same silent-revert shape, but for
+    `conversation_ingest_cursors.json` instead of `version.json`. V1's
+    cursor store (`cursor_store.py`) resolves its path through
+    `core_home()` on every call — no cached path — so once this step's
+    first apply flips `core_home()` to `target`, live conversation
+    ingestion keeps writing fresh cursors straight into `target` while
+    `source`'s copy stays frozen at whatever it was during that first
+    materialization. Before this fix, re-running the FULL ladder had this
+    step's re-apply branch copy that frozen `source` file straight back
+    over the live `target` one, silently reverting already-ingested
+    progress — and `validate()` byte-compared them, so it could never
+    agree the store was healthy either."""
+    data_home = tmp_path / "data_home"
+    runtime_dir = data_home / "runtime"
+    source = runtime_dir / "core"
+    source.mkdir(parents=True)
+    (source / "conversation_ingest_cursors.json").write_text(
+        json.dumps({"claude::conv-1": "cursor-a"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", runtime_dir)
+
+    engine = MigrationEngine()
+    first_reports = engine.apply()
+    assert all(r.ok for r in first_reports), [(r.step_id, r.summary) for r in first_reports]
+    target = data_home / "v2" / "system"
+    assert target.is_dir()
+    assert json.loads((target / "conversation_ingest_cursors.json").read_text()) == {
+        "claude::conv-1": "cursor-a"
+    }
+
+    # Live ingestion after the flip — exactly what a real set_cursor() write
+    # looks like once core_home() resolves straight to target.
+    (target / "conversation_ingest_cursors.json").write_text(
+        json.dumps({"claude::conv-1": "cursor-b"}), encoding="utf-8"
+    )
+
+    for _ in range(2):  # idempotent on a second re-run too
+        second_reports = engine.apply()
+        assert all(r.ok for r in second_reports), [(r.step_id, r.summary) for r in second_reports]
+
+        cursor_now = json.loads((target / "conversation_ingest_cursors.json").read_text())
+        assert cursor_now == {"claude::conv-1": "cursor-b"}
+        # source's copy is frozen from the first materialization — never
+        # touched again.
+        source_cursor = json.loads((source / "conversation_ingest_cursors.json").read_text())
+        assert source_cursor == {"claude::conv-1": "cursor-a"}
+
+        validate_reports = engine.validate()
+        assert all(r.ok for r in validate_reports), [
+            (r.step_id, r.summary) for r in validate_reports
+        ]
+
+
+def test_core_internal_store_step_apply_pending_stays_quiet_once_only_cursors_drifted(
+    tmp_path, monkeypatch
+):
+    """#488: before this fix, `validate()` byte-compared the cursor file
+    against a frozen `source` copy, so a live post-flip write into `target`
+    made this step's `validate()` report False forever — and
+    `apply_pending()`'s pending check (`applied_before and
+    validate().ok`) then re-ran `core-internal-store` (re-copying the WHOLE
+    store) on literally every boot. Confirms boot now stays quiet, and
+    never re-copies over the live write, once nothing has actually
+    drifted."""
+    data_home = tmp_path / "data_home"
+    runtime_dir = data_home / "runtime"
+    source = runtime_dir / "core"
+    source.mkdir(parents=True)
+    (source / "conversation_ingest_cursors.json").write_text(
+        json.dumps({"claude::conv-1": "cursor-a"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", runtime_dir)
+
+    engine = MigrationEngine()
+    first_reports = engine.apply_pending()
+    assert all(r.ok for r in first_reports), [(r.step_id, r.summary) for r in first_reports]
+    assert "core-internal-store" in [r.step_id for r in first_reports]
+
+    target = data_home / "v2" / "system"
+    assert target.is_dir()
+
+    # Live ingestion after the flip — resolves straight through core_home(),
+    # which now equals target.
+    (target / "conversation_ingest_cursors.json").write_text(
+        json.dumps({"claude::conv-1": "cursor-b"}), encoding="utf-8"
+    )
+
+    second_reports = engine.apply_pending()
+    assert second_reports == []  # every step, including core-internal-store, validates green
+    # never re-copied -> the live write survives untouched
+    assert json.loads((target / "conversation_ingest_cursors.json").read_text()) == {
+        "claude::conv-1": "cursor-b"
+    }
