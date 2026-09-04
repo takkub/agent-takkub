@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`migrate validate` ไม่มีวันเขียวบนเครื่อง live + boot re-copy store ทิ้งฟรีทุกรอบ (#488, follow-up #486)** — `conversation_ingest_cursors.json` ถูก V1 เขียนตลอดเวลา (`cursor_store.set_cursor()` resolve ผ่าน `core_home()` ทุก call — หลัง flip เขียนเข้า `v2/system` ตรงๆ) snapshot จึงไม่มีวัน byte-identical → validate แดงถาวร → `apply_pending()` ตอน boot รัน `core-internal-store` ซ้ำทุกรอบ (re-copy ทั้ง store + ก่อน 1.6.31 คือตัว trigger #486 clobber บน prod จริง — marker ค้าง 1.2.0) · เพิ่มเข้า `_REENTRY_EXCLUDED_NAMES` ชุดเดียวกับ `version.json`: first materialization ยัง copy, re-apply ไม่ทับ, validate เช็คแค่ existence · `brain/`/`conversations/` live-written เหมือนกันแต่ไม่ต้องเข้า set (validate เช็ค dir แค่ `is_dir` ไม่เทียบเนื้อ — จดเหตุผลใน comment) · พิสูจน์บน dev store จริง: validate เขียวทั้ง 9 step ขณะ cockpit รันอยู่ — เป็นเงื่อนไขเฝ้า drift ก่อน flip #362
+
 ## [v1.6.31] - 2026-09-04
 
 ### Changed (เปลี่ยน)
