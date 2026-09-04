@@ -866,24 +866,49 @@ class CoreInternalStoreStep:
         happen to the defaults."""
         return frozenset({self.journal.store_path.name, self.backups.root.name})
 
-    # #486: `version.json` stops being this step's to sync the instant
+    # #486/#488: these entries stop being this step's to sync the instant
     # `target` already exists. Once a prior ladder run has materialized
-    # `target` (`v2/system`), `core_home()` (and so `VersionMarkerStep`,
-    # step 0 of the ladder) resolves there directly and writes the current
-    # app version straight into `target/version.json` on every later run —
-    # including the boot-time fast path that runs `version-marker` alone
-    # (`engine.py`'s "just step 0"). `source/version.json`
-    # (`RUNTIME_DIR/core/version.json`) is never touched again after that
-    # first flip, so a later run of the FULL ladder used to have this
-    # step's re-apply branch copy that now-stale source file straight back
-    # over the freshly-written target, silently reverting
-    # `version-marker`'s work. This set is deliberately NOT part of
-    # `_excluded_names()`: the very first materialization (`target` not yet
-    # a directory) still needs `version.json` copied in — nothing else
-    # seeds it — and at that point source's copy IS the fresh one
-    # (`version-marker` runs as step 0, before this last step, and still
-    # resolves to `source` itself pre-flip).
-    _REENTRY_EXCLUDED_NAMES: ClassVar[frozenset[str]] = frozenset({"version.json"})
+    # `target` (`v2/system`), `core_home()` resolves there directly for
+    # every NEW store object — so whatever keeps each of these current in
+    # V1 starts writing straight into `target` from that point on, while
+    # `source`'s copy is frozen from the first materialization:
+    #   - `version.json`: `VersionMarkerStep` (step 0 of the ladder)
+    #     writes the current app version into it on every later run,
+    #     including the boot-time fast path that runs `version-marker`
+    #     alone (`engine.py`'s "just step 0").
+    #   - `conversation_ingest_cursors.json` (#488): `cursor_store.py`'s
+    #     `set_cursor()` resolves its path through `core_home()` on every
+    #     call (no cached path), so live conversation ingestion keeps
+    #     bumping cursors straight into `target` after the flip too.
+    # A later run of the FULL ladder used to have this step's re-apply
+    # branch copy that now-stale `source` file straight back over the
+    # freshly-written `target`, silently reverting the live writer's work
+    # — for `version.json` that meant undoing `version-marker`'s bump
+    # (#486); for the cursor file it meant re-ingesting already-ingested
+    # transcript ranges from the start on the very next boot, and before
+    # this fix it was also `apply_pending()`'s trigger to re-run this step
+    # (and thus re-copy the whole store) on *every* boot, since
+    # `validate()` byte-compares this file and a frozen `source` copy can
+    # never match a live-written `target` one.
+    #
+    # `brain/` and `conversations/` are ALSO live-written straight through
+    # `core_home()` post-flip (`brain/store.py`, `storage/paths.py`), but
+    # they don't need a place in this set: `validate()` below only checks
+    # directory entries for `dest.is_dir()`, never compares their
+    # contents, so a stale `source` copy of a directory can't produce the
+    # false-mismatch this set exists to prevent. (Re-apply's `copytree`
+    # still merges the frozen `source` copy into `target` for those two —
+    # a separate, pre-existing staleness concern, not the one #486/#488
+    # fix.)
+    #
+    # This set is deliberately NOT part of `_excluded_names()`: the very
+    # first materialization (`target` not yet a directory) still needs
+    # every one of these copied in — nothing else seeds them — and at
+    # that point `source`'s copy IS the fresh one (nothing has flipped
+    # yet, so every writer above still resolves to `source` itself).
+    _REENTRY_EXCLUDED_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {"version.json", "conversation_ingest_cursors.json"}
+    )
 
     def _present_entries(self) -> list[str]:
         source = self._source_root()
@@ -946,13 +971,13 @@ class CoreInternalStoreStep:
             if target.is_dir():
                 # Re-apply: already materialized (this step ran before), so
                 # the core_home() fallback already flipped — merge in place,
-                # no atomicity concern left to protect. `version.json` is
-                # skipped here (#486): once flipped, `version-marker`
-                # writes it straight into `target` on every later run
-                # (including the boot-time "step 0 only" fast path), while
-                # `source`'s copy is frozen from the first materialization
-                # — copying it back here would silently revert
-                # `version-marker`'s freshest write.
+                # no atomicity concern left to protect.
+                # `_REENTRY_EXCLUDED_NAMES` entries are skipped here
+                # (#486/#488): once flipped, their real V1 writer resolves
+                # straight through `core_home()` into `target` on every
+                # later run, while `source`'s copy is frozen from the first
+                # materialization — copying it back here would silently
+                # revert whatever that writer most recently wrote.
                 for name in entries:
                     if name in self._REENTRY_EXCLUDED_NAMES:
                         continue
@@ -988,12 +1013,17 @@ class CoreInternalStoreStep:
         mismatched: list[str] = []
         for name in self._present_entries():
             if name in self._REENTRY_EXCLUDED_NAMES and target.is_dir():
-                # #486: once `target` exists, `version.json` there is
-                # `version-marker`'s to keep current, not this step's to
-                # keep byte-identical to a frozen `source` copy — a real
-                # app-version bump between this step's first apply and a
-                # later validate() call would otherwise always read as a
-                # false mismatch.
+                # #486/#488: once `target` exists, entries in this set are
+                # each other writer's to keep current, not this step's to
+                # keep byte-identical to a frozen `source` copy — comparing
+                # bytes would always read as a false mismatch the moment
+                # that writer touches `target` again (an app-version bump
+                # for `version.json`, any conversation ingest for the
+                # cursor file). All this step still owes them is
+                # existence: the first materialization (or an earlier
+                # re-apply) already seeded them into `target`.
+                if not (target / name).exists():
+                    mismatched.append(name)
                 continue
             src = source / name
             dest = target / name
