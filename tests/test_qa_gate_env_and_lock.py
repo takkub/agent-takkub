@@ -280,17 +280,21 @@ def test_second_waiter_queues_then_acquires_after_release_and_announces(tmp_path
 
     announcements: list[str] = []
     result: dict = {}
+    acquired = threading.Event()
 
     def waiter():
         result["handle"] = qa_gate.acquire_full_gate_lock(
             base, label="proj", poll_interval=0.02, print_fn=announcements.append
         )
+        acquired.set()
 
     t = threading.Thread(target=waiter)
     t.start()
     time.sleep(0.2)
     assert result.get("handle") is None  # still queued — holder hasn't released
     holder.release()
+
+    assert acquired.wait(timeout=10), "waiter never acquired the lock after release"
     t.join(timeout=5)
 
     assert result["handle"] is not None
