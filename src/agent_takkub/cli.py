@@ -1243,7 +1243,7 @@ def cmd_spawn_service(args: argparse.Namespace) -> dict:
     services; stopping one is `takkub service-stop --name X` (Lead)."""
     if getattr(args, "list", False):
         return _request(_with_project({"cmd": "service-list", "from": _from_role()}))
-    cmd = list(getattr(args, "command", None) or [])
+    cmd = list(getattr(args, "service_argv", None) or [])
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
@@ -4472,7 +4472,13 @@ def main(argv: list[str] | None = None) -> int:
     ssv.add_argument("--name", default=None, help="service name (default: command basename)")
     ssv.add_argument("--cwd", default=None, help="working directory (default: current)")
     ssv.add_argument("--list", action="store_true", help="show this project's live services")
-    ssv.add_argument("command", nargs=argparse.REMAINDER, help="-- <cmd> [args...]")
+    # dest must NOT be "command" — that collides with the top-level
+    # `add_subparsers(dest="command")` (#483): argparse fills the Namespace's
+    # `command` attribute with this REMAINDER list *after* the subparsers
+    # action already set it to "spawn-service", leaving `args.command` a
+    # list by the time `_enforce_role_gate(args.command)` runs — an
+    # unhashable `in LEAD_ONLY_COMMANDS` check crashes every invocation.
+    ssv.add_argument("service_argv", nargs=argparse.REMAINDER, help="-- <cmd> [args...]")
     ssv.set_defaults(func=cmd_spawn_service)
 
     sst = sub.add_parser("service-stop", help="(lead) stop a spawn-service by name (#429)")

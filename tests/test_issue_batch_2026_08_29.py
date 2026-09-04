@@ -556,10 +556,31 @@ class TestSpawnService:
             cli, "_request", lambda p, **k: seen.update(p) or {"ok": True, "msg": "x"}
         )
         args = argparse.Namespace(
-            name=None, cwd="/w", list=False, command=["--", "cloudflared", "tunnel", "run"]
+            name=None, cwd="/w", list=False, service_argv=["--", "cloudflared", "tunnel", "run"]
         )
         cli.cmd_spawn_service(args)
         assert seen["cmd"] == "spawn-service"
         assert seen["argv"] == ["cloudflared", "tunnel", "run"]
         assert seen["name"] == "cloudflared"
         assert seen["cwd"] == "/w"
+
+    def test_cli_main_spawn_service_survives_role_gate(self, monkeypatch):
+        """#483 regression: the top-level `add_subparsers(dest="command")`
+        used to collide with spawn-service's own positional named "command"
+        (argparse.REMAINDER) — by the time `_enforce_role_gate(args.command)`
+        ran in `main()`, `args.command` had been overwritten with the
+        service's argv list instead of staying "spawn-service", crashing
+        every invocation with `TypeError: unhashable type: 'list'` on the
+        `in LEAD_ONLY_COMMANDS` check. Exercise the real argparse path (not
+        cmd_spawn_service directly) with a non-lead role, since that's
+        exactly the path `_enforce_role_gate` runs on."""
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        seen = {}
+        monkeypatch.setattr(
+            cli, "_request", lambda p, **k: seen.update(p) or {"ok": True, "msg": "started"}
+        )
+        rc = cli.main(["spawn-service", "--name", "docker", "--", "docker", "desktop"])
+        assert rc == 0
+        assert seen["cmd"] == "spawn-service"
+        assert seen["argv"] == ["docker", "desktop"]
+        assert seen["name"] == "docker"
