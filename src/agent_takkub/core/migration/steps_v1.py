@@ -27,6 +27,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from agent_takkub import config
 
@@ -865,6 +866,25 @@ class CoreInternalStoreStep:
         happen to the defaults."""
         return frozenset({self.journal.store_path.name, self.backups.root.name})
 
+    # #486: `version.json` stops being this step's to sync the instant
+    # `target` already exists. Once a prior ladder run has materialized
+    # `target` (`v2/system`), `core_home()` (and so `VersionMarkerStep`,
+    # step 0 of the ladder) resolves there directly and writes the current
+    # app version straight into `target/version.json` on every later run —
+    # including the boot-time fast path that runs `version-marker` alone
+    # (`engine.py`'s "just step 0"). `source/version.json`
+    # (`RUNTIME_DIR/core/version.json`) is never touched again after that
+    # first flip, so a later run of the FULL ladder used to have this
+    # step's re-apply branch copy that now-stale source file straight back
+    # over the freshly-written target, silently reverting
+    # `version-marker`'s work. This set is deliberately NOT part of
+    # `_excluded_names()`: the very first materialization (`target` not yet
+    # a directory) still needs `version.json` copied in — nothing else
+    # seeds it — and at that point source's copy IS the fresh one
+    # (`version-marker` runs as step 0, before this last step, and still
+    # resolves to `source` itself pre-flip).
+    _REENTRY_EXCLUDED_NAMES: ClassVar[frozenset[str]] = frozenset({"version.json"})
+
     def _present_entries(self) -> list[str]:
         source = self._source_root()
         if not source.is_dir():
@@ -926,8 +946,16 @@ class CoreInternalStoreStep:
             if target.is_dir():
                 # Re-apply: already materialized (this step ran before), so
                 # the core_home() fallback already flipped — merge in place,
-                # no atomicity concern left to protect.
+                # no atomicity concern left to protect. `version.json` is
+                # skipped here (#486): once flipped, `version-marker`
+                # writes it straight into `target` on every later run
+                # (including the boot-time "step 0 only" fast path), while
+                # `source`'s copy is frozen from the first materialization
+                # — copying it back here would silently revert
+                # `version-marker`'s freshest write.
                 for name in entries:
+                    if name in self._REENTRY_EXCLUDED_NAMES:
+                        continue
                     self._copy_entry(source / name, target / name)
             else:
                 # First materialization: build the whole tree off to one
@@ -959,6 +987,14 @@ class CoreInternalStoreStep:
         target = self._target()
         mismatched: list[str] = []
         for name in self._present_entries():
+            if name in self._REENTRY_EXCLUDED_NAMES and target.is_dir():
+                # #486: once `target` exists, `version.json` there is
+                # `version-marker`'s to keep current, not this step's to
+                # keep byte-identical to a frozen `source` copy — a real
+                # app-version bump between this step's first apply and a
+                # later validate() call would otherwise always read as a
+                # false mismatch.
+                continue
             src = source / name
             dest = target / name
             if src.is_dir():

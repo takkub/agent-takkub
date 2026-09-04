@@ -789,3 +789,59 @@ def test_core_internal_store_step_validate_and_rollback_survive_a_fresh_engine_a
     rollback_report = engine_b.rollback()
     assert rollback_report.ok, rollback_report.summary
     assert not target.exists()
+
+
+def test_core_internal_store_step_reapply_never_clobbers_version_marker(tmp_path, monkeypatch):
+    """#486: on a store where `target` (v2/system) already exists from an
+    earlier full-ladder run, re-running the WHOLE ladder used to have this
+    (last) step's re-apply branch copy `source`'s frozen `version.json`
+    straight back over `target`, undoing `version-marker` (step 0)'s
+    fresh write earlier in the SAME apply() call — which `engine.py`'s
+    `_verify_post_apply` (#350) then caught by re-validating every step and
+    downgrading `version-marker`'s own apply report to failed, even though
+    `version-marker` itself never regressed."""
+    data_home = tmp_path / "data_home"
+    runtime_dir = data_home / "runtime"
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr("agent_takkub.core.migration.steps.APP_VERSION", "1.0.0")
+
+    # A store with a V1 marker already migrated once, at app version 1.0.0 —
+    # `target` already exists and carries the old version.
+    engine = MigrationEngine()
+    first_reports = engine.apply()
+    assert all(r.ok for r in first_reports), [(r.step_id, r.summary) for r in first_reports]
+    target = data_home / "v2" / "system"
+    source = runtime_dir / "core"
+    assert target.is_dir()
+    assert json.loads((target / "version.json").read_text())["components"][0]["version"] == "1.0.0"
+
+    # App upgraded — re-running the FULL ladder again (not apply_pending())
+    # is exactly the #486 repro shape.
+    monkeypatch.setattr("agent_takkub.core.migration.steps.APP_VERSION", "2.0.0")
+    for _ in range(2):  # สองรอบยิ่งดี — idempotent on a second re-run too
+        second_reports = engine.apply()
+        assert all(r.ok for r in second_reports), [(r.step_id, r.summary) for r in second_reports]
+
+        version_marker_report = second_reports[0]
+        core_internal_report = second_reports[-1]
+        assert version_marker_report.step_id == "version-marker"
+        assert core_internal_report.step_id == "core-internal-store"
+        assert version_marker_report.ok, version_marker_report.summary
+        assert core_internal_report.ok, core_internal_report.summary
+
+        target_version = json.loads((target / "version.json").read_text())["components"][0][
+            "version"
+        ]
+        assert target_version == "2.0.0"
+        # source's copy is frozen from the first materialization — never
+        # touched again, so it stays at the pre-upgrade version forever.
+        source_version = json.loads((source / "version.json").read_text())["components"][0][
+            "version"
+        ]
+        assert source_version == "1.0.0"
+
+        validate_reports = engine.validate()
+        assert all(r.ok for r in validate_reports), [
+            (r.step_id, r.summary) for r in validate_reports
+        ]
