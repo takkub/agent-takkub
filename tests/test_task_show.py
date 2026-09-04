@@ -78,6 +78,60 @@ class TestTaskShowInfo:
         assert payload == {}
 
 
+class TestCloseUndeliveredTaskKeepsLedgerRow:
+    """#484 point (c): closing a pane whose current task was accepted but
+    never actually delivered (e.g. parked on a trust modal the whole time)
+    must not wipe `task_show_info` — the text must stay recoverable. A pane
+    that DID receive its task before being closed without `done()` keeps the
+    prior behaviour (state cleared, ledger row flipped to closed/abandoned)."""
+
+    def _pane(self) -> MagicMock:
+        pane = MagicMock()
+        pane.session = None  # not alive — close() skips the terminate() branch
+        return pane
+
+    def test_close_keeps_task_recoverable_when_never_delivered(self, orch: Orchestrator) -> None:
+        orch._panes_by_project[TEST_PROJECT] = {"backend": self._pane()}
+        ekey = _exit_key(TEST_PROJECT, "backend")
+        orch._ps(ekey).last_assigned_task = "[ROLE: backend] never reached the pane"
+        # task_delivered defaults to False — this task was accepted but the
+        # pane never got past e.g. a trust modal before being closed.
+
+        with (
+            patch("agent_takkub.task_ledger.mark_done", return_value=None),
+            patch.object(orch, "_drain_pane_health", return_value=None),
+            patch.object(orch, "_notify_lead") as notify,
+        ):
+            ok, msg = orch.close("backend", project=TEST_PROJECT)
+
+        assert ok is True, msg
+        show_ok, _show_msg, payload = orch.task_show_info("backend", project=TEST_PROJECT)
+        assert show_ok is True
+        assert payload["task"] == "[ROLE: backend] never reached the pane"
+        assert any(call.kwargs.get("kind") == "close-undelivered" for call in notify.call_args_list)
+
+    def test_close_clears_state_normally_once_task_was_delivered(self, orch: Orchestrator) -> None:
+        orch._panes_by_project[TEST_PROJECT] = {"backend": self._pane()}
+        ekey = _exit_key(TEST_PROJECT, "backend")
+        orch._ps(ekey).last_assigned_task = "[ROLE: backend] this one landed"
+        orch._ps(ekey).task_delivered = True
+
+        with (
+            patch("agent_takkub.task_ledger.mark_done", return_value=None),
+            patch.object(orch, "_drain_pane_health", return_value=None),
+            patch.object(orch, "_notify_lead") as notify,
+        ):
+            ok, msg = orch.close("backend", project=TEST_PROJECT)
+
+        assert ok is True, msg
+        show_ok, show_msg, _payload = orch.task_show_info("backend", project=TEST_PROJECT)
+        assert show_ok is False
+        assert "no task assigned" in show_msg
+        assert not any(
+            call.kwargs.get("kind") == "close-undelivered" for call in notify.call_args_list
+        )
+
+
 class TestCliServerTaskShowDispatch:
     @pytest.fixture
     def srv_and_sock(self, qapp: QCoreApplication):
