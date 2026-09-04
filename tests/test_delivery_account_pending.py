@@ -310,9 +310,14 @@ class TestNeverBlindPasteIntoAccountPendingBanner:
     applies to a trust/tty prompt (see test_delivery_blocked_prompt.py's
     TestNeverBlindPasteIntoModal, which this mirrors)."""
 
-    def test_defers_blind_paste_while_banner_persists(
+    def test_gives_up_without_pasting_once_banner_persists_past_ceiling(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
+        """#484: the OLD contract ("still eventually pastes, last resort")
+        was itself the bug, same class of live incident as the trust-modal
+        case this mirrors (test_delivery_blocked_prompt.py) — a confirmed
+        account-pending gate must never be pasted into either, however long
+        it has been deferred. Gives up cleanly instead."""
         import agent_takkub.lead_inbox as li
 
         # Small defer ceiling, same technique as the trust-modal test this
@@ -334,10 +339,11 @@ class TestNeverBlindPasteIntoAccountPendingBanner:
         assert any(
             c.args and c.args[0] == "task_deliver_prompt_defer_ceiling" for c in log.call_args_list
         )
-        # Still eventually pastes (last-resort, unchanged contract) once the
-        # defer ceiling itself is exhausted — same guarantee the trust-modal
-        # case already has.
-        assert agy.session.write.called
+        # Never pastes into the still-confirmed gate — no bytes land on it.
+        assert not agy.session.write.called
+        warnings = _written_strings(lead.session)
+        assert any("[delivery-blocked-ceiling]" in m for m in warnings)
+        assert not any("[delivery-unconfirmed]" in m for m in warnings)
 
     def test_delivers_normally_once_banner_clears_before_defer_ceiling(
         self, orch: Orchestrator, monkeypatch

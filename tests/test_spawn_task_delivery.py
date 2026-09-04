@@ -235,7 +235,15 @@ def test_fresh_claude_assign_pretrusts_resolved_root_before_native_spawn(
     pre-trusted via whatever root `_resolve_pane_pretrust_root` resolves —
     so a subfolder `--cwd` of an already-registered project root never even
     shows the folder-trust modal in the first place, instead of depending
-    solely on the live `_auto_trust` keypress race."""
+    solely on the live `_auto_trust` keypress race.
+
+    #484: trusting only that resolved ANCESTOR root isn't enough on its own
+    — live-captured 2026-09-04, `.claude.json` still carried
+    `hasTrustDialogAccepted: false` for the EXACT subfolder Claude Code
+    itself launched into (`pms-api`/`pms-web`) even though an ancestor root
+    was already trusted. So the exact `spawn_cwd` this pane is about to
+    launch into must ALSO get pre-trusted directly, every time — not only
+    the inferred root."""
     task = "[ROLE: backend]\n" + ("implement safely\n" * 80)
     pretrust_root = tmp_path / "registered-root"
     with (
@@ -252,7 +260,9 @@ def test_fresh_claude_assign_pretrusts_resolved_root_before_native_spawn(
     resolved_cwd, resolved_project = mock_resolve.call_args.args
     assert Path(resolved_cwd).resolve() == tmp_path.resolve()
     assert resolved_project == TEST_PROJECT
-    mock_pretrust.assert_called_once_with(TEST_PROJECT, pretrust_root, "backend")
+    assert mock_pretrust.call_count == 2
+    mock_pretrust.assert_any_call(TEST_PROJECT, pretrust_root, "backend")
+    mock_pretrust.assert_any_call(TEST_PROJECT, tmp_path.resolve(), "backend")
 
 
 def test_fresh_claude_assign_skips_pretrust_write_when_cwd_not_registered(

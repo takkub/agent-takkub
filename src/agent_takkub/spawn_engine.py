@@ -623,6 +623,15 @@ class PaneState:
     # slashes always (`takkub task show` and the pointer text share this
     # value verbatim).
     last_assigned_task_file: str | None = None
+    # #484: True once `last_assigned_task`'s text has actually been written
+    # into the pane's session at least once (set by lead_inbox._deliver's
+    # real paste branch — never by the confirmed-prompt-block give-up path,
+    # nor merely by `assign()` accepting the task). `close()` consults this
+    # before popping this PaneState: a task that was accepted but never
+    # delivered (pane parked on a trust modal the whole time, then closed)
+    # must stay recoverable via `takkub task show`, not silently vanish as
+    # if the role had simply finished and been torn down normally.
+    task_delivered: bool = False
     # Per-assign model override. Set only when assign() is about to spawn a
     # fresh pane; an assign sent to an already-live pane leaves this unchanged
     # because CLI argv cannot be changed after process start. Keeping it in
@@ -3160,6 +3169,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             from .worktree_manager import pre_trust_pane_cwd
 
             pre_trust_pane_cwd(project_ns, _pretrust_root, role_name)
+            # #484: trusting only the narrowest registered ANCESTOR root
+            # relies on Claude Code walking up parent directories to decide
+            # a subfolder is trusted — live-captured 2026-09-04 (`assign
+            # --cwd .../pms-api` / `.../pms-web`, both subfolders of an
+            # already-registered monorepo root) showed `.claude.json` still
+            # carrying `hasTrustDialogAccepted: false` for the EXACT subfolder
+            # entries Claude Code itself created on first launch, so panes
+            # parked on the trust modal despite the root already being
+            # trusted. `spawn_cwd` was already validated against this
+            # project's paths above (Fix 1) — always ALSO pre-trust the exact
+            # cwd this pane is actually about to launch into, so the fix
+            # doesn't depend on that ancestor-walk assumption holding.
+            try:
+                _exact_pretrust_cwd = pathlib.Path(spawn_cwd).resolve()
+            except OSError:
+                pass
+            else:
+                pre_trust_pane_cwd(project_ns, _exact_pretrust_cwd, role_name)
 
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)

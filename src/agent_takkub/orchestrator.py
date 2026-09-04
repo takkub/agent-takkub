@@ -2836,6 +2836,12 @@ class Orchestrator(
 
         ps_assign.last_assigned_task = delivery_task
         ps_assign.last_assigned_task_file = task_file
+        # #484: a fresh assignment always starts undelivered, even when this
+        # PaneState object is being reused from an earlier assignment that
+        # DID deliver (or from close()'s new "kept, never delivered" retention
+        # below) — otherwise a stale True here would let close() wrongly
+        # conclude THIS task was already safely written into the pane.
+        ps_assign.task_delivered = False
         # New task → fresh assign timestamp so done()'s evidence scan only
         # picks up screenshots captured for THIS task, not a stale one left
         # over from a previous assignment to the same pane (issue #5).
@@ -4261,6 +4267,19 @@ class Orchestrator(
         # holds worktree state here (done() pops it first, so this is None on the
         # done→auto-close path — no double finalize).
         had_worktree_close = _ps_close.worktree if _ps_close is not None else None
+        # #484: a task was accepted (`assign()` already set last_assigned_task
+        # BEFORE async delivery even starts — see PaneState.task_delivered's
+        # docstring) but never actually written into this pane's session —
+        # e.g. parked on a trust modal the whole time it lived. Closing it
+        # must not make that text unrecoverable: keep this PaneState instead
+        # of popping it below, so `takkub task show --role <role>` still
+        # answers with the real task after close (issue #484, live-captured
+        # 2026-09-04 — closing a pane stuck on the trust modal wiped its
+        # ledger row and `task show` read "no task assigned yet" even though
+        # the task had never once reached the pane).
+        _task_undelivered_close = bool(
+            _ps_close is not None and _ps_close.last_assigned_task and not _ps_close.task_delivered
+        )
 
         # Task Ledger (A7): same "still holds state" signal as worktree above —
         # `_ps_close is not None` means this pane never called done(), so flip
@@ -4304,7 +4323,19 @@ class Orchestrator(
         # #422 item 3: keep the session id for the `close` event below — the
         # PaneState that carries it is popped right here.
         _closed_session_uuid = self._session_uuid_for(key)
-        getattr(self, "_pane_state", {}).pop(key, None)
+        if _task_undelivered_close:
+            _log_event("close_kept_undelivered_task", role=role_name, project=project_ns)
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [close-undelivered] {role_name} ถูก close ทั้งที่ task ล่าสุดยังไม่เคย "
+                f"ถึงมือ pane เลย (ค้างอยู่ก่อน close, ไม่ใช่ทำเสร็จแล้วปิด) — text กู้คืนได้ด้วย "
+                f"`takkub task show --role {role_name}` ก่อน assign ใหม่ (issue #484)",
+                from_role=role_name,
+                note="close_undelivered",
+                kind="close-undelivered",
+            )
+        else:
+            getattr(self, "_pane_state", {}).pop(key, None)
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close:

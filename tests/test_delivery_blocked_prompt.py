@@ -216,15 +216,46 @@ class TestWarnLeadBlockedPromptDirect:
             orch._warn_lead_delivery_blocked_prompt("backend", "P", "trust")  # must not raise
 
 
+class TestWarnLeadBlockedCeilingDirect:
+    def test_message_contains_marker_role_and_issue_ref(self, orch: Orchestrator) -> None:
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "gemini": _pane(_live_session())}
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._warn_lead_delivery_blocked_ceiling("gemini", "P", "trust")
+        msg = lead.session.write.call_args[0][0]
+        assert "[delivery-blocked-ceiling]" in msg
+        assert "gemini" in msg
+        assert "#484" in msg
+
+    def test_noop_when_target_is_lead(self, orch: Orchestrator) -> None:
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead}
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._warn_lead_delivery_blocked_ceiling("lead", "P", "trust")
+        lead.session.write.assert_not_called()
+
+    def test_noop_without_live_lead(self, orch: Orchestrator) -> None:
+        orch._panes_by_project["P"] = {"backend": _pane(_live_session())}
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._warn_lead_delivery_blocked_ceiling("backend", "P", "trust")  # must not raise
+
+
 class TestNeverBlindPasteIntoModal:
     """The hard-timeout best-effort paste must not fire while the pane is
     still visibly on a trust/tty prompt — that paste would land as
     keystrokes on the modal, losing the task outright rather than merely
     leaving it unconfirmed."""
 
-    def test_defers_blind_paste_while_still_on_trust_prompt(
+    def test_gives_up_without_pasting_once_still_on_trust_prompt_past_ceiling(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
+        """#484: the OLD contract ("still eventually pastes, last resort")
+        was itself the bug — a live incident (2026-09-04) showed those bytes
+        land as keystrokes on the trust modal (observed selecting "No,
+        exit" and killing the pane), then a delivery that can never confirm
+        loops through `_reap_stale_deliveries`'s stale-reap notice every TTL
+        forever. A confirmed prompt block must never be pasted into, however
+        long it has been deferred — the fix gives up cleanly instead."""
         import agent_takkub.lead_inbox as li
 
         # Small defer ceiling — fake clock, same technique the existing
@@ -247,14 +278,21 @@ class TestNeverBlindPasteIntoModal:
         # is_at_trust_prompt() returning True forever is the pathological
         # case: the deferral ceiling (30s @ 150ms polls) is eventually
         # reached and the fix gives up deferring — proven by the dedicated
-        # log event; the eventual best-effort paste is still the documented
-        # last resort.
+        # log event.
         assert any(
             c.args and c.args[0] == "task_deliver_prompt_defer_ceiling" for c in log.call_args_list
         )
-        # Still eventually pastes (last-resort, unchanged contract) once the
-        # defer ceiling itself is exhausted.
-        assert gemini.session.write.called
+        # Never pastes into the still-confirmed modal — no bytes land on it.
+        assert not gemini.session.write.called
+        # The Lead hears a distinct, accurate "gave up, never delivered"
+        # notice — not the ordinary [delivery-unconfirmed] wording, which
+        # would misleadingly imply a paste WAS attempted.
+        warnings = _written_strings(lead.session)
+        blocked_ceiling = [m for m in warnings if "[delivery-blocked-ceiling]" in m]
+        assert len(blocked_ceiling) == 1
+        assert "gemini" in blocked_ceiling[0]
+        assert "#484" in blocked_ceiling[0]
+        assert not any("[delivery-unconfirmed]" in m for m in warnings)
 
     def test_delivers_normally_once_prompt_clears_before_defer_ceiling(
         self, orch: Orchestrator, monkeypatch

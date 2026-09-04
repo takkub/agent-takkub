@@ -94,9 +94,18 @@ class TestAutoRespawnReplay:
         mock_send.assert_not_called()
 
     def test_no_replay_after_manual_close(self, orch: Orchestrator) -> None:
-        """close() clears the cache so a manual restart doesn't re-inject stale task."""
+        """close() clears the cache so a manual restart doesn't re-inject stale task.
+
+        The pane below is alive and at its ready prompt — i.e. its task was
+        already actually delivered, not merely assigned — so `task_delivered`
+        is set explicitly here. #484 carved out ONE exception to this
+        clearing: a task accepted but never delivered at all (e.g. still
+        parked on a trust modal when closed) now survives close() instead,
+        so `takkub task show` can recover it — see test_task_show.py's
+        TestCloseUndeliveredTaskKeepsLedgerRow for that case."""
         ekey = _exit_key(TEST_PROJECT, "qa")
         orch._ps(ekey).last_assigned_task = SAMPLE_TASK
+        orch._ps(ekey).task_delivered = True
 
         pane = _make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane

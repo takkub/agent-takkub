@@ -1350,21 +1350,45 @@ class LeadInboxMixin:
                     # outright by the gate, either way the task is lost
                     # outright rather than merely unconfirmed (#186, #376).
                     # Give the auto-trust responder (or the gate itself) a
-                    # further bounded grace to clear before falling through
-                    # to the ordinary best-effort blind paste below.
+                    # further bounded grace to clear before giving up.
                     prompt_defer_elapsed[0] += _READY_POLL_INTERVAL_MS
                     if prompt_defer_elapsed[0] < _PROMPT_BLOCK_DEFER_CEILING_MS:
                         QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
                         return
+                    # #484: still blocked after the grace window — this used
+                    # to fall through into the ordinary blind paste below
+                    # anyway, landing keystrokes on the modal (observed
+                    # selecting "No, exit" and killing the pane outright) and
+                    # leaving a delivery that can never confirm to loop
+                    # through `_reap_stale_deliveries`'s stale-reap notice
+                    # every TTL forever (live-captured 2026-09-04, 3 cycles).
+                    # A confirmed prompt block must never be pasted into —
+                    # give up cleanly instead, so the caller sees an accurate
+                    # "never delivered" outcome (#484 point c).
                     _log_event(
                         "task_deliver_prompt_defer_ceiling",
                         project=self._resolve_project(project),
                         role=role_name,
+                        reason=_blind_paste_reason,
                     )
+                    sent[0] = True
+                    self._warn_lead_delivery_blocked_ceiling(
+                        role_name, project, _blind_paste_reason
+                    )
+                    return
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
             pane.set_state("working", note=task[:60])
+            # #484: the ONLY point this closure ever actually writes `task`
+            # into the pane — mark it recoverable-if-closed-without-done
+            # from here on (see PaneState.task_delivered's docstring; a
+            # confirmed prompt block gives up above without ever reaching
+            # this line, leaving the flag False on purpose).
+            try:
+                self._ps(f"{project_ns}::{role_name}").task_delivered = True
+            except Exception:
+                pass
             _task_sess = pane.session
             payload = _paste_payload(_sanitize_pane_text(task))
             generation = int(getattr(pane, "_session_generation", 0))
@@ -2368,6 +2392,46 @@ class LeadInboxMixin:
         self._notify_lead(project_ns, msg, kind="delivery-blocked-prompt")
         _log_event(
             "delivery_blocked_prompt_warned",
+            role=role_name,
+            project=project_ns,
+            reason=reason,
+        )
+
+    def _warn_lead_delivery_blocked_ceiling(
+        self, role_name: str, project: str | None, reason: str
+    ) -> None:
+        """Tell the Lead a delivery gave up WITHOUT pasting — the target pane
+        was still sitting on an interactive prompt after the full
+        `_PROMPT_BLOCK_DEFER_CEILING_MS` grace past `_warn_lead_delivery_
+        blocked_prompt`'s first warning (#484).
+
+        Distinct from `_warn_lead_delivery_unconfirmed` (paste attempted,
+        landing unknown) — here the task was deliberately NOT pasted, since
+        the modal was still confirmed present: writing into it would answer
+        the modal instead of reaching the composer, sometimes fatally (a
+        stray keystroke can land on "No, exit" and kill the pane). The task
+        text was never delivered at all; `takkub task show`/status must
+        reflect that plainly rather than reading as delivered-but-unclear."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        kind = {
+            "trust": "trust/onboarding modal",
+            "permission": "tool-permission approval dialog",
+            "account_pending": "account-pending gate",
+        }.get(reason, "interactive shell prompt")
+        msg = (
+            f"⚠️ [delivery-blocked-ceiling] {role_name} pane ยังติดอยู่ที่ {kind} "
+            f"ไม่ยอมเคลียร์เอง — cockpit ยกเลิกการ paste แล้ว (ไม่ใช่ paste แบบ blind) "
+            f"เพราะ paste ตอนนี้จะไปโดน modal แทน task text ไม่เคยถึงมือ {role_name} เลย "
+            f"— เข้าไปดู pane ตรงๆ แล้วตอบ modal เอง หรือ close แล้ว assign ใหม่ (issue #484)"
+        )
+        self._notify_lead(project_ns, msg, kind="delivery-blocked-ceiling")
+        _log_event(
+            "delivery_blocked_ceiling_warned",
             role=role_name,
             project=project_ns,
             reason=reason,
