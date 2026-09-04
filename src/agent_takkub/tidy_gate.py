@@ -19,7 +19,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._win_console import SUBPROCESS_NO_WINDOW
+from ._win_console import gate_popen_kwargs
 
 _GIT_TIMEOUT_S = 15
 _BASE_REF_CANDIDATES: tuple[str, ...] = ("main", "master", "origin/main", "origin/master")
@@ -50,7 +50,7 @@ def _git(root: Path, *args: str) -> list[str]:
             encoding="utf-8",
             errors="replace",
             timeout=_GIT_TIMEOUT_S,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

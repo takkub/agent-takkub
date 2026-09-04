@@ -216,7 +216,7 @@ def test_full_gate_runs_pytest_under_xdist(repo, monkeypatch):
     # docstring (#349: more workers than this box has headroom for risks a
     # commit-charge fault, not just a slower run).
     assert "-n" in pytest_cmd
-    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "8"
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "4"
     # loadscope, not loadgroup: loadgroup only groups items explicitly marked
     # with @pytest.mark.xdist_group — everything else is freely distributed
     # with NO per-module/class grouping, which is unsafe for a suite that has
@@ -249,7 +249,7 @@ def test_full_gate_xdist_worker_count_ignores_bad_env(repo, monkeypatch):
     qa_gate.run_gate(cwd=repo, write_report=False)
 
     pytest_cmd = recorder[0][0]
-    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "8"
+    assert pytest_cmd[pytest_cmd.index("-n") + 1] == "4"
 
 
 def test_targeted_mode_never_uses_xdist(repo, monkeypatch):

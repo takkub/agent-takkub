@@ -38,6 +38,36 @@ import sys
 SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def gate_popen_kwargs() -> dict[str, object]:
+    """Extra `subprocess.run`/`Popen` kwargs that run a QA-gate child process
+    (pytest, ruff, lint-imports, unittest, Node typecheck/test, prisma,
+    docker) at reduced OS scheduling priority instead of the default, so a
+    full gate no longer pegs the whole machine to 100% CPU/RAM while it runs
+    (#487).
+
+    Windows: `BELOW_NORMAL_PRIORITY_CLASS` added to `creationflags` (on top
+    of `SUBPROCESS_NO_WINDOW`, which this always includes too) — a child
+    process of a below-normal-priority parent inherits that same priority
+    class by default (documented Win32 `CreateProcess` behavior), so
+    pytest-xdist workers spawned BY the gate subprocess get it for free,
+    with no separate flag needed for each one.
+
+    POSIX: `os.nice(10)` via `preexec_fn`, which only runs in the forked
+    child — `preexec_fn` is fork-only and raises on Windows, hence the
+    platform branch rather than always setting it.
+    """
+    if sys.platform == "win32":
+        # getattr, not a bare attribute access: this constant only exists on
+        # a Windows-built `subprocess` module, and tests monkeypatch
+        # `sys.platform` to exercise this branch on non-Windows CI runners
+        # too (a bare access would raise AttributeError there).
+        below_normal = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+        return {"creationflags": SUBPROCESS_NO_WINDOW | below_normal}
+    import os
+
+    return {"preexec_fn": lambda: os.nice(10)}
+
+
 # Every window class that can host a console on Windows. `ConsoleWindowClass`
 # is conhost; the other two are what Windows 11 raises when the default
 # terminal application is Windows Terminal (see the module docstring).

@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._win_console import SUBPROCESS_NO_WINDOW
+from ._win_console import gate_popen_kwargs
 from .verify import pm_exec, workspace_dirs
 
 _GIT_TIMEOUT_S = 15
@@ -80,7 +80,7 @@ def check_schema_drift(prisma_root: Path, pm: str, env: dict) -> PrismaFinding:
             errors="replace",
             env=env,
             timeout=_PRISMA_TIMEOUT_S,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
         return PrismaFinding(True, True, "prisma migrate diff timed out — skip (no reachable DB?)")
@@ -113,7 +113,7 @@ def _resolve_merge_base(cwd: Path) -> str | None:
                 cwd=str(cwd),
                 capture_output=True,
                 timeout=_GIT_TIMEOUT_S,
-                creationflags=SUBPROCESS_NO_WINDOW,
+                **gate_popen_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -128,7 +128,7 @@ def _resolve_merge_base(cwd: Path) -> str | None:
                 encoding="utf-8",
                 errors="replace",
                 timeout=_GIT_TIMEOUT_S,
-                creationflags=SUBPROCESS_NO_WINDOW,
+                **gate_popen_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -162,7 +162,7 @@ def check_migration_integrity(prisma_root: Path) -> PrismaFinding:
             encoding="utf-8",
             errors="replace",
             timeout=_GIT_TIMEOUT_S,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return PrismaFinding(True, True, "git diff failed — skip migration-integrity check")

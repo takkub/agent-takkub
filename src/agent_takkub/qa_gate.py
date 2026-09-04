@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._win_console import SUBPROCESS_NO_WINDOW
+from ._win_console import gate_popen_kwargs
 
 # Mirrors core/*/flag.py's os.environ.get(...) == "1" contract exactly —
 # #309 Phase 9's 5 named flags (context has no module yet, see
@@ -192,7 +192,7 @@ def worktree_root(cwd: Path | None = None) -> Path:
             errors="replace",
             check=True,
             cwd=cwd,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
         return Path(out.stdout.strip())
     except Exception:
@@ -213,7 +213,7 @@ def shared_venv_bin(cwd: Path | None = None) -> Path | None:
             errors="replace",
             check=True,
             cwd=cwd,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
         root = Path(out.stdout.strip()).parent
     except Exception:
@@ -265,7 +265,7 @@ def _find_main_checkout(cwd: Path) -> Path | None:
             errors="replace",
             check=True,
             cwd=cwd,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except Exception:
         return None
@@ -459,21 +459,22 @@ def _xdist_worker_count() -> str:
     a serial full-suite pytest process alone measures ~2.9GB RSS, and
     committed memory is what actually faults a process on Windows when it
     runs out (not physical RAM — see #349's docstring above), not something
-    16 idle-looking cores would tell you about. `8` here is a conservative
-    pick from that commit-charge headroom math, NOT a benchmarked number —
-    a same-machine `-n auto` vs `-n 8` comparison was attempted and aborted
-    (this dev box had too many other panes contending for cores at the time
-    to produce a clean reading); redo that comparison under a quiet machine
-    before tuning this further. `TAKKUB_QA_XDIST_N` overrides this for boxes
-    with different core/RAM ratios (CI runners, other dev machines) without
-    editing this file.
+    16 idle-looking cores would tell you about. `8` workers was the original
+    pick from that commit-charge headroom math alone, without accounting for
+    everything else sharing the same machine (the cockpit itself, other
+    panes) — #487: a user report of the whole machine pegged to 100%
+    CPU/RAM while a full gate ran dropped this to `4`, paired with running
+    every gate child at reduced OS priority (see `gate_popen_kwargs`) rather
+    than raw worker count alone; still not a benchmarked number. `TAKKUB_QA_XDIST_N`
+    overrides this for boxes with different core/RAM ratios (CI runners,
+    other dev machines) without editing this file.
     """
     try:
-        n = int(os.environ.get("TAKKUB_QA_XDIST_N", "8"))
+        n = int(os.environ.get("TAKKUB_QA_XDIST_N", "4"))
         if n < 1:
             raise ValueError
     except (TypeError, ValueError):
-        n = 8
+        n = 4
     return str(n)
 
 
@@ -914,7 +915,7 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
             errors="replace",
             env=env,
             cwd=cwd,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except OSError as e:
         # e.g. FileNotFoundError from a resolved-but-deleted-mid-run exe —
@@ -999,7 +1000,7 @@ def _head_sha(cwd: Path) -> str:
             errors="replace",
             check=True,
             cwd=cwd,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
         return out.stdout.strip()
     except Exception:
@@ -1139,7 +1140,7 @@ def _changed_files(root: Path) -> list[str]:
                 encoding="utf-8",
                 errors="replace",
                 timeout=30,
-                creationflags=SUBPROCESS_NO_WINDOW,
+                **gate_popen_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return []
