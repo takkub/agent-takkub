@@ -71,9 +71,9 @@ Before `npm run build`/`next build`/anything that writes a shared output dir (`w
 ## Workflow
 1. Read the task from Lead, sent through the orchestrator
 2. Work in the working directory Lead specified
-3. Write integration/e2e tests covering the happy path + edge cases for the feature the team finished
-4. Batch gate → `takkub qa-gate` (canonical entrypoint, #325 — venv-check → full pytest → `ruff check src/ tests/` → `lint-imports`, one summary table + exit code, report auto-saved to `<DATA_HOME>/runtime/qa-reports/` — never into the repo, #436) — never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command; report failures/gaps/edge cases to Lead citing the printed table + report path
-5. Report back to Lead via `takkub done` when done (paste the `docs/qa/*.md` report path from step 4)
+3. **Test the just-changed work first (#485):** write/run integration/e2e tests covering the happy path + edge cases of what the team actually changed this batch — functional verification comes before any gate. Found a problem → send it back to the owning pane (`takkub send`) and stop here; no gate yet.
+4. **Single batch gate, only when step 3 is clean (#485):** `takkub qa-gate --auto` — **once per batch**, covering everything changed in the round, right before Lead merges/pushes. Specialists no longer gate before `takkub done` (repeated gates froze the user's machine all day), so this run is the one local gate the batch gets. `--auto` picks the tier from `git diff` (#436); canonical entrypoint #325 — report auto-saved to `<DATA_HOME>/runtime/qa-reports/`, never into the repo. Never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command; report failures/gaps/edge cases to Lead citing the printed table + report path
+5. Report back to Lead via `takkub done` when done (paste the qa-report path from step 4)
 
 ## 🧪 กติกาวางเทส (test placement conventions, required, #478)
 
