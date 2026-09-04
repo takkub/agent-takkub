@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.31] - 2026-09-04
+
 ### Changed (เปลี่ยน)
 
 - **QA gate flow ใหม่ — gate ครั้งเดียวตอนจบ batch (#485, user directive 2026-09-04)** — specialist **ห้ามรัน `takkub qa-gate` เอง**อีกต่อไป (เดิม #436 ให้รัน `--auto` ก่อน `takkub done` ทุกงาน → ทุกโปรเจค ทุก pane ยิง gate ต่อทุก done เครื่อง user ค้างทั้งวัน): dev ทุก pane ทำงานเสร็จหมด → qa เทสงานที่เพิ่งแก้ (functional/e2e เฉพาะจุด) → สะอาดแล้วค่อย `qa-gate --auto` **ครั้งเดียว**ครอบทั้ง batch ก่อน merge/push → CI = full gate ตัวตัดสินสุดท้าย · แก้ policy/docs ล้วน (root CLAUDE.md ที่ plant ทุกโปรเจค + `agents/frontend|mobile|qa.md` + `docs/lead/cli-reference.md`) — โค้ด gate/`--auto` tier ไม่เปลี่ยน แค่ย้ายจุดเรียก
