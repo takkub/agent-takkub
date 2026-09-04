@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Changed (เปลี่ยน)
+
+- **QA gate flow ใหม่ — gate ครั้งเดียวตอนจบ batch (#485, user directive 2026-09-04)** — specialist **ห้ามรัน `takkub qa-gate` เอง**อีกต่อไป (เดิม #436 ให้รัน `--auto` ก่อน `takkub done` ทุกงาน → ทุกโปรเจค ทุก pane ยิง gate ต่อทุก done เครื่อง user ค้างทั้งวัน): dev ทุก pane ทำงานเสร็จหมด → qa เทสงานที่เพิ่งแก้ (functional/e2e เฉพาะจุด) → สะอาดแล้วค่อย `qa-gate --auto` **ครั้งเดียว**ครอบทั้ง batch ก่อน merge/push → CI = full gate ตัวตัดสินสุดท้าย · แก้ policy/docs ล้วน (root CLAUDE.md ที่ plant ทุกโปรเจค + `agents/frontend|mobile|qa.md` + `docs/lead/cli-reference.md`) — โค้ด gate/`--auto` tier ไม่เปลี่ยน แค่ย้ายจุดเรียก
+- **qa-gate ไม่กินเครื่องทั้งเครื่องอีกต่อไป (#487, user: "ค้างเพราะ QA gate cpu 100% ram 100%")** — subprocess ทุกตัวของ gate (pytest/ruff/lint-imports/unittest/Node/prisma/smoke/tidy) รันผ่าน helper กลาง `gate_popen_kwargs()`: Windows `BELOW_NORMAL_PRIORITY_CLASS` (xdist workers สืบทอด priority class ต่อเองตาม documented Win32 behavior) · POSIX `os.nice(10)` ผ่าน `preexec_fn` — UI/งานอื่นแย่ง CPU ชนะ gate เสมอ · full tier ลด xdist workers default 8 → 4 (RAM/commit charge scale ตาม worker; `TAKKUB_QA_XDIST_N` override ได้เหมือนเดิม) · guard test subprocess-no-window รับ `**gate_popen_kwargs()` เป็น starred kwargs ที่เทียบเท่า `creationflags=` — เฉพาะชื่อ helper นี้ ชื่ออื่นยังโดนจับ
+
+### Added (เพิ่ม)
+
+- **qa-gate `--auto` บน Node narrow test ได้จริง (#482)** — module-logic tier รัน `jest --ci --passWithNoTests --findRelatedTests <files>` หรือ `vitest related --run <files>` เฉพาะไฟล์ที่แก้ (detect runner จาก dependencies/config file/`test` script, เรียกผ่าน package manager จาก lockfile) แทน full suite ทั้ง repo ที่เคยรันใต้ label "targeted" (#368) · มี script `verify` (รวม check เป็นก้อนเดียว inject ไม่ได้) หรือหา runner ไม่เจอ = **widen เป็น full พร้อมบอกเหตุผลตรงๆ** ไม่รันเงียบใต้ label ผิด · typecheck ยังรันเต็มทั้งโปรเจคเสมอ (#368) · narrowed run ไม่ต้องรอ full-gate machine lock (#472) · แก้พ่วงเคสสำคัญของ batch gate: **clean tree ไม่ถูกสรุปเป็น style-only แล้ว skip อีก** — ไม่มี diff ใน working tree → เทียบ `origin/<default-branch>..HEAD` ก่อน (จับ commit ที่ยังไม่ push ทั้งหมด ไม่ใช่แค่ `HEAD~1` — ตรงกับจังหวะ Lead merge หลาย branch เสร็จแล้วค่อย gate) → fallback `HEAD~1..HEAD` → ไม่เหลืออะไร = tier "none" พร้อมคำแนะนำรัน full ตรงๆ ในผลลัพธ์
+
+### Fixed (แก้)
+
+- **trust-dialog ทำ pane ตายทั้ง batch + task หายถาวร (#484, เคสจริง pms 2026-09-04)** — 3 จุด: (a) pre-trust (#476) trust แค่ registered root แล้วพึ่ง ancestor-walk ของ Claude Code — เคสจริง subdir (pms-api/pms-web) มี entry `hasTrustDialogAccepted:false` ของตัวเองใน `.claude.json` ทำ pane ค้าง modal ทั้งที่ root trusted → pre-trust **cwd จริงของ task** เพิ่มเสมอ (b) delivery ที่ยืนยันว่าติด modal จนเกิน defer ceiling เดิม fall through ไป blind paste — keystroke ไปโดน `No, exit` ฆ่า pane + stale-reap วนทุก 120s ตลอดกาล → เลิก paste, แจ้ง Lead `delivery-blocked-ceiling` ชัดๆ ว่า task ไม่เคยถึงมือ (c) `close` pane ที่ task ยังไม่เคยถูก paste (`PaneState.task_delivered` ใหม่) เดิม pop PaneState ทิ้ง → `task show` ตอบ "no task assigned yet" ทั้งที่งานไม่เคยถึง agent → เก็บ row ไว้ + แจ้งวิธีกู้
+- **`takkub spawn-service` crash ทุกครั้ง: TypeError unhashable list (#483)** — positional `nargs=REMAINDER` ของ subcommand ใช้ dest `command` ทับค่าที่ `add_subparsers(dest="command")` เพิ่งตั้ง → role-gate เช็ค `args.command in LEAD_ONLY_COMMANDS` เจอ list · rename เป็น `service_argv` + regression test ผ่าน argparse path จริง
+- **migrate: full ladder ทำ version-marker validate แดงถาวรหลัง version bump (#486)** — step ท้าย `core-internal-store` re-apply copy `runtime/core/version.json` (frozen ตั้งแต่ first materialization) ทับ `v2/system/version.json` ที่ step 0 `version-marker` เพิ่งเขียนเวอร์ชันใหม่ในรอบเดียวกัน · re-apply + validate ข้าม `version.json` เมื่อ target มีอยู่แล้ว (ladder-owned โดย version-marker) — first materialization ยัง copy ตามเดิม · regression test ยืนยัน fail ก่อน fix + idempotent สองรอบ
+- **deflake `test_second_waiter_queues_then_acquires_after_release` (#481, windows CI)** — assert อ่าน `result["handle"]` ทันทีหลัง `holder.release()` แข่งกับ waiter thread → `threading.Event` set หลัง acquire แล้ว `acquired.wait(timeout=10)` ก่อนอ่าน
+
 ## [v1.6.30] - 2026-09-03
 
 ### Fixed (แก้)
