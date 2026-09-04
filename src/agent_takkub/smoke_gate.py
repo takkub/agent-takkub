@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._win_console import SUBPROCESS_NO_WINDOW
+from ._win_console import gate_popen_kwargs
 from .verify import load_package_json, pm_run, workspace_dirs
 
 _SMOKE_SCRIPT_NAMES: tuple[str, ...] = ("smoke", "e2e:smoke", "test:smoke")
@@ -93,7 +93,7 @@ def _stack_is_running(compose_file: Path, env: dict) -> bool:
             errors="replace",
             env=env,
             timeout=_DOCKER_TIMEOUT_S,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -137,7 +137,7 @@ def run_smoke_check(root: Path, pkg: dict, pm: str, env: dict) -> SmokeFinding |
             errors="replace",
             env=env,
             timeout=timeout_s,
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **gate_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
         return SmokeFinding(False, False, f"{script_name} timed out after {timeout_s:.0f}s")
