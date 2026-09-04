@@ -1154,7 +1154,7 @@ def test_classify_node_style_vs_logic(tmp_path):
     root = tmp_path / "n"
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"],
@@ -1180,3 +1180,197 @@ def test_auto_non_python_logic_change_widens_to_full_not_empty_targeted(repo, mo
     tier = qa_gate.classify_diff(repo, "python")
     assert tier.tier == "full"
     assert tier.targeted == []
+
+
+# ── #482: Node targeted narrowing (jest/vitest --findRelatedTests) ──────────
+
+
+def test_classify_node_detects_jest_and_narrows(tmp_path):
+    root = tmp_path / "jest-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "package.json").write_text('{"scripts": {"test": "jest"}}', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"],
+        cwd=root,
+        check=True,
+    )
+    (root / "src").mkdir()
+    (root / "src" / "widget.ts").write_text("export {}", encoding="utf-8")
+
+    tier = qa_gate.classify_diff(root, "node")
+
+    assert tier.tier == "targeted"
+    assert tier.targeted == ["src/widget.ts"]
+    assert "jest --findRelatedTests" in tier.reason
+
+
+def test_classify_node_no_runner_detected_widens_to_full(tmp_path):
+    """No jest/vitest to narrow with — must widen and say so, never quietly
+    run everything under a 'targeted' label (#482)."""
+    root = tmp_path / "no-runner-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "package.json").write_text('{"scripts": {"test": "mocha"}}', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"],
+        cwd=root,
+        check=True,
+    )
+    (root / "src").mkdir()
+    (root / "src" / "widget.ts").write_text("export {}", encoding="utf-8")
+
+    tier = qa_gate.classify_diff(root, "node")
+
+    assert tier.tier == "full"
+    assert "no jest/vitest detected" in tier.reason
+
+
+def test_classify_node_verify_script_cannot_narrow_widens_to_full(tmp_path):
+    """A `verify` script combines checks into one command — there's no place
+    to inject --findRelatedTests, so this must widen too, not silently narrow
+    only the `test` script while `verify` (what actually runs) stays full."""
+    root = tmp_path / "verify-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "package.json").write_text(
+        '{"scripts": {"verify": "turbo run typecheck test", "test": "jest"}}',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"],
+        cwd=root,
+        check=True,
+    )
+    (root / "src").mkdir()
+    (root / "src" / "widget.ts").write_text("export {}", encoding="utf-8")
+
+    tier = qa_gate.classify_diff(root, "node")
+
+    assert tier.tier == "full"
+    assert "verify" in tier.reason
+
+
+class TestNodeTargetedNarrowing:
+    def test_narrows_test_to_related_files_and_keeps_typecheck_whole(
+        self, node_repo, monkeypatch
+    ) -> None:
+        (node_repo / "app").mkdir()
+        (node_repo / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=node_repo, auto=True, write_report=False)
+
+        tier_row = next(s for s in report.steps if s.name == "auto-tier")
+        assert "targeted" in tier_row.detail
+        narrow_row = next(s for s in report.steps if s.name == "targeted")
+        assert "narrowed" in narrow_row.detail
+        assert any(s.name == "test:vitest-related" for s in report.steps)
+        ran = [cmd for cmd, _env in recorder]
+        matched = next(cmd for cmd in ran if "related" in cmd)
+        assert "app/Menu.tsx" in matched
+        assert any(
+            "tsc" in " ".join(map(str, cmd)) or "typecheck" in " ".join(map(str, cmd))
+            for cmd in ran
+        )
+        assert not any(s.name == "smoke" for s in report.steps)
+
+    def test_never_acquires_the_full_gate_lock(self, node_repo, monkeypatch) -> None:
+        (node_repo / "app").mkdir()
+        (node_repo / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+        calls: list = []
+        real_acquire = qa_gate.acquire_full_gate_lock
+
+        def spy(*a, **kw):
+            calls.append((a, kw))
+            return real_acquire(*a, **kw)
+
+        monkeypatch.setattr(qa_gate, "acquire_full_gate_lock", spy)
+
+        qa_gate.run_gate(cwd=node_repo, auto=True, write_report=False)
+
+        assert calls == [], "a narrowed Node targeted run must stay lock-free, like Python's"
+
+    def test_falls_back_to_full_when_no_runner_and_says_so(self, node_repo, monkeypatch) -> None:
+        """mocha (or anything that isn't jest/vitest) — `classify_diff` already
+        widened to full tier; this proves `run_gate` actually runs the full
+        set of checks rather than a silently-unnarrowed 'targeted' one."""
+        (node_repo / "package.json").write_text('{"scripts": {"test": "mocha"}}', encoding="utf-8")
+        _commit_all(node_repo)
+        (node_repo / "app").mkdir()
+        (node_repo / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+        monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: node_repo.parent / "rt")
+
+        report = qa_gate.run_gate(cwd=node_repo, auto=True)
+
+        tier_row = next(s for s in report.steps if s.name == "auto-tier")
+        assert "full" in tier_row.detail
+        assert "no jest/vitest detected" in tier_row.detail
+        assert not any(s.name.startswith("test:") and "related" in s.name for s in report.steps)
+
+
+# ── #482: clean-tree auto-tier must widen past just HEAD~1..HEAD ────────────
+
+
+def test_auto_clean_tree_widens_to_all_unpushed_commits_not_just_last(tmp_path):
+    """Batch gate after merge: several unpushed commits exist and the diff to
+    gate must be all of them, not just the last one — a style-only tail
+    commit must not hide real logic changes further back (#482)."""
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "main"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+    (root / "README.md").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=root, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        cwd=root,
+        check=True,
+    )
+
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("X = 1", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "logic change"], cwd=root, check=True)
+
+    (root / "README.md").write_text("y", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "docs tweak"], cwd=root, check=True)
+
+    files, source = qa_gate._changed_files(root)
+
+    assert set(files) == {"src/app.py", "README.md"}
+    assert "unpushed commits" in source
+
+
+def test_auto_clean_tree_with_nothing_anywhere_recommends_full(repo):
+    """A single-commit repo with no remote and a clean tree: HEAD~1 doesn't
+    even exist. Must say plainly that nothing was found and to run full
+    directly — never silently pass as a style-only diff (#482)."""
+    tier = qa_gate.classify_diff(repo, "python")
+
+    assert tier.tier == "none"
+    assert "run" in tier.reason and "full" in tier.reason
+
+
+def test_auto_none_tier_skip_message_differs_from_style(repo):
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    pytest_skip = next(s for s in report.steps if s.name == "pytest")
+    assert "nothing to gate" in pytest_skip.detail
+    assert "no logic changed" not in pytest_skip.detail

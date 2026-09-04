@@ -1125,10 +1125,50 @@ class DiffTier:
     targeted: list[str] = field(default_factory=list)  # Python test paths for "targeted"
 
 
-def _changed_files(root: Path) -> list[str]:
-    """Working-tree + index + untracked; falls back to the last commit when the
-    tree is clean (the specialist already committed — the diff is still the
-    thing to gate)."""
+def _default_branch_ref(root: Path) -> str | None:
+    """Best-effort `origin/<default-branch>` ref, or None with no remote /
+    nothing resolvable — callers must tolerate that and fall back."""
+
+    def git(*args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **gate_popen_kwargs(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    proc = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if proc is not None and proc.returncode == 0 and proc.stdout.strip():
+        return "origin/" + proc.stdout.strip().rsplit("/", 1)[-1]
+    for branch in ("main", "master"):
+        proc = git("rev-parse", "--verify", "-q", f"origin/{branch}")
+        if proc is not None and proc.returncode == 0:
+            return f"origin/{branch}"
+    return None
+
+
+def _changed_files(root: Path) -> tuple[list[str], str]:
+    """Working-tree + index + untracked, paired with a label for the source
+    used — `classify_diff` needs it to tell "genuinely nothing changed" apart
+    from "a real diff, just not in the working tree" (#482).
+
+    When the working tree is fully clean, widens the lookup instead of
+    assuming there's nothing to gate:
+      1. `origin/<default-branch>..HEAD` — every commit not yet pushed, the
+         right window once a specialist has committed (or several branches
+         merged in for a batch gate) — a single `HEAD~1..HEAD` would miss all
+         but the last of those.
+      2. `HEAD~1..HEAD` — no remote/default branch resolvable (e.g. a
+         local-only repo); the last commit is still better than nothing.
+      3. neither found anything — genuinely nothing to gate.
+    """
 
     def git(*args: str) -> list[str]:
         try:
@@ -1151,9 +1191,25 @@ def _changed_files(root: Path) -> list[str]:
     files = set(git("diff", "--name-only", "HEAD"))
     files.update(git("diff", "--name-only", "--cached"))
     files.update(git("ls-files", "--others", "--exclude-standard"))
-    if not files:
-        files.update(git("diff", "--name-only", "HEAD~1", "HEAD"))
-    return sorted(files)
+    if files:
+        return sorted(files), "working tree"
+
+    default_ref = _default_branch_ref(root)
+    if default_ref:
+        unpushed = git("diff", "--name-only", f"{default_ref}..HEAD")
+        if unpushed:
+            return sorted(set(unpushed)), f"{default_ref}..HEAD (unpushed commits)"
+
+    last_commit = git("diff", "--name-only", "HEAD~1", "HEAD")
+    if last_commit:
+        no_ref = f" (no {default_ref or 'origin/<default-branch>'} to diff against)"
+        return sorted(set(last_commit)), f"HEAD~1..HEAD (last commit){no_ref}"
+
+    return [], (
+        "nothing in the working tree, "
+        f"{default_ref + '..HEAD' if default_ref else 'origin/<default-branch>..HEAD (no remote/default branch resolvable)'}"
+        ", or HEAD~1..HEAD"
+    )
 
 
 def _is_style_only(path: str) -> bool:
@@ -1166,6 +1222,65 @@ def _is_style_only(path: str) -> bool:
 def _hits_full_tier(path: str) -> bool:
     low = "/" + path.lower()
     return any(h in low for h in _FULL_TIER_HINTS)
+
+
+# #482: a Node "targeted" tier used to mean "typecheck + the whole test
+# suite" — no narrower than full, just mislabeled and (worse) exempt from the
+# full-gate lock, so several panes' "targeted" auto-tier runs still hammered
+# CPU concurrently. Narrow the `test` check itself via jest/vitest's own
+# related-files mode when one of them is actually in use; when neither is
+# detectable, `classify_diff` widens the tier to "full" instead of quietly
+# running everything under a "targeted" label.
+_JEST_CONFIG_NAMES = (
+    "jest.config.js",
+    "jest.config.cjs",
+    "jest.config.mjs",
+    "jest.config.ts",
+    "jest.config.json",
+)
+_VITEST_CONFIG_NAMES = (
+    "vitest.config.js",
+    "vitest.config.cjs",
+    "vitest.config.mjs",
+    "vitest.config.ts",
+)
+
+
+def _detect_node_test_runner(root: Path, pkg: dict) -> str | None:
+    """``"jest"`` | ``"vitest"`` | None — None means either nothing to narrow
+    with, or a `verify` script combines everything into one command a related-
+    files flag can't be injected into."""
+    scripts = pkg.get("scripts")
+    scripts = scripts if isinstance(scripts, dict) else {}
+    if "verify" in scripts:
+        return None
+    deps: dict = {}
+    for key in ("dependencies", "devDependencies"):
+        d = pkg.get(key)
+        if isinstance(d, dict):
+            deps.update(d)
+    test_script = str(scripts.get("test", ""))
+    if (
+        "jest" in deps
+        or "jest" in test_script
+        or any((root / n).exists() for n in _JEST_CONFIG_NAMES)
+    ):
+        return "jest"
+    if (
+        "vitest" in deps
+        or "vitest" in test_script
+        or any((root / n).exists() for n in _VITEST_CONFIG_NAMES)
+    ):
+        return "vitest"
+    return None
+
+
+def _node_related_test_cmd(pm: str, runner: str, files: list[str]) -> list[str]:
+    from .verify import pm_exec
+
+    if runner == "jest":
+        return pm_exec(pm, "jest", "--ci", "--passWithNoTests", "--findRelatedTests", *files)
+    return pm_exec(pm, "vitest", "related", "--run", *files)
 
 
 def _map_python_tests(root: Path, files: list[str]) -> list[str] | None:
@@ -1191,10 +1306,13 @@ def _map_python_tests(root: Path, files: list[str]) -> list[str] | None:
 
 
 def classify_diff(root: Path, kind: str) -> DiffTier:
-    files = _changed_files(root)
+    files, source = _changed_files(root)
     if not files:
         return DiffTier(
-            "none", [], "no changed files (working tree clean, nothing in HEAD~1..HEAD)"
+            "none",
+            [],
+            f"nothing to gate — {source}. If you intended to gate something, run "
+            "`takkub qa-gate` (full) directly instead of --auto (#482).",
         )
     if all(_is_style_only(f) for f in files):
         return DiffTier(
@@ -1228,11 +1346,38 @@ def classify_diff(root: Path, kind: str) -> DiffTier:
             f"{len(files)} file(s), module logic → pytest on {len(mapped)} mapped test file(s)",
             mapped,
         )
+    if kind == "node":
+        from .verify import load_package_json
+
+        logic = [f for f in files if not _is_style_only(f)]
+        pkg = load_package_json(root)
+        runner = _detect_node_test_runner(root, pkg)
+        if runner is None:
+            scripts = pkg.get("scripts")
+            scripts = scripts if isinstance(scripts, dict) else {}
+            why = (
+                "`verify` script combines checks, can't isolate a narrowed test run"
+                if "verify" in scripts
+                else "no jest/vitest detected (dependency, config file, or `test` script)"
+            )
+            return DiffTier(
+                "full",
+                files,
+                f"{len(files)} file(s), component logic — {why}, widening to full "
+                "instead of silently running everything under a targeted label (#482)",
+            )
+        return DiffTier(
+            "targeted",
+            files,
+            f"{len(files)} file(s), component logic → {runner} --findRelatedTests on "
+            f"{len(logic)} file(s) (typecheck still runs whole-project, #368)",
+            logic,
+        )
     return DiffTier(
         "targeted",
         files,
         f"{len(files)} file(s), component logic — typecheck + test "
-        "(Node can't narrow by path, #368)",
+        "(unknown project kind, can't narrow)",
     )
 
 
@@ -1262,6 +1407,7 @@ def _non_python_gate(
     env: dict,
     log_dir: Path | None,
     only_names: set[str] | None = None,
+    node_targeted: list[str] | None = None,
     lock_base: Path | None = None,
     lock_exclude: _LockHandle | None = None,
     tier: DiffTier | None = None,
@@ -1331,6 +1477,39 @@ def _non_python_gate(
             )
         )
         return report
+
+    # #482: auto's Node "targeted" tier — narrow the `test` check to
+    # jest/vitest's own related-files mode instead of running the whole
+    # suite. `classify_diff` already confirmed a runner is detectable before
+    # setting `node_targeted`, so this only re-derives the command, not the
+    # decision to narrow at all.
+    if node_targeted is not None:
+        idx = next((i for i, c in enumerate(checks) if c.name == "test"), None)
+        if idx is not None:
+            from .verify import Check, detect_package_manager, load_package_json
+
+            pkg = load_package_json(root)
+            pm = detect_package_manager(root, pkg)
+            runner = _detect_node_test_runner(root, pkg)
+            if runner is not None:
+                narrowed = checks[idx]
+                checks[idx] = Check(
+                    name=f"test:{runner}-related",
+                    cmd=_node_related_test_cmd(pm, runner, node_targeted),
+                    stack=narrowed.stack,
+                    cwd=narrowed.cwd,
+                )
+                report.steps.append(
+                    StepResult(
+                        "targeted",
+                        True,
+                        True,
+                        0.0,
+                        f"auto-tier: narrowed `test` to {runner} --findRelatedTests on "
+                        f"{len(node_targeted)} file(s) (#482) — typecheck still runs "
+                        "whole-project (#368)",
+                    )
+                )
 
     report.steps.append(
         StepResult(
@@ -1500,20 +1679,33 @@ def run_gate(
 
     tier: DiffTier | None = None
     node_only: set[str] | None = None
+    node_targeted: list[str] | None = None
     if auto and targeted is None:
         tier = classify_diff(wroot, kind)
         if tier.tier in ("none", "style"):
+            # #482: "none" (nothing changed anywhere the widened lookup could
+            # see) is not the same claim as "style" (a real diff, just none of
+            # it is logic) — say so instead of reusing the style wording for
+            # both.
+            skip_reason = (
+                "auto-tier: nothing to gate — see the auto-tier row above; run "
+                "`takkub qa-gate` (full) directly if unsure"
+                if tier.tier == "none"
+                else "auto-tier: no logic changed"
+            )
             if kind == "python":
                 report = GateReport(v2_flags=v2_flags, targeted=[])
                 report.steps.append(_tier_step(tier))
                 report.steps.append(_tidy_step(wroot))
-                report.steps.append(_skip("pytest", "auto-tier: no logic changed"))
-                report.steps.append(_skip("ruff", "auto-tier: no logic changed"))
-                report.steps.append(_skip("lint-imports", "auto-tier: no logic changed"))
+                report.steps.append(_skip("pytest", skip_reason))
+                report.steps.append(_skip("ruff", skip_reason))
+                report.steps.append(_skip("lint-imports", skip_reason))
                 return report
             node_only = {"typecheck", "verify"}
         elif tier.tier == "targeted" and kind == "python":
             targeted = tier.targeted
+        elif tier.tier == "targeted" and kind == "node":
+            node_targeted = tier.targeted or None
     if write_report is None:
         write_report = targeted is None and tier is None
 
@@ -1552,15 +1744,16 @@ def run_gate(
     if write_report:
         log_dir = _runtime_dir() / "exports" / f"qa-gate-{time.strftime('%Y%m%d-%H%M%S')}"
 
-    # #472: only a full run contends for CPU hard enough to need the
+    # #472/#482: only a full run contends for CPU hard enough to need the
     # machine-wide lock — `--targeted`/auto-targeted stays parallel by
     # design, and so does a style-only Node diff (`node_only` — a plain
-    # typecheck, not the test suite). Both still get `lock_base` passed
-    # through so a bogus timeout can be told apart from a real one (see
-    # `_run_step_contended`).
+    # typecheck, not the test suite) and a narrowed Node module-logic diff
+    # (`node_targeted` — jest/vitest --findRelatedTests, not the full suite).
+    # All three still get `lock_base` passed through so a bogus timeout can be
+    # told apart from a real one (see `_run_step_contended`).
     lock_base = _qa_gate_lock_dir()
     lock_handle: _LockHandle | None = None
-    if targeted is None and node_only is None:
+    if targeted is None and node_only is None and node_targeted is None:
         lock_handle = acquire_full_gate_lock(lock_base, label=str(wroot.name))
         if lock_handle.waited_s > 1:
             # Only surface a row when there was actually something to queue
@@ -1577,6 +1770,7 @@ def run_gate(
                 env,
                 log_dir,
                 only_names=node_only,
+                node_targeted=node_targeted,
                 lock_base=lock_base,
                 lock_exclude=lock_handle,
                 tier=tier,
