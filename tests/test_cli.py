@@ -455,6 +455,96 @@ class TestArgparse:
         assert len(fake_request) == n_before  # nothing dispatched
 
 
+class TestTaskFileAndFromFile:
+    """#491: shell interpolation on the SENDING side eats backticks/$()/parens
+    out of a task/message positional before `takkub` ever sees them —
+    --task-file/--from-file (and "-"/stdin) bypass shell quoting entirely."""
+
+    _TRICKY = "run `rm -rf tmp` then $(echo done) and (parens) literally"
+
+    def test_assign_task_file_reads_file_verbatim(
+        self, fake_request: list[dict[str, Any]], tmp_path: Any
+    ) -> None:
+        task_path = tmp_path / "task.txt"
+        task_path.write_text(self._TRICKY, encoding="utf-8")
+        rc = cli.main(["assign", "--role", "backend", "--task-file", str(task_path)])
+        assert rc == 0
+        assert fake_request[-1]["task"] == self._TRICKY
+
+    def test_assign_task_file_dash_reads_stdin(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(self._TRICKY))
+        rc = cli.main(["assign", "--role", "backend", "--task-file", "-"])
+        assert rc == 0
+        assert fake_request[-1]["task"] == self._TRICKY
+
+    def test_assign_positional_dash_reads_stdin(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(self._TRICKY))
+        rc = cli.main(["assign", "--role", "backend", "-"])
+        assert rc == 0
+        assert fake_request[-1]["task"] == self._TRICKY
+
+    def test_assign_task_file_and_positional_are_mutually_exclusive(
+        self, fake_request: list[dict[str, Any]], tmp_path: Any
+    ) -> None:
+        task_path = tmp_path / "task.txt"
+        task_path.write_text("from file", encoding="utf-8")
+        n_before = len(fake_request)
+        rc = cli.main(
+            ["assign", "--role", "backend", "--task-file", str(task_path), "from positional"]
+        )
+        assert rc != 0
+        assert len(fake_request) == n_before  # nothing dispatched
+
+    def test_assign_requires_task_or_task_file(self, fake_request: list[dict[str, Any]]) -> None:
+        n_before = len(fake_request)
+        rc = cli.main(["assign", "--role", "backend"])
+        assert rc != 0
+        assert len(fake_request) == n_before
+
+    def test_send_from_file_reads_file_verbatim(
+        self, fake_request: list[dict[str, Any]], tmp_path: Any
+    ) -> None:
+        msg_path = tmp_path / "msg.txt"
+        msg_path.write_text(self._TRICKY, encoding="utf-8")
+        rc = cli.main(["send", "--to", "backend", "--from-file", str(msg_path)])
+        assert rc == 0
+        assert fake_request[-1]["msg"] == self._TRICKY
+
+    def test_send_from_file_dash_reads_stdin(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(self._TRICKY))
+        rc = cli.main(["send", "--to", "backend", "--from-file", "-"])
+        assert rc == 0
+        assert fake_request[-1]["msg"] == self._TRICKY
+
+    def test_send_from_file_and_positional_are_mutually_exclusive(
+        self, fake_request: list[dict[str, Any]], tmp_path: Any
+    ) -> None:
+        msg_path = tmp_path / "msg.txt"
+        msg_path.write_text("from file", encoding="utf-8")
+        n_before = len(fake_request)
+        rc = cli.main(["send", "--to", "backend", "--from-file", str(msg_path), "from positional"])
+        assert rc != 0
+        assert len(fake_request) == n_before  # nothing dispatched
+
+
 class TestBrowserShardAssignWarning:
     """#304 point 5: warn Lead in the `assign` response itself when fanning
     out a browser-role (qa/critic/designer) shard — Playwright MCP has been
