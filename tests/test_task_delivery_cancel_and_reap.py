@@ -317,10 +317,16 @@ class TestReapStaleDeliveries:
             c.args and c.args[0] == "delivery_stale_reap_suppressed" for c in log_event.mock_calls
         )
 
-    def test_still_reaps_when_pane_quiet_a_while(self, orch: Orchestrator) -> None:
+    def test_still_reaps_when_pane_quiet_a_while(self, orch: Orchestrator, monkeypatch) -> None:
         """'working' state alone isn't enough — recent output is required,
         or a pane wedged in 'working' forever would mask a genuinely stuck
-        delivery."""
+        delivery. No independent liveness evidence either (#490's second
+        tier), so this must still reach Lead."""
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda self, *a, **k: (False, "no_signal", None, []),
+        )
         now = [100.0]
         lead = _pane(_live_session())
         backend = _pane(_live_session(), generation=1)
@@ -339,3 +345,77 @@ class TestReapStaleDeliveries:
 
         notices = _written_strings(lead.session)
         assert any("[delivery-stale-reap]" in m and "backend" in m for m in notices)
+        # (#490/#464) The Lead-facing message is decisive, not a hedge that
+        # offloads "is this actually fine?" back onto Lead.
+        assert not any("ไม่ต้อง assign ใหม่" in m for m in notices)
+
+    def test_suppressed_when_pty_quiet_but_transcript_still_fresh(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """(#490) Field case: a long task ran under heavy machine load and
+        the PTY reader thread's own quiet-time bookkeeping lagged past
+        `_PROGRESS_QUIET_THRESHOLD_S` even though the pane never stopped —
+        `takkub done` later succeeded normally. The independent liveness
+        check (#468's provider transcript / live child process) must still
+        clear this pane and never page Lead, since a heavily loaded reader
+        thread proves nothing about whether the task landed."""
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda self, *a, **k: (True, "transcript_fresh", 5.0, []),
+        )
+        now = [100.0]
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        backend.state = "working"
+        backend.session.seconds_since_output.return_value = 999.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+        manager.create(
+            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+        )
+        orch._delivery_manager = manager
+        now[0] = 200.0
+
+        with patch("agent_takkub.lead_inbox._log_event") as log_event:
+            orch._reap_stale_deliveries()
+
+        # No action needed → never reaches Lead (#464), logged with the
+        # specific evidence that cleared it instead.
+        assert not _written_strings(lead.session)
+        suppressed = next(
+            c
+            for c in log_event.mock_calls
+            if c.args and c.args[0] == "delivery_stale_reap_suppressed"
+        )
+        assert suppressed.kwargs["reason"] == "transcript_fresh"
+
+    def test_reap_notice_is_decisive_about_missing_evidence(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """(#490/#464) When Lead IS notified, the message states plainly
+        that no liveness evidence was found — not a hedge that tells Lead
+        "reassign, unless it turns out to still be working"."""
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda self, *a, **k: (False, "no_signal", None, []),
+        )
+        now = [100.0]
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        backend.state = "empty"
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+        manager.create(
+            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+        )
+        orch._delivery_manager = manager
+        now[0] = 200.0
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._reap_stale_deliveries()
+
+        notices = _written_strings(lead.session)
+        assert any("ไม่พบสัญญาณว่า pane ยังทำงานอยู่" in m for m in notices)
+        assert not any("ไม่ต้อง assign ใหม่" in m for m in notices)

@@ -2286,19 +2286,62 @@ class LeadInboxMixin:
         for every provider/timing combination). This only answers "is
         something clearly happening on this pane right now", which is
         enough to know a reassign would be premature.
+
+        Thin wrapper over `_pane_progress_reason` — see that method (#490)
+        for the second-tier check this now falls back to when the pane has
+        gone quiet longer than `_PROGRESS_QUIET_THRESHOLD_S`.
+        """
+        return self._pane_progress_reason(project_ns, role_name) is not None
+
+    def _pane_progress_reason(self, project_ns: str, role_name: str) -> str | None:
+        """Evidence-returning version of `_pane_shows_real_progress`: the
+        specific signal that proved the pane alive, or ``None`` if none did.
+
+        (#490) A quiet-for-30s verdict from PTY output alone is only as
+        fresh as the PTY reader thread's own timestamp bookkeeping, which
+        stalls under the exact same heavy-CPU-load GIL convoy that starves
+        the orchestrator's watchdog tick (see `lead_typing_lag` reports on
+        that same convoy) — a pane can genuinely still be mid-task the whole
+        time and still read as "quiet too long" purely from scheduling lag,
+        not because it stopped. Field case: a task ran >20 minutes under
+        heavy machine load and finished with an ordinary `takkub done`, yet
+        the stale-reap sweep saw a stale quiet reading partway through and
+        nearly told Lead to reassign it.
+
+        Once PTY output alone can't clear the pane, falls back to
+        `_stale_marker_liveness` (#468) — the provider's own transcript/
+        session file touched within `WATCHDOG_LIVENESS_FRESH_S`, or a live
+        non-scaffolding child process under the pane — resolved from the
+        provider's own on-disk state rather than the PTY reader thread, so
+        it survives exactly the reader-thread lag that makes the primary
+        check unreliable under heavy load. Covers every provider
+        `token_meter.resolve_pane_session` knows (claude/codex/gemini(-agy)/
+        opencode/kimi/cursor) via the same generic `effective_provider_for`
+        resolver the rest of the engine uses — never a claude-only signal.
+        Best-effort end to end: any probe failure counts as "no evidence",
+        never as proof of death.
         """
         pane = self._project_panes(project_ns).get(role_name)
         if pane is None or pane.session is None or not pane.session.is_alive:
-            return False
+            return None
         if getattr(pane, "state", None) != "working":
-            return False
+            return None
         try:
             quiet_for = _timing_or_none(pane.session.seconds_since_output())
         except Exception:
-            return False
-        if quiet_for is None:
-            return False
-        return quiet_for < _PROGRESS_QUIET_THRESHOLD_S
+            quiet_for = None
+        if quiet_for is not None and quiet_for < _PROGRESS_QUIET_THRESHOLD_S:
+            return "recent_output"
+        try:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(role_name, project=project_ns)
+            alive, reason, _age, _children = self._stale_marker_liveness(
+                project_ns, role_name, pane, pane.session, provider, time.time()
+            )
+        except Exception:
+            return None
+        return reason if alive else None
 
     def _reap_stale_deliveries(self) -> None:
         """Sweep `_delivery_manager` for deliveries that have been stuck in
@@ -2317,32 +2360,44 @@ class LeadInboxMixin:
         DeliveryManager state — the one gap none of the poll loop's own
         one-shot warnings above cover.
 
-        (#359) Before notifying, checks `_pane_shows_real_progress` — a
+        (#359/#490) Before notifying, checks `_pane_progress_reason` — a
         long task paste can outlast the fixed TTL to ingest even though it
-        genuinely landed, and the pane is by then visibly working it. The
-        delivery is still reaped either way (its OWN confirmation really is
-        stale — this only decides whether to also cry wolf to Lead about
-        it), so a rare miss on this check costs nothing beyond the noisy
-        notice this fix exists to remove."""
+        genuinely landed, and the pane is by then visibly working it (or, on
+        a heavily loaded machine, its transcript/child process is the only
+        evidence still fresh — see that method's docstring). The delivery is
+        still reaped either way (its OWN confirmation really is stale — this
+        only decides whether to also cry wolf to Lead about it).
+
+        (#464/#490) The two outcomes get two entirely different treatments,
+        not two wordings of the same notice: found-evidence is "no action
+        needed" and must never reach Lead at all (`delivery_stale_reap_
+        suppressed`, events.log only, with the specific signal that cleared
+        it) — a message that hedges "reassign, unless you find it's actually
+        fine" inside the same notice just re-delegates a decision this
+        method can already make. No-evidence is the only case that reaches
+        Lead, and says so plainly (no hedge), since by then every liveness
+        signal this file knows how to check has already come back empty."""
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_manager is None:
             return
         for delivery in delivery_manager.expire_stale():
-            if self._pane_shows_real_progress(delivery.project_id, delivery.pane_id):
+            reason = self._pane_progress_reason(delivery.project_id, delivery.pane_id)
+            if reason is not None:
                 _log_event(
                     "delivery_stale_reap_suppressed",
                     role=delivery.pane_id,
                     project=delivery.project_id,
                     delivery_id=delivery.delivery_id,
+                    reason=reason,
                 )
                 continue
             self._notify_lead(
                 delivery.project_id,
                 f"⚠️ [delivery-stale-reap] task delivery ค้างอยู่สำหรับ {delivery.pane_id} "
                 f"นานเกิน {delivery.expires_at - delivery.created_at:.0f}s โดยไม่ยืนยันว่า "
-                f"ถึงมือ ({delivery.state.value}) — ยกเลิกอัตโนมัติแล้ว ถ้า {delivery.pane_id} "
-                f"status ยังเป็น working อยู่ (`takkub status`) ไม่ต้อง assign ใหม่ — assign ใหม่"
-                f"เฉพาะตอนที่ยืนยันแล้วว่า pane ไม่ได้รับ task จริงๆ (issue #255)",
+                f"ถึงมือ ({delivery.state.value}) และไม่พบสัญญาณว่า pane ยังทำงานอยู่ "
+                f"(ไม่มี PTY output ล่าสุด, ไม่มี transcript/child process ที่ยังรัน) — "
+                f"ยกเลิก delivery นี้แล้ว แนะนำเปิด pane ดูตรงๆ ก่อน assign ใหม่ (issue #255/#490)",
                 from_role="system",
                 note="delivery_stale_reap",
                 kind="delivery-stale-reap",
