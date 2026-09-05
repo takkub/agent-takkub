@@ -230,6 +230,28 @@ class AgentPane(QFrame):
         self._btn_clear_view.clicked.connect(self._clear_pane_view)
         self._btn_clear_view.hide()
 
+        # Font zoom — visible +/- controls for the wheel-zoom that already
+        # exists (Ctrl/Cmd+wheel, Ctrl/Cmd+0). Same signal path
+        # (TerminalWidget.set_font_point_size → fontSizeChanged →
+        # _save_font_size) so persistence stays a single mechanism.
+        self._btn_zoom_out = QPushButton("-", header)
+        self._btn_zoom_out.setFixedSize(22, 22)
+        self._btn_zoom_out.setToolTip("ลดขนาดตัวอักษร (Ctrl+scroll ก็ใช้ได้)")
+        self._btn_zoom_out.clicked.connect(lambda: self._nudge_font_size(-1))
+        self._btn_zoom_out.hide()
+
+        self._btn_zoom_in = QPushButton("+", header)
+        self._btn_zoom_in.setFixedSize(22, 22)
+        self._btn_zoom_in.setToolTip("เพิ่มขนาดตัวอักษร (Ctrl+scroll ก็ใช้ได้)")
+        self._btn_zoom_in.clicked.connect(lambda: self._nudge_font_size(1))
+        self._btn_zoom_in.hide()
+
+        self._btn_zoom_reset = QPushButton("↺", header)
+        self._btn_zoom_reset.setFixedSize(22, 22)
+        self._btn_zoom_reset.setToolTip("รีเซ็ตขนาดตัวอักษร (Ctrl+0 ก็ใช้ได้)")
+        self._btn_zoom_reset.clicked.connect(self._reset_font_size)
+        self._btn_zoom_reset.hide()
+
         # Input lock toggle (orchestrator-driven panes only). Teammates are
         # driven by takkub assign/send, so the user almost never types into
         # them — locking by default stops an accidental keypress from derailing a
@@ -267,6 +289,9 @@ class AgentPane(QFrame):
         hl.addWidget(self._btn_spawn)
         hl.addWidget(self._btn_export)
         hl.addWidget(self._btn_clear_view)
+        hl.addWidget(self._btn_zoom_out)
+        hl.addWidget(self._btn_zoom_in)
+        hl.addWidget(self._btn_zoom_reset)
         if self._btn_lock is not None:
             hl.addWidget(self._btn_lock)
         hl.addWidget(self._btn_min)
@@ -303,7 +328,10 @@ class AgentPane(QFrame):
         self._terminal.set_discard_guard(self._discard_eligible)
         self._stack.addWidget(self._terminal)
 
-        # restore last font size for this role
+        # restore last font size for this role (updated by _save_font_size
+        # on every fontSizeChanged emission — wheel zoom, Ctrl+0, or the
+        # +/-/reset header buttons)
+        self._current_font_pt = self._FONT_SIZE_DEFAULT_PT
         self._restore_font_size()
 
         root.addWidget(header)
@@ -453,11 +481,17 @@ class AgentPane(QFrame):
             self._btn_spawn.hide()
             self._btn_export.show()
             self._btn_clear_view.show()
+            self._btn_zoom_out.show()
+            self._btn_zoom_in.show()
+            self._btn_zoom_reset.show()
         else:
             self._stack.setCurrentIndex(0)
             self._btn_spawn.show()
             self._btn_export.hide()
             self._btn_clear_view.hide()
+            self._btn_zoom_out.hide()
+            self._btn_zoom_in.hide()
+            self._btn_zoom_reset.hide()
         # × is now always visible (see _btn_close init comment) — user
         # always has an escape hatch regardless of pane state.
         self._btn_close.show()
@@ -1026,9 +1060,19 @@ class AgentPane(QFrame):
     # font size persistence (per role)
     # ──────────────────────────────────────────────────────────────
     _FONT_SIZE_DEFAULT_KEY = "pane/_default/font_pt"
+    # Matches DEFAULT_FONT_PT in terminal.html — the size Ctrl/Cmd+0 resets to.
+    _FONT_SIZE_DEFAULT_PT = 10
 
     def _settings_key(self) -> str:
         return f"pane/{self.role.name}/font_pt"
+
+    def _nudge_font_size(self, delta: int) -> None:
+        """+/- button handler. Clamping happens inside set_font_point_size
+        (same clamp the Ctrl/Cmd+wheel path already applies)."""
+        self._terminal.set_font_point_size(self._current_font_pt + delta)
+
+    def _reset_font_size(self) -> None:
+        self._terminal.set_font_point_size(self._FONT_SIZE_DEFAULT_PT)
 
     def _restore_font_size(self) -> None:
         s = QSettings("agent-takkub", "cockpit")
@@ -1047,6 +1091,7 @@ class AgentPane(QFrame):
         self._terminal.set_font_point_size(size)
 
     def _save_font_size(self, size: int) -> None:
+        self._current_font_pt = int(size)
         s = QSettings("agent-takkub", "cockpit")
         s.setValue(self._settings_key(), int(size))
         s.setValue(self._FONT_SIZE_DEFAULT_KEY, int(size))
