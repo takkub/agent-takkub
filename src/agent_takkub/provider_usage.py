@@ -34,8 +34,11 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -489,14 +492,64 @@ def fetch_codex_usage(
 
 
 # ── gemini (agy / Antigravity) ───────────────────────────────────────────
-# No CLI subcommand exists (survey confirmed via `agy --help`) — reads the
-# local cache file agy itself writes after polling quota internally. The
-# sample found in the spike was ~5.5 months stale with no on-demand refresh
-# available, so freshness is NEVER assumed: `fetched_at` always rides along
-# and anything older than the threshold below is reported `stale`, never
-# `active`.
+# No CLI subcommand exists (survey confirmed via `agy --help`) — no channel
+# was found to actively refresh the Antigravity desktop app's local quota
+# cache file (`docs/audit/2026-08-31-gemini-quota-hunt.md`). #456 follow-up
+# (2026-09-05, user-approved): a LIVE channel does exist after all — the
+# same undocumented `retrieveUserQuota` RPC that audit flagged but didn't
+# implement (needs a keyring credential + an undocumented client check —
+# see `_fetch_gemini_live_usage` below for exactly what was needed and how
+# fragile it is). It is the primary path now; every failure mode (no
+# keyring entry, expired token, endpoint/schema change) falls straight
+# through to the cache-file read below unchanged, so the card can never go
+# fully dark over this — freshness is still NEVER assumed for the fallback
+# path: `fetched_at` always rides along and anything older than the
+# threshold below is reported `stale`, never `active`.
 
 _GEMINI_STALE_THRESHOLD_S = 24 * 3600.0
+
+# The OS credential store entry `agy`/Antigravity itself uses — confirmed
+# empirically (2026-09-05) via `cmdkey /list` showing
+# `LegacyGeneric:target=gemini:antigravity`, then reading that credential's
+# blob directly (`advapi32!CredReadW`): a UTF-8 JSON string
+# `{"auth_method": "...", "token": {"access_token", "token_type",
+# "refresh_token", "expiry"}}`. This is the shape zalando/go-keyring's Go
+# backends serialize into ONE secret string on every OS — Windows Credential
+# Manager and macOS Keychain just store that same string under a different
+# native mechanism, so both platform readers below hand the same JSON text
+# to the same parser. Never verified against a real login on macOS (this
+# dev/audit box is Windows-only) — a naming or format mismatch there just
+# means `_read_macos_keychain_secret` returns None and the live path is
+# skipped, same as any other miss.
+_GEMINI_KEYRING_SERVICE = "gemini"
+_GEMINI_KEYRING_ACCOUNT = "antigravity"
+
+# `POST /v1internal:retrieveUserQuota` on the same host `agy` already calls
+# for chat (`daily-cloudcode-pa.googleapis.com`) — RPC name, REST path and
+# the request's one field (`project`, matched against the cache file's own
+# `projectId`) were extracted from `agy.EXE`'s embedded proto descriptor
+# strings (`RetrieveUserQuotaRequest`/`RetrieveUserQuotaResponse`,
+# `buckets`/`remainingFraction`/`resetTime`/`modelId` — same field names the
+# cache JSON already uses). Empirically verified live 2026-09-05.
+_GEMINI_QUOTA_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+
+# UNDOCUMENTED, found by trial only: the plain default User-Agent (Python's
+# urllib, or a generic "google-api-go-client/..." string) gets a MISLEADING
+# `403 SUBSCRIPTION_REQUIRED` from this endpoint even on a fully licensed,
+# correctly-authenticated account — the server appears to gate this specific
+# RPC on the caller identifying itself as an Antigravity client. Any
+# User-Agent containing "antigravity" was sufficient in testing; kept as
+# short/plain as it can be rather than spoofing a specific product/version
+# string that was never observed. This has NO public contract and could
+# stop working on any Google-side change with no changelog to watch — that
+# is exactly why every caller of `_fetch_gemini_live_usage` treats a failure
+# here as "no live data this poll", never an error surfaced to the UI.
+_GEMINI_QUOTA_USER_AGENT = "antigravity"
+
+# Skip the live attempt entirely once the access token is this close to (or
+# past) its own `expiry` — it would just 401, so don't spend a network round
+# trip finding that out.
+_GEMINI_TOKEN_EXPIRY_MARGIN_S = 30.0
 
 # The Antigravity DESKTOP APP is the only writer of this quota cache — `agy`,
 # the CLI this cockpit actually spawns, never refreshes it (observed on the
@@ -537,11 +590,256 @@ def _antigravity_authorized_cache_dir() -> Path:
     return Path.home() / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized"
 
 
+def _read_windows_credential_secret(target: str) -> str | None:
+    """Raw secret of a Windows Credential Manager *Generic* credential, via
+    `advapi32!CredReadW` directly through ctypes — stdlib only, no pywin32/
+    keyring dependency needed. Returns None for "not found" and for any
+    read/decode failure; never raises."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class _CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", _FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    cred_type_generic = 1
+    try:
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.CredReadW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.POINTER(_CREDENTIAL)),
+        ]
+        advapi32.CredReadW.restype = wintypes.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+        advapi32.CredFree.restype = None
+    except OSError:
+        return None
+    cred_ptr = ctypes.POINTER(_CREDENTIAL)()
+    if not advapi32.CredReadW(target, cred_type_generic, 0, ctypes.byref(cred_ptr)):
+        return None
+    try:
+        cred = cred_ptr.contents
+        size = cred.CredentialBlobSize
+        if size <= 0 or not cred.CredentialBlob:
+            return None
+        addr = ctypes.cast(cred.CredentialBlob, ctypes.c_void_p).value
+        return ctypes.string_at(addr, size).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    finally:
+        advapi32.CredFree(cred_ptr)
+
+
+def _read_macos_keychain_secret(service: str, account: str) -> str | None:
+    """Raw secret of a macOS Keychain *generic password* item via the
+    built-in `security` CLI (no new dependency) — the Darwin counterpart of
+    `_read_windows_credential_secret`. Never verified against a real
+    Antigravity login (audit/dev machine is Windows-only) — any failure
+    here (binary missing, item not found, non-zero exit) is just another
+    "no live credential" miss, same as everywhere else in this path."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    secret = result.stdout.strip()
+    return secret or None
+
+
+def _read_gemini_keyring_secret() -> str | None:
+    if sys.platform == "win32":
+        return _read_windows_credential_secret(
+            f"{_GEMINI_KEYRING_SERVICE}:{_GEMINI_KEYRING_ACCOUNT}"
+        )
+    if sys.platform == "darwin":
+        return _read_macos_keychain_secret(_GEMINI_KEYRING_SERVICE, _GEMINI_KEYRING_ACCOUNT)
+    return None
+
+
+def _parse_gemini_keyring_token(secret: str) -> tuple[str, datetime | None] | None:
+    """`(access_token, expiry)` out of the keyring secret's JSON, or None
+    when it's unparseable or missing the field this needs. Never raises."""
+    try:
+        data = json.loads(secret)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = data.get("token")
+    if not isinstance(token, dict):
+        return None
+    access_token = token.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    expiry: datetime | None = None
+    expiry_raw = token.get("expiry")
+    if isinstance(expiry_raw, str):
+        try:
+            expiry = datetime.fromisoformat(expiry_raw)
+        except ValueError:
+            expiry = None
+    return access_token, expiry
+
+
+def _gemini_access_token() -> str | None:
+    """A live, unexpired access token from the OS keyring, or None when
+    there's no credential, it's unparseable, or it's expired (or about to
+    be) — any of which means "skip the live attempt", not an error."""
+    secret = _read_gemini_keyring_secret()
+    if secret is None:
+        return None
+    parsed = _parse_gemini_keyring_token(secret)
+    if parsed is None:
+        return None
+    access_token, expiry = parsed
+    if expiry is not None:
+        now = datetime.now(tz=expiry.tzinfo or UTC)
+        if (expiry - now).total_seconds() <= _GEMINI_TOKEN_EXPIRY_MARGIN_S:
+            return None
+    return access_token
+
+
+def _fetch_gemini_live_buckets(
+    access_token: str, project_id: str, timeout: float = _FETCH_TIMEOUT_S
+) -> list[dict[str, Any]] | None:
+    """One `retrieveUserQuota` RPC round trip. Blocking, bounded by
+    *timeout*. Returns the response's `buckets` list, or None on ANY
+    failure (network, non-200, malformed response) — never raises. The
+    Authorization header is the only thing carrying the token; no failure
+    path below ever puts *access_token* into a returned value, a log line,
+    or an exception message."""
+    body = json.dumps({"project": project_id}).encode("utf-8")
+    request = urllib.request.Request(
+        _GEMINI_QUOTA_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": _GEMINI_QUOTA_USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    buckets = raw.get("buckets")
+    return buckets if isinstance(buckets, list) else None
+
+
+def _gemini_usage_from_live_buckets(
+    buckets: list[dict[str, Any]], email: str | None
+) -> ProviderUsage | None:
+    """Same worst-case-model aggregation as the cache-file path below, just
+    over the live RPC's `buckets` shape instead of the cache's `models`
+    shape. Returns None when no bucket carries a usable fraction (treated
+    by the caller as "live fetch didn't pan out" — falls back to cache)."""
+    best_fraction: float | None = None
+    resets_at: datetime | None = None
+    windows: list[dict[str, Any]] = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        fraction = bucket.get("remainingFraction")
+        if fraction is None:
+            continue
+        try:
+            fraction = float(fraction)
+        except (TypeError, ValueError):
+            continue
+        model_id = bucket.get("modelId")
+        m_utilization = max(0.0, min(100.0, (1.0 - fraction) * 100.0))
+        reset_raw = bucket.get("resetTime")
+        m_resets_at: datetime | None = None
+        if isinstance(reset_raw, str):
+            try:
+                m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
+            except ValueError:
+                m_resets_at = None
+        windows.append(
+            {
+                "name": str(model_id) if model_id else "?",
+                "utilization": m_utilization,
+                "resets_at": m_resets_at.isoformat() if m_resets_at else None,
+            }
+        )
+        if best_fraction is None or fraction < best_fraction:
+            best_fraction = fraction
+            resets_at = m_resets_at
+    if best_fraction is None:
+        return None
+    return ProviderUsage(
+        provider="gemini",
+        status=STATUS_ACTIVE,
+        utilization=max(0.0, min(100.0, (1.0 - best_fraction) * 100.0)),
+        resets_at=resets_at,
+        fetched_at=datetime.now(tz=UTC),
+        raw_data={"email": email, "model_count": len(windows), "source": "live"},
+        windows=windows or None,
+    )
+
+
+def _fetch_gemini_live_usage(project_id: Any, email: Any) -> ProviderUsage | None:
+    """Best-effort live attempt: keyring credential -> RPC -> aggregate.
+    Returns None the moment any step doesn't pan out (no/expired
+    credential, RPC failure, empty/unusable response) so the caller falls
+    through to the cache-file path unchanged — this is ONLY ever a bonus
+    freshness path, never the sole source of a number. Wrapped in a
+    catch-all (unlike the individual helpers, which already never raise on
+    their own) so an unforeseen failure here degrades the same way instead
+    of ever reaching a caller that isn't `fetch_provider_usage`'s own
+    catch-all — matches `fetch_codex_usage`'s same belt-and-suspenders
+    pattern for its RPC round trip."""
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    try:
+        access_token = _gemini_access_token()
+        if access_token is None:
+            return None
+        buckets = _fetch_gemini_live_buckets(access_token, project_id)
+        if not buckets:
+            return None
+        return _gemini_usage_from_live_buckets(buckets, email if isinstance(email, str) else None)
+    except Exception:
+        _log.exception("gemini live quota fetch failed")
+        return None
+
+
 def fetch_gemini_usage() -> ProviderUsage:
-    """Reads the newest `quota_api_v1_plugin/authorized/*.json` cache file.
-    Blocking (local file I/O only, no subprocess/network) — safe off the Qt
-    main thread like every other adapter here for consistency, though it's
-    fast enough it would rarely matter.
+    """Tries a live `retrieveUserQuota` RPC first (`_fetch_gemini_live_usage`
+    — needs a keyring credential, see the module comment above); on any miss
+    falls back to reading the newest `quota_api_v1_plugin/authorized/*.json`
+    cache file, same as before #456. Blocking (a bounded HTTP POST, or local
+    file I/O only) — run off the Qt main thread like every other adapter
+    here.
     """
     primary_dir = _antigravity_authorized_cache_dir()
     # Only widen discovery when the primary is the real default location.
@@ -576,6 +874,10 @@ def fetch_gemini_usage() -> ProviderUsage:
         return _error("gemini", "could not read Antigravity quota cache file")
     if not isinstance(raw, dict):
         return _error("gemini", "malformed Antigravity quota cache file")
+
+    live_usage = _fetch_gemini_live_usage(raw.get("projectId"), raw.get("email"))
+    if live_usage is not None:
+        return live_usage
 
     fetched_at: datetime | None = None
     updated_at_ms = raw.get("updatedAt")
