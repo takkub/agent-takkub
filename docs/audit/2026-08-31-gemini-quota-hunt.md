@@ -105,7 +105,7 @@ snapshot is from instead of just "stale". `tests/test_provider_usage.py`
 updated to match (`error.startswith(...)` + date substring instead of exact
 string equality).
 
-## Bottom line for the usage card
+## Bottom line for the usage card (superseded 2026-09-05, see below)
 
 **"Open the Antigravity desktop app" is still the only way to refresh this
 number.** No CLI-only, cockpit-side channel exists today. Re-check next
@@ -113,3 +113,60 @@ time `agy --help` changes (Antigravity CLI is actively developed and gets
 new subcommands regularly) — an official `agy usage`/`agy quota`
 subcommand, or `agy --help` verbosity/log-level flags, would be the clean
 way in if either ever ships.
+
+## 2026-09-05 follow-up (#456 reopened, user-approved): the keyring path shipped
+
+The user explicitly approved pulling the keyring credential and calling the
+undocumented RPC (the judgment call this doc's §4 flagged as needing
+sign-off). Implemented in `provider_usage.py` (`_fetch_gemini_live_usage`
+and its helpers) — this is what was actually needed, for anyone re-deriving
+it later:
+
+1. **Where the credential lives.** `cmdkey /list` on Windows shows
+   `LegacyGeneric:target=gemini:antigravity` — a *Generic* credential, not
+   found by guessing, found by just listing what's there. Reading it
+   (`advapi32!CredReadW` via ctypes — no pywin32/keyring dependency needed)
+   gives a UTF-8 JSON blob: `{"auth_method": "consumer", "token":
+   {"access_token", "token_type", "refresh_token", "expiry"}}`. This is
+   zalando/go-keyring's own serialization (agy is a Go binary) — Windows'
+   backend names the target `service:user` (hence `gemini:antigravity`);
+   the macOS Keychain backend is expected to use `service`/`account`
+   directly (`security find-generic-password -s gemini -a antigravity -w`),
+   **never verified against a real login** since this box is Windows-only —
+   any mismatch there just means the macOS reader returns None and the live
+   path is skipped, same as any other miss.
+
+2. **The RPC's shape.** `agy.EXE` embeds a full proto `FileDescriptorProto`
+   for `PredictionService` as plain strings (grep the binary for
+   `RetrieveUserQuotaRequest` — no disassembly needed). It shows the request
+   has exactly ONE field, `project` (a `google.api.resource_reference`
+   string), and the response is `{"buckets": [{"remainingAmount",
+   "remainingFraction", "resetTime", "tokenType", "modelId"}]}` — field
+   names that already match the existing quota-cache JSON, confirming this
+   is the same RPC that populates it. `project` is the cache file's own
+   top-level `projectId` field — no separate lookup call needed.
+
+3. **The wall that took the longest to find:** a well-formed request
+   (`POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`,
+   `{"project": "<projectId>"}`, valid unexpired Bearer token) still got a
+   **misleading `403 SUBSCRIPTION_REQUIRED`** ("You do not have a valid
+   license of this product...") on a fully-licensed, actually-quota-having
+   account. Root cause: the endpoint appears to gate on the `User-Agent`
+   header — the default `Python-urllib/...` (and even a generic
+   `google-api-go-client/0.5`) gets the license error; any UA *containing*
+   `"antigravity"` gets a real `200` with real bucket data. This is
+   undocumented, found only by trial, and could change without notice —
+   every failure mode in the shipped code (missing/expired credential,
+   non-200, malformed response) falls straight through to the existing
+   cache-file read, never raises, never blanks the card.
+
+4. **Not implemented on purpose:** refresh-token exchange. The observed
+   `access_token` is short-lived (~1h) and the credential's `refresh_token`
+   is present but exchanging it needs Google's OAuth client id/secret for
+   the Antigravity app, which was not extracted — reverse-engineering that
+   on top of everything above was judged out of scope for this pass. When
+   the cached access token is expired (or within 30s of expiring) the live
+   attempt is skipped outright (no point 401ing) and the card just falls
+   back to the cache file, same as before this feature existed. In
+   practice this means the live path covers roughly whatever fraction of a
+   poll cycle the access token is still fresh for, not every single poll.

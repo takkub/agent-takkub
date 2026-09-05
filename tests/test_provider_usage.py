@@ -565,6 +565,348 @@ class TestGeminiAdapter:
         assert result.raw_data["email"] == "new@example.com"
 
 
+# ── gemini/agy live quota (#456, keyring-backed) ─────────────────────────
+
+
+def _write_gemini_cache(
+    cache_dir: Path, *, project_id: str | None, models: dict | None = None
+) -> None:
+    cache_dir.mkdir(exist_ok=True)
+    now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    payload: dict = {
+        "email": "user@example.com",
+        "updatedAt": now_ms,
+        "payload": {"models": models or {}},
+    }
+    if project_id is not None:
+        payload["projectId"] = project_id
+    (cache_dir / "acct.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+class TestGeminiLiveQuotaIntegration:
+    """`fetch_gemini_usage()`'s live-first / cache-fallback wiring. Every
+    test monkeypatches the keyring/RPC seams — never a real credential or
+    network call, even though this exact machine has a real `gemini:
+    antigravity` credential (that's how the RPC/schema were verified)."""
+
+    def test_live_success_is_used_and_marks_source(self, monkeypatch, tmp_path):
+        cache_dir = tmp_path / "authorized"
+        _write_gemini_cache(cache_dir, project_id="proj-abc123")
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        monkeypatch.setattr(pu, "_gemini_access_token", lambda: "fake-access-token")
+        monkeypatch.setattr(
+            pu,
+            "_fetch_gemini_live_buckets",
+            lambda token, project_id, timeout=pu._FETCH_TIMEOUT_S: [
+                {
+                    "modelId": "gemini-3-pro",
+                    "remainingFraction": 0.4,
+                    "resetTime": "2026-09-06T00:00:00Z",
+                },
+                {"modelId": "gemini-3-flash", "remainingFraction": 0.9},
+            ],
+        )
+        result = pu.fetch_gemini_usage()
+        assert result.status == "active"
+        assert result.utilization == pytest.approx(60.0)
+        assert result.raw_data["source"] == "live"
+        assert result.error is None
+        assert result.windows is not None
+        assert len(result.windows) == 2
+
+    def test_no_keyring_credential_falls_back_to_cache_without_rpc_attempt(
+        self, monkeypatch, tmp_path
+    ):
+        cache_dir = tmp_path / "authorized"
+        _write_gemini_cache(
+            cache_dir,
+            project_id="proj-abc123",
+            models={"gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.5}}},
+        )
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        monkeypatch.setattr(pu, "_gemini_access_token", lambda: None)
+        attempted = []
+        monkeypatch.setattr(
+            pu, "_fetch_gemini_live_buckets", lambda *a, **k: attempted.append(1) or None
+        )
+        result = pu.fetch_gemini_usage()
+        assert not attempted, "no token means never even try the RPC"
+        assert result.status == "active"
+        assert result.raw_data.get("source") != "live"
+
+    def test_rpc_failure_falls_back_to_cache(self, monkeypatch, tmp_path):
+        cache_dir = tmp_path / "authorized"
+        _write_gemini_cache(
+            cache_dir,
+            project_id="proj-abc123",
+            models={"gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.5}}},
+        )
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        monkeypatch.setattr(pu, "_gemini_access_token", lambda: "fake-access-token")
+        monkeypatch.setattr(pu, "_fetch_gemini_live_buckets", lambda *a, **k: None)
+        result = pu.fetch_gemini_usage()
+        assert result.status == "active"
+        assert result.raw_data.get("source") != "live"
+
+    def test_missing_project_id_never_touches_keyring(self, monkeypatch, tmp_path):
+        cache_dir = tmp_path / "authorized"
+        _write_gemini_cache(cache_dir, project_id=None)
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        attempted = []
+        monkeypatch.setattr(
+            pu, "_gemini_access_token", lambda: attempted.append(1) or "fake-access-token"
+        )
+        pu.fetch_gemini_usage()
+        assert not attempted
+
+    def test_live_failure_never_leaks_the_token_into_the_result(self, monkeypatch, tmp_path):
+        """Security contract (#456): a live-path failure must fall back
+        cleanly — the token must never end up in anything `fetch_gemini_usage`
+        hands back (error/detail/raw_data), even when the RPC step raises."""
+        cache_dir = tmp_path / "authorized"
+        _write_gemini_cache(
+            cache_dir,
+            project_id="proj-abc123",
+            models={"gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.5}}},
+        )
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        secret_token = "super-secret-token-xyz"
+        monkeypatch.setattr(pu, "_gemini_access_token", lambda: secret_token)
+
+        def _raise_unexpectedly(token, project_id, timeout=pu._FETCH_TIMEOUT_S):
+            # `_fetch_gemini_live_buckets` itself never raises (see
+            # TestGeminiLiveRpc) — this stands in for "what if it did
+            # anyway", proving `_fetch_gemini_live_usage`'s own catch-all
+            # degrades cleanly instead of propagating (and possibly the
+            # token along with it) to a caller that isn't
+            # `fetch_provider_usage`'s outer safety net.
+            raise RuntimeError(f"boom involving {token}")
+
+        monkeypatch.setattr(pu, "_fetch_gemini_live_buckets", _raise_unexpectedly)
+        result = pu.fetch_gemini_usage()
+        assert result.status == "active"
+        assert result.raw_data.get("source") != "live"
+        dumped = json.dumps(pu.usage_to_dict(result))
+        assert secret_token not in dumped
+
+
+class TestGeminiKeyringTokenParsing:
+    def test_valid_token_parsed(self):
+        secret = json.dumps(
+            {
+                "auth_method": "consumer",
+                "token": {
+                    "access_token": "abc123",
+                    "token_type": "Bearer",
+                    "refresh_token": "xyz",
+                    "expiry": "2099-01-01T00:00:00+00:00",
+                },
+            }
+        )
+        result = pu._parse_gemini_keyring_token(secret)
+        assert result is not None
+        access_token, expiry = result
+        assert access_token == "abc123"
+        assert expiry is not None and expiry.year == 2099
+
+    def test_malformed_json_returns_none(self):
+        assert pu._parse_gemini_keyring_token("not json") is None
+
+    def test_missing_token_field_returns_none(self):
+        assert pu._parse_gemini_keyring_token(json.dumps({"auth_method": "consumer"})) is None
+
+    def test_missing_access_token_returns_none(self):
+        assert pu._parse_gemini_keyring_token(json.dumps({"token": {"expiry": "x"}})) is None
+
+    def test_unparseable_expiry_still_returns_token(self):
+        secret = json.dumps({"token": {"access_token": "abc", "expiry": "not-a-date"}})
+        assert pu._parse_gemini_keyring_token(secret) == ("abc", None)
+
+
+class TestGeminiAccessToken:
+    def test_no_secret_returns_none(self, monkeypatch):
+        monkeypatch.setattr(pu, "_read_gemini_keyring_secret", lambda: None)
+        assert pu._gemini_access_token() is None
+
+    def test_expired_token_returns_none(self, monkeypatch):
+        secret = json.dumps(
+            {
+                "token": {
+                    "access_token": "abc",
+                    "expiry": (datetime.now(tz=UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            }
+        )
+        monkeypatch.setattr(pu, "_read_gemini_keyring_secret", lambda: secret)
+        assert pu._gemini_access_token() is None
+
+    def test_token_about_to_expire_within_margin_returns_none(self, monkeypatch):
+        secret = json.dumps(
+            {
+                "token": {
+                    "access_token": "abc",
+                    "expiry": (datetime.now(tz=UTC) + timedelta(seconds=5)).isoformat(),
+                }
+            }
+        )
+        monkeypatch.setattr(pu, "_read_gemini_keyring_secret", lambda: secret)
+        assert pu._gemini_access_token() is None
+
+    def test_fresh_token_returned(self, monkeypatch):
+        secret = json.dumps(
+            {
+                "token": {
+                    "access_token": "abc",
+                    "expiry": (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat(),
+                }
+            }
+        )
+        monkeypatch.setattr(pu, "_read_gemini_keyring_secret", lambda: secret)
+        assert pu._gemini_access_token() == "abc"
+
+    def test_no_expiry_field_still_returns_token(self, monkeypatch):
+        secret = json.dumps({"token": {"access_token": "abc"}})
+        monkeypatch.setattr(pu, "_read_gemini_keyring_secret", lambda: secret)
+        assert pu._gemini_access_token() == "abc"
+
+
+class TestGeminiKeyringPlatformDispatch:
+    def test_windows_reads_compound_target(self, monkeypatch):
+        monkeypatch.setattr(pu.sys, "platform", "win32")
+        captured = {}
+
+        def fake_read(target):
+            captured["target"] = target
+            return "secret"
+
+        monkeypatch.setattr(pu, "_read_windows_credential_secret", fake_read)
+        assert pu._read_gemini_keyring_secret() == "secret"
+        assert captured["target"] == "gemini:antigravity"
+
+    def test_macos_reads_service_and_account_separately(self, monkeypatch):
+        monkeypatch.setattr(pu.sys, "platform", "darwin")
+        captured = {}
+
+        def fake_read(service, account):
+            captured["service"] = service
+            captured["account"] = account
+            return "secret"
+
+        monkeypatch.setattr(pu, "_read_macos_keychain_secret", fake_read)
+        assert pu._read_gemini_keyring_secret() == "secret"
+        assert captured == {"service": "gemini", "account": "antigravity"}
+
+    def test_unsupported_platform_returns_none(self, monkeypatch):
+        monkeypatch.setattr(pu.sys, "platform", "linux")
+        assert pu._read_gemini_keyring_secret() is None
+
+
+class TestGeminiLiveRpc:
+    """`_fetch_gemini_live_buckets` never raises — every failure mode
+    collapses to `None` so `fetch_gemini_usage` can fall back cleanly."""
+
+    def test_http_error_returns_none(self, monkeypatch):
+        import urllib.error
+
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(pu._GEMINI_QUOTA_URL, 403, "Forbidden", None, None)
+
+        monkeypatch.setattr(pu.urllib.request, "urlopen", fake_urlopen)
+        assert pu._fetch_gemini_live_buckets("token", "proj") is None
+
+    def test_url_error_returns_none(self, monkeypatch):
+        import urllib.error
+
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.URLError("no route to host")
+
+        monkeypatch.setattr(pu.urllib.request, "urlopen", fake_urlopen)
+        assert pu._fetch_gemini_live_buckets("token", "proj") is None
+
+    def test_malformed_json_response_returns_none(self, monkeypatch):
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"not json"
+
+        monkeypatch.setattr(pu.urllib.request, "urlopen", lambda *a, **k: _FakeResp())
+        assert pu._fetch_gemini_live_buckets("token", "proj") is None
+
+    def test_non_dict_response_returns_none(self, monkeypatch):
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"[]"
+
+        monkeypatch.setattr(pu.urllib.request, "urlopen", lambda *a, **k: _FakeResp())
+        assert pu._fetch_gemini_live_buckets("token", "proj") is None
+
+    def test_success_returns_buckets_with_expected_headers(self, monkeypatch):
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({"buckets": [{"modelId": "x", "remainingFraction": 1}]}).encode(
+                    "utf-8"
+                )
+
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["auth"] = request.get_header("Authorization")
+            captured["ua"] = request.get_header("User-agent")
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeResp()
+
+        monkeypatch.setattr(pu.urllib.request, "urlopen", fake_urlopen)
+        result = pu._fetch_gemini_live_buckets("token-abc", "proj-1")
+        assert result == [{"modelId": "x", "remainingFraction": 1}]
+        assert captured["auth"] == "Bearer token-abc"
+        assert "antigravity" in captured["ua"].lower()
+        assert captured["url"] == pu._GEMINI_QUOTA_URL
+        assert captured["body"] == {"project": "proj-1"}
+
+
+class TestGeminiLiveBucketAggregation:
+    def test_worst_case_bucket_drives_headline(self):
+        result = pu._gemini_usage_from_live_buckets(
+            [
+                {"modelId": "a", "remainingFraction": 0.9},
+                {"modelId": "b", "remainingFraction": 0.3, "resetTime": "2026-09-06T00:00:00Z"},
+            ],
+            email="user@example.com",
+        )
+        assert result is not None
+        assert result.utilization == pytest.approx(70.0)
+        assert result.resets_at is not None
+        assert result.raw_data == {"email": "user@example.com", "model_count": 2, "source": "live"}
+
+    def test_no_usable_bucket_returns_none(self):
+        assert pu._gemini_usage_from_live_buckets([{"modelId": "a"}], email=None) is None
+
+    def test_non_dict_entries_are_skipped(self):
+        result = pu._gemini_usage_from_live_buckets(
+            ["not-a-dict", {"modelId": "a", "remainingFraction": 0.5}], email=None
+        )
+        assert result is not None
+        assert len(result.windows) == 1
+
+
 # ── opencode adapter ──────────────────────────────────────────────────────
 
 
