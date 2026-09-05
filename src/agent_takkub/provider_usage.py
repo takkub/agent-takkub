@@ -659,6 +659,8 @@ def _read_macos_keychain_secret(service: str, account: str) -> str | None:
             ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
             creationflags=SUBPROCESS_NO_WINDOW,
