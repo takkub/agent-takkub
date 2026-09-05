@@ -1571,10 +1571,13 @@ class LeadInboxMixin:
                     manager.mark_uncertain(delivery.delivery_id)
                     self._warn_lead_delivery_uncertain(role_name, project)
 
-            # Self-healing submit: the task pastes as a `[Pasted text]` placeholder
-            # and an Enter landing mid-render is swallowed, leaving the teammate
-            # sitting on the placeholder forever instead of running the spec — the
-            # original #22 symptom. _deliver only runs once the pane is at its ready
+            # Self-healing submit: the task pastes as a placeholder (claude's
+            # `[Pasted text +N lines]`, codex's `[Pasted Content N chars]` — see
+            # pty_session._PASTED_PLACEHOLDERS) and an Enter landing mid-render is
+            # swallowed, leaving the teammate sitting on the placeholder forever
+            # instead of running the spec — the original #22 symptom (recurred for
+            # codex specifically as #489, since this table only ever recognised
+            # claude's wording). _deliver only runs once the pane is at its ready
             # prompt (or blind on timeout), so verifying the submit landed and
             # resending is safe (a busy/booting pane is not "ready" → no resend).
             _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(

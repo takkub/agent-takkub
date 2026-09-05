@@ -268,6 +268,26 @@ class TestShowsPendingInput:
         s = _feed_screen("[Pasted text +42 lines]", "bypass permissions")
         assert s.shows_pending_input() is True
 
+    def test_codex_pasted_content_placeholder_is_pending(self) -> None:
+        # #489: codex renders "[Pasted Content N chars]", not claude's
+        # "[Pasted text +N lines]" — a reviewer/codex pane sat idle at this
+        # exact placeholder for 9 stuck_pane_recover cycles because
+        # shows_pending_input() only ever recognised claude's wording, so the
+        # stuck-paste self-heal never fired a CR resend and the watchdog
+        # escalated straight to full recover/respawn instead. Called with NO
+        # fragment, matching how _maybe_submit_stuck_paste (orchestrator.py)
+        # actually calls it.
+        s = _feed_screen("› [Pasted Content 26889 chars]", "send a message")
+        assert s.shows_pending_input() is True
+
+    def test_gemini_short_paste_still_covered_by_fragment_fallback(self) -> None:
+        # gemini has no confirmed placeholder wording (see
+        # pty_session.NO_PASTE_PLACEHOLDER_GAPS) — a short paste that renders
+        # inline must still be detected via the fragment fallback so this gap
+        # doesn't regress the case it already covers.
+        s = _feed_screen("> [ROLE: qa] verify the login flow", "Type your message or @path")
+        assert s.shows_pending_input("[ROLE: qa] verify the login flow") is True
+
     def test_empty_box_is_not_pending(self) -> None:
         s = _feed_screen("Welcome to Claude Code", "bypass permissions")
         assert s.shows_pending_input("[ROLE: qa] verify the login flow") is False
@@ -632,6 +652,18 @@ class TestReadyMarkerTable:
 
         monkeypatch.setenv("TAKKUB_EXTRA_READY_MARKERS", "zzz-not-a-real-marker")
         assert ready_marker_selftest() == []
+
+
+class TestPastePlaceholderTable:
+    """#489: the same shipped-table self-test pattern as TestReadyMarkerTable,
+    for the bracketed-paste placeholder table — a stale/reworded placeholder
+    here silently starves the stuck-paste self-heal instead of just idle
+    detection, so it gets its own doctor-wired guard."""
+
+    def test_selftest_passes_on_shipped_table(self) -> None:
+        from agent_takkub.pty_session import pasted_placeholder_selftest
+
+        assert pasted_placeholder_selftest() == []
 
 
 # -- orphaned wide-char stub crash (pyte display IndexError) ------------------

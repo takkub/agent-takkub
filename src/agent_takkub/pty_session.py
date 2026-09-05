@@ -719,10 +719,43 @@ def _is_claude_empty_composer(lines: list[str]) -> bool:
     return False
 
 
-# Placeholder claude renders in its input box for a bracketed multi-line paste,
-# e.g. "[Pasted text +42 lines]". Its presence in the input region confirms the
-# paste actually landed (vs a swallowed paste that leaves the box empty — #26).
-_PASTED_PLACEHOLDER = "[pasted text"
+# Placeholder(s) a provider renders in its input box for a bracketed
+# multi-line paste — presence in the input region confirms the paste actually
+# landed (vs a swallowed paste that leaves the box empty — #26). Each entry
+# here is a CONFIRMED, live-captured wording (never a guess — see
+# NO_PASTE_PLACEHOLDER_GAPS below for the providers this doesn't cover yet):
+#   - claude: "[Pasted text +42 lines]" (original #26/#79 finding)
+#   - codex: "[Pasted Content 26889 chars]" — confirmed via events.log
+#     2026-09-05 (#489): a reviewer/codex pane sat idle at exactly this
+#     placeholder for 9 stuck_pane_recover cycles because this table only
+#     ever matched claude's wording ("[pasted text"), so shows_pending_input()
+#     read False and the stuck-paste self-heal (_maybe_submit_stuck_paste,
+#     orchestrator.py, and _delayed_enter_verified, lead_inbox.py) never
+#     fired a resend — the idle watchdog escalated straight to full
+#     recover/respawn instead, looping forever on the same swallowed Enter.
+_PASTED_PLACEHOLDERS: tuple[str, ...] = (
+    "[pasted text",  # claude
+    "[pasted content",  # codex
+)
+
+# gemini/opencode/kimi/cursor have no confirmed placeholder wording captured
+# yet — left OUT of _PASTED_PLACEHOLDERS rather than guessed (a wrong string
+# either matches nothing, same as today, or worse, false-positives on
+# unrelated screen text). shows_pending_input() still works for these
+# providers via the fragment fallback below, but only while the pasted
+# content is short enough to render inline — a long paste that collapses to
+# one of these providers' own (unknown) placeholder would still be missed by
+# the stuck-paste self-heal, same failure shape as #489. Flagged to issue
+# #103 (2026-09-05) per the multi-provider directive — never silently
+# assumed covered. Mirrors the same "document instead of guess" policy as
+# pane_env.NO_AUTOUPDATE_KNOB_GAPS / provider_update.NO_UPDATE_MECHANISM_GAPS.
+NO_PASTE_PLACEHOLDER_GAPS: dict[str, str] = {
+    "gemini": "no live-captured bracketed-paste placeholder wording yet",
+    "opencode": "no live-captured bracketed-paste placeholder wording yet",
+    "kimi": "no live-captured bracketed-paste placeholder wording yet",
+    "cursor": "no live-captured bracketed-paste placeholder wording yet",
+}
+
 # Leading chars of the content to look for as a fallback presence signal when a
 # short paste rendered inline (no placeholder).
 _INPUT_FRAGMENT_LEN = 24
@@ -731,13 +764,46 @@ _INPUT_FRAGMENT_LEN = 24
 def _input_has_content(region: str, fragment: str) -> bool:
     """True when the bottom input region shows pasted/typed content.
 
-    Two signals: the multi-line paste placeholder, or — for short inline
-    content with no placeholder — a leading fragment of the expected text. The
-    region is already lowercased by ``_ready_region``."""
-    if _PASTED_PLACEHOLDER in region:
+    Two signals: one of the known multi-line paste placeholders, or — for
+    short inline content with no placeholder, or a provider not in
+    ``_PASTED_PLACEHOLDERS`` (see ``NO_PASTE_PLACEHOLDER_GAPS``) — a leading
+    fragment of the expected text. The region is already lowercased by
+    ``_ready_region``."""
+    if any(marker in region for marker in _PASTED_PLACEHOLDERS):
         return True
     frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
     return bool(frag) and frag in region
+
+
+# Canonical (screen_text, fragment, expected) cases for pasted_placeholder_selftest()
+# — bakes the confirmed placeholder wordings above so an upstream CLI reword
+# is caught by `takkub doctor` instead of silently breaking the stuck-paste
+# self-heal again (#489).
+_PASTE_PLACEHOLDER_SELFTEST_CASES: tuple[tuple[str, str, bool], ...] = (
+    ("[Pasted text +42 lines]\nbypass permissions", "", True),  # claude
+    (
+        "› [Pasted Content 27000 chars]\nsend a message",
+        "",
+        True,
+    ),  # codex — the #489 incident screen
+    ("Welcome to Claude Code\nbypass permissions", "", False),  # empty composer
+)
+
+
+def pasted_placeholder_selftest() -> list[str]:
+    """Run the canned paste-placeholder screens through `_input_has_content`
+    and return human-readable failures (empty = all good). Called by doctor
+    so an upstream CLI reword of its placeholder wording surfaces as a
+    diagnostic instead of silently starving the stuck-paste self-heal (#489)."""
+    failures: list[str] = []
+    for text, fragment, expected in _PASTE_PLACEHOLDER_SELFTEST_CASES:
+        got = _input_has_content(text.lower(), fragment)
+        if got != expected:
+            first = text.splitlines()[0] if text else ""
+            failures.append(
+                f"paste-placeholder selftest: {first!r} expected pending={expected}, got {got}"
+            )
+    return failures
 
 
 # Canonical sample screens with their expected verdict — bake the behaviour so a

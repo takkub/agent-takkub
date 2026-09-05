@@ -1463,6 +1463,7 @@ class TestRunAllChecks:
             "check_hooks",
             "check_hook_wiring",
             "check_ready_markers",
+            "check_paste_placeholders",
             "check_context",
             "check_resilience",
             "check_version",

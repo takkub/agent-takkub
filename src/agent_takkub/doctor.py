@@ -2068,6 +2068,29 @@ def check_ready_markers() -> list[Finding]:
     ]
 
 
+def check_paste_placeholders() -> list[Finding]:
+    """Self-test the bracketed-paste placeholder table (#489) against
+    canonical sample screens. A FAIL here means an upstream CLI reword has
+    broken the stuck-paste self-heal's ability to tell a swallowed Enter
+    (content still pending) from a swallowed paste (box empty) for one of
+    the confirmed providers."""
+    from .pty_session import pasted_placeholder_selftest
+
+    failures = pasted_placeholder_selftest()
+    if not failures:
+        return [Finding("markers", "paste-placeholder", Status.OK, "known placeholders verified")]
+    return [
+        Finding(
+            "markers",
+            "paste-placeholder",
+            Status.FAIL,
+            "; ".join(failures),
+            "an upstream CLI reword likely broke stuck-paste detection — update "
+            "_PASTED_PLACEHOLDERS in pty_session.py",
+        )
+    ]
+
+
 def check_version() -> list[Finding]:
     """Report the cockpit's own version + how far behind origin/main it is.
 
@@ -3475,6 +3498,7 @@ def run_all_checks() -> list[Finding]:
         ("check_hooks", check_hooks),
         ("check_hook_wiring", check_hook_wiring),
         ("check_ready_markers", check_ready_markers),
+        ("check_paste_placeholders", check_paste_placeholders),
         ("check_context", check_context),
         ("check_resilience", check_resilience),
         ("check_rtk_ripgrep", check_rtk_ripgrep),
