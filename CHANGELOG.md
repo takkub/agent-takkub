@@ -4,7 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-## [v1.6.32] - 2026-09-04
+## [v1.6.33] - 2026-09-05
+
+### Added (เพิ่ม)
+
+- **ปุ่มซูม font +/-/reset บน pane header** — คลิกได้ตรงๆ ไม่ต้องรู้ shortcut (Ctrl+wheel / Ctrl+0 ยังใช้ได้, persist ต่อ role ผ่านกลไกเดิม, ทุก provider)
+- **`takkub assign --task-file <path>` / `takkub send --from-file <path>` / stdin `-` (#491)** — ส่ง task/ข้อความผ่านไฟล์หรือ stdin ข้าม shell interpolation ทั้งชั้น — backtick / `$()` / วงเล็บ รอด byte-for-byte
+- **Settings model dropdown ดึง model สดจาก CLI (#493)** — `provider_model_catalog.py` reuse discovery ของ `provider_model_refresh` + cache ใต้ DATA_HOME + refresh เป็น background thread ตอนเปิด Settings; snapshot เดิมเป็น fallback, combo ยัง editable; kimi/cursor ไม่มี lister (gap → #103)
+- **gemini/agy usage card แสดง quota สด (#456)** — อ่าน credential `gemini:antigravity` จาก Windows Credential Manager (ctypes `CredReadW`, ไม่มี dependency ใหม่) → เรียก `v1internal:retrieveUserQuota` (ต้องส่ง User-Agent มีคำว่า "antigravity" ไม่งั้น 403 หลอก — จดใน audit doc); ทุก failure fallback ไป cache Antigravity เดิม การ์ดไม่มีวันดับ; macOS Keychain branch เขียนแล้วแต่ยังไม่ verify บนเครื่องจริง
+
+### Fixed (แก้)
+
+- **codex pane ค้างที่ paste แล้ว watchdog วน respawn ไม่รู้จบ (#489)** — `_PASTED_PLACEHOLDER` เดิมรู้จักแค่ wording ของ claude (`[Pasted text`) ทำให้ composer codex ที่ค้าง `[Pasted Content N chars]` อ่านเป็น "ไม่มี pending input" → CR resubmit ไม่ยิง → recover/respawn วนซ้ำ (เคสจริง reviewer 9 รอบ ตี 2-4) · เป็น `_PASTED_PLACEHOLDERS` tuple (confirmed wording เท่านั้น) + `NO_PASTE_PLACEHOLDER_GAPS` สำหรับ provider ที่ยังไม่มี capture (→ #103) + doctor selftest กัน vendor reword
+- **delivery-stale-reap แจ้งหลอกทั้งที่ pane ยังทำงาน (#490)** — PTY-quiet อ่านเพี้ยนใต้ GIL convoy ตอนเครื่องโหลดหนัก · `_pane_progress_reason` fallback ไป liveness อิสระ (#468: transcript/child process, ทุก provider) ก่อนตัดสิน — มีหลักฐาน active = ลง events.log ไม่กวน Lead (#464)
+- **spawn-failed ไม่มีรายละเอียดวินิจฉัย + ไทยเพี้ยน cp874 (#492)** — reason เก็บ exception เต็มไม่ตัด + PTY tail + breadcrumb ไป events.log · pane env ได้ `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1` (setdefault) คู่กับ `_ensure_utf8_stdio` ฝั่ง entrypoint ที่มีอยู่แล้ว
 
 ### Fixed (แก้)
 

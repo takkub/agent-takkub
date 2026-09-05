@@ -1,3 +1,3 @@
 """agent-takkub: desktop cockpit for Claude Code dev teammates."""
 
-__version__ = "1.6.32"
+__version__ = "1.6.33"
