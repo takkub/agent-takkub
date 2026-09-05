@@ -189,6 +189,15 @@ class DeliveryManager:
             # ~90s worst case, well short of BUSY_WAIT_CEILING_SEC (1800s)
             # so a delivery genuinely stuck this long is still worth
             # reaping (see expire_stale below).
+            #
+            # (#490 review) A heavily loaded machine doesn't need this TTL
+            # widened: it delays PTY-reader-thread bookkeeping, not whether
+            # this timer itself fires, and lead_inbox._pane_progress_reason
+            # already falls back to the provider's own transcript/child-
+            # process evidence (immune to that same reader-thread lag)
+            # before ever surfacing a reap to Lead. Reaping a still-in-
+            # flight delivery at 120s stays correct; only the *notice*
+            # needed the extra evidence.
             else os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "120")
         )
         self._clock = clock
