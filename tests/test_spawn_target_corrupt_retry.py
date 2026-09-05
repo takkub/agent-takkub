@@ -171,6 +171,32 @@ class TestClaudeBranchCorruptRetry:
         assert mock_pty.spawn.call_count == 1
         assert "gave up" not in msg
 
+    def test_generic_failure_reason_carries_full_text_and_breadcrumb(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        """#492: the reason `_warn_lead_spawn_failed` forwards to the Lead
+        notice must contain the exception's own text in full (never cut
+        short) plus a pointer back to the matching events.log record — not
+        just the bare "failed to spawn claude: <e>" it used to be."""
+        orch = _make_orchestrator(qapp, monkeypatch)
+        pane = _make_pane("backend")
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+
+        long_reason = "working directory does not exist: " + "x" * 200
+        ok, msg, _mock_pty = _spawn_with_scripted_pty(
+            orch,
+            "backend",
+            monkeypatch,
+            tmp_path,
+            [NotADirectoryError(long_reason)],
+        )
+
+        assert ok is False
+        assert long_reason in msg
+        assert "events.log" in msg
+        assert "spawn_native_failed" in msg
+        assert "role=backend" in msg
+
 
 class TestNonClaudeBranchCorruptRetry:
     """_launch_session (shell/gemini/codex tail) hits the same guard."""
