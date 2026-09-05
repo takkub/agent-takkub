@@ -75,6 +75,7 @@ import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -118,6 +119,7 @@ from . import (
     pipeline_config,
     project_nav,
     provider_config,
+    provider_model_catalog,
     provider_models,
     provider_spec,
     provider_state,
@@ -352,12 +354,16 @@ _PROVIDER_DESC: dict[str, str] = {
 _MODEL_DEFAULT_LABEL = "(default)"
 
 # Model shortlists per provider — a *snapshot* (2026-08-03, refreshed against
-# each CLI actually installed on the dev box) offered as dropdown presets.
-# Every model combo stays EDITABLE because each CLI ships new ids on its own
-# cadence and a stale hardcoded list is worse than typing the id; re-verify
-# with the CLI's own lister next time this goes stale (`agy models`, `codex`
-# — read `~/.codex/models_cache.json`'s "slug" fields, no CLI subcommand
-# lists them — `opencode models --refresh`).
+# each CLI actually installed on the dev box) offered as dropdown presets AND
+# the permanent fallback for gemini/codex when live discovery hasn't run yet
+# or fails (`_fill_model_combo` merges this with `provider_model_catalog`'s
+# cached discovery — see #493). Every model combo stays EDITABLE regardless,
+# because a free-typed id always works even for a provider this cockpit can't
+# discover for at all (kimi/cursor/opencode — #103 gap, see
+# `provider_model_refresh.NO_MODEL_DISCOVERY_GAPS`); re-verify this snapshot
+# by hand next time it goes stale (`agy models`, `codex` — read
+# `~/.codex/models_cache.json`'s "slug" fields, no CLI subcommand lists them
+# — `opencode models --refresh`).
 # claude/codex/gemini/opencode entries below were confirmed live against the
 # CLIs installed on this box; kimi has no model-listing command or cache to
 # check against (accepts free-text `-m`) and cursor's CLI wasn't installed
@@ -434,12 +440,19 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
 
 
 def _fill_model_combo(combo: QComboBox, provider: str, current: str | None) -> None:
-    """(Re)populate a model picker with *provider*'s presets, preserving any
-    free-typed value, and point it at *current* (empty/None → "(default)")."""
+    """(Re)populate a model picker with *provider*'s presets — the live
+    discovery cache (`provider_model_catalog`) merged over the hand-written
+    snapshot, freshest ids first, snapshot filling any gap — preserving any
+    free-typed value, and point it at *current* (empty/None → "(default)").
+    `cached_ids` is a small local JSON read, never a subprocess call, so this
+    stays safe to call inline on the Qt main thread."""
     combo.blockSignals(True)
     combo.clear()
     combo.addItem(_MODEL_DEFAULT_LABEL, "")
-    for preset in _MODELS_BY_PROVIDER.get(provider, ()):
+    presets = provider_model_catalog.merge_catalog(
+        _MODELS_BY_PROVIDER.get(provider, ()), provider_model_catalog.cached_ids(provider)
+    )
+    for preset in presets:
         combo.addItem(preset, preset)
     combo.lineEdit().setPlaceholderText(_MODEL_DEFAULT_LABEL)
     _select_model(combo, current)
@@ -622,6 +635,21 @@ class _AutoskillsInstallThread(QThread):
         )
 
 
+class _ModelCatalogRefreshThread(QThread):
+    """Runs `provider_model_catalog.refresh_stale()` off the Qt main thread
+    (#493) — each stale provider's discovery is a real CLI subprocess call
+    (see `provider_model_refresh`'s own discovery functions), so this must
+    never block opening Settings. Started once per SettingsWindow open;
+    `resultReady` carries only the providers that actually got a fresh
+    catalog (empty dict when everything was already fresh, undiscoverable,
+    or discovery failed — see `refresh_stale`'s contract)."""
+
+    resultReady: pyqtSignal = pyqtSignal(dict)  # {provider: [model_id, ...]}
+
+    def run(self) -> None:
+        self.resultReady.emit(provider_model_catalog.refresh_stale())
+
+
 class _AutoskillsConfirmDialog(QDialog):
     """Confirms which of `autoskills`' proposed candidates actually get
     written — never auto-checked-and-fired. A skill under `.claude/skills/`
@@ -792,6 +820,42 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         outer.addWidget(body, 1)
 
         self._goto_view(initial_view)
+        self._model_catalog_thread: _ModelCatalogRefreshThread | None = None
+        self._start_model_catalog_refresh()
+
+    def _start_model_catalog_refresh(self) -> None:
+        """Kick off a background re-discovery of any stale provider model
+        catalog (#493) — never blocks opening Settings; affected combos
+        repopulate in place if/when fresh ids arrive. Skipped under
+        TAKKUB_SKIP_MODEL_CATALOG_REFRESH (set in tests/conftest.py, mirrors
+        every other TAKKUB_SKIP_* boot-side-effect guard there) so the test
+        suite's many `SettingsWindow()` constructions never spawn a thread
+        that shells out to a provider CLI."""
+        if os.environ.get("TAKKUB_SKIP_MODEL_CATALOG_REFRESH"):
+            return
+        thread = _ModelCatalogRefreshThread(self)
+        thread.resultReady.connect(self._on_model_catalog_refreshed)
+        thread.finished.connect(thread.deleteLater)
+        self._model_catalog_thread = thread
+        thread.start()
+
+    def _on_model_catalog_refreshed(self, results: dict[str, list[str]]) -> None:
+        """Repopulate every model combo whose provider just got a fresh
+        catalog, preserving whatever value (preset or free-typed) it
+        currently holds — same pattern as the CLI-combo-changed handlers
+        that already call `_fill_model_combo` this way."""
+        if not results:
+            return
+        for provider, combo in self._provider_model_combos.items():
+            if provider in results:
+                _fill_model_combo(combo, provider, _combo_model(combo) or None)
+        for role, combo in self._role_model_combos.items():
+            provider_combo = self._role_provider_combos.get(role)
+            role_provider = (
+                provider_combo.currentData() if provider_combo else None
+            ) or provider_config.CLAUDE
+            if role_provider in results:
+                _fill_model_combo(combo, role_provider, _combo_model(combo) or None)
 
     # ──────────────────────────────────────────────────────────
     # chrome: titlebar / status strip

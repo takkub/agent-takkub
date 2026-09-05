@@ -82,6 +82,11 @@ os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
 # this explicit flag documents the guard alongside its siblings and gives a
 # single toggle a test can clear on purpose.
 os.environ.setdefault("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "1")
+# Every SettingsWindow() construction (dozens across the suite) now starts a
+# background QThread that shells out to a provider CLI to refresh the model
+# picker's catalog (#493) — never real work in a test, and the thread outliving
+# a widget torn down mid-test is exactly the kind of flake this guard avoids.
+os.environ.setdefault("TAKKUB_SKIP_MODEL_CATALOG_REFRESH", "1")
 
 import pytest
 
