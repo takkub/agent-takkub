@@ -146,6 +146,12 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # `_apply_artifacts_dir()` sets it so instructions can point at
         # `$TAKKUB_DOCS_DIR/...` instead of a repo-relative `docs/...`.
         "TAKKUB_DOCS_DIR",
+        # User override for pane-subprocess UTF-8 I/O (#492, default injected
+        # by `_apply_utf8_io_env` below) — allowlisted so an operator who
+        # deliberately set either at the cockpit level still has it survive
+        # the allowlist copy, same contract as MCP_TOOL_TIMEOUT.
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
     }
 )
 
@@ -200,6 +206,7 @@ def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
     _apply_port_file(env)
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
+    _apply_utf8_io_env(env)
     _apply_color_term(env)
     if project_ns is not None:
         _apply_artifacts_dir(env, project_ns)
@@ -252,6 +259,7 @@ def _build_lead_env(project_ns: str | None = None) -> dict[str, str]:
 
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
+    _apply_utf8_io_env(env)
     _apply_color_term(env)
     if project_ns is not None:
         _apply_artifacts_dir(env, project_ns)
@@ -363,6 +371,30 @@ def _apply_non_interactive_env(env: dict[str, str]) -> None:
     """
     env.setdefault("npm_config_yes", "true")
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+
+def _apply_utf8_io_env(env: dict[str, str]) -> None:
+    """Force UTF-8 I/O for any Python subprocess a pane runs (`takkub` CLI
+    calls it types itself — `takkub done`, `takkub send`, ...).
+
+    Symptom this fixes (#492): on a Windows install whose locale is Thai,
+    Python's own stdout/stderr default to the console codepage (cp874) when
+    nothing overrides it, so Thai text a pane-run `takkub` subcommand prints
+    comes out mojibake — distinct from `cli._ensure_utf8_stdio()`, which only
+    reconfigures the *current* process's already-open streams and can't help
+    a brand new `python`/`takkub.exe` process spawned inside the pane's own
+    shell. ``PYTHONIOENCODING`` covers stdio; ``PYTHONUTF8`` (3.7+) also
+    covers file-system and other text-mode defaults for that subprocess.
+
+    Both via ``setdefault`` — same contract as the other ``_apply_*``
+    helpers — so an operator who deliberately set either at the cockpit
+    level still wins. macOS/Linux are already UTF-8 by default, so this is a
+    no-op in effect there, not gated on ``sys.platform``: forcing the same
+    value everywhere is one idempotent code path instead of a Windows-only
+    branch that could silently drift out of sync with the POSIX side.
+    """
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
 
 
 def _apply_color_term(env: dict[str, str]) -> None:

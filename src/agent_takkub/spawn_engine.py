@@ -513,6 +513,47 @@ CODEX_EARLY_CRASH_WINDOW_SEC = 90
 # that), so kept small.
 _PANE_EXIT_SNAPSHOT_LINES = 40
 
+# #492: how many trailing non-blank PTY lines `_spawn_failure_reason` folds
+# into a spawn-failed reason string, when the failing session managed to
+# render anything before dying (most spawn failures — e.g. a missing cwd —
+# raise before the PTY ever starts, so this is usually empty).
+_SPAWN_FAILURE_TAIL_LINES = 3
+
+
+def _spawn_failure_reason(
+    exc: Exception, *, role_name: str, project_ns: str, session: object | None
+) -> str:
+    """Build the full-detail reason string surfaced to the Lead on a spawn
+    failure (#492).
+
+    Previously this was just ``f"failed to spawn claude: {exc}"`` — enough to
+    log, but not enough to diagnose without also having `events.log` open:
+    the Lead notice carried no pointer back to the matching
+    `spawn_native_failed` record, and no hint of whatever the PTY had already
+    rendered (rare, since most failures — e.g. a missing cwd — raise before
+    the PTY starts, but real when a later step in the spawn try-block throws
+    after the process is already up). This keeps *exc*'s own text whole
+    (never truncated) and appends both, best-effort, so the live notice is
+    self-contained.
+    """
+    parts = [f"failed to spawn claude: {exc}"]
+    tail = ""
+    if session is not None:
+        try:
+            lines = [ln for ln in session.display_lines() if ln.strip()]
+            if lines:
+                tail = " / ".join(lines[-_SPAWN_FAILURE_TAIL_LINES:])
+        except Exception:
+            tail = ""
+    if tail:
+        parts.append(f"pty output ล่าสุดก่อนตาย: {tail}")
+    ts = datetime.now().isoformat(timespec="seconds")
+    parts.append(
+        f"รายละเอียดเต็ม: events.log (event=spawn_native_failed, role={role_name}, "
+        f"project={project_ns}, ts={ts})"
+    )
+    return " | ".join(parts)
+
 
 # Tier 2: tight re-samples of InSendMessageEx immediately before each native
 # ConPTY call to narrow the TOCTOU window between the early gate check and the
@@ -3353,9 +3394,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             )
             if role_name != LEAD.name:
                 getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+            _reason = _spawn_failure_reason(
+                e, role_name=role_name, project_ns=project_ns, session=None
+            )
             return (
                 False,
-                f"failed to spawn claude: {e} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
+                f"{_reason} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
             )
         except Exception as e:
             # #139: make a native-spawn failure's actual elapsed time visible
@@ -3368,6 +3412,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
                 err=f"{type(e).__name__}: {e}",
+            )
+            # #492: capture the reason (incl. any PTY tail) BEFORE tearing
+            # the session down below — display_lines() needs it alive.
+            _reason = _spawn_failure_reason(
+                e, role_name=role_name, project_ns=project_ns, session=session
             )
             _ps_failed = self._ps(_exit_key(project_ns, role_name))
             if _ps_failed.spawn_initial_task_state == "pending":
@@ -3388,7 +3437,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # try block so the pane never actually came up to use it.
             if role_name != LEAD.name:
                 getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
-            return False, f"failed to spawn claude: {e}"
+            return False, _reason
         finally:
             self._spawn_in_progress = False
             self._drain_spawn_queue()
