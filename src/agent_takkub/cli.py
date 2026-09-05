@@ -483,7 +483,57 @@ def _self_commit_isolation_warning(task: str, isolation: str) -> str:
     )
 
 
+def _resolve_text_or_file(
+    positional: str | None,
+    file_path: str | None,
+    *,
+    positional_name: str,
+    file_flag: str,
+    required: bool,
+) -> tuple[str | None, str | None]:
+    """Resolve a CLI text argument that can arrive as a positional string, a
+    `file_flag <path>` (read as utf-8), or stdin (positional "-" or
+    `file_flag -`) — the file/stdin routes bypass shell interpolation
+    entirely, so content with backticks/`$()`/parens survives byte-for-byte
+    (#491: the shell on the SENDING side, not the receiving pane, was eating
+    those characters before `takkub` ever saw them).
+
+    Returns `(text, error)` — exactly one is `None`.
+    """
+    has_positional = bool(positional)
+    if has_positional and file_path is not None:
+        return (
+            None,
+            f"{positional_name} and {file_flag} are mutually exclusive — pass one or the other",
+        )
+    if file_path is not None:
+        if file_path == "-":
+            return sys.stdin.read(), None
+        try:
+            return Path(file_path).read_text(encoding="utf-8"), None
+        except OSError as e:
+            return None, f"could not read {file_flag} {file_path}: {e}"
+    if has_positional:
+        return (sys.stdin.read() if positional == "-" else positional), None
+    if required:
+        return None, (
+            f"{positional_name} is required — pass it directly, via {file_flag} <path>, "
+            f'or "-" (or {file_flag} -) to read from stdin'
+        )
+    return "", None
+
+
 def cmd_assign(args: argparse.Namespace) -> dict:
+    task_text, task_err = _resolve_text_or_file(
+        getattr(args, "task", None),
+        getattr(args, "task_file", None),
+        positional_name="task",
+        file_flag="--task-file",
+        required=True,
+    )
+    if task_err:
+        return {"ok": False, "msg": task_err}
+    args.task = task_text
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
     # #364 lever 2: `args.mode` is None when the caller left --mode unset —
@@ -1064,6 +1114,16 @@ def cmd_send(args: argparse.Namespace) -> dict:
     redirect rather than teaching `orchestrator.send()`/`Orchestrator.send`'s
     pane-liveness/delivery-manager logic about a pseudo-role that was never
     part of that model."""
+    msg_text, msg_err = _resolve_text_or_file(
+        getattr(args, "msg", None),
+        getattr(args, "from_file", None),
+        positional_name="msg",
+        file_flag="--from-file",
+        required=False,
+    )
+    if msg_err:
+        return {"ok": False, "msg": msg_err}
+    args.msg = msg_text
     file_path = getattr(args, "file", None)
     if (args.to or "").strip().lower() == "user":
         if not file_path:
@@ -3780,7 +3840,22 @@ def main(argv: list[str] | None = None) -> int:
         "rather than erroring. Only takes effect when spawning a new pane; an "
         "already-running pane keeps its current effort",
     )
-    sa.add_argument("task", help="task content (positional)")
+    sa.add_argument(
+        "task",
+        nargs="?",
+        default=None,
+        help="task content (positional) — omit and use --task-file instead when the "
+        "text has backticks/$()/parens the sending shell would eat (#491); "
+        '"-" reads the task from stdin',
+    )
+    sa.add_argument(
+        "--task-file",
+        default=None,
+        metavar="PATH",
+        help="read task content from this file (utf-8) instead of the positional arg — "
+        "bypasses shell quoting entirely (#491); mutually exclusive with the positional "
+        'task; PATH "-" reads from stdin',
+    )
     sa.add_argument(
         "--requires-commit",
         action="store_true",
@@ -3951,7 +4026,20 @@ def main(argv: list[str] | None = None) -> int:
 
     ss = sub.add_parser("send", help="send a message to a running pane")
     ss.add_argument("--to", required=True)
-    ss.add_argument("msg", nargs="?", default="", help="message (positional)")
+    ss.add_argument(
+        "msg",
+        nargs="?",
+        default="",
+        help='message (positional) — "-" reads the message from stdin',
+    )
+    ss.add_argument(
+        "--from-file",
+        default=None,
+        metavar="PATH",
+        help="read the message from this file (utf-8) instead of the positional arg — "
+        "bypasses shell quoting for content with backticks/$()/parens (#491); mutually "
+        'exclusive with the positional msg; PATH "-" reads from stdin',
+    )
     ss.add_argument(
         "--file",
         default=None,
