@@ -33,31 +33,29 @@ class Router:
     def effective_model_for(
         self, role: str, provider: str, project: str | None = None
     ) -> str | None:
-        """Model pin lookup — V1-authoritative by default, V2-authoritative
-        when ``TAKKUB_V2_AUTHORITY`` is on (#362 Phase 10 wave 2). Either
-        way both sides are read and compared; the side NOT chosen is only
-        ever a shadow, logged as ``model_pin_v2_drift`` when it disagrees
-        with the side that was actually returned.
+        """Model pin lookup — V1-authoritative when ``TAKKUB_V2_AUTHORITY``
+        is off, V2-authoritative when it's on (default since 2.0.0, #362).
+        Either way both sides are read and compared; the side NOT chosen is
+        only ever a shadow, logged as ``model_pin_v2_drift`` when it
+        disagrees with the side that was actually returned.
 
-        **Why V1 still wins by default (Wave C fix, prod incident
-        2026-08-23):**
-        `migrate apply` copies V1's role/provider model pins into
-        `v2/models/{registry,aliases}.json` exactly once. Nothing syncs that
-        copy back when the user changes a pin afterwards in Settings ->
-        Providers & Roles — those writers (`role_models.py`/
-        `provider_models.py`) only ever touch the V1 files (Phase 10's job,
-        not this resolver's). So on any machine that has already migrated,
-        the V2 copy silently goes stale the moment the user re-pins a model,
-        and answering from V2 would make that re-pin take effect nowhere —
-        the exact class of silent behavior change this V2 rollout exists to
-        avoid. Returning V1 unconditionally makes that impossible by
-        construction.
+        **Why the V2 side used to go stale (Wave C fix, prod incident
+        2026-08-23) — fixed by Wave 1 dual-write:** `migrate apply` copies
+        V1's role/provider model pins into `v2/models/{registry,aliases}.json`
+        exactly once; before Wave 1 shipped, nothing synced that copy back
+        when the user changed a pin afterwards in Settings -> Providers &
+        Roles, so the V2 copy would silently go stale the moment the user
+        re-pinned a model. `role_models.py`/`provider_models.py` now
+        dual-write every `set_model()` into that same target (Wave 1), so
+        the two sides stay in sync going forward — the resolver still reads
+        both and lets the flag decide which one is authoritative rather than
+        assuming Wave 1 covers every write path.
 
         The V2 read below is kept regardless of which side wins — every call
         where V1 and V2 disagree emits a `model_pin_v2_drift` event (see
         `_log_drift` below) naming which side was actually returned, so a
-        drift-free soak with the flag ON is exactly the evidence #362 needs
-        before its default flips in a future release.
+        stale mirror (a write path Wave 1 missed) still surfaces as telemetry
+        instead of silently drifting.
 
         Deliberately NOT routed through `RoutingPolicy.resolve()` —
         `core.contracts.routing_policy`'s own docstring flags folding model

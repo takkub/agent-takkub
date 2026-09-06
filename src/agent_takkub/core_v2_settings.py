@@ -36,9 +36,8 @@ SCHEMA_VERSION = 1
 # apply` gate's Settings-page escape hatch, `TAKKUB_AUTO_MIGRATE` env always
 # wins over it (see `auto_migrate_boot.auto_migrate_enabled`).
 #
-# "v2_authority" (#362 Phase 10 wave 2) is the odd one out — see
-# `_DEFAULT_FLAGS` below for why it does NOT inherit the default-True most
-# of this tuple gets.
+# "v2_authority" (#362 Phase 10 wave 2) joined the default-True sweep in
+# 2.0.0 (see `_DEFAULT_FLAGS` below) after its own soak proved drift=0.
 FLAG_NAMES: tuple[str, ...] = (
     "router",
     "conversation",
@@ -60,15 +59,15 @@ FLAG_NAMES: tuple[str, ...] = (
 # over them, so an explicit `false` on disk is still an explicit `false`. Only
 # a missing file — or a key that never existed — picks up the new default.
 #
-# `v2_authority` is deliberately excluded from the default-True sweep: it
-# switches every dual-written domain's READER from V1 to V2 (#362 Phase 10
-# wave 2), which is a bigger jump than "the resolver code path is live" —
-# the other five flags default ON precisely because wave 1's dual-write and
-# a soak period already proved drift=0 for THEM; this one still needs its
-# own soak before its default flips, which is a 2.0.0 release decision, not
-# something this module makes unilaterally by inheriting the sweep.
-_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES if name != "v2_authority"}
-_DEFAULT_FLAGS["v2_authority"] = False
+# `v2_authority` (#362, 2.0.0 flip) used to be excluded from this sweep and
+# default False — it switches every dual-written domain's READER from V1 to
+# V2, a bigger jump than "the resolver code path is live", so it needed its
+# own soak beyond the other five's. That soak ran drift-free on dev (320
+# keys, IDENTICAL) and prod (259 keys, IDENTICAL) for several days; 2.0.0 is
+# the release that spends that soak and folds it into the sweep below.
+# `TAKKUB_V2_AUTHORITY=0` (or the Settings toggle) is now the escape hatch
+# back to V1, same shape as the other five's `TAKKUB_V2_*=0`.
+_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES}
 
 # Context Strategy (v2-hardening C, `13_SIMPLE_UX.md`) — Fast/Automatic/Deep
 # UX switch for the Context Gate/Classifier v2 stack. A plain string rather

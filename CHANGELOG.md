@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Changed (เปลี่ยน) — 2.0.0
+
+- **`TAKKUB_V2_AUTHORITY` default flipped ON (#362)** — cockpit อ่าน `v2/` เป็น source of truth แล้ว (role/provider model pins, pane-tools/skill policy, projects registry, role-providers routing, custom roles, remote sessions, local-issues dedup ฯลฯ) หลัง soak drift-free หลายวันทั้ง dev+prod (parity IDENTICAL) V1 ยังอยู่ครบเป็น fallback — ไม่มีอะไรถูกลบ. **Escape hatch**: ตั้ง `TAKKUB_V2_AUTHORITY=0` (หรือปิด toggle ใน Core V2 Settings) กลับไปอ่าน V1 ทันที ไม่ต้องรัน migrate ใดๆ. **Rollback เต็ม**: `TAKKUB_V2_AUTHORITY=0` + `takkub migrate rollback` ลบ `v2/` ทิ้งทั้งหมดได้โดยไม่เสียข้อมูล เพราะทุก V1 writer เขียนไฟล์ V1 ตรงก่อนเสมอ (dual-write เป็นแค่ mirror). `migrate validate`/`doctor --storage-layout` รายงาน authority เป็น `v2` เมื่อ flag เปิดและ migrate แล้ว.
+
 ## [v1.6.34] - 2026-09-06
 
 ### Fixed (แก้)

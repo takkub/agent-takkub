@@ -46,11 +46,10 @@ def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 class TestCoreV2SettingsStore:
     def test_load_on_missing_file_is_all_defaults(self) -> None:
         payload = core_v2_settings.load()
-        # Default-ON since 1.0.84 (epic #309's last rung before 2.0.0) — except
-        # `v2_authority` (#362 Phase 10 wave 2), which stays OFF until its own
-        # soak, see `core_v2_settings._DEFAULT_FLAGS`'s own comment.
+        # Default-ON since 1.0.84 (epic #309's last rung before 2.0.0);
+        # `v2_authority` (#362) joined this sweep in 2.0.0 after its own soak
+        # — see `core_v2_settings._DEFAULT_FLAGS`'s own comment.
         expected = {name: True for name in core_v2_settings.FLAG_NAMES}
-        expected["v2_authority"] = False
         assert payload["flags"] == expected
 
     def test_set_flag_round_trips(self) -> None:
@@ -62,19 +61,15 @@ class TestCoreV2SettingsStore:
         assert core_v2_settings.flag_enabled("brain") is True
 
     def test_every_flag_ships_enabled(self) -> None:
-        """The 1.0.84 flip itself (epic #309's last rung before 2.0.0): a
-        cockpit with no settings file gets all five original Core V2
-        subsystems on. `v2_authority` (#362 Phase 10 wave 2) is deliberately
-        excluded — see `test_load_on_missing_file_is_all_defaults`.
+        """The 1.0.84 flip (epic #309's last rung before 2.0.0) plus the
+        2.0.0 flip that folded `v2_authority` (#362) into the same sweep: a
+        cockpit with no settings file gets every Core V2 subsystem on.
 
         Pinned as its own test because every OTHER flag test now sets the
         value it wants explicitly, so nothing else would notice if the
         shipped default silently regressed to off.
         """
         for name in core_v2_settings.FLAG_NAMES:
-            if name == "v2_authority":
-                assert core_v2_settings.flag_enabled(name) is False, name
-                continue
             assert core_v2_settings.flag_enabled(name) is True, name
 
     def test_explicit_false_on_disk_survives_the_new_default(self) -> None:

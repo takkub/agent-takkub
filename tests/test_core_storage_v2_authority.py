@@ -1,8 +1,9 @@
 """`core.storage.v2_authority` (#362 Phase 10 wave 2 — "readers") + the V1
 modules wired to consult it. Every scenario below proves the same three-way
-contract: flag OFF (default) never touches v2 at all; flag ON + a good v2
-mirror answers from v2; flag ON + a missing/corrupt v2 mirror falls back to
-V1 exactly as if the flag were off, never raising."""
+contract: flag OFF (`TAKKUB_V2_AUTHORITY=0`, the escape hatch since the 2.0.0
+default flip) never touches v2 at all; flag ON (default) + a good v2 mirror
+answers from v2; flag ON + a missing/corrupt v2 mirror falls back to V1
+exactly as if the flag were off, never raising."""
 
 from __future__ import annotations
 
@@ -23,14 +24,21 @@ from agent_takkub.core.storage.legacy_reader import read_json
 # ── flag ──────────────────────────────────────────────────────────────────
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_flag_on_by_default(monkeypatch):
+    """Default flipped ON in 2.0.0 (#362) after a drift-free soak."""
     monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
-    assert v2_authority.v2_authority_enabled() is False
+    assert v2_authority.v2_authority_enabled() is True
 
 
 def test_flag_on_when_env_is_1(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
     assert v2_authority.v2_authority_enabled() is True
+
+
+def test_flag_off_when_env_is_0(monkeypatch):
+    """`=0` is the escape hatch back to V1 (2.0.0 default flip)."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
+    assert v2_authority.v2_authority_enabled() is False
 
 
 def test_flag_off_for_any_other_env_value(monkeypatch):
@@ -40,6 +48,10 @@ def test_flag_off_for_any_other_env_value(monkeypatch):
 
 def test_flag_env_wins_over_settings_toggle(monkeypatch):
     from agent_takkub import core_v2_settings
+
+    monkeypatch.setattr(core_v2_settings, "flag_enabled", lambda name: False, raising=False)
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    assert v2_authority.v2_authority_enabled() is True
 
     monkeypatch.setattr(core_v2_settings, "flag_enabled", lambda name: True, raising=False)
     monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
@@ -51,22 +63,22 @@ def test_flag_falls_back_to_settings_toggle_when_env_unset(monkeypatch):
 
     monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
     monkeypatch.setattr(
-        core_v2_settings, "flag_enabled", lambda name: name == "v2_authority", raising=False
+        core_v2_settings, "flag_enabled", lambda name: name != "v2_authority", raising=False
     )
-    assert v2_authority.v2_authority_enabled() is True
+    assert v2_authority.v2_authority_enabled() is False
 
 
-def test_core_v2_settings_defaults_v2_authority_off(monkeypatch, tmp_path):
-    """The other 5 `TAKKUB_V2_*` flags default ON (1.0.84) — this one must
-    NOT inherit that sweep (see `core_v2_settings._DEFAULT_FLAGS`'s own
-    comment for why)."""
+def test_core_v2_settings_defaults_v2_authority_on(monkeypatch, tmp_path):
+    """2.0.0 flip (#362): `v2_authority` now joins the other 5 `TAKKUB_V2_*`
+    flags' default-True sweep (see `core_v2_settings._DEFAULT_FLAGS`'s own
+    comment for the soak evidence that earned it)."""
     from agent_takkub import core_v2_settings
 
     monkeypatch.setattr(core_v2_settings, "path", lambda: tmp_path / "core-v2-settings.json")
     core_v2_settings._reset_cache()
     flags = core_v2_settings.load()["flags"]
-    assert flags["v2_authority"] is False
-    assert flags["router"] is True  # sanity: the sweep itself still applies to the others
+    assert flags["v2_authority"] is True
+    assert flags["router"] is True
 
 
 # ── reader helpers ──────────────────────────────────────────────────────────
@@ -310,7 +322,7 @@ def test_authority_state_v1_when_not_migrated(tmp_path, monkeypatch):
 
 
 def test_authority_state_mixed_when_migrated_but_flag_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")  # explicit escape hatch
     home = _migrated_home(tmp_path)
     (home / "runtime").mkdir()  # a V1 marker so layout_state() reports "mixed"
     assert v2_authority.authority_state(home) == "mixed"
@@ -318,6 +330,15 @@ def test_authority_state_mixed_when_migrated_but_flag_off(tmp_path, monkeypatch)
 
 def test_authority_state_v2_when_migrated_and_flag_on(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "1")
+    home = _migrated_home(tmp_path)
+    (home / "runtime").mkdir()
+    assert v2_authority.authority_state(home) == "v2"
+
+
+def test_authority_state_v2_when_migrated_and_flag_unset(tmp_path, monkeypatch):
+    """2.0.0 default flip: an unset env answers "v2" on a migrated machine,
+    same as an explicit `=1` above — no escape hatch was asked for."""
+    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
     home = _migrated_home(tmp_path)
     (home / "runtime").mkdir()
     assert v2_authority.authority_state(home) == "v2"
@@ -527,7 +548,7 @@ def test_provider_config_routing_project_with_no_v1_file_inherits_global_on_and_
     # its own per-project role-providers.json.
     monkeypatch.setattr(config, "list_project_names", lambda: ["fresh"])
 
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")  # explicit escape hatch
     provider_config.save_providers({"backend": "codex"})
     off = provider_config.load_providers("fresh")
 
@@ -550,7 +571,7 @@ def test_provider_config_routing_genuinely_empty_project_file_on_and_off(monkeyp
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
 
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")  # explicit escape hatch
     provider_config.save_providers({"backend": "codex"})
     provider_config.save_providers({}, project="proj-a")  # writes a genuinely empty file
     off = provider_config.load_providers("proj-a")
@@ -609,7 +630,7 @@ def test_v1_writers_stay_correct_when_flag_off_despite_stale_v2(monkeypatch, tmp
     home = _migrated_home(tmp_path)
     _wire_authority_home(monkeypatch, home)
     monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")  # explicit escape hatch
 
     role_models.set_model("backend", "codex", "gpt-5.6")
     mapping = build_readonly_registries_step(data_home=home).mappings

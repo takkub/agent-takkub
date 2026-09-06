@@ -4,11 +4,13 @@ into ``v2/`` on every V1 write).
 
 Gated by :func:`v2_authority_enabled` (env ``TAKKUB_V2_AUTHORITY``, else the
 Core V2 Settings page's ``v2_authority`` flag — same env-wins-else-Settings
-precedence as ``core.routing.flag.v2_router_enabled``). **Default OFF** —
-unlike the other `TAKKUB_V2_*` flags (default-on since 1.0.84), flipping this
-one's default is a 2.0.0 release decision made after a drift-free soak, not
-something this module decides. While OFF every function below still exists
-and is unit-tested, but no V1 module's loader calls into it.
+precedence as ``core.routing.flag.v2_router_enabled``). **Default ON since
+2.0.0** — same shape as the other five `TAKKUB_V2_*` flags (default-on since
+1.0.84): a drift-free soak (dev + prod, several days, IDENTICAL parity) is
+what earned this one the same default, and `TAKKUB_V2_AUTHORITY=0` (or the
+Settings toggle) is the escape hatch back to V1 rather than the other way
+round. While OFF every function below still exists and is unit-tested, but
+no V1 module's loader calls into it.
 
 **Fail-open contract** (mirrors ``core.storage.dual_write``'s the other way
 round): flag ON + ``v2/`` absent (never migrated) -> ``None``, silent — the
