@@ -71,6 +71,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _prompt_block_reason,
     _safe_session_write,
     _system_marker_role,
+    _timing_or_none,
     _unwrap_notice_item,
 )
 from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
@@ -3635,6 +3636,19 @@ class Orchestrator(
         message_id = self._record_role_message(
             project_ns, to_role=to_role, from_role=from_role, body=body, generation=send_generation
         )
+        # #499: baseline captured right before the write, same as task
+        # delivery's own `_on_settled` (#359) — a target that answers FAST
+        # (a short chat reply, e.g. Lead acking "ลุยเลย" in under a second)
+        # can fully process the message and return to its ready prompt
+        # before the verify chain below ever gets a "not ready" reading, so
+        # `is_at_ready_prompt()` alone at settle time looks identical to
+        # "never delivered". Any PTY output produced AFTER this write proves
+        # the bytes were received regardless of what the pane looks like now.
+        write_baseline = (
+            _timing_or_none(_send_sess.last_output_monotonic())
+            if hasattr(_send_sess, "last_output_monotonic")
+            else None
+        )
         _safe_session_write(
             _send_sess,
             body_payload,
@@ -3665,8 +3679,8 @@ class Orchestrator(
             # pane left its ready prompt, so it took the paste. Until this
             # fires the record stays "sent", which is the honest state: bytes
             # written, receipt unproven.
-            on_settled=lambda p=project_ns, m=message_id, s=_send_sess: self._confirm_role_message(
-                p, m, s
+            on_settled=lambda p=project_ns, m=message_id, s=_send_sess, b=write_baseline: (
+                self._confirm_role_message(p, m, s, write_baseline=b)
             ),
             expires_at=message_expires_at,
         )
@@ -3884,15 +3898,35 @@ class Orchestrator(
             lines,
         )
 
-    def _confirm_role_message(self, project_ns: str, message_id: str, session) -> None:
+    def _confirm_role_message(
+        self, project_ns: str, message_id: str, session, write_baseline: float | None = None
+    ) -> None:
         """Mark a recorded message delivered once its submit chain settles and
-        the pane is demonstrably no longer at its ready prompt."""
+        the pane is demonstrably no longer at its ready prompt.
+
+        #499: a "still at ready prompt" read alone can't tell "never
+        delivered" from "delivered, fully answered, and already back to
+        idle" — a fast reply (a short chat ack, common for `lead`, which is
+        the most continuously-active pane) can round-trip inside the verify
+        chain's own grace window, leaving the pane looking READY at settle
+        time despite having demonstrably taken and processed the message.
+        Same fallback `_on_settled` already uses for task delivery (#359):
+        any PTY output produced after `write_baseline` proves the bytes were
+        received regardless of the pane's current state.
+        """
         if not message_id:
             return
         try:
             accepted = not session.is_at_ready_prompt()
         except Exception:
             accepted = False
+        if not accepted and write_baseline is not None:
+            try:
+                latest = _timing_or_none(session.last_output_monotonic())
+                if latest is not None:
+                    accepted = latest > write_baseline
+            except Exception:
+                pass
         if not accepted:
             return
         try:
