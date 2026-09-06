@@ -2058,9 +2058,21 @@ class Orchestrator(
                 worktree = info.as_dict()
                 task = _append_worktree_hint(task, info.branch, cfg.post_create, info.port)
             else:
+                sibling_shared = 0
+                if run_cwd:
+                    sibling_shared = sum(
+                        1
+                        for r, pane in self._project_panes(project_ns).items()
+                        if r != role_name and getattr(pane, "_session_cwd", None) == run_cwd
+                    )
+                risk_note = (
+                    f" · ⚠️ อีก {sibling_shared} pane กำลังแชร์ tree นี้อยู่ (เสี่ยงชนกัน)"
+                    if sibling_shared
+                    else ""
+                )
                 self._notify_lead(
                     project_ns,
-                    f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → subagent ใช้ shared cwd · {warning}",
+                    f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → subagent ใช้ shared cwd · {warning}{risk_note}",
                     from_role=role_name,
                     note="",
                     kind="worktree-fallback-subagent",
@@ -3081,9 +3093,26 @@ class Orchestrator(
 
         def _fallback(reason: str) -> tuple[bool, str]:
             _log_event("worktree_fallback", role=role_name, project=project_ns, reason=reason[:200])
+            # #494: once this pane degrades to the shared cwd, the panes it can
+            # actually collide with are the ones ALREADY sitting in that same
+            # cwd (typically sibling shards of the same base role) — surface
+            # that count so the Lead knows the real collision risk, not just
+            # that isolation failed.
+            sibling_shared = 0
+            if base_cwd:
+                sibling_shared = sum(
+                    1
+                    for r, pane in self._project_panes(project_ns).items()
+                    if r != role_name and getattr(pane, "_session_cwd", None) == base_cwd
+                )
+            risk_note = (
+                f" · ⚠️ อีก {sibling_shared} pane กำลังแชร์ tree นี้อยู่ (เสี่ยงชนกัน)"
+                if sibling_shared
+                else ""
+            )
             self._notify_lead(
                 project_ns,
-                f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → รันแบบ shared cwd แทน · {reason}",
+                f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → รันแบบ shared cwd แทน · {reason}{risk_note}",
                 from_role=role_name,
                 note="",
                 kind="worktree-fallback",
@@ -3281,12 +3310,16 @@ class Orchestrator(
                 if precomputed is not None:
                     dirty = precomputed["dirty"]
                     uncommitted = precomputed["uncommitted"]
+                    crlf_phantom = precomputed.get("crlf_phantom", False)
                     merge_conflicts = precomputed["merge_conflicts"]
                     conflict_files = precomputed.get("conflict_files")
                     diffstat_text = precomputed["diffstat"]
                 else:
-                    dirty = mgr.is_dirty(info)
-                    uncommitted = mgr.uncommitted_count(info) if dirty else 0
+                    # #496: real_dirty/real_uncommitted_count filter out
+                    # CRLF-only phantom "M" entries.
+                    dirty = mgr.real_dirty(info)
+                    uncommitted = mgr.real_uncommitted_count(info) if dirty else 0
+                    crlf_phantom = mgr.crlf_phantom(info)
                     conflict_files = mgr.merge_conflict_files(info.git_root, info.branch)
                     merge_conflicts = (
                         bool(conflict_files)
@@ -3303,6 +3336,7 @@ class Orchestrator(
                     uncommitted=uncommitted,
                     merge_conflicts=merge_conflicts,
                     conflict_files=conflict_files,
+                    crlf_phantom=crlf_phantom,
                 )
                 _log_event(
                     "worktree_merge_proposed",
@@ -3318,7 +3352,7 @@ class Orchestrator(
                     project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
                 )
                 return
-            dirty = precomputed["dirty"] if precomputed is not None else mgr.is_dirty(info)
+            dirty = precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
             _log_event(
                 "worktree_no_commit_kept",
                 role=from_role,
@@ -4983,10 +5017,15 @@ class Orchestrator(
                 commits = int(gf.get("commits", 0))
                 dirty = bool(gf.get("dirty", False))
                 uncommitted = int(gf.get("uncommitted", 0))
+                crlf_phantom = bool(gf.get("crlf_phantom", False))
             else:
+                # #496: real_dirty/real_uncommitted_count filter out
+                # CRLF-only phantom "M" entries — same protection as the
+                # precomputed (`collect_done_git_facts`) path above.
                 commits = mgr.commit_count(info)
-                dirty = mgr.is_dirty(info)
-                uncommitted = mgr.uncommitted_count(info) if dirty else 0
+                dirty = mgr.real_dirty(info)
+                uncommitted = mgr.real_uncommitted_count(info) if dirty else 0
+                crlf_phantom = mgr.crlf_phantom(info)
             if commits > 0:
                 merge_conflicts = (
                     gf.get("merge_conflicts")
@@ -5016,6 +5055,7 @@ class Orchestrator(
                 branch=info.branch,
                 commits_ahead=commits,
                 uncommitted=uncommitted,
+                crlf_phantom=crlf_phantom,
                 merge_conflicts=merge_conflicts,
                 merge_note=merge_note,
                 pushed=pushed,
@@ -5029,6 +5069,7 @@ class Orchestrator(
                 "commits": commits,
                 "dirty": dirty,
                 "uncommitted": uncommitted,
+                "crlf_phantom": crlf_phantom,
                 "merge_conflicts": merge_conflicts,
                 "diffstat": diffstat,
                 "pushed": pushed,
@@ -10900,8 +10941,8 @@ class Orchestrator(
 
                 info = WorktreeInfo.from_dict(ps.worktree)
                 mgr = WorktreeManager()
-                if mgr.is_dirty(info):
-                    n = mgr.uncommitted_count(info)
+                if mgr.real_dirty(info):  # #496: don't scare with a CRLF-only phantom
+                    n = mgr.real_uncommitted_count(info)
                     lines.append(
                         f"⚠ worktree ({info.branch}) มี {n} ไฟล์ที่ยังไม่ commit — จะหายถ้าปิดตอนนี้"
                     )

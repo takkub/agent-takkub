@@ -112,8 +112,8 @@ class TestConfirmManualPaneClose:
 
         box = _mock_box(QMessageBox.StandardButton.Ok)
         fake_mgr = MagicMock()
-        fake_mgr.is_dirty.return_value = True
-        fake_mgr.uncommitted_count.return_value = 3
+        fake_mgr.real_dirty.return_value = True
+        fake_mgr.real_uncommitted_count.return_value = 3
         fake_mgr.commit_count.return_value = 0
 
         with (
@@ -139,7 +139,7 @@ class TestConfirmManualPaneClose:
 
         box = _mock_box(QMessageBox.StandardButton.Ok)
         fake_mgr = MagicMock()
-        fake_mgr.is_dirty.return_value = False
+        fake_mgr.real_dirty.return_value = False
         fake_mgr.commit_count.return_value = 0
 
         with (

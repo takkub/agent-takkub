@@ -35,6 +35,13 @@ def _make_runner(git_root, porcelain, ahead=None, dirty=None):
             idx = args.index("-C")
             path = args[idx + 1]
             return GitResult(0, "M x\n" if path in dirty else "", "")
+        if "diff" in args and "HEAD" in args and "--quiet" in args:
+            # #496: WorktreeManager's phantom-aware dirty check consults a
+            # real content diff before trusting a tracked "M" porcelain
+            # line — scripted dirty paths need a genuine (nonzero) diff.
+            idx = args.index("-C")
+            path = args[idx + 1]
+            return GitResult(1, "", "") if path in dirty else GitResult(0, "", "")
         return GitResult(0, "", "")
 
     return runner
@@ -92,6 +99,33 @@ class TestOrphanDetection:
         assert info["ahead"] == 3
         assert info["dirty"] is True
 
+    def test_registered_worktree_ignores_crlf_only_phantom_dirt(self, tmp_path):
+        """#496: `status --porcelain` flags the checkout "M" but the real
+        content diff against HEAD is empty (Windows CRLF metadata only) —
+        `takkub disk`/`prune` must not report it as dirty."""
+        wt = tmp_path / "worktrees" / "proj" / "backend-5"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /repo/.git/worktrees/backend-5\n")
+        porcelain = _porcelain([(str(wt), "abc123", "wt/backend-5-1")])
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return GitResult(0, "/repo\n", "")
+            if "worktree" in args and "list" in args and "--porcelain" in args:
+                return GitResult(0, porcelain, "")
+            if "rev-list" in args and "--count" in args:
+                return GitResult(0, "0\n", "")
+            if "status" in args and "--porcelain" in args:
+                return GitResult(0, "M x\n", "")
+            if "diff" in args and "HEAD" in args and "--quiet" in args:
+                return GitResult(0, "", "")  # no real diff — phantom
+            return GitResult(0, "", "")
+
+        mgr = WorktreeManager(runner=runner)
+        info = disk_usage.classify_worktree(wt, mgr)
+        assert info["registered"] is True
+        assert info["dirty"] is False
+
     def test_orphan_not_in_worktree_list_still_reports_git_state(self, tmp_path):
         """#132: `git worktree list` doesn't know this path, but the checkout
         itself still responds to git directly — dirty/branch/ahead must be
@@ -113,6 +147,8 @@ class TestOrphanDetection:
                 return GitResult(0, "2\n", "")
             if "status" in args and "--porcelain" in args:
                 return GitResult(0, "M x\n", "")
+            if "diff" in args and "HEAD" in args and "--quiet" in args:
+                return GitResult(1, "", "")  # #496: a genuine (non-phantom) diff
             return GitResult(0, "", "")
 
         mgr = WorktreeManager(runner=runner)

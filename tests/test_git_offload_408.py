@@ -201,6 +201,7 @@ def test_compute_digest_facts_uses_worktree_git_facts_without_git(monkeypatch) -
         "commits": 3,
         "dirty": False,
         "uncommitted": 0,
+        "crlf_phantom": False,
         "merge_conflicts": False,
         "diffstat": " a.py | 2 ++",
         "pushed": True,

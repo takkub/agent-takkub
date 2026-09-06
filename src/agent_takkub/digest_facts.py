@@ -43,6 +43,11 @@ class DigestFacts:
     branch: str | None = None
     commits_ahead: int | None = None  # None = not computed
     uncommitted: int | None = None  # None = couldn't check
+    # #496: `uncommitted` is already the phantom-filtered count (see
+    # WorktreeManager.real_uncommitted_count) — this is purely an
+    # informational flag so a "0 ไฟล์ค้าง commit" that only reads clean
+    # because of a CRLF-only phantom says so, instead of looking silent.
+    crlf_phantom: bool = False
     # True = `branch` is currently present as `origin/<branch>` (#462 — a
     # worktree-isolated pane may push its own `wt/*` branch, #438). Only ever
     # meaningful for a worktree pane; a shared-tree pane commits directly on
@@ -170,9 +175,12 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     if facts.commits_ahead is not None:
         bits.append(f"{facts.commits_ahead} commit ahead")
     if facts.uncommitted is not None:
-        bits.append(
-            f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit" if facts.uncommitted else "0 ไฟล์ค้าง commit"
-        )
+        if facts.uncommitted:
+            bits.append(f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit")
+        elif facts.crlf_phantom:
+            bits.append("0 ไฟล์ค้าง commit (มี CRLF phantom เฉยๆ)")
+        else:
+            bits.append("0 ไฟล์ค้าง commit")
     if facts.pushed and facts.branch:
         bits.append(f"pushed:origin/{facts.branch}")
     bits.append(_merge_bit(facts))
