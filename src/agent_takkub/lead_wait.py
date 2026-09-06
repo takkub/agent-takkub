@@ -62,6 +62,19 @@ _WAIT_STALE_GRACE_S = 120.0
 # spawned" verdict once this grace window has elapsed since the wait started.
 _WAIT_NEVER_SPAWNED_GRACE_S = 15.0
 
+# #497: `takkub assign` (mode=pane) acks "task queued, spawning async"
+# BEFORE the actual dispatch runs — it's staggered off a QTimer in
+# cli_server, not run inline. A `takkub wait` issued immediately after (no
+# --role, auto-detecting "every active role") used to find nothing at all
+# yet — no pane, no subagent registration — and fail with "nothing to wait
+# on" seconds before the pane would have registered on its own. How long a
+# `note_assign_queued` stamp keeps a role eligible for that auto-detect
+# fallback in `begin_wait`; deliberately wider than
+# `_WAIT_NEVER_SPAWNED_GRACE_S` above (which only governs an already-running
+# registration) since it also has to absorb `--isolation worktree`'s extra
+# `git worktree add` latency before the pane entry exists at all.
+_WAIT_QUEUED_ASSIGN_GRACE_S = 30.0
+
 # #249: pane states that can never produce a NEW report without a fresh
 # spawn (which would flip the pane back to "active"/"working" on the very
 # next poll tick). Before this fix `_resolve_role_wait_status` only special-
@@ -95,6 +108,15 @@ class LeadWaitMixin:
     this mixin cluster depends on — this class only defines methods.
     """
 
+    def note_assign_queued(self, project_ns: str, role: str) -> None:
+        """#497: called synchronously by `cli_server` the moment a plain
+        (pane-mode) `assign` is accepted — before `Orchestrator.assign()`
+        itself ever runs (staggered off a QTimer, see
+        `cli_server._fire_staggered`). Lets `begin_wait`'s auto-detect path
+        (see below) see a just-queued role that has no pane, no
+        `_subagent_assignments` entry, and no `list_status` presence yet."""
+        self._recent_assign_queue[(project_ns, role)] = time.time()
+
     def begin_wait(self, project_ns: str, roles: list[str] | None, timeout_s: float) -> dict:
         """Register (or attach to) a wait for *roles* in *project_ns*.
 
@@ -114,7 +136,25 @@ class LeadWaitMixin:
                 for (pending_project, role) in getattr(self, "_subagent_assignments", {})
                 if pending_project == project_ns
             }
-            clean_roles = sorted({r for r in known if r != LEAD.name} | native_pending)
+            # #497: a role whose `assign` was JUST accepted (see
+            # `note_assign_queued`) but whose staggered dispatch hasn't run
+            # yet — no pane, no subagent entry, invisible to `list_status`.
+            # Without this, `takkub assign` immediately followed by
+            # `takkub wait` (Lead's standard sequence, no explicit --role)
+            # found nothing to auto-detect and failed outright, seconds
+            # before the pane would have registered on its own.
+            now_ts = time.time()
+            queued_pending = {
+                role
+                for (pending_project, role), queued_ts in getattr(
+                    self, "_recent_assign_queue", {}
+                ).items()
+                if pending_project == project_ns
+                and now_ts - queued_ts < _WAIT_QUEUED_ASSIGN_GRACE_S
+            }
+            clean_roles = sorted(
+                {r for r in known if r != LEAD.name} | native_pending | queued_pending
+            )
             if not clean_roles:
                 return {
                     "ok": False,

@@ -1710,6 +1710,15 @@ class Orchestrator(
         # attacher's poll echoes the real terminal outcome instead — see
         # `poll_wait`'s docstring for the cancel/timeout-supersede exception.
         self._wait_resolved_echo: dict[str, dict] = {}
+        # #497: `cli_server` acks a plain (pane-mode) `assign` before the
+        # actual dispatch runs (staggered off a QTimer) — a `takkub wait`
+        # issued in the same breath (Lead's standard sequence) used to see
+        # no trace of the role anywhere yet (`list_status` empty, no pane,
+        # not a subagent) and fail outright with "nothing to wait on".
+        # `note_assign_queued` stamps this the moment the assign is
+        # accepted, synchronously, so `begin_wait`'s auto-detect can bridge
+        # the gap until the pane actually registers. See `LeadWaitMixin`.
+        self._recent_assign_queue: dict[tuple[str, str], float] = {}
         self._hot_md_timer = QTimer(self)
         self._hot_md_timer.setInterval(_HOT_MD_INTERVAL_MS)
         self._hot_md_timer.timeout.connect(self._write_hot_md)
@@ -11082,16 +11091,35 @@ class Orchestrator(
     # re-stamps normally.
     _LEAD_INJECT_GRACE_S = 5.0
 
-    def _is_post_inject_terminal_reply(self, project_ns: str, session, data: bytes) -> bool:
+    def _is_post_inject_terminal_reply(self, project_ns: str, pane, data: bytes) -> bool:
+        """(#498) *pane* — not just its `.session` — so a reply-shaped chunk
+        can also be recognised via `pane._last_output_ts` (see below), not
+        only via how recently WE wrote into the pty."""
         if data[:1] != b"\x1b" or len(data) > self._TERMINAL_AUTO_REPLY_MAX_LEN:
             return False
         if b"\r" in data or b"\n" in data:
             return False
-        last_write = float(getattr(session, "last_write_ts", 0.0) or 0.0)
         last_user = self._lead_last_user_write_ts.get(project_ns, 0.0)
-        if last_write <= last_user:
-            return False  # nothing engine-written since the owner last typed
-        return (time.time() - last_write) <= self._LEAD_INJECT_GRACE_S
+        last_write = float(getattr(pane.session, "last_write_ts", 0.0) or 0.0)
+        if last_write > last_user and (time.time() - last_write) <= self._LEAD_INJECT_GRACE_S:
+            return True
+        # #498: the write-grace check above only covers the first few
+        # seconds right after WE paste something (a digest/task/CC) — it
+        # misses a redraw the target CLI triggers later on its OWN
+        # initiative (e.g. finishing a long reply to a `takkub send`-
+        # delivered remote message, well past `_LEAD_INJECT_GRACE_S` after
+        # the paste itself). Real incident (#498): a remote-delivered
+        # message's own delayed redraw kept leaking reply-shaped bytes that
+        # stamped `_lead_last_user_input_ts`, repeatedly cutting `takkub
+        # wait` short with nothing actually typed.
+        # `pane._last_output_ts` (`AgentPane._mark_output_ts`, wall-clock)
+        # is bumped on every raw byte the pty emits regardless of who
+        # triggered it, so a reply-shaped chunk arriving shortly after ANY
+        # such burst is still terminal chrome, not a keystroke — same
+        # tolerance as above (a stray arrow-key press loses nothing but a
+        # wait-interrupt; the very next keystroke re-stamps normally).
+        last_output = float(getattr(pane, "_last_output_ts", 0.0) or 0.0)
+        return last_output > last_user and (time.time() - last_output) <= self._LEAD_INJECT_GRACE_S
 
     @classmethod
     def _is_terminal_auto_reply_chunk(cls, data: bytes) -> bool:
@@ -11138,7 +11166,7 @@ class Orchestrator(
         if pane.role.name == LEAD.name and not self._is_terminal_auto_reply_chunk(data):
             project_ns = self._project_ns_for_pane(pane)
             if project_ns is not None and self._is_post_inject_terminal_reply(
-                project_ns, pane.session, data
+                project_ns, pane, data
             ):
                 _log_event(
                     "lead_user_input_suppressed_post_inject",
