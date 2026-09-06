@@ -540,6 +540,66 @@ def classify_blocked(note: str) -> tuple[bool, str]:
     return False, ""
 
 
+# #495 sub-item: a BLOCKED report classified too broadly. Field case — a qa
+# pane couldn't find a member because it looked in the wrong tenant, reported
+# it as BLOCKED, and the generic #296 template rendered "ขาด credential รอ
+# เจ้าของ ห้าม role อื่นแก้" even though nothing was actually missing: the task
+# SPEC itself pointed at the wrong target. That is fixable by the Lead
+# correcting the spec and re-assigning the SAME role — a completely different
+# next action from "wait for a human to hand over a secret". Every caller
+# that needs the distinction must check this BEFORE `classify_blocked` so a
+# mismatch report never falls into the generic blocked bucket.
+_PRECONDITION_MISMATCH_RULES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"(tenant|environment|env|project|org(anization)?|branch|target|"
+            r"endpoint|url|path|store|database|db|instance|account)"
+            r"(?:\s*ที่\s*(ระบุ|ให้)(มา)?)?\s*ผิด|"
+            r"ผิด\s*(tenant|environment|env|project|org(anization)?|branch|"
+            r"target|endpoint|url|path|store|database|db|instance|account)",
+            re.IGNORECASE,
+        ),
+        "task spec ระบุ tenant/environment/target ผิด",
+    ),
+    (
+        re.compile(r"(ชี้เป้า|ระบุเป้าหมาย|task\s*spec|spec)\s*[^\n]{0,15}ผิด", re.IGNORECASE),
+        "task spec ชี้เป้าหมายผิด",
+    ),
+    (
+        re.compile(
+            r"wrong\s+(tenant|environment|env|project|org(anization)?|branch|"
+            r"target|endpoint|url|path|store|database|instance|account)",
+            re.IGNORECASE,
+        ),
+        "task spec pointed at the wrong target",
+    ),
+    (
+        re.compile(
+            r"(spec|task)\s+(points?|pointed|targets?|targeted)\s+(to\s+)?the\s+wrong",
+            re.IGNORECASE,
+        ),
+        "task spec pointed at the wrong target",
+    ),
+]
+
+
+def classify_precondition_mismatch(note: str) -> tuple[bool, str]:
+    """True when *note* is a BLOCKED-shaped report whose real cause is the
+    task SPEC pointing at the wrong target (tenant/environment/branch/...),
+    not anything actually missing from the world.
+
+    Returns ``(is_mismatch, what_was_wrong)``. See the module comment above
+    ``_PRECONDITION_MISMATCH_RULES`` for the field case that produced this —
+    callers must check this before `classify_blocked` (#495)."""
+    s = (note or "").strip()
+    if not s:
+        return False, ""
+    for pattern, what in _PRECONDITION_MISMATCH_RULES:
+        if pattern.search(s):
+            return True, what
+    return False, ""
+
+
 def classify_failure(note: str) -> tuple[str | None, str]:
     """Map a verify-fail note to the role a fix loop should target (Tier 2c).
 

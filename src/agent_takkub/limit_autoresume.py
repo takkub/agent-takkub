@@ -146,6 +146,14 @@ def _write_progress_marker(
         "cwd": _pane_cwd(pane),
         "output_tail": _pane_output_tail(pane),
         "park_rounds": ps.limit_park_rounds,
+        # #495: the wake QTimer + PaneState.rate_limited_until only live in
+        # memory — a cockpit restart drops both. Persisting the reset epoch
+        # (and which provider tripped it) here lets `_restore_parked_pane`
+        # re-arm the same wake after a restart instead of the park silently
+        # vanishing. Only meaningful while status == "parked"; left at 0.0
+        # for "gave_up"/"resumed" writes since nothing should resume those.
+        "reset_at": ps.rate_limited_until if status == "parked" else 0.0,
+        "quota_provider": ps.quota_provider or "",
     }
     path = _progress_marker_path(project, role)
     try:
@@ -153,6 +161,19 @@ def _write_progress_marker(
     except OSError:
         return None
     return path
+
+
+def _read_progress_marker(project: str, role: str) -> dict | None:
+    """Best-effort read-back of the marker `_write_progress_marker` writes.
+
+    None on anything unexpected — no marker written yet, corrupt JSON, or a
+    permissions error — never raises."""
+    path = _progress_marker_path(project, role)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 class AutoResumeMixin:
@@ -424,3 +445,96 @@ class AutoResumeMixin:
         self._notify_lead(
             project, lead_msg, from_role=role, note="limit_resumed", kind="limit-resumed"
         )
+
+    # ── restore across cockpit restart (#495) ───────────────────────────
+    def _restore_parked_pane(self, project: str, role: str, last_task: str) -> dict | None:
+        """Called by `restore_teammates()` (orchestrator.py) right before it
+        would otherwise immediately re-send *last_task* to a freshly
+        respawned pane.
+
+        #495: `_park_pane_for_limit`'s wake `QTimer` and
+        `PaneState.limit_parked`/`rate_limited_until` live only in memory —
+        a cockpit restart drops both silently even though the on-disk
+        progress marker still says "parked" and still knows the original
+        reset time. This reads that marker back and, if the parked window
+        hasn't actually elapsed yet, re-arms the same wake the pane would
+        have gotten had cockpit never restarted — instead of either
+        blasting the task at a pane that is still rate-limited, or the park
+        just vanishing with no trace.
+
+        Returns None when there is nothing to do (no marker for this pane,
+        the marker isn't a "parked" one, or its task text no longer matches
+        *last_task* — e.g. the role got reassigned to something else before
+        crashing) — caller proceeds exactly as before. Otherwise returns
+        ``{"skip_resend": bool, "notice": str}``: ``skip_resend`` True means
+        the caller must NOT `_send_when_ready` right now — a QTimer has been
+        armed to do that later; False means the window already reset (or
+        can't be trusted) so the caller should resend immediately as usual,
+        using ``notice`` in place of its own generic restore text."""
+        marker = _read_progress_marker(project, role)
+        if not marker or marker.get("status") != "parked":
+            return None
+        marker_task = marker.get("task")
+        if marker_task and marker_task != last_task:
+            return None  # stale marker from an earlier, unrelated task
+
+        key = f"{project}::{role}"
+        ps = self._ps(key)
+        ps.last_assigned_task = last_task
+        ps.quota_provider = marker.get("quota_provider") or ps.quota_provider
+        try:
+            ps.limit_park_rounds = max(ps.limit_park_rounds, int(marker.get("park_rounds") or 0))
+        except (TypeError, ValueError):
+            pass
+        reset_at = float(marker.get("reset_at") or 0.0)
+        now = time.time()
+
+        if not auto_resume.is_enabled() or reset_at <= 0:
+            _log_event(
+                "pane_limit_park_restore_dropped",
+                role=role,
+                project=project,
+                reason="disabled" if not auto_resume.is_enabled() else "no_reset_at",
+            )
+            return {
+                "skip_resend": False,
+                "notice": (
+                    f"⚠️ [cockpit restart] {role} pane เจอ park ค้างจาก session ก่อนหน้า "
+                    "(auto-resume ปิดอยู่ตอนนี้ หรือ marker เก่าไม่มีเวลา reset บันทึกไว้) "
+                    "— ส่ง task ต่อทันทีแทนที่จะรอ ถ้ายังติด usage limit จริงให้ "
+                    "park/มอบงานใหม่เอง"
+                ),
+            }
+
+        if now >= reset_at + auto_resume.WAKE_BUFFER_S:
+            # Quota already reset while cockpit was down — nothing to wait
+            # for, just resend now (normal flow) with an explanatory note.
+            _log_event("pane_limit_park_restored_elapsed", role=role, project=project)
+            return {
+                "skip_resend": False,
+                "notice": (
+                    f"🌙 [auto-resume] {role} pane เจอ park ค้างจาก session ก่อนหน้า — "
+                    "quota reset ไปแล้วระหว่าง cockpit ปิดอยู่ ส่ง task ต่อทันที"
+                ),
+            }
+
+        ps.rate_limited_until = reset_at
+        ps.limit_parked = True
+        delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - now) * 1000))
+        QTimer.singleShot(delay_ms, lambda: self._wake_parked_pane(project, role))
+        _log_event(
+            "pane_limit_park_restored",
+            role=role,
+            project=project,
+            reset_at=reset_at,
+            round=ps.limit_park_rounds,
+        )
+        return {
+            "skip_resend": True,
+            "notice": (
+                f"🌙 [auto-resume] {role} pane ยัง park ค้างจาก session ก่อน cockpit "
+                f"restart — quota ยังไม่ reset (รอบ {ps.limit_park_rounds}/"
+                f"{auto_resume.MAX_PARK_ROUNDS}) ปลุกทำงานต่ออัตโนมัติตามเวลาเดิม "
+                "ไม่ต้องสั่งเอง"
+            ),
+        }

@@ -1594,6 +1594,27 @@ class TestMergeIsolated:
         assert not r.ran("worktree", "remove")  # but not the deletion
 
 
+class TestAllCommitsLandedViaCherryPick:
+    """#495 sub-item — the pure `git cherry`-based patch-id check on its
+    own, isolated from the rest of `clean_isolated`."""
+
+    def test_all_minus_lines_is_true(self):
+        r = FakeRunner([(["cherry", "HEAD"], _ok("-aaa one\n-bbb two\n"))])
+        assert WorktreeManager(r)._all_commits_landed_via_cherry_pick("/repo", "wt/x-1") is True
+
+    def test_any_plus_line_is_false(self):
+        r = FakeRunner([(["cherry", "HEAD"], _ok("-aaa landed\n+bbb not landed\n"))])
+        assert WorktreeManager(r)._all_commits_landed_via_cherry_pick("/repo", "wt/x-1") is False
+
+    def test_empty_output_is_false(self):
+        r = FakeRunner([(["cherry", "HEAD"], _ok(""))])
+        assert WorktreeManager(r)._all_commits_landed_via_cherry_pick("/repo", "wt/x-1") is False
+
+    def test_git_error_is_false(self):
+        r = FakeRunner([(["cherry", "HEAD"], _fail("fatal: no such commit", 128))])
+        assert WorktreeManager(r)._all_commits_landed_via_cherry_pick("/repo", "wt/x-1") is False
+
+
 class TestCleanIsolated:
     def test_default_keeps_dirty_and_unmerged(self, monkeypatch):
         from agent_takkub import worktree_manager as wm
@@ -1610,6 +1631,66 @@ class TestCleanIsolated:
         lines = WorktreeManager(r).clean_isolated("/repo")
         assert all(line.startswith("KEEP") for line in lines)
         assert not r.ran("worktree", "remove")
+
+    def test_cherry_picked_ahead_commit_is_removed_not_kept(self, monkeypatch):
+        """#495 sub-item: `rev-list --count` reports ahead=1 by SHA, but the
+        commit's patch already landed on HEAD via cherry-pick (a brand new
+        SHA, identical diff — `git cherry` reports it with a leading `-`).
+        Must be treated as effectively merged, not kept forever."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("1\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["cherry", "HEAD"], _ok("-deadbeef some commit\n")),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert all("cherry-pick" in line for line in lines), lines
+        assert r.ran("worktree", "remove")
+        assert r.ran("branch", "-D")
+
+    def test_ahead_with_unmatched_commit_still_kept(self, monkeypatch):
+        """Counterpart: at least one commit's patch has NOT landed on HEAD
+        (`git cherry` reports it with a leading `+`) — must still be kept.
+        Cherry-pick equivalence is a narrow check, not a blanket 'ignore
+        ahead' escape hatch."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("2\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["cherry", "HEAD"], _ok("-deadbeef landed\n+feedface not landed\n")),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("KEEP") for line in lines), lines
+        assert all("commit ยังไม่ merge" in line for line in lines), lines
+
+    def test_cherry_check_error_fails_closed_to_keep(self, monkeypatch):
+        """`git cherry` erroring (older git, unborn branch, ...) must fail
+        closed to the pre-existing keep behaviour, never silently drop a
+        worktree whose merge status couldn't actually be verified."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("1\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["cherry", "HEAD"], _fail("fatal: no such commit", 128)),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("KEEP") for line in lines), lines
 
     def test_default_removes_true_leftovers(self, monkeypatch):
         from agent_takkub import worktree_manager as wm
