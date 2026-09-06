@@ -350,6 +350,13 @@ _EVIDENCE_MAX_FILES = 10
 # warning line (everyone else silently gets nothing when they have no shots).
 _EVIDENCE_WARN_ROLES = ("qa", "critic", "designer", "reviewer")
 
+# Issue #500: a pane that npm-installed a tool (e.g. playwright) inside the
+# exports scratch dir left node_modules images (icons, fixtures) in the tree
+# — the recursive scan swept them in as "evidence" alongside real
+# screenshots. Any path with one of these as a directory component is never
+# a real capture; skip it outright rather than filter by name/extension.
+_EVIDENCE_EXCLUDED_DIR_NAMES = frozenset({"node_modules", "vendor"})
+
 # Issue #159: a screenshot capture can fail silently (blank/loading page,
 # race with render, browser crash mid-shot) and still land as a valid file
 # that passes the extension/mtime/settle filters above — the role reports
@@ -4700,7 +4707,10 @@ class Orchestrator(
     ) -> list[tuple[float, pathlib.Path, int]]:
         """Recursively collect `(mtime, path, size)` for settled evidence
         images under `directory` that landed after `assign_ts`. Empty list on
-        a missing/unreadable dir — never raises (issue #5)."""
+        a missing/unreadable dir — never raises (issue #5). Skips anything
+        under a `node_modules`/`vendor` directory component (issue #500) —
+        a pane that npm-installs a tool into the scratch dir leaves package
+        icons/fixtures behind that are never real screenshots."""
         try:
             candidates = list(directory.rglob("*")) if directory.is_dir() else []
         except OSError:
@@ -4708,6 +4718,8 @@ class Orchestrator(
 
         found: list[tuple[float, pathlib.Path, int]] = []
         for path in candidates:
+            if _EVIDENCE_EXCLUDED_DIR_NAMES.intersection(path.parent.parts):
+                continue
             try:
                 if not path.is_file() or path.suffix.lower() not in _EVIDENCE_EXTENSIONS:
                     continue

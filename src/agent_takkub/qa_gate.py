@@ -160,6 +160,12 @@ class GateReport:
     v2_flags: bool = False
     targeted: list[str] | None = None
     report_path: Path | None = None
+    # #501: set when the worktree root at report-write time no longer matches
+    # the one resolved when the gate started (the checkout was removed/moved
+    # mid-run — e.g. a concurrent `worktree remove`/merge cleanup) — a HEAD
+    # stamped from a `wroot` that has since drifted is exactly how a report
+    # can cite a commit that turns out unreachable by the time Lead reads it.
+    worktree_drift_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -1737,7 +1743,7 @@ def run_gate(
 
     def finish() -> GateReport:
         if write_report:
-            report.report_path = _maybe_write_report(wroot, report)
+            report.report_path = _maybe_write_report(wroot, report, cwd=cwd)
         return report
 
     log_dir = None
@@ -1911,6 +1917,12 @@ def render_report_md(report: GateReport, head: str) -> str:
     if report.v2_flags:
         tag += "  ·  **V2 flags ON:** " + ", ".join(V2_FLAG_ENV_VARS)
     lines.append(tag)
+    if report.worktree_drift_note:
+        # #501: audit trail for a HEAD that can no longer be trusted at face
+        # value — the checkout the gate ran against moved/vanished between
+        # start and finish, so this commit may not be reachable by the time
+        # anyone reads this report.
+        lines.append(f"⚠️ **worktree drift:** {report.worktree_drift_note}")
     lines.append("")
     result_heading = "PASS" if report.ok else "FAIL"
     if report.env_gap:
@@ -1939,19 +1951,39 @@ def _runtime_dir() -> Path:
     return RUNTIME_DIR
 
 
-def _maybe_write_report(wroot: Path, report: GateReport) -> Path | None:
+def _maybe_write_report(wroot: Path, report: GateReport, *, cwd: Path | None = None) -> Path | None:
     """Full-gate report → `<DATA_HOME>/runtime/qa-reports/`, NOT `docs/qa/`.
 
     It used to land in the repo, so every full gate left a 1KB
     `<timestamp>-qa-gate.md` behind that got committed with whatever came
     next — ~60 of them in two weeks, none ever read back. A per-run result is
     runtime state like events.log; `docs/qa/` is for reports a person wrote.
+
+    #501: `wroot` was resolved once when the gate *started* — a long full
+    run (pytest + ruff + lint-imports) leaves a window where the checkout it
+    ran against can be removed or replaced (a concurrent worktree
+    merge/cleanup) before the report is written. Re-resolving
+    `worktree_root(cwd)` here stamps HEAD from the checkout as it stands
+    *now* (report-write time, i.e. "done", not spawn) rather than trusting
+    the start-of-run value blindly, and flags the report when the two
+    disagree so a reader knows the cited commit may already be unreachable.
     """
     if report.targeted:
         return None
+    current_wroot = wroot
+    if cwd is not None:
+        try:
+            current_wroot = worktree_root(cwd)
+        except Exception:
+            current_wroot = wroot
+        if current_wroot != wroot:
+            report.worktree_drift_note = (
+                f"gate started in `{wroot}`, checkout now resolves to `{current_wroot}` — "
+                "HEAD below reflects the latter; treat the run's results with that in mind"
+            )
     docs_dir = _runtime_dir() / "qa-reports"
     docs_dir.mkdir(parents=True, exist_ok=True)
     suffix = "-v2flags" if report.v2_flags else ""
     path = docs_dir / f"{time.strftime('%Y-%m-%d-%H%M%S')}-qa-gate{suffix}.md"
-    path.write_text(render_report_md(report, _head_sha(wroot)), encoding="utf-8")
+    path.write_text(render_report_md(report, _head_sha(current_wroot)), encoding="utf-8")
     return path

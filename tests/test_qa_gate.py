@@ -191,6 +191,62 @@ def test_full_gate_writes_report_file_outside_the_repo(repo, monkeypatch, tmp_pa
     assert not (repo / "runtime").exists()
 
 
+def test_report_head_matches_repo_current_commit(repo, monkeypatch, tmp_path):
+    """#501: the HEAD stamped in the report must be the real, current commit
+    of the checkout the gate ran in — not a cached/stale value."""
+    _make_complete_venv(repo)
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory([], [0, 0, 0]))
+    monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: tmp_path / "data-home" / "runtime")
+
+    real_head = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    report = qa_gate.run_gate(cwd=repo, write_report=True)
+
+    content = report.report_path.read_text(encoding="utf-8")
+    assert f"**HEAD:** `{real_head}`" in content
+    assert report.worktree_drift_note == ""
+    assert "worktree drift" not in content
+
+
+def test_report_flags_worktree_drift_between_start_and_finish(repo, monkeypatch, tmp_path):
+    """#501: if the checkout the gate ran against resolves to a DIFFERENT
+    root by the time the report is written (a worktree removed/replaced
+    mid-run), the report must say so instead of silently stamping HEAD from
+    whichever checkout now happens to sit at that path — this is exactly how
+    a report can cite a commit that turns out unreachable later."""
+    _make_complete_venv(repo)
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory([], [0, 0, 0]))
+    monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: tmp_path / "data-home" / "runtime")
+
+    other_root = tmp_path / "other-repo"
+    other_root.mkdir()
+
+    real_worktree_root = qa_gate.worktree_root
+    calls = {"n": 0}
+
+    def flaky_worktree_root(cwd=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_worktree_root(cwd)
+        return other_root
+
+    monkeypatch.setattr(qa_gate, "worktree_root", flaky_worktree_root)
+
+    report = qa_gate.run_gate(cwd=repo, write_report=True)
+
+    assert report.worktree_drift_note != ""
+    assert str(repo) in report.worktree_drift_note
+    assert str(other_root) in report.worktree_drift_note
+    content = report.report_path.read_text(encoding="utf-8")
+    assert "⚠️ **worktree drift:**" in content
+
+
 def test_targeted_mode_runs_pytest_only_and_writes_no_report(repo, monkeypatch):
     _make_complete_venv(repo)
     recorder: list = []
