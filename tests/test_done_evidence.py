@@ -883,6 +883,49 @@ class TestDuplicateContentFlagging:
         assert "⚠dup-of:original.png" in entry
 
 
+class TestExcludedVendorDirs:
+    """Issue #500: a pane that npm-installed a tool (e.g. playwright) inside
+    the exports scratch dir got node_modules package icons swept in as
+    'evidence' by the recursive scan."""
+
+    def test_node_modules_images_excluded(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "real.png", assign_ts, age=10)
+        nm = shots / "node_modules" / "playwright-core" / "lib" / "tools" / "dashboard"
+        nm.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(nm / "appIcon.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "real.png" in result
+        assert "appIcon.png" not in result
+
+    def test_vendor_dir_images_excluded(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "real.png", assign_ts, age=10)
+        vendor = shots / "vendor" / "some-pkg"
+        vendor.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(vendor / "logo.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "real.png" in result
+        assert "logo.png" not in result
+
+    def test_only_node_modules_present_yields_no_evidence(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        nm = shots / "node_modules" / "some-pkg"
+        nm.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(nm / "icon.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert result == "⚠ no evidence cited"
+
+
 class TestFailureAutoCapture:
     """`done(failed=True)` auto-captures into role-memory (ReflexionMemory-style,
     no agent decision required) — wired at the same point evidence attach is."""
