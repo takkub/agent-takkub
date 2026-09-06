@@ -323,31 +323,72 @@ class TestAmbiguousUserInputInterruptAutoResumes:
         assert "interrupted by user input" in out["msg"]
 
 
+def _fake_pane(last_write_ts: float = 0.0, last_output_ts: float = 0.0):
+    """`pane`-shaped double for `_is_post_inject_terminal_reply` (#498): only
+    `.session.last_write_ts` and `._last_output_ts` are read. Both default to
+    0.0 (not a fresh MagicMock, which would auto-vivify a non-float attribute
+    and break the `float(...)` conversion) so a test only needs to set the
+    one signal it cares about."""
+    pane = MagicMock()
+    pane.session = MagicMock()
+    pane.session.last_write_ts = last_write_ts
+    pane._last_output_ts = last_output_ts
+    return pane
+
+
 class TestPostInjectTerminalReply:
     def test_esc_chunk_right_after_engine_write_is_not_user_input(self, orch):
-        session = MagicMock()
-        session.last_write_ts = time.time()  # engine just pasted a digest
-        orch._lead_last_user_write_ts["proj"] = session.last_write_ts - 30
-        assert orch._is_post_inject_terminal_reply("proj", session, b"\x1b[?1;2c")
+        now = time.time()
+        pane = _fake_pane(last_write_ts=now)  # engine just pasted a digest
+        orch._lead_last_user_write_ts["proj"] = now - 30
+        assert orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[?1;2c")
 
     def test_printable_or_enter_always_counts(self, orch):
-        session = MagicMock()
-        session.last_write_ts = time.time()
-        orch._lead_last_user_write_ts["proj"] = session.last_write_ts - 30
-        assert not orch._is_post_inject_terminal_reply("proj", session, b"hello")
-        assert not orch._is_post_inject_terminal_reply("proj", session, b"\x1b\r")
+        now = time.time()
+        pane = _fake_pane(last_write_ts=now)
+        orch._lead_last_user_write_ts["proj"] = now - 30
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"hello")
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"\x1b\r")
 
     def test_esc_chunk_after_users_own_keystroke_counts(self, orch):
-        session = MagicMock()
-        session.last_write_ts = time.time() - 1
-        orch._lead_last_user_write_ts["proj"] = session.last_write_ts + 0.5  # owner typed last
-        assert not orch._is_post_inject_terminal_reply("proj", session, b"\x1b[D")
+        last_write = time.time() - 1
+        pane = _fake_pane(last_write_ts=last_write)
+        orch._lead_last_user_write_ts["proj"] = last_write + 0.5  # owner typed last
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[D")
 
     def test_grace_window_expires(self, orch):
-        session = MagicMock()
-        session.last_write_ts = time.time() - orch._LEAD_INJECT_GRACE_S - 1
+        pane = _fake_pane(last_write_ts=time.time() - orch._LEAD_INJECT_GRACE_S - 1)
         orch._lead_last_user_write_ts["proj"] = 0.0
-        assert not orch._is_post_inject_terminal_reply("proj", session, b"\x1b[D")
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[D")
+
+    def test_recent_output_outside_write_grace_still_counts(self, orch):
+        """#498: the target CLI can query the terminal well after OUR own
+        paste — e.g. finishing a long reply to a remote-delivered message —
+        not only in the few seconds right after we wrote into the pty.
+        `pane._last_output_ts` (bumped on every raw byte the pty emits,
+        regardless of who caused it) must catch that case too."""
+        pane = _fake_pane(
+            last_write_ts=time.time() - orch._LEAD_INJECT_GRACE_S - 30,  # long past write-grace
+            last_output_ts=time.time(),  # but the pane JUST emitted output
+        )
+        orch._lead_last_user_write_ts["proj"] = 0.0
+        assert orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[?1;2c")
+
+    def test_stale_output_outside_grace_does_not_count(self, orch):
+        pane = _fake_pane(
+            last_write_ts=0.0,
+            last_output_ts=time.time() - orch._LEAD_INJECT_GRACE_S - 1,
+        )
+        orch._lead_last_user_write_ts["proj"] = 0.0
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[D")
+
+    def test_output_before_users_own_keystroke_does_not_count(self, orch):
+        """Same guard as the write-based check: output that predates the
+        owner's own last keystroke must never outrank it."""
+        last_output = time.time() - 1
+        pane = _fake_pane(last_write_ts=0.0, last_output_ts=last_output)
+        orch._lead_last_user_write_ts["proj"] = last_output + 0.5
+        assert not orch._is_post_inject_terminal_reply("proj", pane, b"\x1b[D")
 
 
 # ── #432 ───────────────────────────────────────────────────────────────────

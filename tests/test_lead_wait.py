@@ -112,6 +112,54 @@ class TestBeginWait:
         # Only one registration exists — no duplicate poll loop was created.
         assert len(orch._active_waits) == 1
 
+    def test_recently_queued_assign_counts_as_active_role(self, orch: Orchestrator) -> None:
+        """#497: `takkub assign` acks before its staggered dispatch actually
+        runs — a `takkub wait` (no --role) issued in the same breath used to
+        see no pane, no subagent entry, nothing in `list_status` yet, and
+        fail with "nothing to wait on" seconds before the pane registered.
+        `note_assign_queued` (called synchronously by `cli_server` at ack
+        time) must be enough on its own for auto-detect to pick the role up."""
+        orch.note_assign_queued(PROJECT, "backend")
+
+        result = orch.begin_wait(PROJECT, [], 60.0)
+
+        assert result["ok"] is True
+        assert result["roles"] == ["backend"]
+
+    def test_stale_queued_assign_does_not_count(self, orch: Orchestrator) -> None:
+        """A queued-assign stamp older than the grace window is exactly the
+        same as never having been queued — auto-detect must not resurrect a
+        role from a run long since finished (or abandoned)."""
+        from agent_takkub import lead_wait as lead_wait_mod
+
+        orch.note_assign_queued(PROJECT, "backend")
+        orch._recent_assign_queue[(PROJECT, "backend")] = time.time() - (
+            lead_wait_mod._WAIT_QUEUED_ASSIGN_GRACE_S + 1.0
+        )
+
+        result = orch.begin_wait(PROJECT, [], 60.0)
+
+        assert result["ok"] is False
+        assert "nothing to wait on" in result["msg"]
+
+    def test_queued_assign_for_a_different_project_does_not_count(self, orch: Orchestrator) -> None:
+        orch.note_assign_queued("other-project", "backend")
+
+        result = orch.begin_wait(PROJECT, [], 60.0)
+
+        assert result["ok"] is False
+        assert "nothing to wait on" in result["msg"]
+
+    def test_recently_queued_assign_does_not_shadow_a_real_pane(self, orch: Orchestrator) -> None:
+        """Once the pane actually registers, the queued-assign stamp is
+        redundant but harmless — the role still surfaces exactly once."""
+        _register_working(orch, "backend")
+        orch.note_assign_queued(PROJECT, "backend")
+
+        result = orch.begin_wait(PROJECT, [], 60.0)
+
+        assert result["roles"] == ["backend"]
+
     def test_abandoned_registration_is_replaced(self, orch: Orchestrator) -> None:
         _register_working(orch, "backend")
         first = orch.begin_wait(PROJECT, ["backend"], 1.0)
@@ -784,6 +832,41 @@ class TestPollWaitUserInputInterrupt:
 
         assert result["interrupt"] is None
         assert "backend" in result["pending"]
+
+    def test_delayed_terminal_reply_via_on_pane_input_does_not_interrupt(
+        self, orch: Orchestrator
+    ) -> None:
+        """#498: a reply-shaped chunk arriving well AFTER the write-grace
+        window (e.g. the Lead pane's own CLI redrawing once it finishes
+        composing a reply to a remote-delivered message) must still be
+        recognised as terminal chrome, not a keystroke — as long as the
+        pane's own `_last_output_ts` shows it just emitted something.
+        Before the fix this leaked through and stamped
+        `_lead_last_user_input_ts`, cutting the wait short with nothing
+        actually typed."""
+        from unittest.mock import MagicMock
+
+        _register_working(orch, "backend")
+        lead_pane = MagicMock()
+        lead_pane.role.name = "lead"
+        lead_pane.session = MagicMock()
+        lead_pane.session.last_write_ts = time.time() - orch._LEAD_INJECT_GRACE_S - 30
+        lead_pane._last_output_ts = time.time()  # just redrew, long after the old write
+        orch._panes_by_project.setdefault(PROJECT, {})["lead"] = lead_pane
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+
+        # A fragmented/unrecognized OSC reply (no BEL/ST terminator yet) —
+        # NOT a full `_is_terminal_auto_reply_chunk` match on its own, so
+        # this only clears the wait if `_is_post_inject_terminal_reply`'s
+        # structural (not denylist) check catches it — exactly the "digest/
+        # echo artifact ที่ยังกรองไม่หมด" shape #498 reported.
+        orch._on_pane_input("lead", b"\x1b]11;rgb:0000/0000/0000")
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+        assert "backend" in result["pending"]
+        assert PROJECT not in orch._lead_last_user_input_ts
 
     def test_no_pending_roles_never_computes_user_input_interrupt(self, orch: Orchestrator) -> None:
         """Matches the existing #253/#259 gating: once every watched role

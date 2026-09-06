@@ -169,6 +169,52 @@ class TestAsyncSpawnDispatch:
         qapp.processEvents()
         assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
 
+    def test_assign_stamps_note_assign_queued_before_deferred_dispatch(
+        self, qapp: QCoreApplication
+    ) -> None:
+        """#497: `takkub wait` (no --role) issued right after `takkub assign`
+        must see the role via `begin_wait`'s auto-detect before the staggered
+        `orch.assign()` has even run — `note_assign_queued` has to fire
+        synchronously in `_dispatch`, not on the next event-loop tick."""
+
+        class _FakeOrchWithQueueNote(_FakeOrch):
+            def __init__(self) -> None:
+                super().__init__()
+                self.queued_calls: list[tuple] = []
+
+            def note_assign_queued(self, project_ns, role):
+                self.queued_calls.append((project_ns, role))
+
+        orch = _FakeOrchWithQueueNote()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
+
+        assert orch.queued_calls == [("default", "backend")]
+        assert orch.assign_calls == [], "assign must still be deferred"
+        qapp.processEvents()
+        assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
+
+    def test_assign_without_note_assign_queued_still_dispatches(
+        self, qapp: QCoreApplication
+    ) -> None:
+        """An orchestrator without `note_assign_queued` (older/fake) must
+        degrade silently — same tolerance as `_queued_no_pane_suffix`."""
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock, _auth({"cmd": "assign", "role": "backend", "task": "do x", "mode": "pane"})
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
+
     def test_assign_passes_flags(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
         srv = CliServer(orch)

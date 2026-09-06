@@ -770,6 +770,14 @@ class CliServer(QObject):
                     )
                     self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
                 else:
+                    # #497: stamp the just-accepted assign BEFORE the actual
+                    # dispatch below (staggered off the QTimer, may not run
+                    # for `delay`ms) so a `takkub wait` issued in the same
+                    # breath can see this role via `begin_wait`'s auto-detect
+                    # instead of finding nothing yet and failing outright.
+                    _note_queued_fn = getattr(self._orch, "note_assign_queued", None)
+                    if callable(_note_queued_fn):
+                        _note_queued_fn(project_ns_fp, role)
                     _assign_kwargs = dict(
                         cwd=req.get("cwd"),
                         task=req.get("task", ""),
