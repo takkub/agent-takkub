@@ -69,6 +69,8 @@ class _FakeOrchestrator:
         self._pending_done_notices: dict = {}
         self.send_when_ready_calls: list[tuple[str, str]] = []
         self._pane_state: dict = {}
+        self.restore_parked_pane_result: dict | None = None
+        self.restore_parked_pane_calls: list[tuple[str, str, str]] = []
 
     def spawn(self, role, cwd=None, project=None):
         self.spawn_calls.append((role, cwd, project))
@@ -84,6 +86,14 @@ class _FakeOrchestrator:
 
     def _send_when_ready(self, role: str, task: str, project: str | None = None) -> None:
         self.send_when_ready_calls.append((role, task))
+
+    def _restore_parked_pane(self, project: str, role: str, last_task: str) -> dict | None:
+        """#495: stand-in for AutoResumeMixin's real method. Defaults to
+        "no marker found" (None) so every pre-#495 test in this file keeps
+        exercising the plain resend path unmodified; tests for the new
+        behaviour set `restore_parked_pane_result` first."""
+        self.restore_parked_pane_calls.append((project, role, last_task))
+        return self.restore_parked_pane_result
 
 
 def _run_restore(fake: _FakeOrchestrator) -> int:
@@ -245,6 +255,80 @@ class TestRestoreTeammates:
         isolated_session_file: pathlib.Path,
         ledger_open_roles: set[tuple[str, str]],
     ) -> None:
+        ledger_open_roles.add(("p", "backend"))
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "last_task": "do X"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        assert fake.send_when_ready_calls == [("backend", "do X")]
+        body = fake._pending_done_notices["p"][0]["body"]
+        assert "re-sent automatically" in body
+
+    def test_park_restore_skip_resend_uses_its_own_notice(
+        self,
+        isolated_session_file: pathlib.Path,
+        ledger_open_roles: set[tuple[str, str]],
+    ) -> None:
+        """#495: when `_restore_parked_pane` says the pane is still
+        rate-limited (skip_resend=True), restore_teammates must NOT
+        `_send_when_ready` the task immediately — the mixin already armed a
+        delayed wake — and must surface *its* notice instead of the generic
+        "re-sent automatically" text."""
+        ledger_open_roles.add(("p", "backend"))
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "last_task": "do X"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        fake.restore_parked_pane_result = {
+            "skip_resend": True,
+            "notice": "🌙 still parked, wake re-armed",
+        }
+        assert _run_restore(fake) == 1
+        assert fake.send_when_ready_calls == []
+        assert fake.restore_parked_pane_calls == [("p", "backend", "do X")]
+        body = fake._pending_done_notices["p"][0]["body"]
+        assert body == "🌙 still parked, wake re-armed"
+
+    def test_park_restore_elapsed_still_resends_with_its_notice(
+        self,
+        isolated_session_file: pathlib.Path,
+        ledger_open_roles: set[tuple[str, str]],
+    ) -> None:
+        """Counterpart: skip_resend=False (quota already reset while cockpit
+        was down, or the marker couldn't be trusted) must still resend the
+        task as normal, but with the mixin's explanatory notice instead of
+        the generic restore text."""
+        ledger_open_roles.add(("p", "backend"))
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "last_task": "do X"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        fake.restore_parked_pane_result = {
+            "skip_resend": False,
+            "notice": "🌙 quota reset already, resending",
+        }
+        assert _run_restore(fake) == 1
+        assert fake.send_when_ready_calls == [("backend", "do X")]
+        body = fake._pending_done_notices["p"][0]["body"]
+        assert body == "🌙 quota reset already, resending"
+
+    def test_no_park_marker_keeps_generic_restore_notice(
+        self,
+        isolated_session_file: pathlib.Path,
+        ledger_open_roles: set[tuple[str, str]],
+    ) -> None:
+        """`_restore_parked_pane` returning None (the common case — no park
+        marker at all) must fall through to the pre-#495 generic notice."""
         ledger_open_roles.add(("p", "backend"))
         now = dt.datetime.now().isoformat(timespec="seconds")
         snap = {

@@ -444,6 +444,95 @@ class TestParkAndWake:
         assert o._notify_lead.call_args.kwargs["note"] == "limit_resumed"
 
 
+class TestRestoreParkedPane:
+    """#495: `_restore_parked_pane` — re-arm (or explain the loss of) a park
+    that survived only as an on-disk marker across a cockpit restart."""
+
+    def test_no_marker_returns_none(self) -> None:
+        o = _bare_orch()
+        assert o._restore_parked_pane("proj", "backend", "do the thing") is None
+
+    def test_non_parked_marker_returns_none(self) -> None:
+        o = _bare_orch()
+        ps = PaneState()
+        ps.last_assigned_task = "do the thing"
+        _write_progress_marker("proj", "backend", ps, None, status="resumed")
+        assert o._restore_parked_pane("proj", "backend", "do the thing") is None
+
+    def test_task_mismatch_returns_none(self) -> None:
+        o = _bare_orch()
+        ps = PaneState()
+        ps.last_assigned_task = "some other task"
+        ps.rate_limited_until = time.time() + 3600
+        _write_progress_marker("proj", "backend", ps, None, status="parked")
+        assert o._restore_parked_pane("proj", "backend", "do the thing") is None
+
+    def test_disabled_auto_resume_falls_back_to_resend(self, monkeypatch) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: False)
+        o = _bare_orch()
+        ps = PaneState()
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 3600
+        _write_progress_marker("proj", "backend", ps, None, status="parked")
+
+        result = o._restore_parked_pane("proj", "backend", "do the thing")
+
+        assert result is not None
+        assert result["skip_resend"] is False
+        assert "park ค้าง" in result["notice"]
+
+    def test_missing_reset_at_falls_back_to_resend(self) -> None:
+        # Marker predates #495 (no reset_at field ever written) — cannot be
+        # trusted to schedule a wake, so fail open to an immediate resend.
+        o = _bare_orch()
+        path = _progress_marker_path("proj", "backend")
+        path.write_text(
+            json.dumps({"status": "parked", "task": "do the thing", "park_rounds": 1}),
+            encoding="utf-8",
+        )
+        result = o._restore_parked_pane("proj", "backend", "do the thing")
+        assert result is not None
+        assert result["skip_resend"] is False
+
+    def test_reset_already_elapsed_falls_back_to_resend_with_note(self) -> None:
+        o = _bare_orch()
+        ps = PaneState()
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() - 3600  # reset long in the past
+        ps.quota_provider = "claude"
+        _write_progress_marker("proj", "backend", ps, None, status="parked")
+
+        with patch("agent_takkub.limit_autoresume.QTimer.singleShot") as timer:
+            result = o._restore_parked_pane("proj", "backend", "do the thing")
+
+        assert result is not None
+        assert result["skip_resend"] is False
+        assert "reset ไปแล้ว" in result["notice"]
+        timer.assert_not_called()
+
+    def test_still_within_window_blocks_resend_and_arms_timer(self) -> None:
+        o = _bare_orch()
+        ps = PaneState()
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 3600
+        ps.quota_provider = "claude"
+        ps.limit_park_rounds = 2
+        _write_progress_marker("proj", "backend", ps, None, status="parked")
+
+        with patch("agent_takkub.limit_autoresume.QTimer.singleShot") as timer:
+            result = o._restore_parked_pane("proj", "backend", "do the thing")
+
+        assert result is not None
+        assert result["skip_resend"] is True
+        restored_ps = o._ps("proj::backend")
+        assert restored_ps.limit_parked is True
+        assert restored_ps.rate_limited_until == ps.rate_limited_until
+        assert restored_ps.quota_provider == "claude"
+        assert restored_ps.limit_park_rounds == 2
+        assert restored_ps.last_assigned_task == "do the thing"
+        timer.assert_called_once()
+
+
 # ── layer 5: toggle ──────────────────────────────────────────────────────────
 
 

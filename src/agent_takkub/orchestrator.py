@@ -4834,6 +4834,25 @@ class Orchestrator(
         )
 
     @staticmethod
+    def _build_precondition_mismatch_handoff(from_role: str, body: str, what: str) -> str:
+        """Lead-facing prompt for a BLOCKED-shaped report whose real cause is
+        the task SPEC pointing at the wrong target (#495 sub-item) — e.g. a
+        qa pane that couldn't find a member because the task pointed it at
+        the wrong tenant. Unlike `_build_blocked_handoff`, this DOES name an
+        action Lead can take directly: the fix lives entirely inside the
+        cockpit's own task text, not with an external owner, so there is no
+        need to wait for anyone."""
+        wrong = f" — {what}" if what else ""
+        return (
+            f"[{from_role} BLOCKED] {body}\n\n"
+            f"🎯 รายงานนี้คือ **task spec ชี้เป้าผิด ไม่ใช่ขาดของนอกระบบ**{wrong}\n"
+            f"{from_role} ทำงานตาม spec ที่ได้รับตรงๆ แล้วพบว่าเป้าหมายผิด "
+            "(เช่น tenant/environment/branch ผิด) — ไม่ใช่ credential/สิทธิ์ที่ขาดจริง\n"
+            "1. แก้ task spec ให้ชี้เป้าถูก (ระบุ tenant/environment/target ที่ถูกต้อง)\n"
+            f"2. re-assign งานเดิมกลับไปที่ {from_role} ได้เลย ไม่ต้องรอเจ้าของ"
+        )
+
+    @staticmethod
     def _build_verify_fail_handoff(from_role: str, note: str) -> str:
         """Lead-facing prompt when a pane reports `done --fail` (QA/verify failed).
 
@@ -4848,6 +4867,14 @@ class Orchestrator(
         # a human who can supply the missing thing. Routing it anyway sends a
         # teammate to "fix" working code; in the reported case that meant
         # backend touching a live auth system so QA could get in.
+        try:
+            from .routing_planner import classify_precondition_mismatch
+
+            is_mismatch, mismatch_what = classify_precondition_mismatch(body)
+        except Exception:
+            is_mismatch, mismatch_what = False, ""
+        if is_mismatch:
+            return Orchestrator._build_precondition_mismatch_handoff(from_role, body, mismatch_what)
         try:
             from .routing_planner import classify_blocked
 
@@ -5423,20 +5450,37 @@ class Orchestrator(
                 )
             elif blocked:
                 # Reported BLOCKED outright (#296) — no signature guessing
-                # needed, the pane said so. Still recorded as a failure for
-                # the ledger (the task is not done), but routed to a human.
-                from .routing_planner import classify_blocked
+                # needed for whether it's actionable-vs-blocked, the pane
+                # said so. But #495: still check for the narrower
+                # precondition-mismatch case (task spec pointed at the
+                # wrong tenant/env/target) before falling back to the
+                # generic "no role can fix this, wait for a human" wording —
+                # a mismatch IS fixable by the Lead, immediately.
+                from .routing_planner import classify_blocked, classify_precondition_mismatch
 
-                notice = self._build_blocked_handoff(
-                    from_role, f"{ref_tag}{note}".strip(), classify_blocked(note)[1]
-                )
-                _log_event(
-                    "verify_blocked",
-                    project=project_ns,
-                    role=from_role,
-                    note=(note or "")[:200],
-                    declared=True,
-                )
+                full_note = f"{ref_tag}{note}".strip()
+                is_mismatch, mismatch_what = classify_precondition_mismatch(note)
+                if is_mismatch:
+                    notice = self._build_precondition_mismatch_handoff(
+                        from_role, full_note, mismatch_what
+                    )
+                    _log_event(
+                        "verify_precondition_mismatch",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                    )
+                else:
+                    notice = self._build_blocked_handoff(
+                        from_role, full_note, classify_blocked(note)[1]
+                    )
+                    _log_event(
+                        "verify_blocked",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                        declared=True,
+                    )
             else:
                 notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
                 _log_event(
@@ -8054,11 +8098,26 @@ class Orchestrator(
                         except Exception:
                             task_still_open = True
                     if last_task and task_still_open:
-                        self._send_when_ready(role, last_task, project=project)
-                        notice_body = (
-                            f"[cockpit restart{restart_reason_suffix}] {role} pane restored "
-                            f"from last session and last task re-sent automatically."
-                        )
+                        # #495: don't blindly resend into a pane that was
+                        # parked (usage-limit auto-resume) when cockpit went
+                        # down — check the on-disk park marker first so a
+                        # still-rate-limited pane gets its wake re-armed for
+                        # the original reset time instead of an immediate
+                        # resend that would just re-trip the same limit.
+                        park_restore = self._restore_parked_pane(project, role, last_task)
+                        if park_restore and park_restore["skip_resend"]:
+                            notice_body = park_restore["notice"]
+                        else:
+                            self._send_when_ready(role, last_task, project=project)
+                            notice_body = (
+                                park_restore["notice"]
+                                if park_restore
+                                else (
+                                    f"[cockpit restart{restart_reason_suffix}] {role} pane "
+                                    "restored from last session and last task re-sent "
+                                    "automatically."
+                                )
+                            )
                     elif last_task:
                         notice_body = (
                             f"⚠️ [cockpit restart{restart_reason_suffix}] {role} pane restored "

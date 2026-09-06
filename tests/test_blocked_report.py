@@ -45,6 +45,36 @@ class TestBlockedHandoff:
         assert "BLOCKED" not in out
 
 
+class TestPreconditionMismatchHandoff:
+    """#495 sub-item: a report shaped like BLOCKED but actually caused by the
+    task spec pointing at the wrong target must tell Lead it can fix this
+    itself (edit the spec, re-assign) instead of the generic 'wait for a
+    human, no role can fix this' framing."""
+
+    def test_wrong_tenant_gets_the_mismatch_handoff_not_the_generic_one(self) -> None:
+        out = Orchestrator._build_verify_fail_handoff("qa", "หาสมาชิกไม่เจอเพราะหาผิด tenant")
+        assert "BLOCKED" in out
+        assert "ชี้เป้าผิด" in out
+        assert "re-assign" in out
+        assert "ห้าม role อื่นแก้" not in out
+
+    def test_genuine_blocker_still_gets_the_generic_handoff(self) -> None:
+        out = Orchestrator._build_verify_fail_handoff(
+            "qa", "สร้าง tenant ทดสอบไม่ได้เพราะไม่มีรหัสผ่าน super admin"
+        )
+        assert "ชี้เป้าผิด" not in out
+        assert "ห้าม" in out
+
+    def test_mismatch_handoff_names_the_role_to_reassign(self) -> None:
+        out = Orchestrator._build_precondition_mismatch_handoff(
+            "qa", "หาสมาชิกไม่เจอเพราะหาผิด tenant", "task spec ระบุ tenant ผิด"
+        )
+        assert "BLOCKED" in out
+        assert "re-assign" in out
+        assert "qa" in out
+        assert "ห้าม role อื่นแก้" not in out
+
+
 class TestBlockedCliSurface:
     def test_blocked_flag_reaches_the_wire_as_blocked_and_failed(self, monkeypatch) -> None:
         """`--blocked` still means the task is NOT done, so it rides on the

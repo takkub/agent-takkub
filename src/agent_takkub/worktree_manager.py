@@ -1643,6 +1643,36 @@ class WorktreeManager:
                 msg += f" · {extra}"
         return True, msg
 
+    def _all_commits_landed_via_cherry_pick(self, git_root: str, branch: str) -> bool:
+        """True when every commit unique to *branch* (vs the main checkout's
+        current HEAD) has an equivalent patch already applied to HEAD (#495
+        sub-item).
+
+        `clean_isolated`'s "ahead" count comes from `rev-list --count
+        HEAD..branch`, which compares by commit SHA — a commit that was
+        cherry-picked into HEAD gets a brand new SHA on `main` (different
+        parent, possibly a different author date) even though its patch
+        content is identical, so the branch keeps showing as "N commit
+        ยังไม่ merge" forever even after every change genuinely landed.
+        `git cherry` compares by patch-id (the diff content) instead of SHA,
+        which is exactly the check that survives a cherry-pick: each line is
+        prefixed `-` when an equivalent patch already exists on HEAD, `+`
+        when it doesn't. All-`-` (and at least one line) means the branch's
+        entire diff already landed.
+
+        False on any git error, or when there turn out to be no unique
+        commits to compare at all — fails closed on purpose: this only ever
+        SKIPS a keep-reason that would otherwise block cleanup, never adds
+        one, so a wrong False just means "still keeps the worktree", not
+        "silently drops work"."""
+        res = self._run(["-C", git_root, "cherry", "HEAD", branch], None)
+        if not res.ok:
+            return False
+        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        if not lines:
+            return False
+        return all(ln.startswith("-") for ln in lines)
+
     def clean_isolated(
         self,
         git_root: str,
@@ -1696,12 +1726,20 @@ class WorktreeManager:
                     "ปิด pane ก่อน (`takkub close --role <role>`) แล้วค่อย clean ใหม่"
                 )
                 continue
+            cherry_picked = False
             keep_reason = ""
             if not force:
                 if row["dirty"]:
                     keep_reason = "dirty (มี uncommitted changes)"
                 elif row["ahead"]:
-                    keep_reason = f"{row['ahead']} commit ยังไม่ merge"
+                    # #495: raw SHA-based "ahead" still counts commits whose
+                    # patch already landed on HEAD via cherry-pick — check
+                    # patch-id equivalence before keeping it around forever.
+                    cherry_picked = self._all_commits_landed_via_cherry_pick(
+                        git_root, row["branch"]
+                    )
+                    if not cherry_picked:
+                        keep_reason = f"{row['ahead']} commit ยังไม่ merge"
             if keep_reason:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
                 continue
@@ -1737,6 +1775,8 @@ class WorktreeManager:
             )
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
+            if cherry_picked:
+                note += f" ({row['ahead']} commit cherry-pick เข้า HEAD แล้ว — ตรวจด้วย patch-id)"
             if leftover:
                 note += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
             if not branch_rm.ok:

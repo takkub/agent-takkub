@@ -1108,3 +1108,53 @@ class TestClassifyBlockedVsFailed:
     def test_empty_note_is_not_blocked(self) -> None:
         assert classify_blocked("") == (False, "")
         assert classify_blocked("   ") == (False, "")
+
+
+class TestClassifyPreconditionMismatch:
+    """#495 sub-item: a BLOCKED-shaped report whose real cause is the task
+    SPEC pointing at the wrong target (tenant/env/branch/...), not anything
+    actually missing. Field case: a qa pane couldn't find a member because
+    the task pointed it at the wrong tenant — fixable by the Lead correcting
+    the spec and re-assigning, not by waiting on an external owner."""
+
+    def test_wrong_tenant_thai_is_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        note = "หาสมาชิกไม่เจอเพราะหาผิด tenant"
+        is_mismatch, what = classify_precondition_mismatch(note)
+        assert is_mismatch is True
+        assert what
+
+    def test_tenant_wrong_word_order_is_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        assert classify_precondition_mismatch("task spec ระบุ tenant ผิด")[0] is True
+
+    def test_spec_pointed_wrong_english_is_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        assert classify_precondition_mismatch("task spec pointed to the wrong project")[0] is True
+
+    def test_wrong_environment_english_is_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        assert classify_precondition_mismatch("looked in the wrong environment")[0] is True
+
+    def test_genuine_missing_credential_is_not_a_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        note = "สร้าง tenant ทดสอบไม่ได้เพราะไม่มีรหัสผ่าน super admin"
+        assert classify_precondition_mismatch(note)[0] is False
+        # ... and stays classified as a genuine blocker.
+        assert classify_blocked(note)[0] is True
+
+    def test_real_bug_is_not_a_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        note = "login endpoint returns 401 unauthorized for valid users"
+        assert classify_precondition_mismatch(note)[0] is False
+
+    def test_empty_note_is_not_a_mismatch(self) -> None:
+        from agent_takkub.routing_planner import classify_precondition_mismatch
+
+        assert classify_precondition_mismatch("") == (False, "")
