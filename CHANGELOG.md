@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v1.6.34] - 2026-09-06
+
+### Fixed (แก้)
+
+- **worktree branch ชื่อ epoch-วินาที ชนกันตอน parallel fan-out (#494)** — assign `--isolation worktree` หลายตัวห่างกันไม่กี่ร้อย ms ได้ branch ชื่อวินาทีเดียวกัน → `git worktree add` fail → degrade เงียบเป็น shared cwd ตรงจุดที่ isolation จำเป็นที่สุด → แก้: `create()` retry ด้วยชื่อใหม่ epoch-ms + random salt (สูงสุด 5 ครั้ง เฉพาะ name-collision) ก่อนยอม fallback + notice บอกจำนวน pane ที่แชร์ tree อยู่ (`worktree_manager.py`, `orchestrator.py`) + tests
+- **worktree digest นับ CRLF phantom เป็นไฟล์ค้าง commit (#496)** — Windows: `git status` โชว์ M แต่ diff จริงว่างเปล่า → ธง "ยังไม่พร้อม merge" หลอกให้ Lead ตรวจมือ + `worktree clean` KEEP ฟรี → แก้: `real_dirty`/`real_uncommitted_count`/`crlf_phantom` เช็ค `git diff HEAD --quiet` ก่อนนับ (fail-safe: probe พัง = ถือว่า dirty) wired เข้า done digest / merge proposal / clean / safe_remove / pane-close warning + tests
+- **quota park หายเงียบเมื่อ cockpit restart (#495)** — wake timer + state อยู่แค่ใน memory → restart แล้ว park ไม่ถูกปลุกและไม่มีแจ้งเตือน → แก้: persist `reset_at`/`quota_provider` ลง progress marker, `_restore_parked_pane()` re-arm wake ตามเวลาเดิมตอน boot (reset ผ่านแล้ว = resend ทันทีพร้อม note, marker เชื่อไม่ได้ = resend + เตือน — ไม่มีทางหายเงียบ) · พ่วง: หมวด BLOCKED ใหม่ "precondition ผิด" (`classify_precondition_mismatch` — task spec ชี้เป้าผิดให้ Lead แก้ spec + re-assign ได้เลย ไม่ใช่ "รอเจ้าของ credential") + `worktree clean` ตรวจ patch-id ผ่าน `git cherry` ก่อน KEEP branch ที่ cherry-pick เข้า main ไปแล้ว + tests
+- **`takkub wait` ยิงทันทีหลัง assign ได้ exit 2 "nothing to wait on" (#497)** — assign ack ก่อน dispatch จริง (staggered QTimer) → wait auto-detect ไม่เห็น role → แก้: `note_assign_queued()` stamp แบบ synchronous ตอน accept, `begin_wait` นับ role ที่เพิ่ง queue ภายใน grace 30s + tests
+- **`takkub wait` โดน interrupt จาก terminal reply ที่มาช้า (#498)** — CLI redraw หลังตอบ remote message ยาวๆ (เกิน write-grace) หลุดไป stamp เป็น user input → wait ขาดทั้งที่ไม่มีใครพิมพ์ → แก้: `_is_post_inject_terminal_reply` เช็ค `pane._last_output_ts` (ทุก byte ที่ pty พ่น) เพิ่มจาก `last_write_ts` + tests
+- **remote→lead delivery ack ไม่เคยถูก mark (#499)** — target ที่ตอบเร็ว round-trip กลับ ready prompt ก่อน verify chain เช็ค → 64/83 ค้าง "ส่งแล้วยังไม่ยืนยัน" ทั้งที่ถึงมือจริง → แก้: capture `write_baseline` ก่อนเขียน payload + fallback `last_output_monotonic > baseline` (pattern เดียวกับ task delivery #359, provider-agnostic) + tests
+- **done evidence collector กวาด node_modules images (#500)** — pane npm-install playwright ใน exports scratch → icon ของ package ติดเข้า evidence list → แก้: `_find_evidence_files` ข้าม path ที่มี `node_modules`/`vendor` เป็น component (dup detection เป็น content-hash อยู่แล้ว #182 — ไม่ใช่ byte-size ตามที่สงสัย) + tests
+- **qa done digest อ้าง HEAD ที่ไม่มีจริงใน repo (#501)** — reproduce เป๊ะไม่ได้ (ไม่มีจุด stamp HEAD ตอน spawn ใน repo) → กัน mechanism ที่เป็นไปได้: `_maybe_write_report` re-resolve `worktree_root` ตอนเขียนไฟล์จริง, stamp HEAD จาก checkout ปัจจุบัน + ธง "⚠ worktree drift" ในรายงานเมื่อ checkout ย้าย/หายกลางคัน + tests
+
 ## [v1.6.33] - 2026-09-05
 
 ### Added (เพิ่ม)
