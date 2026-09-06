@@ -264,9 +264,11 @@ def test_effective_model_for_v2_malformed_v2_json_fails_open_per_pin(
 ):
     """A corrupted V2 target (one file, not both — "not migrated" only
     triggers when NEITHER exists) must not crash: `read_json` itself fails
-    open to "no data" for that one file. Since V1 is authoritative (Wave C
-    shadow-read fix), the corruption can't change the *answer* either way —
-    it only ever affects the shadow comparison used for drift telemetry."""
+    open to "no data" for that one file. With `TAKKUB_V2_AUTHORITY=0` (the
+    2.0.0 escape hatch back to V1-wins), the corruption can't change the
+    *answer* either way — it only ever affects the shadow comparison used
+    for drift telemetry."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     monkeypatch.setenv("TAKKUB_V2_ROUTER", "1")
     _write_v1_model_state(
         v1_model_state,
@@ -282,16 +284,21 @@ def test_effective_model_for_v2_malformed_v2_json_fails_open_per_pin(
     assert effective_model_for_v2("backend", "claude") == "claude-opus-5"
 
 
-# -- shadow-read: V1 authoritative even after migration, V2 drift is telemetry-only
-# (Wave C fix, prod incident 2026-08-23 — Settings writes never sync back into V2) --
+# -- escape hatch (`TAKKUB_V2_AUTHORITY=0`): V1 authoritative even after
+# migration, V2 drift is telemetry-only (Wave C fix, prod incident
+# 2026-08-23 — a stale V2 copy must never win once the user re-pins in V1).
+# 2.0.0 flipped the *default* to V2-authoritative (soak proved dual-write
+# keeps V2 in sync for every real writer), so these now explicitly set the
+# escape hatch to exercise the pre-dual-write hazard Wave C guards against. --
 
 
 def test_effective_model_for_prefers_v1_over_stale_v2_after_migration(
-    v1_model_state, isolated_v2_data_home
+    v1_model_state, isolated_v2_data_home, monkeypatch
 ):
     """The steady-state prod hazard this fix closes: migrate once, then the
     user re-pins a model in Settings (V1-only write, `role_models.set_model`)
     — the next spawn must see the NEW pin, not the stale migrated V2 copy."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(
         v1_model_state,
         roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
@@ -309,9 +316,10 @@ def test_effective_model_for_prefers_v1_over_stale_v2_after_migration(
 
 
 def test_effective_model_for_provider_pin_drift_prefers_v1_too(
-    v1_model_state, isolated_v2_data_home
+    v1_model_state, isolated_v2_data_home, monkeypatch
 ):
     """Same hazard, provider-level pin instead of a role pin."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(v1_model_state, roles={}, providers={"claude": "claude-sonnet-5"})
     _migrate(isolated_v2_data_home, v1_model_state)
 
@@ -321,11 +329,12 @@ def test_effective_model_for_provider_pin_drift_prefers_v1_too(
 
 
 def test_effective_model_for_v1_pin_cleared_after_migration_returns_none(
-    v1_model_state, isolated_v2_data_home
+    v1_model_state, isolated_v2_data_home, monkeypatch
 ):
     """V1 drops the pin entirely (user clears it in Settings) while the
     stale V2 copy still carries the old value — V1's ``None`` must win, not
     V2's leftover value."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(
         v1_model_state,
         roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
@@ -339,8 +348,9 @@ def test_effective_model_for_v1_pin_cleared_after_migration_returns_none(
 
 
 def test_effective_model_for_logs_drift_event_when_v1_and_v2_disagree(
-    v1_model_state, isolated_v2_data_home, caplog
+    v1_model_state, isolated_v2_data_home, monkeypatch, caplog
 ):
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(
         v1_model_state,
         roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
@@ -374,10 +384,11 @@ def test_effective_model_for_no_drift_event_when_v1_matches_freshly_migrated_v2(
 
 
 def test_effective_model_for_drift_event_rate_limited_per_role_provider(
-    v1_model_state, isolated_v2_data_home, caplog
+    v1_model_state, isolated_v2_data_home, monkeypatch, caplog
 ):
     """Repeated spawns for the same (role, provider) log the drift once,
     not once per call — the module-level de-dupe set."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(
         v1_model_state,
         roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
@@ -476,10 +487,37 @@ def test_effective_model_for_v2_authoritative_when_flag_on(
     assert Router().effective_model_for("backend", "claude") == "claude-opus-5"
 
 
+def test_effective_model_for_v2_authoritative_by_default_since_2_0_0(
+    v1_model_state, isolated_v2_data_home, monkeypatch
+):
+    """2.0.0 flip (#362): an UNSET env is now V2-authoritative too, not just
+    an explicit `=1` — same assertion as
+    `test_effective_model_for_v2_authoritative_when_flag_on` above, but
+    proving the new *default* rather than an explicit override."""
+    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    _write_v1_model_state(
+        v1_model_state,
+        roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},
+        providers={"claude": "claude-sonnet-5"},
+    )
+    _migrate(isolated_v2_data_home, v1_model_state)  # only to satisfy the "not migrated" guard
+
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider: "claude-fable-5")
+    monkeypatch.setattr(
+        "agent_takkub.core.model_catalog.legacy.read_legacy_role_model_pin",
+        lambda role, data_home: ("claude", "claude-opus-5"),
+    )
+
+    assert Router().effective_model_for("backend", "claude") == "claude-opus-5"
+
+
 def test_effective_model_for_still_v1_authoritative_when_flag_off(
     v1_model_state, isolated_v2_data_home, monkeypatch
 ):
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    """`=0` is the 2.0.0 escape hatch — unset now defaults to V2-authoritative
+    (see `test_effective_model_for_v2_authoritative_when_flag_on` above),
+    so this must set it explicitly to exercise the V1-wins path."""
+    monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
     _write_v1_model_state(
         v1_model_state,
         roles={"backend": {"provider": "claude", "model": "claude-opus-5"}},

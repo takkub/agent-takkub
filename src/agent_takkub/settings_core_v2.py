@@ -4,9 +4,9 @@ and Migration were removed in the settings-nav declutter: Overview duplicated
 `takkub doctor`'s own status view and its flags default-on since 1.0.84 per
 `core_v2_settings._DEFAULT_FLAGS`; Migration's inspect/plan/dry-run duplicated
 the `takkub migrate` CLI and boot already runs `auto_migrate_boot` (#361) —
-apply on prod completed 2026-08-23. `v2_authority`'s eventual default flip
-(#362 Phase 10) is an env-flag decision, not something driven by a Settings
-page).
+apply on prod completed 2026-08-23. `v2_authority`'s default flip (#362
+Phase 10, 2.0.0) was an env-flag decision, not something driven by a
+Settings page — `TAKKUB_V2_AUTHORITY=0` remains the escape hatch).
 
 A mixin (`CoreV2SettingsMixin`) mixed into `settings_window.SettingsWindow`
 — same "UI-layer mixin" shape as `user_actions.UserActionsMixin`/
