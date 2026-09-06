@@ -115,6 +115,19 @@ class _FakeMgr:
         self.uncommitted_calls += 1
         return self.uncommitted
 
+    # #496: real_* variants filter CRLF-only phantom dirt; these fakes have
+    # no phantom to filter, so they mirror the raw is_dirty/uncommitted_count.
+    def real_dirty(self, info):
+        self.is_dirty_calls += 1
+        return self.dirty
+
+    def real_uncommitted_count(self, info):
+        self.uncommitted_calls += 1
+        return self.uncommitted
+
+    def crlf_phantom(self, info):
+        return False
+
     def merge_conflicts_with_base(self, git_root, branch):
         self.merge_calls += 1
         return self.merge_conflicts

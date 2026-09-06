@@ -253,7 +253,7 @@ def classify_worktree(
     )
     if match is None:
         branch = mgr.current_branch(str(wt_dir))
-        dirty = mgr.is_dirty_at(str(wt_dir))
+        dirty = mgr.real_dirty_at(str(wt_dir))  # #496: ignore CRLF-only phantom dirt
         ahead = mgr.commits_ahead(root, branch) if branch else 0
         row.update(orphan=True, registered=False, dirty=dirty, branch=branch, ahead=ahead)
         return row

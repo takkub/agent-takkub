@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import stat
@@ -56,6 +57,14 @@ _GIT_TIMEOUT_S = 30
 # Branch/dir prefix so isolated worktrees are unmistakable in `git worktree
 # list`, `git branch`, and the pane title chip.
 _BRANCH_PREFIX = "wt"
+
+# #494: caller mints `ts` from `int(time.time())` (epoch SECONDS) once per
+# assign; a parallel fan-out a few hundred ms apart can land two panes on the
+# same second, so `create()` must retry with a freshly-minted, higher-
+# resolution name rather than degrade straight to the shared cwd — the one
+# spot isolation matters most. Bounded so a persistently-broken repo (e.g.
+# every branch name rejected for an unrelated reason) still fails fast.
+_MAX_CREATE_ATTEMPTS = 5
 
 # `_stage_for_delete` renames a checkout aside under this prefix before the
 # recursive delete that follows — always our own staged trash, never a real
@@ -283,6 +292,25 @@ def branch_name(role: str, ts: int) -> str:
     """Deterministic isolated-branch name. ``ts`` is passed in (never sampled
     here) so the value is reproducible and the module stays side-effect-free."""
     return f"{_BRANCH_PREFIX}/{sanitize_ref_component(role)}-{ts}"
+
+
+def _retry_ts() -> int:
+    """Higher-resolution, salted ``ts`` for a `create()` retry after a
+    branch/dest name collision (#494): epoch milliseconds plus a random 0-999
+    salt, so two panes that collided on the same epoch SECOND don't just line
+    up and collide again on their retry. Only ever used after the caller's
+    original ``ts`` has already failed — never sampled on the happy path, so
+    :func:`branch_name` stays deterministic for its one caller-supplied value."""
+    return int(time.time() * 1000) * 1000 + random.randint(0, 999)
+
+
+def _is_name_collision(git_stderr_tail: str) -> bool:
+    """True when a `git worktree add` failure is a branch/dir NAME collision
+    (retryable with a fresh name) rather than some other failure (e.g. a
+    genuinely broken repo) that a retry can't fix. Git's own messages for
+    this: \"a branch named '<x>' already exists\" and \"'<dest>' already
+    exists\" (pre-existing directory)."""
+    return "already exists" in git_stderr_tail.lower()
 
 
 def worktrees_managed_root() -> Path:
@@ -954,25 +982,47 @@ class WorktreeManager:
         base_sha = self.head_sha(base_cwd)
         if not base_sha:
             return None, "repo ยังไม่มี commit (HEAD ว่าง) — ใช้ shared cwd แทน"
-        try:
-            dest = worktree_dest(project_ns, role, ts)
-        except UnsafePathError as exc:
-            return None, f"path ไม่ปลอดภัย: {exc} — ใช้ shared cwd แทน"
-        branch = branch_name(role, ts)
-        # Ensure the managed root exists; the dest itself must NOT pre-exist
-        # (git refuses "working tree already exists").
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return None, f"สร้าง worktree root ไม่ได้: {exc} — ใช้ shared cwd แทน"
-        add = self._run(
-            ["-C", root, "worktree", "add", str(dest), "-b", branch, base_sha],
-            None,
-        )
-        if not add.ok:
+
+        attempt_ts = ts
+        dest: Path
+        branch: str
+        collisions = 0
+        for attempt in range(_MAX_CREATE_ATTEMPTS):
+            try:
+                dest = worktree_dest(project_ns, role, attempt_ts)
+            except UnsafePathError as exc:
+                return None, f"path ไม่ปลอดภัย: {exc} — ใช้ shared cwd แทน"
+            branch = branch_name(role, attempt_ts)
+            # Ensure the managed root exists; the dest itself must NOT pre-exist
+            # (git refuses "working tree already exists").
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return None, f"สร้าง worktree root ไม่ได้: {exc} — ใช้ shared cwd แทน"
+            add = self._run(
+                ["-C", root, "worktree", "add", str(dest), "-b", branch, base_sha],
+                None,
+            )
+            if add.ok:
+                break
             reason = (add.stderr or add.stdout).strip().splitlines()
             tail = reason[-1] if reason else f"exit {add.returncode}"
-            return None, f"git worktree add ล้มเหลว ({tail}) — ใช้ shared cwd แทน"
+            last_reason = f"git worktree add ล้มเหลว ({tail}) — ใช้ shared cwd แทน"
+            if not _is_name_collision(tail) or attempt == _MAX_CREATE_ATTEMPTS - 1:
+                return None, last_reason
+            # Name collision (#494, parallel fan-out on the same epoch second):
+            # mint a fresh, higher-resolution name and retry rather than
+            # degrading straight to the shared cwd.
+            collisions += 1
+            attempt_ts = _retry_ts()
+        if collisions:
+            _log_event(
+                "worktree_create_retried",
+                role=role,
+                project=project_ns,
+                collisions=collisions,
+                branch=branch,
+            )
         # P2.2: env propagation per the project's opt-in config. Failures here
         # are NON-fatal — the worktree exists and is usable bare; warnings ride
         # back on the (info, reason) success channel for the Lead notice.
@@ -1082,6 +1132,56 @@ class WorktreeManager:
         :class:`WorktreeInfo` needed) — used to inspect an orphan checkout
         that git can still read directly (#132)."""
         return bool(self.status_porcelain(cwd).strip())
+
+    def _dirty_lines(self, cwd: str) -> tuple[list[str], list[str]]:
+        """``(raw, real)`` porcelain lines — *real* is *raw* with a CRLF-only
+        phantom filtered out (#496): Windows can leave a tracked file
+        flagged "M" purely from line-ending/smudge-filter metadata even
+        though its content is byte-identical to HEAD (`git diff`/`--cached`/
+        `HEAD` all empty).
+
+        An untracked ("??") entry is never a phantom — it was never
+        committed, so there is no baseline for a line-ending filter to
+        disagree with — always real. Only when EVERY remaining (tracked)
+        line is present is `git diff HEAD --quiet` consulted (one extra
+        call, only when needed): exit 0 (no real content diff anywhere)
+        downgrades those tracked lines out of *real*; any other exit (a
+        genuine diff, OR the probe itself failing) keeps them — fail-safe,
+        never a false "clean" (same direction as #261's own established
+        fallback)."""
+        lines = [ln for ln in self.status_porcelain(cwd).splitlines() if ln.strip()]
+        tracked = [ln for ln in lines if not ln.startswith("??")]
+        untracked = [ln for ln in lines if ln.startswith("??")]
+        if not tracked:
+            return lines, lines
+        diff = self._run(["-C", cwd, "diff", "HEAD", "--quiet"], None)
+        real = untracked if diff.returncode == 0 else lines
+        return lines, real
+
+    def real_dirty_at(self, cwd: str) -> bool:
+        """Phantom-aware :meth:`is_dirty_at` (#496) — see :meth:`_dirty_lines`."""
+        return bool(self._dirty_lines(cwd)[1])
+
+    def real_dirty(self, info: WorktreeInfo) -> bool:
+        return self.real_dirty_at(info.path)
+
+    def real_uncommitted_count_at(self, cwd: str) -> int:
+        """Phantom-aware :meth:`uncommitted_count_at` (#496)."""
+        return len(self._dirty_lines(cwd)[1])
+
+    def real_uncommitted_count(self, info: WorktreeInfo) -> int:
+        return self.real_uncommitted_count_at(info.path)
+
+    def crlf_phantom_at(self, cwd: str) -> bool:
+        """True when raw `status --porcelain` reported changes but every one
+        of them was a CRLF-only phantom (#496) — i.e. `real_dirty_at` comes
+        back clean despite `is_dirty_at` being dirty. Purely informational:
+        callers use it for a short Lead-facing note, never a gate."""
+        raw, real = self._dirty_lines(cwd)
+        return bool(raw) and not real
+
+    def crlf_phantom(self, info: WorktreeInfo) -> bool:
+        return self.crlf_phantom_at(info.path)
 
     def current_branch(self, cwd: str) -> str | None:
         """Branch checked out at *cwd*, or None when detached/unresolvable."""
@@ -1248,8 +1348,15 @@ class WorktreeManager:
         if worktree:
             info = WorktreeInfo.from_dict(worktree)
             commits = self.commit_count(info)
-            dirty = self.is_dirty(info)
-            uncommitted = self.uncommitted_count(info) if dirty else 0
+            # #496: `_dirty_lines` filters out CRLF-only phantom "M" entries
+            # (git status flags them, but their content vs HEAD is
+            # byte-identical) — never nag the Lead to "commit ให้ครบก่อน"
+            # for a file with nothing to commit. One call covers all three
+            # derived facts instead of three separate status/diff probes.
+            raw_lines, real_lines = self._dirty_lines(info.path)
+            dirty = bool(real_lines)
+            uncommitted = len(real_lines) if dirty else 0
+            crlf_phantom = bool(raw_lines) and not real_lines
             conflict_files: list[str] | None = None
             merge_conflicts: bool | None = None
             if commits > 0:
@@ -1264,6 +1371,7 @@ class WorktreeManager:
                 "commits": commits,
                 "dirty": dirty,
                 "uncommitted": uncommitted,
+                "crlf_phantom": crlf_phantom,
                 "merge_conflicts": merge_conflicts,
                 "conflict_files": conflict_files,
                 "diffstat": self.diffstat(info),
@@ -1371,7 +1479,7 @@ class WorktreeManager:
         it was preserved — typically because the tree is dirty. Callers surface
         the reason to the Lead instead of silently losing work.
         """
-        if self.is_dirty(info):
+        if self.real_dirty(info):  # #496: CRLF-only phantom "M" never blocks removal
             return False, "worktree มี uncommitted changes — เก็บไว้ (ไม่ลบทิ้ง)"
         # Unlink junctions/symlinks FIRST — a recursive delete that followed a
         # junction would destroy the main tree's real node_modules (#81 P2.2).
@@ -1426,14 +1534,16 @@ class WorktreeManager:
                 ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
             except ValueError:
                 ahead = 0
-            dirty_res = self._run(["-C", ent["path"], "status", "--porcelain"], None)
+            # #496: a phantom CRLF-only "M" (git status dirty, real diff
+            # empty) must never KEEP a worktree in `clean_isolated` — the
+            # pane already committed everything of substance.
             rows.append(
                 {
                     "path": ent["path"],
                     "branch": branch,
                     "sha": ent.get("sha", ""),
                     "ahead": ahead,
-                    "dirty": bool(dirty_res.ok and dirty_res.stdout.strip()),
+                    "dirty": self.real_dirty_at(ent["path"]),
                 }
             )
         return rows
@@ -2140,6 +2250,7 @@ def build_merge_proposal(
     uncommitted: int = 0,
     merge_conflicts: bool | None = None,
     conflict_files: list[str] | None = None,
+    crlf_phantom: bool = False,
 ) -> str:
     """Lead-facing PROPOSAL when an isolated pane finishes with commits to merge.
 
@@ -2182,6 +2293,11 @@ def build_merge_proposal(
         if merge_conflicts is False
         else "merge-tree ตรวจสถานะไม่ได้ (unknown) — review diff ก่อน merge"
     )
+    # #496: dirty=False here can mean genuinely clean OR "raw git status
+    # showed changes but they were all CRLF-only phantom" — say so briefly
+    # instead of looking suspiciously silent about it.
+    if crlf_phantom:
+        readiness += " (มี CRLF-only phantom ใน git status ที่ diff จริงว่างเปล่า — ไม่ใช่งานค้าง)"
     return (
         f"🌿 [{role} worktree] `{info.branch}` — {readiness} (digest ด้านบนมี branch/commits/"
         "files แล้ว)\n"

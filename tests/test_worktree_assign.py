@@ -83,6 +83,17 @@ class _FakeMgr:
     def uncommitted_count(self, info):
         return self._uncommitted
 
+    # #496: real_* variants filter CRLF-only phantom dirt; these fakes have
+    # no phantom to filter, so they mirror the raw is_dirty/uncommitted_count.
+    def real_dirty(self, info):
+        return self._dirty
+
+    def real_uncommitted_count(self, info):
+        return self._uncommitted
+
+    def crlf_phantom(self, info):
+        return False
+
     def merge_conflicts_with_base(self, git_root, branch):
         return self._merge_conflicts
 
@@ -149,6 +160,28 @@ class TestAssignWithWorktree:
         assert orch._notify_lead.called
         warn = orch._notify_lead.call_args[0][1]
         assert "shared cwd" in warn
+
+    def test_fallback_warns_how_many_panes_share_the_cwd(self, orch, monkeypatch):
+        """#494 — once a pane degrades to the shared cwd, the Lead needs to
+        know how many OTHER panes are already sitting in that same cwd
+        (the ones it can actually collide with), not just that isolation
+        failed."""
+        fake = _FakeMgr(info=None, reason="git worktree add ล้มเหลว — ใช้ shared cwd แทน")
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+
+        sibling1 = MagicMock()
+        sibling1._session_cwd = "/repo/api"
+        sibling2 = MagicMock()
+        sibling2._session_cwd = "/repo/api"
+        orch._project_panes("proj")["backend#1"] = sibling1
+        orch._project_panes("proj")["backend#2"] = sibling2
+
+        orch._assign_with_worktree(
+            "backend#3", "/repo/api", "build Y", False, False, 0, False, "proj"
+        )
+        warn = orch._notify_lead.call_args[0][1]
+        assert "อีก 2 pane" in warn
 
     def test_fallback_when_no_cwd(self, orch, monkeypatch):
         monkeypatch.setattr(orch_mod, "default_cwd_for_role", lambda *a, **k: None)

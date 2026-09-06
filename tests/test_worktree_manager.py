@@ -171,6 +171,72 @@ class TestCreate:
         assert "worktree add" in reason
         assert "checked out elsewhere" in reason
 
+    # ── #494: retry on a branch/dir NAME collision before falling back ──
+
+    def test_create_retries_with_fresh_name_on_branch_collision(self):
+        """Parallel fan-out landed two panes on the same epoch-SECOND `ts`
+        (#494 repro) — the first `worktree add` collides on the branch name
+        that already exists; `create()` must mint a fresh name and retry
+        rather than degrading straight to the shared cwd."""
+        add_calls: list[list[str]] = []
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return _ok("/repo\n")
+            if "rev-parse" in args and "HEAD" in args:
+                return _ok("basesha123\n")
+            if "worktree" in args and "add" in args:
+                add_calls.append(args)
+                if len(add_calls) == 1:
+                    return _fail("fatal: a branch named 'wt/qa-1' already exists", 128)
+                return _ok("")
+            return _ok("")
+
+        info, reason = WorktreeManager(runner).create("/repo", "proj", "qa", 1)
+        assert reason == ""
+        assert info is not None
+        assert len(add_calls) == 2
+        # retried with a name different from the one that collided
+        assert info.branch != "wt/qa-1"
+
+    def test_create_falls_back_after_exhausting_collision_retries(self):
+        """Every retry still collides (pathological repo state) — must give
+        up after the bounded attempt count, not retry forever."""
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return _ok("/repo\n")
+            if "rev-parse" in args and "HEAD" in args:
+                return _ok("basesha123\n")
+            if "worktree" in args and "add" in args:
+                return _fail("fatal: a branch named 'x' already exists", 128)
+            return _ok("")
+
+        info, reason = WorktreeManager(runner).create("/repo", "proj", "qa", 1)
+        assert info is None
+        assert "already exists" in reason
+        assert "ใช้ shared cwd แทน" in reason
+
+    def test_create_does_not_retry_a_non_collision_failure(self):
+        """A failure that ISN'T a name collision (e.g. branch checked out
+        elsewhere, or a broken repo) can't be fixed by minting a new name —
+        must fall back immediately, not burn through retry attempts."""
+        add_calls: list[list[str]] = []
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return _ok("/repo\n")
+            if "rev-parse" in args and "HEAD" in args:
+                return _ok("basesha123\n")
+            if "worktree" in args and "add" in args:
+                add_calls.append(args)
+                return _fail("fatal: branch checked out elsewhere", 128)
+            return _ok("")
+
+        info, _reason = WorktreeManager(runner).create("/repo", "proj", "qa", 1)
+        assert info is None
+        assert len(add_calls) == 1  # no retry attempted
+
 
 # ── Inspect ─────────────────────────────────────────────────────────────────
 
@@ -206,6 +272,59 @@ class TestInspect:
     def test_uncommitted_count_zero_on_error(self):
         r = FakeRunner([(["status", "--porcelain"], _fail())])
         assert WorktreeManager(r).uncommitted_count(self._info()) == 0
+
+    # ── #496: phantom-aware real_* variants ─────────────────────────────
+
+    def test_real_dirty_false_when_clean(self):
+        r = FakeRunner([(["status", "--porcelain"], _ok(""))])
+        assert WorktreeManager(r).real_dirty(self._info()) is False
+
+    def test_real_dirty_true_for_genuine_tracked_change(self):
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M file.ts\n")),
+                (["diff", "HEAD", "--quiet"], _fail("", 1)),  # real content diff
+            ]
+        )
+        assert WorktreeManager(r).real_dirty(self._info()) is True
+        assert WorktreeManager(r).real_uncommitted_count(self._info()) == 1
+
+    def test_real_dirty_false_for_crlf_only_phantom(self):
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M file.ts\n")),
+                (["diff", "HEAD", "--quiet"], _ok("")),  # no real diff
+            ]
+        )
+        mgr = WorktreeManager(r)
+        assert mgr.real_dirty(self._info()) is False
+        assert mgr.real_uncommitted_count(self._info()) == 0
+        assert mgr.crlf_phantom(self._info()) is True
+
+    def test_untracked_file_is_always_real_even_alongside_phantom(self):
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M file.ts\n?? new.ts\n")),
+                (["diff", "HEAD", "--quiet"], _ok("")),  # the tracked "M" is phantom
+            ]
+        )
+        mgr = WorktreeManager(r)
+        # the untracked file was never committed — always real, regardless
+        # of the tracked entry's diff status
+        assert mgr.real_dirty(self._info()) is True
+        assert mgr.real_uncommitted_count(self._info()) == 1
+        assert mgr.crlf_phantom(self._info()) is False  # some dirt IS real
+
+    def test_diff_probe_failure_is_fail_safe_not_clean(self):
+        # an unrecognized exit code (probe itself broken) must never be
+        # read as "no real diff" — #261's own established direction.
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M file.ts\n")),
+                (["diff", "HEAD", "--quiet"], _fail("git error", 129)),
+            ]
+        )
+        assert WorktreeManager(r).real_dirty(self._info()) is True
 
     def test_merge_conflicts_with_base_true_when_markers_present(self):
         r = FakeRunner(
@@ -613,12 +732,32 @@ class TestSafeRemove:
         return WorktreeInfo(path="/w", branch="wt/x-1", base_sha="base", git_root="/repo")
 
     def test_refuses_dirty_worktree(self):
-        r = FakeRunner([(["status", "--porcelain"], _ok(" M work.ts\n"))])
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M work.ts\n")),
+                (["diff", "HEAD", "--quiet"], _fail("", 1)),  # a REAL content diff
+            ]
+        )
         removed, reason = WorktreeManager(r).safe_remove(self._info())
         assert removed is False
         assert "uncommitted" in reason
         # must NOT have attempted a remove — work is preserved
         assert not r.ran("worktree", "remove")
+
+    def test_removes_worktree_with_only_crlf_phantom_dirt(self):
+        # #496: `status --porcelain` flags a tracked "M" but the real diff
+        # against HEAD is empty (CRLF/smudge-filter metadata only) — must
+        # NOT be treated as uncommitted work blocking removal.
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok(" M work.ts\n")),
+                (["diff", "HEAD", "--quiet"], _ok("")),  # no real diff
+                (["rev-list", "--count"], _ok("0\n")),
+            ]
+        )
+        removed, reason = WorktreeManager(r).safe_remove(self._info())
+        assert removed is True and reason == ""
+        assert r.ran("worktree", "remove")
 
     def test_removes_clean_empty_and_deletes_branch(self):
         r = FakeRunner(
@@ -852,6 +991,23 @@ class TestMergeProposal:
         assert "cleanup: `git" not in msg  # cleanup step no longer opens with raw git
         assert "takkub worktree clean" in msg
         assert "takkub worktree merge --role frontend" in msg
+
+    def test_crlf_phantom_note_shown_when_clean_only_because_of_it(self):
+        """#496 — dirty=False can mean genuinely clean OR "raw status was
+        dirty but it was all CRLF phantom"; the proposal should say so
+        briefly rather than looking silently clean."""
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        msg = build_merge_proposal(
+            "backend",
+            info,
+            2,
+            " src/x.ts | 3 +++",
+            dirty=False,
+            merge_conflicts=False,
+            crlf_phantom=True,
+        )
+        assert "พร้อม merge" in msg
+        assert "CRLF" in msg
 
     def test_diffstat_and_file_list_not_duplicated_from_digest(self):
         """#464 — the digest bullet `done()` sends for the same event already
@@ -1260,9 +1416,35 @@ class TestListIsolated:
         assert all(r["dirty"] is False for r in rows)
 
     def test_dirty_flag_surfaces(self):
-        mgr = WorktreeManager(self._runner(extra=[(["status", "--porcelain"], _ok(" M x.ts\n"))]))
+        # #496: "dirty" is the phantom-filtered flag now — a REAL tracked
+        # change also needs `diff HEAD --quiet` to report a genuine diff
+        # (nonzero exit) for the row to come back dirty.
+        mgr = WorktreeManager(
+            self._runner(
+                extra=[
+                    (["status", "--porcelain"], _ok(" M x.ts\n")),
+                    (["diff", "HEAD", "--quiet"], _fail("", 1)),
+                ]
+            )
+        )
         rows = mgr.list_isolated("/repo")
         assert all(r["dirty"] for r in rows)
+
+    def test_dirty_flag_ignores_crlf_phantom(self):
+        # #496 repro: `status --porcelain` shows a tracked "M" but the real
+        # content diff against HEAD is empty (Windows CRLF/smudge-filter
+        # metadata only) — must NOT surface as dirty (which would KEEP the
+        # worktree in `clean_isolated` for no real reason).
+        mgr = WorktreeManager(
+            self._runner(
+                extra=[
+                    (["status", "--porcelain"], _ok(" M x.ts\n")),
+                    (["diff", "HEAD", "--quiet"], _ok("")),
+                ]
+            )
+        )
+        rows = mgr.list_isolated("/repo")
+        assert all(r["dirty"] is False for r in rows)
 
 
 class TestListOrphans:
@@ -1560,9 +1742,30 @@ class TestMergeIsolated:
         assert not r.ran("worktree", "remove")  # left intact
 
     def test_dirty_worktree_refused(self):
-        r = self._runner(extra=[(["status", "--porcelain"], _ok(" M y.ts\n"))])
+        r = self._runner(
+            extra=[
+                (["status", "--porcelain"], _ok(" M y.ts\n")),
+                (["diff", "HEAD", "--quiet"], _fail("", 1)),  # a REAL content diff
+            ]
+        )
         ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
         assert not ok and "uncommitted" in msg
+
+    def test_crlf_phantom_dirt_does_not_block_merge(self, monkeypatch):
+        # #496: a tracked "M" that's pure CRLF/line-ending metadata (real
+        # diff against HEAD empty) must not refuse the merge as "uncommitted
+        # changes" — the pane has nothing real left to commit.
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(
+            extra=[
+                (["status", "--porcelain"], _ok(" M y.ts\n")),
+                (["diff", "HEAD", "--quiet"], _ok("")),  # no real diff
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok, msg
 
     def test_unknown_branch_refused(self):
         ok, msg = WorktreeManager(self._runner()).merge_isolated("/repo", "wt/ghost-1")
