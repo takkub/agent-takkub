@@ -897,6 +897,29 @@ class TestPluginsMatrixView:
         )
         dlg.deleteLater()
 
+    def test_token_cost_hint_and_per_column_estimate_shown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#516: the Tools/Plugins tab surfaces a boot-token cost estimate
+        next to each marketplace's name, plus a one-line hint that an
+        enabled plugin is loaded into every pane of that role at spawn."""
+        from PyQt6.QtWidgets import QLabel
+
+        monkeypatch.setattr(
+            settings_window.pane_tools_dialog, "discover_marketplaces", lambda: ["pordee"]
+        )
+        monkeypatch.setattr(
+            settings_window.pane_tools_dialog,
+            "marketplace_token_costs",
+            lambda items: {item: 1234 for item in items},
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
+        view = dlg._stack.widget(settings_window.VIEW_MCP_MATRIX).widget()
+        labels = [lbl.text() for lbl in view.findChildren(QLabel)]
+        assert any("โหลดเข้าทุก pane" in t for t in labels)
+        assert any("tok" in t for t in labels)
+        dlg.deleteLater()
+
 
 class TestSkillMatrixView:
     """Role × skill toggle grid (#103 phase 4) — persists to skill_policy,
@@ -923,6 +946,30 @@ class TestSkillMatrixView:
         assert "gemini" in dlg._skill_toggles
         assert "shell" not in dlg._skill_toggles
         assert dlg._skill_matrix_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_matrix_header_shows_per_skill_token_cost(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """#516: each skill column's header shows an estimated boot-token
+        cost, read straight from that skill's own SKILL.md."""
+        from PyQt6.QtWidgets import QLabel
+
+        skill_md = tmp_path / "SKILL.md"
+        skill_md.write_text("a" * 38, encoding="utf-8")
+        monkeypatch.setattr(
+            settings_window.skill_scan,
+            "scan_skills",
+            lambda roots: [
+                __import__("agent_takkub.skill_scan", fromlist=["SkillInfo"]).SkillInfo(
+                    name="sized-skill", description="d", path=skill_md
+                )
+            ],
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        matrix_view = dlg._stack.widget(settings_window.VIEW_SKILL_CATALOG).widget().widget(1)
+        labels = [lbl.text() for lbl in matrix_view.findChildren(QLabel)]
+        assert any("tok" in t for t in labels)
         dlg.deleteLater()
 
     def test_empty_catalog_shows_empty_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -998,7 +1045,9 @@ class TestSkillCatalogView:
             if dlg._catalog_list.item(i).data(Qt.ItemDataRole.UserRole) == "cockpit-ui-style"
         )
         dlg._catalog_list.setCurrentRow(row)
-        assert dlg._catalog_name.text() == "cockpit-ui-style"
+        # #516: name is followed by an estimated boot-token cost badge
+        assert dlg._catalog_name.text().startswith("cockpit-ui-style")
+        assert "tok" in dlg._catalog_name.text()
         assert "design system" in dlg._catalog_desc.text()
         # frontend's doc mentions the skill name → surfaced as a referencing role
         assert "Frontend" in dlg._catalog_roles.text()

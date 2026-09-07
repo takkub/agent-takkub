@@ -20,6 +20,7 @@ from agent_takkub.pane_tools_dialog import (
     diff_role_items,
     discover_marketplace_plugins,
     discover_marketplaces,
+    marketplace_token_costs,
     matrix_roles,
     matrix_to_role_items,
     parse_install_form,
@@ -218,3 +219,26 @@ def test_matrix_roles_includes_registered_custom_role():
         assert "sales-ops-test" in matrix_roles()
     finally:
         roles_mod.unregister_role("sales-ops-test")
+
+
+# ---------------------------------------------------------------------------
+# marketplace_token_costs (#516 — Tools page per-plugin token cost)
+# ---------------------------------------------------------------------------
+
+
+def test_marketplace_token_costs_sums_skill_and_hook_files(tmp_path):
+    cache_root = tmp_path / "plugins" / "cache"
+    mp_dir = cache_root / "pordee" / "some-plugin"
+    (mp_dir / "skills" / "a-skill").mkdir(parents=True)
+    (mp_dir / "skills" / "a-skill" / "SKILL.md").write_text("a" * 38, encoding="utf-8")
+    (mp_dir / "hooks").mkdir()
+    (mp_dir / "hooks" / "pre.py").write_text("a" * 38, encoding="utf-8")
+    with patch("agent_takkub.config.default_claude_config_dir", return_value=tmp_path):
+        costs = marketplace_token_costs(["pordee"])
+    assert costs == {"pordee": 20}
+
+
+def test_marketplace_token_costs_missing_marketplace_is_zero(tmp_path):
+    with patch("agent_takkub.config.default_claude_config_dir", return_value=tmp_path):
+        costs = marketplace_token_costs(["never-installed"])
+    assert costs == {"never-installed": 0}
