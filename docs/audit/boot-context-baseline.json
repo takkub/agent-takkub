@@ -4,7 +4,7 @@
   "project": "agent-takkub",
   "allowance_ratio": 1.15,
   "roles": {
-    "frontend": { "total_chars": 20937, "total_est_tokens": 5234 },
+    "frontend": { "total_chars": 11552, "total_est_tokens": 2888 },
     "backend": { "total_chars": 19409, "total_est_tokens": 4852 },
     "mobile": { "total_chars": 20891, "total_est_tokens": 5222 },
     "devops": { "total_chars": 23726, "total_est_tokens": 5931 },

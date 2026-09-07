@@ -130,6 +130,7 @@ from . import (
     skill_policy,
     skill_scan,
     theme_settings,
+    token_estimate,
     user_profile,
 )
 from . import roles as roles_mod
@@ -3279,6 +3280,7 @@ class SettingsWindow(
         matrix: dict[str, dict[str, bool]],
         *,
         column_category: str = "",
+        item_costs: dict[str, int] | None = None,
     ) -> dict[str, dict[str, cockpit_theme.ToggleSwitch]]:
         """Fill *grid* (already parented to a panel widget) with a role×item
         toggle matrix: col 0 = 180px role-chip column, cols 1..N = 1fr item
@@ -3290,7 +3292,12 @@ class SettingsWindow(
         / "Plugin"), so the matrix doesn't rely on the reader already
         knowing what the sidebar section implied. Each role row also gets a
         hairline bottom-border (inline, not a new global QSS class) so the
-        eye can track a row across many toggle columns."""
+        eye can track a row across many toggle columns.
+
+        *item_costs* (#516) — optional estimated boot-token cost per item
+        (see `token_estimate`/`pane_tools_dialog.marketplace_token_costs`),
+        shown as a third header line next to the item's name so an operator
+        sees what enabling it actually costs every pane of that role."""
         self._clear_grid(grid)
         panel = grid.parentWidget()
         grid.setColumnMinimumWidth(0, 160)
@@ -3299,7 +3306,10 @@ class SettingsWindow(
         role_header.setObjectName("matrixHeaderCell")
         grid.addWidget(role_header, 0, 0)
         for col, item in enumerate(items, start=1):
-            header = self._build_matrix_column_header(item, column_category, panel)
+            cost = (item_costs or {}).get(item)
+            header = self._build_matrix_column_header(
+                item, column_category, panel, cost_tokens=cost
+            )
             grid.addWidget(header, 0, col)
             grid.setColumnStretch(col, 1)
 
@@ -3331,9 +3341,17 @@ class SettingsWindow(
                 boxes[role][item] = toggle
         return boxes
 
-    def _build_matrix_column_header(self, item: str, category: str, parent: QWidget) -> QWidget:
+    def _build_matrix_column_header(
+        self,
+        item: str,
+        category: str,
+        parent: QWidget,
+        *,
+        cost_tokens: int | None = None,
+    ) -> QWidget:
         """One matrix header cell: item name + a muted category sublabel
-        underneath (design review 2026-07-24 #3)."""
+        underneath (design review 2026-07-24 #3), plus an estimated
+        boot-token cost line when *cost_tokens* is given (#516)."""
         cell = QWidget(parent)
         lay = QVBoxLayout(cell)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3343,6 +3361,15 @@ class SettingsWindow(
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_lbl.setToolTip(item)
         lay.addWidget(name_lbl)
+        if cost_tokens is not None:
+            cost_lbl = QLabel(token_estimate.format_tokens(cost_tokens), cell)
+            cost_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cost_lbl.setToolTip(
+                "Estimated boot-context cost — every pane of a role with this "
+                "enabled loads it at spawn (#516)"
+            )
+            cost_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_FAINT}; font-size: 10px;")
+            lay.addWidget(cost_lbl)
         if category:
             cat_lbl = QLabel(category, cell)
             cat_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3511,6 +3538,17 @@ class SettingsWindow(
         banner.setWordWrap(True)
         lay.addWidget(banner)
 
+        # #516: a plugin's per-role toggle isn't free — every pane of a role
+        # with it enabled loads it at spawn, every time.
+        cost_hint = QLabel(
+            "plugin ที่เปิดถูกโหลดเข้าทุก pane ของตำแหน่งนี้ตอนเริ่ม — "
+            "ตัวเลขใต้ชื่อคือ token cost โดยประมาณต่อการเปิด (#516)",
+            view,
+        )
+        cost_hint.setObjectName("panelHint")
+        cost_hint.setWordWrap(True)
+        lay.addWidget(cost_hint)
+
         self._plugins_empty = QLabel(
             "ไม่พบ marketplace plugin — ยังไม่มีอะไรใน installed_plugins.json", view
         )
@@ -3555,8 +3593,14 @@ class SettingsWindow(
         }
         self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
         matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_plugin_items)
+        costs = pane_tools_dialog.marketplace_token_costs(items)
         self._plugin_toggles = self._populate_matrix_grid(
-            self._plugins_grid, _matrix_roles(), items, matrix, column_category="Plugin"
+            self._plugins_grid,
+            _matrix_roles(),
+            items,
+            matrix,
+            column_category="Plugin",
+            item_costs=costs,
         )
         self._plugins_empty.setVisible(not items)
         self._plugins_matrix_panel.setVisible(bool(items))
@@ -3901,7 +3945,8 @@ class SettingsWindow(
         skill = next((s for s in self._catalog_skills if s.name == name), None)
         if skill is None:
             return
-        self._catalog_name.setText(skill.name)
+        cost = token_estimate.estimate_file_tokens(skill.path)
+        self._catalog_name.setText(f"{skill.name}  ·  {token_estimate.format_tokens(cost)}")
         self._catalog_desc.setText(skill.description or "(ไม่มี description ใน frontmatter)")
         refs = self._roles_referencing_skill(skill.name)
         if refs:
@@ -4024,16 +4069,20 @@ class SettingsWindow(
         return view
 
     def _reload_skill_matrix(self) -> None:
-        items = [
-            s.name
+        skills = [
+            s
             for s in skill_scan.scan_skills(self._new_role_skill_roots())
             if skill_policy._validate_name(s.name)
         ]
+        items = [s.name for s in skills]
+        # #516: per-skill boot-token cost, read straight from each skill's own
+        # SKILL.md — cheap and exact (no marketplace-cache walk needed here).
+        costs = {s.name: token_estimate.estimate_file_tokens(s.path) for s in skills}
         roles = skill_policy.skill_matrix_roles()
         self._orig_skill_items = {role: skill_policy.effective_skills(role) for role in roles}
         matrix = pane_tools_dialog.build_matrix(roles, items, self._orig_skill_items)
         self._skill_toggles = self._populate_matrix_grid(
-            self._skill_matrix_grid, roles, items, matrix
+            self._skill_matrix_grid, roles, items, matrix, item_costs=costs
         )
         self._skill_matrix_empty.setVisible(not items)
 
