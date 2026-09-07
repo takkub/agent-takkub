@@ -5,12 +5,12 @@
   "allowance_ratio": 1.15,
   "roles": {
     "frontend": { "total_chars": 11552, "total_est_tokens": 2888 },
-    "backend": { "total_chars": 19409, "total_est_tokens": 4852 },
-    "mobile": { "total_chars": 20891, "total_est_tokens": 5222 },
-    "devops": { "total_chars": 23726, "total_est_tokens": 5931 },
-    "qa": { "total_chars": 24449, "total_est_tokens": 6111 },
-    "reviewer": { "total_chars": 19438, "total_est_tokens": 4859 },
-    "critic": { "total_chars": 22607, "total_est_tokens": 5651 }
+    "backend": { "total_chars": 11388, "total_est_tokens": 2847 },
+    "mobile": { "total_chars": 11839, "total_est_tokens": 2959 },
+    "devops": { "total_chars": 12997, "total_est_tokens": 3248 },
+    "qa": { "total_chars": 13599, "total_est_tokens": 3399 },
+    "reviewer": { "total_chars": 11885, "total_est_tokens": 2971 },
+    "critic": { "total_chars": 12423, "total_est_tokens": 3105 }
   },
   "native_project_memory": { "chars": 14743, "est_tokens": 3685 }
 }

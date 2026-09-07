@@ -1,6 +1,7 @@
 # Common specialist rules (#516 token diet)
 
-Shared by every non-Lead role file (`frontend`, `codex`, `gemini`, `opencode`,
+Shared by every non-Lead role file (`frontend`, `backend`, `mobile`,
+`devops`, `qa`, `reviewer`, `critic`, `codex`, `gemini`, `opencode`,
 `kimi`, `cursor` today — other specialist roles can point here too). Each
 role's core `.claude/agents/<role>.md` carries only a one-line pointer into
 whichever section below applies; this file is **not staged into any pane's
