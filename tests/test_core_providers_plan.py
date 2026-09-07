@@ -47,6 +47,13 @@ def test_account_env_overrides_codex_sets_codex_home():
     assert got == {"CODEX_HOME": "/home/u/codex-b"}
 
 
+def test_account_env_overrides_kimi_sets_share_dir():
+    # KIMI_SHARE_DIR moves kimi-cli's whole share dir (proven 2026-09-07,
+    # see config._PROVIDER_HOME_SUBDIRS) — one var, so per-account works.
+    got = account_env_overrides("kimi", _account(provider="kimi", config_dir="/home/u/kimi-b"))
+    assert got == {"KIMI_SHARE_DIR": "/home/u/kimi-b"}
+
+
 def test_account_env_overrides_empty_for_provider_with_no_isolation_knob():
     got = account_env_overrides("gemini", _account(provider="gemini", config_dir="/whatever"))
     assert got == {}

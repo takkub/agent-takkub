@@ -18,7 +18,13 @@ authoritative, typed Pydantic source, not a guess:
                                                       — per-turn event log
 
 `~/.kimi` is overridable via the `KIMI_SHARE_DIR` env var
-(`kimi_cli/share.py::get_share_dir`).
+(`kimi_cli/share.py::get_share_dir` — re-verified 1.50.0, 2026-09-07:
+EVERYTHING routes through it, credentials and mcp-oauth included, and a
+live ConPTY probe confirmed zero writes outside the override dir). An
+installed cockpit points it at `config.provider_home_env("kimi")`
+(`DATA_HOME/providers/kimi/default`) on both the spawn side
+(`pane_env.inject_provider_home_env`) and this read side
+(`kimi_share_dir` below).
 
 wire.jsonl line shape (`kimi_cli/wire/file.py::WireMessageRecord`, confirmed
 against a real recorded line from a genuine prior teammate task on this
@@ -73,7 +79,22 @@ _USER_TURN_TYPES = {"TurnBegin", "SteerInput"}
 
 
 def kimi_share_dir() -> Path:
-    """Return Kimi CLI's share directory (`~/.kimi`, or `$KIMI_SHARE_DIR`)."""
+    """Return the share dir the cockpit's kimi panes actually use.
+
+    Precedence — isolation-first, same contract as `codex_helper.codex_home`:
+
+    1. ``config.provider_home_dir("kimi", "KIMI_SHARE_DIR")`` (installed
+       build) — the same value ``pane_env.inject_provider_home_env`` exports
+       into the pane, so this reader can never point somewhere no pane
+       writes to (silent-blank-phone class of bug).
+    2. an inherited ``KIMI_SHARE_DIR`` (dev checkout, or a user who set it).
+    3. kimi-cli's own default, ``~/.kimi``.
+    """
+    from . import config
+
+    isolated = config.provider_home_dir("kimi", "KIMI_SHARE_DIR")
+    if isolated is not None:
+        return isolated
     override = os.environ.get("KIMI_SHARE_DIR", "").strip()
     if override:
         return Path(override)

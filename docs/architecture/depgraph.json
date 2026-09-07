@@ -520,6 +520,7 @@
         "agent_takkub.headless_window",
         "agent_takkub.hook_wiring",
         "agent_takkub.issues",
+        "agent_takkub.kimi_helper",
         "agent_takkub.lead_bash_audit",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
@@ -587,7 +588,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 101,
+      "fan_in": 102,
       "fan_out": 2
     },
     {
@@ -2679,13 +2680,15 @@
     },
     {
       "module": "agent_takkub.kimi_helper",
-      "imports": [],
+      "imports": [
+        "agent_takkub.config"
+      ],
       "imported_by": [
         "agent_takkub.core.conversation.ingest.kimi_adapter",
         "agent_takkub.token_meter"
       ],
       "fan_in": 2,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.lead_bash_audit",
