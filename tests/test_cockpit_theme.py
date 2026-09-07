@@ -223,3 +223,121 @@ class TestWidgetHelpers:
         compact_chip = cockpit_theme.gold_soft_chip("BUILT-IN", compact=True)
         assert "10px" in compact_chip.styleSheet()
         assert compact_chip.styleSheet() != default_chip.styleSheet()
+
+
+@pytest.fixture
+def _restore_dark_variant():
+    """Any test that switches the theme variant must leave the module back on
+    the dark set — the tokens are rebindable module globals shared by the
+    whole test session."""
+    yield
+    cockpit_theme.apply_variant("dark")
+
+
+class TestThemeVariants:
+    """#506 — two full token sets + in-place variant switching."""
+
+    def test_light_and_dark_token_sets_have_identical_keys(self) -> None:
+        assert set(cockpit_theme.DARK_TOKENS) == set(cockpit_theme.LIGHT_TOKENS)
+
+    def test_every_themed_token_is_a_module_attribute(self) -> None:
+        for name in cockpit_theme._THEMED_TOKEN_NAMES:
+            assert hasattr(cockpit_theme, name), name
+
+    def test_dark_tokens_match_the_module_defaults(self) -> None:
+        """The module-level constants ARE the dark set — DARK_TOKENS is a
+        snapshot of them, so on a fresh (dark) module they must agree."""
+        cockpit_theme.apply_variant("dark")
+        for name, value in cockpit_theme.DARK_TOKENS.items():
+            assert getattr(cockpit_theme, name) == value, name
+
+    def test_grounds_and_text_actually_differ_between_variants(self) -> None:
+        """A light theme that equals the dark theme on its core surfaces is
+        not a light theme. (Identity tokens like ROLE_COLORS are deliberately
+        shared and unthemed — not asserted here.)"""
+        for name in (
+            "GROUND_BODY",
+            "GROUND_WINDOW",
+            "GROUND_PANEL",
+            "TEXT_PRIMARY",
+            "TEXT_MUTED",
+            "BORDER_HAIRLINE",
+            "ACCENT_GOLD",
+            "ACCENT_GOLD_TEXT",
+        ):
+            assert cockpit_theme.DARK_TOKENS[name] != cockpit_theme.LIGHT_TOKENS[name], name
+
+    def test_apply_variant_rebinds_and_restores(self, _restore_dark_variant) -> None:
+        cockpit_theme.apply_variant("light")
+        assert cockpit_theme.current_variant() == "light"
+        assert cockpit_theme.GROUND_WINDOW == cockpit_theme.LIGHT_TOKENS["GROUND_WINDOW"]
+        cockpit_theme.apply_variant("dark")
+        assert cockpit_theme.current_variant() == "dark"
+        assert cockpit_theme.GROUND_WINDOW == cockpit_theme.DARK_TOKENS["GROUND_WINDOW"]
+
+    def test_apply_variant_rejects_unknown(self) -> None:
+        with pytest.raises(ValueError):
+            cockpit_theme.apply_variant("neon")
+
+    def test_stylesheet_follows_the_bound_variant(self, _restore_dark_variant) -> None:
+        cockpit_theme.apply_variant("light")
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        assert cockpit_theme.LIGHT_TOKENS["GROUND_WINDOW"] in qss
+        assert cockpit_theme.DARK_TOKENS["GROUND_WINDOW"] not in qss
+        # Per-variant arrow SVGs — the dark glyphs are invisible on light inputs.
+        assert "spin-up-light.svg" in qss
+        cockpit_theme.apply_variant("dark")
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        assert cockpit_theme.DARK_TOKENS["GROUND_WINDOW"] in qss
+        assert "-light.svg" not in qss
+
+    def test_token_meter_fallback_matches_dark_usage_tokens(self) -> None:
+        """token_meter._USAGE_FALLBACK must mirror the dark USAGE_* tokens —
+        it exists only because a static cockpit_theme import from token_meter
+        would put PyQt6 under agent_takkub.core (core-is-bottom-layer)."""
+        from agent_takkub import token_meter
+
+        assert token_meter._USAGE_FALLBACK == (
+            cockpit_theme.DARK_TOKENS["USAGE_NEUTRAL"],
+            cockpit_theme.DARK_TOKENS["USAGE_WARN"],
+            cockpit_theme.DARK_TOKENS["USAGE_HIGH"],
+            cockpit_theme.DARK_TOKENS["USAGE_CRIT"],
+        )
+
+    def test_light_variant_arrow_svgs_exist_on_disk(self) -> None:
+        icons_dir = Path(cockpit_theme.__file__).parent / "static" / "icons"
+        for name in (
+            "spin-up-light.svg",
+            "spin-down-light.svg",
+            "spin-up-disabled-light.svg",
+            "spin-down-disabled-light.svg",
+            "combo-down-on-light.svg",
+        ):
+            assert (icons_dir / name).exists(), name
+        nav_dir = icons_dir / "nav"
+        for base in ("diamond", "grid", "pipeline", "star", "target", "user"):
+            for tone in ("muted", "gold"):
+                assert (nav_dir / f"nav-{base}-{tone}-light.svg").exists(), f"{base}-{tone}"
+
+    def test_retheme_open_windows_calls_hooks_and_survives_failures(
+        self, _restore_dark_variant
+    ) -> None:
+        from PyQt6.QtWidgets import QWidget
+
+        called: list[str] = []
+
+        class _Good(QWidget):
+            def retheme(self) -> None:
+                called.append("good")
+
+        class _Bad(QWidget):
+            def retheme(self) -> None:
+                raise RuntimeError("boom")
+
+        good, bad, plain = _Good(), _Bad(), QWidget()
+        try:
+            cockpit_theme.retheme_open_windows()
+            assert "good" in called  # a failing hook must not stop the others
+        finally:
+            for w in (good, bad, plain):
+                w.deleteLater()

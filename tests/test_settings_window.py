@@ -93,15 +93,16 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_fifteen_stacked_views(self) -> None:
+    def test_has_sixteen_stacked_views(self) -> None:
         # Settings-nav declutter (2026-08-24): 9 nav-visible views + New Role
         # (reached via its own button) + 4 ADVANCED-section views (Routing/
         # Brain/Scheduler/Performance) + 1 placeholder slot = 15. The slot at
         # VIEW_CORE_V2_ACCOUNTS is an empty placeholder since #505 merged
         # Accounts & Pools into the unified Accounts page — kept so the
         # VIEW_* indices after it don't shift; `_goto_view` redirects it.
+        # +1 (2026-09-07, #506): the top-level General view (theme mode) = 16.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 15
+        assert dlg._stack.count() == 16
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:

@@ -127,6 +127,7 @@ from . import (
     skill_audit,
     skill_policy,
     skill_scan,
+    theme_settings,
     user_profile,
 )
 from . import roles as roles_mod
@@ -172,6 +173,7 @@ VIEW_CORE_V2_ROUTING = 11
 VIEW_CORE_V2_BRAIN = 12
 VIEW_CORE_V2_SCHEDULER = 13
 VIEW_PERFORMANCE = 14
+VIEW_GENERAL = 15
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -181,6 +183,9 @@ VIEW_PERFORMANCE = 14
 # (`_ADVANCED_SECTION`/`_build_sidebar`) — everything in it is a real, still-
 # live control, just not one most operators touch often.
 _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
+    # General first — theme + everyday knobs live at top level, never under
+    # ADVANCED (#506 user directive "ไม่ซุกใน Advanced").
+    (VIEW_GENERAL, "General", "GENERAL"),
     (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "PIPELINE"),
     (VIEW_TEMPLATES, "Templates", "PIPELINE"),
     (VIEW_PROVIDERS_ROLES, "Providers & Roles", "ROLE"),
@@ -234,9 +239,13 @@ _CORE_V2_VIEWS: frozenset[int] = frozenset(
 # (`settings_knowledge_design`'s own module docstring).
 _KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset({VIEW_KNOWLEDGE})
 # VIEW_USERS (the #505 Accounts page) writes through immediately on add/
-# remove/login, and its API-override tab has its own Save button — same
-# "never the footer transaction" shape as the Core V2 pages.
-_NO_FOOTER_SAVE_VIEWS: frozenset[int] = _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | {VIEW_USERS}
+# remove/login, and its API-override tab has its own Save button. General
+# (#506) also writes through immediately (the theme switch applies + saves
+# on change — that IS the apply). Both are "never the footer transaction",
+# same shape as the Core V2 pages.
+_NO_FOOTER_SAVE_VIEWS: frozenset[int] = (
+    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | {VIEW_USERS, VIEW_GENERAL}
+)
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
 # (⌘ ◇ ◉ ⊞ ✦ ♙) were ported 1:1 from the web mockup but IBM Plex Sans/Mono
@@ -247,6 +256,7 @@ _NO_FOOTER_SAVE_VIEWS: frozenset[int] = _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS
 # Two-tone per icon (muted/gold) so the active nav item still reads as
 # accented without depending on font color inheritance through QIcon.
 _NAV_ICON_NAMES: dict[int, str] = {
+    VIEW_GENERAL: "diamond",
     VIEW_PIPELINE_BUILDER: "pipeline",
     VIEW_TEMPLATES: "diamond",
     VIEW_PROVIDERS_ROLES: "target",
@@ -269,10 +279,17 @@ _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
 def _nav_icon(view_idx: int, *, active: bool) -> QIcon:
     name = _NAV_ICON_NAMES.get(view_idx, "diamond")
     tone = "gold" if active else "muted"
-    return QIcon(str(_NAV_ICONS_DIR / f"nav-{name}-{tone}.svg"))
+    # Per-variant icon files (#506): SVG fills are baked in, and the dark-set
+    # glyphs are near-invisible on the light sidebar.
+    suffix = "-light" if cockpit_theme.current_variant() == "light" else ""
+    return QIcon(str(_NAV_ICONS_DIR / f"nav-{name}-{tone}{suffix}.svg"))
 
 
 _VIEW_HEADERS: dict[int, tuple[str, str]] = {
+    VIEW_GENERAL: (
+        "General",
+        "การตั้งค่าทั่วไปของ cockpit — ธีมสี (ตามระบบ/สว่าง/มืด) มีผลทันทีและจำค่าไว้",
+    ),
     VIEW_PIPELINE_BUILDER: ("Pipeline Builder", "ลาก-วาง hop และ role ใน pipeline template"),
     VIEW_TEMPLATES: ("Templates", "จัดการ pipeline template ที่บันทึกไว้"),
     VIEW_PROVIDERS_ROLES: (
@@ -1106,6 +1123,7 @@ class SettingsWindow(
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_general_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -1407,6 +1425,81 @@ class SettingsWindow(
             )
         self._clear_dirty()
         self.accept()
+
+    # ──────────────────────────────────────────────────────────
+    # view: General (theme mode — write-through, applies live, #506)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_general_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(14)
+
+        panel = QWidget(view)
+        panel.setObjectName("panel")
+        panel_lay = QVBoxLayout(panel)
+        panel_lay.setContentsMargins(16, 16, 16, 16)
+        panel_lay.setSpacing(8)
+
+        title = QLabel("ธีมสี (Theme)", panel)
+        title.setObjectName("panelTitle")
+        panel_lay.addWidget(title)
+
+        self._theme_mode_combo = QComboBox(panel)
+        for key, label in (
+            ("system", "ตามระบบ (System)"),
+            ("light", "สว่าง (Light)"),
+            ("dark", "มืด (Dark)"),
+        ):
+            self._theme_mode_combo.addItem(label, key)
+        idx = self._theme_mode_combo.findData(theme_settings.load())
+        if idx >= 0:
+            self._theme_mode_combo.setCurrentIndex(idx)
+        self._theme_mode_combo.currentIndexChanged.connect(self._on_theme_mode_changed)
+        panel_lay.addWidget(self._theme_mode_combo)
+
+        hint = QLabel(
+            "มีผลทันทีและจำค่าไว้ · terminal ของแต่ละ pane คงพื้นมืดเสมอ "
+            "(สี ANSI ออกแบบมาสำหรับพื้นมืด) · ส่วนภายในหน้าต่างหลักที่วาดไว้แล้ว "
+            "(แถบ project/task ที่เปิดค้าง แถบแท็บของ pane) จะตามธีมครบ 100% หลัง restart cockpit",
+            panel,
+        )
+        hint.setObjectName("panelHint")
+        hint.setWordWrap(True)
+        panel_lay.addWidget(hint)
+
+        lay.addWidget(panel)
+        lay.addStretch(1)
+        return view
+
+    def _on_theme_mode_changed(self, _index: int) -> None:
+        """Write-through + live apply (#506): persist the picked mode, rebind
+        the token set, then re-apply QSS on every open window exposing a
+        ``retheme()`` hook (this dialog included). Deliberately never part of
+        the footer Save & Apply transaction — see _NO_FOOTER_SAVE_VIEWS."""
+        mode = self._theme_mode_combo.currentData() or theme_settings.DEFAULT_MODE
+        try:
+            theme_settings.save(mode)
+        except (OSError, ValueError):
+            # Persist failure must not block the live switch — the user still
+            # sees the theme they picked for this session.
+            pass
+        cockpit_theme.apply_variant(theme_settings.resolve_variant(mode))
+        cockpit_theme.retheme_open_windows()
+
+    def retheme(self) -> None:
+        """#506: re-apply this dialog's stylesheet + placeholder palette with
+        the currently-bound token set (called via
+        ``cockpit_theme.retheme_open_windows``)."""
+        fonts = self._fonts
+        self.setStyleSheet(cockpit_theme.build_stylesheet(str(fonts["sans"]), str(fonts["mono"])))
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(cockpit_theme.TEXT_MUTED))
+        self.setPalette(palette)
+        # Nav icons are per-variant SVG files — refresh the current tones.
+        for idx, btn in self._nav_buttons.items():
+            btn.setIcon(_nav_icon(idx, active=bool(btn.property("active"))))
 
     # ──────────────────────────────────────────────────────────
     # view: Performance (persisted + live-applied by the caller)

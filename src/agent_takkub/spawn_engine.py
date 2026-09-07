@@ -2029,11 +2029,13 @@ class SpawnEngineMixin:
             # OS-wide default home, so a hand-run `codex` here read/wrote a
             # DIFFERENT config.toml than the one the user's isolated codex
             # teammate pane used — edits made against one never took effect
-            # against the other. Loop mirrors `doctor.check_provider_isolation`'s
-            # `("codex", "opencode")` — the only two providers with a known
-            # isolation knob; gemini/kimi/cursor have none (PROVIDER_ISOLATION_GAPS)
+            # against the other. Loop comes from `config.isolated_providers()`
+            # (codex/opencode/kimi today) — the providers with a proven
+            # isolation knob; gemini/cursor have none (PROVIDER_ISOLATION_GAPS)
             # so injecting for them would be a no-op anyway.
-            for _isolated_provider in ("codex", "opencode"):
+            from .config import isolated_providers as _isolated_providers
+
+            for _isolated_provider in _isolated_providers():
                 inject_provider_home_env(env, _isolated_provider)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")

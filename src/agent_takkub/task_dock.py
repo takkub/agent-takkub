@@ -11,7 +11,7 @@ free of any Qt import so they're unit-testable without a QApplication; only
 `TaskDockWidget` itself touches PyQt.
 
 Visuals (A8-polish) match the left PROJECTS sidebar's design language
-(`project_nav._SIDEBAR_QSS`/`_ProjectRow`): dark card background, rounded
+(`project_nav._sidebar_qss()`/`_ProjectRow`): themed card background, rounded
 hover/selected rows, and the same deterministic avatar coloring — reused
 directly from `project_nav` (and `token_meter.usage_color` for badge/bar
 color) so the same project shows the same avatar tint in both places.
@@ -99,7 +99,10 @@ def _clamp_label(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-_DOCK_QSS = f"""
+def _dock_qss() -> str:
+    # (#506) built per call, not at import — an import-time f-string froze the
+    # dark token values before app.py's apply_variant() could ever run.
+    return f"""
 #taskDockRoot {{
     background: {cockpit_theme.GROUND_SIDEBAR};
 }}
@@ -624,7 +627,7 @@ class TaskDockWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("taskDockRoot")
-        self.setStyleSheet(_DOCK_QSS)
+        self.setStyleSheet(_dock_qss())
 
         # The dock only ever shows one project's ledger — the active tab's
         # (set via `set_project`), not every open project mixed together.

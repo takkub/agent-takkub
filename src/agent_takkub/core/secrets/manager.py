@@ -10,11 +10,13 @@ Nothing is migrated: every ref still points at the file/Keychain/Credential
 Manager location the provider CLI itself already writes to ("ยังไม่ย้าย
 credential" — the blueprint requirement this phase follows).
 
-Providers with no confirmed credential-file location (gemini/opencode/kimi/
-cursor — see `doctor.check_provider_auth`'s "unknown" INFO finding and
-`config.PROVIDER_ISOLATION_GAPS`) have no backend registered here; asking
-for one of those raises `SecretUnavailableError` with a clear reason rather
-than guessing a path.
+Providers with no confirmed credential-file location (gemini/opencode/
+cursor — see `doctor.check_provider_auth`'s "unknown" INFO finding) have no
+backend registered here; asking for one of those raises
+`SecretUnavailableError` with a clear reason rather than guessing a path.
+kimi's location IS confirmed now (`kimi_share_dir()/credentials`, 2026-09-07
+isolation probe) but stays unregistered until an account flow needs it —
+registering a backend nothing reads would just be another path to drift.
 
 The three optional design-tool integrations (#373 — `core.capabilities.
 design_integrations.OPTIONAL_DESIGN_MCPS`: `reference-21st`/`figma`/

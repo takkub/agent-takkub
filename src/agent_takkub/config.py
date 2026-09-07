@@ -236,8 +236,9 @@ def default_claude_config_dir() -> Path:
 #
 # Read by BOTH sides on purpose:
 #   * spawn  — `pane_env.inject_provider_home_env` exports these into the pane.
-#   * mirror — `codex_helper.codex_sessions_root` / `opencode_helper` resolve
-#     transcripts through the same function.
+#   * mirror — `codex_helper.codex_sessions_root` / `opencode_helper` /
+#     `kimi_helper.kimi_share_dir` resolve transcripts through the same
+#     function.
 # Splitting those two would point the Remote mirror at a directory no pane
 # writes to — silent-blank-phone, the exact class of bug this release fixes.
 #
@@ -256,18 +257,44 @@ _PROVIDER_HOME_SUBDIRS: dict[str, dict[str, str]] = {
         "XDG_DATA_HOME": "opencode-home/data",
         "XDG_CONFIG_HOME": "opencode-home/config",
     },
+    # `KIMI_SHARE_DIR` moves kimi-cli's ENTIRE share dir (`~/.kimi`):
+    # config.toml, credentials, device_id, kimi.json, sessions/, logs/,
+    # mcp.json, plugins/, telemetry/ all route through one
+    # `share.py::get_share_dir()` in kimi-cli's own source (verified 1.50.0
+    # site-packages, 2026-09-07) and a live ConPTY probe wrote every one of
+    # those into the override dir with zero fresh files under the real
+    # `~/.kimi`. Subdir uses the #504 layout (`providers/<name>/default`);
+    # codex/opencode keep their pre-#504 paths until the boot-time migration.
+    "kimi": {"KIMI_SHARE_DIR": "providers/kimi/default"},
 }
 
 # Providers with NO isolation knob, kept explicit so the gap is visible
 # instead of looking like an oversight (#103). Surfaced by `takkub doctor`.
 PROVIDER_ISOLATION_GAPS: dict[str, str] = {
     "gemini": (
-        "gemini-cli joins the constant `.gemini` onto os.homedir() and exposes no "
-        "directory env var — isolating it would need a full HOME override"
+        "agy 1.1.27 (probed 2026-09-07, live ConPTY spawn): binary-string sweep "
+        "found no home knob — `GEMINIHOME` is an unrelated SMARTDISPLAY enum, "
+        "`ANTIGRAVITY_EXECUTABLE_DATA_DIR` is a var agy SETS for its sidecars, "
+        "and spawning with JETSKI_APP_DATA_DIR + XDG_CONFIG_HOME + XDG_DATA_HOME "
+        "all pointed at scratch dirs left them empty while agy still wrote "
+        "`~/.gemini/antigravity-cli/` — isolating it would need a full HOME "
+        "override, which would break gh/uv/npm in the same pane"
     ),
-    "kimi": "no documented home/config env var found in the shipped kimi binary",
-    "cursor": "cursor-agent home layout not yet verified on this machine",
+    "cursor": (
+        "cursor-agent CLI is not installed on this machine (checked PATH + every "
+        "known install location 2026-09-07; `~/.cursor` here is IDE state with no "
+        "bin/) — no binary to probe, so the CURSOR_HOME guess in cursor_helper "
+        "stays unverified"
+    ),
 }
+
+
+def isolated_providers() -> tuple[str, ...]:
+    """Providers with a proven home-isolation knob (`_PROVIDER_HOME_SUBDIRS`),
+    for callers that loop over "everything isolatable" (doctor, the shell-pane
+    injection in spawn_engine) instead of hardcoding the tuple in each place.
+    """
+    return tuple(sorted(_PROVIDER_HOME_SUBDIRS))
 
 
 def provider_home_env(provider: str) -> dict[str, str]:

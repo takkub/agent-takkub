@@ -1109,10 +1109,12 @@ _FETCHERS: dict[str, Callable[[], ProviderUsage]] = {
 
 
 # Providers with a real per-account isolation knob (config.py's
-# `_PROVIDER_HOME_SUBDIRS` / user_profile's CLAUDE_CONFIG_DIR) that
-# `fetch_provider_usage`'s `config_dir` param can actually scope a probe to.
-# Every other provider has no such knob yet (config.PROVIDER_ISOLATION_GAPS)
-# so `config_dir` is silently ignored for them rather than guessed at.
+# `_PROVIDER_HOME_SUBDIRS` / user_profile's CLAUDE_CONFIG_DIR) AND a fetcher
+# that can actually scope its probe to `fetch_provider_usage`'s `config_dir`
+# param. gemini/cursor have no knob (config.PROVIDER_ISOLATION_GAPS);
+# opencode/kimi have one but no scoped usage probe (opencode's fetcher is
+# store-wide, kimi's is `_unsupported`) — `config_dir` is silently ignored
+# for all of them rather than guessed at.
 _CONFIG_DIR_AWARE_FETCHERS: dict[str, Callable[..., ProviderUsage]] = {
     "claude": fetch_claude_usage,
     "codex": fetch_codex_usage,
