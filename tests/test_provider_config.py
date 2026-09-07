@@ -327,6 +327,40 @@ class TestSaveProviders:
         assert written["global"] == {"backend": "codex"}
         assert written["projects"] == {"proj-a": {"qa": "gemini"}}
 
+    def test_role_models_direct_write_also_refreshes_the_v2_routing_mirror(
+        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    ) -> None:
+        """B-H2 (2026-09-07 round-2 review): the model picker
+        (`settings_window.py`, `provider_model_refresh.py`) writes a role's
+        provider through `role_models.set_provider`/`set_model` DIRECTLY,
+        never through `save_providers` — before this fix that path only
+        ever mirrored into `models/aliases.json`
+        (`dual_write_role_models`), leaving `config/routing.json`'s
+        `global` bucket stale."""
+        from agent_takkub import config, role_models
+        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+        from agent_takkub.core.storage.legacy_reader import read_json
+
+        data_home = tmp_path / "data_home"
+        (data_home / "v2").mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.core.storage.dual_write._effective_data_home",
+            lambda dh=None: data_home,
+        )
+        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        monkeypatch.setattr(config, "list_project_names", lambda: [])
+
+        role_models.set_provider("backend", "codex")
+
+        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
+        written = read_json(target)
+        assert written["global"] == {"backend": "codex"}
+
+        # A second direct write (model, not provider) must refresh it too.
+        role_models.set_model("backend", "codex", "gpt-5.6-terra")
+        written_after_model = read_json(target)
+        assert written_after_model["global"] == {"backend": "codex"}
+
     def test_save_dual_write_omits_projects_with_no_v1_file(
         self, redirect_config_path: Path, monkeypatch, tmp_path: Path
     ) -> None:
@@ -417,6 +451,37 @@ class TestGlobalRoleProvidersMigration:
         backup = redirect_config_path.parent / "backups" / "role-providers.json"
         assert backup.is_file()
         assert not redirect_config_path.exists()
+
+    def test_migration_with_v2_present_does_not_recurse(
+        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    ) -> None:
+        """B-H2 follow-up (2026-09-07): `role_models.set_provider` (called
+        once per legacy role, inside this very migration's own loop) now
+        also refreshes the v2 routing mirror, which calls
+        `load_providers(None)` — landing right back in this function while
+        `role-providers.json` still exists (it isn't archived until the
+        loop finishes). Without the re-entry guard this recurses without
+        bound for ANY non-empty legacy mapping; with two roles it would
+        blow the stack almost immediately."""
+        from agent_takkub import role_models
+
+        data_home = tmp_path / "data_home"
+        (data_home / "v2").mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.core.storage.dual_write._effective_data_home",
+            lambda dh=None: data_home,
+        )
+        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        redirect_config_path.write_text(
+            json.dumps({"backend": "codex", "qa": "gemini"}), encoding="utf-8"
+        )
+
+        assert provider_config.load_providers() == {"backend": "codex", "qa": "gemini"}
+        assert role_models.all_models() == {
+            "backend": {"provider": "codex"},
+            "qa": {"provider": "gemini"},
+        }
+        assert not redirect_config_path.exists()  # archived once the loop finished
 
 
 class TestRoleProviderMap:

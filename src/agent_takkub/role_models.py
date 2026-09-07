@@ -107,7 +107,13 @@ def _sanitize(data: dict) -> dict[str, dict[str, str]]:
 
 def _save(entries: dict[str, dict[str, str]]) -> None:
     """Persist role-model selections atomically, dropping entries that carry
-    neither a model nor an effort override."""
+    neither a model nor an effort override.
+
+    Also refreshes the v2 `config/routing.json` mirror's `global` bucket
+    (B-H2, 2026-09-07 round-2 review) — every setter in this module funnels
+    through here, including the model picker's direct calls that never go
+    through `provider_config.save_providers`, which used to be the only
+    caller that kept that mirror current."""
     cleaned: dict[str, dict[str, str]] = {}
     for role, entry in entries.items():
         provider = entry.get("provider")
@@ -148,6 +154,10 @@ def _save(entries: dict[str, dict[str, str]]) -> None:
             if provider_config.config_path(name).exists()
         },
     )
+
+    from . import provider_config
+
+    provider_config.dual_write_routing_mirror()
 
 
 def model_for(role: str, provider: str) -> str | None:

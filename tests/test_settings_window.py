@@ -1411,6 +1411,26 @@ class TestAccountsView:
     the write-through wiring via `accounts_adapter` (pure adapter behavior is
     covered separately in tests/test_accounts_adapter.py)."""
 
+    @pytest.fixture(autouse=True)
+    def _drain_accounts_refresh_pool(self):
+        """B-M2 (2026-09-07): `_AccountsRefreshWorker` runs on the
+        process-global `QThreadPool`, not per-dialog — a job left running
+        by an earlier test (in this class or another file in the same
+        batch) can still be in flight when a later test reads/writes the
+        same on-disk profile store, producing the exact nondeterministic
+        failure the round-2 review reproduced. Draining the pool both
+        before and after every test removes that cross-test window."""
+        from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtWidgets import QApplication
+
+        QThreadPool.globalInstance().waitForDone(5_000)
+        yield
+        QThreadPool.globalInstance().waitForDone(5_000)
+        app = QApplication.instance()
+        if app is not None:
+            for _ in range(10):
+                app.processEvents()
+
     def test_accounts_nav_item_present_and_clickable(self) -> None:
         dlg = settings_window.SettingsWindow()
         assert settings_window.VIEW_USERS in dlg._nav_buttons
@@ -1431,6 +1451,28 @@ class TestAccountsView:
         dlg = settings_window.SettingsWindow()
         assert settings_window.VIEW_CORE_V2_ACCOUNTS not in dlg._nav_buttons
         dlg.deleteLater()
+
+    def test_accounts_refresh_hooks_a_bounded_wait_at_shutdown(self) -> None:
+        """B-M2 (2026-09-07 round-2 review): `_AccountsRefreshWorker` runs
+        on the process-global `QThreadPool`, not a per-dialog `QThread`, so
+        it cannot be joined/cancelled the way `_ACTIVE_THREADS` joins
+        `_CallableThread` — the fix is a bounded `aboutToQuit` wait on the
+        whole pool instead, wired lazily the first time a refresh runs."""
+        from PyQt6.QtWidgets import QApplication
+
+        from agent_takkub import settings_accounts
+
+        app = QApplication.instance()
+        was_hooked = settings_accounts._accounts_refresh_shutdown_hooked
+        settings_accounts._accounts_refresh_shutdown_hooked = False
+        try:
+            dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+            assert settings_accounts._accounts_refresh_shutdown_hooked is True
+            dlg.deleteLater()
+        finally:
+            if not was_hooked and app is not None:
+                app.aboutToQuit.disconnect(settings_accounts._wait_for_accounts_refresh_jobs)
+            settings_accounts._accounts_refresh_shutdown_hooked = was_hooked
 
     def test_renders_loading_placeholder_before_the_background_refresh_lands(self) -> None:
         """#505 review M4: the account rows must never block construction —
@@ -1481,6 +1523,9 @@ class TestAccountsView:
     def test_add_account_persists_and_updates_auth_combo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtWidgets import QApplication
+
         from agent_takkub import settings_accounts
 
         class _FakeDialog:
@@ -1497,6 +1542,14 @@ class TestAccountsView:
 
         monkeypatch.setattr(settings_accounts, "_AddAccountDialog", _FakeDialog)
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        # B-M2 (2026-09-07 round-2 review) — see the sibling remove-account
+        # test's comment: drain the construction-triggered background
+        # refresh before writing to the same registry file it's reading.
+        QThreadPool.globalInstance().waitForDone(5_000)
+        app = QApplication.instance()
+        if app is not None:
+            for _ in range(10):
+                app.processEvents()
         dlg._on_accounts_add_clicked("claude")
 
         assert any(p["name"] == "work" for p in user_profile.list_profiles())
@@ -1507,6 +1560,9 @@ class TestAccountsView:
     def test_remove_account_persists_and_updates_auth_combo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtWidgets import QApplication
+
         from agent_takkub import accounts_adapter
 
         user_profile.add_profile("work", str(tmp_path / "work-cfg"), share_sessions=False)
@@ -1522,6 +1578,21 @@ class TestAccountsView:
             settings_window.cockpit_theme, "themed_message_box", lambda *_a: _FakeBox()
         )
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        # B-M2 (2026-09-07 round-2 review): `SettingsWindow()` construction
+        # kicks off `_AccountsRefreshWorker` on the background QThreadPool,
+        # which READS `user_profile`'s registry file for every provider —
+        # if that job is still in flight when `remove_profile`'s own
+        # atomic-write races it on Windows, `os.replace` can raise, and
+        # `remove_profile` swallows that `OSError` silently, leaving "work"
+        # never actually removed on disk. Draining the pool before touching
+        # the registry again removes the race instead of just hoping the
+        # timing works out — same pattern `test_renders_one_panel_per_provider`
+        # already uses for this exact worker.
+        QThreadPool.globalInstance().waitForDone(5_000)
+        app = QApplication.instance()
+        if app is not None:
+            for _ in range(10):
+                app.processEvents()
         account = accounts_adapter.AccountInfo(
             provider="claude",
             name="work",

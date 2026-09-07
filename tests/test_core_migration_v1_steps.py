@@ -269,8 +269,8 @@ def test_role_agent_reapply_clears_stale_empty_project_entry(v1_homes, journal_b
     with it."""
     data_home, settings_home = v1_homes
     journal, backups = journal_backups
-    (settings_home / "role-providers.json").write_text(
-        json.dumps({"backend": "codex"}), encoding="utf-8"
+    (settings_home / "role-models.json").write_text(
+        json.dumps({"backend": {"provider": "codex"}}), encoding="utf-8"
     )
     (data_home / "projects.json").write_text(
         json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "/tmp/web"}}}}),

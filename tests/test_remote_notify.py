@@ -257,6 +257,28 @@ class TestLeadTextBlocks:
         assert _lead_text_blocks({"type": "queue-operation"}) == []
 
 
+class TestRecEpochTs:
+    """B-L7 (2026-09-07 round-2 review): a `timestamp` string with no UTC
+    offset must not drift with the host machine's local timezone."""
+
+    def test_z_suffixed_timestamp_is_utc(self):
+        ts = notify_mod._rec_epoch_ts({"timestamp": "2026-09-07T00:00:00Z"})
+        assert ts == datetime(2026, 9, 7, 0, 0, 0, tzinfo=UTC).timestamp()
+
+    def test_naive_timestamp_is_pinned_to_utc_not_local(self):
+        naive = "2026-09-07T12:00:00"
+        ts = notify_mod._rec_epoch_ts({"timestamp": naive})
+        assert ts == datetime(2026, 9, 7, 12, 0, 0, tzinfo=UTC).timestamp()
+
+    def test_offset_timestamp_is_respected_verbatim(self):
+        ts = notify_mod._rec_epoch_ts({"timestamp": "2026-09-07T12:00:00+05:00"})
+        assert ts == datetime.fromisoformat("2026-09-07T12:00:00+05:00").timestamp()
+
+    def test_missing_or_unparseable_is_none(self):
+        assert notify_mod._rec_epoch_ts({}) is None
+        assert notify_mod._rec_epoch_ts({"timestamp": "not-a-date"}) is None
+
+
 class TestDoneEvents:
     def test_lead_done_pushes_to_broadcaster(self, qapp):
         orch = _FakeOrch()
