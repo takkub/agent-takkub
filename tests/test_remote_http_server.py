@@ -126,6 +126,20 @@ def _run_pumped(fn):
     return result["value"]
 
 
+def _read_sse_frame(resp) -> bytes:
+    """Read one `event: ...\\ndata: ...\\n\\n` SSE frame off a live response
+    (#517: payloads now carry a server-stamped `ts`, so a fixed-byte-length
+    `resp.read(n)` no longer lines up with the wire — read to the frame
+    terminator instead)."""
+    buf = b""
+    while not buf.endswith(b"\n\n"):
+        chunk = resp.read(1)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
 def _issue_ticket(server, project: str | None = None) -> str:
     def _do() -> str:
         req = urllib.request.Request(
@@ -525,8 +539,11 @@ class TestProjectScoping:
                 assert resp.status == 200
 
                 srv.broadcaster.push("lead", "hi proj-b", "proj-b")
-                expected = f"event: lead\ndata: {json.dumps({'text': 'hi proj-b'})}\n\n".encode()
-                assert resp.read(len(expected)) == expected
+                raw = _read_sse_frame(resp)
+                assert raw.startswith(b"event: lead\ndata: ")
+                decoded = json.loads(raw.split(b"data: ", 1)[1])
+                assert decoded["text"] == "hi proj-b"
+                assert isinstance(decoded["ts"], float)
             finally:
                 conn.close()
         finally:
@@ -548,8 +565,11 @@ class TestProjectScoping:
                 # `_FakeOrch._resolve_project(None)` == "default".
                 srv.broadcaster.push("lead", "should not arrive", "proj-forged")
                 srv.broadcaster.push("lead", "hi default", "default")
-                expected = f"event: lead\ndata: {json.dumps({'text': 'hi default'})}\n\n".encode()
-                assert resp.read(len(expected)) == expected
+                raw = _read_sse_frame(resp)
+                assert raw.startswith(b"event: lead\ndata: ")
+                decoded = json.loads(raw.split(b"data: ", 1)[1])
+                assert decoded["text"] == "hi default"
+                assert isinstance(decoded["ts"], float)
             finally:
                 conn.close()
         finally:
@@ -895,7 +915,9 @@ class TestSSEBroadcaster:
         items = []
         while not q.empty():
             items.append(q.get_nowait()[1])
-        assert items[-1] == json.dumps({"text": str(http_server._SSE_QUEUE_MAXSIZE + 49)})
+        last = json.loads(items[-1])
+        assert isinstance(last.pop("ts"), float)
+        assert last == {"text": str(http_server._SSE_QUEUE_MAXSIZE + 49)}
 
     def test_evicts_oldest_beyond_max_clients(self):
         # At the cap the broadcaster admits the newcomer by evicting the oldest
@@ -962,7 +984,10 @@ class TestSSEBroadcaster:
 
         broadcaster.push("done", "backend: shipped it", "proj-a")
 
-        assert q_a.get_nowait() == ("done", json.dumps({"text": "backend: shipped it"}))
+        event, payload = q_a.get_nowait()
+        decoded = json.loads(payload)
+        assert isinstance(decoded.pop("ts"), float)
+        assert (event, decoded) == ("done", {"text": "backend: shipped it"})
         assert q_b.empty()
 
     def test_push_without_project_ns_reaches_every_client(self):
@@ -983,7 +1008,9 @@ class TestSSEBroadcaster:
         broadcaster.push("blocked_on_picker", "ไปทางไหนดี?", "proj")
         event, payload = q.get_nowait()
         assert event == "blocked_on_picker"
-        assert json.loads(payload) == {"text": "ไปทางไหนดี?"}
+        decoded = json.loads(payload)
+        assert isinstance(decoded.pop("ts"), float)
+        assert decoded == {"text": "ไปทางไหนดี?"}
 
     def test_dict_payload_is_sent_unwrapped(self):
         """B2: a dict `data` (the picker's structured questions/options/
@@ -999,7 +1026,9 @@ class TestSSEBroadcaster:
         broadcaster.push("blocked_on_picker", structured, "proj")
         event, payload = q.get_nowait()
         assert event == "blocked_on_picker"
-        assert json.loads(payload) == structured
+        decoded = json.loads(payload)
+        assert isinstance(decoded.pop("ts"), float)
+        assert decoded == structured
 
     @pytest.mark.parametrize("event", ["user", "session_changed"])
     def test_remote_sync_events_are_allowlisted(self, event):
@@ -1009,7 +1038,9 @@ class TestSSEBroadcaster:
         broadcaster.push(event, payload, "proj")
         received_event, received_payload = q.get_nowait()
         assert received_event == event
-        assert json.loads(received_payload) == payload
+        decoded = json.loads(received_payload)
+        assert isinstance(decoded.pop("ts"), float)
+        assert decoded == payload
 
     def test_unknown_event_name_is_dropped(self):
         """Defense-in-depth allowlist (H-C): only `done`/`lead` are ever
@@ -1029,6 +1060,7 @@ class TestSSEBroadcaster:
         assert event == "lead"
         assert "\n" not in payload
         decoded = json.loads(payload)
+        assert isinstance(decoded.pop("ts"), float)
         assert decoded == {"text": "line one\nline two\nevent: fake\ndata: injected"}
 
     def test_close_all_wakes_every_registered_client(self):
@@ -1050,9 +1082,11 @@ class TestSSEEndToEnd:
 
             server.broadcaster.push("lead", "hello mobile", "default")
 
-            expected = f"event: lead\ndata: {json.dumps({'text': 'hello mobile'})}\n\n".encode()
-            chunk = resp.read(len(expected))
-            assert chunk == expected
+            raw = _read_sse_frame(resp)
+            assert raw.startswith(b"event: lead\ndata: ")
+            decoded = json.loads(raw.split(b"data: ", 1)[1])
+            assert decoded["text"] == "hello mobile"
+            assert isinstance(decoded["ts"], float)
         finally:
             conn.close()
 

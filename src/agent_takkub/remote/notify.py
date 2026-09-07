@@ -102,6 +102,22 @@ _DEFAULT_HISTORY_LIMIT = 200
 _HISTORY_MAX_BYTES = 8 * 1024 * 1024
 
 
+def _rec_epoch_ts(rec: dict) -> float | None:
+    """Epoch-seconds (UTC) for a JSONL record's own `timestamp` field, or
+    None when it's missing/unparseable — never fabricated (#517: a history
+    entry's displayed time must come from the record itself, not the
+    scan/render clock). Claude and Codex both write ISO8601 with a
+    trailing 'Z' in this field; `datetime.fromisoformat` needs '+00:00' on
+    older 3.10 builds, same fixup `chatlog_scanner.record_timestamp` uses."""
+    ts = rec.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 @dataclass
 class _Tail:
     """Per-project incremental-read state for one Lead session's JSONL."""
@@ -704,7 +720,7 @@ def _compact_marker(rec: dict) -> dict | None:
     record, else None. Only history readers emit it (the live SSE path
     drops the record — a mid-turn pill would just interrupt the reply)."""
     if rec.get("type") == "user" and rec.get("isCompactSummary"):
-        return {"text": _COMPACT_MARKER_TEXT, "kind": "sys"}
+        return {"text": _COMPACT_MARKER_TEXT, "kind": "sys", "ts": _rec_epoch_ts(rec)}
     return None
 
 
@@ -844,7 +860,13 @@ def _read_recent_claude_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
             continue
         lead_texts = _lead_text_blocks(rec)
         if lead_texts:
-            out.append({"text": "\n".join(lead_texts)[:_MAX_EVENT_CHARS], "kind": "lead"})
+            out.append(
+                {
+                    "text": "\n".join(lead_texts)[:_MAX_EVENT_CHARS],
+                    "kind": "lead",
+                    "ts": _rec_epoch_ts(rec),
+                }
+            )
             continue
         marker = _compact_marker(rec)
         if marker is not None:
@@ -853,7 +875,9 @@ def _read_recent_claude_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
         user_text = _lead_user_text(rec)
         if user_text:
             user_text = _strip_remote_prefix(user_text)
-            out.append({"text": user_text[:_MAX_EVENT_CHARS], "kind": "me"})
+            out.append(
+                {"text": user_text[:_MAX_EVENT_CHARS], "kind": "me", "ts": _rec_epoch_ts(rec)}
+            )
     return out[-limit:]
 
 
@@ -986,7 +1010,9 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
             kind, text = parsed
             if kind == "me":
                 text = _strip_remote_prefix(text)
-            antigravity.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind})
+            # agy records carry no timestamp field — ts stays null (never
+            # faked); the phone falls back to receive-time for these.
+            antigravity.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind, "ts": None})
             continue
 
         for message in _gemini_record_messages(rec):
@@ -1012,9 +1038,9 @@ def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
         if mtype == "user":
             if not text.startswith("<session_context>"):
                 text = _strip_remote_prefix(text)
-                out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "me"})
+                out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "me", "ts": None})
         elif mtype == "gemini":
-            out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "lead"})
+            out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "lead", "ts": None})
 
     return out[-limit:]
 
@@ -1443,15 +1469,17 @@ def _read_recent_codex_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT)
     out: list[dict] = []
     for raw_line in lines:
         try:
-            parsed = _codex_record_message(json.loads(raw_line))
+            rec = json.loads(raw_line)
         except (ValueError, TypeError):
             continue
+        parsed = _codex_record_message(rec)
         if parsed is None:
             continue
         kind, text = parsed
         if kind == "me":
             text = _strip_remote_prefix(text)
-        out.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind})
+        ts = _rec_epoch_ts(rec) if isinstance(rec, dict) else None
+        out.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind, "ts": ts})
     return out[-limit:]
 
 
@@ -1777,6 +1805,7 @@ def _read_from_conversation_store_v2(project_ns: str, limit: int) -> list[dict] 
             {
                 "text": m.text[:_MAX_EVENT_CHARS],
                 "kind": kind_by_role.get(str(m.role), "lead"),
+                "ts": m.created_at,
             }
             for m in messages[-limit:]
         ]

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
@@ -117,6 +118,24 @@ def test_codex_read_new_parses_legacy_schema(tmp_path):
         (MessageRole.USER, "hi"),
         (MessageRole.ASSISTANT, "hello back"),
     ]
+
+
+def test_codex_read_new_extracts_the_records_own_timestamp(tmp_path):
+    """#517: a codex rollout's top-level ISO8601 `timestamp` must become
+    `created_at`, not the ingest-time clock `ConversationStore.append_message`
+    falls back to when None."""
+    path = tmp_path / "rollout-1.jsonl"
+    line = json.dumps(
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-02T03:04:05.000Z",
+            "payload": {"type": "agent_message", "message": "old reply"},
+        }
+    )
+    path.write_text(line + "\n")
+    batch = codex_adapter.read_new(str(path), None)
+    expected = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
+    assert batch.messages[0].created_at == pytest.approx(expected)
 
 
 def test_codex_read_new_parses_0147_item_completed_schema(tmp_path):
@@ -384,6 +403,16 @@ def test_opencode_read_new_slices_past_seen_count(monkeypatch):
     batch = opencode_ingest.read_new(f"db.sqlite{opencode_ingest._SEP}sid-1", "2")
     assert [m.text for m in batch.messages] == ["another"]
     assert batch.next_cursor == "3"
+
+
+def test_opencode_read_new_passes_through_the_row_timestamp(monkeypatch):
+    """#517: `read_opencode_session_messages` now returns each row's own
+    write time as `ts` (opencode_helper.py) — the adapter must carry it
+    into `created_at`, not drop it and let ingest-time fill the gap."""
+    rows = [{"text": "hi", "kind": "me", "ts": 1735808645.0}]
+    monkeypatch.setattr(opencode_ingest, "read_opencode_session_messages", lambda *a, **kw: rows)
+    batch = opencode_ingest.read_new(f"db.sqlite{opencode_ingest._SEP}sid-1", None)
+    assert batch.messages[0].created_at == 1735808645.0
 
 
 def test_opencode_read_new_first_call_reads_everything(monkeypatch):

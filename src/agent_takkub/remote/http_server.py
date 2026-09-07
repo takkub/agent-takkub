@@ -22,6 +22,7 @@ import os
 import queue
 import socketserver
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -456,7 +457,13 @@ class SSEBroadcaster:
         it as-is, unwrapped."""
         if event not in _ALLOWED_SSE_EVENTS:
             return
-        payload = json.dumps(data if isinstance(data, dict) else {"text": data}, ensure_ascii=False)
+        # #517: every live event is stamped with the wall-clock time it was
+        # actually sent — the phone must never fall back to its own render
+        # clock, which is what made every history entry (and every live one
+        # replayed after a reconnect) show "now" instead of when it happened.
+        body = dict(data) if isinstance(data, dict) else {"text": data}
+        body.setdefault("ts", time.time())
+        payload = json.dumps(body, ensure_ascii=False)
         with self._lock:
             clients = list(self._clients)
         for q, ns in clients:
