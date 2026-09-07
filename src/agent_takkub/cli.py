@@ -2978,6 +2978,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         pane_project = getattr(args, "project", None) or _from_project() or active_project()[0]
         findings += check_pane_mcp_handshake(pane_role, pane_project)
 
+    boot_context_report: str | None = None
+    if getattr(args, "boot_context", False):
+        from .config import active_project
+        from .doctor import check_boot_context
+
+        bc_project = getattr(args, "project", None) or _from_project() or active_project()[0]
+        bc_findings, boot_context_report = check_boot_context(
+            role=getattr(args, "role", None), project=bc_project
+        )
+        findings += bc_findings
+
     if args.json:
         import json as _json
 
@@ -3002,6 +3013,8 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             extra_payload["ram"] = ram_resp
         if getattr(args, "workspace", False):
             extra_payload["workspace"] = workspace_resp
+        if boot_context_report is not None:
+            extra_payload["boot_context_report"] = boot_context_report
         if extra_payload:
             _utf8_print(_json.dumps({"findings": findings_payload, **extra_payload}, indent=2))
         else:
@@ -3018,6 +3031,9 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
             _utf8_print("")
             _utf8_print(format_workspace_report(workspace_resp))
+        if boot_context_report is not None:
+            _utf8_print("")
+            _utf8_print(boot_context_report)
 
     n_fail = sum(1 for f in findings if f.status == Status.FAIL)
     ok = n_fail == 0
@@ -5187,6 +5203,20 @@ def main(argv: list[str] | None = None) -> int:
         "--project",
         default=None,
         help="project namespace for --pane (default: current pane's project, or the active project)",
+    )
+    sdoc.add_argument(
+        "--boot-context",
+        action="store_true",
+        help="issue #516: measure per-role/per-category boot-context token cost "
+        "without spawning a real pane — reconstructs the exact "
+        "--append-system-prompt-file content + repo CLAUDE.md + MCP config a "
+        "real spawn would use. Combine with --role to scope to one role "
+        "(default: every claude-capable role known to the active project)",
+    )
+    sdoc.add_argument(
+        "--role",
+        default=None,
+        help="scope --boot-context to one role (base role, no #shard)",
     )
     sdoc.set_defaults(func=cmd_doctor)
 
