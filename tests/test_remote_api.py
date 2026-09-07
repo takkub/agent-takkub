@@ -743,6 +743,94 @@ class TestUsage:
         assert result["cockpit_version"] == __version__
 
 
+class TestUsageHistory:
+    """`/api/usage/history` (#507) must NEVER trigger the expensive
+    transcript import itself — same view-mode-safe contract as `usage()`
+    above, just reading `usage_ledger`'s already-recorded numbers."""
+
+    def test_reads_ledger_without_importing(self, monkeypatch):
+        from agent_takkub import usage_ledger
+
+        def _boom(*a, **k):
+            raise AssertionError("usage_history must never call import_all")
+
+        monkeypatch.setattr(usage_ledger, "import_all", _boom)
+        usage_ledger.record_turn(
+            "claude",
+            "default",
+            "2026-09-05T00:00:00Z",
+            "r1",
+            "claude-sonnet-5",
+            {"input": 1, "cache_creation": 2, "cache_read": 3, "output": 4},
+        )
+        result = api.usage_history(days="7", month=None, provider=None)
+        assert result["rows"][0]["total"] == 10
+
+    def test_days_param_parses_string_to_int(self, monkeypatch):
+        from agent_takkub import usage_ledger
+
+        seen = {}
+
+        def fake_query(*, days=None, month=None, provider=None):
+            seen["days"] = days
+            return {
+                "start": "x",
+                "end": "y",
+                "month": None,
+                "rows": [],
+                "uncountable": [],
+                "quota": [],
+                "rtk_gain": None,
+            }
+
+        monkeypatch.setattr(usage_ledger, "query_usage", fake_query)
+        api.usage_history(days="30", month=None, provider=None)
+        assert seen["days"] == 30
+
+    def test_malformed_days_param_falls_back_to_default(self, monkeypatch):
+        from agent_takkub import usage_ledger
+
+        seen = {}
+
+        def fake_query(*, days=None, month=None, provider=None):
+            seen["days"] = days
+            return {
+                "start": "x",
+                "end": "y",
+                "month": None,
+                "rows": [],
+                "uncountable": [],
+                "quota": [],
+                "rtk_gain": None,
+            }
+
+        monkeypatch.setattr(usage_ledger, "query_usage", fake_query)
+        api.usage_history(days="not-a-number", month=None, provider=None)
+        assert seen["days"] is None
+
+    def test_includes_daily_series_for_the_sparkline(self):
+        from agent_takkub import usage_ledger
+
+        usage_ledger.record_turn(
+            "claude",
+            "default",
+            "2026-09-05T00:00:00Z",
+            "r1",
+            "m",
+            {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
+        )
+        result = api.usage_history(days="7", month=None, provider=None)
+        assert "daily_series" in result
+        assert isinstance(result["daily_series"], list)
+
+    def test_uncountable_provider_reported_not_crashed(self):
+        from agent_takkub import usage_ledger
+
+        usage_ledger.account_dir("gemini", "default").mkdir(parents=True, exist_ok=True)
+        result = api.usage_history(days="7", month=None, provider=None)
+        assert any(u["provider"] == "gemini" for u in result["uncountable"])
+
+
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
         with pytest.raises(api.RemoteApiError) as excinfo:

@@ -58,14 +58,14 @@ def test_usage_provider_filter_is_threaded_through(monkeypatch):
 def test_usage_import_subcommand_calls_import_all(monkeypatch, capsys):
     calls = []
 
-    def fake_import_all(provider=None):
-        calls.append(provider)
+    def fake_import_all(provider=None, source=None):
+        calls.append((provider, source))
         return {"claude": {"scanned_files": 1, "skipped_files": 0, "new_turns": 5}}
 
     monkeypatch.setattr(usage_ledger, "import_all", fake_import_all)
     rc = cli.main(["usage", "import"])
     assert rc == 0
-    assert calls == [None]
+    assert calls == [(None, None)]
     out = capsys.readouterr().out
     assert "new_turns=5" in out
 
@@ -73,17 +73,37 @@ def test_usage_import_subcommand_calls_import_all(monkeypatch, capsys):
 def test_usage_import_provider_flag_threaded_through(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        usage_ledger, "import_all", lambda provider=None: (calls.append(provider), {})[1]
+        usage_ledger,
+        "import_all",
+        lambda provider=None, source=None: (calls.append((provider, source)), {})[1],
     )
     cli.main(["usage", "import", "--provider", "gemini"])
-    assert calls == ["gemini"]
+    assert calls == [("gemini", None)]
+
+
+def test_usage_import_source_flag_threaded_through(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        usage_ledger,
+        "import_all",
+        lambda provider=None, source=None: (calls.append((provider, source)), {})[1],
+    )
+    cli.main(["usage", "import", "--provider", "claude", "--source", "C:/some/dir"])
+    assert calls == [("claude", "C:/some/dir")]
+
+
+def test_usage_import_source_without_provider_is_rejected(monkeypatch, capsys):
+    monkeypatch.setattr(usage_ledger, "import_all", lambda provider=None, source=None: {})
+    rc = cli.main(["usage", "import", "--source", "C:/some/dir"])
+    assert rc != 0
+    assert "--source requires --provider" in capsys.readouterr().err
 
 
 def test_usage_import_prints_uncountable_provider_without_crashing(monkeypatch, capsys):
     monkeypatch.setattr(
         usage_ledger,
         "import_all",
-        lambda provider=None: {"gemini": {"error": "นับไม่ได้"}},
+        lambda provider=None, source=None: {"gemini": {"error": "นับไม่ได้"}},
     )
     rc = cli.main(["usage", "import", "--provider", "gemini"])
     assert rc == 0

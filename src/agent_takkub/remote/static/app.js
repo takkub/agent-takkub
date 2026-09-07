@@ -3038,12 +3038,201 @@
     if (usageState.timer) { clearInterval(usageState.timer); usageState.timer = null; }
   }
 
+  // ---------------------------------------------------------------
+  // Usage HISTORY (#507) — real per-provider/account/model token totals +
+  // quota-% delta, reads GET /api/usage/history. Same view-mode-safe
+  // contract as fetchUsage() (server never scans transcripts itself for
+  // this request — see api.usage_history's docstring), but the payload is
+  // bigger than the quota-only /api/usage poll, so this only fetches on
+  // sheet-open / range-change, never on the 5-min background timer.
+  // ---------------------------------------------------------------
+
+  var usageHistoryState = { data: null, range: "week" };
+
+  function fmtTokens(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 10000) return (n / 1000).toFixed(1) + "k";
+    if (n < 1000000) return Math.floor(n / 1000) + "k";
+    return (n / 1000000).toFixed(1) + "M";
+  }
+
+  function usageHistoryRangeParams(range) {
+    if (range === "today") return { days: "1" };
+    if (range === "month") {
+      var now = new Date();
+      var mm = String(now.getUTCMonth() + 1);
+      if (mm.length < 2) mm = "0" + mm;
+      return { month: now.getUTCFullYear() + "-" + mm };
+    }
+    return { days: "7" };
+  }
+
+  function renderUsageHistorySpark(series) {
+    var el = $("usage-history-spark");
+    if (!el) return;
+    el.innerHTML = "";
+    if (!Array.isArray(series) || !series.length) {
+      var empty = document.createElement("div");
+      empty.className = "usage-history-spark-empty";
+      empty.textContent = "ยังไม่มีข้อมูลพอวาดกราฟ";
+      el.appendChild(empty);
+      return;
+    }
+    var vmax = 0;
+    series.forEach(function (pt) { if (pt && pt[1] > vmax) vmax = pt[1]; });
+    series.forEach(function (pt) {
+      var bar = document.createElement("div");
+      bar.className = "usage-history-spark-bar";
+      var v = pt && typeof pt[1] === "number" ? pt[1] : 0;
+      bar.style.height = (vmax > 0 ? Math.max(2, (v / vmax) * 100) : 2) + "%";
+      bar.title = (pt[0] || "") + ": " + fmtTokens(v);
+      el.appendChild(bar);
+    });
+  }
+
+  function renderUsageHistoryCards(rows) {
+    var el = $("usage-history-cards");
+    if (!el) return;
+    el.innerHTML = "";
+    var perProvider = {};
+    (rows || []).forEach(function (r) {
+      perProvider[r.provider] = (perProvider[r.provider] || 0) + (Number(r.total) || 0);
+    });
+    var names = Object.keys(perProvider).sort();
+    if (!names.length) {
+      var empty = document.createElement("div");
+      empty.className = "usage-history-note";
+      empty.textContent = "ยังไม่มีข้อมูลที่นับได้ในช่วงนี้";
+      el.appendChild(empty);
+      return;
+    }
+    names.forEach(function (name) {
+      var card = document.createElement("div");
+      card.className = "usage-history-card";
+      var meta = providerMeta(name);
+      var nameEl = document.createElement("div");
+      nameEl.className = "usage-history-card-name";
+      nameEl.textContent = meta.logo + " " + meta.name;
+      var valueEl = document.createElement("div");
+      valueEl.className = "usage-history-card-value";
+      valueEl.textContent = fmtTokens(perProvider[name]);
+      card.appendChild(nameEl);
+      card.appendChild(valueEl);
+      el.appendChild(card);
+    });
+  }
+
+  function renderUsageHistoryTable(rows) {
+    var el = $("usage-history-table");
+    if (!el) return;
+    el.innerHTML = "";
+    if (!rows || !rows.length) {
+      var empty = document.createElement("div");
+      empty.className = "usage-history-note";
+      empty.textContent = "(ไม่มีข้อมูลที่นับได้ในช่วงนี้)";
+      el.appendChild(empty);
+      return;
+    }
+    var head = document.createElement("div");
+    head.className = "usage-history-row head";
+    head.innerHTML = "<span>Provider/Account</span><span>Model</span><span>Turns</span><span class=\"total\">Total</span>";
+    el.appendChild(head);
+    rows.forEach(function (r) {
+      var row = document.createElement("div");
+      row.className = "usage-history-row";
+      var p1 = document.createElement("span");
+      p1.textContent = r.provider + " / " + r.account;
+      var p2 = document.createElement("span");
+      p2.textContent = r.model;
+      var p3 = document.createElement("span");
+      p3.textContent = String(r.turns);
+      var p4 = document.createElement("span");
+      p4.className = "total";
+      p4.textContent = fmtTokens(r.total);
+      row.appendChild(p1); row.appendChild(p2); row.appendChild(p3); row.appendChild(p4);
+      el.appendChild(row);
+    });
+  }
+
+  function renderUsageHistoryQuota(quota) {
+    var el = $("usage-history-quota");
+    if (!el) return;
+    el.innerHTML = "";
+    var countable = (quota || []).filter(function (q) { return q.window; });
+    if (!countable.length) {
+      var empty = document.createElement("div");
+      empty.className = "usage-history-note";
+      empty.textContent = "(ไม่มีตัวอย่าง quota ในช่วงนี้)";
+      el.appendChild(empty);
+      return;
+    }
+    countable.forEach(function (q) {
+      var row = document.createElement("div");
+      row.className = "usage-history-quota-row";
+      var label = document.createElement("span");
+      label.textContent = q.provider + " · " + q.window;
+      var delta = document.createElement("span");
+      delta.className = "delta";
+      delta.textContent = typeof q.delta_pct === "number" ? "+" + q.delta_pct.toFixed(1) + "%" : "—";
+      row.appendChild(label);
+      row.appendChild(delta);
+      el.appendChild(row);
+    });
+  }
+
+  function renderUsageHistory() {
+    var data = usageHistoryState.data;
+    if (!data) return;
+    renderUsageHistorySpark(data.daily_series);
+    renderUsageHistoryCards(data.rows);
+    renderUsageHistoryTable(data.rows);
+    renderUsageHistoryQuota(data.quota);
+    var uncountableEl = $("usage-history-uncountable");
+    if (uncountableEl) {
+      var parts = (data.uncountable || []).map(function (u) { return u.provider + ": นับไม่ได้ (" + u.reason + ")"; })
+        .concat((data.quota || []).filter(function (q) { return !q.window; })
+          .map(function (q) { return q.provider + " quota: นับไม่ได้ (" + q.reason + ")"; }));
+      uncountableEl.textContent = parts.join(" · ");
+    }
+    var rtkEl = $("usage-history-rtk");
+    if (rtkEl) {
+      rtkEl.textContent = "rtk saved (ตามที่ rtk รายงาน — ไม่รวมกับตัวเลขข้างบน): " + (data.rtk_gain || "—");
+    }
+  }
+
+  function fetchUsageHistory() {
+    var params = usageHistoryRangeParams(usageHistoryState.range);
+    var qs = Object.keys(params).map(function (k) { return k + "=" + encodeURIComponent(params[k]); }).join("&");
+    apiFetch("api/usage/history?" + qs)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        usageHistoryState.data = data;
+        renderUsageHistory();
+      })
+      .catch(function () { /* keep last known snapshot */ });
+  }
+
+  var usageHistoryRangeEl = $("usage-history-range");
+  if (usageHistoryRangeEl) {
+    usageHistoryRangeEl.addEventListener("click", function (evt) {
+      var btn = evt.target.closest("button[data-range]");
+      if (!btn) return;
+      usageHistoryState.range = btn.getAttribute("data-range");
+      Array.prototype.forEach.call(usageHistoryRangeEl.querySelectorAll("button"), function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+      fetchUsageHistory();
+    });
+  }
+
   function openUsageSheet() {
     var sheet = $("usage-sheet");
     if (!sheet) return;
     sheet.classList.add("show");
     renderUsageSheet();
     fetchUsage(); // still cache-only server-side (see usage() docstring) — cheap to refresh on open
+    fetchUsageHistory();
   }
 
   function closeUsageSheet() {

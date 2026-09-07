@@ -302,6 +302,17 @@ class _Bridge(QObject):
                 pending.reply.put((200, api.activity(self._orch)))
             elif pending.action == "usage":
                 pending.reply.put((200, api.usage()))
+            elif pending.action == "usage_history":
+                pending.reply.put(
+                    (
+                        200,
+                        api.usage_history(
+                            pending.params.get("days"),
+                            pending.params.get("month"),
+                            pending.params.get("provider"),
+                        ),
+                    )
+                )
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
         except Exception:
@@ -617,6 +628,16 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         elif rest == "/api/usage":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("usage", {})
+        elif rest == "/api/usage/history":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled(
+                    "usage_history",
+                    {
+                        "days": query.get("days"),
+                        "month": query.get("month"),
+                        "provider": query.get("provider"),
+                    },
+                )
         elif rest.startswith("/r/"):
             # #367 Remote Reports — deliberately NOT behind bearer/password
             # auth (see `_serve_report`'s docstring): a report link is meant

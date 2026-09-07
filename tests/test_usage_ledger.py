@@ -343,6 +343,80 @@ def test_countability_report_shape():
     assert report["quota"]["opencode"][0] is False
 
 
+def test_import_all_with_source_reads_that_dir_without_profile_registry(tmp_path):
+    base = tmp_path / "prod-claude-config"
+    _write_claude_session(base, lines=[_claude_assistant_line("2026-09-01T10:00:00Z", "req_1")])
+    stats = ul.import_all(provider="claude", source=str(base))
+    assert stats["claude"]["new_turns"] == 1
+
+
+def test_import_all_source_never_writes_into_the_source_dir(tmp_path):
+    base = tmp_path / "prod-claude-config"
+    _write_claude_session(base, lines=[_claude_assistant_line("2026-09-01T10:00:00Z", "req_1")])
+    before = sorted(p.relative_to(base) for p in base.rglob("*") if p.is_file())
+    ul.import_all(provider="claude", source=str(base))
+    after = sorted(p.relative_to(base) for p in base.rglob("*") if p.is_file())
+    assert before == after  # importer only read from `base`, wrote nothing there
+
+
+def test_import_all_source_requires_a_known_importer():
+    result = ul.import_all(provider="gemini", source="/somewhere")
+    assert "error" in result["gemini"]
+
+
+def test_usage_ledger_dir_env_override(tmp_path, monkeypatch):
+    override = tmp_path / "scratch-ledger"
+    monkeypatch.setenv("TAKKUB_USAGE_LEDGER_DIR", str(override))
+    assert ul.usage_root() == override
+    ul.record_turn(
+        "claude",
+        "default",
+        "2026-09-01T00:00:00Z",
+        "r1",
+        "m",
+        {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    assert (override / "claude" / "default" / "2026-09.jsonl").is_file()
+
+
+# ── daily_series ─────────────────────────────────────────────────────────
+
+
+def test_daily_series_returns_one_entry_per_day_zero_filled():
+    series = ul.daily_series("claude", days=5)
+    assert len(series) == 5
+    assert all(total == 0 for _date_str, total in series)
+
+
+def test_daily_series_sums_across_models_and_accounts():
+    today = datetime.now(tz=UTC).date().isoformat()
+    ul.record_turn(
+        "claude",
+        "default",
+        f"{today}T00:00:00Z",
+        "r1",
+        "m1",
+        {"input": 1, "cache_creation": 2, "cache_read": 3, "output": 4},
+    )
+    ul.record_turn(
+        "claude",
+        "office",
+        f"{today}T01:00:00Z",
+        "r2",
+        "m2",
+        {"input": 5, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    series = dict(ul.daily_series("claude", days=1))
+    assert series[today] == 15
+
+
+def test_daily_series_skips_uncountable_providers():
+    ul.account_dir("gemini", "default").mkdir(parents=True, exist_ok=True)
+    assert ul.daily_series("gemini", days=3) == [
+        (d, 0) for d, _ in ul.daily_series("gemini", days=3)
+    ]
+
+
 # ── rollup_daily ─────────────────────────────────────────────────────────
 
 

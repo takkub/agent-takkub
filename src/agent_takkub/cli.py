@@ -2456,10 +2456,20 @@ def cmd_usage(args: argparse.Namespace) -> dict:
 
 
 def cmd_usage_import(args: argparse.Namespace) -> dict:
-    """`takkub usage import [--provider p]` — idempotent historical backfill."""
+    """`takkub usage import [--provider p] [--source DIR]` — idempotent
+    historical backfill. `--source` (requires `--provider`) reads
+    transcripts from that directory instead of the normal profile
+    registry — read-only, never writes there — for a cross-machine
+    cross-check (combine with env `TAKKUB_USAGE_LEDGER_DIR` to also keep
+    the ledger itself out of this process's own DATA_HOME)."""
     from . import usage_ledger
 
-    stats = usage_ledger.import_all(provider=getattr(args, "provider", None))
+    source = getattr(args, "source", None)
+    provider = getattr(args, "provider", None)
+    if source and not provider:
+        print("error: --source requires --provider", file=sys.stderr)
+        return {"ok": False, "msg": "--source requires --provider"}
+    stats = usage_ledger.import_all(provider=provider, source=source)
     for provider, s in stats.items():
         if "error" in s:
             print(f"{provider}: นับไม่ได้ ({s['error']})")
@@ -4691,6 +4701,15 @@ def main(argv: list[str] | None = None) -> int:
         "import", help="idempotent historical backfill from provider transcripts"
     )
     su_import.add_argument("--provider", default=None, help="limit to one provider")
+    su_import.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "read transcripts from this dir instead of the profile registry "
+            "(requires --provider; read-only, never writes there — combine with "
+            "env TAKKUB_USAGE_LEDGER_DIR to also redirect the ledger itself)"
+        ),
+    )
     su_import.set_defaults(func=cmd_usage_import)
 
     sas = sub.add_parser("audit-skills", help="TF-IDF role boundary audit")

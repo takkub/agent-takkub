@@ -119,6 +119,20 @@ def countability_report() -> dict[str, dict[str, tuple[bool, str | None]]]:
 
 
 def usage_root() -> Path:
+    """Where the ledger lives. `TAKKUB_USAGE_LEDGER_DIR` overrides the
+    default `config.RUNTIME_DIR/usage` — lets a read-only cross-check
+    against another machine's transcripts (e.g. prod) write its ledger to
+    a scratch dir instead of this process's own DATA_HOME, and lets a user
+    who moved machines or wants one combined ledger point it anywhere.
+    Combine with `usage import --source <dir>` (which controls where
+    TRANSCRIPTS are read from) — this only controls where the LEDGER is
+    WRITTEN; importers never write into a `--source` dir.
+    """
+    import os
+
+    override = os.environ.get("TAKKUB_USAGE_LEDGER_DIR", "").strip()
+    if override:
+        return Path(override)
     from . import config
 
     return config.RUNTIME_DIR / "usage"
@@ -502,16 +516,21 @@ def import_codex(profiles: list[dict] | None = None) -> dict:
 # ── opencode importer ────────────────────────────────────────────────────
 
 
-def import_opencode() -> dict:
+def import_opencode(db_path: Path | None = None) -> dict:
     """Read every historical assistant message's real `tokens`+`modelID`
     straight out of `opencode.db` (confirmed schema — see
     `opencode_helper.read_opencode_token_usage`'s own docstring). Single
     "default" account: opencode has no per-account profile switching yet.
+
+    `db_path` overrides the normal isolation-first resolution (`import_all`'s
+    `source=` passes an explicit db file for a read-only cross-machine
+    check) — the importer only ever reads it, never writes.
     """
     from . import opencode_helper
 
     stats = {"scanned_files": 0, "skipped_files": 0, "new_turns": 0}
-    db_path = opencode_helper.opencode_db_path()
+    if db_path is None:
+        db_path = opencode_helper.opencode_db_path()
     if db_path is None or not db_path.is_file():
         return stats
 
@@ -581,19 +600,28 @@ _IMPORTERS: dict[str, Any] = {
 }
 
 
-def import_all(provider: str | None = None) -> dict[str, dict]:
+def import_all(provider: str | None = None, *, source: str | None = None) -> dict[str, dict]:
     """Run every turn-countable provider's importer, or just one. A provider
     with no importer (not turn-countable) reports its reason instead of
-    crashing — see `TURN_UNCOUNTABLE_REASON`."""
+    crashing — see `TURN_UNCOUNTABLE_REASON`.
+
+    `source` (requires `provider`) reads transcripts from that directory
+    instead of the normal profile-registry resolution — e.g. pointing
+    read-only at another machine's `claude-config` to cross-check a count
+    without ever writing anything there (combine with
+    `TAKKUB_USAGE_LEDGER_DIR` to also keep the ledger itself out of this
+    process's own DATA_HOME).
+    """
     if provider:
-        fn = _IMPORTERS.get(provider)
-        if fn is None:
+        if provider not in _IMPORTERS:
+            return {provider: {"error": TURN_UNCOUNTABLE_REASON.get(provider, "unknown provider")}}
+        if source:
+            if provider == "opencode":
+                return {provider: import_opencode(Path(source))}
             return {
-                provider: {
-                    "error": TURN_UNCOUNTABLE_REASON.get(provider, "unknown provider"),
-                }
+                provider: _IMPORTERS[provider]([{"name": _DEFAULT_ACCOUNT, "config_dir": source}])
             }
-        return {provider: fn()}
+        return {provider: _IMPORTERS[provider]()}
     return {name: fn() for name, fn in _IMPORTERS.items()}
 
 
@@ -685,6 +713,32 @@ def _all_accounts(provider: str | None = None) -> list[tuple[str, str]]:
             continue
         out.extend((prov, adir.name) for adir in sorted(pdir.iterdir()) if adir.is_dir())
     return out
+
+
+def daily_series(provider: str | None = None, *, days: int = 14) -> list[tuple[str, int]]:
+    """`(date, total_tokens)` pairs for the last `days` days — the trend
+    sparkline's data source. Summed across every account/model for
+    `provider` (or every turn-countable provider when None). Always rolls
+    up first, same as `query_usage`, so a fresh turn shows up without a
+    separate explicit rollup step.
+    """
+    end_date = datetime.now(tz=UTC).date()
+    dates = [_date.fromordinal(end_date.toordinal() - i) for i in range(days - 1, -1, -1)]
+    totals: dict[str, int] = {d.isoformat(): 0 for d in dates}
+
+    for prov, account in _all_accounts(provider):
+        if not TURN_COUNTABLE.get(prov, False):
+            continue
+        rollup_daily(prov, account)
+        daily = _load_daily(prov, account)
+        for date_str, models in daily.items():
+            if date_str not in totals or not isinstance(models, dict):
+                continue
+            for agg in models.values():
+                if isinstance(agg, dict):
+                    totals[date_str] += sum(int(agg.get(f) or 0) for f in TURN_FIELDS)
+
+    return sorted(totals.items())
 
 
 def _date_in_range(date_str: str, start: _date, end: _date) -> bool:

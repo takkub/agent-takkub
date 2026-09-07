@@ -98,9 +98,10 @@ class TestSettingsWindowStructure:
         # from 21 — Role Overlap, Core V2 Overview, Core V2 Migration, and
         # OpenViking were removed outright; Knowledge/Design Tools/Context
         # Debug collapsed into one tabbed page. +1 (2026-09-07, #506): the
-        # top-level General view (theme mode) = 16.
+        # top-level General view (theme mode) = 16. +1 (2026-09-07, #507):
+        # the Usage view (token/quota report) = 17.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 16
+        assert dlg._stack.count() == 17
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:

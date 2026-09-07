@@ -136,6 +136,7 @@ from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_
 from .lead_context import _allowed_project_roots
 from .settings_core_v2 import CoreV2SettingsMixin
 from .settings_knowledge_design import KnowledgeDesignSettingsMixin
+from .settings_usage import UsageSettingsMixin
 
 # ── view indices (QStackedWidget page order) ────────────────────
 # Settings-nav declutter (2026-08-24, `docs/plans/v2-hardening-2026-08-24/
@@ -174,6 +175,10 @@ VIEW_CORE_V2_BRAIN = 12
 VIEW_CORE_V2_SCHEDULER = 13
 VIEW_PERFORMANCE = 14
 VIEW_GENERAL = 15
+# #507 — appended after the declutter pass above rather than inserted in
+# numeric position, so every existing VIEW_* index stays stable (external
+# test references key off these numbers).
+VIEW_USAGE = 16
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -194,6 +199,7 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
     (VIEW_USERS, "Users", "ACCOUNT"),
+    (VIEW_USAGE, "Usage", "ACCOUNT"),
     (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE"),
     (VIEW_CORE_V2_ACCOUNTS, "Accounts & Pools", "ADVANCED"),
     (VIEW_CORE_V2_ROUTING, "Routing", "ADVANCED"),
@@ -238,9 +244,10 @@ _CORE_V2_VIEWS: frozenset[int] = frozenset(
 _KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset({VIEW_KNOWLEDGE})
 # General (#506) writes through immediately (the theme switch applies + saves
 # on change — that IS the apply), so the footer pair must not pretend to
-# control it, same as the Core V2 pages.
+# control it, same as the Core V2 pages. Usage (#507) is pure read-only
+# report — there is nothing to save at all.
 _NO_FOOTER_SAVE_VIEWS: frozenset[int] = (
-    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | frozenset({VIEW_GENERAL})
+    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | frozenset({VIEW_GENERAL, VIEW_USAGE})
 )
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
@@ -269,6 +276,7 @@ _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_CORE_V2_BRAIN: "star",
     VIEW_CORE_V2_SCHEDULER: "grid",
     VIEW_PERFORMANCE: "grid",
+    VIEW_USAGE: "grid",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
 
@@ -331,6 +339,10 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_KNOWLEDGE: (
         "Knowledge",
         "สถานะ Brain / Obsidian / Graft, credential เครื่องมือ design, และ context build trace — 3 tab",
+    ),
+    VIEW_USAGE: (
+        "Usage",
+        "token/quota จริงที่ provider รายงาน แยก provider→บัญชี→model (#507) — กด Refresh เพื่อ import ล่าสุด",
     ),
 }
 
@@ -755,7 +767,9 @@ class _AutoskillsConfirmDialog(QDialog):
         return [cand.name for cand, chk in self._checks if chk.isChecked()]
 
 
-class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin):
+class SettingsWindow(
+    QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin, UsageSettingsMixin
+):
     """The unified Settings window. One instance per open — construct fresh
     each time (mirrors the old, now-removed ``PaneToolsDialog``/
     ``PipelineSettingsDialog``'s no-singleton/no-caching pattern), so it
@@ -1115,6 +1129,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_general_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_usage_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 329,
+  "module_count": 330,
   "modules": [
     {
       "module": "agent_takkub",
@@ -442,6 +442,7 @@
         "agent_takkub.settings_management.widgets.management_page",
         "agent_takkub.settings_management.widgets.source_badge",
         "agent_takkub.settings_management.window",
+        "agent_takkub.settings_usage",
         "agent_takkub.settings_window",
         "agent_takkub.status_header",
         "agent_takkub.task_dock",
@@ -451,7 +452,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 33,
+      "fan_in": 34,
       "fan_out": 0
     },
     {
@@ -3760,13 +3761,14 @@
         "agent_takkub.remote.notify",
         "agent_takkub.roles",
         "agent_takkub.spawn_engine",
+        "agent_takkub.usage_ledger",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.remote.auth",
@@ -4106,9 +4108,10 @@
         "agent_takkub.settings_window"
       ],
       "imported_by": [
+        "agent_takkub.settings_usage",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 11
     },
     {
@@ -4553,6 +4556,20 @@
       "fan_out": 6
     },
     {
+      "module": "agent_takkub.settings_usage",
+      "imports": [
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.settings_knowledge_design",
+        "agent_takkub.token_meter",
+        "agent_takkub.usage_ledger"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
+    },
+    {
       "module": "agent_takkub.settings_window",
       "imports": [
         "agent_takkub",
@@ -4578,6 +4595,7 @@
         "agent_takkub.roles",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_knowledge_design",
+        "agent_takkub.settings_usage",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
         "agent_takkub.skill_policy",
@@ -4591,7 +4609,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 29
+      "fan_out": 30
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -4885,11 +4903,12 @@
         "agent_takkub.orchestrator_text",
         "agent_takkub.project_nav",
         "agent_takkub.remote.notify",
+        "agent_takkub.settings_usage",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 5
     },
     {
@@ -4964,9 +4983,11 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.provider_usage"
+        "agent_takkub.provider_usage",
+        "agent_takkub.remote.api",
+        "agent_takkub.settings_usage"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 5
     },
     {

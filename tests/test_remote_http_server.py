@@ -1148,6 +1148,44 @@ class TestUsageRoute:
         assert seen["thread"] is threading.main_thread()
 
 
+class TestUsageHistoryRoute:
+    """`/api/usage/history` (#507) — same gating + query-param passthrough
+    as every other view-mode GET route."""
+
+    def test_returns_api_usage_history_payload(self, monkeypatch, server):
+        monkeypatch.setattr(
+            api, "usage_history", lambda days, month, provider: {"rows": [], "seen": days}
+        )
+        status, body = _run_pumped(
+            lambda: _get_status(
+                _url(server, "/sek/api/usage/history?days=7"), {"Authorization": "Bearer tok"}
+            )
+        )
+        assert status == 200
+        assert json.loads(body) == {"rows": [], "seen": "7"}
+
+    def test_requires_bearer_auth(self, server):
+        status, _ = _get_status(_url(server, "/sek/api/usage/history"))
+        assert status == 404
+
+    def test_query_params_are_threaded_through(self, monkeypatch):
+        seen: dict = {}
+
+        def _fake_usage_history(days, month, provider):
+            seen.update(days=days, month=month, provider=provider)
+            return {}
+
+        monkeypatch.setattr(api, "usage_history", _fake_usage_history)
+        bridge = http_server._Bridge(_FakeOrch())
+        pending = http_server._PendingRequest(
+            action="usage_history", params={"days": None, "month": "2026-08", "provider": "codex"}
+        )
+        bridge._handle(pending)
+        status, payload = pending.reply.get(timeout=5)
+        assert (status, payload) == (200, {})
+        assert seen == {"days": None, "month": "2026-08", "provider": "codex"}
+
+
 class TestStaticFileTraversal:
     def test_path_traversal_outside_static_root_rejected(self, server):
         with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
