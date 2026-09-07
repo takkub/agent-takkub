@@ -238,8 +238,8 @@ class TestOpencodeMessageReading:
 
         msgs = opencode_helper.read_opencode_session_messages(db_path, "ses_1", limit=10)
         assert len(msgs) == 2
-        assert msgs[0] == {"kind": "me", "text": "hello world"}
-        assert msgs[1] == {"kind": "lead", "text": "Hello! How can I help?"}
+        assert msgs[0] == {"kind": "me", "text": "hello world", "ts": 1.0}
+        assert msgs[1] == {"kind": "lead", "text": "Hello! How can I help?", "ts": 2.1}
 
 
 class TestOpencodeListSessions:

@@ -302,11 +302,14 @@ def read_opencode_session_messages(
             text = (pdata.get("text") or "").strip()
             if not text:
                 continue
+            # `time_created` is opencode's own ms-epoch write time (#517) —
+            # real message time, not scan/render time.
+            ts = row["time_created"] / 1000.0 if row["time_created"] is not None else None
             if role == "user":
                 clean = _strip_remote_prefix(text)
-                out.append({"text": clean[:_MAX_EVENT_CHARS], "kind": "me"})
+                out.append({"text": clean[:_MAX_EVENT_CHARS], "kind": "me", "ts": ts})
             elif role == "assistant":
-                out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "lead"})
+                out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "lead", "ts": ts})
         return out[-limit:]
     except (sqlite3.Error, OSError):
         return []

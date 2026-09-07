@@ -1,7 +1,7 @@
 """OpenCode ingest adapter — WRAPS `opencode_helper.py`'s
 `resolve_opencode_session`/`read_opencode_session_messages` (already
-normalized to `{"text": str, "kind": "me"|"lead"}` — no schema-drift risk to
-duplicate here, unlike codex/gemini). Not modified.
+normalized to `{"text": str, "kind": "me"|"lead", "ts": float|None}` — no
+schema-drift risk to duplicate here, unlike codex/gemini). Not modified.
 
 OpenCode keeps every project's sessions in ONE shared sqlite db with no byte
 offset to seek by, so the cursor here is a MESSAGE COUNT, not a byte offset
@@ -44,7 +44,7 @@ def read_new(source_id: str, cursor: str | None) -> IngestBatch:
     rows = read_opencode_session_messages(Path(db_path), sid, _MAX_MESSAGES)
     new_rows = rows[seen:]
     messages = [
-        IngestedMessage(role=_KIND_TO_ROLE[row["kind"]], text=row["text"])
+        IngestedMessage(role=_KIND_TO_ROLE[row["kind"]], text=row["text"], created_at=row.get("ts"))
         for row in new_rows
         if row.get("kind") in _KIND_TO_ROLE and row.get("text")
     ]

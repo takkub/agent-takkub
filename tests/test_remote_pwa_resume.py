@@ -226,13 +226,13 @@ class TestConcurrentProjectStreams:
     def test_background_events_are_stamped_to_captured_project(self):
         js = _read("app.js")
         chunk = js.split("function connectSse(ticket, project)")[1]
-        assert "appendLeadLive(parseSseData(evt.data, project), project)" in chunk[:3500]
+        assert "appendLeadLive(parseSseData(evt.data, project), project," in chunk[:3500]
         assert 'appendProjectMessage(project, "done"' in chunk[:3500]
 
     def test_desktop_user_turns_stream_to_mobile_without_refetch(self):
         js = _read("app.js")
         chunk = js.split('es.addEventListener("user"')[1].split('es.addEventListener("done"')[0]
-        assert 'appendProjectMessage(project, "me", text)' in chunk
+        assert 'appendProjectMessage(project, "me", text, parseSseTs(evt.data))' in chunk
         assert "payload.remote" in chunk
 
     def test_working_state_has_server_reconciliation_and_optimistic_timeout(self):

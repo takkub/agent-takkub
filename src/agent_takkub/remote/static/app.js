@@ -905,11 +905,26 @@
   var ES_RETRY_WARNING_THRESHOLD = 5;
   var lastMsgKind = null;
 
-  function timeLabel() {
-    var d = new Date();
+  var MONTH_ABBR = [
+    "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."
+  ];
+
+  // #517: `ts` is the record's own epoch-seconds time (server-stamped, never
+  // fabricated by this page) — history replay and live SSE alike must read
+  // it from here, not from `new Date()` at render time. A missing/invalid
+  // `ts` (a provider with no timestamp source) falls back to *now*, which is
+  // still correct for a genuinely live event and the best available guess
+  // for an untimestamped history entry.
+  function formatTs(ts) {
+    var d = typeof ts === "number" && isFinite(ts) ? new Date(ts * 1000) : new Date();
+    var now = new Date();
     var hh = String(d.getHours()).padStart(2, "0");
     var mm = String(d.getMinutes()).padStart(2, "0");
-    return hh + ":" + mm;
+    var sameDay = d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    if (sameDay) return hh + ":" + mm;
+    return d.getDate() + " " + MONTH_ABBR[d.getMonth()] + " " + hh + ":" + mm;
   }
 
   // Kind of a history/resume record as the PWA stores it. "sys" only ever
@@ -1390,7 +1405,7 @@
     if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
   }
 
-  function appendMsgDom(kind, text, skipScroll) {
+  function appendMsgDom(kind, text, ts, skipScroll) {
     if (typeof text !== "string" || !text) return;
     hideThinking();
     var log = $("lead-log");
@@ -1418,7 +1433,7 @@
       who.appendChild(document.createTextNode(providerIdentity(state.provider)));
       var time = document.createElement("span");
       time.className = "time";
-      time.textContent = timeLabel();
+      time.textContent = formatTs(ts);
       who.appendChild(time);
       div.appendChild(who);
     } else if (kind === "done") {
@@ -1427,7 +1442,7 @@
       doneChip.appendChild(document.createTextNode("✅ done"));
       var doneTime = document.createElement("span");
       doneTime.className = "time";
-      doneTime.textContent = timeLabel();
+      doneTime.textContent = formatTs(ts);
       doneChip.appendChild(doneTime);
       div.appendChild(doneChip);
     }
@@ -1452,19 +1467,19 @@
     if (state.leadWorking) showThinking();
   }
 
-  function appendProjectMessage(project, kind, text) {
+  function appendProjectMessage(project, kind, text, ts) {
     if (typeof text !== "string" || !text || !project) return;
     var lead = projectLeadState(project);
     if (kind === "lead") lead.picker = null;
-    lead.messages.push({ kind: kind, text: text });
-    if (project === visibleProject()) appendMsgDom(kind, text);
+    lead.messages.push({ kind: kind, text: text, ts: ts });
+    if (project === visibleProject()) appendMsgDom(kind, text, ts);
   }
 
   // Existing composer/quick-reply callers target the currently visible
   // project. SSE handlers use appendProjectMessage with their captured
   // project namespace so background streams never paint into the wrong tab.
-  function appendMsg(kind, text) {
-    appendProjectMessage(visibleProject(), kind, text);
+  function appendMsg(kind, text, ts) {
+    appendProjectMessage(visibleProject(), kind, text, ts);
   }
 
   // Live SSE 'lead' events land one-per-backend-record (notify.py pushes
@@ -1473,8 +1488,9 @@
   // here) — this only smooths the *rendering*: consecutive live events
   // within LEAD_MERGE_WINDOW_MS fold into the previous bubble's body instead
   // of stacking a new one. History replay (loadHistory) never merges —
-  // there's no timestamp on stored entries, so kind-adjacency alone can't
-  // tell "same reply, chunked" from "two separate replies, re-rendered".
+  // kind-adjacency alone can't tell "same reply, chunked" from "two separate
+  // replies, re-rendered" (the merge window uses wall-clock arrival time,
+  // not the stored `ts`, which is unaffected by #517).
   var LEAD_MERGE_WINDOW_MS = 4000;
   var lastLeadBodyEl = null;
   var lastLeadAt = 0;
@@ -1483,7 +1499,7 @@
   // this rather than the rendered DOM.
   var lastLeadRawAccum = "";
 
-  function appendLeadLive(text, project) {
+  function appendLeadLive(text, project, ts) {
     project = project || visibleProject();
     if (typeof text !== "string" || !text || !project) return;
     var leadState = projectLeadState(project);
@@ -1498,7 +1514,7 @@
       prior.text += "\n" + text;
       leadState.lastLeadAt = now;
     } else {
-      leadState.messages.push({ kind: "lead", text: text });
+      leadState.messages.push({ kind: "lead", text: text, ts: ts });
       leadState.lastLeadAt = now;
     }
     if (project !== visibleProject()) return;
@@ -1516,7 +1532,7 @@
       if (state.leadWorking) showThinking();
       return;
     }
-    appendMsgDom("lead", text);
+    appendMsgDom("lead", text, ts);
     lastLeadAt = now;
     var bodies = document.querySelectorAll("#lead-log .msg.lead .msg-body");
     lastLeadBodyEl = bodies.length ? bodies[bodies.length - 1] : null;
@@ -1572,7 +1588,7 @@
     // "true" early on), so the scroll decision for the whole rebuild is
     // made once, below, from the pre-rebuild snapshot instead.
     lead.messages.forEach(function (message) {
-      appendMsgDom(message.kind, message.text, true);
+      appendMsgDom(message.kind, message.text, message.ts, true);
     });
     if (pinned) {
       scrollToBottom(log);
@@ -2035,7 +2051,8 @@
         lead.messages = [];
         messages.forEach(function (m) {
           var text = m && typeof m.text === "string" ? m.text : null;
-          if (text) lead.messages.push({ kind: historyKind(m), text: text });
+          var ts = m && typeof m.ts === "number" && isFinite(m.ts) ? m.ts : null;
+          if (text) lead.messages.push({ kind: historyKind(m), text: text, ts: ts });
         });
         pending.forEach(function (message) {
           var duplicate = lead.messages.slice(-10).some(function (stored) {
@@ -2189,6 +2206,19 @@
     }
   }
 
+  // #517: every live SSE event is server-stamped with the wall-clock time it
+  // was actually sent (`SSEBroadcaster.push`) — read it back instead of
+  // letting the render site fall back to its own clock.
+  function parseSseTs(raw) {
+    try {
+      var payload = JSON.parse(raw);
+      var ts = payload && typeof payload === "object" ? payload.ts : null;
+      return typeof ts === "number" && isFinite(ts) ? ts : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function connectSse(ticket, project) {
     var lead = projectLeadState(project);
     if (!lead) return;
@@ -2226,7 +2256,7 @@
       // the local optimistic spinner; a confirmed working state stays until
       // the authoritative idle event arrives.
       if (!lead.workingConfirmed) setProjectWorking(project, false, null, false);
-      appendLeadLive(parseSseData(evt.data, project), project);
+      appendLeadLive(parseSseData(evt.data, project), project, parseSseTs(evt.data));
     });
     // Mirror prompts typed in the desktop Lead pane to every connected
     // phone. Messages originating from this same Remote client are already
@@ -2244,11 +2274,11 @@
       if (!text) return;
       var last = lead.messages.length ? lead.messages[lead.messages.length - 1] : null;
       if (payload && payload.remote && last && last.kind === "me" && last.text === text) return;
-      appendProjectMessage(project, "me", text);
+      appendProjectMessage(project, "me", text, parseSseTs(evt.data));
     });
     es.addEventListener("done", function (evt) {
       setProjectWorking(project, false, null, true);
-      appendProjectMessage(project, "done", parseSseData(evt.data, project));
+      appendProjectMessage(project, "done", parseSseData(evt.data, project), parseSseTs(evt.data));
     });
     // A session was resumed/replaced on the desktop while this project's SSE
     // remained connected. Invalidate only this project's history request and
@@ -2478,9 +2508,13 @@
           resumedMessages.forEach(function (message) {
             var text = message && typeof message.text === "string" ? message.text : "";
             if (!text) return;
+            var ts = message && typeof message.ts === "number" && isFinite(message.ts)
+              ? message.ts
+              : null;
             resumedLead.messages.push({
               kind: historyKind(message),
               text: text,
+              ts: ts,
             });
           });
           resumedLead.historyLoaded = resumedLead.messages.length > 0;
