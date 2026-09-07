@@ -217,3 +217,47 @@ def test_clear_model_also_clears_effort() -> None:
     role_models.clear_model("backend")
     assert role_models.model_for("backend", "claude") is None
     assert role_models.effort_for("backend", "claude") is None
+
+
+# ── B-H2 (round2 review, docs/audit/2026-09-07-batch-2.0.x-review-round2.md):
+# #515 folded the standalone global-routing file (role-providers.json) into
+# this module, making `set_provider`/`_save` the ONLY writer of global
+# routing — but it only ever mirrored `role-models.json` itself
+# (`dual_write_role_models`), never `v2/config/routing.json`
+# (`dual_write_routing`). A provider switch through the model picker (this
+# module, not `provider_config.save_providers`) left the v2 mirror stale
+# and invisible to `scan_v1_only_writes`'s exit-gate check. ────────────────
+
+
+def test_set_provider_mirrors_v2_routing_global(monkeypatch, isolated_v2_data_home) -> None:
+    (isolated_v2_data_home / "v2").mkdir(parents=True)
+    settings_home = isolated_v2_data_home.parent / "settings"
+    settings_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", settings_home)
+    monkeypatch.setattr(role_models, "_PATH", settings_home / "role-models.json")
+
+    role_models.set_provider("frontend", "codex")
+
+    from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+    from agent_takkub.core.storage.legacy_reader import read_json
+
+    routing_target = RoleAgentMigrationStep(data_home=isolated_v2_data_home)._routing_target()
+    assert read_json(routing_target).get("global") == {"frontend": "codex"}
+
+
+def test_set_provider_leaves_no_v1_only_write_hit(monkeypatch, isolated_v2_data_home) -> None:
+    """The regression this bug produces at the exit gate: `scan_v1_only_writes`
+    reading clean (0 hits) despite the v2 mirror never having been updated —
+    the exact `probe_routing_source.py` scenario from the round2 review."""
+    (isolated_v2_data_home / "v2").mkdir(parents=True)
+    settings_home = isolated_v2_data_home.parent / "settings"
+    settings_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", settings_home)
+    monkeypatch.setattr(role_models, "_PATH", settings_home / "role-models.json")
+
+    role_models.set_provider("frontend", "codex")
+
+    from agent_takkub.core.storage.v1_only_write import scan_v1_only_writes
+
+    hits = scan_v1_only_writes(data_home=isolated_v2_data_home)
+    assert not any(h.name.startswith("role-providers") for h in hits)

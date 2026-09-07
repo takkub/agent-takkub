@@ -1182,7 +1182,3 @@ class MainWindowUpdateMixin:
             )
             return
         QCoreApplication.quit()
-
-    def _on_install_rtk_clicked(self) -> None:
-        """Central rtk toggle UI removed — rtk is forced enabled when binary is present."""
-        pass

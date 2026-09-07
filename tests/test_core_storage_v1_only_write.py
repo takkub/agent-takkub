@@ -185,8 +185,10 @@ def test_role_providers_fanout_missing_target_is_a_hit(tmp_path):
     home = _migrated_home(tmp_path)
     from agent_takkub import config
 
-    global_source = config.SETTINGS_HOME / "role-providers.json"
-    global_source.write_text('{"backend": "claude"}', encoding="utf-8")
+    # #515: global routing lives in role-models.json now — see
+    # steps_v1.py's `_global_routing_source`.
+    global_source = config.SETTINGS_HOME / "role-models.json"
+    global_source.write_text('{"backend": {"provider": "claude"}}', encoding="utf-8")
     # routing.json target deliberately never created
 
     hits = scan_v1_only_writes(data_home=home)
@@ -203,8 +205,8 @@ def test_role_providers_fanout_stale_global_source_is_a_hit(tmp_path):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"schema": 1, "global": {}, "projects": {}}', encoding="utf-8")
 
-    global_source = config.SETTINGS_HOME / "role-providers.json"
-    global_source.write_text('{"backend": "claude"}', encoding="utf-8")
+    global_source = config.SETTINGS_HOME / "role-models.json"
+    global_source.write_text('{"backend": {"provider": "claude"}}', encoding="utf-8")
     _touch_future(global_source)
 
     hits = scan_v1_only_writes(data_home=home)
@@ -225,7 +227,6 @@ def test_role_providers_fanout_stale_project_scope_is_a_hit(tmp_path):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"schema": 1, "global": {}, "projects": {}}', encoding="utf-8")
 
-    (config.SETTINGS_HOME / "role-providers.json").write_text("{}", encoding="utf-8")
     proj_source = config.SETTINGS_HOME / "projects" / "proj_a" / "role-providers.json"
     proj_source.parent.mkdir(parents=True, exist_ok=True)
     proj_source.write_text('{"backend": "codex"}', encoding="utf-8")
@@ -241,8 +242,8 @@ def test_role_providers_fanout_no_hit_right_after_dual_write(tmp_path):
     from agent_takkub import config
     from agent_takkub.core.storage import dual_write
 
-    global_source = config.SETTINGS_HOME / "role-providers.json"
-    global_source.write_text('{"backend": "claude"}', encoding="utf-8")
+    global_source = config.SETTINGS_HOME / "role-models.json"
+    global_source.write_text('{"backend": {"provider": "claude"}}', encoding="utf-8")
     dual_write.dual_write_routing({"backend": "claude"}, {}, data_home=home)
 
     hits = scan_v1_only_writes(data_home=home)

@@ -127,11 +127,13 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
 ### 🟢 Extracted (self-contained dialog subsystem) — method lists refreshed 2026-07-11
 
 **`mw_self_update`** → `update_panel.py` — cockpit + Claude-CLI + **npm** self-update UX (own QThread)
-- `_on_restart_cockpit_clicked`, `_schedule_update_check`, `_on_update_check_done`, `_schedule_npm_update_check`, `_on_npm_update_check_done`, `_notify_update_available`, `_pulse_update_button`, `_run_update_check`, `_on_claude_update_check_done`, `_show_claude_update_dialog`, `_count_live_claude_panes`, `_confirm_and_apply_claude_update`, `_start_npm_update_check`, `_start_npm_update_install`, `_refresh_update_button`, `_on_update_clicked`, `_restart_with_pip_sync`, `_restart_cockpit`, `_on_install_rtk_clicked`
+- `_on_restart_cockpit_clicked`, `_schedule_update_check`, `_on_update_check_done`, `_schedule_npm_update_check`, `_on_npm_update_check_done`, `_notify_update_available`, `_pulse_update_button`, `_run_update_check`, `_on_claude_update_check_done`, `_show_claude_update_dialog`, `_count_live_claude_panes`, `_confirm_and_apply_claude_update`, `_start_npm_update_check`, `_start_npm_update_install`, `_refresh_update_button`, `_on_update_clicked`, `_restart_with_pip_sync`, `_restart_cockpit`
 - Drift from the 2026-06-21 doc: `_refresh_version_label`, `_copy_version_to_clipboard`,
   `_show_changelog`, `_on_claude_update_clicked` no longer exist (verified — not renamed
   elsewhere, just gone); the npm-update sub-flow (`_schedule_npm_update_check` through
   `_start_npm_update_install`) and `_restart_with_pip_sync` are new since then.
+  `_on_install_rtk_clicked` (a dead no-op stub, central rtk toggle UI already
+  removed) was deleted 2026-09-07 (B-L1, round2 review).
 
 **`mw_project_creation_wizard`** → `project_wizard.py` — new/import project + AI rules gen (`_RulesGeneratorThread`)
 - `_RulesGeneratorThread`, `_on_add_project_clicked`, `_import_existing_project`, `_new_project_with_rules`, `_ask_project_description`, `_generate_rules_with_ui`, `_run_map_paths_dialog`, `_save_and_open_project`, `_on_edit_project_rules_clicked`, `_show_rules_editor_dialog`, `_on_edit_project_clicked`

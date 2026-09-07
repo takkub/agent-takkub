@@ -277,13 +277,13 @@ class MainWindow(
         self.tabs.closeRequested.connect(self._on_tab_close_requested)
         self.tabs.contextMenuRequested.connect(self._on_tab_context_menu)
         self.tabs.openProjectRequested.connect(self._open_project_tab)
-        # NOTE: `currentChanged` is connected at the end of __init__ — once the
-        # status-bar widgets exist. It fires the moment the first row is added,
-        # and the slot calls `_refresh_rtk_button` which touches
-        # `self._btn_install_rtk`. Connecting up-front would fire the slot before
-        # that button exists, raising AttributeError inside a Qt slot — which the
-        # event-dispatch path then surfaces as a silent Chromium renderer crash
-        # on Windows (pythonw shows nothing; the cockpit window never appears).
+        # NOTE: `currentChanged` is connected further down in __init__ — once
+        # the widgets its slot (`_on_tab_switched`) touches (the usage corner,
+        # `_limit_label_host`, ...) exist. Connecting right here, before the
+        # first tab is added, would fire the slot before those widgets exist,
+        # raising AttributeError inside a Qt slot — which the event-dispatch
+        # path then surfaces as a silent Chromium renderer crash on Windows
+        # (pythonw shows nothing; the cockpit window never appears).
 
         outer.addWidget(self.tabs, 1)
 
@@ -394,8 +394,8 @@ class MainWindow(
         self._limit_label_host: ProjectTab | None = initial_tab
         initial_tab.mount_usage_widget(self._usage_corner)
 
-        # Only NOW is it safe to listen for project switches — the handler
-        # touches `_btn_install_rtk` via `_refresh_rtk_button`, which didn't
+        # Only NOW is it safe to listen for project switches — `_on_tab_switched`
+        # touches the usage corner / `_limit_label_host` above, which didn't
         # exist when the first row was added (see the deferred-connect note).
         self.tabs.currentChanged.connect(self._on_tab_switched)
 

@@ -118,6 +118,7 @@ def session_project_dirs_for_cwd(
     *,
     project_ns: str | None = None,
     project_dir_name: str | None = None,
+    base_role: str | None = None,
 ) -> tuple[Path, ...]:
     """Return transcript directories in preferred new-to-legacy order.
 
@@ -135,11 +136,29 @@ def session_project_dirs_for_cwd(
     share. Fall back to reading that directory too (read-only; nothing here
     ever moves a session file) so those pre-upgrade sessions stay resumable
     instead of silently disappearing from every lookup keyed by uuid.
+
+    B-M3 (round2 cross review): ``project_dir_name`` only carries the F1
+    role suffix when the CALLER already knows the exact spawn-side name (as
+    a live pane's own ``PtySession._claude_project_dir_name`` does). A
+    caller that instead only has ``(project_ns, base_role)`` — no live pane
+    to read the exact name off of — used to have no way to reach the
+    role-suffixed directory at all: without an explicit ``project_dir_name``
+    this function derived ``new_name`` from ``project_ns`` alone, silently
+    reproducing the bare pre-F1 name instead of a teammate's real one.
+    ``base_role`` closes that gap, mirroring ``pane_env.
+    claude_project_dir_name``'s own formula, and is ignored once
+    ``project_dir_name`` is given explicitly (that value already IS the
+    resolved name).
     """
     root = _claude_projects_dir(config_dir)
-    new_name = project_dir_name or (
-        f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}" if project_ns else None
-    )
+    if project_dir_name:
+        new_name = project_dir_name
+    elif project_ns and base_role and base_role != "lead":
+        new_name = f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}-{base_role}"
+    elif project_ns:
+        new_name = f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}"
+    else:
+        new_name = None
     names = [new_name, encode_path_for_claude(cwd)] if new_name else [encode_path_for_claude(cwd)]
     if project_ns and new_name and new_name != f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}":
         names.append(f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}")
@@ -184,6 +203,7 @@ def find_session_by_uuid(
     *,
     project_ns: str | None = None,
     project_dir_name: str | None = None,
+    base_role: str | None = None,
 ) -> Path | None:
     """Return this pane's *exact* session JSONL —
     ``<cwd's encoded project dir>/<session_uuid>.jsonl`` — never a guess.
@@ -206,7 +226,11 @@ def find_session_by_uuid(
     if not session_uuid:
         return None
     for project_dir in session_project_dirs_for_cwd(
-        config_dir, cwd, project_ns=project_ns, project_dir_name=project_dir_name
+        config_dir,
+        cwd,
+        project_ns=project_ns,
+        project_dir_name=project_dir_name,
+        base_role=base_role,
     ):
         candidate = project_dir / f"{session_uuid}.jsonl"
         if candidate.is_file():
@@ -221,6 +245,7 @@ def find_latest_session(
     *,
     project_ns: str | None = None,
     project_dir_name: str | None = None,
+    base_role: str | None = None,
 ) -> Path | None:
     """Return the most-recently-modified JSONL file matching `cwd`'s encoded
     project dir, optionally requiring mtime >= since_ts.
@@ -242,7 +267,11 @@ def find_latest_session(
     """
     best: tuple[float, Path] | None = None
     for proj_dir in session_project_dirs_for_cwd(
-        config_dir, cwd, project_ns=project_ns, project_dir_name=project_dir_name
+        config_dir,
+        cwd,
+        project_ns=project_ns,
+        project_dir_name=project_dir_name,
+        base_role=base_role,
     ):
         if not proj_dir.is_dir():
             continue
