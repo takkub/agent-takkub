@@ -6,7 +6,6 @@ Layers:
      scoped to pending-task panes, respects the cap + re-limit grace).
   3. _on_limit_usage_confirmed / _park_pane_for_limit / _wake_parked_pane —
      the actual park→wake state machine.
-  4. set_auto_resume — toggle persist + broadcast.
 """
 
 from __future__ import annotations
@@ -82,7 +81,6 @@ def _bare_orch():
     o._pane_state = {}
     o._panes_by_project = {}
     o.leadInjected = MagicMock()
-    o.autoResumeChanged = MagicMock()
     o.limitUsageConfirmed = MagicMock()
     o._notify_lead = MagicMock()
     return o
@@ -534,32 +532,6 @@ class TestRestoreParkedPane:
 
 
 # ── layer 5: toggle ──────────────────────────────────────────────────────────
-
-
-class TestSetAutoResume:
-    def test_enable_persists_and_broadcasts(self, monkeypatch) -> None:
-        o = _bare_orch()
-        saved = {}
-        monkeypatch.setattr(auto_resume, "set_enabled", lambda flag: saved.setdefault("v", flag))
-        lead = _pane_alive()
-        o._panes_by_project["proj"] = {"lead": lead}
-        from agent_takkub.roles import LEAD
-
-        o._panes_by_project["proj"][LEAD.name] = lead
-        ok, _msg = o.set_auto_resume(True)
-        assert ok is True
-        assert saved["v"] is True
-        lead.session.write.assert_called()
-        o.autoResumeChanged.emit.assert_called_once_with(True)
-
-    def test_disable_persists_and_broadcasts(self, monkeypatch) -> None:
-        o = _bare_orch()
-        saved = {}
-        monkeypatch.setattr(auto_resume, "set_enabled", lambda flag: saved.setdefault("v", flag))
-        ok, _msg = o.set_auto_resume(False)
-        assert ok is True
-        assert saved["v"] is False
-        o.autoResumeChanged.emit.assert_called_once_with(False)
 
 
 # ── layer 6: give-up status dump (#158) ─────────────────────────────────────

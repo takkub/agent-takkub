@@ -141,6 +141,29 @@ def _write_json_atomic(path: Path, data: dict) -> bool:
             return True
 
 
+def archive_settings_file(source: Path) -> bool:
+    """Move a deprecated ``SETTINGS_HOME`` store into ``SETTINGS_HOME/backups/``
+    instead of deleting it (#515 Settings diet — "เอาออก = ถอน dead code
+    ทั้งสาย" but never the user's own data). No-op (returns True) when
+    *source* doesn't exist. If a backup with the same name is already there
+    from an earlier run, *source* is left in place rather than overwritten or
+    silently dropped — one archived copy per filename is enough, and this
+    only ever runs once per store's one-time migration anyway."""
+    if not source.exists():
+        return True
+    backups_dir = source.parent / "backups"
+    dest = backups_dir / source.name
+    if dest.exists():
+        return True
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        source.replace(dest)
+        return True
+    except OSError:
+        _log.exception("could not archive deprecated settings file %s", source)
+        return False
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

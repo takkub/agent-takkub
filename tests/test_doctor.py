@@ -19,6 +19,7 @@ from agent_takkub.doctor import (
     check_arch,
     check_capability_skill_store,
     check_claude,
+    check_core_v2,
     check_design_integrations,
     check_editable_install,
     check_graft,
@@ -1553,6 +1554,46 @@ class TestCheckEditableInstall:
 
 
 # ---------------------------------------------------------------------------
+# check_core_v2 — #515 Settings diet: status for the folded-away
+# Routing/Brain/Scheduler ADVANCED pages + Context Debug tab
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCoreV2:
+    def test_every_flag_reports_ok_by_default(self) -> None:
+        findings = check_core_v2()
+        by_name = {f.name: f for f in findings}
+        for name in (
+            "router",
+            "brain",
+            "context",
+            "scheduler",
+            "conversation",
+            "v2_authority",
+            "auto_migrate",
+        ):
+            assert by_name[name].status == Status.OK, name
+            assert by_name[name].category == "core-v2"
+            assert "default" in by_name[name].detail
+
+    def test_env_override_reported_and_warns_when_it_disables(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_V2_ROUTER", "0")
+        findings = check_core_v2()
+        router = next(f for f in findings if f.name == "router")
+        assert router.status == Status.WARN
+        assert "TAKKUB_V2_ROUTER" in router.detail
+        assert "0" in router.detail
+
+    def test_context_strategy_and_brain_count_present(self) -> None:
+        findings = check_core_v2()
+        by_name = {f.name: f for f in findings}
+        assert by_name["context-strategy"].detail == "automatic"
+        assert "record" in by_name["brain-memory-count"].detail
+
+
+# ---------------------------------------------------------------------------
 # run_all_checks
 # ---------------------------------------------------------------------------
 
@@ -1589,6 +1630,7 @@ class TestRunAllChecks:
             "check_ready_markers",
             "check_paste_placeholders",
             "check_context",
+            "check_core_v2",
             "check_resilience",
             "check_version",
             "check_editable_install",

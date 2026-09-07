@@ -18,7 +18,7 @@ reset, or a list for whichever kind(s) you're setting explicitly.
 
 from __future__ import annotations
 
-from ... import pane_tools_policy, provider_config, shared_dev_tools, skill_policy
+from ... import pane_tools_policy, provider_config, role_models, shared_dev_tools, skill_policy
 from .. import models
 from ..commands import RoleAccessDraft
 from ..models import OperationResult
@@ -47,7 +47,11 @@ def get_role_access(name: str) -> models.RoleAccess:
 
 def _relationship_paths(*role_names: str) -> list:
     return [
-        provider_config.config_path(None),
+        # #515: a global provider override (`save_role_overrides` with no
+        # `project`) now lands in `role-models.json`, not a standalone
+        # `role-providers.json` — the transaction must snapshot the file it
+        # ACTUALLY writes, or a rollback here would miss that write.
+        role_models.path(),
         pane_tools_policy.PANE_TOOLS_POLICY_FILE,
         skill_policy.SKILL_POLICY_FILE,
         *shared_dev_tools.role_variant_paths(role_names),

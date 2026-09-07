@@ -1277,13 +1277,9 @@ class Orchestrator(
     # main_window still listens here, to repaint if anything calls
     # `set_plan_tier` directly.
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
-    execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
     # Emitted when a project's team preset (#512) changes — status-bar chip
     # and Settings listen to repaint without polling. (project, preset_id)
     teamPresetChanged = pyqtSignal(str, str)
-    # Emitted when user flips the auto-resume (🌙) toggle via the status bar.
-    # main_window listens to repaint the chip without polling.
-    autoResumeChanged = pyqtSignal(bool)
     # Emitted by AutoResumeMixin's background usage-confirm fetch (signal b)
     # once it has an answer, so the actual park decision runs on the Qt
     # thread instead of the fetch's daemon thread. (project, role, confirmed)
@@ -4716,53 +4712,6 @@ class Orchestrator(
         self.planTierChanged.emit(tier)
         _log_event("plan_tier_set", tier=tier)
         return True, f"plan set to {tier}"
-
-    def set_exec_mode(self, mode: str) -> tuple[bool, str]:
-        """Set the execution mode (solo/parallel) globally and persist it.
-
-        SOLO is the cockpit's original 1-agent-per-role behaviour. PARALLEL tells
-        the Lead, on the NEXT task, to decompose an independent-multi-feature
-        request and fan out several instances per role (frontend#1..#K, …) so the
-        features finish concurrently. The instruction reaches the Lead via the
-        system-prompt block in lead_context (read at spawn); we also broadcast a
-        `[system]` notice so a live Lead switches planning style immediately.
-
-        Returns (ok, message). Fails only on an unknown mode.
-        """
-        from . import exec_mode
-
-        mode = mode.lower().strip()
-        if mode not in exec_mode.MODES:
-            return False, f"unknown execution mode: {mode!r}"
-
-        exec_mode.set_current(mode)
-
-        if mode == exec_mode.PARALLEL:
-            notice = (
-                "[system] execution mode → PARALLEL (multi). When a request has "
-                "K independent features, plan a decomposition and fan out one "
-                "instance per role per feature (frontend#1..#K, backend#1..#K). "
-                "No hard numeric cap — sequence independent tasks in waves by "
-                "per-role cost instead of firing everything at once. Independent "
-                "features only; keep dependent work serial."
-            )
-        else:
-            notice = (
-                "[system] execution mode → SOLO (1:1). One agent per role; work "
-                "features sequentially. (No multi-instance fan-out.)"
-            )
-
-        for _project_ns, panes in self._panes_by_project.items():
-            lead = panes.get(LEAD.name)
-            if lead and lead.session and lead.session.is_alive:
-                _em_sess = lead.session
-                _em_sess.write(notice)
-                _delayed_enter(lead, _em_sess, 150)
-                self.leadInjected.emit(notice)
-
-        self.execModeChanged.emit(mode)
-        _log_event("exec_mode_set", mode=mode)
-        return True, f"execution mode set to {mode}"
 
     def set_team_preset(
         self, preset_id: str, project: str | None = None, *, custom: dict | None = None

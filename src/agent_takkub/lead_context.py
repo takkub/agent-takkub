@@ -707,7 +707,7 @@ Status เปลี่ยนระหว่าง session: cockpit จะ inject
     # keeps the Lead from firing everything at once without hardcoding a number.
     from . import exec_mode as _exec_mode
 
-    if _exec_mode.is_parallel():
+    if _exec_mode.is_parallel(name):
         suffix += """
 
 ---

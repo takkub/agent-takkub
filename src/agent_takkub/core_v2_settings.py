@@ -26,49 +26,6 @@ from . import config
 
 SCHEMA_VERSION = 1
 
-# Mirrors the 5 flags named in the epic #309 Phase 9 task spec. "context" has
-# no `core.context` module / flag.py yet (Context Builder is 7c, still
-# unbuilt per `core.brain.facade`'s own docstring) — kept here anyway so the
-# Overview view has one place to persist it the day that module exists,
-# rather than needing a schema migration later.
-#
-# "auto_migrate" (#361) joined later, same shape — the boot-time `migrate
-# apply` gate's Settings-page escape hatch, `TAKKUB_AUTO_MIGRATE` env always
-# wins over it (see `auto_migrate_boot.auto_migrate_enabled`).
-#
-# "v2_authority" (#362 Phase 10 wave 2) joined the default-True sweep in
-# 2.0.0 (see `_DEFAULT_FLAGS` below) after its own soak proved drift=0.
-FLAG_NAMES: tuple[str, ...] = (
-    "router",
-    "conversation",
-    "context",
-    "brain",
-    "scheduler",
-    "auto_migrate",
-    "v2_authority",
-)
-
-# Default-ON since 1.0.84 (epic #309's last rung before 2.0.0). Every flag
-# shipped off through the Phase 1-9 build-out and then ran with all five on
-# for a full working day on a real cockpit, which is what surfaced #332-#337;
-# those are fixed, so "V2 on" is now the product and `TAKKUB_V2_*=0` is the
-# escape hatch rather than the other way round.
-#
-# A cockpit that already has a core-v2-settings.json keeps whatever it says:
-# `load()` starts from these defaults and then applies the persisted values
-# over them, so an explicit `false` on disk is still an explicit `false`. Only
-# a missing file — or a key that never existed — picks up the new default.
-#
-# `v2_authority` (#362, 2.0.0 flip) used to be excluded from this sweep and
-# default False — it switches every dual-written domain's READER from V1 to
-# V2, a bigger jump than "the resolver code path is live", so it needed its
-# own soak beyond the other five's. That soak ran drift-free on dev (320
-# keys, IDENTICAL) and prod (259 keys, IDENTICAL) for several days; 2.0.0 is
-# the release that spends that soak and folds it into the sweep below.
-# `TAKKUB_V2_AUTHORITY=0` (or the Settings toggle) is now the escape hatch
-# back to V1, same shape as the other five's `TAKKUB_V2_*=0`.
-_DEFAULT_FLAGS: dict[str, bool] = {name: True for name in FLAG_NAMES}
-
 # Context Strategy (v2-hardening C, `13_SIMPLE_UX.md`) — Fast/Automatic/Deep
 # UX switch for the Context Gate/Classifier v2 stack. A plain string rather
 # than another `FLAG_NAMES` boolean since it's a 3-way choice, not on/off;
@@ -101,7 +58,6 @@ def path() -> Path:
 def _default_payload() -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
-        "flags": dict(_DEFAULT_FLAGS),
         "scheduler_policy": asdict(SchedulerPolicyConfig()),
         "context_strategy": _DEFAULT_CONTEXT_STRATEGY,
     }
@@ -154,9 +110,14 @@ def load() -> dict:
             if not isinstance(payload, dict):
                 raise ValueError("core-v2-settings.json root is not an object")
             merged = _default_payload()
-            flags = payload.get("flags")
-            if isinstance(flags, dict):
-                merged["flags"].update({k: bool(v) for k, v in flags.items() if k in FLAG_NAMES})
+            # "flags" (router/conversation/context/brain/scheduler/
+            # auto_migrate/v2_authority) is intentionally NOT read back here
+            # any more (#515 Settings diet) — every one of them is default-ON
+            # since 1.0.84/2.0.0 and `flag_enabled()` below now always
+            # returns True, so a legacy file's persisted values are dead
+            # weight; the next `save()` (scheduler policy / context strategy)
+            # drops the key from disk for good. `TAKKUB_V2_*=0` env vars
+            # remain the only escape hatch (see each `core/*/flag.py`).
             policy = payload.get("scheduler_policy")
             if isinstance(policy, dict):
                 merged["scheduler_policy"].update(
@@ -182,15 +143,14 @@ def save(payload: dict) -> bool:
 
 
 def flag_enabled(name: str) -> bool:
-    return bool(load()["flags"].get(name, False))
-
-
-def set_flag(name: str, value: bool) -> bool:
-    if name not in FLAG_NAMES:
-        raise ValueError(f"unknown Core V2 flag: {name!r}")
-    payload = load()
-    payload["flags"][name] = bool(value)
-    return save(payload)
+    """Always True (#515 Settings diet) — every Core V2 flag (router/
+    conversation/context/brain/scheduler/auto_migrate/v2_authority) has been
+    default-ON since 1.0.84/2.0.0 with no real-world reason left to flip one
+    off from the UI. `name` is accepted (unused) so every `core/*/flag.py`
+    module's `env-wins-else-this` call shape needs no change — an operator's
+    `TAKKUB_V2_*=0`/`TAKKUB_AUTO_MIGRATE=0` env override is checked BEFORE
+    this function is ever reached and still fully works."""
+    return True
 
 
 def load_scheduler_policy() -> SchedulerPolicyConfig:

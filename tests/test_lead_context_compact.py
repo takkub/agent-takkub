@@ -92,16 +92,15 @@ class TestPostCompactBriefInjection:
 
 class TestParallelModeWorktreeRule:
     """The PARALLEL exec-mode block must teach the Lead to isolate same-repo
-    fan-out instances with --isolation worktree (#81 Phase 1.5). SOLO mode no
-    longer exists (#104 — exec_mode.is_parallel() is forced to True always),
-    so only the PARALLEL rendering is exercised here."""
+    fan-out instances with --isolation worktree (#81 Phase 1.5). #515:
+    exec mode now derives from the project's team preset (`exec_mode.
+    is_parallel(project)`) — the "default" project's preset resolves to
+    "auto", which is PARALLEL (`team_preset._resolve`), so no monkeypatch is
+    needed to exercise that rendering."""
 
     def test_parallel_block_includes_worktree_rule(
         self, runtime_tmp: pathlib.Path, cockpit_md: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from agent_takkub import exec_mode
-
-        monkeypatch.setattr(exec_mode, "current", lambda: exec_mode.PARALLEL)
         result_path = _render_lead_context("default")
         text = pathlib.Path(result_path).read_text(encoding="utf-8")
         assert "Execution mode: PARALLEL" in text

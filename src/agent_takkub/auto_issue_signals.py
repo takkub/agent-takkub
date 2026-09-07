@@ -48,7 +48,7 @@ _ENABLED_FLAG = "auto-issue.json"
 
 def _flag_path() -> Path:
     """Resolved at call time so a test monkeypatching SETTINGS_HOME lands in
-    its own tmp dir (same rule `rtk_helper._enabled_flag_path` follows)."""
+    its own tmp dir (same rule `performance_settings.path` follows)."""
     from . import config
 
     return config.SETTINGS_HOME / _ENABLED_FLAG

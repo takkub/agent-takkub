@@ -4,6 +4,20 @@ The environment variables supported by :mod:`resource_governor` remain the
 highest-priority emergency override.  This module supplies the durable UI
 defaults underneath them and deliberately has no Qt dependency so settings,
 CLI, and tests all use one schema.
+
+#515 Settings diet — "โหมดเครื่อง" (machine mode): the only thing worth
+persisting is `mode` (safe/balanced/maximum); every concurrency/threshold
+number in `PerformanceSettings` is a live `preset(mode)` derivation from
+this machine's current CPU/RAM (psutil), never a user-picked number again.
+`get_mode()`/`set_mode()` are the new persistence API — `load()`/`save()`
+still exist and still return/accept a full `PerformanceSettings` (every
+existing caller reads its fields unchanged), but `save()` now only persists
+the `mode` field, and `load()` recomputes the rest fresh from `preset(mode)`
+every call rather than reading back stale numbers a prior machine/OS
+produced. A legacy file that still carries the old per-field numbers is
+migrated once on first read: its `mode` is extracted, the old file is moved
+to `SETTINGS_HOME/backups/` (never deleted), and a slim mode-only file is
+written in its place.
 """
 
 from __future__ import annotations
@@ -167,19 +181,56 @@ def from_dict(payload: dict) -> PerformanceSettings:
     return validate(PerformanceSettings(**values))
 
 
-def load(settings_path: Path | None = None) -> PerformanceSettings:
-    target = settings_path or path()
+_DEFAULT_MODE = "balanced"
+
+
+def _read_raw(target: Path) -> dict | None:
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("performance settings root must be an object")
-        return from_dict(payload)
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        return preset("balanced")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def get_mode(settings_path: Path | None = None) -> str:
+    """The persisted machine mode ("safe"/"balanced"/"maximum") — the only
+    field this store keeps any more. A legacy file still shaped like the
+    pre-#515 full `PerformanceSettings` dump (numeric fields alongside
+    `mode`) is migrated once: the old file moves to `SETTINGS_HOME/backups/`
+    (never deleted) and a slim `{"mode": ...}` file is written in its place.
+    Missing/corrupt/unknown-mode -> `_DEFAULT_MODE`."""
+    target = settings_path or path()
+    payload = _read_raw(target)
+    mode = payload.get("mode") if payload else None
+    if mode not in MODES:
+        return _DEFAULT_MODE
+    # Legacy shape carries the old numeric fields too — slim it down once.
+    if payload is not None and len(payload.keys() - {"schema_version", "mode"}) > 0:
+        from . import config
+
+        config.archive_settings_file(target)
+        set_mode(mode, settings_path)
+    return mode
+
+
+def set_mode(mode: str, settings_path: Path | None = None) -> bool:
+    mode = str(mode).strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"unknown performance mode: {mode!r}")
+    target = settings_path or path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return config._write_json_atomic(target, {"schema_version": SCHEMA_VERSION, "mode": mode})
+
+
+def load(settings_path: Path | None = None) -> PerformanceSettings:
+    """A full, machine-aware `PerformanceSettings` — every numeric field is a
+    fresh `preset(mode)` derivation from this machine's current CPU/RAM, not
+    a persisted number (see module docstring)."""
+    return preset(get_mode(settings_path))
 
 
 def save(settings: PerformanceSettings, settings_path: Path | None = None) -> bool:
-    target = settings_path or path()
-    validate(settings)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return config._write_json_atomic(target, settings.to_dict())
+    """Persists only `settings.mode` — any numeric overrides on `settings`
+    are derived, not user-settable any more (see module docstring), so they
+    are accepted (for call-site backward compatibility) but ignored."""
+    return set_mode(settings.mode, settings_path)

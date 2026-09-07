@@ -2,8 +2,8 @@
 `13_SIMPLE_UX.md`): default "automatic", round-trips, rejects unknown
 values, and survives being absent from an older settings file on disk.
 No Qt needed — this is the plain JSON-store half `test_settings_core_v2.py`
-covers with widget/Qt fixtures for the boolean `FLAG_NAMES` tuple; kept
-separate so this module's tests never need a QApplication."""
+covers with widget/Qt fixtures for the (now always-on, #515) boolean flags;
+kept separate so this module's tests never need a QApplication."""
 
 from __future__ import annotations
 
@@ -59,9 +59,8 @@ def test_missing_key_in_older_settings_file_defaults_to_automatic():
 
 
 def test_setting_strategy_does_not_clobber_flags():
-    core_v2_settings.set_flag("router", False)
     core_v2_settings.save_context_strategy("deep")
-    assert core_v2_settings.flag_enabled("router") is False
+    assert core_v2_settings.flag_enabled("router") is True  # #515: always on
     assert core_v2_settings.load_context_strategy() == "deep"
 
 

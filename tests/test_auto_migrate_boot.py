@@ -44,17 +44,18 @@ class TestAutoMigrateEnabled:
         monkeypatch.setenv("TAKKUB_AUTO_MIGRATE", "0")
         assert auto_migrate_boot.auto_migrate_enabled() is False
 
-    def test_env_wins_over_settings_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        core_v2_settings.set_flag("auto_migrate", False)
-        monkeypatch.setenv("TAKKUB_AUTO_MIGRATE", "1")
-        assert auto_migrate_boot.auto_migrate_enabled() is True
-
-    def test_settings_toggle_off_disables_when_env_unset(
+    def test_env_zero_disables_even_though_the_flag_is_always_on(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("TAKKUB_AUTO_MIGRATE", raising=False)
-        core_v2_settings.set_flag("auto_migrate", False)
+        """#515 Settings diet: there is no more Settings toggle to disable
+        this with (`core_v2_settings.flag_enabled` is always True) — the env
+        var is the ONLY escape hatch left, and it must still work."""
+        monkeypatch.setenv("TAKKUB_AUTO_MIGRATE", "0")
         assert auto_migrate_boot.auto_migrate_enabled() is False
+
+    def test_enabled_by_default_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_AUTO_MIGRATE", raising=False)
+        assert auto_migrate_boot.auto_migrate_enabled() is True
 
 
 class TestDevCheckoutGate:

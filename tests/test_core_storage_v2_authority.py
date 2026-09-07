@@ -69,16 +69,16 @@ def test_flag_falls_back_to_settings_toggle_when_env_unset(monkeypatch):
 
 
 def test_core_v2_settings_defaults_v2_authority_on(monkeypatch, tmp_path):
-    """2.0.0 flip (#362): `v2_authority` now joins the other 5 `TAKKUB_V2_*`
-    flags' default-True sweep (see `core_v2_settings._DEFAULT_FLAGS`'s own
-    comment for the soak evidence that earned it)."""
+    """2.0.0 flip (#362): `v2_authority` is default-True same as the other 5
+    `TAKKUB_V2_*` flags. #515 Settings diet made this unconditional —
+    `flag_enabled()` always returns True (no more persisted "flags" section,
+    see `core_v2_settings.load`'s own docstring)."""
     from agent_takkub import core_v2_settings
 
     monkeypatch.setattr(core_v2_settings, "path", lambda: tmp_path / "core-v2-settings.json")
     core_v2_settings._reset_cache()
-    flags = core_v2_settings.load()["flags"]
-    assert flags["v2_authority"] is True
-    assert flags["router"] is True
+    assert core_v2_settings.flag_enabled("v2_authority") is True
+    assert core_v2_settings.flag_enabled("router") is True
 
 
 # ── reader helpers ──────────────────────────────────────────────────────────

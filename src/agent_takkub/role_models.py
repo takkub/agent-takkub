@@ -1,10 +1,17 @@
-"""Persist the optional model and reasoning-effort selected for each *role*,
-bound to the provider they were chosen for.
+"""Persist the optional provider/model/reasoning-effort selected for each
+*role*.
 
 State file: ``~/.takkub/role-models.json`` —
 ``{role: {"provider": p, "model": m, "effort": e}}`` (``model``/``effort``
 both optional — a role's entry only needs to carry whichever axis the user
-actually overrode; an entry with neither is dropped entirely).
+actually overrode; a bare ``{"provider": p}`` entry — no model, no effort —
+is a **plain role→provider override** with nothing else pinned, same thing
+`provider_config.py`'s now-retired standalone ``role-providers.json`` used
+to store (#515 Settings diet folded that file in here — see
+`provider_for_role`/`set_provider` below — "one file, one source of truth"
+instead of two files that could disagree about the same role's provider).
+An entry is only dropped once it carries neither a provider nor a model nor
+an effort.
 
 **Why the provider is stored with the model/effort:** a model id or effort
 level is only meaningful to the CLI it was picked for (`k2.5` means nothing
@@ -83,7 +90,7 @@ def _sanitize(data: dict) -> dict[str, dict[str, str]]:
         model = model.strip() if isinstance(model, str) else ""
         effort = value.get("effort", "")
         effort = effort.strip() if isinstance(effort, str) else ""
-        if not provider or (not model and not effort):
+        if not provider:
             continue
         entry: dict[str, str] = {"provider": provider}
         if model:
@@ -106,7 +113,7 @@ def _save(entries: dict[str, dict[str, str]]) -> None:
         provider = entry.get("provider")
         model = entry.get("model")
         effort = entry.get("effort")
-        if not provider or not (model or effort):
+        if not provider:
             continue
         clean_entry = {"provider": provider}
         if model:
@@ -146,6 +153,27 @@ def effort_for(role: str, provider: str) -> str | None:
     if entry is None or not provider or entry.get("provider") != provider:
         return None
     return entry.get("effort") or None
+
+
+def set_provider(role: str, provider: str) -> None:
+    """Persist a bare role→provider override with no model/effort pinned —
+    clearing *provider* (falsy) drops the role's entire entry, same as
+    `clear_model`. Switching to a different provider than what's already
+    stored drops that entry's model/effort too (same wrong-CLI hazard
+    `_set_field` guards against) rather than leaving a model pinned for a
+    CLI it was never chosen for."""
+    role = role.strip()
+    if not role:
+        raise ValueError("role must be a non-empty string")
+    provider = (provider or "").strip()
+    entries = _load()
+    if not provider:
+        entries.pop(role, None)
+    else:
+        existing = entries.get(role)
+        entries[role] = dict(existing) if existing and existing.get("provider") == provider else {}
+        entries[role]["provider"] = provider
+    _save(entries)
 
 
 def raw_model_for(role: str) -> tuple[str, str] | None:

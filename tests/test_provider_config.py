@@ -238,13 +238,15 @@ class TestEffectiveProviderFor:
 
 
 class TestLoadProviders:
-    def test_creates_empty_file_when_missing(self, redirect_config_path: Path) -> None:
+    def test_global_scope_reads_through_role_models_not_a_file(
+        self, redirect_config_path: Path
+    ) -> None:
+        """#515 Settings diet: global role→provider overrides live in
+        `role-models.json` now — there is no standalone global
+        `role-providers.json` to auto-create any more."""
         assert not redirect_config_path.exists()
-        loaded = provider_config.load_providers()
-        assert loaded == {}
-        assert redirect_config_path.exists()
-        # File should be valid JSON object
-        assert json.loads(redirect_config_path.read_text(encoding="utf-8")) == {}
+        assert provider_config.load_providers() == {}
+        assert not redirect_config_path.exists()
 
     def test_invalid_json_returns_empty(self, redirect_config_path: Path) -> None:
         redirect_config_path.write_text("{not valid json", encoding="utf-8")
@@ -270,11 +272,17 @@ class TestLoadProviders:
 
 
 class TestSaveProviders:
-    def test_writes_and_round_trips(self, redirect_config_path: Path) -> None:
+    def test_writes_and_round_trips(self, redirect_config_path: Path, tmp_path: Path) -> None:
+        """#515: a global save lands in `role-models.json` as bare
+        provider-only entries — no standalone `role-providers.json` file."""
+        from agent_takkub import role_models
+
         provider_config.save_providers({"backend": "codex", "qa": "codex"})
-        text = redirect_config_path.read_text(encoding="utf-8")
-        # Pretty-printed JSON (indent=2) for hand-editing
-        assert '"backend": "codex"' in text
+        assert not redirect_config_path.exists()
+        assert role_models.all_models() == {
+            "backend": {"provider": "codex"},
+            "qa": {"provider": "codex"},
+        }
         # Reload and confirm round-trip
         assert provider_config.load_providers() == {
             "backend": "codex",
@@ -382,6 +390,33 @@ class TestSaveProviders:
         target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
         written = read_json(target)
         assert written["projects"] == {"proj-a": {}}
+
+
+class TestGlobalRoleProvidersMigration:
+    """#515 Settings diet: the standalone global `role-providers.json` folds
+    into `role-models.json` once — real prod shape is `{}` on every machine
+    (nothing to migrate), but a real override must survive too."""
+
+    def test_empty_prod_shape_migrates_cleanly(self, redirect_config_path: Path) -> None:
+        redirect_config_path.write_text("{}", encoding="utf-8")
+
+        assert provider_config.provider_for("backend") == "claude"
+
+        assert not redirect_config_path.exists()  # archived, not recreated
+        backup = redirect_config_path.parent / "backups" / "role-providers.json"
+        assert backup.is_file()
+
+    def test_real_override_lands_in_role_models(self, redirect_config_path: Path) -> None:
+        from agent_takkub import role_models
+
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+
+        assert provider_config.provider_for("backend") == "codex"
+        assert role_models.all_models() == {"backend": {"provider": "codex"}}
+
+        backup = redirect_config_path.parent / "backups" / "role-providers.json"
+        assert backup.is_file()
+        assert not redirect_config_path.exists()
 
 
 class TestRoleProviderMap:

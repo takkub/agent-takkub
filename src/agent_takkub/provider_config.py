@@ -105,6 +105,45 @@ def _sanitize_providers(data: dict) -> dict[str, str]:
     }
 
 
+def _migrate_legacy_global_overrides_once() -> None:
+    """#515 Settings diet: a plain role→provider override with no model/
+    effort pinned belongs in `role-models.json` now too (`role_models.
+    provider_for_role`/`set_provider` — a bare ``{"provider": p}`` entry),
+    so a role's provider lives in exactly one place instead of two files
+    that could disagree. One-time, idempotent, global scope only (the real
+    per-project file — `config_path(project)` for a real project — is left
+    untouched; #515 only retired the redundant *global* half, since
+    `role-models.json` has always been global-only, same shape).
+
+    Never touches the per-project files, and safe to call on every
+    `load_providers(None)` — the global file only ever carries anything
+    worth migrating once, on an upgrade from a pre-#515 install; the very
+    next read finds `role-providers.json` already archived (or freshly
+    recreated empty by the existence-check below it), so this is a no-op
+    thereafter.
+    """
+    global_path = _BASE_DIR / "role-providers.json"
+    if not global_path.exists():
+        return
+    try:
+        data = json.loads(global_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = None
+    legacy = _sanitize_providers(data) if isinstance(data, dict) else {}
+    if legacy:
+        from . import role_models
+
+        # The Providers & Roles override is the more explicit, more recent
+        # action than whatever the model picker implied — it wins even when
+        # `role-models.json` already has an entry for the same role (mirrors
+        # `provider_for`'s old precedence: role-providers > role-models).
+        for role, provider in legacy.items():
+            role_models.set_provider(role, provider)
+    from . import config as _config
+
+    _config.archive_settings_file(global_path)
+
+
 def load_providers(project: str | None = None) -> dict[str, str]:
     """Return the role→provider mapping for ``project`` (or global when None).
 
@@ -126,6 +165,9 @@ def load_providers(project: str | None = None) -> dict[str, str]:
     file actually exists (#480); a project with no per-project file simply
     gets no key in the mirror, same as V1's own existence check.
     """
+    if project is None:
+        _migrate_legacy_global_overrides_once()
+
     from .core.storage.v2_authority import read_routing, v2_authority_enabled
 
     if v2_authority_enabled():
@@ -139,47 +181,61 @@ def load_providers(project: str | None = None) -> dict[str, str]:
         p = config_path(project)
         if not p.exists():
             return load_providers(None)  # inherit global defaults
-    else:
-        p = config_path(None)
-        if not p.exists():
-            try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("{}\n", encoding="utf-8")
-            except OSError:
-                return {}
+        try:
+            raw = p.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
             return {}
-    try:
-        raw = p.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return _sanitize_providers(data)
+        if not isinstance(data, dict):
+            return {}
+        return _sanitize_providers(data)
+
+    # Global scope: role-models.json is the one store now (#515) — every
+    # role with a `provider` field there, whether it came from a model pick
+    # or a bare `role_models.set_provider` override.
+    from . import role_models
+
+    return _sanitize_providers(
+        {role: entry["provider"] for role, entry in role_models.all_models().items()}
+    )
 
 
 def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
-    """Write the mapping back to disk (per-project when ``project`` given, else
-    global). Best-effort: raises only if the target dir is unwritable (very
-    rare). Caller passes the full desired mapping — partial updates aren't
-    supported."""
-    path = config_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Persist the mapping (per-project file when ``project`` given, else
+    into ``role-models.json`` — see :func:`load_providers`). Best-effort:
+    raises only if the target dir is unwritable (very rare). Caller passes
+    the full desired mapping — partial updates aren't supported."""
     cleaned = {
         str(role).lower(): str(provider).lower()
         for role, provider in mapping.items()
         if str(provider).lower() in VALID_PROVIDERS
     }
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    if project:
+        path = config_path(project)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    else:
+        from . import role_models
+
+        existing = role_models.all_models()
+        for role, entry in existing.items():
+            # Only clear a bare provider-only entry no longer in `cleaned` —
+            # a role_models entry that also carries a model/effort pick came
+            # from the model picker, not this mapping, and is never this
+            # call's to drop (Providers & Roles renders a subset of roles).
+            if role not in cleaned and not entry.get("model") and not entry.get("effort"):
+                role_models.set_provider(role, "")
+        for role, provider in cleaned.items():
+            role_models.set_provider(role, provider)
 
     from . import config as _config
     from .core.storage.dual_write import dual_write_routing
     from .core.storage.legacy_reader import read_json
 
     dual_write_routing(
-        read_json(config_path(None)),
+        load_providers(None),
         {
             name: read_json(config_path(name))
             for name in _config.list_project_names()
