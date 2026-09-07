@@ -1228,7 +1228,14 @@ class ProviderUsageStore:
             with self._lock:
                 self._cache[provider] = data
             self._emit(provider, data)
-            _record_quota_ledger(provider, "default", data)
+            # M2 (2026-09-07): attribute the sample to the profile that was
+            # ACTUALLY fetched, not a hardcoded "default" — for claude this
+            # is whichever named profile the active project tab currently
+            # resolves to (`_resolve_claude_config_dir`, same resolution
+            # `fetch_claude_usage` itself used). A hardcoded label mixed
+            # every named account's % into one shared "default" series.
+            account = _account_name_for_config_dir(provider, _active_config_dir(provider))
+            _record_quota_ledger(provider, account, data)
             return
         key = (provider, str(config_dir))
         with self._lock:
@@ -1238,6 +1245,11 @@ class ProviderUsageStore:
         with self._lock:
             self._account_cache[key] = data
         self._emit(provider, data)
+        # M2: the account-scoped branch previously never recorded history
+        # at all — a named account's own quota series stayed empty forever
+        # even though its data was being fetched every refresh.
+        account = _account_name_for_config_dir(provider, config_dir)
+        _record_quota_ledger(provider, account, data)
 
     def _emit(self, provider: str, data: ProviderUsage) -> None:
         if self._on_update is not None:
@@ -1264,6 +1276,44 @@ class ProviderUsageStore:
                 if cached is not None and cached.status == STATUS_UNSUPPORTED:
                     continue
                 self._fetch_one(provider)
+
+
+def _active_config_dir(provider: str) -> Path | None:
+    """The config dir the provider-level (`config_dir=None`) fetch branch
+    actually used for `provider`, when known — only claude currently has a
+    per-project-tab profile resolution; every other provider's
+    provider-level fetch has no such concept, so `None` (→ "default", the
+    existing behavior for them, unchanged)."""
+    if provider != "claude":
+        return None
+    return _resolve_claude_config_dir()
+
+
+def _account_name_for_config_dir(provider: str, config_dir: Path | str | None) -> str:
+    """Resolve the real profile NAME that owns `config_dir` (M2, 2026-09-07)
+    — the usage ledger keys quota history by account name, never a raw
+    path, so a fetch resolved via a config_dir must be attributed back to
+    whichever named profile registered that same dir (`user_profile
+    .profiles_for_provider`), falling back to "default" only when no named
+    profile claims it (the legacy single-account-per-provider case)."""
+    if config_dir is None:
+        return "default"
+    try:
+        target = Path(config_dir).resolve()
+    except OSError:
+        return "default"
+    from . import user_profile
+
+    for profile in user_profile.profiles_for_provider(provider):
+        raw = profile.get("config_dir") or ""
+        if not raw:
+            continue
+        try:
+            if Path(raw).resolve() == target:
+                return str(profile.get("name") or "default")
+        except OSError:
+            continue
+    return "default"
 
 
 def _record_quota_ledger(provider: str, account: str, data: ProviderUsage) -> None:

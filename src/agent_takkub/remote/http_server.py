@@ -210,7 +210,9 @@ class _Bridge(QObject):
 
     request = pyqtSignal(object)
 
-    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say", "lead_upload", "answer_picker"})
+    _OFF_THREAD_ACTIONS = frozenset(
+        {"pulse", "lead_say", "lead_upload", "answer_picker", "usage_history"}
+    )
 
     def __init__(self, orch) -> None:
         super().__init__()
@@ -318,17 +320,6 @@ class _Bridge(QObject):
                     pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
             elif pending.action == "usage":
                 pending.reply.put((200, api.usage()))
-            elif pending.action == "usage_history":
-                pending.reply.put(
-                    (
-                        200,
-                        api.usage_history(
-                            pending.params.get("days"),
-                            pending.params.get("month"),
-                            pending.params.get("provider"),
-                        ),
-                    )
-                )
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
         except Exception:
@@ -360,6 +351,22 @@ class _Bridge(QObject):
                     self._orch, pending.params.get("project"), pending.params.get("answers")
                 )
                 pending.reply.put((200, result))
+            elif pending.action == "usage_history":
+                # H2 (2026-09-07): a ledger read + rollup + `rtk gain`
+                # subprocess (~0.5s measured) has no business on the Qt
+                # main thread — `usage_history` itself needs no `project`
+                # scoping (it takes no project param), only the file I/O
+                # below.
+                pending.reply.put(
+                    (
+                        200,
+                        api.usage_history(
+                            pending.params.get("days"),
+                            pending.params.get("month"),
+                            pending.params.get("provider"),
+                        ),
+                    )
+                )
         except api.RemoteApiError as exc:
             pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
         except Exception:
