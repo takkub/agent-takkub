@@ -52,6 +52,24 @@ class CategoryMeasurement:
 # (a fresh checkout with none of that state) stays green — see
 # tests/test_boot_context_ceiling.py's own docstring for the incident.
 # Reported for visibility, excluded from the ceiling-ratchet sum.
+#
+# `graft_caveats` joined this set 2026-09-07 (#516 follow-up): whether a
+# role gets it is decided by `shared_dev_tools.role_mcp_allowlist`, which
+# merges the built-in `_ROLE_MCP_POLICY` default with a per-machine
+# operator override at `SETTINGS_HOME/pane-tools.json` (`takkub mcp
+# allow|deny --role`). That file is real mutable operator config, not repo
+# content — a machine that has denied/granted graft for a role makes this
+# module's report disagree with a machine that hasn't, even on the exact
+# same commit. Confirmed live: this machine's real `pane-tools.json` denies
+# graft to frontend/backend/mobile (so `doctor --boot-context` never shows
+# it), while `tests/test_boot_context_ceiling.py` runs under conftest's
+# autouse `_isolate_runtime` (which points `SETTINGS_HOME`/`PANE_TOOLS_
+# POLICY_FILE` at an empty tmp dir for every test — a correct, load-bearing
+# isolation, not something to work around here) and so always falls back to
+# the built-in policy, which grants graft to those three roles — a fixed
+# +631 tok gap between `doctor` and the test that has nothing to do with
+# the repo. Same shape as `learned_notes` above: measured and reported,
+# never gated.
 DYNAMIC_STATE_CATEGORIES = frozenset(
     {
         "learned_notes",
@@ -59,6 +77,7 @@ DYNAMIC_STATE_CATEGORIES = frozenset(
         "project_memory_pointer",
         "native_project_memory",
         "native_project_memory_LEAD",
+        "graft_caveats",
     }
 )
 
