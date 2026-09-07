@@ -748,7 +748,10 @@ class TestRoleEffortCombo:
 
         dlg._on_reset_clicked()
 
-        assert effort_combo.currentData() == "medium"
+        # #512: Reset rebuilds the roster panel from scratch (its rows can
+        # differ per team-size pick), so the reset combo is a fresh widget —
+        # re-fetch it rather than asserting on the pre-reset reference.
+        assert dlg._role_effort_combos["backend"].currentData() == "medium"
         dlg.deleteLater()
 
 
@@ -1322,12 +1325,51 @@ class TestAccountsView:
         assert settings_window.VIEW_CORE_V2_ACCOUNTS not in dlg._nav_buttons
         dlg.deleteLater()
 
+    def test_renders_loading_placeholder_before_the_background_refresh_lands(self) -> None:
+        """#505 review M4: the account rows must never block construction —
+        the box starts with a single loading row, not the real panels."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        assert dlg._accounts_rows_box.count() == 1
+        dlg.deleteLater()
+
     def test_renders_one_panel_per_provider(self) -> None:
+        from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtWidgets import QApplication
+
         from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        QThreadPool.globalInstance().waitForDone(5_000)
+        app = QApplication.instance()
+        for _ in range(10):
+            app.processEvents()
         assert dlg._accounts_rows_box.count() == len(PROVIDER_REGISTRY)
         dlg.deleteLater()
+
+    def test_gap_provider_panel_still_renders_its_account_cards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#505 review M7: a gap-provider panel used to `return panel` before
+        ever looping `row.accounts` — an existing account was invisible."""
+        from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtWidgets import QApplication
+
+        from agent_takkub import config, user_profile
+
+        gap_provider = next(iter(config.PROVIDER_ISOLATION_GAPS))
+        user_profile.add_profile(
+            "gap-office", str(tmp_path / "gap-cfg"), provider=gap_provider, share_sessions=False
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        try:
+            QThreadPool.globalInstance().waitForDone(5_000)
+            app = QApplication.instance()
+            for _ in range(10):
+                app.processEvents()
+            texts = " ".join(w.text() for w in dlg.findChildren(settings_window.QLabel))
+            assert "gap-office" in texts
+        finally:
+            dlg.deleteLater()
 
     def test_add_account_persists_and_updates_auth_combo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1729,3 +1771,157 @@ class TestAutoskillsPanel:
         ]
         assert labels, "flagged skill's annotation must be rendered somewhere in the dialog"
         dialog.deleteLater()
+
+
+class TestTeamPresetView:
+    """#512 — Providers & Roles ("ทีม & ตำแหน่ง") team-size cards + the
+    roster panel they drive, and the dead exec-mode/auto-resume chip stubs
+    this issue's UI work retires."""
+
+    def test_nav_renamed_and_grouped_under_team_section(self) -> None:
+        entries = {label: section for _idx, label, section in settings_window._NAV_VIEWS}
+        assert entries["ทีม & ตำแหน่ง"] == "TEAM"
+        assert entries["Pipeline Builder"] == "TEAM"
+        assert entries["Templates"] == "TEAM"
+        assert "Providers & Roles" not in entries
+
+    def test_team_size_shows_four_cards_matching_quick_preset_ids(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert set(dlg._team_preset_cards.keys()) == set(team_preset.QUICK_PRESET_IDS)
+        dlg.deleteLater()
+
+    def test_default_project_selects_auto_card(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert dlg._selected_team_preset_id == "auto"
+        assert dlg.pending_team_preset is None
+        dlg.deleteLater()
+
+    def test_clicking_a_card_stages_the_pick_and_marks_dirty(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        assert dlg._selected_team_preset_id == "full"
+        assert dlg.pending_team_preset == "full"
+        assert settings_window.VIEW_PROVIDERS_ROLES in dlg._dirty_views
+        # staged only — nothing written to disk yet.
+        assert team_preset.current_preset_id("proj-a") == "auto"
+        dlg.deleteLater()
+
+    def test_clicking_full_enables_every_position_toggle_in_preview(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        for role in team_preset.POSITION_ROLES:
+            assert dlg._role_toggles[role].isChecked() is True
+        assert dlg._role_toggles["qa"].isChecked() is True
+        dlg.deleteLater()
+
+    def test_clicking_solo_lead_disables_every_position_and_drops_checker_row(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("solo-lead")
+        for role in team_preset.POSITION_ROLES:
+            assert dlg._role_toggles[role].isChecked() is False
+        assert "qa" not in dlg._role_toggles
+        assert "reviewer" not in dlg._role_toggles
+        assert "lead" in dlg._role_toggles or "lead" in dlg._role_provider_combos
+        dlg.deleteLater()
+
+    def test_checker_row_labeled_as_the_checker(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("pair")
+        assert "reviewer" in dlg._role_toggles
+        assert "qa" not in dlg._role_toggles
+        row = dlg._role_toggles["reviewer"].parent()
+        label_texts = [w.text() for w in row.findChildren(settings_window.QLabel)]
+        assert any("ตัวตรวจ" in t for t in label_texts)
+        dlg.deleteLater()
+
+    def test_lead_row_always_present_regardless_of_preset(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        assert "lead" in dlg._role_provider_combos
+        dlg._on_team_preset_card_clicked("solo-lead")
+        assert "lead" in dlg._role_provider_combos
+        dlg.deleteLater()
+
+    def test_exec_mode_wording_uses_thai_not_solo_parallel(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        assert dlg._team_preset_exec_line.text() == "โหมดทำงาน: แตกหลายคน"
+        dlg._on_team_preset_card_clicked("solo-lead")
+        assert dlg._team_preset_exec_line.text() == "โหมดทำงาน: 1 คน/ตำแหน่ง"
+        dlg.deleteLater()
+
+    def test_save_apply_persists_the_picked_preset(self) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        dlg._on_save_apply_clicked()
+        assert team_preset.current_preset_id("proj-a") == "full"
+        cfg = team_preset.current("proj-a")
+        assert all(cfg["roles"].values())
+        assert cfg["checker"] == "qa"
+
+    def test_hand_toggle_after_save_still_flips_a_fixed_preset_to_custom(self) -> None:
+        """#512 acceptance, unchanged by the #512-UI refactor of this view:
+        toggling a role by hand while a FIXED preset is saved flips the
+        project to custom on the next Save & Apply."""
+        team_preset.set_current("full", "proj-a")
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._role_toggles["backend"].setChecked(False)
+        dlg._on_save_apply_clicked()
+        assert team_preset.current_preset_id("proj-a") == "custom"
+
+    def test_reset_discards_staged_card_pick(self) -> None:
+        team_preset.set_current("pair", "proj-a")
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        dlg._on_reset_clicked()
+        assert dlg._selected_team_preset_id == "pair"
+        assert dlg.pending_team_preset is None
+        assert "reviewer" in dlg._role_toggles
+        assert "qa" not in dlg._role_toggles
+        dlg.deleteLater()
+
+    def test_secondary_brains_panel_lists_non_claude_providers_as_chips(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        panel = dlg._build_secondary_brains_panel(dlg)
+        texts = " ".join(w.text() for w in panel.findChildren(settings_window.QLabel) if w.text())
+        for provider in ("codex", "gemini", "opencode", "kimi", "cursor"):
+            assert provider.capitalize() in texts
+        assert "claude" not in texts.lower()
+        panel.deleteLater()
+        dlg.deleteLater()
+
+    def test_team_size_cards_use_painted_dots_not_tofu_prone_glyphs(self) -> None:
+        """2026-07-24 design review #4: IBM Plex Sans/Mono don't ship "○"/
+        "●" — the radio indicator must be a painted `cockpit_theme.color_dot`
+        widget, never that text glyph (this file's OWN role dots already
+        dodge this; the team-size card radio must too)."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        for card in dlg._team_preset_cards.values():
+            for label in card.findChildren(settings_window.QLabel):
+                assert label.text() not in ("○", "●")
+        dlg.deleteLater()
+
+    def test_legacy_settings_route_still_lands_on_team_view(self) -> None:
+        """Old route constant, new label — the #512 UI rename must not break
+        any existing entry point keyed off VIEW_PROVIDERS_ROLES."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_PROVIDERS_ROLES
+        assert dlg._nav_buttons[settings_window.VIEW_PROVIDERS_ROLES].property("active") is True
+        dlg.deleteLater()

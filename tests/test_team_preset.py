@@ -190,3 +190,38 @@ def test_corrupt_file_falls_back_to_default(tmp_path):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{not json", encoding="utf-8")
     assert team_preset.current("proj")["preset"] == "auto"
+
+
+# ── #512 UI support: label/description/pane_note/resolve (Settings cards,
+# status-bar chip menu, mobile drawer) ──────────────────────────────────
+
+
+def test_quick_preset_ids_excludes_custom():
+    assert "custom" not in team_preset.QUICK_PRESET_IDS
+    assert set(team_preset.QUICK_PRESET_IDS) == {"solo-lead", "pair", "full", "auto"}
+
+
+def test_description_and_pane_note_cover_every_preset_id():
+    for pid in team_preset.PRESET_IDS:
+        assert team_preset.description(pid)
+        assert team_preset.pane_note(pid)
+
+
+def test_description_and_pane_note_unknown_id_returns_empty_string():
+    assert team_preset.description("nope") == ""
+    assert team_preset.pane_note("nope") == ""
+
+
+def test_resolve_ignores_active_override():
+    team_preset.set_current("full", "proj")
+    team_preset.set_override("solo-lead", "proj")
+    # current() honors the override; resolve() previews the standing preset
+    # a caller is ABOUT to write, so it must not read through it.
+    assert team_preset.current("proj")["preset"] == "solo-lead"
+    assert team_preset.resolve("full", "proj")["preset"] == "full"
+    assert team_preset.resolve("pair", "proj")["checker"] == "reviewer"
+
+
+def test_resolve_rejects_unknown_preset():
+    with pytest.raises(ValueError):
+        team_preset.resolve("nope", "proj")

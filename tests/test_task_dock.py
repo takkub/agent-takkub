@@ -40,7 +40,21 @@ class TestStatusGlyph:
     def test_unknown_status_falls_back_instead_of_raising(self) -> None:
         glyph, color = task_dock.status_glyph("queued")
         assert glyph == task_dock._STATUS_FALLBACK[0]
-        assert color == task_dock._STATUS_FALLBACK[1]
+        assert color == getattr(cockpit_theme, task_dock._STATUS_FALLBACK[1])
+
+    def test_color_reads_the_current_theme_variant_live(self) -> None:
+        """#505 review M5: the color must never be frozen at import time —
+        it has to track a live `cockpit_theme.apply_variant` switch."""
+        original = cockpit_theme.current_variant()
+        try:
+            cockpit_theme.apply_variant("dark")
+            dark_color = task_dock.status_glyph("ok")[1]
+            cockpit_theme.apply_variant("light")
+            light_color = task_dock.status_glyph("ok")[1]
+            assert dark_color != light_color
+            assert light_color == cockpit_theme.STATE_OK_BRIGHT
+        finally:
+            cockpit_theme.apply_variant(original)
 
 
 class TestProjectProgress:

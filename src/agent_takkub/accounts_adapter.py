@@ -173,13 +173,13 @@ def claude_login_status(config_dir: Path, *, is_default: bool = False) -> LoginS
     return LoginStatus(LOGGED_OUT, "ยังไม่ได้เข้าสู่ระบบ")
 
 
-def codex_login_status(home: Path) -> LoginStatus:
+def codex_login_status(home: Path, *, is_default: bool = False) -> LoginStatus:
     """Presence-only ``auth.json`` check (same heuristic doctor uses) + the
     cached ``planType`` from a running usage store, if one exists — never a
     fresh probe (a `codex app-server` round trip is too heavy for a page
     build)."""
     auth = home / "auth.json"
-    plan = _codex_plan_cached()
+    plan = _codex_plan_cached(home, is_default=is_default)
     if not auth.is_file():
         return LoginStatus(LOGGED_OUT, "ยังไม่ได้เข้าสู่ระบบ (ไม่มี auth.json)", plan)
     if _read_json(auth) is None:
@@ -187,17 +187,29 @@ def codex_login_status(home: Path) -> LoginStatus:
     return LoginStatus(LOGGED_IN, "", plan)
 
 
-def _codex_plan_cached() -> str | None:
+def _codex_plan_cached(home: Path, *, is_default: bool) -> str | None:
     """codex ``planType`` from the already-running ProviderUsageStore cache.
     Peek only — never starts the store's poll thread (that belongs to the
-    usage meter, not this page)."""
+    usage meter, not this page).
+
+    #505 review finding M3 (2026-09-07): the store's provider-wide cache
+    (``store.get("codex")``, no ``config_dir``) is only ever populated by a
+    fetch against the machine's DEFAULT codex home — reading it for a NAMED
+    account borrowed that account's plan from whichever identity actually
+    polled, with no evidence it applied to THIS home. A named account reads
+    only its own per-account cache (``config_dir=home``) — that cache entry
+    exists only once something has actually fetched for this exact home
+    (e.g. an explicit ``refresh_now(provider, config_dir)``), so an
+    unfetched named account correctly reports unknown rather than a
+    borrowed number.
+    """
     try:
         from . import provider_usage
 
         store = provider_usage.peek_store()
         if store is None:
             return None
-        usage = store.get("codex")
+        usage = store.get("codex", config_dir=None if is_default else home)
         return usage.plan if usage is not None and usage.plan else None
     except Exception:
         return None
@@ -216,7 +228,7 @@ def login_status(provider: str, config_dir: str, *, is_default: bool = False) ->
             from .codex_helper import codex_home
 
             home = codex_home()
-        return codex_login_status(home)
+        return codex_login_status(home, is_default=is_default)
     return LoginStatus(UNKNOWN, "ยังไม่มีวิธีตรวจ credential ของ provider นี้ที่ยืนยันแล้ว")
 
 
@@ -295,7 +307,17 @@ def can_add_account(provider: str) -> tuple[bool, str]:
 
 
 def provider_rows() -> list[ProviderRow]:
-    """Everything the Accounts page renders, in PROVIDER_REGISTRY order."""
+    """Everything the Accounts page renders, in PROVIDER_REGISTRY order.
+
+    #505 review M7: a provider with an isolation gap (gemini/cursor — no
+    per-account credential separation, `PROVIDER_ISOLATION_GAPS`) used to
+    skip listing its accounts ENTIRELY here, even though `user_profile`/the
+    V2 registry can perfectly well hold named profiles for it (adding one
+    is only blocked by `can_add_account`, a separate check). That silently
+    hid an existing account from the one page meant to show every account
+    of every provider. The gap only ever governs add/login affordances now
+    — accounts always list.
+    """
     from .provider_spec import PROVIDER_REGISTRY
 
     selections = projects_by_selection()
@@ -303,24 +325,23 @@ def provider_rows() -> list[ProviderRow]:
     for provider, spec in PROVIDER_REGISTRY.items():
         gap = config.PROVIDER_ISOLATION_GAPS.get(provider, "")
         accounts: list[AccountInfo] = []
-        if not gap:
-            profiles = user_profile.profiles_for_provider(provider)
-            for entry in profiles:
-                name = entry["name"]
-                is_default = name == user_profile.DEFAULT_PROFILE
-                accounts.append(
-                    AccountInfo(
-                        provider=provider,
-                        name=name,
-                        config_dir=entry.get("config_dir") or "",
-                        is_default=is_default,
-                        login=login_status(
-                            provider, entry.get("config_dir") or "", is_default=is_default
-                        ),
-                        projects=list(selections.get((provider, name), [])),
-                    )
+        profiles = user_profile.profiles_for_provider(provider)
+        for entry in profiles:
+            name = entry["name"]
+            is_default = name == user_profile.DEFAULT_PROFILE
+            accounts.append(
+                AccountInfo(
+                    provider=provider,
+                    name=name,
+                    config_dir=entry.get("config_dir") or "",
+                    is_default=is_default,
+                    login=login_status(
+                        provider, entry.get("config_dir") or "", is_default=is_default
+                    ),
+                    projects=list(selections.get((provider, name), [])),
                 )
-            accounts.extend(_v2_registry_accounts(provider, {a.name for a in accounts}))
+            )
+        accounts.extend(_v2_registry_accounts(provider, {a.name for a in accounts}))
         addable, add_hint = can_add_account(provider)
         rows.append(
             ProviderRow(

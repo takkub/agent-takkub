@@ -119,3 +119,18 @@ class TestRemovedControlsStayRemoved:
         from agent_takkub import cli
 
         assert hasattr(cli, "cmd_end_session")
+
+    def test_exec_mode_and_auto_resume_chip_stubs_gone(self) -> None:
+        """#512 — these chips were already gone (no widget ever wired to
+        them, no test referenced them — verified by grep before deleting);
+        this issue's UI pass retired the orphaned stub handlers too, plus
+        the style helper's own stale docstring reference to one of them."""
+        for name in (
+            "_on_exec_mode_chip_clicked",
+            "_on_exec_mode_changed",
+            "_on_auto_resume_chip_clicked",
+            "_on_auto_resume_changed",
+        ):
+            assert not hasattr(UserActionsMixin, name), name
+        for name in ("_exec_mode_chip_style", "_auto_resume_chip_style"):
+            assert not hasattr(StatusHeaderMixin, name), name

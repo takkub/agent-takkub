@@ -835,6 +835,7 @@
     syncProjectStreams();
     switchView("lead");
     fetchPulse();
+    fetchTeamPreset();
   }
 
   function renderProjects(items) {
@@ -3247,6 +3248,128 @@
   });
 
   // ---------------------------------------------------------------
+  // Team preset (#512) — the project's team-size switch. Reads
+  // GET /api/team-preset?project=<visible project> (view-mode safe, same
+  // bar as fetchUsage), writes via POST /api/team-preset (control mode
+  // only — rows aren't even clickable outside control mode, same pattern
+  // as the composer/close-project button elsewhere in this file).
+  // ---------------------------------------------------------------
+
+  var teamPresetState = { data: null };
+
+  function renderTeamChip() {
+    var chip = $("team-chip");
+    if (!chip) return;
+    var data = teamPresetState.data;
+    chip.textContent = "ทีม: " + (data ? (data.override_label || data.preset_label || "—") : "—");
+  }
+
+  function renderTeamSheet() {
+    var list = $("team-sheet-list");
+    if (!list) return;
+    var data = teamPresetState.data;
+    var projectLabel = $("team-sheet-project");
+    if (projectLabel) projectLabel.textContent = visibleProject() ? "· " + visibleProject() : "";
+
+    var overrideEl = $("team-sheet-override");
+    if (overrideEl) {
+      if (data && data.override) {
+        overrideEl.hidden = false;
+        overrideEl.textContent = "override งานนี้: " + data.override_label + " (ล้างที่ takkub CLI)";
+      } else {
+        overrideEl.hidden = true;
+      }
+    }
+
+    list.innerHTML = "";
+    if (!data) return;
+    var options = Array.isArray(data.options) ? data.options : [];
+    var isControl = state.mode === "control";
+    options.forEach(function (opt) {
+      var row = document.createElement("div");
+      row.className = "team-preset-row" + (opt.id === data.preset ? " selected" : "");
+      if (!isControl) row.style.opacity = "0.6";
+
+      var head = document.createElement("div");
+      head.className = "team-preset-row-head";
+      var label = document.createElement("span");
+      label.className = "team-preset-row-label";
+      label.textContent = opt.label;
+      head.appendChild(label);
+      var pane = document.createElement("span");
+      pane.className = "team-preset-row-pane";
+      pane.textContent = opt.pane_note;
+      head.appendChild(pane);
+      row.appendChild(head);
+
+      var desc = document.createElement("div");
+      desc.className = "team-preset-row-desc";
+      desc.textContent = opt.desc;
+      row.appendChild(desc);
+
+      if (isControl) {
+        row.addEventListener("click", function () { setTeamPreset(opt.id); });
+      }
+      list.appendChild(row);
+    });
+  }
+
+  function fetchTeamPreset() {
+    var project = visibleProject();
+    var qs = project ? "?project=" + encodeURIComponent(project) : "";
+    return apiFetch("api/team-preset" + qs)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        teamPresetState.data = data;
+        renderTeamChip();
+        var sheet = $("team-sheet");
+        if (sheet && sheet.classList.contains("show")) renderTeamSheet();
+      })
+      .catch(function () { /* keep last known snapshot — offline banner already covers this */ });
+  }
+
+  function setTeamPreset(presetId) {
+    apiFetch("api/team-preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: visibleProject(), preset: presetId }),
+    })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (err) {
+            throw new Error((err && err.msg) || "ตั้งค่าทีมไม่สำเร็จ");
+          });
+        }
+        return r.json();
+      })
+      .then(function (data) {
+        teamPresetState.data = data;
+        renderTeamChip();
+        renderTeamSheet();
+      })
+      .catch(function (err) { toast(err.message || "ตั้งค่าทีมไม่สำเร็จ"); });
+  }
+
+  function openTeamSheet() {
+    var sheet = $("team-sheet");
+    if (!sheet) return;
+    sheet.classList.add("show");
+    renderTeamSheet();
+    fetchTeamPreset();
+  }
+
+  function closeTeamSheet() {
+    var sheet = $("team-sheet");
+    if (sheet) sheet.classList.remove("show");
+  }
+
+  $("team-chip").addEventListener("click", openTeamSheet);
+  $("team-sheet-close").addEventListener("click", closeTeamSheet);
+  $("team-sheet").addEventListener("click", function (evt) {
+    if (evt.target === $("team-sheet")) closeTeamSheet();
+  });
+
+  // ---------------------------------------------------------------
   // Service worker
   // ---------------------------------------------------------------
 
@@ -3276,7 +3399,9 @@
 
   function enterAuthenticatedApp() {
     showApp();
-    fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+    fetchProjectsAndMode()
+      .then(fetchTeamPreset)
+      .catch(function () { /* stay in view mode assumption */ });
     startUsagePolling();
   }
 
