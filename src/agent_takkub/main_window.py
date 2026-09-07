@@ -831,12 +831,9 @@ class MainWindow(
                 "เช็คว่าเครื่องพร้อม — เวอร์ชัน core, plugins, MCPs, providers ครบไหม "
                 "กด Fix ซ่อมอัตโนมัติได้เลย",
             ),
-            TutorialStep(
-                lambda: getattr(self, "_btn_end_session", None),
-                "5 · จบงาน",
-                "พอเสร็จกด End Session — เขียนสรุปสั้นๆ ปิด teammate ทั้งหมด แล้วบันทึกไว้ "
-                "session หน้าเปิดมา Lead จะจำได้ว่าทำอะไรค้างไว้",
-            ),
+            # Step 5 (🏁 End Session) removed with the button itself (#505
+            # scope addition 2026-09-07) — sessions wrap up via `takkub
+            # end-session` now.
         ]
 
     def _start_tutorial(self) -> None:

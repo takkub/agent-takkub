@@ -86,7 +86,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -134,6 +133,7 @@ from . import (
 from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 from .lead_context import _allowed_project_roots
+from .settings_accounts import AccountsSettingsMixin
 from .settings_core_v2 import CoreV2SettingsMixin
 from .settings_knowledge_design import KnowledgeDesignSettingsMixin
 from .settings_usage import UsageSettingsMixin
@@ -198,10 +198,12 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
-    (VIEW_USERS, "Users", "ACCOUNT"),
+    # #505: one "Accounts" page replaced both the old "Users" entry here and
+    # the ADVANCED "Accounts & Pools" entry (VIEW_CORE_V2_ACCOUNTS now
+    # redirects to it in `_goto_view` so old routes/constants keep working).
+    (VIEW_USERS, "Accounts", "ACCOUNT"),
     (VIEW_USAGE, "Usage", "ACCOUNT"),
     (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE"),
-    (VIEW_CORE_V2_ACCOUNTS, "Accounts & Pools", "ADVANCED"),
     (VIEW_CORE_V2_ROUTING, "Routing", "ADVANCED"),
     (VIEW_CORE_V2_BRAIN, "Brain", "ADVANCED"),
     (VIEW_CORE_V2_SCHEDULER, "Scheduler", "ADVANCED"),
@@ -234,7 +236,7 @@ _SIDEBAR_SETTINGS_APP = "cockpit"
 # `VIEW_PERFORMANCE in self._dirty_views` branch), only its sidebar position
 # changed.
 _CORE_V2_VIEWS: frozenset[int] = frozenset(
-    {VIEW_CORE_V2_ACCOUNTS, VIEW_CORE_V2_ROUTING, VIEW_CORE_V2_BRAIN, VIEW_CORE_V2_SCHEDULER}
+    {VIEW_CORE_V2_ROUTING, VIEW_CORE_V2_BRAIN, VIEW_CORE_V2_SCHEDULER}
 )
 
 # Same "own dedicated save button, never the footer transaction" shape as
@@ -242,12 +244,14 @@ _CORE_V2_VIEWS: frozenset[int] = frozenset(
 # Design Tools (the third tab) writes each credential through immediately
 # (`settings_knowledge_design`'s own module docstring).
 _KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset({VIEW_KNOWLEDGE})
-# General (#506) writes through immediately (the theme switch applies + saves
-# on change — that IS the apply), so the footer pair must not pretend to
-# control it, same as the Core V2 pages. Usage (#507) is pure read-only
-# report — there is nothing to save at all.
+# VIEW_USERS (the #505 Accounts page) writes through immediately on add/
+# remove/login, and its API-override tab has its own Save button. General
+# (#506) also writes through immediately (the theme switch applies + saves
+# on change — that IS the apply). Usage (#507) is a pure read-only report —
+# there is nothing to save at all. All three are "never the footer
+# transaction", same shape as the Core V2 pages.
 _NO_FOOTER_SAVE_VIEWS: frozenset[int] = (
-    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | frozenset({VIEW_GENERAL, VIEW_USAGE})
+    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | {VIEW_USERS, VIEW_GENERAL, VIEW_USAGE}
 )
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
@@ -271,7 +275,6 @@ _NAV_ICON_NAMES: dict[int, str] = {
     # Icon set is fixed at 6 names (diamond/grid/pipeline/star/target/user,
     # see static/icons/nav/) — reused rather than adding new SVG assets.
     VIEW_KNOWLEDGE: "star",
-    VIEW_CORE_V2_ACCOUNTS: "user",
     VIEW_CORE_V2_ROUTING: "pipeline",
     VIEW_CORE_V2_BRAIN: "star",
     VIEW_CORE_V2_SCHEDULER: "grid",
@@ -305,8 +308,8 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_PLUGINS_MATRIX: ("Plugins Matrix", "role × plugin policy"),
     VIEW_NEW_ROLE: ("New Role", "สร้าง custom role ใหม่"),
     VIEW_USERS: (
-        "Users",
-        "จัดการ Claude profile (add/remove, share sessions) + per-profile auth override",
+        "Accounts",
+        "บัญชีของทุก provider — ใครเข้าสู่ระบบอยู่ ใช้กับโปรเจคไหน เพิ่ม/ลบบัญชี (#505)",
     ),
     VIEW_SKILL_CATALOG: (
         "Skill Catalog",
@@ -319,10 +322,6 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_PERFORMANCE: (
         "Performance",
         "กำหนดเพดานงานหนัก, จุดพัก CPU/RAM และ cadence การ render เบื้องหลัง",
-    ),
-    VIEW_CORE_V2_ACCOUNTS: (
-        "Core V2 — Accounts & Pools",
-        "ProviderAccount + AccountPool registry (secretRef เท่านั้น ไม่มี credential)",
     ),
     VIEW_CORE_V2_ROUTING: (
         "Core V2 — Routing",
@@ -768,7 +767,11 @@ class _AutoskillsConfirmDialog(QDialog):
 
 
 class SettingsWindow(
-    QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin, UsageSettingsMixin
+    QDialog,
+    AccountsSettingsMixin,
+    CoreV2SettingsMixin,
+    KnowledgeDesignSettingsMixin,
+    UsageSettingsMixin,
 ):
     """The unified Settings window. One instance per open — construct fresh
     each time (mirrors the old, now-removed ``PaneToolsDialog``/
@@ -1058,6 +1061,11 @@ class SettingsWindow(
             pass
 
     def _goto_view(self, view_idx: int) -> None:
+        # #505: the ADVANCED "Accounts & Pools" page was folded into the
+        # unified Accounts page — any old route/constant lands there instead
+        # of on the dead placeholder slot.
+        if view_idx == VIEW_CORE_V2_ACCOUNTS:
+            view_idx = VIEW_USERS
         # Jumping straight to a view inside a folded section (initial_view,
         # or the caller passing a VIEW_* constant directly) must still land
         # on a visible, reachable nav row — expand its section first so the
@@ -1123,7 +1131,10 @@ class SettingsWindow(
         self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_knowledge_tabbed_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_accounts_view()))
+        # Slot 10 (VIEW_CORE_V2_ACCOUNTS) is a bare placeholder: the page
+        # merged into Accounts (#505) and `_goto_view` redirects the constant
+        # there, but the index order of the slots after it must not shift.
+        self._stack.addWidget(QWidget(self))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_routing_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
@@ -2645,6 +2656,9 @@ class SettingsWindow(
     # ──────────────────────────────────────────────────────────
 
     def _build_users_view(self) -> QWidget:
+        """The unified **Accounts** page (#505) — provider rows + account
+        cards (built by `AccountsSettingsMixin`), with the per-profile Claude
+        API override form kept as an advanced second tab."""
         view = QWidget(self)
         lay = QVBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 16)
@@ -2653,8 +2667,8 @@ class SettingsWindow(
         self._up_profiles: list[dict] = user_profile.list_profiles()
 
         tabs = QTabWidget(view)
-        tabs.addTab(self._build_users_profiles_tab(tabs), "Profiles")
-        tabs.addTab(self._build_users_auth_tab(tabs), "Claude Auth")
+        tabs.addTab(self._build_accounts_tab(tabs), "บัญชี")
+        tabs.addTab(self._build_users_auth_tab(tabs), "การเชื่อมต่อ API (ขั้นสูง)")
         lay.addWidget(tabs, 1)
 
         self._up_status = QLabel("", view)
@@ -2666,184 +2680,6 @@ class SettingsWindow(
 
     def _users_status(self, msg: str) -> None:
         self._up_status.setText(msg)
-
-    def _build_users_profiles_tab(self, parent: QWidget) -> QWidget:
-        tab = QWidget(parent)
-        lay = QVBoxLayout(tab)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(10)
-
-        list_panel = QWidget(tab)
-        list_panel.setObjectName("panel")
-        lp_lay = QVBoxLayout(list_panel)
-        lp_lay.setContentsMargins(14, 12, 14, 12)
-        lp_lay.setSpacing(8)
-        lp_title = QLabel("Existing profiles", list_panel)
-        lp_title.setObjectName("panelTitle")
-        lp_lay.addWidget(lp_title)
-        lp_hint = QLabel("'default' cannot be removed", list_panel)
-        lp_hint.setObjectName("panelHint")
-        lp_lay.addWidget(lp_hint)
-
-        self._up_profile_list = QListWidget(list_panel)
-        self._up_profile_list.setFrameShape(QFrame.Shape.NoFrame)
-        for p in self._up_profiles:
-            self._up_profile_list.addItem(f"{p['name']}  ->  {p['config_dir']}")
-        lp_lay.addWidget(self._up_profile_list)
-
-        btn_row = QHBoxLayout()
-        self._up_remove_btn = cockpit_theme.secondary_button("Remove selected", list_panel)
-        self._up_remove_btn.setEnabled(False)
-        self._up_share_btn = cockpit_theme.secondary_button(
-            "Share sessions with default", list_panel
-        )
-        self._up_share_btn.setEnabled(False)
-        self._up_share_btn.setToolTip(
-            "Convert this profile to shared-session mode: its existing\n"
-            "sessions/todos/plugins/skills are merged into the default\n"
-            "profile (nothing overwritten, originals kept as *.pre-share-backup),\n"
-            "then linked — from then on switching users changes ONLY the\n"
-            "account; history and plugins are the same everywhere."
-        )
-        btn_row.addWidget(self._up_remove_btn)
-        btn_row.addWidget(self._up_share_btn)
-        btn_row.addStretch(1)
-        lp_lay.addLayout(btn_row)
-        lay.addWidget(list_panel)
-
-        self._up_profile_list.currentRowChanged.connect(self._on_users_profile_row_changed)
-        self._up_remove_btn.clicked.connect(self._on_users_remove_profile_clicked)
-        self._up_share_btn.clicked.connect(self._on_users_share_profile_clicked)
-
-        add_panel = QWidget(tab)
-        add_panel.setObjectName("panel")
-        ap_lay = QVBoxLayout(add_panel)
-        ap_lay.setContentsMargins(14, 12, 14, 12)
-        ap_lay.setSpacing(8)
-        ap_title = QLabel("Add new profile", add_panel)
-        ap_title.setObjectName("panelTitle")
-        ap_lay.addWidget(ap_title)
-
-        form = QFormLayout()
-        self._up_add_name = QLineEdit(add_panel)
-        self._up_add_name.setPlaceholderText("e.g. work, personal")
-        self._up_add_dir = QLineEdit(add_panel)
-        self._up_add_dir.setPlaceholderText("path to Claude config dir, e.g. ~/.claude-work")
-        dir_row = QWidget(add_panel)
-        dir_row_lay = QHBoxLayout(dir_row)
-        dir_row_lay.setContentsMargins(0, 0, 0, 0)
-        dir_row_lay.addWidget(self._up_add_dir)
-        browse_btn = cockpit_theme.secondary_button("Browse…", add_panel)
-        browse_btn.setFixedWidth(84)
-        dir_row_lay.addWidget(browse_btn)
-        form.addRow("Name:", self._up_add_name)
-        form.addRow("Config dir:", dir_row)
-
-        self._up_add_share_chk = QCheckBox(
-            "Share sessions/plugins with default (switch account only)", add_panel
-        )
-        self._up_add_share_chk.setChecked(True)
-        self._up_add_share_chk.setToolTip(
-            "Recommended. The new profile links sessions/todos/plugins/skills\n"
-            "to the default profile — switching users changes ONLY the login.\n"
-            "Uncheck for a fully isolated profile (old behaviour).\n"
-            "Leave Config dir blank to use ~/.claude-<name>."
-        )
-        form.addRow("", self._up_add_share_chk)
-        ap_lay.addLayout(form)
-
-        browse_btn.clicked.connect(self._on_users_browse_clicked)
-
-        add_btn = cockpit_theme.gold_button("+ Add Profile", add_panel)
-        add_btn.clicked.connect(self._on_users_add_profile_clicked)
-        ap_lay.addWidget(add_btn)
-
-        lay.addWidget(add_panel)
-        lay.addStretch(1)
-        return tab
-
-    def _on_users_profile_row_changed(self, row: int) -> None:
-        self._up_remove_btn.setEnabled(row > 0)  # row 0 = "default", not removable
-        self._up_share_btn.setEnabled(row > 0)
-
-    def _on_users_remove_profile_clicked(self) -> None:
-        row = self._up_profile_list.currentRow()
-        if row <= 0 or row >= len(self._up_profiles):
-            return
-        try:
-            user_profile.remove_profile(self._up_profiles[row]["name"])
-        except ValueError as exc:
-            QMessageBox.warning(self, "Cannot remove", str(exc))
-            return
-        # Unlink shared junctions FIRST so a later manual delete of the
-        # profile folder can't traverse a junction into ~/.claude data.
-        try:
-            user_profile.cleanup_profile_links(self._up_profiles[row]["config_dir"])
-        except Exception:
-            pass
-        self._up_profile_list.takeItem(row)
-        self._up_profiles.pop(row)
-        self._reload_users_auth_combo()
-
-    def _on_users_share_profile_clicked(self) -> None:
-        row = self._up_profile_list.currentRow()
-        if row <= 0 or row >= len(self._up_profiles):
-            return
-        p = self._up_profiles[row]
-        confirm = QMessageBox.question(
-            self,
-            "Share sessions?",
-            f"Convert '{p['name']}' ({p['config_dir']}) to shared-session mode?\n\n"
-            "• Its sessions/todos/plugins/skills merge into the default\n"
-            "  profile — nothing is overwritten, originals are kept as\n"
-            "  *.pre-share-backup inside the profile dir.\n"
-            "• Login/credentials stay separate — only the account differs.\n"
-            "• Panes already open keep their old view until respawned.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if confirm != QMessageBox.StandardButton.Ok:
-            return
-        results = user_profile.convert_profile_to_shared(p["config_dir"])
-        QMessageBox.information(
-            self,
-            "Shared-session conversion",
-            "\n".join(f"{k}: {v}" for k, v in results.items()),
-        )
-
-    def _on_users_browse_clicked(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select Claude config directory")
-        if d:
-            self._up_add_dir.setText(d)
-
-    def _on_users_add_profile_clicked(self) -> None:
-        n = self._up_add_name.text().strip()
-        d = self._up_add_dir.text().strip()
-        if not n:
-            return
-        if not d:
-            if not self._up_add_share_chk.isChecked():
-                return  # isolated profiles must name their dir explicitly
-            d = str(Path.home() / f".claude-{n}")
-        try:
-            linked = user_profile.add_profile(
-                n, d, share_sessions=self._up_add_share_chk.isChecked()
-            )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid profile", str(exc))
-            return
-        new_p = {"name": n, "config_dir": d}
-        self._up_profiles.append(new_p)
-        suffix = "  (shared)" if linked else ""
-        self._up_profile_list.addItem(f"{n}  ->  {d}{suffix}")
-        self._up_add_name.clear()
-        self._up_add_dir.clear()
-        self._reload_users_auth_combo()
-        if linked:
-            self._users_status(
-                f"profile '{n}' created — shares {', '.join(linked)} with default · "
-                "run 'claude login' in a pane of that profile to sign in"
-            )
 
     def _build_users_auth_tab(self, parent: QWidget) -> QWidget:
         tab = QWidget(parent)

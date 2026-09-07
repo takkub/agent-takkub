@@ -1,12 +1,17 @@
 """Core V2 Settings views — epic #309 Phase 9 (`ADVANCED` sidebar section,
-folded by default: Accounts & Pools / Routing / Brain / Scheduler — Overview
-and Migration were removed in the settings-nav declutter: Overview duplicated
-`takkub doctor`'s own status view and its flags default-on since 1.0.84 per
+folded by default: Routing / Brain / Scheduler — Overview and Migration were
+removed in the settings-nav declutter: Overview duplicated `takkub doctor`'s
+own status view and its flags default-on since 1.0.84 per
 `core_v2_settings._DEFAULT_FLAGS`; Migration's inspect/plan/dry-run duplicated
 the `takkub migrate` CLI and boot already runs `auto_migrate_boot` (#361) —
 apply on prod completed 2026-08-23. `v2_authority`'s default flip (#362
 Phase 10, 2.0.0) was an env-flag decision, not something driven by a
-Settings page — `TAKKUB_V2_AUTHORITY=0` remains the escape hatch).
+Settings page — `TAKKUB_V2_AUTHORITY=0` remains the escape hatch. The
+Accounts & Pools page merged into the unified **Accounts** page (#505,
+`settings_accounts.py` + `accounts_adapter.py`); its `VIEW_CORE_V2_ACCOUNTS`
+route redirects there. Pool CRUD has no UI for now — nothing populates pools
+today (`core.accounts.facade`'s own docstring) and the routing preview below
+still reads them).
 
 A mixin (`CoreV2SettingsMixin`) mixed into `settings_window.SettingsWindow`
 — same "UI-layer mixin" shape as `user_actions.UserActionsMixin`/
@@ -22,11 +27,9 @@ Every view here is read-mostly and deliberately NOT wired into
 already spans 7+ unrelated stores and entangling more (with very different
 shapes: append-only JSONL registries, thread-driven read-only reports) would
 make an already-large rollback surface harder to reason about for no real
-benefit. Instead each view either writes through immediately on its own
-explicit action (Accounts & Pools' add/edit/remove, mirroring Templates'
-Duplicate/Delete-writes-immediately precedent) or has its own dedicated Save
-button scoped to just that view's fields (Scheduler's SlotPolicy) — never
-routed through the shared footer.
+benefit. Instead each view has its own dedicated Save button scoped to just
+that view's fields (Scheduler's SlotPolicy) — never routed through the
+shared footer.
 """
 
 from __future__ import annotations
@@ -35,8 +38,6 @@ import psutil
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -44,7 +45,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QSpinBox,
     QVBoxLayout,
@@ -57,12 +57,7 @@ from .core.accounts.registry import AccountPoolRegistry, AccountRegistry
 from .core.accounts.selector import selector_for
 from .core.brain.flag import v2_brain_enabled
 from .core.brain.store import BrainStore
-from .core.models.account import (
-    AccountPool,
-    AccountStatus,
-    ProviderAccount,
-    SelectionStrategy,
-)
+from .core.models.account import SelectionStrategy
 from .core.models.memory import Scope
 from .core.routing.facade import effective_provider_for_v2
 from .core.routing.flag import v2_router_enabled
@@ -137,396 +132,11 @@ def _brain_counts(project: str | None) -> dict[str, dict[str, int]]:
     return {"by_scope": by_scope, "by_trust": by_trust, "total": total}
 
 
-# ──────────────────────────────────────────────────────────────
-# dialogs — Account / Pool create-or-edit
-# ──────────────────────────────────────────────────────────────
-
-
-class _AccountEditDialog(QDialog):
-    """Create or edit one `ProviderAccount`. `secret_ref` is a pointer into
-    the future SecretManager (`core.models.account.ProviderAccount`'s own
-    docstring) — this form never has a raw-credential field, only the ref
-    string."""
-
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        account: ProviderAccount | None = None,
-        provider_ids: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__(parent)
-        self._editing = account is not None
-        self.setWindowTitle("Edit account" if self._editing else "Add account")
-        self.resize(420, 320)
-
-        form = QFormLayout(self)
-
-        self.id_edit = QLineEdit(account.id if account else "", self)
-        self.id_edit.setEnabled(not self._editing)
-        self.id_edit.setPlaceholderText("account id (unique)")
-        form.addRow("ID", self.id_edit)
-
-        self.provider_combo = QComboBox(self)
-        self.provider_combo.setEditable(True)
-        for pid in provider_ids:
-            self.provider_combo.addItem(pid)
-        if account:
-            self.provider_combo.setCurrentText(account.provider_id)
-        form.addRow("Provider", self.provider_combo)
-
-        self.label_edit = QLineEdit(account.label if account else "", self)
-        form.addRow("Label", self.label_edit)
-
-        self.secret_ref_edit = QLineEdit(account.secret_ref or "" if account else "", self)
-        self.secret_ref_edit.setPlaceholderText("secretRef — never a raw credential")
-        form.addRow("Secret ref", self.secret_ref_edit)
-
-        self.status_combo = QComboBox(self)
-        for status in AccountStatus:
-            self.status_combo.addItem(status.value, status)
-        if account:
-            idx = self.status_combo.findData(account.status)
-            if idx >= 0:
-                self.status_combo.setCurrentIndex(idx)
-        form.addRow("Status", self.status_combo)
-
-        self.priority_spin = QSpinBox(self)
-        self.priority_spin.setRange(-1000, 1000)
-        self.priority_spin.setValue(account.priority if account else 0)
-        form.addRow("Priority", self.priority_spin)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def result_account(self) -> ProviderAccount | None:
-        account_id = self.id_edit.text().strip()
-        provider_id = self.provider_combo.currentText().strip()
-        if not account_id or not provider_id:
-            return None
-        return ProviderAccount(
-            id=account_id,
-            provider_id=provider_id,
-            label=self.label_edit.text().strip(),
-            secret_ref=self.secret_ref_edit.text().strip() or None,
-            status=self.status_combo.currentData() or AccountStatus.ACTIVE,
-            priority=self.priority_spin.value(),
-        )
-
-
-class _PoolEditDialog(QDialog):
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        pool: AccountPool | None = None,
-        provider_ids: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__(parent)
-        self._editing = pool is not None
-        self.setWindowTitle("Edit pool" if self._editing else "Add pool")
-        self.resize(440, 340)
-
-        form = QFormLayout(self)
-
-        self.id_edit = QLineEdit(pool.id if pool else "", self)
-        self.id_edit.setEnabled(not self._editing)
-        self.id_edit.setPlaceholderText("pool id (unique)")
-        form.addRow("ID", self.id_edit)
-
-        self.name_edit = QLineEdit(pool.name if pool else "", self)
-        form.addRow("Name", self.name_edit)
-
-        self.provider_combo = QComboBox(self)
-        self.provider_combo.setEditable(True)
-        for pid in provider_ids:
-            self.provider_combo.addItem(pid)
-        if pool:
-            self.provider_combo.setCurrentText(pool.provider_id)
-        form.addRow("Provider", self.provider_combo)
-
-        self.account_ids_edit = QLineEdit(", ".join(pool.account_ids) if pool else "", self)
-        self.account_ids_edit.setPlaceholderText("comma-separated account ids")
-        form.addRow("Account IDs", self.account_ids_edit)
-
-        self.strategy_combo = QComboBox(self)
-        for strategy in SelectionStrategy:
-            self.strategy_combo.addItem(strategy.value, strategy)
-        if pool:
-            idx = self.strategy_combo.findData(pool.strategy)
-            if idx >= 0:
-                self.strategy_combo.setCurrentIndex(idx)
-        form.addRow("Strategy", self.strategy_combo)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def result_pool(self) -> AccountPool | None:
-        pool_id = self.id_edit.text().strip()
-        name = self.name_edit.text().strip()
-        provider_id = self.provider_combo.currentText().strip()
-        if not pool_id or not provider_id:
-            return None
-        account_ids = tuple(
-            aid.strip() for aid in self.account_ids_edit.text().split(",") if aid.strip()
-        )
-        return AccountPool(
-            id=pool_id,
-            name=name or pool_id,
-            provider_id=provider_id,
-            account_ids=account_ids,
-            strategy=self.strategy_combo.currentData() or SelectionStrategy.PRIORITY,
-        )
-
-
 class CoreV2SettingsMixin:
     """Mixed into `SettingsWindow` — every method assumes `self` has the
     attributes `SettingsWindow.__init__` sets (`_project`, `_fonts`, …) plus
     the QSS-driven helpers (`_build_card_header`) that class already
     defines."""
-
-    # ──────────────────────────────────────────────────────────
-    # view: Accounts & Pools
-    # ──────────────────────────────────────────────────────────
-
-    def _build_core_v2_accounts_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QVBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(14)
-
-        accounts_panel = QWidget(view)
-        accounts_panel.setObjectName("panel")
-        ap_lay = QVBoxLayout(accounts_panel)
-        ap_lay.setContentsMargins(14, 12, 14, 12)
-        ap_lay.setSpacing(8)
-        header_row = QHBoxLayout()
-        header_row.addWidget(
-            self._build_card_header("ACCOUNTS", "Provider accounts", "", accounts_panel), 1
-        )
-        add_account_btn = cockpit_theme.secondary_button("+ Add account", accounts_panel)
-        add_account_btn.clicked.connect(self._on_cv2_add_account_clicked)
-        header_row.addWidget(add_account_btn)
-        ap_lay.addLayout(header_row)
-        self._cv2_accounts_list = QListWidget(accounts_panel)
-        self._cv2_accounts_list.setFrameShape(QFrame.Shape.NoFrame)
-        self._cv2_accounts_list.setUniformItemSizes(True)
-        ap_lay.addWidget(self._cv2_accounts_list)
-        acct_btn_row = QHBoxLayout()
-        edit_account_btn = cockpit_theme.secondary_button("Edit", accounts_panel)
-        edit_account_btn.clicked.connect(self._on_cv2_edit_account_clicked)
-        acct_btn_row.addWidget(edit_account_btn)
-        remove_account_btn = cockpit_theme.secondary_button("Remove", accounts_panel)
-        remove_account_btn.clicked.connect(self._on_cv2_remove_account_clicked)
-        acct_btn_row.addWidget(remove_account_btn)
-        acct_btn_row.addStretch(1)
-        ap_lay.addLayout(acct_btn_row)
-        lay.addWidget(accounts_panel)
-
-        pools_panel = QWidget(view)
-        pools_panel.setObjectName("panel")
-        pp_lay = QVBoxLayout(pools_panel)
-        pp_lay.setContentsMargins(14, 12, 14, 12)
-        pp_lay.setSpacing(8)
-        pool_header_row = QHBoxLayout()
-        pool_header_row.addWidget(
-            self._build_card_header("ACCOUNTS", "Account pools", "", pools_panel), 1
-        )
-        add_pool_btn = cockpit_theme.secondary_button("+ Add pool", pools_panel)
-        add_pool_btn.clicked.connect(self._on_cv2_add_pool_clicked)
-        pool_header_row.addWidget(add_pool_btn)
-        pp_lay.addLayout(pool_header_row)
-        self._cv2_pools_list = QListWidget(pools_panel)
-        self._cv2_pools_list.setFrameShape(QFrame.Shape.NoFrame)
-        self._cv2_pools_list.setUniformItemSizes(True)
-        pp_lay.addWidget(self._cv2_pools_list)
-        pool_btn_row = QHBoxLayout()
-        edit_pool_btn = cockpit_theme.secondary_button("Edit", pools_panel)
-        edit_pool_btn.clicked.connect(self._on_cv2_edit_pool_clicked)
-        pool_btn_row.addWidget(edit_pool_btn)
-        remove_pool_btn = cockpit_theme.secondary_button("Remove", pools_panel)
-        remove_pool_btn.clicked.connect(self._on_cv2_remove_pool_clicked)
-        pool_btn_row.addWidget(remove_pool_btn)
-        pool_btn_row.addStretch(1)
-        pp_lay.addLayout(pool_btn_row)
-        lay.addWidget(pools_panel)
-        lay.addStretch(1)
-
-        self._cv2_accounts_status = QLabel("", view)
-        self._cv2_accounts_status.setObjectName("panelHint")
-        lay.addWidget(self._cv2_accounts_status)
-
-        self._reload_cv2_accounts()
-        return view
-
-    def _cv2_fit_list_height(self, list_widget: QListWidget, *, cap: int = 160) -> None:
-        """Size-to-content up to `cap`, instead of always reserving a fixed
-        160px box that leaves ~120px of empty panel below a single row
-        (design critic nice #1, `docs/v2/phase9-critic-review.md`)."""
-        row_height = list_widget.sizeHintForRow(0)
-        if row_height <= 0:
-            row_height = 24
-        frame = 2 * list_widget.frameWidth()
-        content_height = list_widget.count() * row_height + frame
-        list_widget.setFixedHeight(min(cap, max(content_height, row_height + frame)))
-
-    def _cv2_provider_ids(self) -> tuple[str, ...]:
-        from . import provider_spec
-
-        return tuple(sorted(provider_spec.PROVIDER_REGISTRY.keys()))
-
-    def _reload_cv2_accounts(self) -> None:
-        accounts = AccountRegistry().all()
-        self._cv2_accounts_list.clear()
-        if not accounts:
-            item = QListWidgetItem("ยังไม่มี account — กด “+ Add account” เพื่อเริ่ม")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._cv2_accounts_list.addItem(item)
-        for account in sorted(accounts, key=lambda a: (a.provider_id, -a.priority, a.id)):
-            item = QListWidgetItem(
-                f"[{account.provider_id}] {account.id}"
-                f"  label={account.label or '-'}  priority={account.priority}"
-                f"  status={account.status.value}"
-                f"  secretRef={'set' if account.secret_ref else 'unset'}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, account.id)
-            self._cv2_accounts_list.addItem(item)
-
-        pools = AccountPoolRegistry().all()
-        self._cv2_pools_list.clear()
-        if not pools:
-            item = QListWidgetItem("ยังไม่มี pool — กด “+ Add pool” เพื่อเริ่ม")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._cv2_pools_list.addItem(item)
-        for pool in sorted(pools, key=lambda p: (p.provider_id, p.id)):
-            item = QListWidgetItem(
-                f'[{pool.provider_id}] {pool.id} "{pool.name}"'
-                f"  strategy={pool.strategy.value}"
-                f"  accounts={len(pool.account_ids)}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, pool.id)
-            self._cv2_pools_list.addItem(item)
-
-        self._cv2_fit_list_height(self._cv2_accounts_list)
-        self._cv2_fit_list_height(self._cv2_pools_list)
-
-    def _cv2_selected_account_id(self) -> str | None:
-        item = self._cv2_accounts_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
-
-    def _cv2_selected_pool_id(self) -> str | None:
-        item = self._cv2_pools_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
-
-    def _on_cv2_add_account_clicked(self) -> None:
-        dlg = _AccountEditDialog(self, provider_ids=self._cv2_provider_ids())
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        account = dlg.result_account()
-        if account is None:
-            self._cv2_accounts_status.setText("ต้องกรอก ID และ Provider")
-            return
-        if AccountRegistry().get(account.id) is not None:
-            self._cv2_accounts_status.setText(f"account id '{account.id}' มีอยู่แล้ว")
-            return
-        AccountRegistry().upsert(account)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"เพิ่ม account '{account.id}' แล้ว")
-
-    def _on_cv2_edit_account_clicked(self) -> None:
-        account_id = self._cv2_selected_account_id()
-        if account_id is None:
-            self._cv2_accounts_status.setText("เลือก account ก่อน")
-            return
-        registry = AccountRegistry()
-        existing = registry.get(account_id)
-        if existing is None:
-            self._cv2_accounts_status.setText("account นี้ถูกลบไปแล้ว")
-            self._reload_cv2_accounts()
-            return
-        dlg = _AccountEditDialog(self, account=existing, provider_ids=self._cv2_provider_ids())
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        updated = dlg.result_account()
-        if updated is None:
-            return
-        registry.upsert(updated)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"แก้ไข account '{updated.id}' แล้ว")
-
-    def _on_cv2_remove_account_clicked(self) -> None:
-        account_id = self._cv2_selected_account_id()
-        if account_id is None:
-            self._cv2_accounts_status.setText("เลือก account ก่อน")
-            return
-        box = cockpit_theme.themed_message_box(self)
-        box.setWindowTitle("Remove account")
-        box.setText(f"ลบ account '{account_id}' ออกจาก registry?")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-        AccountRegistry().delete(account_id)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"ลบ account '{account_id}' แล้ว")
-
-    def _on_cv2_add_pool_clicked(self) -> None:
-        dlg = _PoolEditDialog(self, provider_ids=self._cv2_provider_ids())
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        pool = dlg.result_pool()
-        if pool is None:
-            self._cv2_accounts_status.setText("ต้องกรอก ID และ Provider")
-            return
-        if AccountPoolRegistry().get(pool.id) is not None:
-            self._cv2_accounts_status.setText(f"pool id '{pool.id}' มีอยู่แล้ว")
-            return
-        AccountPoolRegistry().upsert(pool)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"เพิ่ม pool '{pool.id}' แล้ว")
-
-    def _on_cv2_edit_pool_clicked(self) -> None:
-        pool_id = self._cv2_selected_pool_id()
-        if pool_id is None:
-            self._cv2_accounts_status.setText("เลือก pool ก่อน")
-            return
-        registry = AccountPoolRegistry()
-        existing = registry.get(pool_id)
-        if existing is None:
-            self._cv2_accounts_status.setText("pool นี้ถูกลบไปแล้ว")
-            self._reload_cv2_accounts()
-            return
-        dlg = _PoolEditDialog(self, pool=existing, provider_ids=self._cv2_provider_ids())
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        updated = dlg.result_pool()
-        if updated is None:
-            return
-        registry.upsert(updated)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"แก้ไข pool '{updated.id}' แล้ว")
-
-    def _on_cv2_remove_pool_clicked(self) -> None:
-        pool_id = self._cv2_selected_pool_id()
-        if pool_id is None:
-            self._cv2_accounts_status.setText("เลือก pool ก่อน")
-            return
-        box = cockpit_theme.themed_message_box(self)
-        box.setWindowTitle("Remove pool")
-        box.setText(f"ลบ pool '{pool_id}' ออกจาก registry?")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-        AccountPoolRegistry().delete(pool_id)
-        self._reload_cv2_accounts()
-        self._cv2_accounts_status.setText(f"ลบ pool '{pool_id}' แล้ว")
 
     # ──────────────────────────────────────────────────────────
     # view: Routing (read-only preview)

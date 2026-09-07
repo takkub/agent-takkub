@@ -1,7 +1,7 @@
 """StatusHeaderMixin — status-bar construction + update helpers.
 
 Extracted from ``MainWindow`` (~580 lines).  All widget refs stay on ``self``
-(``self._status``, ``self._chip_plan``, …) so every other mixin and
+(``self._status``, ``self._plan_badge``, …) so every other mixin and
 MainWindow method can touch them unchanged.
 
 **Import constraint:** this module MUST NOT import ``app`` or ``cli``.
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
     QStatusBar,
@@ -109,6 +110,39 @@ class _RamSnapshotWorker(QRunnable):
             pass
 
 
+# ── Plan badge credential probe (#505) — fallback for when the LimitStore
+# has no cached usage data for the active account yet. Reads that account's
+# credential file (and, on macOS, possibly the Keychain via `security`) —
+# file/subprocess IO that must stay off the Qt main thread (#488), so it
+# reuses the graft/RAM workers' QRunnable shape. Result is cached per
+# config_dir on the mixin instance; a failed probe caches None so it never
+# respawns in a loop.
+class _PlanProbeSignals(QObject):
+    finished = pyqtSignal(str, object)  # (config_dir, plan label | None)
+
+
+class _PlanProbeWorker(QRunnable):
+    def __init__(self, config_dir: str, is_default: bool) -> None:
+        super().__init__()
+        self.signals = _PlanProbeSignals()
+        self._config_dir = config_dir
+        self._is_default = is_default
+
+    def run(self) -> None:
+        from pathlib import Path
+
+        from .accounts_adapter import claude_login_status
+
+        try:
+            plan = claude_login_status(Path(self._config_dir), is_default=self._is_default).plan
+        except Exception:
+            plan = None
+        try:
+            self.signals.finished.emit(self._config_dir, plan)
+        except RuntimeError:
+            pass  # window deleted while the pool job was running
+
+
 def _reset_graft_caches() -> None:
     """Test hook: clear both graft-chip caches so the next
     `_graft_progress_snapshot()` call recomputes from scratch instead of
@@ -152,31 +186,16 @@ class StatusHeaderMixin:
         return wrap
 
     @staticmethod
-    def _plan_chip_label(is_pro: bool) -> str:
-        """'Plan: Pro' / 'Plan: Max' — the bare 'Pro'/'Max' text used to sit
-        right next to the '👤 1:1' / '👥 Multi' exec-mode chip with a near
-        -identical outline style; the two easily got mistaken for the same
-        kind of toggle. The 'Plan:' prefix removes the ambiguity without
-        needing the reader to memorise a colour legend."""
-        return "Plan: Pro" if is_pro else "Plan: Max"
-
-    @staticmethod
-    def _plan_chip_style(is_pro: bool) -> str:
-        """Outline chip for the account plan (Pro/Max).
-
-        Two valid modes (not on/off), so no strikethrough. Outline (not the
-        old solid fill) keeps it consistent with the provider chips and
-        signals a clickable mode-toggle without shouting. Max = violet
-        (full access incl. 1M context), Pro = amber (1M capped).
-        """
-        brand = cockpit_theme.CHIP_PLAN_MAX if not is_pro else cockpit_theme.STATE_WARN_ALT
+    def _plan_badge_style() -> str:
+        """Read-only outline badge for the account plan — deliberately a
+        QLabel style with no hover state, so it can't be mistaken for the
+        clickable toggle it replaced (#505: the plan is a fact of the
+        account's credential now, not a cockpit switch)."""
         return (
-            "QPushButton { "
-            f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
-            "padding:2px 10px; font-weight:600; "
-            "}"
-            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+            f"QLabel {{ background:transparent; color:{cockpit_theme.TEXT_SECONDARY}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; "
+            f"border-radius:{cockpit_theme.RADIUS_MD}px; "
+            "padding:2px 10px; font-weight:600; }"
         )
 
     @staticmethod
@@ -270,37 +289,6 @@ class StatusHeaderMixin:
             f"color:{cockpit_theme.TEXT_PRIMARY_ALT}; border-color:{cockpit_theme.BORDER_STRONG2}; }}"
         )
 
-    @staticmethod
-    def _danger_button_style() -> str:
-        """Restrained red accent for the one consequential action.
-
-        End Session closes every teammate pane — the most destructive
-        status-bar action — so it gets the only colored treatment. Outline,
-        not a full red fill, so it stands out against the ghost buttons
-        without re-introducing the rainbow.
-        """
-        return (
-            f"QPushButton {{ color:{cockpit_theme.BANNER_ERROR_TEXT}; background:transparent; "
-            f"border:1px solid {cockpit_theme.BANNER_ERROR_BORDER}; border-radius:4px; "
-            "padding:2px 8px; }"
-            f"QPushButton:hover {{ background:{cockpit_theme.BANNER_ERROR_BG}; "
-            f"border-color:{cockpit_theme.STATE_ERROR}; }}"
-        )
-
-    @staticmethod
-    def _plan_chip_tooltip(is_pro: bool) -> str:
-        """Tooltip for the plan chip — explains the consequence, not just the state."""
-        if is_pro:
-            return (
-                "Account plan: Pro — click to switch to Max.\n"
-                "New Lead panes pin to a standard-context model\n"
-                "(1M context is usage-credits gated on Pro)."
-            )
-        return (
-            "Account plan: Max — click to switch to Pro.\n"
-            "Lead inherits your default model, incl. 1M context."
-        )
-
     # ──────────────────────────────────────────────────────────────
     # status-bar construction
     # ──────────────────────────────────────────────────────────────
@@ -329,18 +317,18 @@ class StatusHeaderMixin:
         # user profile selector moved to the 👥 Team chip's right-click QMenu
         # (was ⚙ Pipelines' left-click menu before the A6-redesign)
 
-        # ── account plan chip (Pro / Max) ──────────────────────────
-        # Records whether the owner is on Pro or Max so the orchestrator can
-        # pin the Lead to a standard-context model under Pro (the 1M-context
-        # variant is usage-credits gated and hard-errors on Pro). State lives
-        # in plan.json; orchestrator owns persist+broadcast on flip.
-        from .plan_tier import is_pro as _plan_is_pro
-
-        _pro_now = _plan_is_pro()
-        self._chip_plan = QPushButton(self._plan_chip_label(_pro_now), self)
-        self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
-        self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
-        self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
+        # ── account plan badge (read-only, #505) ───────────────────
+        # Shows the ACTIVE project's claude account plan (Max 20x / Pro / …)
+        # read from that account's own credential — not a cockpit switch.
+        # The old clickable Pro/Max toggle chip was removed per owner
+        # request; `plan_tier`/`orchestrator.set_plan_tier` (the Lead
+        # model-pin logic + CLI) are untouched — #505 stage 2 repoints the
+        # pin at the account's real plan.
+        self._plan_badge = QLabel("Plan: —", self)
+        self._plan_badge.setStyleSheet(self._plan_badge_style())
+        self._plan_badge_cache: dict[str, str | None] = {}
+        self._plan_badge_probe_busy = False
+        self._refresh_plan_badge()
 
         # ⚠ Usage-overage chip: warns when the ACTIVE project's Claude
         # account has fully exhausted its 5-hour usage window. Anthropic
@@ -482,20 +470,9 @@ class StatusHeaderMixin:
         # /remote-control auto-bridge and kept cancelling. Use claude's native
         # /resume typed directly in the pane instead.
 
-        # End-Session button: prompts for a session-summary note then runs
-        # close_all_teammates + end_session. The summary feeds Lead's
-        # spawn-time "Recent session brief" the next time a pane opens for
-        # this project — so finishing through this button is what makes
-        # the next session "remember" what just happened.
-        self._btn_end_session = QPushButton("🏁 End Session", self)
-        self._btn_end_session.setToolTip(
-            "Wrap up the active project: prompts for a one-paragraph note,\n"
-            "closes every teammate pane, then writes a Lead session summary\n"
-            "to runtime/sessions/ + the vault. Next session for this project\n"
-            "auto-inherits the note in Lead's spawn-time prompt."
-        )
-        self._btn_end_session.setStyleSheet(self._danger_button_style())
-        self._btn_end_session.clicked.connect(self._on_end_session_clicked)
+        # The 🏁 End Session button was removed per owner request (2026-09-07
+        # "เกะกะ") — `takkub end-session` (CLI → orchestrator.end_session)
+        # remains the way to wrap up a session.
 
         # 🩺 Doctor button: one-stop cockpit readiness check. Runs environment
         # diagnostics AND folds in the recommended dev-team plugin set — the
@@ -601,12 +578,11 @@ class StatusHeaderMixin:
             self._btn_open_shell,
             self._chip_tasks,
             self._btn_doctor,
-            self._btn_end_session,
         ):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
-            (self._chip_plan, self._chip_overage),
+            (self._plan_badge, self._chip_overage),
             (self._chip_remote, self._chip_graft),
             (
                 self._btn_restart,
@@ -630,7 +606,8 @@ class StatusHeaderMixin:
             lambda port: self._status.showMessage(f"cockpit ready · cli port {port}")
         )
         self.orch.statusChanged.connect(self._update_status)
-        self.orch.planTierChanged.connect(self._on_plan_tier_changed)
+        # A CLI-side `takkub plan` flip still lands here — repaint the badge.
+        self.orch.planTierChanged.connect(lambda _tier: self._refresh_plan_badge())
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
@@ -741,6 +718,7 @@ class StatusHeaderMixin:
         self._schedule_graft_snapshot()
         self._refresh_remote_chip()
         self._refresh_overage_chip()
+        self._refresh_plan_badge()
         self._update_provider_chip()
         self._refresh_active_provider_usage()
         self._refresh_performance_health_chip()
@@ -981,6 +959,57 @@ class StatusHeaderMixin:
             return
         data = store.get(user_profile.config_dir_for(proj))
         self._chip_overage.setVisible(is_in_overage(data))
+
+    def _refresh_plan_badge(self) -> None:
+        """Repaint the read-only plan badge (#505) for the ACTIVE project's
+        claude account. Cache-only on the Qt thread: LimitStore's cached
+        usage data first (it already carries the account's plan label), then
+        this mixin's own per-config-dir probe cache; a cache miss fires ONE
+        off-thread `_PlanProbeWorker` — never a credential read here (#488).
+        Same `__dict__` guard as `_refresh_overage_chip`."""
+        if "_plan_badge" not in self.__dict__:
+            return
+        from . import user_profile
+        from .config import active_project
+
+        try:
+            proj, _ = active_project()
+        except Exception:
+            proj = None
+        if not proj:
+            self._plan_badge.setText("Plan: —")
+            self._plan_badge.setToolTip("ยังไม่มีโปรเจคที่เปิดอยู่")
+            return
+        account = user_profile.profile_for(proj)
+        config_dir = user_profile.config_dir_for(proj)
+        key = str(config_dir)
+
+        plan: str | None = None
+        store = getattr(self, "_limit_store", None)
+        if store is not None:
+            data = store.get(config_dir)
+            plan = getattr(data, "plan", None)
+            if plan == "Unknown":
+                plan = None
+        if not plan:
+            if key in self._plan_badge_cache:
+                plan = self._plan_badge_cache[key]
+            elif not self._plan_badge_probe_busy:
+                self._plan_badge_probe_busy = True
+                worker = _PlanProbeWorker(key, is_default=account == "default")
+                worker.signals.finished.connect(self._on_plan_probe_done)
+                QThreadPool.globalInstance().start(worker)
+
+        self._plan_badge.setText(f"Plan: {plan}" if plan else "Plan: ไม่ทราบ")
+        self._plan_badge.setToolTip(
+            f"แผนการใช้งานของบัญชี claude '{account}' ที่โปรเจคนี้ใช้\n"
+            "อ่านจาก credential ของบัญชี (read-only) — เปลี่ยนบัญชีของโปรเจคได้ที่ Settings → Accounts"
+        )
+
+    def _on_plan_probe_done(self, config_dir: str, plan: object) -> None:
+        self._plan_badge_probe_busy = False
+        self._plan_badge_cache[config_dir] = plan if isinstance(plan, str) else None
+        self._refresh_plan_badge()
 
     # ──────────────────────────────────────────────────────────────
     # 🧠 Graft chip — code-graph auto-build status

@@ -591,7 +591,13 @@ type = "forbidden"
 # update_panel/project_wizard/user_actions/limit_panel/status_header: a
 # settings page must never reach past the data layer into the engine or
 # the other desktop entry points.
-source_modules = ["agent_takkub.settings_window"]
+# settings_accounts/accounts_adapter (#505) are the Accounts page's UI mixin
+# + storage adapter — same layer, same constraint.
+source_modules = [
+    "agent_takkub.settings_window",
+    "agent_takkub.settings_accounts",
+    "agent_takkub.accounts_adapter",
+]
 forbidden_modules = [
     "agent_takkub.orchestrator",
     "agent_takkub.main_window",

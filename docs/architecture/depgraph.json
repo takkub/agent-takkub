@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 330,
+  "module_count": 332,
   "modules": [
     {
       "module": "agent_takkub",
@@ -107,6 +107,24 @@
       ],
       "fan_in": 45,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.accounts_adapter",
+      "imports": [
+        "agent_takkub.codex_helper",
+        "agent_takkub.config",
+        "agent_takkub.core.accounts.registry",
+        "agent_takkub.limit_status",
+        "agent_takkub.provider_spec",
+        "agent_takkub.provider_usage",
+        "agent_takkub.user_profile"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_accounts",
+        "agent_takkub.status_header"
+      ],
+      "fan_in": 2,
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.agent_pane",
@@ -428,6 +446,7 @@
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.remote.settings_dialog",
+        "agent_takkub.settings_accounts",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.pages.mcp_page",
@@ -452,7 +471,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 34,
+      "fan_in": 35,
       "fan_out": 0
     },
     {
@@ -474,6 +493,7 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.cli",
         "agent_takkub.core.conversation.ingest.codex_adapter",
         "agent_takkub.core.secrets.manager",
@@ -487,7 +507,7 @@
         "agent_takkub.token_meter",
         "agent_takkub.usage_ledger"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 2
     },
     {
@@ -497,6 +517,7 @@
         "agent_takkub.core.storage.v2_authority"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.agent_pane",
         "agent_takkub.app",
         "agent_takkub.auto_issue_capture",
@@ -602,7 +623,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 104,
+      "fan_in": 105,
       "fan_out": 2
     },
     {
@@ -663,11 +684,12 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.core.accounts",
         "agent_takkub.core.accounts.facade",
         "agent_takkub.settings_core_v2"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 3
     },
     {
@@ -2851,6 +2873,7 @@
         "agent_takkub._win_console"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.doctor",
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
@@ -2859,7 +2882,7 @@
         "agent_takkub.status_header",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 1
     },
     {
@@ -3289,11 +3312,9 @@
         "agent_takkub.agent_pane_model",
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator",
-        "agent_takkub.orchestrator_text",
-        "agent_takkub.status_header",
-        "agent_takkub.user_actions"
+        "agent_takkub.orchestrator_text"
       ],
-      "fan_in": 6,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -3590,6 +3611,7 @@
         "agent_takkub.opencode_helper"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.agent_pane",
         "agent_takkub.boot_update_window",
         "agent_takkub.cli",
@@ -3612,7 +3634,6 @@
         "agent_takkub.pty_session",
         "agent_takkub.remote.notify",
         "agent_takkub.role_models",
-        "agent_takkub.settings_core_v2",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
@@ -3669,12 +3690,13 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.core.accounts.selector",
         "agent_takkub.limit_panel",
         "agent_takkub.remote.api",
         "agent_takkub.usage_meter"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 6
     },
     {
@@ -3694,9 +3716,10 @@
         "agent_takkub.openviking_cleanup",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.tunnel",
+        "agent_takkub.settings_accounts",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 4
     },
     {
@@ -4066,6 +4089,21 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.settings_accounts",
+      "imports": [
+        "agent_takkub.accounts_adapter",
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.pty_session",
+        "agent_takkub.terminal_widget",
+        "agent_takkub.user_profile"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
       "module": "agent_takkub.settings_core_v2",
       "imports": [
         "agent_takkub.cockpit_theme",
@@ -4083,14 +4121,13 @@
         "agent_takkub.core.scheduling.models",
         "agent_takkub.core_v2_settings",
         "agent_takkub.performance_settings",
-        "agent_takkub.provider_spec",
         "agent_takkub.roles"
       ],
       "imported_by": [
         "agent_takkub.settings_window"
       ],
       "fan_in": 1,
-      "fan_out": 17
+      "fan_out": 16
     },
     {
       "module": "agent_takkub.settings_knowledge_design",
@@ -4593,6 +4630,7 @@
         "agent_takkub.provider_state",
         "agent_takkub.role_models",
         "agent_takkub.roles",
+        "agent_takkub.settings_accounts",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_usage",
@@ -4609,7 +4647,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 30
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -4782,12 +4820,12 @@
       "module": "agent_takkub.status_header",
       "imports": [
         "agent_takkub._win_console",
+        "agent_takkub.accounts_adapter",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.graft_autobuild",
         "agent_takkub.graft_store",
         "agent_takkub.limit_status",
-        "agent_takkub.plan_tier",
         "agent_takkub.project_tab",
         "agent_takkub.provider_config",
         "agent_takkub.ram_report",
@@ -4857,9 +4895,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
-        "agent_takkub.agent_pane"
+        "agent_takkub.agent_pane",
+        "agent_takkub.settings_accounts"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 2
     },
     {
@@ -5011,7 +5050,6 @@
         "agent_takkub.config",
         "agent_takkub.doctor",
         "agent_takkub.orchestrator",
-        "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
@@ -5024,7 +5062,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.user_profile",
@@ -5035,6 +5073,7 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.app",
         "agent_takkub.cli_server",
         "agent_takkub.core.accounts.legacy_reader",
@@ -5047,6 +5086,7 @@
         "agent_takkub.pane_env",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
+        "agent_takkub.settings_accounts",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
@@ -5054,7 +5094,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 18,
+      "fan_in": 20,
       "fan_out": 4
     },
     {
