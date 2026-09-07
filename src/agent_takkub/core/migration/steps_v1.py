@@ -185,10 +185,36 @@ class RoleAgentMigrationStep:
         return self.settings_home / "projects" / slug / "role-providers.json"
 
     def _routing_sources(self) -> dict[str, Path]:
-        sources: dict[str, Path] = {"global": self.settings_home / "role-providers.json"}
+        # "global" points at `role-models.json`, NOT `role-providers.json`
+        # (B-H2, 2026-09-07 round-2 review): #515 archives the global
+        # `role-providers.json` on first read
+        # (`provider_config._migrate_legacy_global_overrides_once`) and
+        # folds every plain role->provider override into `role-models.json`
+        # instead — the archived file no longer changes, so pointing here
+        # at it made both `scan_v1_only_writes()` (a source that never
+        # exists is never a hit) and this step's own `dry_run`/`validate`
+        # blind to every global-provider change made through the model
+        # picker or the Providers & Roles page. Per-project sources are
+        # unaffected — #515 only retired the *global* file.
+        sources: dict[str, Path] = {"global": self.settings_home / "role-models.json"}
         for name in self._project_names():
             sources[name] = self._project_routing_source(name)
         return sources
+
+    def _global_routing_from_role_models(self) -> dict[str, str]:
+        """The `{role: provider}` mapping `role-models.json` currently
+        implies — same shape `provider_config.load_providers(None)` returns
+        for its global scope, re-derived here (not imported) to keep this
+        module's only V1-shape dependency a plain `read_json`, matching how
+        the rest of this step already reads its other V1 sources."""
+        data = read_json(self.settings_home / "role-models.json")
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(role): entry["provider"]
+            for role, entry in data.items()
+            if isinstance(entry, dict) and entry.get("provider")
+        }
 
     def _routing_target(self) -> Path:
         return storage_layout_v2(self.data_home).config_dir / "routing.json"
@@ -224,11 +250,11 @@ class RoleAgentMigrationStep:
         # same `{}`, silently losing global-inheritance for every project
         # that had never saved its own override.
         sources = self._routing_sources()
-        global_src = sources.pop("global")
+        sources.pop("global")  # different shape than a per-project file — see below
         return {
             "schema": 1,
             "migrated_at": time.time(),
-            "global": read_json(global_src),
+            "global": self._global_routing_from_role_models(),
             "projects": {name: read_json(p) for name, p in sources.items() if p.exists()},
         }
 
@@ -265,8 +291,9 @@ class RoleAgentMigrationStep:
         registry_changed = read_json(self._custom_roles_target()).get("data") != read_json(
             self._custom_roles_source()
         )
-        routing_changed = read_json(self._routing_target()).get("global") != read_json(
-            self._routing_sources()["global"]
+        routing_changed = (
+            read_json(self._routing_target()).get("global")
+            != self._global_routing_from_role_models()
         )
         md_changed = [
             name
@@ -327,7 +354,7 @@ class RoleAgentMigrationStep:
             self._custom_roles_source()
         )
         routing_doc = read_json(self._routing_target())
-        routing_ok = routing_doc.get("global") == read_json(self._routing_sources()["global"])
+        routing_ok = routing_doc.get("global") == self._global_routing_from_role_models()
         md_mismatched = [
             name
             for name, src, dest in self._role_md_pairs()

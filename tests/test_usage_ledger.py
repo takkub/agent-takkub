@@ -596,6 +596,118 @@ def test_rollup_daily_writes_atomically_no_tmp_file_left_behind():
     assert not daily_path.with_suffix(daily_path.suffix + ".tmp").exists()
 
 
+# ── B-H1/B-M4 (2026-09-07 round-2 review): month-rollover double-count ────
+
+
+def test_rollup_daily_does_not_double_count_a_month_at_the_rollover_boundary(monkeypatch):
+    """probe_rollover.py's exact repro: a month that is NOT yet being pruned
+    (full-replace branch) transitions to being pruned (merge branch) at the
+    next rollup after the calendar rolls over — the old code re-added the
+    WHOLE file's contents on top of the total the full-replace branch had
+    already published, doubling every field."""
+    rows = [
+        {
+            "ts": "2026-09-10T01:00:00Z",
+            "request_id": "r1",
+            "model": "m",
+            "input": 100,
+            "cache_creation": 0,
+            "cache_read": 0,
+            "output": 10,
+        },
+        {
+            "ts": "2026-09-10T02:00:00Z",
+            "request_id": "r2",
+            "model": "m",
+            "input": 200,
+            "cache_creation": 0,
+            "cache_read": 0,
+            "output": 20,
+        },
+    ]
+    acct_dir = ul.account_dir("claude", "rollover")
+    acct_dir.mkdir(parents=True, exist_ok=True)
+    with (acct_dir / "2026-09.jsonl").open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+    def freeze(month: str) -> None:
+        monkeypatch.setattr(ul, "_month_n_ago", lambda n, _m=month: _m)
+
+    freeze("2026-09")
+    first = ul.rollup_daily("claude", "rollover")["2026-09-10"]["m"]
+    assert first == {"turns": 2, "input": 300, "cache_creation": 0, "cache_read": 0, "output": 30}
+
+    second = ul.rollup_daily("claude", "rollover")["2026-09-10"]["m"]
+    assert second == first  # idempotent while still in the non-prune branch
+
+    freeze("2026-10")  # the calendar rolls over — this month now gets pruned
+    after_rollover = ul.rollup_daily("claude", "rollover")["2026-09-10"]["m"]
+    assert after_rollover == first  # must NOT double
+
+
+def test_rollup_daily_does_not_double_count_when_unlink_keeps_failing(monkeypatch):
+    """B-M4: if `unlink()` on the pruned raw file fails every call (a
+    locked file on Windows is the real-world trigger), the merge branch
+    used to re-add the SAME file's full contents on every subsequent
+    rollup, without bound. The seen-id delta merge must stay idempotent
+    even when the raw file is never actually removed."""
+    ul.record_turn(
+        "claude",
+        "stuck",
+        "2026-08-01T00:00:00Z",
+        "r1",
+        "m",
+        {"input": 10, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    monkeypatch.setattr(ul, "_month_n_ago", lambda n: "2026-09")  # always in the prune branch
+    monkeypatch.setattr(
+        ul.Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(OSError("locked"))
+    )
+
+    first = ul.rollup_daily("claude", "stuck")["2026-08-01"]["m"]["input"]
+    assert first == 10
+    second = ul.rollup_daily("claude", "stuck")["2026-08-01"]["m"]["input"]
+    assert second == 10  # not 20 — the file is still on disk but already fully seen
+    third = ul.rollup_daily("claude", "stuck")["2026-08-01"]["m"]["input"]
+    assert third == 10
+
+
+# ── B-L5 (2026-09-07 round-2 review): input - cached must not go negative ─
+
+
+def test_import_codex_clamps_input_minus_cached_at_zero(tmp_path):
+    """A provider report where `cached_input_tokens` exceeds
+    `input_tokens` (never observed live, but not provably impossible) must
+    not push a negative number into the ledger."""
+    home = tmp_path / "codex-home"
+    _write_codex_rollout(
+        home,
+        lines=[
+            {
+                "timestamp": "2026-09-01T10:00:00Z",
+                "ordinal": 0,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 5,
+                            "cached_input_tokens": 20,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 1,
+                        }
+                    },
+                },
+            },
+        ],
+    )
+    stats = ul.import_codex([{"name": "default", "config_dir": str(home)}])
+    assert stats["new_turns"] == 1
+    rows = ul._read_jsonl(ul._turn_file("codex", "default", "2026-09"))
+    assert rows[0]["input"] == 0
+
+
 # ── H1: provider allowlist / path containment ───────────────────────────
 
 

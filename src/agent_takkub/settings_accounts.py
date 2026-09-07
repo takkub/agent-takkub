@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -37,6 +37,29 @@ from PyQt6.QtWidgets import (
 )
 
 from . import accounts_adapter, cockpit_theme
+
+_accounts_refresh_shutdown_hooked = False
+
+
+def _wait_for_accounts_refresh_jobs() -> None:
+    """`aboutToQuit` hook (registered lazily the first time an accounts
+    refresh runs) — `_AccountsRefreshWorker` is a `QRunnable` on the
+    process-global `QThreadPool`, so it can't be tracked/cancelled
+    per-instance the way `settings_knowledge_design._CallableThread` is;
+    give the pool a bounded window to drain instead of letting a job get
+    killed mid-read at process exit (B-M2, 2026-09-07)."""
+    QThreadPool.globalInstance().waitForDone(3000)
+
+
+def _hook_accounts_refresh_shutdown() -> None:
+    global _accounts_refresh_shutdown_hooked
+    if _accounts_refresh_shutdown_hooked:
+        return
+    app = QCoreApplication.instance()
+    if app is None:
+        return
+    app.aboutToQuit.connect(_wait_for_accounts_refresh_jobs)
+    _accounts_refresh_shutdown_hooked = True
 
 
 class _AccountsRefreshSignals(QObject):
@@ -299,6 +322,7 @@ class AccountsSettingsMixin:
         if self._accounts_refresh_busy:
             return
         self._accounts_refresh_busy = True
+        _hook_accounts_refresh_shutdown()
         worker = _AccountsRefreshWorker()
         worker.signals.finished.connect(self._on_accounts_refreshed)
         QThreadPool.globalInstance().start(worker)

@@ -59,7 +59,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
@@ -108,14 +108,20 @@ def _rec_epoch_ts(rec: dict) -> float | None:
     entry's displayed time must come from the record itself, not the
     scan/render clock). Claude and Codex both write ISO8601 with a
     trailing 'Z' in this field; `datetime.fromisoformat` needs '+00:00' on
-    older 3.10 builds, same fixup `chatlog_scanner.record_timestamp` uses."""
+    older 3.10 builds, same fixup `chatlog_scanner.record_timestamp` uses.
+    A parsed value with no offset (B-L7, 2026-09-07) is pinned to UTC
+    before `.timestamp()` — otherwise Python treats a naive datetime as
+    local time and the epoch drifts with the host machine's timezone."""
     ts = rec.get("timestamp")
     if not isinstance(ts, str):
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
 
 
 @dataclass

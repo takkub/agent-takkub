@@ -16,7 +16,7 @@ so a future schema flip fails a **core** test, not just the remote-mirror one.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_takkub.codex_helper import (
@@ -54,14 +54,20 @@ def _record_epoch(rec: dict) -> float | None:
     """Codex rollout records carry a top-level ISO8601 `timestamp` (same
     field/format claude's does — confirmed live, `usage_ledger.py`'s codex
     importer reads the identical field). None when missing/unparseable,
-    never fabricated (#517)."""
+    never fabricated (#517). A parsed value with no offset (B-L7,
+    2026-09-07) is pinned to UTC before `.timestamp()` — otherwise Python
+    treats a naive datetime as local time and the epoch drifts with the
+    host machine's timezone."""
     ts = rec.get("timestamp")
     if not isinstance(ts, str):
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
 
 
 def _parse_record(rec: dict) -> IngestedMessage | None:

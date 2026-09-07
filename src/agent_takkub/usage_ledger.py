@@ -39,6 +39,7 @@ and ``provider_usage.py``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -48,6 +49,8 @@ from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 TURN_FIELDS: tuple[str, ...] = ("input", "cache_creation", "cache_read", "output")
 
@@ -680,7 +683,7 @@ def _import_codex_file(
                 cached = last.get("cached_input_tokens")
                 input_val = raw_input
                 if isinstance(raw_input, (int, float)) and isinstance(cached, (int, float)):
-                    input_val = raw_input - cached
+                    input_val = max(0, raw_input - cached)
                 fields = {
                     "input": input_val,
                     "cache_creation": last.get("cache_write_input_tokens"),
@@ -897,25 +900,46 @@ _EMPTY_MODEL_BUCKET: dict[str, int] = {
 }
 
 
+def _aggregate_rows(rows: list[dict]) -> dict[str, dict[str, dict[str, int]]]:
+    fresh: dict[str, dict[str, dict[str, int]]] = {}
+    for row in rows:
+        ts = row.get("ts")
+        if not isinstance(ts, str) or len(ts) < 10:
+            continue
+        date_str = ts[:10]
+        model = row.get("model") or "unknown"
+        bucket = fresh.setdefault(date_str, {}).setdefault(model, dict(_EMPTY_MODEL_BUCKET))
+        bucket["turns"] += 1
+        for field in TURN_FIELDS:
+            bucket[field] += int(row.get(field) or 0)
+    return fresh
+
+
 def rollup_daily(provider: str, account: str, *, retention_months: int = _RETENTION_MONTHS) -> dict:
     """Recompute `daily.json`'s per-day/model totals from every raw turn
     file still on disk, then prune raw month files older than the
     retention window. Cheap enough to call on every `takkub usage` read:
     usually only the current month's file has any rows.
 
-    H4/H7 (2026-09-07): a month file that is ABOUT TO BE PRUNED this call
-    gets MERGED (added) into `daily`, not replaced — a month's raw file
-    can legitimately reappear after an earlier prune+rollup already
-    published its total (a resumed cross-month session, a rotated source
-    directory, a rebuilt/lost import cursor), and by then it holds only
-    the rows `record_turn`'s durable-id dedup (`_seen_ids.json`, folded in
-    here right before deletion) considers genuinely new — replacing the
-    day's bucket with just that reappeared file's contents would silently
-    erase the already-published historical total instead of growing it.
-    A month that is NOT being pruned this call (normally just the current
-    month) is still always fully replaced from its own file, same as
-    before — that file is never partial, so replace-on-every-call
-    correctly reflects rows appended since the last rollup.
+    H4/H7/B-H1 (2026-09-07): a month that is NOT being pruned this call
+    (normally just the current month) is fully replaced from its own file
+    every call — that file is never partial, so replace-on-every-call
+    correctly reflects rows appended since the last rollup, and each such
+    call also snapshots which request ids are now fully reflected in
+    `daily` for that month (`_seen_ids.json`).
+
+    A month that IS about to be pruned this call is MERGED (added) into
+    `daily`, but only with the rows whose request id was not already in
+    that snapshot — a month's raw file can legitimately reappear after an
+    earlier rollup already published its total (a resumed cross-month
+    session, a rotated source directory, a rebuilt/lost import cursor),
+    and by then it may hold a mix of already-published and genuinely new
+    rows. Adding the FULL file every time a month sits in the will-prune
+    branch (across the month-rollover call, or across repeated calls when
+    `unlink` keeps failing — B-M4) double-counted every row that was
+    already reflected in `daily` from an earlier non-pruned pass. Merging
+    only the delta since the last snapshot keeps every pass idempotent
+    regardless of which side of the prune boundary a month falls on.
     """
     with _UsageLock():
         daily = _load_daily(provider, account)
@@ -926,38 +950,30 @@ def rollup_daily(provider: str, account: str, *, retention_months: int = _RETENT
 
         for path in month_files:
             rows = _read_jsonl(path)
-            month_fresh: dict[str, dict[str, dict[str, int]]] = {}
-            for row in rows:
-                ts = row.get("ts")
-                if not isinstance(ts, str) or len(ts) < 10:
-                    continue
-                date_str = ts[:10]
-                model = row.get("model") or "unknown"
-                bucket = month_fresh.setdefault(date_str, {}).setdefault(
-                    model, dict(_EMPTY_MODEL_BUCKET)
-                )
-                bucket["turns"] += 1
-                for field in TURN_FIELDS:
-                    bucket[field] += int(row.get(field) or 0)
-
+            ids = {r["request_id"] for r in rows if r.get("request_id")}
             will_prune = path.stem < cutoff
+
             if not will_prune:
-                daily.update(month_fresh)
+                daily.update(_aggregate_rows(rows))
+                if ids and set(seen_ids.get(path.stem) or ()) != ids:
+                    seen_ids[path.stem] = sorted(ids)
+                    seen_dirty = True
                 continue
 
-            for date_str, models in month_fresh.items():
+            prior_seen = set(seen_ids.get(path.stem) or ())
+            new_rows = [
+                r for r in rows if not r.get("request_id") or r["request_id"] not in prior_seen
+            ]
+            for date_str, models in _aggregate_rows(new_rows).items():
                 day = daily.setdefault(date_str, {})
                 for model, agg in models.items():
                     existing = day.setdefault(model, dict(_EMPTY_MODEL_BUCKET))
                     for field in ("turns", *TURN_FIELDS):
                         existing[field] = int(existing.get(field) or 0) + int(agg.get(field) or 0)
 
-            ids = {r["request_id"] for r in rows if r.get("request_id")}
-            if ids:
-                bucket_ids = set(seen_ids.get(path.stem) or ())
-                if not ids <= bucket_ids:
-                    seen_ids[path.stem] = sorted(bucket_ids | ids)
-                    seen_dirty = True
+            if ids and not ids <= prior_seen:
+                seen_ids[path.stem] = sorted(prior_seen | ids)
+                seen_dirty = True
 
         daily_path = _daily_file(provider, account)
         daily_path.parent.mkdir(parents=True, exist_ok=True)
@@ -973,7 +989,7 @@ def rollup_daily(provider: str, account: str, *, retention_months: int = _RETENT
                 try:
                     path.unlink()
                 except OSError:
-                    pass
+                    logger.warning("rollup_daily: could not prune raw month file %s", path)
 
         return daily
 

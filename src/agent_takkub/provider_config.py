@@ -105,6 +105,9 @@ def _sanitize_providers(data: dict) -> dict[str, str]:
     }
 
 
+_migrating_legacy_overrides = False
+
+
 def _migrate_legacy_global_overrides_once() -> None:
     """#515 Settings diet: a plain role→provider override with no model/
     effort pinned belongs in `role-models.json` now too (`role_models.
@@ -121,27 +124,41 @@ def _migrate_legacy_global_overrides_once() -> None:
     next read finds `role-providers.json` already archived (or freshly
     recreated empty by the existence-check below it), so this is a no-op
     thereafter.
+
+    Guarded against re-entry (B-H2 follow-up, 2026-09-07): each
+    `role_models.set_provider` call below now refreshes the v2 routing
+    mirror via `dual_write_routing_mirror` -> `load_providers(None)`,
+    which lands right back here — `global_path` hasn't been archived yet
+    mid-loop, so without the guard every role in `legacy` would re-trigger
+    the whole migration loop from inside itself, recursing without bound.
     """
+    global _migrating_legacy_overrides
+    if _migrating_legacy_overrides:
+        return
     global_path = _BASE_DIR / "role-providers.json"
     if not global_path.exists():
         return
+    _migrating_legacy_overrides = True
     try:
-        data = json.loads(global_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = None
-    legacy = _sanitize_providers(data) if isinstance(data, dict) else {}
-    if legacy:
-        from . import role_models
+        try:
+            data = json.loads(global_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = None
+        legacy = _sanitize_providers(data) if isinstance(data, dict) else {}
+        if legacy:
+            from . import role_models
 
-        # The Providers & Roles override is the more explicit, more recent
-        # action than whatever the model picker implied — it wins even when
-        # `role-models.json` already has an entry for the same role (mirrors
-        # `provider_for`'s old precedence: role-providers > role-models).
-        for role, provider in legacy.items():
-            role_models.set_provider(role, provider)
-    from . import config as _config
+            # The Providers & Roles override is the more explicit, more recent
+            # action than whatever the model picker implied — it wins even when
+            # `role-models.json` already has an entry for the same role (mirrors
+            # `provider_for`'s old precedence: role-providers > role-models).
+            for role, provider in legacy.items():
+                role_models.set_provider(role, provider)
+        from . import config as _config
 
-    _config.archive_settings_file(global_path)
+        _config.archive_settings_file(global_path)
+    finally:
+        _migrating_legacy_overrides = False
 
 
 def load_providers(project: str | None = None) -> dict[str, str]:
@@ -200,6 +217,50 @@ def load_providers(project: str | None = None) -> dict[str, str]:
     )
 
 
+def dual_write_routing_mirror() -> None:
+    """Refresh the v2 `config/routing.json` mirror's `global` bucket (plus
+    every known project) from the current V1 state.
+
+    B-H2 (2026-09-07 round-2 review): `save_providers` already called this
+    at the end of its own write, but `role_models.set_provider`/`_save()` —
+    the path the model picker (`settings_window.py`, `provider_model_refresh
+    .py`) writes through directly, bypassing `save_providers` entirely — only
+    ever mirrored into `models/aliases.json` (`dual_write_role_models`), never
+    into `config/routing.json`. Any write that can change the global
+    role→provider mapping must call this, not just `save_providers`'s own
+    caller — `role_models._save()` calls it too now, so every path that can
+    move a role's provider keeps the routing mirror current.
+
+    Checks the v2 root's existence FIRST, before doing anything else —
+    `role_models._save()` reaching this on every single save means it now
+    runs on machines/tests that have never migrated to v2 at all, and
+    `load_providers(None)` below is not a cheap no-op there: it also drives
+    `_migrate_legacy_global_overrides_once()`, which is safe to call
+    repeatedly but should still not run on a v2-unaware machine just
+    because a role's model got saved. Reuses `dual_write`'s own
+    presence check (module reference, not a re-import of the bare names)
+    so a test's `monkeypatch.setattr("...dual_write._effective_data_home",
+    ...)` is honoured here exactly like it is inside `dual_write_routing`
+    itself, instead of this function silently resolving a different
+    ``data_home``."""
+    from .core.storage import dual_write as _dual_write
+
+    if not _dual_write._v2_present(_dual_write._effective_data_home(None)):
+        return
+
+    from . import config as _config
+    from .core.storage.legacy_reader import read_json
+
+    _dual_write.dual_write_routing(
+        load_providers(None),
+        {
+            name: read_json(config_path(name))
+            for name in _config.list_project_names()
+            if config_path(name).exists()
+        },
+    )
+
+
 def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
     """Persist the mapping (per-project file when ``project`` given, else
     into ``role-models.json`` — see :func:`load_providers`). Best-effort:
@@ -230,18 +291,7 @@ def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
         for role, provider in cleaned.items():
             role_models.set_provider(role, provider)
 
-    from . import config as _config
-    from .core.storage.dual_write import dual_write_routing
-    from .core.storage.legacy_reader import read_json
-
-    dual_write_routing(
-        load_providers(None),
-        {
-            name: read_json(config_path(name))
-            for name in _config.list_project_names()
-            if config_path(name).exists()
-        },
-    )
+    dual_write_routing_mirror()
 
 
 def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[str, str]:

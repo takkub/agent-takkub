@@ -138,6 +138,18 @@ def test_codex_read_new_extracts_the_records_own_timestamp(tmp_path):
     assert batch.messages[0].created_at == pytest.approx(expected)
 
 
+def test_record_epoch_pins_a_naive_timestamp_to_utc_not_local():
+    """B-L7 (2026-09-07 round-2 review): a `timestamp` with no offset must
+    not be interpreted as the host machine's local time."""
+    epoch = codex_adapter._record_epoch({"timestamp": "2026-09-07T12:00:00"})
+    assert epoch == datetime(2026, 9, 7, 12, 0, 0, tzinfo=UTC).timestamp()
+
+
+def test_record_epoch_missing_or_unparseable_is_none():
+    assert codex_adapter._record_epoch({}) is None
+    assert codex_adapter._record_epoch({"timestamp": "not-a-date"}) is None
+
+
 def test_codex_read_new_parses_0147_item_completed_schema(tmp_path):
     path = tmp_path / "rollout-1.jsonl"
     lines = [
