@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -488,13 +489,13 @@ class TestLeadHistoryHelpers:
             ],
         )
         assert notify_mod.read_recent_lead_messages(path) == [
-            {"text": "one", "kind": "lead"},
-            {"text": "two", "kind": "lead"},
-            {"text": "three", "kind": "lead"},
+            {"text": "one", "kind": "lead", "ts": None},
+            {"text": "two", "kind": "lead", "ts": None},
+            {"text": "three", "kind": "lead", "ts": None},
         ]
         assert notify_mod.read_recent_lead_messages(path, limit=2) == [
-            {"text": "two", "kind": "lead"},
-            {"text": "three", "kind": "lead"},
+            {"text": "two", "kind": "lead", "ts": None},
+            {"text": "three", "kind": "lead", "ts": None},
         ]
 
     def test_read_recent_lead_messages_missing_file_is_empty(self, tmp_path):
@@ -517,10 +518,10 @@ class TestLeadHistoryHelpers:
             ],
         )
         assert notify_mod.read_recent_lead_messages(path) == [
-            {"text": "hi lead", "kind": "me"},
-            {"text": "hi there", "kind": "lead"},
-            {"text": "do the thing", "kind": "me"},
-            {"text": "done", "kind": "lead"},
+            {"text": "hi lead", "kind": "me", "ts": None},
+            {"text": "hi there", "kind": "lead", "ts": None},
+            {"text": "do the thing", "kind": "me", "ts": None},
+            {"text": "done", "kind": "lead", "ts": None},
         ]
 
     def test_read_recent_lead_messages_strips_remote_prefix_only_at_the_start(
@@ -533,7 +534,7 @@ class TestLeadHistoryHelpers:
             [_user_line("[remote → lead] not [remote → lead] twice")],
         )
         assert notify_mod.read_recent_lead_messages(path) == [
-            {"text": "not [remote → lead] twice", "kind": "me"}
+            {"text": "not [remote → lead] twice", "kind": "me", "ts": None}
         ]
 
     def test_read_recent_lead_messages_skips_tool_result_only_user_record(
@@ -556,8 +557,27 @@ class TestLeadHistoryHelpers:
             ],
         )
         assert notify_mod.read_recent_lead_messages(path) == [
-            {"text": "real question", "kind": "me"}
+            {"text": "real question", "kind": "me", "ts": None}
         ]
+
+    def test_read_recent_lead_messages_uses_the_records_own_timestamp(self, tmp_path, config_dir):
+        """#517: a real transcript's `timestamp` field (ISO8601, trailing
+        'Z') must become the entry's `ts` (epoch seconds UTC) — never the
+        scan-time clock."""
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-02T03:04:05.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "old reply"}],
+                },
+            }
+        )
+        path = _write_jsonl(tmp_path, "C--proj", "uuid-1", [line])
+        result = notify_mod.read_recent_lead_messages(path)
+        expected = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
+        assert result == [{"text": "old reply", "kind": "lead", "ts": pytest.approx(expected)}]
 
 
 class TestLeadMirrorDiagnosis:
@@ -791,8 +811,8 @@ class TestGeminiHistoryHelpers:
         )
 
         assert notify_mod.read_recent_lead_messages(path, provider="gemini") == [
-            {"text": "hello", "kind": "me"},
-            {"text": "answer", "kind": "lead"},
+            {"text": "hello", "kind": "me", "ts": None},
+            {"text": "answer", "kind": "lead", "ts": None},
         ]
 
     def test_lists_gemini_sessions_and_filters_teammate_tasks(self) -> None:
@@ -839,7 +859,7 @@ class TestGeminiHistoryHelpers:
             ],
         )
         assert notify_mod.read_recent_lead_messages(path) == [
-            {"text": "real question", "kind": "me"}
+            {"text": "real question", "kind": "me", "ts": None}
         ]
 
 
@@ -1648,10 +1668,28 @@ class TestCodexRemoteHistory:
         )
 
         assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
-            {"text": "hello", "kind": "me"},
-            {"text": "working update", "kind": "lead"},
-            {"text": "final answer", "kind": "lead"},
+            {"text": "hello", "kind": "me", "ts": None},
+            {"text": "working update", "kind": "lead", "ts": None},
+            {"text": "final answer", "kind": "lead", "ts": None},
         ]
+
+    def test_reads_the_records_own_timestamp(self):
+        """#517: codex rollout records carry a top-level ISO8601
+        `timestamp` (verified live, same field `usage_ledger.py`'s codex
+        importer reads) — it must become `ts`, not the scan-time clock."""
+        path = self._write(
+            "codex-ts",
+            [
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-02T03:04:05.000Z",
+                    "payload": {"type": "agent_message", "message": "old reply"},
+                },
+            ],
+        )
+        result = notify_mod.read_recent_lead_messages(path, provider="codex")
+        expected = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
+        assert result == [{"text": "old reply", "kind": "lead", "ts": pytest.approx(expected)}]
 
     def _item_event(self, item: dict) -> dict:
         return {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
@@ -1695,9 +1733,9 @@ class TestCodexRemoteHistory:
         )
 
         assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
-            {"text": "hello", "kind": "me"},
-            {"text": "working update", "kind": "lead"},
-            {"text": "final answer", "kind": "lead"},
+            {"text": "hello", "kind": "me", "ts": None},
+            {"text": "working update", "kind": "lead", "ts": None},
+            {"text": "final answer", "kind": "lead", "ts": None},
         ]
 
     def test_reads_item_completed_messages_from_codex_0_148_paginated(self):
@@ -1735,8 +1773,8 @@ class TestCodexRemoteHistory:
         )
 
         assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
-            {"text": "hello", "kind": "me"},
-            {"text": "final answer", "kind": "lead"},
+            {"text": "hello", "kind": "me", "ts": None},
+            {"text": "final answer", "kind": "lead", "ts": None},
         ]
 
     def test_live_codex_0_147_reply_is_pushed(self, qapp):

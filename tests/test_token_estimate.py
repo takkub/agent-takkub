@@ -1,7 +1,12 @@
-"""token_estimate.py — issue #516 F2 Thai-weighted token estimator."""
+"""token_estimate.py — issue #516 F2 Thai-weighted estimator + #516b merge
+of the core `estimate_tokens` callers with the marketplace/skill cost
+helpers (`estimate_file_tokens`/`estimate_dir_tokens`/`format_tokens`)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from agent_takkub import token_estimate
 from agent_takkub.token_estimate import estimate_tokens
 
 
@@ -39,3 +44,33 @@ def test_real_role_file_is_far_above_naive_chars_over_4():
     thai_heavy = "อ่านก่อนเริ่มงานที่แตะ dependency, lockfile, docker, ports" * 20
     naive = max(1, len(thai_heavy) // 4)
     assert estimate_tokens(thai_heavy) > naive
+
+
+def test_estimate_file_tokens_missing_file_is_zero(tmp_path: Path) -> None:
+    assert token_estimate.estimate_file_tokens(tmp_path / "nope.md") == 0
+
+
+def test_estimate_file_tokens_reads_real_file(tmp_path: Path) -> None:
+    f = tmp_path / "SKILL.md"
+    f.write_text("a" * 400, encoding="utf-8")
+    assert token_estimate.estimate_file_tokens(f) == 100
+
+
+def test_estimate_dir_tokens_sums_text_files_only(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text("a" * 40, encoding="utf-8")
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "pre.py").write_text("a" * 40, encoding="utf-8")
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n")
+    assert token_estimate.estimate_dir_tokens(tmp_path) == 20
+
+
+def test_estimate_dir_tokens_missing_dir_is_zero(tmp_path: Path) -> None:
+    assert token_estimate.estimate_dir_tokens(tmp_path / "nope") == 0
+
+
+def test_format_tokens_under_1000() -> None:
+    assert token_estimate.format_tokens(340) == "~340 tok"
+
+
+def test_format_tokens_over_1000_shows_k() -> None:
+    assert token_estimate.format_tokens(1234) == "~1.2k tok"

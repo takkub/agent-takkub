@@ -327,9 +327,9 @@ class TestCompactSummary:
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         out = notify_mod.read_recent_lead_messages(p, provider="claude")
         assert out == [
-            {"text": "hi", "kind": "lead"},
-            {"text": notify_mod._COMPACT_MARKER_TEXT, "kind": "sys"},
-            {"text": "ต่อเลย", "kind": "me"},
+            {"text": "hi", "kind": "lead", "ts": None},
+            {"text": notify_mod._COMPACT_MARKER_TEXT, "kind": "sys", "ts": None},
+            {"text": "ต่อเลย", "kind": "me", "ts": None},
         ]
         assert len(notify_mod._COMPACT_MARKER_TEXT) < 80
 

@@ -88,8 +88,8 @@ class TestAgyMirror:
 
         assert notify_mod._resolve_gemini_jsonl_path("proj", None) == transcript
         assert notify_mod.read_recent_lead_messages(transcript, provider="gemini") == [
-            {"text": "ทดสอบ", "kind": "me"},
-            {"text": "สวัสดีครับ", "kind": "lead"},
+            {"text": "ทดสอบ", "kind": "me", "ts": None},
+            {"text": "สวัสดีครับ", "kind": "lead", "ts": None},
         ]
 
     def test_thinking_and_system_records_never_reach_the_phone(self, agy_root, workspace):
@@ -103,7 +103,7 @@ class TestAgyMirror:
             ],
         )
         messages = notify_mod.read_recent_lead_messages(transcript, provider="gemini")
-        assert messages == [{"text": "visible answer", "kind": "lead"}]
+        assert messages == [{"text": "visible answer", "kind": "lead", "ts": None}]
 
         rec = {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "x", "thinking": "SECRET"}
         assert notify_mod._gemini_live_text_blocks(rec) == ["x"]

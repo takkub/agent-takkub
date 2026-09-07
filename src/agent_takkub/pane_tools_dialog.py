@@ -192,6 +192,19 @@ def discover_marketplaces(
     return sorted(found)
 
 
+def marketplace_token_costs(marketplaces: list[str]) -> dict[str, int]:
+    """Estimated boot-token cost per marketplace (#516) — sums every
+    SKILL.md/hook text file under ``~/.claude/plugins/cache/<marketplace>/``.
+    Local fallback estimator (no live per-pane boot-context API yet, see
+    `token_estimate` module docstring) — swap for a real measurement once
+    one lands; callers only need the `dict[str, int]` shape to stay put."""
+    from . import token_estimate
+    from .config import default_claude_config_dir
+
+    cache_root = default_claude_config_dir() / "plugins" / "cache"
+    return {mp: token_estimate.estimate_dir_tokens(cache_root / mp) for mp in marketplaces}
+
+
 def parse_install_form(name: str, command: str, args_line: str) -> tuple[str, dict] | None:
     """Turn the "add MCP" form fields into ``(name, cfg)`` for
     ``shared_dev_tools.add_mcp_server``. Returns ``None`` if the form is

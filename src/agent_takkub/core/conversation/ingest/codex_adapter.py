@@ -16,6 +16,7 @@ so a future schema flip fails a **core** test, not just the remote-mirror one.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from agent_takkub.codex_helper import (
@@ -49,12 +50,27 @@ def _item_text(item: dict) -> str:
     return "\n".join(parts)
 
 
+def _record_epoch(rec: dict) -> float | None:
+    """Codex rollout records carry a top-level ISO8601 `timestamp` (same
+    field/format claude's does — confirmed live, `usage_ledger.py`'s codex
+    importer reads the identical field). None when missing/unparseable,
+    never fabricated (#517)."""
+    ts = rec.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _parse_record(rec: dict) -> IngestedMessage | None:
     if rec.get("type") != "event_msg":
         return None
     payload = rec.get("payload")
     if not isinstance(payload, dict):
         return None
+    created_at = _record_epoch(rec)
     ptype = payload.get("type")
     if ptype == "item_completed":  # codex >= 0.147 (TUI)
         item = payload.get("item")
@@ -64,7 +80,7 @@ def _parse_record(rec: dict) -> IngestedMessage | None:
         if role is None:
             return None
         text = _item_text(item)
-        return IngestedMessage(role=role, text=text) if text else None
+        return IngestedMessage(role=role, text=text, created_at=created_at) if text else None
     if ptype == "agent_message":  # codex <= 0.146, and `codex exec` on 0.147
         role = MessageRole.ASSISTANT
     elif ptype == "user_message":
@@ -74,7 +90,7 @@ def _parse_record(rec: dict) -> IngestedMessage | None:
     text = payload.get("message")
     if not isinstance(text, str) or not text.strip():
         return None
-    return IngestedMessage(role=role, text=text.strip())
+    return IngestedMessage(role=role, text=text.strip(), created_at=created_at)
 
 
 def _scan_root_for_cwd(root: Path, wanted_cwd: str, wanted_id: str) -> str | None:
