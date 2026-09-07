@@ -364,6 +364,88 @@ class TestRunBootStageMixedPendingApply:
         assert events == []  # no stale step, no rollback — the 8 old steps were untouched
         assert core_home() == config.DATA_HOME / "v2" / "system"  # the new step actually ran
 
+    def test_stale_routing_global_self_heals_on_next_boot_no_rollback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Release-blocker repro (2026-09-07, prod on 2.0.0): a machine whose
+        `role-agent` step already applied once under the PRE-#515 ladder (V2
+        `routing.json`'s "global" mirrored the then-empty
+        `role-providers.json`) later gets real per-role assignments saved
+        into `role-models.json` by hand (Settings UI, or restored from an
+        even older V1 profile) WITHOUT going through `role_models._save()`'s
+        post-#515 `dual_write_routing` call — e.g. the file was written
+        before this build's `_save()` fix ever ran once. `v2/routing.json`
+        is then stale: "global" still `{}}` while `role-models.json` (the
+        one V1 source of truth, #515) has real entries. The next boot's
+        `apply_pending()` must re-run `role-agent`'s `apply()` (validate()
+        fails for an already-applied step -> not skipped) and that apply()
+        recomputes `_routing_payload()` fresh from `role-models.json` every
+        time — self-healing the mirror with NO rollback, NO stale-step
+        bookkeeping (that bucket is only for a REAPPLY that itself fails),
+        and NO V1 file touched."""
+        from agent_takkub.core.migration.registry_copy_step import write_json_atomic
+        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+        from agent_takkub.core.storage.legacy_reader import read_json
+
+        role_models = {
+            "backend": {"provider": "claude"},
+            "critic": {"provider": "codex"},
+            "devops": {"provider": "claude"},
+            "frontend": {"provider": "claude"},
+            "lead": {"provider": "claude"},
+            "mobile": {"provider": "claude"},
+            "qa": {"provider": "gemini"},
+            "reviewer": {"provider": "codex"},
+        }
+        (config.SETTINGS_HOME / "role-models.json").write_text(
+            json.dumps(role_models), encoding="utf-8"
+        )
+
+        # Full ladder applies once (role-agent mirrors the real role-models
+        # data faithfully the first time) and lands on "mixed".
+        first = auto_migrate_boot.run_boot_stage()
+        assert first.action == "applied"
+        assert layout_state() == "mixed"
+        routing_target = RoleAgentMigrationStep(data_home=config.DATA_HOME)._routing_target()
+        assert read_json(routing_target)["global"] == {
+            role: e["provider"] for role, e in role_models.items()
+        }
+
+        # Simulate the drift: a stale V2 mirror written before role-models.json
+        # became the source of truth (the pre-#515 shape) sits on disk —
+        # "global" empty even though V1's role-models.json is unchanged.
+        stale = read_json(routing_target)
+        stale["global"] = {}
+        write_json_atomic(routing_target, stale)
+        assert MigrationEngine(data_home=config.DATA_HOME).validate()[-1].step_id == "role-agent"
+        role_agent_validate = next(
+            r
+            for r in MigrationEngine(data_home=config.DATA_HOME).validate()
+            if r.step_id == "role-agent"
+        )
+        assert role_agent_validate.ok is False  # confirms the repro before asserting the fix
+
+        events: list[dict] = []
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "_log_boot_event",
+            lambda ev, **kw: events.append({"event": ev, **kw}),
+        )
+
+        second = auto_migrate_boot.run_boot_stage()
+
+        assert second.action == "pending_applied"
+        assert events == []  # no stale-step bookkeeping, no rollback event at all
+        assert auto_migrate_boot.load_state().get("stale_applied_steps", {}) == {}
+        assert auto_migrate_boot.load_state().get("rolled_back_steps", {}) == {}
+
+        healed = read_json(routing_target)
+        assert healed["global"] == {role: e["provider"] for role, e in role_models.items()}
+        assert read_json(config.SETTINGS_HOME / "role-models.json") == role_models  # V1 untouched
+
+        final_reports = MigrationEngine(data_home=config.DATA_HOME).validate()
+        assert all(r.ok for r in final_reports), [(r.step_id, r.summary) for r in final_reports]
+
 
 class TestRunBootStageHappyPath:
     def test_v1_fixture_applies_and_lands_on_mixed(self, monkeypatch: pytest.MonkeyPatch) -> None:
