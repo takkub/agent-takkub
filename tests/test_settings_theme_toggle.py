@@ -232,13 +232,15 @@ class TestRethemeReachesInlineStyledChildren:
             dlg.deleteLater()
 
     def test_retheme_is_a_no_op_when_the_page_was_never_built(self) -> None:
-        """Guards the `hasattr` gate itself — a future lazy-build refactor
-        (backend#2, in flight) may construct pages on first visit only;
-        `retheme()` must not crash reaching for caches that don't exist yet."""
+        """Guards the `hasattr` gate itself — Accounts/Usage are lazy-built
+        pages now (H3, 2026-09-07 `_lazy_view_builders`), so opening
+        Settings on General never creates `_accounts_rows_box`/
+        `_usage_cards_row` at all; `retheme()` must not crash reaching for
+        caches that genuinely don't exist yet."""
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
         try:
-            del dlg._accounts_rows_box
-            del dlg._usage_cards_row
+            assert not hasattr(dlg, "_accounts_rows_box")
+            assert not hasattr(dlg, "_usage_cards_row")
             cockpit_theme.apply_variant("light")
             dlg.retheme()  # must not raise
         finally:

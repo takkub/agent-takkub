@@ -587,18 +587,23 @@ class StatusHeaderMixin:
         self._project_combo.hide()
 
         # Status bar is laid out in 2 semantic groups separated by a thin
-        # vertical line, and Group 2 is further split into 4 sub-groups —
+        # vertical line, and Group 2 is further split into 3 sub-groups —
         # Group 2 used to dump 10 heterogeneous chips (exec mode, providers,
         # session toggles, system actions) in one run with no internal
         # separator, so it read as a single wall even after the top-level
         # grouping landed. Order within each (sub-)group stays stable across
         # cockpit versions so muscle memory survives upgrades.
         #
+        # #515 settings diet removed the exec-mode/rtk/auto-resume chips
+        # this comment used to list here — exec-mode now derives from the
+        # team preset (#512), rtk auto-detects (see `_refresh_rtk_button`'s
+        # own docstring), and auto-resume always rerouts (#514). What's left:
+        #
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
-        #     2a. exec      — account plan · team-size chip (#512) · usage-overage warning
-        #     2b. session   — auto-resume · remote · graft build status
-        #     2c. system    — rtk install · restart · team · update
+        #     2a. account   — account plan · team-size chip (#512) · usage-overage warning
+        #     2b. session   — remote · graft build status
+        #     2c. system    — restart · team · provider · update
         for w in (
             self._btn_open_shell,
             self._chip_tasks,

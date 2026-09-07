@@ -64,10 +64,9 @@ scanner พวกนั้น scan `<project>/.claude/skills` อยู่แล
 - **hook ฉีดตอน spawn ผ่านไฟล์ `--settings` กลางที่มีอยู่แล้ว** — `hook_wiring._rendered_settings()`
   merge `rtk_hook_fragment()` (PreToolUse Bash) เข้าไฟล์เดียวกับ Stop/Notification/SessionStart
   เมื่อ `rtk_should_inject()` (enabled **และ** binary อยู่บน PATH — กัน `rtk hook claude` พังทุก Bash call)
-- `install_rtk(project_root=None)` → set flag + `uninstall_rtk` เก็บกวาด rtk entry เก่าใน project
-  settings.json (เก็บ key อื่นของ user, prune container ว่าง, ไม่ลบไฟล์)
-- `is_rtk_installed()` → อ่าน flag กลาง (param project_root รับไว้เพื่อ compat แต่ ignore)
-- UI: `update_panel._on_install_rtk_clicked` เปลี่ยน copy เป็น "Enable rtk (central, ไม่แตะ repo)"
+- ~~`install_rtk` / `uninstall_rtk` / `is_rtk_installed` (flag กลาง)~~ — **ถอดแล้ว 2026-09-07 (#515 Settings diet):**
+  rtk ไม่ใช่ toggle อีกต่อไป `rtk_should_inject()` auto-detect จาก PATH ล้วน (มี = ใช้, ไม่มี = ใช้ไม่ได้)
+- UI: ปุ่ม "Enable rtk" ถอดพร้อมกัน
 
 **ไม่มี TODO ค้างสำหรับ backend#2:** `spawn_engine` เรียก `ensure_hook_settings_file()` อยู่แล้ว
 (บรรทัด ~1565, `argv += ["--settings", …]`) → rtk เข้า pane อัตโนมัติเมื่อ enable. **ข้อควรระวัง
@@ -141,13 +140,9 @@ idempotent (รอบ 2 เห็น junction → skipped-linked).
 
 ### 2.2 rtk toggle UI (real on/off)
 
-เดิมปุ่ม "Install rtk" ซ่อนตัวเองเมื่อ enabled → **ปิดไม่ได้จาก UI**. เปลี่ยนเป็น **toggle จริง**:
-- `status_header._refresh_rtk_button`: ปุ่มโชว์ตราบใดที่ rtk binary อยู่บน PATH (central toggle
-  ไม่ผูก project อีกต่อไป) · enabled → "⚡ rtk: on" (gold-soft-chip = toggle-on ตาม design system) ·
-  disabled → "⚡ Enable rtk" (amber nudge) · สถานะอ่านจาก `is_rtk_installed()` (central flag)
-- `update_panel._on_install_rtk_clicked`: enabled → `set_rtk_enabled(False)` ทันที (reversible ไม่ถามซ้ำ) ·
-  disabled → confirm + `install_rtk()` (root=None ก็ได้ — flag กลาง) · refresh ปุ่มหลัง toggle
-- สี/label ใช้ token จาก `cockpit_theme` (GOLD_CHIP_*, METER_AMBER, STATE_WARN) ไม่ inline hex
+> **ประวัติ (ถอดแล้ว 2026-09-07, #515):** ช่วง 2026-07 ปุ่ม "Install rtk" เคยเป็น toggle จริงที่
+> status bar (on = gold-soft-chip / off = amber nudge, อ่าน flag กลาง) — #515 ตัดสินว่า rtk ที่มีบน PATH
+> ควรใช้เสมอ จึงถอด toggle + flag + ปุ่ม เหลือ auto-detect ใน `rtk_should_inject()` อย่างเดียว
 
 ### 2.3 rtk hook fires on new panes — verified
 

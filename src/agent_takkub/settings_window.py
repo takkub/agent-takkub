@@ -78,6 +78,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSettings, QSize, Qt, QThread, pyqtSignal
@@ -135,27 +136,39 @@ from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 from .lead_context import _allowed_project_roots
 from .settings_accounts import AccountsSettingsMixin
-from .settings_core_v2 import CoreV2SettingsMixin
 from .settings_knowledge_design import KnowledgeDesignSettingsMixin
 from .settings_usage import UsageSettingsMixin
 
 # ── view indices (QStackedWidget page order) ────────────────────
-# Settings-nav declutter (2026-08-24, `docs/plans/v2-hardening-2026-08-24/
-# 13_SIMPLE_UX.md`) renumbered this block from scratch — the prior "append,
-# never renumber" discipline existed to keep numeric indices stable across
-# incremental additions, but this pass is an intentional behavior change
-# (21 pages -> ~10 visible) so the old numbering carried no value to
-# preserve; external test references were updated alongside this file.
-# Removed outright: Role Overlap (pure `skill_audit` diagnostic, duplicated
-# nowhere else but added nothing `takkub doctor` doesn't already surface),
-# Core V2 Overview (flag-status view — flags default-on since 1.0.84 per
-# `core_v2_settings._DEFAULT_FLAGS`, `takkub doctor` shows the same state),
-# Core V2 Migration (inspect/plan/dry-run only — boot already runs
-# `auto_migrate_boot` (#361) and `takkub migrate` CLI covers the same
-# inspect/plan), and the OpenViking page (product withdrew OpenViking
-# entirely, not just this UI — see `settings_knowledge_design`'s own
-# docstring). Knowledge/OpenViking/Design Tools/Context Debug collapsed into
-# one "Knowledge" page with tabs (OpenViking tab dropped, not carried over).
+# Settings diet (#515, 2026-09-07 user directive "Settings จุดไหนไม่จำเป็นแล้ว
+# เอาออกได้เลย"): 17 pages / 8 sections -> 8 pages / 4 sections (GENERAL /
+# TEAM / TOOLS / ACCOUNT — no ADVANCED). VIEW_* indices are NOT renumbered
+# (old routes/deep-links/tests keyed off these ints keep working) — a page
+# that merged into another or was dropped outright instead gets a
+# `_VIEW_REDIRECTS` entry below, and its old stack slot stays a bare
+# placeholder (same pattern #505's VIEW_CORE_V2_ACCOUNTS slot already used).
+#
+# Merged into one page (tabs, or list+builder side by side):
+#   VIEW_PIPELINE_BUILDER = **Pipeline** — template list (left) + hop
+#     builder (right) in one page; VIEW_TEMPLATES redirects here.
+#   VIEW_MCP_MATRIX = **Tools** — MCP / Plugins tabs; VIEW_PLUGINS_MATRIX
+#     redirects here.
+#   VIEW_SKILL_CATALOG = **Skills** — Catalog / Matrix tabs;
+#     VIEW_SKILL_MATRIX redirects here.
+# Dropped outright (redundant with a live default, or duplicated `takkub
+# doctor` — see issue #515's own table for the prod evidence per item):
+#   VIEW_PERFORMANCE — its one still-meaningful control (the machine-aware
+#     safe/balanced/maximum preset) becomes the "โหมดเครื่อง" picker on
+#     General; the numeric sliders it used to expose are engine-derived now.
+#   VIEW_CORE_V2_ROUTING / _BRAIN / _SCHEDULER — Core V2 flags default-on
+#     since 1.0.84 and these three duplicated status `takkub doctor` already
+#     surfaces (or will — see #515's own acceptance notes).
+#   VIEW_NEW_ROLE — used to be a stack page reached via a persistent sidebar
+#     button; now a QDialog opened from a button on "ทีม & ตำแหน่ง"
+#     (`_open_new_role_dialog`) — `_goto_view` special-cases it below instead
+#     of routing it through the stack at all.
+# `settings_core_v2.py` (Routing/Brain/Scheduler's only callers) was deleted
+# outright in the same pass — see git history for the removed views.
 VIEW_PIPELINE_BUILDER = 0
 VIEW_TEMPLATES = 1
 VIEW_PROVIDERS_ROLES = 2
@@ -166,61 +179,64 @@ VIEW_USERS = 6
 VIEW_SKILL_CATALOG = 7
 VIEW_SKILL_MATRIX = 8
 VIEW_KNOWLEDGE = 9
-# ADVANCED section (folded by default, `_ADVANCED_SECTION` below) — Core V2
-# epic #309 Phase 9's remaining 4 pages plus Performance, none of which a
-# typical operator needs day-to-day (`13_SIMPLE_UX.md` "hide internal knobs
-# under Advanced").
 VIEW_CORE_V2_ACCOUNTS = 10
 VIEW_CORE_V2_ROUTING = 11
 VIEW_CORE_V2_BRAIN = 12
 VIEW_CORE_V2_SCHEDULER = 13
 VIEW_PERFORMANCE = 14
 VIEW_GENERAL = 15
-# #507 — appended after the declutter pass above rather than inserted in
+# #507 — appended after the earlier declutter pass rather than inserted in
 # numeric position, so every existing VIEW_* index stays stable (external
 # test references key off these numbers).
 VIEW_USAGE = 16
 
-# (view index, nav label, sidebar section) — New Role is reached via the
-# dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
-# Sections keep the orthogonal concepts apart: ROLE = team seats (who),
-# TOOLS = per-role MCP/plugin policy, SKILL = reusable knowledge files (what a
-# role can *read*). The "ADVANCED" section is rendered folded by default
-# (`_ADVANCED_SECTION`/`_build_sidebar`) — everything in it is a real, still-
-# live control, just not one most operators touch often.
+# Legacy VIEW_* constants that no longer name a real stack page — `_goto_view`
+# maps them to whichever page absorbed their content before doing anything
+# else, so an old deep-link/test/bookmark still lands somewhere sensible
+# instead of a blank placeholder slot (#515, same contract #505 established
+# for VIEW_CORE_V2_ACCOUNTS below).
+_VIEW_REDIRECTS: dict[int, int] = {
+    VIEW_CORE_V2_ACCOUNTS: VIEW_USERS,  # #505
+    # #515: New Role is a QDialog now (opened by a button ON this page), not
+    # a stack page — a `_goto_view(VIEW_NEW_ROLE)` from old code just lands
+    # on the page that owns the button, same as every other redirect below.
+    VIEW_NEW_ROLE: VIEW_PROVIDERS_ROLES,
+    VIEW_TEMPLATES: VIEW_PIPELINE_BUILDER,  # #515: merged into Pipeline
+    VIEW_PLUGINS_MATRIX: VIEW_MCP_MATRIX,  # #515: merged into Tools
+    VIEW_SKILL_MATRIX: VIEW_SKILL_CATALOG,  # #515: merged into Skills
+    VIEW_PERFORMANCE: VIEW_GENERAL,  # #515: preset -> "โหมดเครื่อง" on General
+    VIEW_CORE_V2_ROUTING: VIEW_GENERAL,  # #515: dropped, no direct replacement page
+    VIEW_CORE_V2_BRAIN: VIEW_KNOWLEDGE,  # #515: closest still-live status page
+    VIEW_CORE_V2_SCHEDULER: VIEW_GENERAL,  # #515: dropped, no direct replacement page
+}
+
+# (view index, nav label, sidebar section) — 4 sections, no ADVANCED (#515).
+# New Role is reached via a button on "ทีม & ตำแหน่ง" (`_open_new_role_dialog`),
+# not this list, so it isn't a normal nav item.
 _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
-    # General first — theme + everyday knobs live at top level, never under
-    # ADVANCED (#506 user directive "ไม่ซุกใน Advanced").
-    (VIEW_GENERAL, "General", "GENERAL"),
-    # #512: "ทีม & ตำแหน่ง" (ex-"Providers & Roles") leads the TEAM section —
-    # team-size preset first, roster/provider detail below it — with Pipeline
-    # Builder/Templates (still their own views, unchanged) grouped under the
-    # same section since "which hop sequence runs" is part of the same team
-    # question. Was section "ROLE" (this view) + "PIPELINE" (the other two);
-    # merged so the sidebar doesn't split one team-shape decision in half.
+    (VIEW_GENERAL, "ทั่วไป", "GENERAL"),
+    # #512: "ทีม & ตำแหน่ง" (ex-"Providers & Roles") leads TEAM — team-size
+    # preset first, roster/provider detail below it — with Pipeline grouped
+    # under the same section since "which hop sequence runs" is part of the
+    # same team question.
     (VIEW_PROVIDERS_ROLES, "ทีม & ตำแหน่ง", "TEAM"),
-    (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "TEAM"),
-    (VIEW_TEMPLATES, "Templates", "TEAM"),
-    (VIEW_MCP_MATRIX, "MCP Matrix", "TOOLS"),
-    (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
-    (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
-    (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
+    (VIEW_PIPELINE_BUILDER, "Pipeline", "TEAM"),
+    (VIEW_MCP_MATRIX, "Tools", "TOOLS"),
+    (VIEW_SKILL_CATALOG, "Skills", "TOOLS"),
+    (VIEW_KNOWLEDGE, "Knowledge", "TOOLS"),
     # #505: one "Accounts" page replaced both the old "Users" entry here and
-    # the ADVANCED "Accounts & Pools" entry (VIEW_CORE_V2_ACCOUNTS now
-    # redirects to it in `_goto_view` so old routes/constants keep working).
+    # the ADVANCED "Accounts & Pools" entry (VIEW_CORE_V2_ACCOUNTS redirects
+    # to it above so old routes/constants keep working).
     (VIEW_USERS, "Accounts", "ACCOUNT"),
     (VIEW_USAGE, "Usage", "ACCOUNT"),
-    (VIEW_KNOWLEDGE, "Knowledge", "KNOWLEDGE"),
-    (VIEW_CORE_V2_ROUTING, "Routing", "ADVANCED"),
-    (VIEW_CORE_V2_BRAIN, "Brain", "ADVANCED"),
-    (VIEW_CORE_V2_SCHEDULER, "Scheduler", "ADVANCED"),
-    (VIEW_PERFORMANCE, "Performance", "ADVANCED"),
 )
 
-# Sidebar section names rendered as a foldable group rather than a plain
-# header — currently just one, but a set (not a single constant) so a future
-# second folded section is a one-line change in `_build_sidebar`.
-_FOLDABLE_SECTIONS: frozenset[str] = frozenset({"ADVANCED"})
+# No folded section anymore (ADVANCED was the only one — #515 dropped it
+# along with everything it held). Kept as a frozenset, not deleted outright,
+# since `_build_sidebar`/`_goto_view` still branch on membership — empty
+# just means that branch never fires; a future folded section is still a
+# one-line change here.
+_FOLDABLE_SECTIONS: frozenset[str] = frozenset()
 
 _NAV_VIEW_SECTION: dict[int, str] = {view_idx: section for view_idx, _label, section in _NAV_VIEWS}
 
@@ -231,34 +247,17 @@ _NAV_VIEW_SECTION: dict[int, str] = {view_idx: section for view_idx, _label, sec
 _SIDEBAR_SETTINGS_ORG = "agent-takkub"
 _SIDEBAR_SETTINGS_APP = "cockpit"
 
-# Core V2 pages each save through their own dedicated button (Scheduler's
-# "Save policy", Accounts & Pools' immediate add/edit/remove) and never join
-# the footer's dirty-tracking transaction (`settings_core_v2`'s own module
-# docstring) — the footer "Save & Apply" / "Revert unsaved changes" pair is
-# disabled whenever the sidebar is on one of these views so it can't be
-# mistaken for controlling them (design critic should #1, `docs/v2/
-# phase9-critic-review.md`). VIEW_PERFORMANCE is NOT in this set — despite
-# moving into the ADVANCED nav group it still saves through the shared
-# footer transaction exactly as before (`_on_save_apply_clicked`'s
-# `VIEW_PERFORMANCE in self._dirty_views` branch), only its sidebar position
-# changed.
-_CORE_V2_VIEWS: frozenset[int] = frozenset(
-    {VIEW_CORE_V2_ROUTING, VIEW_CORE_V2_BRAIN, VIEW_CORE_V2_SCHEDULER}
-)
-
-# Same "own dedicated save button, never the footer transaction" shape as
-# Core V2 above — Knowledge/Context Debug (tabs on this page) are read-only,
-# Design Tools (the third tab) writes each credential through immediately
-# (`settings_knowledge_design`'s own module docstring).
-_KNOWLEDGE_DESIGN_VIEWS: frozenset[int] = frozenset({VIEW_KNOWLEDGE})
-# VIEW_USERS (the #505 Accounts page) writes through immediately on add/
-# remove/login, and its API-override tab has its own Save button. General
-# (#506) also writes through immediately (the theme switch applies + saves
-# on change — that IS the apply). Usage (#507) is a pure read-only report —
-# there is nothing to save at all. All three are "never the footer
-# transaction", same shape as the Core V2 pages.
-_NO_FOOTER_SAVE_VIEWS: frozenset[int] = (
-    _CORE_V2_VIEWS | _KNOWLEDGE_DESIGN_VIEWS | {VIEW_USERS, VIEW_GENERAL, VIEW_USAGE}
+# Pages that save through their own dedicated button (Knowledge/Design
+# Tools writes each credential through immediately) or write through
+# immediately on every change (Accounts' add/edit/remove/login, General's
+# theme/machine-mode/toggles, same "that IS the apply" story) rather than
+# ever joining the footer's shared Save & Apply transaction — Usage is a
+# pure read-only report, nothing to save at all. The footer "Save & Apply" /
+# "Revert unsaved changes" pair is disabled outright while one of these is
+# showing so it can't be mistaken for controlling them (design critic should
+# #1, pre-#515 `docs/v2/phase9-critic-review.md`).
+_NO_FOOTER_SAVE_VIEWS: frozenset[int] = frozenset(
+    {VIEW_KNOWLEDGE, VIEW_USERS, VIEW_GENERAL, VIEW_USAGE}
 )
 
 # Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
@@ -271,21 +270,14 @@ _NO_FOOTER_SAVE_VIEWS: frozenset[int] = (
 # accented without depending on font color inheritance through QIcon.
 _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_GENERAL: "diamond",
-    VIEW_PIPELINE_BUILDER: "pipeline",
-    VIEW_TEMPLATES: "diamond",
     VIEW_PROVIDERS_ROLES: "target",
+    VIEW_PIPELINE_BUILDER: "pipeline",
     VIEW_MCP_MATRIX: "grid",
-    VIEW_PLUGINS_MATRIX: "grid",
     VIEW_SKILL_CATALOG: "star",
-    VIEW_SKILL_MATRIX: "star",
-    VIEW_USERS: "user",
     # Icon set is fixed at 6 names (diamond/grid/pipeline/star/target/user,
     # see static/icons/nav/) — reused rather than adding new SVG assets.
     VIEW_KNOWLEDGE: "star",
-    VIEW_CORE_V2_ROUTING: "pipeline",
-    VIEW_CORE_V2_BRAIN: "star",
-    VIEW_CORE_V2_SCHEDULER: "grid",
-    VIEW_PERFORMANCE: "grid",
+    VIEW_USERS: "user",
     VIEW_USAGE: "grid",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
@@ -302,49 +294,29 @@ def _nav_icon(view_idx: int, *, active: bool) -> QIcon:
 
 _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_GENERAL: (
-        "General",
-        "การตั้งค่าทั่วไปของ cockpit — ธีมสี (ตามระบบ/สว่าง/มืด) มีผลทันทีและจำค่าไว้",
+        "ทั่วไป",
+        "ธีมสี · โหมดเครื่อง · ภาษา — ทุกอย่างในหน้านี้มีผลทันทีและจำค่าไว้",
     ),
-    VIEW_PIPELINE_BUILDER: ("Pipeline Builder", "ลาก-วาง hop และ role ใน pipeline template"),
-    VIEW_TEMPLATES: ("Templates", "จัดการ pipeline template ที่บันทึกไว้"),
     VIEW_PROVIDERS_ROLES: (
         "ทีม & ตำแหน่ง",
         "ขนาดทีมของโปรเจคนี้ (#512) + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
     ),
-    VIEW_MCP_MATRIX: ("MCP Matrix", "role × MCP server policy"),
-    VIEW_PLUGINS_MATRIX: ("Plugins Matrix", "role × plugin policy"),
-    VIEW_NEW_ROLE: ("New Role", "สร้าง custom role ใหม่"),
+    VIEW_PIPELINE_BUILDER: (
+        "Pipeline",
+        "template ที่บันทึกไว้ (ซ้าย) + ลาก-วาง hop/role ของ template ที่เลือก (ขวา) — ขั้นสูง",
+    ),
+    VIEW_MCP_MATRIX: ("Tools", "role × MCP server / plugin policy"),
+    VIEW_SKILL_CATALOG: (
+        "Skills",
+        "skill จริงใน .claude/skills/ (SKILL.md) + role × skill ที่ inject เข้า context อัตโนมัติ",
+    ),
     VIEW_USERS: (
         "Accounts",
         "บัญชีของทุก provider — ใครเข้าสู่ระบบอยู่ ใช้กับโปรเจคไหน เพิ่ม/ลบบัญชี (#505)",
     ),
-    VIEW_SKILL_CATALOG: (
-        "Skill Catalog",
-        "skill จริงใน .claude/skills/ (SKILL.md) — ความรู้ที่ role อ้างถึง/อ่านได้",
-    ),
-    VIEW_SKILL_MATRIX: (
-        "Skill Matrix",
-        "role × skill — เลือก skill ที่จะ inject เข้า context ตอน spawn อัตโนมัติ",
-    ),
-    VIEW_PERFORMANCE: (
-        "Performance",
-        "กำหนดเพดานงานหนัก, จุดพัก CPU/RAM และ cadence การ render เบื้องหลัง",
-    ),
-    VIEW_CORE_V2_ROUTING: (
-        "Core V2 — Routing",
-        "preview ว่า role หนึ่งจะ resolve ไป provider/account ไหน (read-only)",
-    ),
-    VIEW_CORE_V2_BRAIN: (
-        "Core V2 — Brain",
-        "จำนวน memory ต่อ scope/trust + ค้นหาผ่าน RetrievalEngine",
-    ),
-    VIEW_CORE_V2_SCHEDULER: (
-        "Core V2 — Scheduler",
-        "SlotPolicy (global/provider/account/project) + priority default + backpressure estimate",
-    ),
     VIEW_KNOWLEDGE: (
         "Knowledge",
-        "สถานะ Brain / Obsidian / Graft, credential เครื่องมือ design, และ context build trace — 3 tab",
+        "Context Strategy + สถานะ Brain / Obsidian / Graft + credential เครื่องมือ design",
     ),
     VIEW_USAGE: (
         "Usage",
@@ -795,7 +767,6 @@ class _AutoskillsConfirmDialog(QDialog):
 class SettingsWindow(
     QDialog,
     AccountsSettingsMixin,
-    CoreV2SettingsMixin,
     KnowledgeDesignSettingsMixin,
     UsageSettingsMixin,
 ):
@@ -1098,13 +1069,6 @@ class SettingsWindow(
             self._nav_indicators[view_idx] = indicator
 
         lay.addStretch(1)
-
-        new_role_btn = QPushButton("+ New Role", sidebar)
-        new_role_btn.setObjectName("newRoleButton")
-        new_role_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        new_role_btn.clicked.connect(lambda: self._goto_view(VIEW_NEW_ROLE))
-        lay.addWidget(new_role_btn)
-
         return sidebar
 
     def _on_nav_section_toggled(self, section: str, expanded: bool) -> None:
@@ -1137,11 +1101,16 @@ class SettingsWindow(
             old.deleteLater()
 
     def _goto_view(self, view_idx: int) -> None:
-        # #505: the ADVANCED "Accounts & Pools" page was folded into the
-        # unified Accounts page — any old route/constant lands there instead
-        # of on the dead placeholder slot.
-        if view_idx == VIEW_CORE_V2_ACCOUNTS:
-            view_idx = VIEW_USERS
+        # Every merged/dropped page's old VIEW_* constant lands on whichever
+        # page absorbed it instead of a dead placeholder slot — see
+        # `_VIEW_REDIRECTS`'s own comment for the full merge/drop table.
+        # VIEW_NEW_ROLE is in that map too (-> VIEW_PROVIDERS_ROLES, where
+        # its dialog-opening button now lives): `_goto_view` is called from
+        # `__init__` (`initial_view`) and must stay a fast, synchronous
+        # page-switch — never a modal `QDialog.exec()` — so opening the New
+        # Role dialog is wired ONLY to that button's own click handler
+        # (`_open_new_role_dialog`), never routed through here.
+        view_idx = _VIEW_REDIRECTS.get(view_idx, view_idx)
         # Jumping straight to a view inside a folded section (initial_view,
         # or the caller passing a VIEW_* constant directly) must still land
         # on a visible, reachable nav row — expand its section first so the
@@ -1195,30 +1164,51 @@ class SettingsWindow(
         hb_lay.addSpacing(8)
 
         self._stack = QStackedWidget(header_body)
-        # Index order MUST match the VIEW_* constants above — renumbered
-        # from scratch in the settings-nav declutter (see that block's own
-        # comment for what was removed/merged).
-        self._stack.addWidget(self._wrap_scroll(self._build_pipeline_builder_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_templates_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_providers_roles_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_mcp_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_plugins_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_new_role_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_users_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_knowledge_tabbed_view()))
-        # Slot 10 (VIEW_CORE_V2_ACCOUNTS) is a bare placeholder: the page
-        # merged into Accounts (#505) and `_goto_view` redirects the constant
-        # there, but the index order of the slots after it must not shift.
-        self._stack.addWidget(QWidget(self))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_routing_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_brain_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_general_view()))
-        usage_placeholder = QWidget(content)
-        self._stack.addWidget(usage_placeholder)
+        # Index order MUST match the VIEW_* constants above. Every merged/
+        # dropped page's slot (VIEW_TEMPLATES, VIEW_PLUGINS_MATRIX,
+        # VIEW_SKILL_MATRIX, VIEW_CORE_V2_ACCOUNTS/_ROUTING/_BRAIN/
+        # _SCHEDULER, VIEW_PERFORMANCE, VIEW_NEW_ROLE) is a bare placeholder
+        # — `_goto_view` redirects the old constant elsewhere (or, for New
+        # Role, opens a QDialog) before it can ever reach one of these slots
+        # (#515, same pattern #505 established for VIEW_CORE_V2_ACCOUNTS).
+        # Every real page is registered lazily (`_lazy_view_builders`, H3
+        # 2026-09-07) rather than built here, so opening Settings never pays
+        # for a page the operator doesn't visit this session.
+        self._stack.addWidget(QWidget(self))  # 0  VIEW_PIPELINE_BUILDER
+        self._stack.addWidget(QWidget(self))  # 1  VIEW_TEMPLATES -> redirect
+        self._stack.addWidget(QWidget(self))  # 2  VIEW_PROVIDERS_ROLES
+        self._stack.addWidget(QWidget(self))  # 3  VIEW_MCP_MATRIX
+        self._stack.addWidget(QWidget(self))  # 4  VIEW_PLUGINS_MATRIX -> redirect
+        self._stack.addWidget(QWidget(self))  # 5  VIEW_NEW_ROLE -> dialog, never built
+        self._stack.addWidget(QWidget(self))  # 6  VIEW_USERS
+        self._stack.addWidget(QWidget(self))  # 7  VIEW_SKILL_CATALOG
+        self._stack.addWidget(QWidget(self))  # 8  VIEW_SKILL_MATRIX -> redirect
+        self._stack.addWidget(QWidget(self))  # 9  VIEW_KNOWLEDGE
+        self._stack.addWidget(QWidget(self))  # 10 VIEW_CORE_V2_ACCOUNTS -> redirect
+        self._stack.addWidget(QWidget(self))  # 11 VIEW_CORE_V2_ROUTING -> redirect
+        self._stack.addWidget(QWidget(self))  # 12 VIEW_CORE_V2_BRAIN -> redirect
+        self._stack.addWidget(QWidget(self))  # 13 VIEW_CORE_V2_SCHEDULER -> redirect
+        self._stack.addWidget(QWidget(self))  # 14 VIEW_PERFORMANCE -> redirect
+        self._stack.addWidget(
+            self._wrap_scroll(self._build_general_view())
+        )  # 15 (cheap, built eagerly)
+        self._stack.addWidget(QWidget(self))  # 16 VIEW_USAGE
+        self._lazy_view_builders[VIEW_PIPELINE_BUILDER] = lambda: self._wrap_scroll(
+            self._build_pipeline_view()
+        )
+        self._lazy_view_builders[VIEW_PROVIDERS_ROLES] = lambda: self._wrap_scroll(
+            self._build_providers_roles_view()
+        )
+        self._lazy_view_builders[VIEW_MCP_MATRIX] = lambda: self._wrap_scroll(
+            self._build_tools_view()
+        )
+        self._lazy_view_builders[VIEW_USERS] = lambda: self._wrap_scroll(self._build_users_view())
+        self._lazy_view_builders[VIEW_SKILL_CATALOG] = lambda: self._wrap_scroll(
+            self._build_skills_view()
+        )
+        self._lazy_view_builders[VIEW_KNOWLEDGE] = lambda: self._wrap_scroll(
+            self._build_knowledge_tabbed_view()
+        )
         self._lazy_view_builders[VIEW_USAGE] = lambda: self._wrap_scroll(self._build_usage_view())
         hb_lay.addWidget(self._stack, 1)
 
@@ -1317,22 +1307,18 @@ class SettingsWindow(
     def _on_reset_clicked(self) -> None:
         """Revert the currently-visible view's editable fields back to the
         on-disk state, clearing only THIS view's dirty flag — a different
-        view's still-staged edits (#6) must survive. Templates/Skill Catalog
-        have nothing staged to reset (structural template edits write
-        immediately; the catalog is read-only), so they no-op."""
+        view's still-staged edits (#6) must survive. Skill Catalog has
+        nothing staged to reset (read-only), so it no-ops; Tools/Skills
+        reload BOTH their tabs since one merged view (#515) now covers what
+        used to be two separately-reset pages."""
         idx = self._stack.currentIndex()
         if idx == VIEW_PROVIDERS_ROLES:
             self._reset_providers_roles_view()
-        elif idx == VIEW_NEW_ROLE:
-            self._reset_new_role_form()
         elif idx == VIEW_MCP_MATRIX:
             self._reload_mcp_matrix()
-        elif idx == VIEW_PLUGINS_MATRIX:
             self._reload_plugins_matrix()
-        elif idx == VIEW_SKILL_MATRIX:
+        elif idx == VIEW_SKILL_CATALOG:
             self._reload_skill_matrix()
-        elif idx == VIEW_PERFORMANCE:
-            self._load_performance_form(performance_settings.load())
         elif idx == VIEW_PIPELINE_BUILDER and getattr(self, "_pb_template_id", None):
             self._load_pb_hops(self._pb_template_id)
         self._dirty_views.discard(idx)
@@ -1340,26 +1326,13 @@ class SettingsWindow(
 
     def _on_save_apply_clicked(self) -> None:
         """Persist every staged edit across all views in one Save & Apply:
-        Providers & Roles, Pipeline Builder's in-flight hop edits (rolled
-        into the same pipelines.json write as rolesEnabled), and the
-        MCP/Plugins matrices. Templates' Duplicate/Delete commit
-        independently (their own buttons), so this is a safe no-op for
-        whichever of those the user never touched.
-
-        New Role (#2) is a special case: the footer button doesn't "save
-        provider/pipeline state" while that view is showing — it dispatches
-        to the exact same create transaction as the in-view "+ Create Role"
-        button, and only closes the dialog when that create actually
-        succeeds (an invalid/incomplete form must not discard the user's
-        typed input by accepting anyway).
+        Providers & Roles, Pipeline's in-flight hop edits (rolled into the
+        same pipelines.json write as rolesEnabled), and the MCP/Plugins
+        matrices. A template's Duplicate/Delete commits independently (its
+        own buttons), so this is a safe no-op for whichever of those the
+        user never touched. New Role (#515) is a QDialog with its own
+        Create button now — it never reaches this transaction at all.
         """
-        if self._stack.currentIndex() == VIEW_NEW_ROLE:
-            if self._on_create_role_clicked():
-                self._dirty_views.discard(VIEW_NEW_ROLE)
-                self._refresh_dirty_indicator()
-                self.accept()
-            return
-
         # Snapshot every on-disk store this transaction can touch so a
         # failure partway through (#3) rolls back instead of leaving stores
         # inconsistent — e.g. a role-provider override written but the
@@ -1375,7 +1348,6 @@ class SettingsWindow(
             # "save failed" while the model files are already persisted.
             provider_models.path(),
             role_models.path(),
-            performance_settings.path(),
         )
         snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
 
@@ -1389,10 +1361,25 @@ class SettingsWindow(
                 except OSError:
                     pass
 
+        # Every dict below belongs to a page registered in `_lazy_view_builders`
+        # (H3, 2026-09-07 + #515) — a Settings session that never navigated to
+        # Providers & Roles (say, it only opened Tools) never built these
+        # widgets at all. `getattr(..., {})` treats "page never visited" the
+        # same as "page visited, nothing on it changed": there is genuinely
+        # nothing staged there either way, so this transaction just skips it.
+        provider_toggles = getattr(self, "_provider_toggles", {})
+        provider_model_combos = getattr(self, "_provider_model_combos", {})
+        role_model_combos = getattr(self, "_role_model_combos", {})
+        role_provider_combos = getattr(self, "_role_provider_combos", {})
+        role_effort_combos = getattr(self, "_role_effort_combos", {})
+        role_toggles = getattr(self, "_role_toggles", {})
+        mcp_toggles = getattr(self, "_mcp_toggles", {})
+        plugin_toggles = getattr(self, "_plugin_toggles", {})
+        skill_toggles = getattr(self, "_skill_toggles", {})
+
         try:
-            self.pending_performance_reload = False
             self.pending_provider_disabled = {}
-            for provider, toggle in self._provider_toggles.items():
+            for provider, toggle in provider_toggles.items():
                 desired_disabled = not toggle.isChecked()
                 if desired_disabled != provider_state.is_disabled(provider):
                     self.pending_provider_disabled[provider] = desired_disabled
@@ -1401,18 +1388,16 @@ class SettingsWindow(
             # through (unlike the on/off toggle they need no orchestrator
             # broadcast; the value is read at spawn time, so it lands on the
             # next pane).
-            for provider, combo in self._provider_model_combos.items():
+            for provider, combo in provider_model_combos.items():
                 provider_models.set_model(provider, _combo_model(combo))
             dropped_effort_roles: list[str] = []
-            for role, combo in self._role_model_combos.items():
+            for role, combo in role_model_combos.items():
                 # Bind the model to the CLI it was picked for, so switching the
                 # role's provider (or a substitute kicking in) can't pass a
                 # model id to a CLI that doesn't know it.
-                role_provider = (
-                    self._role_provider_combos[role].currentData() or provider_config.CLAUDE
-                )
+                role_provider = role_provider_combos[role].currentData() or provider_config.CLAUDE
                 role_models.set_model(role, role_provider, _combo_model(combo))
-                effort_combo = self._role_effort_combos.get(role)
+                effort_combo = role_effort_combos.get(role)
                 if effort_combo is not None:
                     if not effort_combo.isEnabled() and role_models.effort_for(role, role_provider):
                         # Combo is disabled because the CURRENT provider/model
@@ -1425,17 +1410,17 @@ class SettingsWindow(
                     role_models.set_effort(role, role_provider, _combo_effort(effort_combo))
 
             role_providers = {
-                role: combo.currentData() for role, combo in self._role_provider_combos.items()
+                role: combo.currentData() for role, combo in role_provider_combos.items()
             }
-            # scope=self._role_provider_combos.keys(): this page renders a
-            # control only for the team_preset ROSTER (#512 — positions +
-            # lead + whichever ONE role is the active checker, not the full
+            # scope=role_provider_combos.keys(): this page renders a control
+            # only for the team_preset ROSTER (#512 — positions + lead +
+            # whichever ONE role is the active checker, not the full
             # _overridable_roles() set anymore) — anything outside that (a
             # custom role's override, or the checker role NOT currently
             # active, say) must be preserved, not silently dropped by a
             # naive full-replace write.
             provider_config.save_role_overrides(
-                role_providers, self._project, scope=self._role_provider_combos.keys()
+                role_providers, self._project, scope=role_provider_combos.keys()
             )
 
             # #512: persist a staged team-size card pick BEFORE the
@@ -1452,7 +1437,7 @@ class SettingsWindow(
 
             payload = pipeline_config.load(self._project)
             roles_enabled = dict(payload.get("rolesEnabled", {}))
-            for role, toggle in self._role_toggles.items():
+            for role, toggle in role_toggles.items():
                 roles_enabled[role] = toggle.isChecked()
             payload["rolesEnabled"] = roles_enabled
 
@@ -1475,19 +1460,19 @@ class SettingsWindow(
             updated_mcps = pane_tools_dialog.matrix_to_role_items(
                 {
                     role: {item: t.isChecked() for item, t in items.items()}
-                    for role, items in self._mcp_toggles.items()
+                    for role, items in mcp_toggles.items()
                 }
             )
             updated_plugins = pane_tools_dialog.matrix_to_role_items(
                 {
                     role: {item: t.isChecked() for item, t in items.items()}
-                    for role, items in self._plugin_toggles.items()
+                    for role, items in plugin_toggles.items()
                 }
             )
-            mcp_changes = pane_tools_dialog.diff_role_items(self._orig_mcp_items, updated_mcps)
-            plugin_changes = pane_tools_dialog.diff_role_items(
-                self._orig_plugin_items, updated_plugins
-            )
+            orig_mcp_items = getattr(self, "_orig_mcp_items", {})
+            orig_plugin_items = getattr(self, "_orig_plugin_items", {})
+            mcp_changes = pane_tools_dialog.diff_role_items(orig_mcp_items, updated_mcps)
+            plugin_changes = pane_tools_dialog.diff_role_items(orig_plugin_items, updated_plugins)
             # Write BOTH kinds for every role that changed EITHER — see
             # pane_tools_dialog._on_save_clicked's own note: set_role_items
             # seeds a fresh role entry's sibling kind to [] (an explicit deny),
@@ -1510,22 +1495,17 @@ class SettingsWindow(
             updated_skills = pane_tools_dialog.matrix_to_role_items(
                 {
                     role: {item: t.isChecked() for item, t in items.items()}
-                    for role, items in self._skill_toggles.items()
+                    for role, items in skill_toggles.items()
                 }
             )
-            skill_changes = pane_tools_dialog.diff_role_items(
-                self._orig_skill_items, updated_skills
-            )
+            orig_skill_items = getattr(self, "_orig_skill_items", {})
+            skill_changes = pane_tools_dialog.diff_role_items(orig_skill_items, updated_skills)
             for role in skill_changes:
                 if not skill_policy.set_role_skills(role, updated_skills[role]):
                     raise OSError(f"เขียน skill policy ของ role '{role}' ไม่สำเร็จ")
             self._orig_skill_items = updated_skills
             if mcp_changes or plugin_changes:
                 shared_dev_tools.regen_role_variants()
-            if VIEW_PERFORMANCE in self._dirty_views:
-                if not performance_settings.save(self._performance_settings_from_form()):
-                    raise OSError("เขียน performance-settings.json ไม่สำเร็จ")
-                self.pending_performance_reload = True
         except (OSError, ValueError) as e:
             _rollback()
             self._pipeline_payload = pipeline_config.load(self._project)
@@ -1544,8 +1524,19 @@ class SettingsWindow(
         self.accept()
 
     # ──────────────────────────────────────────────────────────
-    # view: General (theme mode — write-through, applies live, #506)
+    # view: General (theme / machine mode / language — every field here
+    # write-through + applies live, #506/#515. Machine mode + the pane-
+    # discard/auto-issue toggles moved here from the now-removed Performance
+    # page (#515: its numeric sliders were dropped — see the VIEW_* block's
+    # own comment — but these three controls are still real, still-live
+    # operator decisions, not values with one correct answer).
     # ──────────────────────────────────────────────────────────
+
+    _MACHINE_MODES: tuple[tuple[str, str], ...] = (
+        ("safe", "เงียบ (Safe)"),
+        ("balanced", "สมดุล (Balanced)"),
+        ("maximum", "เต็มที่ (Maximum)"),
+    )
 
     def _build_general_view(self) -> QWidget:
         view = QWidget(self)
@@ -1553,17 +1544,17 @@ class SettingsWindow(
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(14)
 
-        panel = QWidget(view)
-        panel.setObjectName("panel")
-        panel_lay = QVBoxLayout(panel)
-        panel_lay.setContentsMargins(16, 16, 16, 16)
-        panel_lay.setSpacing(8)
+        theme_panel = QWidget(view)
+        theme_panel.setObjectName("panel")
+        theme_lay = QVBoxLayout(theme_panel)
+        theme_lay.setContentsMargins(16, 16, 16, 16)
+        theme_lay.setSpacing(8)
 
-        title = QLabel("ธีมสี (Theme)", panel)
-        title.setObjectName("panelTitle")
-        panel_lay.addWidget(title)
+        theme_title = QLabel("ธีมสี (Theme)", theme_panel)
+        theme_title.setObjectName("panelTitle")
+        theme_lay.addWidget(theme_title)
 
-        self._theme_mode_combo = QComboBox(panel)
+        self._theme_mode_combo = QComboBox(theme_panel)
         for key, label in (
             ("system", "ตามระบบ (System)"),
             ("light", "สว่าง (Light)"),
@@ -1574,21 +1565,182 @@ class SettingsWindow(
         if idx >= 0:
             self._theme_mode_combo.setCurrentIndex(idx)
         self._theme_mode_combo.currentIndexChanged.connect(self._on_theme_mode_changed)
-        panel_lay.addWidget(self._theme_mode_combo)
+        theme_lay.addWidget(self._theme_mode_combo)
 
-        hint = QLabel(
+        theme_hint = QLabel(
             "มีผลทันทีและจำค่าไว้ · terminal ของแต่ละ pane คงพื้นมืดเสมอ "
             "(สี ANSI ออกแบบมาสำหรับพื้นมืด) · ส่วนภายในหน้าต่างหลักที่วาดไว้แล้ว "
             "(แถบ project/task ที่เปิดค้าง แถบแท็บของ pane) จะตามธีมครบ 100% หลัง restart cockpit",
-            panel,
+            theme_panel,
         )
-        hint.setObjectName("panelHint")
-        hint.setWordWrap(True)
-        panel_lay.addWidget(hint)
+        theme_hint.setObjectName("panelHint")
+        theme_hint.setWordWrap(True)
+        theme_lay.addWidget(theme_hint)
+        lay.addWidget(theme_panel)
 
-        lay.addWidget(panel)
+        # โหมดเครื่อง (#515) — replaces the old Performance page's numeric
+        # sliders (heavy-agent caps, CPU/RAM pause thresholds, render
+        # cadence) with the one control an operator actually has an opinion
+        # about; the engine derives the rest from CPU/RAM instead of asking
+        # the user to guess (`performance_settings.preset`, already
+        # machine-aware). `_set_machine_mode` is the adapter this page binds
+        # to until the engine exposes a dedicated mode API (#515 backend
+        # track) — swap the write there, not here, when that lands.
+        mode_panel = QWidget(view)
+        mode_panel.setObjectName("panel")
+        mode_lay = QVBoxLayout(mode_panel)
+        mode_lay.setContentsMargins(16, 16, 16, 16)
+        mode_lay.setSpacing(8)
+
+        mode_title = QLabel("โหมดเครื่อง", mode_panel)
+        mode_title.setObjectName("panelTitle")
+        mode_lay.addWidget(mode_title)
+
+        self._machine_mode_combo = QComboBox(mode_panel)
+        for key, label in self._MACHINE_MODES:
+            self._machine_mode_combo.addItem(label, key)
+        current_mode = performance_settings.load().mode
+        idx = self._machine_mode_combo.findData(current_mode)
+        self._machine_mode_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        self._machine_mode_combo.currentIndexChanged.connect(self._on_machine_mode_changed)
+        mode_lay.addWidget(self._machine_mode_combo)
+
+        mode_hint = QLabel(
+            "สมดุล เหมาะกับการใช้งานทั่วไป · เงียบ ลดแรงกดบนเครื่องที่เปิด prod อยู่ · "
+            "เต็มที่ เพิ่ม throughput แต่ยังคง CPU/RAM guard ไว้ — cap จริงคำนวณจาก CPU/RAM "
+            "ของเครื่องนี้ ไม่ใช่ตัวเลขตายตัว ค่า environment TAKKUB_* มีลำดับสูงกว่าเสมอ",
+            mode_panel,
+        )
+        mode_hint.setObjectName("panelHint")
+        mode_hint.setWordWrap(True)
+        mode_lay.addWidget(mode_hint)
+        lay.addWidget(mode_panel)
+
+        # ภาษา (#515) — placeholder: cockpit is Thai/English mixed UI copy
+        # with no i18n layer yet, so there is nothing real to switch. Kept
+        # visible (disabled) rather than omitted so "where would language
+        # live" has an answer, and so wiring an actual i18n layer later is a
+        # one-combo change, not a new page.
+        lang_panel = QWidget(view)
+        lang_panel.setObjectName("panel")
+        lang_lay = QVBoxLayout(lang_panel)
+        lang_lay.setContentsMargins(16, 16, 16, 16)
+        lang_lay.setSpacing(8)
+
+        lang_title = QLabel("ภาษา", lang_panel)
+        lang_title.setObjectName("panelTitle")
+        lang_lay.addWidget(lang_title)
+
+        lang_combo = QComboBox(lang_panel)
+        lang_combo.addItem("ไทย / English (ผสม)", "th-en")
+        lang_combo.setEnabled(False)
+        lang_combo.setToolTip("ยังไม่รองรับเลือกภาษา — cockpit ยังไม่มี i18n layer")
+        lang_lay.addWidget(lang_combo)
+
+        lang_hint = QLabel("เร็วๆ นี้ — ยังไม่มี i18n layer ให้เลือกภาษาจริง", lang_panel)
+        lang_hint.setObjectName("panelHint")
+        lang_hint.setWordWrap(True)
+        lang_lay.addWidget(lang_hint)
+        lay.addWidget(lang_panel)
+
+        # #364 lever 1: discard a hidden pane's Chromium renderer after it
+        # sits inactive past the debounce window — frees ~60MB/pane at the
+        # current pane-ceiling, at the cost of a sub-400ms reload when the
+        # user switches back. Lead panes and panes with fresh PTY output are
+        # always exempt regardless of this toggle.
+        discard_panel = QWidget(view)
+        discard_panel.setObjectName("panel")
+        discard_lay = QVBoxLayout(discard_panel)
+        discard_lay.setContentsMargins(16, 16, 16, 16)
+        discard_lay.setSpacing(8)
+        self._pane_discard_chk = QCheckBox(
+            "คืน RAM ของ pane ที่ซ่อนอยู่ (discard renderer)", discard_panel
+        )
+        self._pane_discard_chk.setToolTip(
+            "เปิดอยู่โดยค่าเริ่มต้น หลัง pane ถูกซ่อน (สลับ tab/project ไปที่อื่น) ค้างไว้สักครู่\n"
+            "cockpit จะปล่อย renderer ของ pane นั้นเพื่อคืน RAM ~60MB/pane\n"
+            "กลับมาดูอีกครั้งจะ reload ให้ใหม่ภายในเสี้ยววินาที — scrollback เก่าก่อน discard\n"
+            "จะกลับมาเป็นข้อความล้วน (ไม่มีสี), ข้อความที่มาระหว่างซ่อนไม่หาย สีครบเหมือนเดิม\n\n"
+            "Lead pane และ pane ที่เพิ่งมี output ไม่ถูก discard ไม่ว่าตั้งค่านี้ไว้อย่างไร\n"
+            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_PANE_DISCARD=0"
+        )
+        self._pane_discard_chk.setChecked(performance_settings.load().pane_discard_enabled)
+        self._pane_discard_chk.toggled.connect(self._on_pane_discard_toggled)
+        discard_lay.addWidget(self._pane_discard_chk)
+        lay.addWidget(discard_panel)
+
+        # #297: the switch for automatic cockpit bug reports. Lives here rather
+        # than buried in a config file because it decides whether something
+        # leaves the user's machine — that has to be findable and reversible.
+        report_panel = QWidget(view)
+        report_panel.setObjectName("panel")
+        report_lay = QVBoxLayout(report_panel)
+        report_lay.setContentsMargins(16, 16, 16, 16)
+        report_lay.setSpacing(8)
+        self._auto_issue_chk = QCheckBox("ส่งรายงานบั๊กของ cockpit อัตโนมัติ", report_panel)
+        self._auto_issue_chk.setToolTip(
+            "เปิดอยู่โดยค่าเริ่มต้น เมื่อ cockpit เองมีปัญหา (crash หรือสัญญาณผิดปกติ\n"
+            "ใน events.log เช่น UI ค้างยาวซ้ำ / watchdog respawn ถี่ผิดปกติ)\n"
+            "จะเปิด issue ให้อัตโนมัติที่ takkub/agent-takkub\n\n"
+            "ส่งเฉพาะชนิดของ event + จำนวนครั้ง + เวอร์ชัน + platform\n"
+            "ไม่ส่งเนื้อ task, path ของโปรเจกต์ หรือ token (scrub + redact ก่อนส่ง)\n"
+            "จำกัดไม่เกิน 5 ใบ/24 ชม. และหัวข้อเดิมซ้ำได้ไม่เกิน 1 ครั้ง/24 ชม.\n\n"
+            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_AUTO_ISSUE=0"
+        )
+        report_lay.addWidget(self._auto_issue_chk)
+        report_hint = QLabel(
+            "ปิดสวิตช์นี้แล้ว cockpit จะไม่ส่งอะไรออกจากเครื่องเลย — ปัญหาที่เจอจะถูกเก็บไว้ในเครื่องอย่างเดียว",
+            report_panel,
+        )
+        report_hint.setObjectName("panelHint")
+        report_hint.setWordWrap(True)
+        report_lay.addWidget(report_hint)
+        lay.addWidget(report_panel)
+
+        self._auto_issue_chk.setChecked(auto_issue_signals.auto_issue_enabled())
+        self._auto_issue_chk.toggled.connect(self._on_auto_issue_toggled)
+
         lay.addStretch(1)
         return view
+
+    def _on_machine_mode_changed(self, _index: int) -> None:
+        """Write-through (#515) — see `_set_machine_mode`'s own docstring
+        for the preset-adapter contract this bridges to."""
+        mode = self._machine_mode_combo.currentData() or "balanced"
+        self._set_machine_mode(str(mode))
+
+    def _set_machine_mode(self, mode: str) -> None:
+        """Persist `mode` via `performance_settings.preset()` (already
+        machine-aware — computes caps/thresholds from this machine's actual
+        CPU/RAM) — a thin adapter standing in for a dedicated engine mode
+        API that doesn't exist on `main` yet. Backend's #515 track landed
+        `performance_settings.get_mode()`/`set_mode(mode)` on
+        `wt/backend-1788759928` (commit e7cf89d, not yet merged as of this
+        commit) — once that merges, swap this body for `set_mode(mode)`
+        directly (call sites stay the same). Preserves the two fields the
+        preset itself doesn't own (`pane_discard_enabled`, the overload
+        dead-band timeout) from whatever is already on disk, so picking a
+        mode never silently resets an unrelated toggle."""
+        current = performance_settings.load()
+        new_settings = _dataclass_replace(
+            performance_settings.preset(mode),
+            pane_discard_enabled=current.pane_discard_enabled,
+            overload_deadband_timeout_s=current.overload_deadband_timeout_s,
+        )
+        if not performance_settings.save(new_settings):
+            QMessageBox.warning(self, "โหมดเครื่อง", "บันทึก performance-settings.json ไม่สำเร็จ")
+            return
+        self.pending_performance_reload = True
+
+    def _on_pane_discard_toggled(self, enabled: bool) -> None:
+        """Write-through (#515, moved off the old Performance page's footer-
+        staged form) — same "applies live, no second confirming click"
+        pattern the theme switch and auto-issue toggle already use."""
+        current = performance_settings.load()
+        if not performance_settings.save(_dataclass_replace(current, pane_discard_enabled=enabled)):
+            QMessageBox.warning(self, "โหมดเครื่อง", "บันทึก performance-settings.json ไม่สำเร็จ")
+            return
+        self.pending_performance_reload = True
 
     def _on_theme_mode_changed(self, _index: int) -> None:
         """Write-through + live apply (#506): persist the picked mode, rebind
@@ -1633,169 +1785,10 @@ class SettingsWindow(
         if hasattr(self, "_usage_cards_row"):
             self._retheme_usage()
 
-    # ──────────────────────────────────────────────────────────
-    # view: Performance (persisted + live-applied by the caller)
-    # ──────────────────────────────────────────────────────────
-
-    def _build_performance_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QVBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(14)
-
-        banner = QLabel(
-            "Balanced เหมาะกับการใช้งานทั่วไป · Safe ลดแรงกดบนเครื่องที่เปิด prod อยู่ · "
-            "Maximum เพิ่ม throughput แต่ยังคง CPU/RAM guard ไว้ ค่า environment TAKKUB_* "
-            "มีลำดับสูงกว่าหน้านี้เสมอ",
-            view,
-        )
-        banner.setObjectName("infoBanner")
-        banner.setWordWrap(True)
-        lay.addWidget(banner)
-
-        panel = QWidget(view)
-        panel.setObjectName("panel")
-        form = QFormLayout(panel)
-        form.setContentsMargins(16, 16, 16, 16)
-        form.setSpacing(10)
-
-        self._performance_mode = QComboBox(panel)
-        for key, label in (("safe", "Safe"), ("balanced", "Balanced"), ("maximum", "Maximum")):
-            self._performance_mode.addItem(label, key)
-        form.addRow("Preset", self._performance_mode)
-
-        specs = (
-            ("max_heavy_global", "Heavy agents · global", 1, 64, " concurrent"),
-            ("max_heavy_per_project", "Heavy agents · per project", 1, 64, " concurrent"),
-            ("max_browser_global", "Browser agents · global", 1, 64, " concurrent"),
-            ("max_build_global", "Builds · global", 1, 64, " concurrent"),
-            ("max_test_global", "Test suites · global", 1, 64, " concurrent"),
-            ("max_package_install_global", "Package installs · global", 1, 64, " concurrent"),
-            ("cpu_pause_percent", "Pause new heavy work at CPU", 50, 100, "%"),
-            ("cpu_resume_percent", "Resume heavy work below CPU", 1, 99, "%"),
-            ("min_available_ram_percent", "Pause below available RAM", 1, 99, "%"),
-            ("resume_ram_percent", "Resume above available RAM", 2, 100, "%"),
-            ("hidden_render_ms", "Background render cadence", 50, 2_000, " ms"),
-        )
-        self._performance_fields: dict[str, QSpinBox] = {}
-        for name, label, minimum, maximum, suffix in specs:
-            spin = QSpinBox(panel)
-            spin.setRange(minimum, maximum)
-            spin.setSuffix(suffix)
-            form.addRow(label, spin)
-            self._performance_fields[name] = spin
-
-        lay.addWidget(panel)
-        note = QLabel(
-            "Save & Apply ใช้กับงานใหม่ทันทีโดยไม่ตัด pane ที่กำลังทำงาน และไม่ทิ้งคิวเดิม",
-            view,
-        )
-        note.setObjectName("panelHint")
-        note.setWordWrap(True)
-        lay.addWidget(note)
-
-        # #364 lever 1: discard a hidden pane's Chromium renderer after it
-        # sits inactive past the debounce window — frees ~60MB/pane at the
-        # current pane-ceiling, at the cost of a sub-400ms reload when the
-        # user switches back. Lead panes and panes with fresh PTY output are
-        # always exempt regardless of this toggle.
-        discard_panel = QWidget(view)
-        discard_panel.setObjectName("panel")
-        discard_lay = QVBoxLayout(discard_panel)
-        discard_lay.setContentsMargins(16, 16, 16, 16)
-        discard_lay.setSpacing(8)
-        self._pane_discard_chk = QCheckBox(
-            "คืน RAM ของ pane ที่ซ่อนอยู่ (discard renderer)", discard_panel
-        )
-        self._pane_discard_chk.setToolTip(
-            "เปิดอยู่โดยค่าเริ่มต้น หลัง pane ถูกซ่อน (สลับ tab/project ไปที่อื่น) ค้างไว้สักครู่\n"
-            "cockpit จะปล่อย renderer ของ pane นั้นเพื่อคืน RAM ~60MB/pane\n"
-            "กลับมาดูอีกครั้งจะ reload ให้ใหม่ภายในเสี้ยววินาที — scrollback เก่าก่อน discard\n"
-            "จะกลับมาเป็นข้อความล้วน (ไม่มีสี), ข้อความที่มาระหว่างซ่อนไม่หาย สีครบเหมือนเดิม\n\n"
-            "Lead pane และ pane ที่เพิ่งมี output ไม่ถูก discard ไม่ว่าตั้งค่านี้ไว้อย่างไร\n"
-            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_PANE_DISCARD=0"
-        )
-        discard_lay.addWidget(self._pane_discard_chk)
-        lay.addWidget(discard_panel)
-
-        # #297: the switch for automatic cockpit bug reports. Lives here rather
-        # than buried in a config file because it decides whether something
-        # leaves the user's machine — that has to be findable and reversible.
-        report_panel = QWidget(view)
-        report_panel.setObjectName("panel")
-        report_lay = QVBoxLayout(report_panel)
-        report_lay.setContentsMargins(16, 16, 16, 16)
-        report_lay.setSpacing(8)
-        self._auto_issue_chk = QCheckBox("ส่งรายงานบั๊กของ cockpit อัตโนมัติ", report_panel)
-        self._auto_issue_chk.setToolTip(
-            "เปิดอยู่โดยค่าเริ่มต้น เมื่อ cockpit เองมีปัญหา (crash หรือสัญญาณผิดปกติ\n"
-            "ใน events.log เช่น UI ค้างยาวซ้ำ / watchdog respawn ถี่ผิดปกติ)\n"
-            "จะเปิด issue ให้อัตโนมัติที่ takkub/agent-takkub\n\n"
-            "ส่งเฉพาะชนิดของ event + จำนวนครั้ง + เวอร์ชัน + platform\n"
-            "ไม่ส่งเนื้อ task, path ของโปรเจกต์ หรือ token (scrub + redact ก่อนส่ง)\n"
-            "จำกัดไม่เกิน 5 ใบ/24 ชม. และหัวข้อเดิมซ้ำได้ไม่เกิน 1 ครั้ง/24 ชม.\n\n"
-            "ปิดได้ที่นี่ หรือตั้ง TAKKUB_AUTO_ISSUE=0"
-        )
-        report_lay.addWidget(self._auto_issue_chk)
-        report_hint = QLabel(
-            "ปิดสวิตช์นี้แล้ว cockpit จะไม่ส่งอะไรออกจากเครื่องเลย — ปัญหาที่เจอจะถูกเก็บไว้ในเครื่องอย่างเดียว",
-            report_panel,
-        )
-        report_hint.setObjectName("panelHint")
-        report_hint.setWordWrap(True)
-        report_lay.addWidget(report_hint)
-        lay.addWidget(report_panel)
-
-        self._auto_issue_chk.setChecked(auto_issue_signals.auto_issue_enabled())
-        self._auto_issue_chk.toggled.connect(self._on_auto_issue_toggled)
-
-        lay.addStretch(1)
-
-        self._load_performance_form(performance_settings.load())
-        self._performance_mode.currentIndexChanged.connect(self._on_performance_mode_changed)
-        for spin in self._performance_fields.values():
-            spin.valueChanged.connect(self._mark_dirty)
-        self._pane_discard_chk.toggled.connect(self._mark_dirty)
-        return view
-
     def _on_auto_issue_toggled(self, enabled: bool) -> None:
         """Applied immediately, not on Save & Apply — a privacy switch that
         needs a second confirming click is a switch people mistrust."""
         auto_issue_signals.set_auto_issue_enabled(bool(enabled))
-
-    def _load_performance_form(self, settings: performance_settings.PerformanceSettings) -> None:
-        controls = [
-            self._performance_mode,
-            *self._performance_fields.values(),
-            self._pane_discard_chk,
-        ]
-        for control in controls:
-            control.blockSignals(True)
-        try:
-            idx = self._performance_mode.findData(settings.mode)
-            self._performance_mode.setCurrentIndex(max(0, idx))
-            for name, spin in self._performance_fields.items():
-                spin.setValue(round(getattr(settings, name)))
-            self._pane_discard_chk.setChecked(settings.pane_discard_enabled)
-        finally:
-            for control in controls:
-                control.blockSignals(False)
-
-    def _on_performance_mode_changed(self) -> None:
-        mode = self._performance_mode.currentData() or "balanced"
-        self._load_performance_form(performance_settings.preset(str(mode)))
-        self._dirty_views.add(VIEW_PERFORMANCE)
-        self._refresh_dirty_indicator()
-
-    def _performance_settings_from_form(self) -> performance_settings.PerformanceSettings:
-        values = {name: spin.value() for name, spin in self._performance_fields.items()}
-        return performance_settings.validate(
-            performance_settings.PerformanceSettings(
-                mode=str(self._performance_mode.currentData() or "balanced"),
-                pane_discard_enabled=self._pane_discard_chk.isChecked(),
-                **values,
-            )
-        )
 
     # ──────────────────────────────────────────────────────────
     # view: Providers & Roles (real)
@@ -2089,14 +2082,24 @@ class SettingsWindow(
         rp_lay.setSpacing(10)
         n_positions = len(position_roles)
         n_positions_enabled = sum(1 for r in position_roles if cfg["roles"].get(r, False))
-        rp_lay.addWidget(
+        roster_header_row = QHBoxLayout()
+        roster_header_row.addWidget(
             self._build_card_header(
                 "TEAM ROSTER",
                 "ตำแหน่งในทีม",
                 f"{n_positions_enabled}/{n_positions} active",
                 role_panel,
-            )
+            ),
+            1,
         )
+        # #515: New Role moved off a persistent sidebar button (reached
+        # regardless of which page was showing) onto this button, scoped to
+        # the one page it's actually about — opens a QDialog wrapping the
+        # same form/Create-role transaction unchanged.
+        new_role_btn = cockpit_theme.secondary_button("+ ตำแหน่งเฉพาะโปรเจค", role_panel)
+        new_role_btn.clicked.connect(self._open_new_role_dialog)
+        roster_header_row.addWidget(new_role_btn)
+        rp_lay.addLayout(roster_header_row)
 
         self._role_toggles = {}
         self._role_provider_combos = {}
@@ -2505,6 +2508,41 @@ class SettingsWindow(
     # view: New Role (real)
     # ──────────────────────────────────────────────────────────
 
+    def _open_new_role_dialog(self) -> None:
+        """New Role (#515) — was a stack page reached via a persistent
+        sidebar button; now a plain QDialog opened from the "+ ตำแหน่ง
+        เฉพาะโปรเจค" button on "ทีม & ตำแหน่ง" instead, built fresh every
+        open (mirrors `SettingsWindow` itself never caching a stale instance
+        — see this class's own docstring). The form's own "+ Create Role"
+        button writes through immediately (`_on_create_role_clicked`) and
+        never joins the footer's Save & Apply transaction, so this dialog
+        needs only a Close button, not an Accept/Reject pair."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("+ ตำแหน่งเฉพาะโปรเจค")
+        dlg.setStyleSheet(self.styleSheet())
+        avail = self._available_screen_size()
+        dlg.resize(560, min(760, avail.height()))
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._wrap_scroll(self._build_new_role_view()), 1)
+
+        close_row = QHBoxLayout()
+        close_row.setContentsMargins(20, 12, 20, 16)
+        close_row.addStretch(1)
+        close_btn = cockpit_theme.secondary_button("Close", dlg)
+        close_btn.clicked.connect(dlg.accept)
+        close_row.addWidget(close_btn)
+        lay.addLayout(close_row)
+
+        dlg.exec()
+        # A role created while the dialog was open changes "ตำแหน่งในทีม"
+        # (`_rebuild_roster_panel` reads `custom_roles`/`team_preset` fresh
+        # each call) — refresh it now rather than leaving the roster stale
+        # until the next full Settings reopen.
+        if hasattr(self, "_roster_panel"):
+            self._rebuild_roster_panel()
+
     def _build_new_role_view(self) -> QWidget:
         view = QWidget(self)
         lay = QVBoxLayout(view)
@@ -2521,7 +2559,6 @@ class SettingsWindow(
         name_col.addWidget(QLabel("Name (--role)", identity))
         self._nr_name = QLineEdit(identity)
         self._nr_name.setPlaceholderText("data-eng (a-z0-9-_ เท่านั้น)")
-        self._nr_name.textChanged.connect(self._mark_dirty)
         name_col.addWidget(self._nr_name)
         name_row.addLayout(name_col, 1)
 
@@ -2529,7 +2566,6 @@ class SettingsWindow(
         label_col.addWidget(QLabel("Label", identity))
         self._nr_label = QLineEdit(identity)
         self._nr_label.setPlaceholderText("Data Eng")
-        self._nr_label.textChanged.connect(self._mark_dirty)
         label_col.addWidget(self._nr_label)
         name_row.addLayout(label_col, 1)
         id_lay.addLayout(name_row)
@@ -2566,7 +2602,6 @@ class SettingsWindow(
         self._nr_column.addItem("1 · Dev column", 1)
         self._nr_column.addItem("2 · Support column", 2)
         self._nr_column.setCurrentIndex(1)
-        self._nr_column.currentIndexChanged.connect(self._mark_dirty)
         self._nr_column.currentIndexChanged.connect(self._update_new_role_grid_hint)
         col_col.addWidget(self._nr_column)
         grid_row.addLayout(col_col)
@@ -2581,7 +2616,6 @@ class SettingsWindow(
         self._nr_row.setLocale(QLocale(QLocale.Language.C))
         self._nr_row.setRange(0, 99)
         self._nr_row.setValue(99)
-        self._nr_row.valueChanged.connect(self._mark_dirty)
         self._nr_row.valueChanged.connect(self._update_new_role_grid_hint)
         row_col.addWidget(self._nr_row)
         grid_row.addLayout(row_col)
@@ -2603,7 +2637,6 @@ class SettingsWindow(
         toggle_row = QHBoxLayout()
         toggle_row.addWidget(QLabel("ใช้ default MCP+Plugins ตาม column (แนะนำ)", tools), 1)
         self._nr_default_tools_toggle = cockpit_theme.ToggleSwitch(tools, checked=True)
-        self._nr_default_tools_toggle.toggled.connect(self._mark_dirty)
         toggle_row.addWidget(self._nr_default_tools_toggle)
         tl_lay.addLayout(toggle_row)
         tools_hint = QLabel(
@@ -2623,8 +2656,7 @@ class SettingsWindow(
         assert isinstance(sk_lay, QVBoxLayout)
         skills_hint = QLabel(
             "สแกนจาก .claude/skills/ จริงในโปรเจค — ติ๊กเพื่อฝัง reference "
-            "เข้า instructions ให้อัตโนมัติตอนบันทึก role นี้ (ปุ่ม Create Role "
-            "หรือ Save & Apply ด้านล่างทำเหมือนกัน)",
+            "เข้า instructions ให้อัตโนมัติตอนกด + Create Role ด้านล่าง",
             skills,
         )
         skills_hint.setObjectName("panelHint")
@@ -2676,7 +2708,6 @@ class SettingsWindow(
         self._nr_instructions = QPlainTextEdit(instr)
         self._nr_instructions.setPlaceholderText("บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร...")
         self._nr_instructions.setMinimumHeight(90)
-        self._nr_instructions.textChanged.connect(self._mark_dirty)
         in_lay.addWidget(self._nr_instructions)
         lay.addWidget(instr)
 
@@ -2740,7 +2771,6 @@ class SettingsWindow(
     def _on_swatch_clicked(self, color: str) -> None:
         self._nr_color = color
         self._update_swatch_selection()
-        self._mark_dirty()
 
     def _update_swatch_selection(self) -> None:
         for btn, color in zip(self._nr_swatch_btns, project_nav._AVATAR_COLORS, strict=False):
@@ -2833,7 +2863,6 @@ class SettingsWindow(
         top = QHBoxLayout()
         top.setSpacing(8)
         chk = QCheckBox(skill.name, row)
-        chk.toggled.connect(self._mark_dirty)
         chk.toggled.connect(self._update_new_role_skill_count)
         top.addWidget(chk)
         source = (
@@ -3351,6 +3380,18 @@ class SettingsWindow(
         return legend
 
     # ──────────────────────────────────────────────────────────
+    # view: Tools (#515 — merged MCP Matrix + Plugins Matrix into one page,
+    # tabbed: same "one role × policy grid" shape, just two tabs on it
+    # instead of two separate nav entries)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_tools_view(self) -> QWidget:
+        tabs = QTabWidget(self)
+        tabs.addTab(self._build_mcp_matrix_view(), "MCP")
+        tabs.addTab(self._build_plugins_matrix_view(), "Plugins")
+        return tabs
+
+    # ──────────────────────────────────────────────────────────
     # view: MCP Matrix (real)
     # ──────────────────────────────────────────────────────────
 
@@ -3519,6 +3560,18 @@ class SettingsWindow(
         )
         self._plugins_empty.setVisible(not items)
         self._plugins_matrix_panel.setVisible(bool(items))
+
+    # ──────────────────────────────────────────────────────────
+    # view: Skills (#515 — merged Skill Catalog + Skill Matrix into one
+    # page, tabbed: browse (Catalog) and per-role policy (Matrix) are the
+    # same underlying skill set, just two different questions about it)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_skills_view(self) -> QWidget:
+        tabs = QTabWidget(self)
+        tabs.addTab(self._build_skill_catalog_view(), "Catalog")
+        tabs.addTab(self._build_skill_matrix_view(), "Matrix")
+        return tabs
 
     # ──────────────────────────────────────────────────────────
     # view: Skill Catalog (real — SKILL section)
@@ -3985,22 +4038,49 @@ class SettingsWindow(
         self._skill_matrix_empty.setVisible(not items)
 
     # ──────────────────────────────────────────────────────────
-    # view: Pipeline Builder (real)
+    # view: Pipeline (#515 — merged the old Pipeline Builder + Templates
+    # pages into one: the template list on the left drives the hop builder
+    # on the right directly, so selecting a row IS "start editing this
+    # template's hops" — no separate "Editing template:" combo or
+    # "Edit hops ->" detour needed anymore.)
     # ──────────────────────────────────────────────────────────
 
-    def _build_pipeline_builder_view(self) -> QWidget:
+    def _build_pipeline_view(self) -> QWidget:
         view = QWidget(self)
-        lay = QVBoxLayout(view)
+        lay = QHBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(12)
 
-        sel_row = QHBoxLayout()
-        sel_row.addWidget(QLabel("Editing template:", view))
-        self._pb_template_combo = QComboBox(view)
-        sel_row.addWidget(self._pb_template_combo, 1)
-        lay.addLayout(sel_row)
+        # ── left: saved templates ────────────────────────────
+        list_panel = QWidget(view)
+        list_panel.setObjectName("panel")
+        list_panel.setFixedWidth(220)
+        list_lay = QVBoxLayout(list_panel)
+        list_lay.setContentsMargins(6, 6, 6, 6)
+        list_lay.setSpacing(6)
+        self._tpl_list = QListWidget(list_panel)
+        self._tpl_list.setFrameShape(QFrame.Shape.NoFrame)
+        self._tpl_list.currentItemChanged.connect(self._on_template_selected)
+        list_lay.addWidget(self._tpl_list)
 
-        palette_panel = QWidget(view)
+        tpl_btn_row = QHBoxLayout()
+        self._tpl_duplicate_btn = cockpit_theme.secondary_button("Duplicate", list_panel)
+        self._tpl_duplicate_btn.clicked.connect(self._on_template_duplicate_clicked)
+        tpl_btn_row.addWidget(self._tpl_duplicate_btn)
+        self._tpl_delete_btn = cockpit_theme.secondary_button("Delete", list_panel)
+        self._tpl_delete_btn.clicked.connect(self._on_template_delete_clicked)
+        tpl_btn_row.addWidget(self._tpl_delete_btn)
+        list_lay.addLayout(tpl_btn_row)
+        lay.addWidget(list_panel)
+        lay.setAlignment(list_panel, Qt.AlignmentFlag.AlignTop)
+
+        # ── right: hop builder for whichever template is selected ────
+        builder_panel = QWidget(view)
+        b_lay = QVBoxLayout(builder_panel)
+        b_lay.setContentsMargins(0, 0, 0, 0)
+        b_lay.setSpacing(12)
+
+        palette_panel = QWidget(builder_panel)
         palette_panel.setObjectName("panel")
         pal_lay = QHBoxLayout(palette_panel)
         pal_lay.setContentsMargins(12, 10, 12, 10)
@@ -4027,15 +4107,15 @@ class SettingsWindow(
             )
             pal_lay.addWidget(btn)
         pal_lay.addStretch(1)
-        lay.addWidget(palette_panel)
+        b_lay.addWidget(palette_panel)
 
-        self._pb_hops_container = QWidget(view)
+        self._pb_hops_container = QWidget(builder_panel)
         self._pb_hops_lay = QVBoxLayout(self._pb_hops_container)
         self._pb_hops_lay.setContentsMargins(0, 0, 0, 0)
         self._pb_hops_lay.setSpacing(4)
-        lay.addWidget(self._pb_hops_container)
+        b_lay.addWidget(self._pb_hops_container)
 
-        add_hop_btn = QPushButton("+ Add hop", view)
+        add_hop_btn = QPushButton("+ Add hop", builder_panel)
         add_hop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_hop_btn.setStyleSheet(
             f"QPushButton {{ border: 1px dashed {cockpit_theme.BORDER_STRONG}; border-radius:"
@@ -4044,29 +4124,15 @@ class SettingsWindow(
             f" {cockpit_theme.ACCENT_GOLD}; }}"
         )
         add_hop_btn.clicked.connect(self._on_add_hop_clicked)
-        lay.addWidget(add_hop_btn)
-        lay.addStretch(1)
+        b_lay.addWidget(add_hop_btn)
+        b_lay.addStretch(1)
+        lay.addWidget(builder_panel, 1)
 
-        self._reload_pb_template_combo()
-        self._pb_template_combo.currentIndexChanged.connect(self._on_pb_template_changed)
-        self._load_pb_hops(self._pipeline_payload.get("activeTemplate", ""))
+        # Populates the list AND (via `_on_template_selected`, wired above)
+        # loads the first/active template's hops into the builder — no
+        # separate "load active template" call needed.
+        self._reload_templates_list()
         return view
-
-    def _reload_pb_template_combo(self) -> None:
-        self._pb_template_combo.blockSignals(True)
-        self._pb_template_combo.clear()
-        for t in self._pipeline_payload.get("templates", []):
-            badge = "  ·  BUILT-IN" if t.get("builtin") else ""
-            self._pb_template_combo.addItem(f"{t['name']}{badge}", t["id"])
-        active = self._pipeline_payload.get("activeTemplate", "")
-        idx = self._pb_template_combo.findData(active)
-        self._pb_template_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self._pb_template_combo.blockSignals(False)
-
-    def _on_pb_template_changed(self, _index: int) -> None:
-        template_id = self._pb_template_combo.currentData()
-        if template_id:
-            self._load_pb_hops(template_id)
 
     def _load_pb_hops(self, template_id: str) -> None:
         tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == template_id), None)
@@ -4199,63 +4265,11 @@ class SettingsWindow(
         self._mark_dirty()
 
     # ──────────────────────────────────────────────────────────
-    # view: Templates (real)
+    # Templates (real) — the list panel built above, in `_build_pipeline_view`
     # ──────────────────────────────────────────────────────────
 
-    def _build_templates_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QHBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(12)
-
-        list_panel = QWidget(view)
-        list_panel.setObjectName("panel")
-        list_panel.setFixedWidth(220)
-        list_lay = QVBoxLayout(list_panel)
-        list_lay.setContentsMargins(6, 6, 6, 6)
-        self._tpl_list = QListWidget(list_panel)
-        self._tpl_list.setFrameShape(QFrame.Shape.NoFrame)
-        self._tpl_list.currentItemChanged.connect(self._on_template_selected)
-        list_lay.addWidget(self._tpl_list)
-        lay.addWidget(list_panel)
-        lay.setAlignment(list_panel, Qt.AlignmentFlag.AlignTop)
-
-        detail_panel = QWidget(view)
-        detail_panel.setObjectName("panel")
-        d_lay = QVBoxLayout(detail_panel)
-        d_lay.setContentsMargins(14, 12, 14, 12)
-        d_lay.setSpacing(10)
-
-        self._tpl_title = QLabel("", detail_panel)
-        self._tpl_title.setObjectName("panelTitle")
-        d_lay.addWidget(self._tpl_title)
-
-        self._tpl_hops_summary = QLabel("", detail_panel)
-        self._tpl_hops_summary.setWordWrap(True)
-        self._tpl_hops_summary.setObjectName("panelHint")
-        d_lay.addWidget(self._tpl_hops_summary)
-        d_lay.addStretch(1)
-
-        btn_row = QHBoxLayout()
-        self._tpl_edit_btn = cockpit_theme.secondary_button("Edit hops ->", detail_panel)
-        self._tpl_edit_btn.clicked.connect(self._on_template_edit_hops_clicked)
-        btn_row.addWidget(self._tpl_edit_btn)
-        self._tpl_duplicate_btn = cockpit_theme.secondary_button("Duplicate", detail_panel)
-        self._tpl_duplicate_btn.clicked.connect(self._on_template_duplicate_clicked)
-        btn_row.addWidget(self._tpl_duplicate_btn)
-        self._tpl_delete_btn = cockpit_theme.secondary_button("Delete", detail_panel)
-        self._tpl_delete_btn.clicked.connect(self._on_template_delete_clicked)
-        btn_row.addWidget(self._tpl_delete_btn)
-        btn_row.addStretch(1)
-        d_lay.addLayout(btn_row)
-
-        lay.addWidget(detail_panel, 1)
-
-        self._reload_templates_list()
-        return view
-
     _TPL_ROW_HEIGHT = 34
-    # list_panel.setFixedWidth(220) in _build_templates_view — the panel's
+    # list_panel.setFixedWidth(220) in `_build_pipeline_view` — the panel's
     # width never changes, so the label's available width can be computed
     # once here instead of chasing live resize events.
     _TPL_LIST_PANEL_WIDTH = 220
@@ -4319,36 +4333,22 @@ class SettingsWindow(
     def _on_template_selected(
         self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
     ) -> None:
+        """Selecting a template in the list (#515) loads its hops straight
+        into the builder on the right — no separate "Edit hops ->" detour."""
         if current is None:
             self._tpl_selected_id = None
-            self._tpl_title.setText("")
-            self._tpl_hops_summary.setText("")
             self._tpl_delete_btn.setEnabled(False)
+            self._pb_template_id = None
+            self._pb_hops = []
+            self._render_pb_hops()
             return
         tid = current.data(Qt.ItemDataRole.UserRole)
         tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == tid), None)
         if tpl is None:
             return
         self._tpl_selected_id = tid
-        self._tpl_title.setText(tpl["name"])
-        lines = [
-            f"HOP {i}: " + (", ".join(e["role"] for e in hop) or "(ว่าง)")
-            for i, hop in enumerate(tpl["hops"], start=1)
-        ]
-        self._tpl_hops_summary.setText("\nv wait for all\n".join(lines) or "(ไม่มี hop)")
         self._tpl_delete_btn.setEnabled(not tpl.get("builtin"))
-
-    def _on_template_edit_hops_clicked(self) -> None:
-        tid = getattr(self, "_tpl_selected_id", None)
-        if not tid:
-            return
         self._load_pb_hops(tid)
-        idx = self._pb_template_combo.findData(tid)
-        if idx >= 0:
-            self._pb_template_combo.blockSignals(True)
-            self._pb_template_combo.setCurrentIndex(idx)
-            self._pb_template_combo.blockSignals(False)
-        self._goto_view(VIEW_PIPELINE_BUILDER)
 
     def _on_template_duplicate_clicked(self) -> None:
         tid = getattr(self, "_tpl_selected_id", None)
@@ -4372,7 +4372,6 @@ class SettingsWindow(
         if not self._persist_pipeline_payload():
             return
         self._reload_templates_list()
-        self._reload_pb_template_combo()
 
     def _on_template_delete_clicked(self) -> None:
         tid = getattr(self, "_tpl_selected_id", None)
@@ -4390,7 +4389,6 @@ class SettingsWindow(
         if not self._persist_pipeline_payload():
             return
         self._reload_templates_list()
-        self._reload_pb_template_combo()
 
     def _persist_pipeline_payload(self) -> bool:
         """Write ``self._pipeline_payload`` (Duplicate/Delete's immediate-commit

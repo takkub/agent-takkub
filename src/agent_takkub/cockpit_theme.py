@@ -777,18 +777,6 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         background: {ACCENT_GOLD};
         border-radius: 2px;
     }}
-    QPushButton#newRoleButton {{
-        margin: 10px 12px 12px 12px;
-        padding: 8px 10px;
-        border-radius: {RADIUS_SM}px;
-        border: 1px solid {GOLD_CHIP_BORDER};
-        background: {GOLD_CHIP_BG};
-        color: {GOLD_CHIP_TEXT};
-        font-weight: 600;
-    }}
-    QPushButton#newRoleButton:hover {{
-        background: {GOLD_CHIP_BG_HOVER};
-    }}
     QWidget#content {{
         background: {GROUND_WINDOW};
     }}

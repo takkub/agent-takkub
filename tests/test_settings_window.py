@@ -95,22 +95,23 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_sixteen_stacked_views(self) -> None:
-        # Settings-nav declutter (2026-08-24): 9 nav-visible views (Pipeline
-        # Builder/Templates/Providers & Roles/MCP Matrix/Plugins Matrix/
-        # Skill Catalog/Skill Matrix/Accounts/Knowledge) + New Role (reached
-        # via its own button, not the nav list) + 4 ADVANCED-section views
-        # (Routing/Brain/Scheduler/Performance) + 1 placeholder slot = 15.
-        # Down from 21 — Role Overlap, Core V2 Overview, Core V2 Migration,
-        # and OpenViking were removed outright; Knowledge/Design Tools/
-        # Context Debug collapsed into one tabbed page. The placeholder slot
-        # at VIEW_CORE_V2_ACCOUNTS is empty since #505 merged Accounts &
-        # Pools into the unified Accounts page — kept so the VIEW_* indices
-        # after it don't shift; `_goto_view` redirects it. +1 (2026-09-07,
-        # #506): the top-level General view (theme mode) = 16. +1
-        # (2026-09-07, #507): the Usage view (token/quota report) = 17.
+    def test_has_seventeen_stacked_slots_eight_nav_visible(self) -> None:
+        # #515 settings diet: 8 nav-visible pages (ทั่วไป/ทีม & ตำแหน่ง/
+        # Pipeline/Tools/Skills/Knowledge/Accounts/Usage across 4 sections —
+        # GENERAL/TEAM/TOOLS/ACCOUNT, no ADVANCED) + 9 dead placeholder
+        # slots for every VIEW_* constant that merged into one of those 8
+        # or was dropped outright (VIEW_TEMPLATES, VIEW_PLUGINS_MATRIX,
+        # VIEW_SKILL_MATRIX, VIEW_NEW_ROLE [now a QDialog, never a stack
+        # page], VIEW_CORE_V2_ACCOUNTS/_ROUTING/_BRAIN/_SCHEDULER,
+        # VIEW_PERFORMANCE) — `_goto_view` redirects every one of those
+        # constants elsewhere (see `TestViewRedirects`), so the placeholder
+        # slots exist only to keep every other VIEW_* index stable. VIEW_*
+        # ints are NOT renumbered on purpose (old routes/tests/deep-links
+        # keyed off them keep working) — total stack count is unchanged at
+        # 17 from before this diet.
         dlg = settings_window.SettingsWindow()
         assert dlg._stack.count() == 17
+        assert len(settings_window._NAV_VIEWS) == 8
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -149,69 +150,103 @@ class TestSettingsWindowStructure:
 
     def test_header_updates_with_view(self) -> None:
         dlg = settings_window.SettingsWindow()
-        dlg._goto_view(settings_window.VIEW_NEW_ROLE)
-        assert dlg._content_title.text() == "New Role"
+        dlg._goto_view(settings_window.VIEW_KNOWLEDGE)
+        assert dlg._content_title.text() == "Knowledge"
         dlg.deleteLater()
 
-    def test_performance_preset_persists_and_requests_live_reload(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PERFORMANCE)
-        dlg._performance_mode.setCurrentIndex(dlg._performance_mode.findData("safe"))
-        assert settings_window.VIEW_PERFORMANCE in dlg._dirty_views
-        dlg._on_save_apply_clicked()
+    def test_machine_mode_change_persists_and_requests_live_reload(self) -> None:
+        """#515: replaces the old Performance page's preset dropdown — same
+        machine-aware `performance_settings.preset()` underneath, but
+        General write-throughs immediately (it's a `_NO_FOOTER_SAVE_VIEWS`
+        page) instead of staging into `_dirty_views` for a footer Save &
+        Apply click."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        dlg._machine_mode_combo.setCurrentIndex(dlg._machine_mode_combo.findData("safe"))
         assert dlg.pending_performance_reload is True
         saved = performance_settings.load()
         assert saved.mode == "safe"
         assert saved.max_heavy_global == 2
-
-
-class TestAdvancedSectionFold:
-    """Sidebar ADVANCED section (Accounts & Pools/Routing/Brain/Scheduler/
-    Performance) — folded by default (`13_SIMPLE_UX.md` "hide internal
-    knobs under Advanced"), toggle persists across a fresh SettingsWindow()
-    the way `project_nav`'s explorer expand/collapse already does."""
-
-    def test_advanced_section_starts_folded(self) -> None:
-        dlg = settings_window.SettingsWindow()
-        toggle = dlg._nav_section_toggles["ADVANCED"]
-        assert toggle.isChecked() is False
-        # Offscreen tests never `.show()` the dialog, so `isVisible()` always
-        # reads False regardless of state — `isHidden()` reflects the
-        # widget's own `setVisible()` call (same pattern used throughout
-        # this file, e.g. `test_lead_warning_hidden_by_default`).
-        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is True
-        # A row inside the folded section still exists and is reachable —
-        # only the sidebar row is hidden, not the underlying page.
-        assert dlg._nav_buttons[settings_window.VIEW_CORE_V2_ROUTING] is not None
         dlg.deleteLater()
 
-    def test_toggling_expands_section_and_persists_across_reopen(self) -> None:
-        dlg = settings_window.SettingsWindow()
-        toggle = dlg._nav_section_toggles["ADVANCED"]
-        toggle.setChecked(True)
-        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is False
+
+class TestViewRedirects:
+    """#515 settings diet: every VIEW_* constant a merged/dropped page used
+    to own now redirects to whichever page absorbed it (`settings_window.
+    _VIEW_REDIRECTS`) — same "old constant still lands somewhere sane"
+    contract #505 established for VIEW_CORE_V2_ACCOUNTS below. Replaces the
+    removed `TestAdvancedSectionFold` (the ADVANCED sidebar section itself
+    is gone — nothing left to fold)."""
+
+    def test_accounts_pools_redirects_to_accounts(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
         dlg.deleteLater()
 
-        # A fresh window (same isolated QSettings store, per this file's own
-        # `_isolate_settings_paths` fixture) must reopen already expanded.
-        reopened = settings_window.SettingsWindow()
-        assert reopened._nav_section_toggles["ADVANCED"].isChecked() is True
-        assert reopened._nav_section_bodies["ADVANCED"].isHidden() is False
-        reopened.deleteLater()
+    def test_templates_redirects_to_pipeline(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_PIPELINE_BUILDER
+        dlg.deleteLater()
 
-    def test_goto_view_inside_folded_section_auto_expands_it(self) -> None:
-        """Jumping straight to an ADVANCED-section view (e.g. `initial_view`)
-        must not leave its own highlighted nav row hidden behind a still-
-        collapsed header."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_SCHEDULER)
-        assert dlg._nav_section_toggles["ADVANCED"].isChecked() is True
-        assert dlg._nav_section_bodies["ADVANCED"].isHidden() is False
-        assert dlg._stack.currentIndex() == settings_window.VIEW_CORE_V2_SCHEDULER
+    def test_plugins_matrix_redirects_to_tools(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_MCP_MATRIX
+        dlg.deleteLater()
+
+    def test_skill_matrix_redirects_to_skills(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_SKILL_CATALOG
+        dlg.deleteLater()
+
+    def test_performance_redirects_to_general(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PERFORMANCE)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_GENERAL
+        dlg.deleteLater()
+
+    def test_core_v2_routing_and_scheduler_redirect_to_general(self) -> None:
+        for legacy in (
+            settings_window.VIEW_CORE_V2_ROUTING,
+            settings_window.VIEW_CORE_V2_SCHEDULER,
+        ):
+            dlg = settings_window.SettingsWindow(initial_view=legacy)
+            assert dlg._stack.currentIndex() == settings_window.VIEW_GENERAL
+            dlg.deleteLater()
+
+    def test_core_v2_brain_redirects_to_knowledge(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_BRAIN)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_KNOWLEDGE
+        dlg.deleteLater()
+
+    def test_new_role_redirects_to_providers_roles(self) -> None:
+        """`_goto_view(VIEW_NEW_ROLE)` must stay a fast, synchronous page-
+        switch (this constructs `SettingsWindow` itself, so a `.exec()` here
+        would hang the test forever) — the dialog only ever opens from its
+        own button's click handler, never through `_goto_view`."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_PROVIDERS_ROLES
+        dlg.deleteLater()
+
+    def test_nav_has_eight_visible_items_in_four_sections(self) -> None:
+        dlg = settings_window.SettingsWindow()
+        assert len(settings_window._NAV_VIEWS) == 8
+        sections = {section for _view, _label, section in settings_window._NAV_VIEWS}
+        assert sections == {"GENERAL", "TEAM", "TOOLS", "ACCOUNT"}
+        assert len(dlg._nav_buttons) == 8
         dlg.deleteLater()
 
 
 class TestNewRoleView:
+    """#515: New Role is a QDialog opened from a button on "ทีม & ตำแหน่ง"
+    now, not a stack page — `_build_new_role_view()` builds the exact same
+    form/attributes (`_nr_*`) `_open_new_role_dialog` wraps in a QDialog,
+    without the blocking `.exec()` a real open would need a user to close;
+    tests call it directly on a plain `SettingsWindow()` instead of the old
+    `initial_view=VIEW_NEW_ROLE` construction (that constant now just
+    redirects to VIEW_PROVIDERS_ROLES, the page the button lives on — see
+    `settings_window._VIEW_REDIRECTS`)."""
+
     def test_create_role_persists_and_registers_live(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         dlg._nr_name.setText("data-eng")
         dlg._nr_label.setText("Data Eng")
         dlg._nr_instructions.setPlainText("do data things")
@@ -225,7 +260,8 @@ class TestNewRoleView:
         dlg.deleteLater()
 
     def test_reserved_name_rejected_without_creating(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         dlg._nr_name.setText("lead")
         dlg._on_create_role_clicked()
 
@@ -233,48 +269,40 @@ class TestNewRoleView:
         assert dlg._nr_status.text().startswith("!")
         dlg.deleteLater()
 
-    def test_footer_save_apply_creates_role_and_accepts(self) -> None:
-        """Codex High #2 — footer Save & Apply while on the New Role view
-        must dispatch to the real create transaction, not just save
-        provider/pipeline state and close over an untouched form."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
-        dlg._nr_name.setText("data-eng")
-        dlg._nr_label.setText("Data Eng")
-
-        dlg._on_save_apply_clicked()
-
-        assert "data-eng" in custom_roles.load_custom_roles()
-        assert dlg.result() == QDialog.DialogCode.Accepted
-        dlg.deleteLater()
-
-    def test_footer_save_apply_invalid_form_does_not_close_dialog(self) -> None:
-        """A reserved/invalid name must not accept() and discard the form —
-        the old behavior saved provider/pipeline state and closed regardless
-        of whether New Role's own form was valid."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
-        dlg._nr_name.setText("lead")  # reserved, create_role() rejects it
-
-        dlg._on_save_apply_clicked()
-
-        assert dlg.result() != QDialog.DialogCode.Accepted
-        assert dlg._nr_status.text().startswith("!")
-        dlg.deleteLater()
-
-    def test_new_role_fields_mark_dirty(self) -> None:
-        """Codex Medium #6 — New Role's fields didn't feed _mark_dirty at
-        all, so no unsaved-changes indicator ever showed for this view."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+    def test_new_role_fields_never_mark_the_window_dirty(self) -> None:
+        """#515: New Role no longer joins the footer's Save & Apply/dirty-
+        tracking transaction at all — it writes through immediately via its
+        own "+ Create Role" button — so typing into its fields must NOT
+        flip the underlying window's unsaved-changes indicator (that would
+        be wrong regardless: those fields describe an entirely different
+        dialog by the time a real user sees them)."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._build_new_role_view()
         assert dlg._dirty is False
         dlg._nr_name.setText("data-eng")
-        assert dlg._dirty is True
+        dlg._nr_instructions.setPlainText("do data things")
+        assert dlg._dirty is False
         dlg.deleteLater()
 
     def test_default_swatch_color_is_in_palette(self) -> None:
         """Codex/Gemini #17 — the initial swatch color must be one of the
         selectable palette colors so a swatch shows selected on first open."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         assert dlg._nr_color == project_nav._AVATAR_COLORS[0]
         assert dlg._nr_color in project_nav._AVATAR_COLORS
+        dlg.deleteLater()
+
+    def test_roster_panel_has_new_role_button_opening_the_dialog(self) -> None:
+        """The one entry point into New Role now (#515) — a button on the
+        "ทีม & ตำแหน่ง" roster card, replacing the old persistent sidebar
+        button that stayed visible regardless of which page was showing."""
+        from PyQt6.QtWidgets import QPushButton
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        buttons = dlg._roster_panel.findChildren(QPushButton)
+        matches = [b for b in buttons if "ตำแหน่งเฉพาะโปรเจค" in b.text()]
+        assert len(matches) == 1
         dlg.deleteLater()
 
 
@@ -303,14 +331,16 @@ class TestNewRoleSkillPicker:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._write_skill(tmp_path, "test-skill", "does a thing")
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         assert [s.name for s, _chk in dlg._nr_skill_checks] == ["test-skill"]
         dlg.deleteLater()
 
     def test_no_skills_dir_shows_empty_list_without_crashing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         assert dlg._nr_skill_checks == []
         dlg.deleteLater()
 
@@ -320,7 +350,8 @@ class TestNewRoleSkillPicker:
         """#4 in the task spec — an empty Instructions box still gets the
         skill reference embedded into the generated default template."""
         self._write_skill(tmp_path, "test-skill", "does a thing")
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         dlg._nr_name.setText("data-eng")
         dlg._nr_label.setText("Data Eng")
         dlg._nr_skill_checks[0][1].setChecked(True)
@@ -336,7 +367,8 @@ class TestNewRoleSkillPicker:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._write_skill(tmp_path, "test-skill", "does a thing")
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         dlg._nr_name.setText("data-eng")
         dlg._nr_instructions.setPlainText("custom instructions here")
         dlg._nr_skill_checks[0][1].setChecked(True)
@@ -353,7 +385,8 @@ class TestNewRoleSkillPicker:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._write_skill(tmp_path, "test-skill", "does a thing")
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         dlg._nr_name.setText("data-eng")
         dlg._nr_instructions.setPlainText("custom instructions here")
 
@@ -376,7 +409,8 @@ class TestNewRoleSkillPicker:
         monkeypatch.setattr(config, "ASSETS_ROOT", assets_root)
         self._write_skill(assets_root, "bundled-skill", "ships in the wheel")
 
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg = settings_window.SettingsWindow()
+        dlg._build_new_role_view()
         assert [s.name for s, _chk in dlg._nr_skill_checks] == ["bundled-skill"]
         dlg.deleteLater()
 
@@ -539,16 +573,19 @@ class TestProvidersRolesView:
         dlg.deleteLater()
 
     def test_reset_on_one_view_keeps_another_views_dirty_state(self) -> None:
-        """Codex Medium #6 — dirty must be tracked per-view, not globally."""
+        """Codex Medium #6 — dirty must be tracked per-view, not globally.
+        Uses Providers & Roles + Pipeline (both still footer-tracked, #515)
+        — New Role no longer participates in this transaction at all (its
+        own "+ Create Role" button writes through immediately), so it can't
+        stand in as "the other still-dirty view" here anymore."""
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         dlg._role_toggles["qa"].setChecked(False)
-        dlg._goto_view(settings_window.VIEW_NEW_ROLE)
-        dlg._nr_name.setText("data-eng")
+        dlg._goto_view(settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._on_add_hop_clicked()
         assert dlg._dirty is True
 
-        dlg._on_reset_clicked()  # reverts the New Role view only
+        dlg._on_reset_clicked()  # reverts the Pipeline view only
 
-        assert dlg._nr_name.text() == ""
         # Providers & Roles' staged qa-disable must still be dirty/unsaved.
         assert dlg._dirty is True
         assert dlg._role_toggles["qa"].isChecked() is False
@@ -809,8 +846,8 @@ class TestPluginsMatrixView:
         from PyQt6.QtWidgets import QLabel
 
         monkeypatch.setattr(settings_window.pane_tools_dialog, "discover_marketplaces", lambda: [])
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
-        view = dlg._stack.widget(settings_window.VIEW_PLUGINS_MATRIX).widget()
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
+        view = dlg._stack.widget(settings_window.VIEW_MCP_MATRIX).widget()
         banner_texts = [
             lbl.text() for lbl in view.findChildren(QLabel) if lbl.objectName() == "infoBanner"
         ]
@@ -823,7 +860,7 @@ class TestPluginsMatrixView:
         monkeypatch.setattr(
             settings_window.pane_tools_dialog, "discover_marketplaces", lambda: ["pordee"]
         )
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
         assert set(dlg._plugin_toggles.keys()) == set(settings_window._matrix_roles())
         for items in dlg._plugin_toggles.values():
             assert set(items.keys()) == {"pordee"}
@@ -843,7 +880,7 @@ class TestPluginsMatrixView:
             lambda: ["ui-ux-pro-max-skill"],
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
         toggle = dlg._plugin_toggles["backend"]["ui-ux-pro-max-skill"]
         assert toggle.isChecked() is False
         toggle.setChecked(True)
@@ -878,7 +915,7 @@ class TestSkillMatrixView:
             "scan_skills",
             lambda roots: self._fake_skills("debug-mantra", "verify"),
         )
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
         assert set(dlg._skill_toggles.keys()) == set(skill_policy.skill_matrix_roles())
         for items in dlg._skill_toggles.values():
             assert set(items.keys()) == {"debug-mantra", "verify"}
@@ -890,7 +927,7 @@ class TestSkillMatrixView:
 
     def test_empty_catalog_shows_empty_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda roots: [])
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
         assert not dlg._skill_matrix_empty.isHidden()
         dlg.deleteLater()
 
@@ -902,7 +939,7 @@ class TestSkillMatrixView:
             "scan_skills",
             lambda roots: self._fake_skills("debug-mantra"),
         )
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
         toggle = dlg._skill_toggles["backend"]["debug-mantra"]
         assert toggle.isChecked() is False
         toggle.setChecked(True)
@@ -919,7 +956,7 @@ class TestSkillMatrixView:
             "scan_skills",
             lambda roots: self._fake_skills("debug-mantra"),
         )
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
         dlg._skill_toggles["backend"]["debug-mantra"].setChecked(True)
         dlg._mark_dirty()
         dlg._on_reset_clicked()
@@ -1152,6 +1189,10 @@ class TestNewSkillForm:
         dlg._ns_name.setText("picker-visible")
         dlg._on_create_skill_clicked()
 
+        # New Role (#515) is a QDialog now — `_build_new_role_view()` builds
+        # the same form/`_nr_*` attributes without the blocking `.exec()` a
+        # real open would need a user to close.
+        dlg._build_new_role_view()
         assert "picker-visible" in {s.name for s, _chk in dlg._nr_skill_checks}
         dlg.deleteLater()
 
@@ -1227,13 +1268,13 @@ class TestSaveApplyAtomicity:
 
 class TestTemplatesView:
     def test_builtin_template_listed_and_delete_disabled(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         assert dlg._tpl_list.count() >= 1
         assert dlg._tpl_delete_btn.isEnabled() is False  # first row is builtin
         dlg.deleteLater()
 
     def test_duplicate_creates_non_builtin_copy(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         before = len(dlg._pipeline_payload["templates"])
         dlg._on_template_duplicate_clicked()
 
@@ -1245,7 +1286,7 @@ class TestTemplatesView:
         dlg.deleteLater()
 
     def test_delete_removes_duplicated_template(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         dlg._on_template_duplicate_clicked()
         dlg._reload_templates_list()
         dlg._tpl_list.setCurrentRow(dlg._tpl_list.count() - 1)
@@ -1257,11 +1298,17 @@ class TestTemplatesView:
         assert len(dlg._pipeline_payload["templates"]) == before - 1
         dlg.deleteLater()
 
-    def test_edit_hops_switches_to_pipeline_builder_view(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
-        dlg._tpl_list.setCurrentRow(0)
-        dlg._on_template_edit_hops_clicked()
-        assert dlg._stack.currentIndex() == settings_window.VIEW_PIPELINE_BUILDER
+    def test_selecting_a_template_loads_its_hops_into_the_builder(self) -> None:
+        """#515: Pipeline merged the old Templates + Pipeline Builder pages
+        into one — selecting a row in the list IS "start editing this
+        template's hops" now, no separate "Edit hops ->" button/detour."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        second_id = dlg._pipeline_payload["templates"][1]["id"]
+        for row in range(dlg._tpl_list.count()):
+            if dlg._tpl_list.item(row).data(Qt.ItemDataRole.UserRole) == second_id:
+                dlg._tpl_list.setCurrentRow(row)
+                break
+        assert dlg._pb_template_id == second_id
         dlg.deleteLater()
 
     def test_long_template_name_is_elided_not_hard_clipped(self) -> None:
@@ -1270,7 +1317,7 @@ class TestTemplatesView:
         fixed-width BUILT-IN chip left too little room for the label."""
         from PyQt6.QtGui import QFontMetrics
 
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         metrics = QFontMetrics(dlg._tpl_list.font())
         long_name = "A Very Long Template Name That Cannot Possibly Fit (UI+API)"
         elided = dlg._elide_template_name(metrics, long_name, avail_width=60)
@@ -1282,7 +1329,7 @@ class TestTemplatesView:
     def test_short_template_name_not_elided(self) -> None:
         from PyQt6.QtGui import QFontMetrics
 
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         metrics = QFontMetrics(dlg._tpl_list.font())
         short_name = "Blank"
         elided = dlg._elide_template_name(metrics, short_name, avail_width=500)
@@ -1292,7 +1339,7 @@ class TestTemplatesView:
     def test_compact_chip_width_reserves_space_for_builtin_badge(self) -> None:
         from PyQt6.QtGui import QFontMetrics
 
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         metrics = QFontMetrics(dlg._tpl_list.font())
         width = dlg._compact_chip_width(metrics, "BUILT-IN")
         assert width > metrics.horizontalAdvance("BUILT-IN")
@@ -1301,7 +1348,7 @@ class TestTemplatesView:
     def test_builtin_row_label_carries_full_name_as_tooltip(self) -> None:
         """Even when elided, the full name must stay reachable (tooltip) —
         eliding must not be a silent data loss."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         first_tpl = dlg._pipeline_payload["templates"][0]
         row_widget = dlg._tpl_list.itemWidget(dlg._tpl_list.item(0))
         name_label = row_widget.layout().itemAt(0).widget()
@@ -1507,9 +1554,8 @@ class TestSkillDescriptionClamp:
         (d / "SKILL.md").write_text(
             f"---\nname: verbose-skill\ndescription: {long_desc}\n---\n\nbody\n", encoding="utf-8"
         )
-        dlg = settings_window.SettingsWindow(
-            project="demo", initial_view=settings_window.VIEW_NEW_ROLE
-        )
+        dlg = settings_window.SettingsWindow(project="demo")
+        dlg._build_new_role_view()
         _skill, chk = dlg._nr_skill_checks[0]
         desc_label = chk.parentWidget().findChildren(settings_window.QLabel)[-1]
         assert desc_label.toolTip() == long_desc
@@ -1543,9 +1589,8 @@ class TestSkillDescriptionClamp:
         (d / "SKILL.md").write_text(
             f"---\nname: debug-mantra\ndescription: {long_desc}\n---\n\nbody\n", encoding="utf-8"
         )
-        dlg = settings_window.SettingsWindow(
-            project="demo", initial_view=settings_window.VIEW_NEW_ROLE
-        )
+        dlg = settings_window.SettingsWindow(project="demo")
+        dlg._build_new_role_view()
         width = dlg._nr_skills_container.sizeHint().width()
         # Audit doc measured 2405px before the fix, 554px after; keep a wide
         # margin above the "after" figure without re-permitting the overflow.
@@ -1792,8 +1837,11 @@ class TestTeamPresetView:
     def test_nav_renamed_and_grouped_under_team_section(self) -> None:
         entries = {label: section for _idx, label, section in settings_window._NAV_VIEWS}
         assert entries["ทีม & ตำแหน่ง"] == "TEAM"
-        assert entries["Pipeline Builder"] == "TEAM"
-        assert entries["Templates"] == "TEAM"
+        # #515: Pipeline Builder + Templates merged into one "Pipeline" nav
+        # item under the same TEAM section.
+        assert entries["Pipeline"] == "TEAM"
+        assert "Pipeline Builder" not in entries
+        assert "Templates" not in entries
         assert "Providers & Roles" not in entries
 
     def test_team_size_shows_four_cards_matching_quick_preset_ids(self) -> None:

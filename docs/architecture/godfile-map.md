@@ -149,14 +149,15 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
 ### 🟡 กลาง
 
 **`mw_user_actions`** → `user_actions.py` — toolbar/button handlers
-- `_show_pipelines_menu`, `_on_team_chip_clicked`, `_open_settings_window`, `_on_open_shell_clicked`, `_on_doctor_clicked`, `_on_provider_chip_clicked`, `_on_provider_state_changed`, `_on_exec_mode_chip_clicked`, `_on_exec_mode_changed`, `_on_auto_resume_chip_clicked`, `_on_auto_resume_changed`, `_on_remote_chip_clicked`, `_apply_remote_config`, `_on_user_changed`, `_on_add_user_clicked`
+- `_show_pipelines_menu`, `_on_team_chip_clicked`, `_open_settings_window`, `_on_open_shell_clicked`, `_on_doctor_clicked`, `_on_remote_chip_clicked`, `_apply_remote_config`, `_on_user_changed`, `_on_add_user_clicked`
 - Removed 2026-09-07 (#505 scope addition): `_on_end_session_clicked`/`_show_end_session_summary` (🏁 End Session button gone — `takkub end-session` CLI + `orchestrator.end_session` remain) and `_on_plan_chip_clicked`/`_on_plan_tier_changed` (clickable plan chip → read-only `_plan_badge` in `status_header.py`, fed by `accounts_adapter`)
+- Removed (date unrecorded, predates #515's audit): `_on_provider_chip_clicked`/`_on_provider_state_changed` and the exec-mode/auto-resume chip click+change handlers — no status-bar chip called them by the time #515 checked (`status_header._build_status_bar`'s widget groups have no exec-mode/rtk/autoresume chip either; `_refresh_rtk_button`'s own docstring: "Central rtk toggle UI removed — rtk is forced enabled when binary is present").
 - Drift: `_on_resume_clicked` removed intentionally (commit `28136df`, 2026-07-10 — see the
   `/remote-control` note below). `_on_ui_review_clicked` and `_on_bug_check_clicked` no longer
   exist anywhere in `src/` (their `broadcast_actions` targets were also never shipped — see the
   status section above). `_open_pipeline_settings_dialog` → only `_show_pipelines_menu` remains.
-  New: the exec-mode/auto-resume/remote chip handlers, `_on_team_chip_clicked` +
-  `_open_settings_window` (Users tab, 2026-07-11).
+  New: the remote chip handler, `_on_team_chip_clicked` + `_open_settings_window`
+  (Users tab, 2026-07-11).
 
 ### 🔴 อันตราย — เก็บไว้ด้วยกัน
 
