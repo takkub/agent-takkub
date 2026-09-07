@@ -1114,6 +1114,90 @@ def check_pane_mcp_handshake(role: str, project: str | None = None) -> list[Find
 
 
 # ---------------------------------------------------------------------------
+# [boot-context] — issue #516: per-role/per-category boot-token audit,
+# no live pane required. See boot_context.py's module docstring for why the
+# measurement logic lives there (a leaf module) rather than being imported
+# from spawn_engine.py (pulls PyQt6 at module level).
+# ---------------------------------------------------------------------------
+
+# Claude-native teammates whose spawn goes through --append-system-prompt-file
+# (see spawn_engine's role_md_file assembly). Provider-alias roles
+# (codex/gemini/opencode/kimi/cursor) boot through a different mechanism
+# (agents_md_file bridge, no --append-system-prompt-file) and Lead's own
+# system-prompt assembly is a separate function (_render_lead_context) — both
+# are out of scope for this pass and tracked as a gap (issue #516 point 6),
+# not silently skipped.
+_BOOT_CONTEXT_DEFAULT_ROLES = (
+    "frontend",
+    "backend",
+    "mobile",
+    "devops",
+    "qa",
+    "reviewer",
+    "critic",
+    "designer",
+)
+
+
+def check_boot_context(role: str | None, project: str) -> tuple[list[Finding], str]:
+    """`takkub doctor --boot-context [--role r] [--project p]`.
+
+    Returns (findings, human-readable detail report). The detail report
+    (per-category chars/est-tokens breakdown) is too dense for the normal
+    one-line-per-Finding format, so callers print it separately — same
+    pattern as --ram/--workspace's raw-dict json/text handling.
+    """
+    from . import boot_context
+    from .roles import all_role_names
+
+    findings: list[Finding] = []
+    known = set(all_role_names())
+    if role:
+        roles_to_check = [role.strip().lower()]
+    else:
+        roles_to_check = [r for r in _BOOT_CONTEXT_DEFAULT_ROLES if r in known]
+
+    reports: list[boot_context.RoleBootReport] = []
+    for r in roles_to_check:
+        try:
+            rep = boot_context.build_report(r, project)
+        except Exception as e:
+            findings.append(Finding("boot-context", r, Status.FAIL, f"could not measure: {e}"))
+            continue
+        reports.append(rep)
+        findings.append(
+            Finding(
+                "boot-context",
+                r,
+                Status.INFO,
+                f"~{rep.total_est_tokens} tok lower-bound across {len(rep.categories)} "
+                f"categor(y/ies) — see detail report below for the breakdown",
+            )
+        )
+
+    try:
+        native_mem = boot_context.measure_native_project_memory(project)
+    except Exception:
+        native_mem = None
+    if native_mem is not None:
+        findings.append(
+            Finding(
+                "boot-context",
+                "native_project_memory",
+                Status.WARN,
+                f"{native_mem.chars} chars (~{native_mem.est_tokens} tok lower bound) at "
+                f"{native_mem.detail} — auto-loaded into EVERY role's pane for this "
+                "project (Claude's native /memory feature keys off "
+                "CLAUDE_CODE_PROJECT_DIR_NAME, which cockpit sets to the same value "
+                "for every role); not role-specific",
+            )
+        )
+
+    report_text = boot_context.format_report(reports, native_mem)
+    return findings, report_text
+
+
+# ---------------------------------------------------------------------------
 # [projects]
 # ---------------------------------------------------------------------------
 
