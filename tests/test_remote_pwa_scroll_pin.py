@@ -61,7 +61,7 @@ class TestShowThinkingRespectsPin:
 
     def test_append_msg_dom_accepts_skip_scroll_for_bulk_rebuild(self):
         js = _read("app.js")
-        assert "function appendMsgDom(kind, text, skipScroll)" in js
+        assert "function appendMsgDom(kind, text, ts, skipScroll)" in js
         assert "if (!skipScroll) {" in js
 
 

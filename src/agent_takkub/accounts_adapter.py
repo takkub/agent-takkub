@@ -418,7 +418,15 @@ def login_launch(provider: str, config_dir: str) -> tuple[list[str], dict[str, s
     so logging in here lands the credential exactly where panes will read it.
     """
     if provider == "claude":
-        exe = config.find_claude_executable()
+        try:
+            exe = config.find_claude_executable()
+        except RuntimeError:
+            # Not installed / not resolvable right now (e.g. CI, a fresh
+            # machine) — the card page builds every account's row through
+            # this on every render (panel build + retheme), so this must
+            # report "no login flow available" rather than blow up the
+            # whole Accounts page for every provider (#505 regression).
+            return None
         home = config_dir or str(user_profile._DEFAULT_CONFIG_DIR)
         return [exe], {"CLAUDE_CONFIG_DIR": home}
     if provider == "codex":

@@ -181,15 +181,24 @@ class TestMultiLineSseIntegrityOverRealHttp:
 
             server.broadcaster.push("lead", multiline, "default")
 
-            expected = f"event: lead\ndata: {json.dumps({'text': multiline})}\n\n".encode()
-            chunk = resp.read(len(expected))
-            assert chunk == expected
-            # Exactly one SSE frame (one blank-line-terminated block) reached
-            # the wire — the embedded "event:"/"data:" substrings inside the
-            # JSON-encoded payload never became real SSE line framing (H-C).
-            lines = chunk.decode().split("\n")
-            assert lines[0] == "event: lead"
-            assert lines[1].startswith("data: ")
-            assert lines[2:] == ["", ""]
+            # #517 stamps every pushed payload with a live "ts" (time.time()),
+            # so the frame can no longer be compared byte-for-byte against a
+            # fixed expected string — read it line-by-line instead and check
+            # the JSON body's fields directly.
+            event_line = resp.readline().decode()
+            data_line = resp.readline().decode()
+            blank_line = resp.readline().decode()
+
+            assert event_line == "event: lead\n"
+            assert data_line.startswith("data: ")
+            body = json.loads(data_line[len("data: ") :])
+            assert body["text"] == multiline
+            assert isinstance(body["ts"], (int, float))
+            # The blank line closing the frame — proves the multi-line text
+            # (with its own embedded "event:"/"data:" substrings) stayed
+            # fully inside the single JSON-encoded data line and never
+            # became real SSE line framing (H-C), i.e. exactly one intact
+            # frame reached the wire.
+            assert blank_line == "\n"
         finally:
             conn.close()
