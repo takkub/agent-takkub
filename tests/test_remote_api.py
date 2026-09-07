@@ -1537,3 +1537,100 @@ class TestProjects:
         monkeypatch.setattr(api._config, "list_project_names", lambda: [])
         monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
         assert api.projects(None)["mode"] == "view"
+
+
+class _FakeOrchTeamPreset:
+    """`team_preset_status`/`team_preset_set` only ever call `_resolve_project`
+    (never `.parent()` — no main_window round trip, unlike open/close) and
+    `set_team_preset` for the write path."""
+
+    def __init__(self, *, set_ok: bool = True, set_msg: str = "team preset set to solo-lead"):
+        self._set_ok = set_ok
+        self._set_msg = set_msg
+        self.set_calls: list[tuple[str, str | None]] = []
+
+    def _resolve_project(self, project):
+        return project or "default-proj"
+
+    def set_team_preset(self, preset_id, project=None, *, custom=None):
+        self.set_calls.append((preset_id, project))
+        return self._set_ok, self._set_msg
+
+
+class TestTeamPresetStatus:
+    """#512 item 7/mobile — GET /api/team-preset must be view-mode safe
+    (read-only, no orchestrator write) and never read through an active
+    per-task override for the `preset`/`preset_label` fields (those name the
+    project's STANDING preset, matching what a POST here would write)."""
+
+    def test_default_project_reports_auto(self, monkeypatch, tmp_path):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+        result = api.team_preset_status(_FakeOrchTeamPreset(), "proj")
+        assert result["project"] == "proj"
+        assert result["preset"] == "auto"
+        assert result["preset_label"] == team_preset.label("auto")
+        assert result["override"] is None
+        assert result["override_label"] is None
+
+    def test_standing_preset_reported_even_with_override_active(self, monkeypatch, tmp_path):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+        team_preset.set_current("full", "proj")
+        team_preset.set_override("solo-lead", "proj")
+        result = api.team_preset_status(_FakeOrchTeamPreset(), "proj")
+        # `preset` is the STANDING value (what Settings/this POST would
+        # change) — `effective` is what's actually governing right now.
+        assert result["preset"] == "full"
+        assert result["override"] == "solo-lead"
+        assert result["effective"] == "solo-lead"
+        assert result["verify"] == "self"
+
+    def test_options_cover_the_four_quick_presets_in_order(self, monkeypatch, tmp_path):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+        result = api.team_preset_status(_FakeOrchTeamPreset(), "proj")
+        assert [o["id"] for o in result["options"]] == list(team_preset.QUICK_PRESET_IDS)
+        for opt in result["options"]:
+            assert opt["label"] and opt["desc"] and opt["pane_note"]
+
+    def test_missing_project_resolves_via_orch(self):
+        orch = _FakeOrchTeamPreset()
+        result = api.team_preset_status(orch, None)
+        assert result["project"] == "default-proj"
+
+
+class TestTeamPresetSet:
+    def test_rejects_non_quick_preset_id(self):
+        orch = _FakeOrchTeamPreset()
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.team_preset_set(orch, "proj", "custom")
+        assert excinfo.value.status == 400
+        assert orch.set_calls == []
+
+    def test_rejects_non_string_preset(self):
+        orch = _FakeOrchTeamPreset()
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.team_preset_set(orch, "proj", 123)
+        assert excinfo.value.status == 400
+
+    def test_orchestrator_failure_surfaces_as_400(self):
+        orch = _FakeOrchTeamPreset(set_ok=False, set_msg="unknown team preset override")
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.team_preset_set(orch, "proj", "full")
+        assert excinfo.value.status == 400
+        assert excinfo.value.msg == "unknown team preset override"
+
+    def test_success_writes_through_orchestrator_and_returns_fresh_status(
+        self, monkeypatch, tmp_path
+    ):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+        orch = _FakeOrchTeamPreset()
+        result = api.team_preset_set(orch, "proj", "pair")
+        assert orch.set_calls == [("pair", "proj")]
+        assert result["project"] == "proj"

@@ -199,12 +199,25 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _team_preset_chip_style() -> str:
+        """Gold soft-chip treatment (matches Settings' team-size cards and
+        the mockup's status-bar chip) — always the same accent since a team
+        preset isn't an on/off state, just a value that changes."""
+        return (
+            "QPushButton { "
+            f"background:{cockpit_theme.GOLD_CHIP_BG}; color:{cockpit_theme.GOLD_CHIP_TEXT}; "
+            f"border:1px solid {cockpit_theme.GOLD_CHIP_BORDER}; "
+            f"border-radius:{cockpit_theme.RADIUS_MD}px; padding:2px 10px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{cockpit_theme.GOLD_CHIP_BG_HOVER}; }}"
+        )
+
+    @staticmethod
     def _overage_chip_style() -> str:
         """Outline chip for the ⚠ usage-overage warning.
 
         Unlike the other status-bar chips this one is never toggled — it's a
         pure warning, shown only while true — so it has a single style (warn
-        amber), not a paired on/off pair like _auto_resume_chip_style.
+        amber), not a paired on/off pair like `_remote_chip_style`.
         """
         brand = cockpit_theme.STATE_WARN_ALT
         return (
@@ -274,11 +287,13 @@ class StatusHeaderMixin:
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
-        Quiet by default so the bar reads calm and the one accented button
-        (End Session, destructive) carries the visual weight. Replaces the
-        old per-button rainbow fills (every button shouted equally →
-        Christmas-tree effect, no hierarchy). `:checked` covers the
-        toggle-style Logs button.
+        Quiet by default so the bar reads calm — replaces the old per-button
+        rainbow fills (every button shouted equally → Christmas-tree effect,
+        no hierarchy). `:checked` covers the toggle-style Logs button. (The
+        🏁 End Session button that used to be this row's one accented/
+        destructive exception was removed 2026-09-07, #505 — `takkub
+        end-session` is CLI-only now; see `TestRemovedControlsStayRemoved`
+        in test_status_header_plan_badge.py.)
         """
         return (
             f"QPushButton {{ color:{cockpit_theme.TEXT_SECONDARY}; background:transparent; "
@@ -329,6 +344,16 @@ class StatusHeaderMixin:
         self._plan_badge_cache: dict[str, str | None] = {}
         self._plan_badge_probe_busy = False
         self._refresh_plan_badge()
+
+        # 👥 Team-size chip (#512) — the space #505 freed by making the plan
+        # badge read-only. "ทีม: <preset>" for the ACTIVE project's
+        # EFFECTIVE team preset (standing, or the per-task override when one
+        # is active) — click opens a quick-pick menu of the 4 built-in
+        # presets (user_actions._on_team_preset_chip_clicked).
+        self._chip_team_preset = QPushButton("ทีม: —", self)
+        self._chip_team_preset.setStyleSheet(self._team_preset_chip_style())
+        self._chip_team_preset.clicked.connect(self._on_team_preset_chip_clicked)
+        self._refresh_team_preset_chip()
 
         # ⚠ Usage-overage chip: warns when the ACTIVE project's Claude
         # account has fully exhausted its 5-hour usage window. Anthropic
@@ -571,7 +596,7 @@ class StatusHeaderMixin:
         #
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
-        #     2a. exec      — account plan · usage-overage warning · execution mode
+        #     2a. exec      — account plan · team-size chip (#512) · usage-overage warning
         #     2b. session   — auto-resume · remote · graft build status
         #     2c. system    — rtk install · restart · team · update
         for w in (
@@ -582,7 +607,7 @@ class StatusHeaderMixin:
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
-            (self._plan_badge, self._chip_overage),
+            (self._plan_badge, self._chip_team_preset, self._chip_overage),
             (self._chip_remote, self._chip_graft),
             (
                 self._btn_restart,
@@ -608,6 +633,9 @@ class StatusHeaderMixin:
         self.orch.statusChanged.connect(self._update_status)
         # A CLI-side `takkub plan` flip still lands here — repaint the badge.
         self.orch.planTierChanged.connect(lambda _tier: self._refresh_plan_badge())
+        # A CLI/mobile-side `takkub team set` (or a live Settings Save &
+        # Apply) also lands here — same reasoning as planTierChanged above.
+        self.orch.teamPresetChanged.connect(lambda _proj, _preset: self._refresh_team_preset_chip())
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
@@ -719,6 +747,7 @@ class StatusHeaderMixin:
         self._refresh_remote_chip()
         self._refresh_overage_chip()
         self._refresh_plan_badge()
+        self._refresh_team_preset_chip()
         self._update_provider_chip()
         self._refresh_active_provider_usage()
         self._refresh_performance_health_chip()
@@ -1010,6 +1039,40 @@ class StatusHeaderMixin:
         self._plan_badge_probe_busy = False
         self._plan_badge_cache[config_dir] = plan if isinstance(plan, str) else None
         self._refresh_plan_badge()
+
+    def _refresh_team_preset_chip(self) -> None:
+        """Repaint "ทีม: <preset>" for the ACTIVE project's EFFECTIVE team
+        preset (#512) — the per-task override when one is active, else the
+        project's standing preset (same resolution `team_preset.current`
+        already does). A bare local-JSON read (like `team_preset.current`
+        itself), so this is cheap enough to call every `_update_status` tick
+        — same reasoning as `_refresh_plan_badge`'s cache-only contract,
+        just with no cache needed here at all."""
+        if "_chip_team_preset" not in self.__dict__:
+            return
+        from . import team_preset
+        from .config import active_project
+
+        try:
+            proj, _ = active_project()
+        except Exception:
+            proj = None
+        if not proj:
+            self._chip_team_preset.setText("ทีม: —")
+            self._chip_team_preset.setToolTip("ยังไม่มีโปรเจคที่เปิดอยู่")
+            return
+        cfg = team_preset.current(proj)
+        override = team_preset.active_override(proj)
+        label = team_preset.label(cfg["preset"])
+        # No trailing dropdown glyph ("▾" tofus on IBM Plex, 2026-07-24
+        # design review #4) — matches the sibling 👥 Team/🤖 Accounts chips'
+        # plain-text style; the tooltip below already says "คลิกเพื่อเปลี่ยน".
+        self._chip_team_preset.setText(f"ทีม: {label}")
+        tooltip = f"ขนาดทีมของโปรเจคนี้ตอนนี้: {label} — ตรวจงานด้วย: {team_preset.verify_mode(cfg)}"
+        if override:
+            tooltip += f"\noverride เฉพาะงานนี้ (ค่าโปรเจคจริง: {team_preset.label(team_preset.current_preset_id(proj))})"
+        tooltip += "\nคลิกเพื่อเปลี่ยน"
+        self._chip_team_preset.setToolTip(tooltip)
 
     # ──────────────────────────────────────────────────────────────
     # 🧠 Graft chip — code-graph auto-build status

@@ -191,9 +191,15 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     # General first — theme + everyday knobs live at top level, never under
     # ADVANCED (#506 user directive "ไม่ซุกใน Advanced").
     (VIEW_GENERAL, "General", "GENERAL"),
-    (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "PIPELINE"),
-    (VIEW_TEMPLATES, "Templates", "PIPELINE"),
-    (VIEW_PROVIDERS_ROLES, "Providers & Roles", "ROLE"),
+    # #512: "ทีม & ตำแหน่ง" (ex-"Providers & Roles") leads the TEAM section —
+    # team-size preset first, roster/provider detail below it — with Pipeline
+    # Builder/Templates (still their own views, unchanged) grouped under the
+    # same section since "which hop sequence runs" is part of the same team
+    # question. Was section "ROLE" (this view) + "PIPELINE" (the other two);
+    # merged so the sidebar doesn't split one team-shape decision in half.
+    (VIEW_PROVIDERS_ROLES, "ทีม & ตำแหน่ง", "TEAM"),
+    (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "TEAM"),
+    (VIEW_TEMPLATES, "Templates", "TEAM"),
     (VIEW_MCP_MATRIX, "MCP Matrix", "TOOLS"),
     (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
@@ -301,8 +307,8 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_PIPELINE_BUILDER: ("Pipeline Builder", "ลาก-วาง hop และ role ใน pipeline template"),
     VIEW_TEMPLATES: ("Templates", "จัดการ pipeline template ที่บันทึกไว้"),
     VIEW_PROVIDERS_ROLES: (
-        "Providers & Roles",
-        "เปิด/ปิด provider (codex/gemini) + กำหนด CLI ต่อ role",
+        "ทีม & ตำแหน่ง",
+        "ขนาดทีมของโปรเจคนี้ (#512) + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
     ),
     VIEW_MCP_MATRIX: ("MCP Matrix", "role × MCP server policy"),
     VIEW_PLUGINS_MATRIX: ("Plugins Matrix", "role × plugin policy"),
@@ -371,6 +377,25 @@ def _overridable_roles() -> tuple[str, ...]:
     if "lead" not in provider_config.FORCED_ROLES:
         pipeline_roles = ("lead", *pipeline_roles)
     return pipeline_roles
+
+
+def _provider_installed(provider: str) -> bool:
+    """True unless `provider`'s CLI is registered with a discovery probe
+    that came back empty — used only for the "สมองเสริม" chip strip's
+    "ยังไม่ติดตั้ง" label (#512 item 3), a lighter question than
+    `provider_config._provider_available` (which also folds in the
+    disabled-providers toggle). Defaults True on a discovery error/missing
+    probe — a probe failure isn't proof of absence, and this label is
+    advisory only (the actual gate stays MODEL CONNECTIONS' toggle)."""
+    if provider == provider_config.CLAUDE:
+        return True
+    spec = provider_spec.PROVIDER_REGISTRY.get(provider)
+    if spec is None or spec.custom_discovery_fn is None:
+        return True
+    try:
+        return spec.custom_discovery_fn() is not None
+    except Exception:
+        return True
 
 
 _PROVIDER_DESC: dict[str, str] = {
@@ -802,6 +827,14 @@ class SettingsWindow(
         # broadcast a status-bar chip click produces.
         self.pending_provider_disabled: dict[str, bool] = {}
         self.pending_performance_reload = False
+        # #512: staged team-size pick, applied on Save & Apply (persisted
+        # inside this same transaction, see _on_save_apply_clicked) — a
+        # separate flag (not folded into pending_provider_disabled) so the
+        # caller (user_actions._open_legacy_settings_window) can additionally
+        # route it through orchestrator.set_team_preset for the live-Lead
+        # broadcast + teamPresetChanged signal, same split as
+        # pending_provider_disabled/orchestrator.toggle_provider.
+        self.pending_team_preset: str | None = None
         # Pipeline Builder/Templates share this in-memory copy of pipelines.json
         # (structural edits — Duplicate/Delete — write through immediately and
         # refresh it; hop edits stay staged here until Save & Apply).
@@ -1348,13 +1381,28 @@ class SettingsWindow(
             role_providers = {
                 role: combo.currentData() for role, combo in self._role_provider_combos.items()
             }
-            # scope=_overridable_roles() (#1): this page only renders a control
-            # for these roles — anything else already on disk (a custom
-            # role's override, say) must be preserved, not silently dropped
-            # by a naive full-replace write.
+            # scope=self._role_provider_combos.keys(): this page renders a
+            # control only for the team_preset ROSTER (#512 — positions +
+            # lead + whichever ONE role is the active checker, not the full
+            # _overridable_roles() set anymore) — anything outside that (a
+            # custom role's override, or the checker role NOT currently
+            # active, say) must be preserved, not silently dropped by a
+            # naive full-replace write.
             provider_config.save_role_overrides(
-                role_providers, self._project, scope=_overridable_roles()
+                role_providers, self._project, scope=self._role_provider_combos.keys()
             )
+
+            # #512: persist a staged team-size card pick BEFORE the
+            # rolesEnabled write below — note_manual_roles_change (right
+            # after) diffs the saved roles against the STANDING preset on
+            # disk, and the roster panel's toggles already reflect the
+            # newly-picked preset's roles (see _rebuild_roster_panel), so the
+            # standing preset must already be the new one or that diff would
+            # see false drift and wrongly flip the project to "custom".
+            from . import team_preset as _team_preset
+
+            if self.pending_team_preset is not None:
+                _team_preset.set_current(self.pending_team_preset, self._project)
 
             payload = pipeline_config.load(self._project)
             roles_enabled = dict(payload.get("rolesEnabled", {}))
@@ -1376,8 +1424,6 @@ class SettingsWindow(
             # sits on a FIXED team preset flips it to "custom" (carrying the
             # other resolved fields along) so the preset doesn't silently
             # overwrite the user's manual choice on its next apply.
-            from . import team_preset as _team_preset
-
             _team_preset.note_manual_roles_change(roles_enabled, self._project)
 
             updated_mcps = pane_tools_dialog.matrix_to_role_items(
@@ -1516,7 +1562,18 @@ class SettingsWindow(
     def retheme(self) -> None:
         """#506: re-apply this dialog's stylesheet + placeholder palette with
         the currently-bound token set (called via
-        ``cockpit_theme.retheme_open_windows``)."""
+        ``cockpit_theme.retheme_open_windows``).
+
+        #505 review M9: the parent QSS cascade above does NOT reach a child
+        that was styled with its own inline ``setStyleSheet(f"...{color}...")``
+        at BUILD time (Accounts' account-name/plan labels, Usage's card/
+        table/quota labels) — that literal color string is baked in and the
+        child never re-reads ``cockpit_theme`` again on its own. Rebuilding
+        those specific children from already-held state (never re-reading
+        credentials or re-querying the ledger) is cheap enough to do on
+        every retheme and is the only way they pick up the new variant
+        before the next full Settings reopen.
+        """
         fonts = self._fonts
         self.setStyleSheet(cockpit_theme.build_stylesheet(str(fonts["sans"]), str(fonts["mono"])))
         palette = self.palette()
@@ -1525,6 +1582,10 @@ class SettingsWindow(
         # Nav icons are per-variant SVG files — refresh the current tones.
         for idx, btn in self._nav_buttons.items():
             btn.setIcon(_nav_icon(idx, active=bool(btn.property("active"))))
+        if hasattr(self, "_accounts_rows_box"):
+            self._render_accounts_rows(self._accounts_rows_cache)
+        if hasattr(self, "_usage_cards_row"):
+            self._retheme_usage()
 
     # ──────────────────────────────────────────────────────────
     # view: Performance (persisted + live-applied by the caller)
@@ -1700,6 +1761,21 @@ class SettingsWindow(
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(14)
 
+        # #512 — ordered per the item list: team size, then the roster it
+        # governs, then the optional secondary providers, then the detailed
+        # provider connections panel (unchanged, just moved down since
+        # "which positions" now leads the page it used to follow).
+        lay.addWidget(self._build_team_size_panel(view))
+
+        self._roster_panel = QWidget(view)
+        roster_outer = QVBoxLayout(self._roster_panel)
+        roster_outer.setContentsMargins(0, 0, 0, 0)
+        roster_outer.setSpacing(0)
+        lay.addWidget(self._roster_panel)
+        self._rebuild_roster_panel()
+
+        lay.addWidget(self._build_secondary_brains_panel(view))
+
         banner = QLabel(
             "provider ที่ปิดหรือยังไม่ติดตั้ง -> Claude รับตำแหน่งแทนอัตโนมัติ "
             "(role เดิม, engine เปลี่ยนเป็น claude — เสีย model diversity)",
@@ -1768,19 +1844,211 @@ class SettingsWindow(
             pp_lay.addWidget(row)
         lay.addWidget(provider_panel)
 
-        roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
-        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
+        lay.addStretch(1)
+        return view
 
-        role_panel = QWidget(view)
+    # ── #512: team size + roster (moved to lead this page) ─────
+
+    def _build_team_size_panel(self, parent: QWidget) -> QWidget:
+        """4 selectable cards (solo-lead/pair/full/auto) — write-through is
+        staged (`self.pending_team_preset`), not immediate: this page's
+        other controls (roster toggles, provider CLI) already gate behind
+        the footer Save & Apply transaction, so team size follows the same
+        rule rather than being the one write-through control on the page.
+        Picking a card re-renders the roster panel to PREVIEW that preset's
+        roles (`_rebuild_roster_panel`, reading `team_preset.resolve()` —
+        never disk) so the two panels can't show conflicting state while
+        the dialog is still open."""
+        from . import team_preset
+
+        panel = QWidget(parent)
+        panel.setObjectName("panel")
+        p_lay = QVBoxLayout(panel)
+        p_lay.setContentsMargins(14, 12, 14, 12)
+        p_lay.setSpacing(10)
+
+        standing_id = team_preset.current_preset_id(self._project)
+        # Not `_build_card_header` (its tag chip is a fire-and-forget QLabel
+        # built at construction time) — this header's tag must keep tracking
+        # the staged pick live as cards are clicked, so it needs a widget
+        # reference `_refresh_team_size_panel` can restyle in place.
+        header = QWidget(panel)
+        header_lay = QVBoxLayout(header)
+        header_lay.setContentsMargins(0, 0, 0, 0)
+        header_lay.setSpacing(2)
+        top_row = QWidget(header)
+        top_lay = QHBoxLayout(top_row)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.setSpacing(8)
+        mono = cockpit_theme.ensure_fonts_loaded()["mono"]
+        kicker_lbl = QLabel("TEAM SIZE", top_row)
+        kicker_lbl.setStyleSheet(
+            f'font-family: "{mono}"; font-size: 10px; font-weight: 600; '
+            f"letter-spacing: 1.5px; color: {cockpit_theme.TEXT_FAINT};"
+        )
+        top_lay.addWidget(kicker_lbl)
+        top_lay.addStretch(1)
+        self._team_size_tag_chip = cockpit_theme.gold_soft_chip(
+            team_preset.label(standing_id), top_row, compact=True
+        )
+        top_lay.addWidget(self._team_size_tag_chip)
+        header_lay.addWidget(top_row)
+        title_lbl = QLabel("ขนาดทีมของโปรเจคนี้", header)
+        title_lbl.setObjectName("panelTitle")
+        header_lay.addWidget(title_lbl)
+        p_lay.addWidget(header)
+
+        cards_row = QWidget(panel)
+        cards_lay = QHBoxLayout(cards_row)
+        cards_lay.setContentsMargins(0, 0, 0, 0)
+        cards_lay.setSpacing(8)
+        self._team_preset_cards: dict[str, QWidget] = {}
+        for pid in team_preset.QUICK_PRESET_IDS:
+            card = self._build_team_preset_card(pid, cards_row)
+            cards_lay.addWidget(card, 1)
+            self._team_preset_cards[pid] = card
+        p_lay.addWidget(cards_row)
+
+        self._team_preset_hint = QLabel(
+            "โหมดทำเอง Lead ยังต้องรัน test/screenshot ก่อนปิดงาน และ qa-gate ยังตรวจก่อน push",
+            panel,
+        )
+        self._team_preset_hint.setObjectName("panelHint")
+        self._team_preset_hint.setWordWrap(True)
+        p_lay.addWidget(self._team_preset_hint)
+
+        mono = cockpit_theme.ensure_fonts_loaded()["mono"]
+        self._team_preset_exec_line = QLabel("", panel)
+        self._team_preset_exec_line.setStyleSheet(
+            f'font-family: "{mono}"; font-size: 10px; color: {cockpit_theme.TEXT_FAINT};'
+        )
+        p_lay.addWidget(self._team_preset_exec_line)
+
+        self._selected_team_preset_id = standing_id
+        self._refresh_team_size_panel()
+        return panel
+
+    def _build_team_preset_card(self, preset_id: str, parent: QWidget) -> QWidget:
+        from . import team_preset
+
+        card = QWidget(parent)
+        card.setObjectName("teamPresetCard")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.setAccessibleName(f"เลือกขนาดทีม {team_preset.label(preset_id)}")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(4)
+
+        title = QLabel(team_preset.label(preset_id), card)
+        title.setObjectName("panelTitle")
+        lay.addWidget(title)
+
+        desc = QLabel(team_preset.description(preset_id), card)
+        desc.setObjectName("panelHint")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        mono = cockpit_theme.ensure_fonts_loaded()["mono"]
+        pane_note = QLabel(team_preset.pane_note(preset_id), card)
+        pane_note.setStyleSheet(
+            f'font-family: "{mono}"; font-size: 10px; color: {cockpit_theme.TEXT_FAINT};'
+        )
+        lay.addWidget(pane_note)
+
+        # A real painted dot, not a "○"/"●" text glyph — IBM Plex Sans/Mono
+        # don't ship those code points (2026-07-24 design review #4, same
+        # tofu this file's other radio/dot indicators already dodge via
+        # `cockpit_theme.color_dot`).
+        radio = cockpit_theme.color_dot(cockpit_theme.BORDER_STRONG2, card, size=10)
+        radio.setObjectName(f"teamPresetRadio_{preset_id}")
+        radio_row = QHBoxLayout()
+        radio_row.setContentsMargins(0, 2, 0, 0)
+        radio_row.addWidget(radio)
+        radio_row.addStretch(1)
+        lay.addLayout(radio_row)
+        card.setProperty("_radio", radio)
+
+        def _handler(_evt: object, pid: str = preset_id) -> None:
+            self._on_team_preset_card_clicked(pid)
+
+        card.mousePressEvent = _handler  # type: ignore[method-assign]
+        return card
+
+    def _team_preset_card_style(self, selected: bool) -> str:
+        if selected:
+            return (
+                f"QWidget#teamPresetCard {{ background:{cockpit_theme.GOLD_CHIP_BG}; "
+                f"border:1px solid {cockpit_theme.GOLD_CHIP_BORDER}; "
+                f"border-radius:{cockpit_theme.RADIUS_MD}px; }}"
+            )
+        return (
+            f"QWidget#teamPresetCard {{ background:transparent; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; "
+            f"border-radius:{cockpit_theme.RADIUS_MD}px; }}"
+            f"QWidget#teamPresetCard:hover {{ border-color:{cockpit_theme.BORDER_STRONG2}; }}"
+        )
+
+    def _on_team_preset_card_clicked(self, preset_id: str) -> None:
+        self._selected_team_preset_id = preset_id
+        self.pending_team_preset = preset_id
+        self._mark_dirty()
+        self._refresh_team_size_panel()
+        self._rebuild_roster_panel()
+
+    def _refresh_team_size_panel(self) -> None:
+        from . import team_preset
+
+        for pid, card in self._team_preset_cards.items():
+            selected = pid == self._selected_team_preset_id
+            card.setStyleSheet(self._team_preset_card_style(selected))
+            radio = card.property("_radio")
+            if radio is not None:
+                color = cockpit_theme.ACCENT_GOLD if selected else cockpit_theme.BORDER_STRONG2
+                radio.setStyleSheet(f"background: {color}; border-radius: 5px;")
+
+        label = team_preset.label(self._selected_team_preset_id)
+        self._team_size_tag_chip.setText(label)
+
+        cfg = team_preset.resolve(self._selected_team_preset_id, self._project)
+        exec_label = "แตกหลายคน" if cfg["exec_mode"] == "parallel" else "1 คน/ตำแหน่ง"
+        self._team_preset_exec_line.setText(f"โหมดทำงาน: {exec_label}")
+
+    def _rebuild_roster_panel(self) -> None:
+        """(Re)builds the 'ตำแหน่งในทีม' panel for `self._selected_team_preset_id`
+        — one row per POSITION_ROLES + custom role the preset roster covers,
+        Lead (always, never preset-governed), and ONE row for whichever role
+        is the active checker (labeled '<role> — ตัวตรวจ'), per #512 item 2.
+        Called on first build AND every team-size card click (preview, no
+        disk write — see `_build_team_size_panel`)."""
+        from . import team_preset as _team_preset
+
+        outer = self._roster_panel.layout()
+        while outer.count():
+            item = outer.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        cfg = _team_preset.resolve(self._selected_team_preset_id, self._project)
+        position_roles = list(cfg["roles"].keys())
+        checker_role = _team_preset.CHECKER_ROLES.get(cfg["checker"]) if cfg["checker"] else None
+        display_roles = ["lead", *position_roles, *([checker_role] if checker_role else [])]
+
+        role_providers = provider_config.role_provider_map(display_roles, self._project)
+
+        role_panel = QWidget(self._roster_panel)
         role_panel.setObjectName("panel")
         rp_lay = QVBoxLayout(role_panel)
         rp_lay.setContentsMargins(14, 12, 14, 12)
         rp_lay.setSpacing(10)
-        n_roles = len(_overridable_roles())
-        n_roles_enabled = sum(1 for r in _overridable_roles() if roles_enabled.get(r, True))
+        n_positions = len(position_roles)
+        n_positions_enabled = sum(1 for r in position_roles if cfg["roles"].get(r, False))
         rp_lay.addWidget(
             self._build_card_header(
-                "TEAM ROSTER", "Roles", f"{n_roles_enabled}/{n_roles} active", role_panel
+                "TEAM ROSTER",
+                "ตำแหน่งในทีม",
+                f"{n_positions_enabled}/{n_positions} active",
+                role_panel,
             )
         )
 
@@ -1827,16 +2095,17 @@ class SettingsWindow(
         bulk_lay.addWidget(self._bulk_role_provider_btn)
         rp_lay.addWidget(bulk_row)
 
-        for role in _overridable_roles():
+        for role in display_roles:
             r = roles_mod.by_name(role)
-            label = r.label if r else role.capitalize()
+            base_label = r.label if r else role.capitalize()
             color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
             is_lead = role == "lead"
+            is_checker = checker_role is not None and role == checker_role
             row = self._build_role_row(
                 role,
-                label,
+                f"{base_label} — ตัวตรวจ" if is_checker else base_label,
                 color,
                 # #101: Lead is unlocked (no longer forced to claude) but is
                 # NOT a pipeline participant — no enable/disable toggle for
@@ -1847,7 +2116,7 @@ class SettingsWindow(
                 else "",
                 role_panel,
                 locked=False,
-                enabled=roles_enabled.get(role, True),
+                enabled=True if is_lead else cfg["roles"].get(role, is_checker),
                 current_provider=role_providers.get(role, provider_config.CLAUDE),
                 deletable=role in custom_roles.list_role_names(),
                 show_enable_toggle=not is_lead,
@@ -1855,9 +2124,46 @@ class SettingsWindow(
             )
             rp_lay.addWidget(row)
 
-        lay.addWidget(role_panel)
-        lay.addStretch(1)
-        return view
+        outer.addWidget(role_panel)
+
+    def _build_secondary_brains_panel(self, parent: QWidget) -> QWidget:
+        """#512 item 3 — codex/gemini/opencode/kimi/cursor as a compact chip
+        row: optional second opinions, not team POSITIONS, so no toggle
+        lives here (that's still the MODEL CONNECTIONS panel below, unchanged
+        — this is a read-only glance, not a second control for the same
+        state)."""
+        panel = QWidget(parent)
+        panel.setObjectName("panel")
+        p_lay = QVBoxLayout(panel)
+        p_lay.setContentsMargins(14, 12, 14, 12)
+        p_lay.setSpacing(10)
+        p_lay.addWidget(self._build_card_header("OPTIONAL", "สมองเสริม", "ไม่ใช่ตำแหน่งในทีม", panel))
+
+        chips_row = QWidget(panel)
+        chips_lay = QHBoxLayout(chips_row)
+        chips_lay.setContentsMargins(0, 0, 0, 0)
+        chips_lay.setSpacing(10)
+        for provider in sorted(provider_state.TOGGLABLE - {provider_config.CLAUDE}):
+            enabled = not provider_state.is_disabled(provider)
+            installed = _provider_installed(provider)
+            color = (
+                cockpit_theme.ROLE_COLORS.get(provider, cockpit_theme.ROLE_COLOR_FALLBACK)
+                if enabled and installed
+                else cockpit_theme.TEXT_MUTED
+            )
+            label = provider.capitalize()
+            if not installed:
+                label += " (ยังไม่ติดตั้ง)"
+            chip = cockpit_theme.role_chip(label, color, chips_row)
+            chip.setToolTip(
+                "ปิดอยู่ที่ MODEL CONNECTIONS ด้านล่าง"
+                if not enabled
+                else ("CLI ยังไม่ติดตั้ง" if not installed else "พร้อมใช้")
+            )
+            chips_lay.addWidget(chip)
+        chips_lay.addStretch(1)
+        p_lay.addWidget(chips_row)
+        return panel
 
     def _build_card_header(self, kicker: str, title: str, tag: str, parent: QWidget) -> QWidget:
         """Card header matching the mockup pattern — uppercase kicker line,
@@ -2136,30 +2442,18 @@ class SettingsWindow(
             _select_model(combo, provider_models.model_for(provider))
             combo.blockSignals(False)
 
-        roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
-        for role, toggle in self._role_toggles.items():
-            toggle.blockSignals(True)
-            toggle.setChecked(roles_enabled.get(role, True))
-            toggle.blockSignals(False)
+        # #512: the roster panel is a full rebuild (not per-widget resets)
+        # since which roles/rows it even shows depends on the selected team
+        # size — resetting the pick back to the on-disk standing preset and
+        # rebuilding fresh from disk covers roles/toggles/provider/model/
+        # effort in one pass, the same disk reads _build_providers_roles_view
+        # itself does on first open.
+        from . import team_preset as _team_preset
 
-        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
-        for role, combo in self._role_provider_combos.items():
-            combo.blockSignals(True)
-            idx = combo.findData(role_providers.get(role, provider_config.CLAUDE))
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.blockSignals(False)
-            self._sync_role_provider_badge(role)
-
-        for role, combo in self._role_model_combos.items():
-            provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
-            _fill_model_combo(combo, provider, role_models.model_for(role, provider))
-
-        for role, effort_combo in self._role_effort_combos.items():
-            provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
-            model = _combo_model(self._role_model_combos[role])
-            _fill_effort_combo(
-                effort_combo, provider, model, role_models.effort_for(role, provider)
-            )
+        self.pending_team_preset = None
+        self._selected_team_preset_id = _team_preset.current_preset_id(self._project)
+        self._refresh_team_size_panel()
+        self._rebuild_roster_panel()
 
     # ──────────────────────────────────────────────────────────
     # view: New Role (real)

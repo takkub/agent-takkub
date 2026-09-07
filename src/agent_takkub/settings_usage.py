@@ -220,9 +220,25 @@ class UsageSettingsMixin:
         kwargs = _range_query_kwargs(self._usage_range_combo.currentData() or "week")
         result = usage_ledger.query_usage(provider=None, **kwargs)
         self._apply_usage_result(result)
-        self._usage_sparkline.set_points(usage_ledger.daily_series(days=_SPARKLINE_DAYS))
+        self._usage_last_sparkline_points = usage_ledger.daily_series(days=_SPARKLINE_DAYS)
+        self._usage_sparkline.set_points(self._usage_last_sparkline_points)
+
+    def _retheme_usage(self) -> None:
+        """#505 review M9: a live theme switch (`SettingsWindow.retheme`)
+        rebuilds the card/table/quota labels from the LAST query result —
+        never `usage_ledger.query_usage()` again (that stays Refresh-button
+        only per this module's own docstring; a bare retheme must not pay
+        for another rollup). No-op if Usage was never rendered (page not
+        yet visited)."""
+        result = getattr(self, "_usage_last_result", None)
+        if result is not None:
+            self._apply_usage_result(result)
+        points = getattr(self, "_usage_last_sparkline_points", None)
+        if points is not None:
+            self._usage_sparkline.set_points(points)
 
     def _apply_usage_result(self, result: dict) -> None:
+        self._usage_last_result = result
         self._clear_layout(self._usage_cards_row)
         per_provider: dict[str, int] = {}
         for row in result.get("rows") or ():

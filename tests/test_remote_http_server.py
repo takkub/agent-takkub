@@ -64,6 +64,16 @@ def server(monkeypatch):
     # `ProviderUsageStore` singleton (background threads, real subprocess/
     # network calls) — never let a generic route test touch that.
     monkeypatch.setattr(api, "usage", lambda: {"providers": []})
+    monkeypatch.setattr(
+        api,
+        "team_preset_status",
+        lambda orch, project: {"project": project or "default", "preset": "auto"},
+    )
+    monkeypatch.setattr(
+        api,
+        "team_preset_set",
+        lambda orch, project, preset: {"project": project or "default", "preset": preset},
+    )
 
     config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
     srv = http_server.start_server(config, _FakeOrch())
@@ -80,6 +90,20 @@ def _get_status(url: str, headers: dict | None = None) -> tuple[int, bytes]:
         with urllib.request.urlopen(
             urllib.request.Request(url, headers=headers or {}), timeout=5
         ) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def _post_status(url: str, payload: dict, headers: dict | None = None) -> tuple[int, bytes]:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers or {},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -1358,3 +1382,88 @@ class TestUrlOnlyAuth:
         assert cfg.pairing_url() == "https://h.example/s/#token=t"
         cfg.url_only_auth = True
         assert cfg.pairing_url() == "https://h.example/s/"
+
+
+class TestTeamPresetRoute:
+    """#512 mobile — GET/POST `/api/team-preset`. GET is view-mode safe (a
+    plain-file read, same bar as `/api/usage`); POST is control-gated,
+    same as `/api/open`/`/api/close`."""
+
+    def test_get_returns_status_payload(self, server, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["demo"])
+        status, body = _run_pumped(
+            lambda: _get_status(
+                _url(server, "/sek/api/team-preset?project=demo"),
+                {"Authorization": "Bearer tok"},
+            )
+        )
+        assert status == 200
+        assert json.loads(body) == {"project": "demo", "preset": "auto"}
+
+    def test_get_requires_bearer_auth(self, server):
+        status, _ = _get_status(_url(server, "/sek/api/team-preset"))
+        assert status == 404
+
+    def test_get_dispatch_runs_on_qt_main_thread_not_a_worker(self, monkeypatch):
+        """`team_preset_status` is a plain-file read, no orchestrator/pane
+        state touched — same reasoning as `usage`/`activity` staying out of
+        `_OFF_THREAD_ACTIONS`."""
+        seen: dict[str, threading.Thread] = {}
+
+        def _fake_status(orch, project):
+            seen["thread"] = threading.current_thread()
+            return {"project": project, "preset": "auto"}
+
+        monkeypatch.setattr(api, "team_preset_status", _fake_status)
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["x"])
+        bridge = http_server._Bridge(_FakeOrch())
+        pending = http_server._PendingRequest(action="team_preset_status", params={"project": "x"})
+        bridge._handle(pending)
+        status, payload = pending.reply.get(timeout=5)
+        assert (status, payload) == (200, {"project": "x", "preset": "auto"})
+        assert seen["thread"] is threading.main_thread()
+
+    def test_post_in_control_mode_reaches_bridge(self, server, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["demo"])
+        status, body = _run_pumped(
+            lambda: _post_status(
+                _url(server, "/sek/api/team-preset"),
+                {"project": "demo", "preset": "full"},
+                {"Authorization": "Bearer tok", "Content-Type": "application/json"},
+            )
+        )
+        assert status == 200
+        assert json.loads(body) == {"project": "demo", "preset": "full"}
+
+    def test_post_in_view_mode_is_forbidden(self, monkeypatch):
+        monkeypatch.setattr(
+            api, "team_preset_set", lambda orch, project, preset: {"ok": True, "preset": preset}
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, _ = _post_status(
+                _url(srv, "/sek/api/team-preset"),
+                {"project": "demo", "preset": "full"},
+                {"Authorization": "Bearer tok"},
+            )
+            assert status == 403
+        finally:
+            srv.stop()
+
+    def test_post_invalid_preset_surfaces_as_400(self, monkeypatch, server):
+        from agent_takkub.remote import api as _api
+
+        def _reject(orch, project, preset):
+            raise _api.RemoteApiError(400, "invalid team preset")
+
+        monkeypatch.setattr(api, "team_preset_set", _reject)
+        status, body = _run_pumped(
+            lambda: _post_status(
+                _url(server, "/sek/api/team-preset"),
+                {"project": "demo", "preset": "nope"},
+                {"Authorization": "Bearer tok", "Content-Type": "application/json"},
+            )
+        )
+        assert status == 400
+        assert json.loads(body) == {"ok": False, "msg": "invalid team preset"}

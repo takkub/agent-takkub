@@ -675,6 +675,59 @@ def close_project(orch, project: object) -> dict:
     return {"ok": True, "project": project}
 
 
+def team_preset_status(orch, project: object) -> dict:
+    """GET /api/team-preset — view-mode safe (read-only), same bar as
+    `activity`/`lead_history`: the project's STANDING preset (what Settings'
+    team-size cards / this same endpoint's POST would write), any active
+    per-task override, and the 4 quick-pick options with their Thai
+    label/description/pane-count (`team_preset.QUICK_PRESET_IDS`) so the
+    phone never needs its own copy of that copy."""
+    from .. import team_preset
+
+    project_ns = orch._resolve_project(project if isinstance(project, str) else None)
+    standing_id = team_preset.current_preset_id(project_ns)
+    override_id = team_preset.active_override(project_ns)
+    effective = team_preset.current(project_ns)
+    return {
+        "project": project_ns,
+        "preset": standing_id,
+        "preset_label": team_preset.label(standing_id),
+        "override": override_id,
+        "override_label": team_preset.label(override_id) if override_id else None,
+        "effective": effective["preset"],
+        "effective_label": team_preset.label(effective["preset"]),
+        "verify": team_preset.verify_mode(effective),
+        "lead_may_implement": effective["lead_may_implement"],
+        "options": [
+            {
+                "id": pid,
+                "label": team_preset.label(pid),
+                "desc": team_preset.description(pid),
+                "pane_note": team_preset.pane_note(pid),
+            }
+            for pid in team_preset.QUICK_PRESET_IDS
+        ],
+    }
+
+
+def team_preset_set(orch, project: object, preset_id: object) -> dict:
+    """control-mode only (enforced by the HTTP handler's mode gate before
+    this runs, same as `open_project`/`lead_say`). Sets the project's
+    STANDING preset — mirrors the status-bar chip's quick menu and
+    Settings' team-size cards, never a per-task `--team` override (that flag
+    stays CLI-only, #512 item 4). `orch.set_team_preset` handles the
+    Lead-pane broadcast + `teamPresetChanged` signal itself."""
+    from .. import team_preset
+
+    if not isinstance(preset_id, str) or preset_id not in team_preset.QUICK_PRESET_IDS:
+        raise RemoteApiError(400, "invalid team preset")
+    project_ns = orch._resolve_project(project if isinstance(project, str) else None)
+    ok, msg = orch.set_team_preset(preset_id, project_ns)
+    if not ok:
+        raise RemoteApiError(400, msg)
+    return team_preset_status(orch, project_ns)
+
+
 def lead_history(orch, project_ns: str, limit: object = None) -> dict:
     """View-mode safe (read-only) — lets the PWA repopulate its chat log on
     connect/reconnect/project-switch instead of showing a blank screen for

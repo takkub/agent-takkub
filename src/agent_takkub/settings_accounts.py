@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -36,6 +37,34 @@ from PyQt6.QtWidgets import (
 )
 
 from . import accounts_adapter, cockpit_theme
+
+
+class _AccountsRefreshSignals(QObject):
+    finished = pyqtSignal(object)  # list[accounts_adapter.ProviderRow]
+
+
+class _AccountsRefreshWorker(QRunnable):
+    """#505 review finding M4: `accounts_adapter.provider_rows()` can shell
+    out — the default claude account's macOS Keychain probe
+    (`limit_status._read_keychain_credentials`, `security ... -w`) carries
+    a 5s subprocess timeout. The status-bar plan badge already moved this
+    exact class of read off the Qt main thread (`status_header.
+    _PlanProbeWorker`); the Accounts page never had until now, even though
+    it reads every provider's every account on every page build."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = _AccountsRefreshSignals()
+
+    def run(self) -> None:
+        try:
+            rows = accounts_adapter.provider_rows()
+        except Exception:
+            rows = []
+        try:
+            self.signals.finished.emit(rows)
+        except RuntimeError:
+            pass  # window deleted while the pool job was running
 
 
 def _provider_color(provider: str) -> str:
@@ -251,17 +280,49 @@ class AccountsSettingsMixin:
         lay.addStretch(1)
 
         self._accounts_login_dialogs: list[_LoginPaneDialog] = []
+        self._accounts_rows_cache: list[accounts_adapter.ProviderRow] | None = None
+        self._accounts_refresh_busy = False
         self._accounts_refresh()
         return tab
 
     def _accounts_refresh(self) -> None:
-        """Re-read everything through the adapter and rebuild the rows."""
+        """Re-read everything through the adapter and rebuild the rows.
+
+        #505 review M4: `provider_rows()` must never run on the Qt main
+        thread (see `_AccountsRefreshWorker`'s own docstring). Renders
+        whatever's cached from the last refresh (or a bare loading row on
+        the very first build) immediately, then kicks a background job and
+        rebuilds for real when it lands — never blocks page construction or
+        any other call site (add/remove/login-close) waiting on a probe.
+        """
+        self._render_accounts_rows(self._accounts_rows_cache)
+        if self._accounts_refresh_busy:
+            return
+        self._accounts_refresh_busy = True
+        worker = _AccountsRefreshWorker()
+        worker.signals.finished.connect(self._on_accounts_refreshed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_accounts_refreshed(self, rows: list) -> None:
+        self._accounts_refresh_busy = False
+        try:
+            self._accounts_rows_cache = rows
+            self._render_accounts_rows(rows)
+        except RuntimeError:
+            pass  # this Settings window was closed/deleted while the job ran
+
+    def _render_accounts_rows(self, rows: list[accounts_adapter.ProviderRow] | None) -> None:
         while self._accounts_rows_box.count():
             item = self._accounts_rows_box.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        for row in accounts_adapter.provider_rows():
+        if rows is None:
+            loading = QLabel("กำลังโหลดบัญชี…", self)
+            loading.setObjectName("panelHint")
+            self._accounts_rows_box.addWidget(loading)
+            return
+        for row in rows:
             self._accounts_rows_box.addWidget(self._build_provider_panel(row))
 
     def _build_provider_panel(self, row: accounts_adapter.ProviderRow) -> QWidget:
@@ -284,11 +345,8 @@ class AccountsSettingsMixin:
             f"color: {title_color};"
         )
         header.addWidget(name_lbl)
-        if not row.gap_reason:
-            count_chip = cockpit_theme.gold_soft_chip(
-                f"{len(row.accounts)} บัญชี", panel, compact=True
-            )
-            header.addWidget(count_chip)
+        count_chip = cockpit_theme.gold_soft_chip(f"{len(row.accounts)} บัญชี", panel, compact=True)
+        header.addWidget(count_chip)
         header.addStretch(1)
         if not row.gap_reason:
             add_btn = cockpit_theme.secondary_button("+ เพิ่มบัญชี", panel)
@@ -302,7 +360,12 @@ class AccountsSettingsMixin:
         lay.addLayout(header)
 
         if row.gap_reason:
-            gap_lbl = QLabel("ยังแยกบัญชีไม่ได้ — ใช้บัญชีของเครื่องทั้งเครื่อง", panel)
+            # #505 review M7: a gap only ever blocks ADD/LOGIN for a NEW
+            # account (`login_launch` already returns None for every
+            # provider but claude/codex, so an existing account's own
+            # "เข้าสู่ระบบ" button never renders below either) — an existing
+            # account must still be listed, never hidden by this notice.
+            gap_lbl = QLabel("ยังแยกบัญชีใหม่ไม่ได้ — ใช้บัญชีของเครื่องทั้งเครื่อง", panel)
             gap_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED};")
             gap_lbl.setToolTip(row.gap_reason)
             lay.addWidget(gap_lbl)
@@ -310,7 +373,6 @@ class AccountsSettingsMixin:
             why_lbl.setObjectName("panelHint")
             why_lbl.setWordWrap(True)
             lay.addWidget(why_lbl)
-            return panel
 
         for account in row.accounts:
             lay.addWidget(self._build_account_card(account, panel))

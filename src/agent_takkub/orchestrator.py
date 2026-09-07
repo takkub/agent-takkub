@@ -1270,8 +1270,11 @@ class Orchestrator(
     # Emitted when user toggles a provider on/off via status bar. main_window
     # listens to refresh chip color/label without polling.
     providerStateChanged = pyqtSignal(str, bool)  # (provider, disabled)
-    # Emitted when user flips the account plan (Pro/Max) via the status bar.
-    # main_window listens to repaint the plan chip without polling.
+    # Emitted on `set_plan_tier` (the old status-bar Pro/Max toggle chip was
+    # removed 2026-09-07, #505 — the badge that replaced it, `_plan_badge`,
+    # is a read-only display of the account's real plan and does not drive
+    # this signal; main_window still listens, to repaint if anything calls
+    # `set_plan_tier` directly).
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
     execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
     # Emitted when a project's team preset (#512) changes — status-bar chip
