@@ -2,13 +2,17 @@
 (`settings_knowledge_design.KnowledgeDesignSettingsMixin` — originally the
 final closeout pack 2 `KNOWLEDGE & DESIGN` section, `docs/plans/
 final-closeout-after-1.3.0/04_SETTINGS_UI_FINAL.md`; collapsed into one
-tabbed "Knowledge" page (Knowledge / Design Tools / Context Debug) in the
-settings-nav declutter — the OpenViking tab was dropped outright, not
-carried over, since the product withdrew OpenViking entirely).
+tabbed "Knowledge" page (Knowledge / Design Tools) in the settings-nav
+declutter — the OpenViking tab was dropped outright, not carried over,
+since the product withdrew OpenViking entirely. The #515 settings diet
+later dropped the Context Debug tab too — it duplicated `takkub doctor`'s
+own context-trace section — and moved its one still-live control, Context
+Strategy, onto the Knowledge tab instead; `TestContextStrategyPanel` below
+covers that control, unchanged from when it lived on its own tab).
 
 Offscreen QPA (session-scoped QApplication from tests/conftest.py), same
 "tofu" widget-property + `thread.wait()` + `QCoreApplication.processEvents()`
-style `test_settings_core_v2.py` already uses for its own worker-thread
+style `test_core_v2_settings.py` used for its own (now-removed) worker-thread
 buttons. Every network/subprocess-touching function (`doctor.check_graft`,
 `PenpotClient.get_profile`, `detect_storybook`, `integration_config_status`)
 is monkeypatched to a fake — no test here ever makes a real socket/subprocess
@@ -65,14 +69,14 @@ def _wait(thread) -> None:
 
 
 class TestNavigation:
-    def test_knowledge_page_has_three_tabs(self) -> None:
+    def test_knowledge_page_has_two_tabs(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
         assert dlg._stack.currentIndex() == settings_window.VIEW_KNOWLEDGE
         assert dlg._content_title.text() == "Knowledge"
 
         tabs = dlg._stack.widget(settings_window.VIEW_KNOWLEDGE).widget()
         titles = [tabs.tabText(i) for i in range(tabs.count())]
-        assert titles == ["Knowledge", "Design Tools", "Context Debug"]
+        assert titles == ["Knowledge", "Design Tools"]  # Context Debug dropped, #515
         dlg.deleteLater()
 
     def test_knowledge_view_disables_footer_save_and_reset(self) -> None:
@@ -283,138 +287,10 @@ class TestContextStrategyPanel:
         dlg.deleteLater()
 
 
-class TestContextDebugView:
-    def test_no_trace_shows_placeholder_and_disables_buttons(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from agent_takkub.core.context_sources import trace_store
-
-        monkeypatch.setattr(trace_store, "load_last_trace", lambda: None)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-
-        assert dlg._kd_ctx_view_btn.isEnabled() is False
-        assert "ยังไม่มี" in dlg._kd_ctx_totals_lbl.text()
-        dlg.deleteLater()
-
-    def test_trace_renders_table_totals_and_report(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_takkub.core.context_sources import trace_store
-
-        fake_trace = {
-            "project": "agent-takkub",
-            "role": "frontend",
-            "mode": "hybrid",
-            "sources": [
-                {"name": "Obsidian", "count": 5, "unit": "notes", "tokens": 1842},
-                {"name": "Resource", "count": 3, "unit": "docs", "tokens": 731},
-            ],
-            "total_tokens": 4120,
-            "budget_tokens": 6000,
-            "dedup_count": 3,
-            "latency_ms": 91.0,
-        }
-        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
-
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-        assert dlg._kd_ctx_view_btn.isEnabled() is True
-        assert "frontend" in dlg._kd_ctx_header_lbl.text()
-        assert "4120" in dlg._kd_ctx_totals_lbl.text()
-        # scope_rejects/task_size don't exist on this trace shape yet
-        # (pane B/C follow-up) — must degrade to "—", never KeyError/crash.
-        assert "—" in dlg._kd_ctx_totals_lbl.text()
-
-        report = dlg._kd_ctx_report_text()
-        assert "Obsidian" in report and "1842" in report
-
-        dlg._on_kd_ctx_copy_report_clicked()
-        from PyQt6.QtGui import QGuiApplication
-
-        assert "agent-takkub" in QGuiApplication.clipboard().text()
-        dlg.deleteLater()
-
-    def test_trace_with_forward_compat_fields_renders_them(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Once pane B/C lands `scope_rejects`/`task_size`/per-source
-        `time_ms`, this view must pick them up with no code change — only
-        the `.get(...)` defaults stop applying."""
-        from agent_takkub.core.context_sources import trace_store
-
-        fake_trace = {
-            "sources": [{"name": "Brain", "count": 4, "tokens": 945, "time_ms": 10.0}],
-            "total_tokens": 945,
-            "budget_tokens": 6000,
-            "dedup_count": 0,
-            "scope_rejects": 4,
-            "trust_rejects": 1,
-            "task_size": "medium",
-        }
-        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
-
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-        assert "Scope rejected: 4" in dlg._kd_ctx_totals_lbl.text()
-        assert "Task size: medium" in dlg._kd_ctx_totals_lbl.text()
-        assert "10ms" in dlg._kd_ctx_report_text()
-        dlg.deleteLater()
-
-    def test_trace_without_explainable_fields_hides_explain_label(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Pre-C/E trace shape (no score/risk_flags/escalation/strategy/
-        skipped) — the Explainable Trace label must degrade to hidden/empty,
-        never KeyError."""
-        from agent_takkub.core.context_sources import trace_store
-
-        fake_trace = {
-            "sources": [],
-            "total_tokens": 100,
-            "budget_tokens": 6000,
-            "dedup_count": 0,
-        }
-        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
-
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-        # Widgets never .show()'n in offscreen tests always report
-        # isVisible()=False regardless of state; isHidden() reflects the
-        # widget's own explicit setVisible() call (see test_settings_window.
-        # py's own comment on this).
-        assert dlg._kd_ctx_explain_lbl.isHidden()
-        assert dlg._kd_ctx_explain_lbl.text() == ""
-        dlg.deleteLater()
-
-    def test_trace_with_explainable_fields_renders_complexity_risk_and_escalation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from agent_takkub.core.context_sources import trace_store
-
-        fake_trace = {
-            "sources": [],
-            "total_tokens": 4120,
-            "budget_tokens": 6000,
-            "dedup_count": 0,
-            "task_size": "medium",
-            "score": 8,
-            "confidence": 0.88,
-            "risk_flags": ["auth"],
-            "initial_size": "small",
-            "final_size": "medium",
-            "escalation_reason": "auth module + 5 impacted files",
-            "strategy": "automatic",
-            "skipped": [{"name": "openviking", "reason": "no knowledge-heavy signal"}],
-        }
-        monkeypatch.setattr(trace_store, "load_last_trace", lambda: fake_trace)
-
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-        assert not dlg._kd_ctx_explain_lbl.isHidden()
-        text = dlg._kd_ctx_explain_lbl.text()
-        assert "MEDIUM" in text
-        assert "score 8" in text
-        assert "confidence 88%" in text
-        assert "Risk: auth" in text
-        assert "small → medium" in text
-        assert "auth module + 5 impacted files" in text
-        assert "Strategy: automatic" in text
-        assert "openviking (no knowledge-heavy signal)" in text
-
-        report = dlg._kd_ctx_report_text()
-        assert "openviking" in report
-        dlg.deleteLater()
+# TestContextDebugView (trace table/report/explainable-fields rendering)
+# removed in the #515 settings diet along with the whole Context Debug tab
+# it tested — that surface duplicated `takkub doctor`'s own context-trace
+# section (`core.context_sources.doctor_section`, already wired to the same
+# `load_last_trace()` these tests used to fake). Coverage for the one
+# control that tab actually still needed, Context Strategy, is unaffected
+# — see `TestContextStrategyPanel` above.

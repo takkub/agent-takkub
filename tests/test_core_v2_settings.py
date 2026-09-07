@@ -1,9 +1,15 @@
-"""Widget smoke tests for the Core V2 Settings views (epic #309 Phase 9,
-`settings_core_v2.CoreV2SettingsMixin`) + `core_v2_settings` round-trip +
-config-fallback flag tests.
+"""`core_v2_settings` store: flag round-trip/cache tests + config-fallback
+flag tests (env always wins; unset falls back to the persisted config).
 
-Offscreen QPA (session-scoped QApplication from tests/conftest.py), same
-"tofu" widget-property style as test_settings_window.py.
+Was also the widget smoke-test home for the Core V2 Settings views (epic
+#309 Phase 9, `settings_core_v2.CoreV2SettingsMixin`, Routing/Brain/
+Scheduler) — that whole UI module was removed outright in the #515 settings
+diet (flags default-on since 1.0.84 made the pages redundant with `takkub
+doctor`; see `settings_window._VIEW_REDIRECTS`'s own comment for where the
+old VIEW_CORE_V2_* constants land now). This file is pure store-level tests
+now and was renamed off the deleted module's name to match — no Qt/
+QApplication needed here at all, same reasoning
+`test_core_v2_settings_context_strategy.py` already gives for staying Qt-free.
 """
 
 from __future__ import annotations
@@ -12,38 +18,15 @@ import json
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication, QSettings
 
-from agent_takkub import config, core_v2_settings, custom_roles, settings_window, user_profile
-from agent_takkub import roles as roles_mod
+from agent_takkub import config, core_v2_settings
 
 
 @pytest.fixture(autouse=True)
 def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
-    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
-    monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
-    # SettingsWindow now builds the #505 Accounts page eagerly, which reads
-    # user_profile's registry + per-project selections + credential paths —
-    # isolate them exactly like test_settings_window.py does.
-    monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
-    monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
-    monkeypatch.setattr(user_profile, "_BASE_DIR", tmp_path)
-    # Sidebar's ADVANCED section fold state — see
-    # test_settings_window.py's own `_isolate_settings_paths` fixture for why
-    # this must be redirected off the real machine registry/INI store.
-    ini_path = str(tmp_path / "cockpit_settings.ini")
-    monkeypatch.setattr(
-        settings_window,
-        "QSettings",
-        lambda *_a, **_kw: QSettings(ini_path, QSettings.Format.IniFormat),
-    )
     core_v2_settings._reset_cache()
-    saved = dict(roles_mod._CUSTOM)
     yield
-    roles_mod._CUSTOM.clear()
-    roles_mod._CUSTOM.update(saved)
     core_v2_settings._reset_cache()
 
 
@@ -213,54 +196,8 @@ class TestFlagConfigFallback:
         core_v2_settings.set_flag("conversation", True)
         assert v2_conversation_enabled() is True
 
-
-class TestCoreV2Views:
-    def test_remaining_views_build_with_empty_stores(self) -> None:
-        """Every remaining Core V2 (ADVANCED-section) view must open cleanly
-        with flags off and every core store empty (task spec: "ทุกหน้าต้อง
-        เปิดได้แม้ core store ว่าง/flag ปิด"). Accounts & Pools merged into
-        the unified Accounts page (#505) — its constant now redirects, see
-        `test_accounts_route_redirects` below."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ROUTING)
-        for view in (
-            settings_window.VIEW_CORE_V2_ROUTING,
-            settings_window.VIEW_CORE_V2_BRAIN,
-            settings_window.VIEW_CORE_V2_SCHEDULER,
-        ):
-            dlg._goto_view(view)
-            assert dlg._stack.currentIndex() == view
-        dlg.deleteLater()
-
-    def test_accounts_route_redirects(self) -> None:
-        """The removed Accounts & Pools page's constant lands on the unified
-        Accounts page (#505) — old callers/tests must not break."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
-        assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
-        dlg.deleteLater()
-
-    def test_routing_view_shows_resolved_provider(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ROUTING)
-        assert dlg._cv2_routing_role_combo.count() > 0
-        assert "resolved provider" in dlg._cv2_routing_result.toPlainText()
-        dlg.deleteLater()
-
-    def test_brain_view_reindex_updates_counts_label(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_BRAIN)
-        assert "กด" in dlg._cv2_brain_counts_lbl.text()
-        dlg._on_cv2_brain_reindex_clicked()
-        thread = dlg._cv2_brain_reindex_thread
-        assert thread is not None
-        thread.wait(5000)
-        QCoreApplication.processEvents()  # deliver the queued resultReady signal
-        assert "ยังไม่มี memory record" in dlg._cv2_brain_counts_lbl.text()
-        dlg.deleteLater()
-
-    def test_scheduler_view_save_policy_persists(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_SCHEDULER)
-        dlg._cv2_max_agents_spin.setValue(3)
-        dlg._cv2_provider_limits_edit[1].setPlainText("codex=2")
-        dlg._on_cv2_save_scheduler_policy_clicked()
-        reloaded = core_v2_settings.load_scheduler_policy()
-        assert reloaded.max_agents_global == 3
-        assert reloaded.provider_max_concurrent == {"codex": 2}
-        dlg.deleteLater()
+    # Widget smoke tests for the Core V2 (Routing/Brain/Scheduler/Accounts &
+    # Pools) Settings views used to live here — removed along with the whole
+    # `settings_core_v2.py` UI module in the #515 settings diet. The
+    # equivalent "old VIEW_* constant still routes somewhere sane" coverage
+    # now lives in `test_settings_window.py`'s `TestViewRedirects`.

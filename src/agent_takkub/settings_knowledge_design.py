@@ -1,32 +1,33 @@
 """Knowledge & Design Settings views: the tabbed "Knowledge" page (Knowledge /
-Design Tools / Context Debug tabs — originally `docs/plans/
-final-closeout-after-1.3.0/04_SETTINGS_UI_FINAL.md` + `05_UI_EXAMPLES.md`'s
-`KNOWLEDGE & DESIGN` sidebar section, collapsed into one tabbed nav entry and
-stripped of its OpenViking tab during the settings-nav declutter — OpenViking
-was withdrawn from the product entirely, not just hidden).
+Design Tools tabs — originally `docs/plans/final-closeout-after-1.3.0/
+04_SETTINGS_UI_FINAL.md` + `05_UI_EXAMPLES.md`'s `KNOWLEDGE & DESIGN` sidebar
+section, collapsed into one tabbed nav entry, stripped of its OpenViking tab
+during the settings-nav declutter (OpenViking was withdrawn from the product
+entirely, not just hidden), and stripped of its Context Debug tab in the
+#515 settings diet — that tab duplicated `takkub doctor`'s own context-trace
+section; its one still-live control, Context Strategy, moved onto the
+Knowledge tab instead, see `_build_knowledge_view`).
 
 A mixin (`KnowledgeDesignSettingsMixin`) mixed into `settings_window.
-SettingsWindow`, same shape as `settings_core_v2.CoreV2SettingsMixin` (see
-that module's own docstring) — kept in its own file rather than growing
-`settings_window.py`/`settings_core_v2.py` further. **This module must never
-import from `settings_window`** (that direction already goes the other way).
+SettingsWindow` — kept in its own file rather than growing
+`settings_window.py` further. **This module must never import from
+`settings_window`** (that direction already goes the other way).
 
-Every view here is read-mostly and, like Core V2, deliberately NOT wired
-into `SettingsWindow`'s footer Save & Apply / dirty-tracking transaction —
+Every view here is read-mostly and deliberately NOT wired into
+`SettingsWindow`'s footer Save & Apply / dirty-tracking transaction —
 Design Tools writes each credential through immediately on its own "Save
-credential" button (mirrors Core V2 Accounts & Pools' add/edit/remove-writes-
-immediately precedent), and Knowledge/Context Debug are pure read-only status
-panels.
+credential" button, and Knowledge is a pure read-only status panel (plus the
+Context Strategy control, which write-throughs on click — see
+`_on_kd_ctx_strategy_clicked`).
 
 Every health/subprocess/network call (`graft --version`, a design-tool
-connectivity probe) runs on a background `QThread` — same "run() emits
-result-or-Exception, one `resultReady` signal" shape `settings_core_v2.py`
-already established — never on the Qt main thread. Nothing here fetches
-eagerly at view-construction time (same reasoning as Core V2 Brain's own
-comments: every `SettingsWindow()` build already constructs all views up
-front, so an eager fetch would cost a network/subprocess round-trip on every
-Settings open even when this section is never visited) — every panel starts
-as a "press Refresh/Test to load" placeholder.
+connectivity probe) runs on a background `QThread` — a "run() emits
+result-or-Exception, one `resultReady` signal" shape — never on the Qt main
+thread. Nothing here fetches eagerly at view-construction time — even
+lazily built (`settings_window._lazy_view_builders`), an eager fetch here
+would still cost a network/subprocess round-trip the moment this section is
+first opened; every panel starts as a "press Refresh/Test to load"
+placeholder instead.
 
 Secrets are never displayed once stored (`04_SETTINGS_UI_FINAL.md`: "Never
 reveal saved secrets") — the credential field only ever accepts a NEW value
@@ -40,7 +41,6 @@ import json
 import os
 
 from PyQt6.QtCore import QCoreApplication, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -203,11 +203,17 @@ class KnowledgeDesignSettingsMixin:
     defines."""
 
     # ──────────────────────────────────────────────────────────
-    # single sidebar entry ("Knowledge") — settings-nav declutter folded the
-    # former 4-page KNOWLEDGE & DESIGN section (Knowledge/OpenViking/Design
-    # Tools/Context Debug) into one page with 3 tabs (OpenViking's tab was
-    # dropped outright — the product withdrew OpenViking entirely, not just
-    # this UI). Each tab keeps its own view-builder below unchanged; this
+    # single sidebar entry ("Knowledge") — folded the former 4-page
+    # KNOWLEDGE & DESIGN section (Knowledge/OpenViking/Design Tools/Context
+    # Debug) into one page with tabs (OpenViking's tab was dropped outright
+    # — the product withdrew OpenViking entirely, not just this UI). Context
+    # Debug's own tab was dropped in the #515 settings diet — it duplicated
+    # `takkub doctor`'s context-trace section (`core.context_sources.
+    # doctor_section`, already wired to the same `load_last_trace()` this
+    # tab used to read) — but its Context Strategy control was a real,
+    # still-live pick (Fast/Automatic/Deep), not debug, so it moved onto
+    # this Knowledge tab instead of disappearing with the rest of the page.
+    # Each remaining tab keeps its own view-builder below unchanged; this
     # just composes them so `settings_window._build_content` only needs one
     # `_stack.addWidget` call for the whole section.
     # ──────────────────────────────────────────────────────────
@@ -216,11 +222,10 @@ class KnowledgeDesignSettingsMixin:
         tabs = QTabWidget(self)
         tabs.addTab(self._build_knowledge_view(), "Knowledge")
         tabs.addTab(self._build_design_tools_view(), "Design Tools")
-        tabs.addTab(self._build_context_debug_view(), "Context Debug")
         return tabs
 
     # ──────────────────────────────────────────────────────────
-    # view: Knowledge (status overview)
+    # view: Knowledge (status overview + Context Strategy, #515)
     # ──────────────────────────────────────────────────────────
 
     def _build_knowledge_view(self) -> QWidget:
@@ -228,6 +233,8 @@ class KnowledgeDesignSettingsMixin:
         lay = QVBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(14)
+
+        lay.addWidget(self._build_context_strategy_panel(view))
 
         panel = QWidget(view)
         panel.setObjectName("panel")
@@ -471,9 +478,9 @@ class KnowledgeDesignSettingsMixin:
     # load_context_strategy`/`save_context_strategy`. `TAKKUB_CONTEXT_
     # STRATEGY` env still wins at build time (`core.brain.flag.
     # context_strategy`) — this panel just mirrors that precedence: when the
-    # env var is set to a valid value the buttons show it and lock, same
-    # "env wins, Settings UI just informs" precedent `settings_core_v2.py`'s
-    # own `TAKKUB_V2_*` banners already use.
+    # env var is set to a valid value the buttons show it and lock — same
+    # "env wins, Settings UI just informs" precedent the old Core V2 pages'
+    # `TAKKUB_V2_*` banners used before that section was removed (#515).
     # ──────────────────────────────────────────────────────────
 
     def _build_context_strategy_panel(self, parent: QWidget) -> QWidget:
@@ -528,251 +535,17 @@ class KnowledgeDesignSettingsMixin:
         for v, btn in self._kd_ctx_strategy_buttons.items():
             btn.setChecked(v == value)
 
+    # view: Context Debug — REMOVED in the #515 settings diet: it duplicated
+    # `takkub doctor`'s own context-trace section (`core.context_sources.
+    # doctor_section`, wired to the same `load_last_trace()` this tab used
+    # to read directly) — debug output belongs in doctor, not a Settings
+    # page. Its Context Strategy control (the one real, still-live pick on
+    # that tab) moved onto the "Knowledge" tab instead — see
+    # `_build_knowledge_view`/`_build_context_strategy_panel` above.
+
     # ──────────────────────────────────────────────────────────
-    # view: Context Debug
+    # module-level helpers
     # ──────────────────────────────────────────────────────────
-
-    def _build_context_debug_view(self) -> QWidget:
-        view = QWidget(self)
-        lay = QVBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(14)
-
-        lay.addWidget(self._build_context_strategy_panel(view))
-
-        panel = QWidget(view)
-        panel.setObjectName("panel")
-        p_lay = QVBoxLayout(panel)
-        p_lay.setContentsMargins(14, 12, 14, 12)
-        p_lay.setSpacing(8)
-        header_row = QHBoxLayout()
-        header_row.addWidget(self._build_card_header("CONTEXT", "Last build trace", "", panel), 1)
-        refresh_btn = cockpit_theme.secondary_button("Refresh", panel)
-        refresh_btn.clicked.connect(self._reload_kd_context_debug)
-        header_row.addWidget(refresh_btn)
-        p_lay.addLayout(header_row)
-
-        self._kd_ctx_header_lbl = QLabel("", panel)
-        self._kd_ctx_header_lbl.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
-        p_lay.addWidget(self._kd_ctx_header_lbl)
-
-        self._kd_ctx_explain_lbl = QLabel("", panel)
-        self._kd_ctx_explain_lbl.setObjectName("panelHint")
-        self._kd_ctx_explain_lbl.setWordWrap(True)
-        self._kd_ctx_explain_lbl.setVisible(False)
-        p_lay.addWidget(self._kd_ctx_explain_lbl)
-
-        self._kd_ctx_grid_host = QWidget(panel)
-        self._kd_ctx_grid = QGridLayout(self._kd_ctx_grid_host)
-        self._kd_ctx_grid.setContentsMargins(0, 8, 0, 8)
-        self._kd_ctx_grid.setHorizontalSpacing(18)
-        self._kd_ctx_grid.setVerticalSpacing(4)
-        p_lay.addWidget(self._kd_ctx_grid_host)
-
-        self._kd_ctx_totals_lbl = QLabel("", panel)
-        self._kd_ctx_totals_lbl.setObjectName("panelHint")
-        self._kd_ctx_totals_lbl.setWordWrap(True)
-        p_lay.addWidget(self._kd_ctx_totals_lbl)
-        lay.addWidget(panel)
-
-        action_row = QHBoxLayout()
-        self._kd_ctx_view_btn = cockpit_theme.secondary_button("View Context", view)
-        self._kd_ctx_view_btn.clicked.connect(self._on_kd_ctx_view_context_clicked)
-        action_row.addWidget(self._kd_ctx_view_btn)
-        self._kd_ctx_trace_btn = cockpit_theme.secondary_button("Retrieval Trace", view)
-        self._kd_ctx_trace_btn.clicked.connect(self._on_kd_ctx_retrieval_trace_clicked)
-        action_row.addWidget(self._kd_ctx_trace_btn)
-        self._kd_ctx_copy_btn = cockpit_theme.secondary_button("Copy Report", view)
-        self._kd_ctx_copy_btn.clicked.connect(self._on_kd_ctx_copy_report_clicked)
-        action_row.addWidget(self._kd_ctx_copy_btn)
-        action_row.addStretch(1)
-        lay.addLayout(action_row)
-        lay.addStretch(1)
-
-        self._kd_ctx_trace: dict | None = None
-        self._reload_kd_context_debug()
-        return view
-
-    def _reload_kd_context_debug(self) -> None:
-        from .core.context_sources.trace_store import load_last_trace
-
-        trace = load_last_trace()
-        self._kd_ctx_trace = trace
-
-        while self._kd_ctx_grid.count():
-            item = self._kd_ctx_grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-
-        has_trace = trace is not None
-        for btn in (self._kd_ctx_view_btn, self._kd_ctx_trace_btn, self._kd_ctx_copy_btn):
-            btn.setEnabled(has_trace)
-
-        if not has_trace:
-            self._kd_ctx_header_lbl.setText(f"Project: {self._project or '(no project)'}")
-            self._kd_ctx_explain_lbl.setVisible(False)
-            self._kd_ctx_totals_lbl.setText(
-                "ยังไม่มี context build record — ยังไม่เคยรัน assign ที่มี context source เปิดอยู่"
-            )
-            return
-
-        self._kd_ctx_header_lbl.setText(
-            f"Project: {trace.get('project') or self._project or '(no project)'}"
-            f"   Role: {trace.get('role') or '—'}   Mode: {trace.get('mode') or '—'}"
-        )
-
-        explain_text = _explainable_trace_text(trace)
-        self._kd_ctx_explain_lbl.setText(explain_text)
-        self._kd_ctx_explain_lbl.setVisible(bool(explain_text))
-
-        headers = ("SOURCE", "ITEMS", "TOKENS", "TIME")
-        for col, h in enumerate(headers):
-            lbl = QLabel(h, self._kd_ctx_grid_host)
-            lbl.setStyleSheet(
-                f'font-family: "{self._fonts["mono"]}"; font-size: 10px; font-weight: 600; '
-                f"letter-spacing: 1px; color: {cockpit_theme.TEXT_FAINT};"
-            )
-            self._kd_ctx_grid.addWidget(lbl, 0, col)
-        for row, source in enumerate(trace.get("sources", []), start=1):
-            # `time_ms` doesn't exist on ContextTrace/SourceTrace yet
-            # (`08_OBSERVABILITY_FINAL.md` "latency per source" is a future
-            # backend addition) — read optionally so this table degrades to
-            # "—" instead of crashing once that field exists but isn't
-            # populated for an older trace file, or vice versa.
-            time_val = source.get("time_ms")
-            cells = (
-                str(source.get("name", "?")),
-                str(source.get("count", 0)),
-                str(source.get("tokens", 0)),
-                f"{time_val:.0f}ms" if isinstance(time_val, (int, float)) else "—",
-            )
-            for col, text in enumerate(cells):
-                self._kd_ctx_grid.addWidget(QLabel(text, self._kd_ctx_grid_host), row, col)
-
-        scope_rejected = trace.get("scope_rejects", "—")
-        trust_rejected = trace.get("trust_rejects", "—")
-        task_size = trace.get("task_size", "—")
-        self._kd_ctx_totals_lbl.setText(
-            f"Total: {trace.get('total_tokens', 0)} / {trace.get('budget_tokens', 0)}"
-            f"   Dedup: {trace.get('dedup_count', 0)}"
-            f"   Scope rejected: {scope_rejected}"
-            f"   Trust rejected: {trust_rejected}"
-            f"   Task size: {task_size}"
-            f"   Latency: {trace.get('latency_ms', 0):.0f}ms"
-        )
-
-    def _kd_ctx_report_text(self) -> str:
-        trace = self._kd_ctx_trace
-        if not trace:
-            return "(no context build recorded yet)"
-        lines = [
-            f"Project: {trace.get('project') or self._project or '(no project)'}",
-            f"Role: {trace.get('role') or '—'}",
-            f"Mode: {trace.get('mode') or '—'}",
-            "",
-            f"{'SOURCE':<16}{'ITEMS':>8}{'TOKENS':>8}{'TIME':>8}",
-        ]
-        for source in trace.get("sources", []):
-            time_val = source.get("time_ms")
-            time_text = f"{time_val:.0f}ms" if isinstance(time_val, (int, float)) else "—"
-            lines.append(
-                f"{source.get('name', '?')!s:<16}{source.get('count', 0):>8}"
-                f"{source.get('tokens', 0):>8}{time_text:>8}"
-            )
-        lines += [
-            "",
-            f"Total: {trace.get('total_tokens', 0)} / {trace.get('budget_tokens', 0)}",
-            f"Dedup: {trace.get('dedup_count', 0)}",
-            f"Scope rejected: {trace.get('scope_rejects', '—')}",
-            f"Trust rejected: {trace.get('trust_rejects', '—')}",
-            f"Task size: {trace.get('task_size', '—')}",
-            f"Latency: {trace.get('latency_ms', 0):.0f}ms",
-        ]
-        explain_text = _explainable_trace_text(trace)
-        if explain_text:
-            lines += ["", explain_text]
-        return "\n".join(lines)
-
-    def _kd_ctx_show_text_dialog(self, title: str, text: str) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        dlg.setStyleSheet(self.styleSheet())
-        dlg.resize(560, 420)
-        lay = QVBoxLayout(dlg)
-        body = QPlainTextEdit(dlg)
-        body.setReadOnly(True)
-        body.setPlainText(text)
-        body.setStyleSheet(f'font-family: "{self._fonts["mono"]}"; font-size: 12px;')
-        lay.addWidget(body)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
-        buttons.rejected.connect(dlg.reject)
-        buttons.accepted.connect(dlg.accept)
-        lay.addWidget(buttons)
-        dlg.exec()
-
-    def _on_kd_ctx_view_context_clicked(self) -> None:
-        self._kd_ctx_show_text_dialog("Context Debug — View Context", self._kd_ctx_report_text())
-
-    def _on_kd_ctx_retrieval_trace_clicked(self) -> None:
-        trace = self._kd_ctx_trace or {}
-        self._kd_ctx_show_text_dialog(
-            "Context Debug — Retrieval Trace", json.dumps(trace, indent=2, ensure_ascii=False)
-        )
-
-    def _on_kd_ctx_copy_report_clicked(self) -> None:
-        QGuiApplication.clipboard().setText(self._kd_ctx_report_text())
-
-
-# ──────────────────────────────────────────────────────────────
-# module-level helpers
-# ──────────────────────────────────────────────────────────────
-
-
-def _explainable_trace_text(trace: dict) -> str:
-    """Render the v2-hardening C/E Explainable Trace fields (`07_
-    EXPLAINABLE_TRACE.md`) that `trace_store.save_last_trace` adds on top of
-    the pre-existing shape — Classifier v2's score/confidence/risk_flags,
-    adaptive escalation's initial->final size, the active Context Strategy,
-    and skipped sources. Every field is read with `.get()`: an older trace
-    file (or the gate disabled) simply omits the section entirely instead of
-    crashing, same contract every other `trace.get(...)` call in this module
-    already keeps."""
-    lines: list[str] = []
-
-    score = trace.get("score")
-    confidence = trace.get("confidence")
-    if score is not None or confidence is not None:
-        conf_text = f"{confidence * 100:.0f}%" if isinstance(confidence, (int, float)) else "—"
-        size_text = str(trace.get("task_size") or "—").upper()
-        score_text = score if score is not None else "—"
-        lines.append(f"Complexity: {size_text}   score {score_text}   confidence {conf_text}")
-
-    risk_flags = trace.get("risk_flags")
-    if risk_flags:
-        lines.append(f"Risk: {', '.join(str(r) for r in risk_flags)}")
-
-    initial_size = trace.get("initial_size")
-    final_size = trace.get("final_size")
-    if initial_size is not None and final_size is not None:
-        if initial_size != final_size:
-            lines.append(f"Initial → Final: {initial_size} → {final_size}")
-            reason = trace.get("escalation_reason")
-            if reason:
-                lines.append(f"Escalation reason: {reason}")
-        else:
-            lines.append(f"Initial → Final: {final_size} (no escalation)")
-
-    strategy = trace.get("strategy")
-    if strategy:
-        lines.append(f"Strategy: {strategy}")
-
-    skipped = trace.get("skipped")
-    if skipped:
-        skip_text = "; ".join(f"{s.get('name', '?')} ({s.get('reason', '—')})" for s in skipped)
-        lines.append(f"Skipped sources: {skip_text}")
-
-    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────

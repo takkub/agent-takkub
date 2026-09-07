@@ -8,8 +8,8 @@ tooltips/advanced only). All data flows through `accounts_adapter` (the one
 storage layer #504 will later swap underneath).
 
 `AccountsSettingsMixin` is mixed into `settings_window.SettingsWindow` — the
-same UI-layer-mixin shape as `CoreV2SettingsMixin`, and the same rule: this
-module must never import `settings_window` back (cycle).
+same UI-layer-mixin shape as `KnowledgeDesignSettingsMixin`, and the same
+rule: this module must never import `settings_window` back (cycle).
 
 Writes are immediate (add/remove), never routed through the footer
 Save & Apply transaction — mirroring the Core V2 pages' precedent.
