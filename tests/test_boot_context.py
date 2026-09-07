@@ -92,6 +92,64 @@ def test_doctor_check_boot_context_warns_when_learned_notes_exceeds_live_cap(
     assert warn[0].status == Status.WARN
 
 
+def test_role_file_base_ignores_stale_runtime_cache(monkeypatch, tmp_path):
+    """#516 follow-up: `role_file_base` reads `agent_role_dir(role)/CLAUDE.md`,
+    which `config.agent_role_dir` unconditionally rewrites from `.claude/
+    agents/<role>.md` on every call — never a stale materialised copy left
+    behind by an older code version or a prior spawn. Seed the staging dir
+    with garbage before measuring to lock that in; a regression that made
+    `agent_role_dir` skip the rewrite when the file already exists would
+    make this test fail on the garbage content instead."""
+    from agent_takkub import config
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(config, "RUNTIME_DIR", runtime, raising=False)
+
+    fresh = next(
+        c
+        for c in boot_context.measure_role_appendix("backend", "agent-takkub")
+        if c.category == "role_file_base"
+    )
+
+    staging = config.agent_role_dir("backend")
+    (staging / "CLAUDE.md").write_text("STALE PRE-DIET CONTENT " * 500, encoding="utf-8")
+
+    again = next(
+        c
+        for c in boot_context.measure_role_appendix("backend", "agent-takkub")
+        if c.category == "role_file_base"
+    )
+    assert again.chars == fresh.chars
+    assert again.est_tokens == fresh.est_tokens
+
+
+def test_graft_caveats_never_enters_repo_controlled_ceiling(monkeypatch, tmp_path):
+    """#516 follow-up: whether a role gets `graft_caveats` is decided by
+    `shared_dev_tools.role_mcp_allowlist`, which merges the built-in policy
+    with a per-machine `SETTINGS_HOME/pane-tools.json` operator override —
+    real mutable machine config, not repo content (same class as
+    `learned_notes`). A `doctor --boot-context` run on a machine with a
+    graft override and `test_boot_context_ceiling.py` (which always runs
+    under conftest's isolated, override-free `SETTINGS_HOME`) must never
+    disagree on `repo_controlled_est_tokens` because of it."""
+    from agent_takkub import pane_tools_policy
+
+    without_override = boot_context.build_report("frontend", "agent-takkub")
+
+    policy_file = tmp_path / "pane-tools.json"
+    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file, raising=False)
+    policy_file.write_text(
+        '{"version": 1, "roles": {"frontend": {"mcps": ["graft"], "plugins": []}}}',
+        encoding="utf-8",
+    )
+
+    with_override = boot_context.build_report("frontend", "agent-takkub")
+
+    graft_cats = [c for c in with_override.categories if c.category == "graft_caveats"]
+    assert graft_cats, "override should have actually granted graft for this to be a real check"
+    assert with_override.repo_controlled_est_tokens == without_override.repo_controlled_est_tokens
+
+
 def test_doctor_check_boot_context_not_in_run_all_checks_default_set():
     import inspect
 
