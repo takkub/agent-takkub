@@ -24,17 +24,12 @@ from dataclasses import dataclass
 
 from agent_takkub.bm25_search import tokenize
 from agent_takkub.core.models.memory import MemoryRecord, Scope
+from agent_takkub.token_estimate import estimate_tokens as _token_cost
 
 from .retrieval import RetrievalEngine
 from .store import BrainStore
 
 _HEADER = "## Context (Takkub brain)"
-
-# ponytail: 1 token ≈ 4 chars — the same rough estimate `retrieval.py`
-# already uses for its own budget trim (see that module's docstring). Fine
-# for a soft prompt-injection budget; upgrade to a real tokenizer if a
-# provider ever needs a hard guarantee.
-_CHARS_PER_TOKEN = 4
 
 # token_meter._DEFAULT_LIMIT's own fallback for "context window unknown".
 _DEFAULT_CONTEXT_WINDOW = 200_000
@@ -64,10 +59,6 @@ def budget_tokens_for(context_window: int | None, *, file_read_supported: bool =
     if not file_read_supported:
         budget = max(_NO_FILE_READ_FLOOR, budget // 2)
     return budget
-
-
-def _token_cost(content: str) -> int:
-    return max(1, len(content) // _CHARS_PER_TOKEN)
 
 
 def _fit_to_budget(records: list[MemoryRecord], budget_tokens: int) -> list[MemoryRecord]:

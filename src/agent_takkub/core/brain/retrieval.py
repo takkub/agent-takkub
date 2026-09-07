@@ -40,6 +40,7 @@ from dataclasses import dataclass
 
 from agent_takkub.bm25_search import tokenize
 from agent_takkub.core.models.memory import Confidence, MemoryRecord, Scope, Trust
+from agent_takkub.token_estimate import estimate_tokens as _token_cost
 
 from .store import BrainStore
 
@@ -79,11 +80,6 @@ _W_SCOPE = 0.5
 _W_RECENCY = 0.3
 _W_CONFIDENCE = 0.3
 _W_IMPORTANCE = 0.3
-
-# ponytail: 1 token ≈ 4 chars is a rough estimate, not a real tokenizer
-# count — fine for a soft recall budget; upgrade to a real token counter
-# if the Context Builder (7c) ever needs a hard guarantee.
-_CHARS_PER_TOKEN = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +147,7 @@ def _fit_budget(records: list[MemoryRecord], budget_tokens: int) -> list[MemoryR
     out: list[MemoryRecord] = []
     used = 0
     for r in records:
-        cost = max(1, len(r.content) // _CHARS_PER_TOKEN)
+        cost = _token_cost(r.content)
         if out and used + cost > budget_tokens:
             break
         out.append(r)

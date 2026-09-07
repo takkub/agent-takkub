@@ -482,14 +482,25 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
         pass
 
 
-def claude_project_dir_name(project_ns: str) -> str:
+def claude_project_dir_name(project_ns: str, base_role: str | None = None) -> str:
     """Return the cockpit-owned Claude transcript directory for a project.
 
     The project namespace is the cockpit's stable identifier, unlike Claude's
     legacy cwd encoding which collapses ``-``, ``_`` and ``.`` to the same
     character.  Keep the prefix fixed so a new directory can never be
     mistaken for a legacy encoded absolute path.
+
+    ``base_role`` (#516 F1) suffixes the directory for every non-Lead role so
+    Claude Code's own native ``/memory`` feature — which keys off this exact
+    env var — stops pooling every role's pane onto Lead's identical, Lead-
+    scoped ``MEMORY.md`` (cockpit already has a purpose-built per-role
+    equivalent: ``role_memory.py``). Lead keeps the bare, unsuffixed name
+    (``base_role`` omitted or ``"lead"``) because its `--resume`/session
+    continuity and `remote/notify.py`'s resume picker are keyed off that
+    exact historical value.
     """
+    if base_role and base_role != "lead":
+        return f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}-{base_role}"
     return f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}"
 
 
@@ -512,7 +523,7 @@ def supports_claude_project_dir_name(version: str | None) -> bool:
 
 
 def inject_claude_project_dir_name_env(
-    env: dict[str, str], project_ns: str, claude_executable: str
+    env: dict[str, str], project_ns: str, claude_executable: str, base_role: str | None = None
 ) -> None:
     """Opt into the reversible per-project transcript name on supported Claude.
 
@@ -520,6 +531,10 @@ def inject_claude_project_dir_name_env(
     Probe the exact executable about to be spawned; older/unknown versions
     retain the default encoded-cwd layout rather than receiving an environment
     variable they do not understand.
+
+    ``base_role`` is forwarded to `claude_project_dir_name` (#516 F1) so a
+    non-Lead teammate pane gets its own transcript dir instead of piggy-
+    backing on Lead's, which is what native ``/memory`` keys off.
     """
     try:
         completed = subprocess.run(
@@ -536,7 +551,7 @@ def inject_claude_project_dir_name_env(
     except (OSError, subprocess.SubprocessError):
         version = None
     if supports_claude_project_dir_name(version):
-        env["CLAUDE_CODE_PROJECT_DIR_NAME"] = claude_project_dir_name(project_ns)
+        env["CLAUDE_CODE_PROJECT_DIR_NAME"] = claude_project_dir_name(project_ns, base_role)
 
 
 def inject_provider_home_env(env: dict[str, str], provider: str) -> None:

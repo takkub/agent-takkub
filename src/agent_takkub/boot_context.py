@@ -12,11 +12,14 @@ changes, update this module's `measure_role_appendix` to match.
 Every number here is a real byte count of a real file/render call — never a
 guess. Where a real Anthropic-billed ground truth exists (see
 `docs/audit/2026-09-07-boot-context.md`, captured from this project's own
-`.claude-work` transcript), the naive chars/4 estimate is FAR below the real
-token count for this codebase's Thai+English mix — that gap is documented
-there, not silently "corrected" here, because a single calibration point
-does not justify a new constant. Treat every `est_tokens` value in this
-module as a LOWER BOUND, not a prediction.
+`.claude-work` transcript), even the Thai-weighted `token_estimate` (#516 F2)
+stays well below the real token count for this codebase's Thai+English mix —
+the categories this module measures are not the whole boot payload (the
+per-spawn task block, git status, env block, and Claude's own dynamic
+system-prompt sections are real contributors this module does not read yet,
+tracked as a gap in the audit doc, not silently patched over with an
+inflated constant). Treat every `est_tokens` value in this module as a
+LOWER BOUND, not a prediction.
 """
 
 from __future__ import annotations
@@ -25,17 +28,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Same convention as core.context_sources.base / core.brain.context_builder /
-# core.brain.retrieval (3 independent copies already in this codebase) — not
-# re-centralized here to keep this a leaf module with zero new coupling.
-_CHARS_PER_TOKEN = 4
-
-
-def estimate_tokens(text: str) -> int:
-    """Naive chars/4 lower bound. See module docstring — do not trust this
-    as an absolute number for Thai-heavy content, only for relative deltas
-    between two renders of the same category."""
-    return max(1, len(text) // _CHARS_PER_TOKEN)
+# #516 F2: was a private chars/4 copy (same convention as core.context_
+# sources.base / core.brain.context_builder / core.brain.retrieval had, each
+# independently); all 4 now share `token_estimate.estimate_tokens`, which
+# still stays a leaf import (stdlib-only, zero new coupling for this module).
+from .token_estimate import estimate_tokens
 
 
 @dataclass
@@ -44,6 +41,26 @@ class CategoryMeasurement:
     chars: int
     est_tokens: int
     detail: str = ""
+
+
+# #516b (addendum, Lead 2026-09-07): categories whose SIZE is per-machine
+# runtime state accumulated by panes doing real work during the day
+# (role_memory.py's learned-notes file, the Lead-memory pointer text, the
+# native `/memory` file), not repo content a `git diff` can regress. A
+# static baseline ceiling gated on these produces false "regressions" on
+# whichever dev machine happens to have written more notes today while CI
+# (a fresh checkout with none of that state) stays green — see
+# tests/test_boot_context_ceiling.py's own docstring for the incident.
+# Reported for visibility, excluded from the ceiling-ratchet sum.
+DYNAMIC_STATE_CATEGORIES = frozenset(
+    {
+        "learned_notes",
+        "learned_notes_empty_pointer",
+        "project_memory_pointer",
+        "native_project_memory",
+        "native_project_memory_LEAD",
+    }
+)
 
 
 @dataclass
@@ -60,6 +77,18 @@ class RoleBootReport:
     @property
     def total_est_tokens(self) -> int:
         return sum(c.est_tokens for c in self.categories)
+
+    @property
+    def repo_controlled_categories(self) -> list[CategoryMeasurement]:
+        return [c for c in self.categories if c.category not in DYNAMIC_STATE_CATEGORIES]
+
+    @property
+    def repo_controlled_chars(self) -> int:
+        return sum(c.chars for c in self.repo_controlled_categories)
+
+    @property
+    def repo_controlled_est_tokens(self) -> int:
+        return sum(c.est_tokens for c in self.repo_controlled_categories)
 
 
 def _cat(category: str, text: str, detail: str = "") -> CategoryMeasurement:
@@ -237,15 +266,22 @@ def measure_mcp_config(
     return CategoryMeasurement("mcp_config", 0, 0, detail)
 
 
-def measure_native_project_memory(project_ns: str) -> CategoryMeasurement | None:
+def measure_native_project_memory(
+    project_ns: str, base_role: str | None = None
+) -> CategoryMeasurement | None:
     """Claude Code's own built-in `/memory` auto-load — NOT cockpit's
-    `role_memory.py` (that's `learned_notes` above). Cockpit sets
-    `CLAUDE_CODE_PROJECT_DIR_NAME` (`pane_env.claude_project_dir_name`) to
-    the SAME value for every role of a project (it exists only to give every
-    pane a shared, findable transcript folder name) — Claude Code's memory
-    feature piggybacks on that same env var, so this file is identical and
-    auto-loaded for EVERY role's pane on this project, not role-specific.
-    Real, measured finding — see docs/audit/2026-09-07-boot-context.md F1.
+    `role_memory.py` (that's `learned_notes` above).
+
+    Before #516 F1: `CLAUDE_CODE_PROJECT_DIR_NAME` (`pane_env.
+    claude_project_dir_name`) was the SAME value for every role of a
+    project, so this file was identical and auto-loaded for EVERY role's
+    pane, not role-specific (see docs/audit/2026-09-07-boot-context.md F1).
+    After the fix, `base_role` selects which pane's memory file this reads —
+    `None`/`"lead"` for Lead's own (unsuffixed, unchanged) directory, any
+    other role for that role's own `<project>-<role>` directory. A non-Lead
+    role returns `None` here until that role has actually been spawned under
+    the new naming (no file exists yet at the new path) — that is the
+    expected, correct post-fix state, not a measurement bug.
     """
     from .pane_env import claude_project_dir_name
     from .user_profile import config_dir_for
@@ -254,7 +290,7 @@ def measure_native_project_memory(project_ns: str) -> CategoryMeasurement | None
         config_dir = config_dir_for(project_ns)
     except Exception:
         config_dir = Path.home() / ".claude"
-    dirname = claude_project_dir_name(project_ns)
+    dirname = claude_project_dir_name(project_ns, base_role)
     mem_path = config_dir / "projects" / dirname / "memory" / "MEMORY.md"
     if not mem_path.is_file():
         return None
@@ -262,8 +298,12 @@ def measure_native_project_memory(project_ns: str) -> CategoryMeasurement | None
         text = mem_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    m = _cat("native_project_memory_SHARED_ACROSS_ALL_ROLES", text, str(mem_path))
-    return m
+    category = (
+        "native_project_memory"
+        if base_role and base_role != "lead"
+        else "native_project_memory_LEAD"
+    )
+    return _cat(category, text, str(mem_path))
 
 
 def build_report(base_role: str, project_ns: str) -> RoleBootReport:
@@ -271,6 +311,9 @@ def build_report(base_role: str, project_ns: str) -> RoleBootReport:
     report.categories.extend(measure_role_appendix(base_role, project_ns))
     report.categories.extend(measure_repo_claude_md(project_ns, base_role))
     report.categories.append(measure_mcp_config(base_role, project_ns))
+    own_memory = measure_native_project_memory(project_ns, base_role)
+    if own_memory is not None:
+        report.categories.append(own_memory)
     return report
 
 
@@ -278,17 +321,20 @@ def format_report(reports: list[RoleBootReport], native_memory: CategoryMeasurem
     lines: list[str] = []
     if native_memory is not None:
         lines.append(
-            f"[shared, every role] native_project_memory: {native_memory.chars} chars, "
+            f"[Lead only, post-#516-F1] native_project_memory: {native_memory.chars} chars, "
             f"~{native_memory.est_tokens} tok (lower bound) — {native_memory.detail}"
         )
         lines.append("")
     for r in reports:
         lines.append(
-            f"=== {r.role} ({r.project}) — cockpit-controlled est. {r.total_est_tokens} tok (lower bound) ==="
+            f"=== {r.role} ({r.project}) — total est. {r.total_est_tokens} tok "
+            f"(repo-controlled: {r.repo_controlled_est_tokens} tok — the ceiling-gated "
+            "subset; the rest is per-machine dynamic state) ==="
         )
         for c in r.categories:
+            tag = " [dynamic-state, not gated]" if c.category in DYNAMIC_STATE_CATEGORIES else ""
             lines.append(
-                f"  {c.category:32s} {c.chars:7d} chars  ~{c.est_tokens:6d} tok  {c.detail}"
+                f"  {c.category:32s} {c.chars:7d} chars  ~{c.est_tokens:6d} tok  {c.detail}{tag}"
             )
         lines.append("")
     return "\n".join(lines)

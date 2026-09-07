@@ -230,9 +230,9 @@ def test_marketplace_token_costs_sums_skill_and_hook_files(tmp_path):
     cache_root = tmp_path / "plugins" / "cache"
     mp_dir = cache_root / "pordee" / "some-plugin"
     (mp_dir / "skills" / "a-skill").mkdir(parents=True)
-    (mp_dir / "skills" / "a-skill" / "SKILL.md").write_text("a" * 38, encoding="utf-8")
+    (mp_dir / "skills" / "a-skill" / "SKILL.md").write_text("a" * 40, encoding="utf-8")
     (mp_dir / "hooks").mkdir()
-    (mp_dir / "hooks" / "pre.py").write_text("a" * 38, encoding="utf-8")
+    (mp_dir / "hooks" / "pre.py").write_text("a" * 40, encoding="utf-8")
     with patch("agent_takkub.config.default_claude_config_dir", return_value=tmp_path):
         costs = marketplace_token_costs(["pordee"])
     assert costs == {"pordee": 20}

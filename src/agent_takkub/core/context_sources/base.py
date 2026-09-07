@@ -5,8 +5,9 @@ context_builder` never has to know which source a result came from beyond
 the fields on `ContextItem` itself.
 
 Pure/stdlib-only — no filesystem I/O, no config import beyond what a single
-helper lazily reaches for (`bm25_search.tokenize`, itself pure) — safe for
-every source module to depend on.
+helper lazily reaches for (`bm25_search.tokenize`, itself pure) and the
+equally pure `token_estimate` module — safe for every source module to
+depend on.
 """
 
 from __future__ import annotations
@@ -14,15 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-# Same rough "1 token ~= 4 chars" estimate `core.brain.context_builder`
-# already documents and uses for its own budget trim — kept in sync
-# deliberately so a mixed-source budget adds up consistently rather than
-# each source using its own conversion.
-_CHARS_PER_TOKEN = 4
-
-
-def estimate_tokens(text: str) -> int:
-    return max(1, len(text) // _CHARS_PER_TOKEN)
+# Thai-weighted estimator (#516 F2) — shared with `core.brain.context_builder`
+# so a mixed-source budget adds up consistently rather than each source using
+# its own conversion. See `agent_takkub.token_estimate` module docstring.
+from agent_takkub.token_estimate import estimate_tokens
 
 
 # v2-hardening H (`14_SECURITY_RETRIEVAL.md`) — "Retrieved content is DATA,

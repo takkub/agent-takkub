@@ -415,9 +415,16 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
     return roots
 
 
-def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bool:
+def _resume_uuid_matches_cwd(
+    project_ns: str, session_uuid: str, cwd: str, base_role: str | None = None
+) -> bool:
     """W3: verify a caller-chosen resume session (mobile session picker)
     actually belongs to `cwd` before handing it to `--resume`.
+
+    `base_role` (#516 F1) must match whatever was passed to
+    `inject_claude_project_dir_name_env` at spawn time for a non-Lead role —
+    otherwise this reconstructs the OLD (unsuffixed) directory name and misses
+    a resumable session that actually lives under the role-suffixed one.
 
     Same cwd-disambiguation guarantee the 5-min auto-resume path enforces via
     the in-memory pane-state cache — but this checks the JSONL store instead,
@@ -442,12 +449,15 @@ def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bo
     if not _SAFE_SESSION_UUID_RE.match(session_uuid):
         return False
 
+    from .pane_env import claude_project_dir_name
     from .token_meter import session_project_dirs_for_cwd
     from .user_profile import config_dir_for
 
     try:
         project_dirs = session_project_dirs_for_cwd(
-            config_dir_for(project_ns), cwd, project_ns=project_ns
+            config_dir_for(project_ns),
+            cwd,
+            project_dir_name=claude_project_dir_name(project_ns, base_role),
         )
     except OSError:
         return False
@@ -455,13 +465,13 @@ def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bo
 
 
 def _resume_uuid_matches_provider_cwd(
-    project_ns: str, provider: str, session_uuid: str, cwd: str
+    project_ns: str, provider: str, session_uuid: str, cwd: str, base_role: str | None = None
 ) -> bool:
     """Validate a caller-selected conversation against its provider store."""
     if not _SAFE_SESSION_UUID_RE.fullmatch(session_uuid):
         return False
     if provider == "claude":
-        return _resume_uuid_matches_cwd(project_ns, session_uuid, cwd)
+        return _resume_uuid_matches_cwd(project_ns, session_uuid, cwd, base_role)
     if provider == "gemini":
         from .gemini_helper import resolve_gemini_jsonl_for_cwd
 
@@ -2156,7 +2166,7 @@ class SpawnEngineMixin:
                     )
                     return False, f"resume unavailable for provider {spec.name}"
                 if not _resume_uuid_matches_provider_cwd(
-                    project_ns, spec.name, resume_uuid, spawn_cwd
+                    project_ns, spec.name, resume_uuid, spawn_cwd, base_role
                 ):
                     return False, f"resume_uuid does not match cwd for {role_name}"
             if _is_lead:
@@ -2783,7 +2793,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # token that a later early-return would leave orphaned in
         # self._pane_tokens (the token is never revoked because it was never
         # minted in the first place).
-        if resume_uuid and not _resume_uuid_matches_cwd(project_ns, resume_uuid, spawn_cwd):
+        if resume_uuid and not _resume_uuid_matches_cwd(
+            project_ns, resume_uuid, spawn_cwd, base_role
+        ):
             return False, f"resume_uuid does not match cwd for {role_name}"
 
         try:
@@ -2795,7 +2807,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
-        inject_claude_project_dir_name_env(env, project_ns, claude)
+        inject_claude_project_dir_name_env(env, project_ns, claude, base_role)
         inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled
 

@@ -147,20 +147,35 @@ per-skill or per-role granular switch from the CLI side.
 
 ### F3 — real, shipped CLI levers relevant to this issue (from `claude --help`, this machine's installed version)
 
-Not wired into spawn_engine yet — listed here as concrete follow-up items
-for #516 point 2, not implemented in this pass:
+**Correction (2026-09-07, follow-up pass):** `--setting-sources` was NOT an
+open candidate — it is already wired (`spawn_engine.py`, `sources =
+os.environ.get("TAKKUB_SETTING_SOURCES", "project,local")`, feeding
+`assemble_claude_argv`'s `setting_sources`), defaulting every claude pane
+(Lead and teammates alike) to `project,local` — `user`-scope
+`~/.claude/settings.json` is already excluded. It was added for an unrelated
+reason (working around a crashing claude-obsidian SessionStart hook), not
+for this issue, but it already delivers the effect this section originally
+proposed as a candidate. This audit doc's original text was wrong on this
+point; corrected here rather than silently reworded.
 
-- **`--disable-slash-commands`** — "Disable all skills." All-or-nothing per
-  session, but exactly the knob point 2 asked whether exists. Candidate: add
-  it to a role's argv when `skill_policy.effective_skills(role)` is empty
-  AND the role has no other skill dependency — saves the full
-  `skill_listing` (F2) for that pane.
-- **`--setting-sources <user,project,local>`** — scope which
-  `settings.json` layers load. A teammate pane currently inherits whatever
-  `user`-scope settings.json the operator's own account carries (plugins,
-  hooks) in addition to the project's — restricting to `project` (or
-  `project,local`) for teammate panes is a candidate for point 3's "plugins
-  default off" without touching `pane-tools.json` at all.
+Still NOT wired into spawn_engine — real follow-up items for #516 point 2:
+
+- **`--disable-slash-commands`** — "Disable all skills." Investigated this
+  pass and deliberately NOT wired: this flag is all-or-nothing per session
+  and disables Claude Code's entire built-in skill catalog (F2's 16-skill
+  `skill_listing`, e.g. `artifact-design`, `debug-mantra`,
+  `provider-integration` — general-purpose skills every role can invoke,
+  not just Skill-Matrix-assigned ones). Gating it on
+  `skill_policy.effective_skills(role)` being empty would fire for EVERY
+  role in this project right now (the Skill Matrix has no assignments at
+  all — §1), silently removing the entire built-in skill catalog from every
+  teammate pane project-wide. The 30-day usage scan below shows real,
+  non-trivial use of some of those skills — shipping this blind was judged
+  too risky for this pass. Needs an explicit decision from whoever owns
+  which built-in skills teammates should keep, not an automatic token-diet
+  toggle.
+- **`--setting-sources <user,project,local>`** — see correction above;
+  already delivers this.
 - **`--exclude-dynamic-system-prompt-sections`** — moves cwd/env
   info/memory paths/git status out of the system prompt into the first user
   message. Does not shrink the total, but improves cross-pane prompt-cache
@@ -211,3 +226,178 @@ for #516 point 2, not implemented in this pass:
 - `docs/audit/boot-context-baseline.json` — per-role byte-count baseline for the CI ceiling test.
 - `tests/test_boot_context_ceiling.py` — targeted regression test.
 - This document.
+
+## 6. Follow-up pass (2026-09-07, second session) — F1 fix, F2 fix, #516b addendum, plugin-usage measurement
+
+### F1 fixed: non-Lead roles now get their own transcript dir
+
+`pane_env.claude_project_dir_name(project_ns, base_role=None)` and
+`inject_claude_project_dir_name_env(..., base_role=None)` now suffix the
+directory (`takkub-project-<project>-<role>`) for every role except Lead
+(`base_role` `None`/`"lead"` keeps the exact old, unsuffixed name — Lead's
+`--resume`/session continuity and `remote/notify.py`'s resume picker are
+keyed off that historical value and must not move). Threaded through
+`spawn_engine.py`'s claude branch: the env injection call, and both
+`_resume_uuid_matches_cwd`/`_resume_uuid_matches_provider_cwd` (which
+reconstruct the same directory name to validate a caller-picked
+`resume_uuid`, and would otherwise silently look in the wrong directory for
+a non-Lead role and reject a legitimate resume). `boot_context.
+measure_native_project_memory(project_ns, base_role=None)` and
+`build_report` updated to read each role's own memory file instead of
+Lead's shared one — every non-Lead role now reports `None` for
+`native_project_memory` until that role is actually respawned under its new
+directory name (expected, not a bug — no pane has run under the new naming
+yet at the time of this pass). Tests: `tests/test_resume_session_picker.py`
+`TestClaudeProjectDirNameRoleSuffix` (4 new tests) + existing suite kept
+green (3 test lambdas needed their arity updated for the new optional
+`base_role` parameter — behavior unchanged, no production regression).
+
+Real-token impact of this fix is NOT independently re-measured against a
+fresh transcript in this pass (would need spawning an actual non-Lead pane
+under the new naming and burning real quota) — the ~13k real-token/pane
+estimate from §1/F1 above stands as the projected saving, not a re-verified
+number. Flagged, not silently assumed.
+
+### F2 fixed: Thai-weighted token estimator, all 4 copies unified
+
+New `src/agent_takkub/token_estimate.py` (pure, stdlib-only `re` — same
+leaf-module bar as `boot_context.py`) replaces the 4 independent
+`_CHARS_PER_TOKEN = 4` copies (`core/context_sources/base.py`, `core/brain/
+context_builder.py`, `core/brain/retrieval.py`, `boot_context.py`) with one
+shared `estimate_tokens(text)`: non-Thai characters keep the exact old
+chars/4 ratio (verified: `"x"*400` still estimates to exactly 100, so every
+English/code caller sees zero behavior change), Thai-script characters
+(U+0E00–U+0E7F) are weighted at 0.9 tokens/char per this task's calibration
+target. `lint-imports` confirms no contract broken by the new module (29/29
+contracts kept) — precedent already exists for `core/brain/*` importing a
+top-level leaf module (`agent_takkub.bm25_search`).
+
+**Honesty note on the ±15% target**: this pass could NOT independently
+verify the weighted estimator lands within ±15% of a real
+`cache_creation_input_tokens` transcript number end-to-end, because (a) the
+one real calibration point this repo has (37,338 tokens, §0) predates the
+F1 fix and included the ~13k-token shared native-memory chunk F1 just
+removed from non-Lead roles, so it is no longer the right target to compare
+against, and (b) boot_context.py still only measures a subset of what
+actually boots (per-spawn task block, git status, env block, Claude's own
+dynamic system-prompt sections — §2's original gap, still open). A fresh
+calibration needs a new pane spawn under the post-F1/F2 code to get a real
+number to check against — not done here to avoid burning quota on a
+measurement pass basis, consistent with this doc's existing quota
+discipline (§4/F3's MCP-schema note). What IS verified: role-appendix
+`repo_controlled_est_tokens` moved from a naive ~4,850 tok (backend) to a
+weighted ~7,030 tok — directionally correct (higher, since the content is
+majority Thai) and it is now the number the CI ceiling ratchets against.
+
+### #516b (same-day addendum from Lead): ceiling test false-positive fixed
+
+The ceiling test (`tests/test_boot_context_ceiling.py`) went red on a dev
+machine after F1/F2 landed for an unrelated reason: `learned_notes`
+(role_memory.py's per-role accumulated notes file, real per-machine runtime
+state a pane's own `takkub done` writes throughout the day) had simply grown
+since the baseline was captured, and a static ceiling gated on it produces a
+false regression on whichever machine has the most accumulated notes at gate
+time, while a clean CI checkout (no accumulated state) stays green. Fixed
+two ways:
+
+1. `RoleBootReport.repo_controlled_est_tokens`/`repo_controlled_chars`
+   (`boot_context.DYNAMIC_STATE_CATEGORIES` = `learned_notes`,
+   `learned_notes_empty_pointer`, `project_memory_pointer`,
+   `native_project_memory`, `native_project_memory_LEAD`) excludes
+   per-machine dynamic state from the gated sum; the ceiling test and
+   baseline JSON now key off this subset. Dynamic categories are still
+   measured and shown in `format_report`'s output (tagged
+   `[dynamic-state, not gated]`), just never failed on.
+2. `role_memory.py` gained a second, tighter cap —
+   `_MEM_MAX_LIVE_CHARS = 1_500` — on top of the existing 6,000-byte
+   whole-document cap, checked against `_bullet_content_chars(sections)`
+   (real bullet content only, not the fixed header/seed skeleton) inside
+   `_curate_text`'s existing `_over_budget()` check. Reuses the SAME
+   oldest-first trim-and-archive loop that cap already had (`_trim_oldest_
+   bullet` + `_archive_entries`, both unchanged) — nothing new to write,
+   just a second trigger condition, so a busy role's notes rotate into the
+   L2 archive sooner instead of growing unbounded toward the 6,000-byte
+   ceiling. `doctor.check_boot_context` now also emits a WARN Finding if a
+   role's `learned_notes` category ever exceeds `_MEM_MAX_LIVE_CHARS` at
+   measurement time — should be unreachable in practice (curation runs on
+   every read, including this one), so a hit means curation itself silently
+   failed (e.g. an `OSError` swallowed) and is worth investigating.
+
+Tests: `tests/test_boot_context_ceiling.py` re-baselined against
+`repo_controlled_est_tokens` + a new
+`test_dynamic_state_categories_reported_not_gated`;
+`tests/test_role_memory.py` gained `test_live_content_cap_is_1500_chars` +
+`test_oldest_bullets_rotate_to_archive_once_live_cap_exceeded`;
+`tests/test_boot_context.py` gained a doctor-WARN wiring test. `docs/audit/
+boot-context-baseline.json` regenerated against the current repo state
+(schema changed: `total_est_tokens`/`total_chars` per role →
+`repo_controlled_est_tokens`/`repo_controlled_chars`).
+
+### Point 3 measurement: real 30-day Skill-tool usage (dev + prod transcripts)
+
+Read-only scan (script kept in this session's scratchpad, not committed —
+`$TAKKUB_ARTIFACTS_DIR` policy) over every `*agent-takkub*` project
+directory under both `~/.claude/projects` (dev) and
+`~/.agent-takkub/claude-config/projects` (prod), files modified in the last
+30 days, counting `"type":"tool_use","name":"Skill"` blocks and resolving
+each `input.skill` value (bare name, or `<plugin>:<skill>` for a
+plugin-provided one) to its marketplace via the actual installed plugin
+cache directory listing (real skill names, not guessed):
+
+- **587 transcript files in the 30-day window**, **68 total Skill-tool
+  invocations**.
+- **`superpowers-dev`: 15 invocations** (`test-driven-development` x9,
+  `systematic-debugging` x4, `verification-before-completion` x2) — real,
+  non-trivial use. Do NOT default this off.
+- **`ui-ux-pro-max-skill`: 1 invocation** (`design`) — marginal but
+  non-zero; already scoped to design roles only (`_ROLE_PLUGIN_POLICY`), no
+  change indicated.
+- **`pordee`: 0 Skill-tool invocations observed.** Per `_default_plugin_
+  dirs`'s own comment it's meant to work as automatic Thai-context
+  compression, not a user-invoked skill, so zero here does not necessarily
+  mean unused — this scan can only see explicit Skill-tool calls, not
+  automatic/hook-driven plugin behavior. Not a recommendation to remove it;
+  flagged as a measurement blind spot instead.
+- **`addy-agent-skills`: 0 invocations** — consistent with it already being
+  excluded from every role's default (`_TEAMMATE_PLUGINS`/`_ROLE_PLUGIN_
+  POLICY` in `lead_context.py` never lists it); no action needed, this
+  confirms the existing exclusion rather than finding new information.
+- **`claude-plugins-official`'s pane-facing skill (`frontend-design`): 0
+  invocations observed.**
+
+**Methodology caveat, stated plainly rather than hidden**: role attribution
+(matching a transcript to `frontend`/`backend`/`qa`/etc. via a `[ROLE:
+<name>` prefix scan of each file's first 8 lines) worked for only 1 of the
+68 invocations (`qa`); the other 67 fell into an `lead_or_unknown` bucket.
+Either most Skill-tool usage in this window genuinely happened in Lead's own
+session (plausible — Lead does most of the direct work in this project's
+observed workflow), or the role-prefix detection heuristic itself needs
+refinement (the exact `[ROLE:` marker position/format in a real teammate
+transcript was not independently verified against a live sample beyond the
+one file that matched). Numbers above are trustworthy in aggregate
+(skill/marketplace totals); the per-role breakdown is not — reported as an
+open gap rather than a false per-role table. `_ROLE_PLUGIN_POLICY`'s
+existing per-role defaults were not changed on the strength of this
+measurement; it substantiates keeping `superpowers-dev` as a teammate
+default, nothing more.
+
+### Explicitly NOT done this pass (same "measure before guess" discipline)
+
+- **`--disable-slash-commands` wiring** — investigated, deliberately not
+  shipped; see corrected F3 above for why (would remove every teammate's
+  entire built-in skill catalog project-wide since the Skill Matrix has zero
+  assignments right now, and the usage scan above shows real skill use).
+- **`--exclude-dynamic-system-prompt-sections`** — not attempted; needs a
+  live before/after cache-hit-ratio experiment (two real spawns, comparing
+  `cache_read_input_tokens` share of the first turn), which this pass judged
+  out of scope for a token/quota-conscious measurement session.
+- **Idle-pane reuse (point 4/5)** — no engine change. This is a scheduling
+  feature touching `orchestrator`'s assign/spawn path (which pane is idle,
+  which role it was last running, session-resume-vs-fresh-spawn decision,
+  the 10-minute window, and interaction with `--resume`/context-window
+  checks) — a correctness-sensitive change to shared spawn/assign machinery
+  that this pass did not have the remaining scope to design, implement, and
+  test to the bar the rest of this document holds itself to. Left for a
+  dedicated follow-up task rather than shipped half-verified.
+- **Multi-provider boot-context measurement (point 6)** — unchanged gap from
+  §4; still only claude's `--append-system-prompt-file` path is measured.
