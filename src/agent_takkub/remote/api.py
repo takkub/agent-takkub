@@ -821,11 +821,17 @@ def usage() -> dict:
 
 
 def usage_history(days: str | int | None, month: str | None, provider: str | None) -> dict:
-    """View-mode safe (read-only, #507). Reads whatever `usage_ledger`
-    already has on disk — like `usage()` above, this must NEVER trigger the
-    expensive transcript import itself (that's desktop-Settings-triggered,
-    or a future scheduled job); a phone poll only ever reads, same
-    provider-usage design doc §4 contract `usage()` follows.
+    """View-mode safe (read-only, #507/H1/H2 hardening 2026-09-07). Reads
+    whatever `usage_ledger` already has on disk — like `usage()` above,
+    this must NEVER trigger the expensive transcript import, and (H1) must
+    never write/prune the ledger either: `refresh=False` skips
+    `rollup_daily`'s write+prune, so a view-mode GET is a pure read no
+    matter what `provider`/`month` a client sends. `provider` itself is
+    validated inside `usage_ledger._all_accounts` against a static
+    allowlist — an unrecognized value (e.g. `../outside`, an absolute
+    path) yields an empty result instead of ever being joined onto the
+    ledger root. `days` is clamped (L7) instead of being able to raise
+    inside `date.fromordinal` on an absurd value.
     """
     from .. import usage_ledger
 
@@ -833,10 +839,12 @@ def usage_history(days: str | int | None, month: str | None, provider: str | Non
         days_int = int(days) if days not in (None, "") else None
     except (TypeError, ValueError):
         days_int = None
+    if days_int is not None:
+        days_int = max(1, min(days_int, usage_ledger._MAX_DAYS))
     result = usage_ledger.query_usage(
-        days=days_int, month=(month or None), provider=(provider or None)
+        days=days_int, month=(month or None), provider=(provider or None), refresh=False
     )
-    result["daily_series"] = usage_ledger.daily_series(provider or None, days=14)
+    result["daily_series"] = usage_ledger.daily_series(provider or None, days=14, refresh=False)
     return result
 
 

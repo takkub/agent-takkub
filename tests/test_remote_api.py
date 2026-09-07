@@ -763,16 +763,60 @@ class TestUsageHistory:
             "claude-sonnet-5",
             {"input": 1, "cache_creation": 2, "cache_read": 3, "output": 4},
         )
+        # A real (desktop-triggered) rollup already happened before this
+        # view-mode read — usage_history itself must never roll up (H1/H2:
+        # it reads refresh=False), so without this the fresh row would not
+        # be reflected in daily.json yet.
+        usage_ledger.rollup_daily("claude", "default")
         result = api.usage_history(days="7", month=None, provider=None)
         assert result["rows"][0]["total"] == 10
+
+    def test_never_writes_or_prunes_the_ledger(self, monkeypatch):
+        """H1/H2 (2026-09-07): a view-mode read must be a pure read — no
+        rollup write, no raw-file prune — no matter what's already on
+        disk."""
+        from agent_takkub import usage_ledger
+
+        usage_ledger.record_turn(
+            "claude",
+            "default",
+            "2026-09-05T00:00:00Z",
+            "r1",
+            "m",
+            {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
+        )
+        raw = usage_ledger._turn_file("claude", "default", "2026-09")
+        daily = usage_ledger._daily_file("claude", "default")
+        assert raw.is_file()
+        assert not daily.exists()
+        api.usage_history(days="7", month=None, provider=None)
+        assert raw.is_file(), "usage_history must never prune the raw month file"
+        assert not daily.exists(), "usage_history must never write daily.json (no rollup)"
+
+    def test_provider_traversal_is_rejected(self):
+        """H1: a `provider` value crafted to escape `usage_root()` must
+        never touch the filesystem outside the ledger."""
+        from agent_takkub import usage_ledger
+
+        outside = usage_ledger.usage_root().parent / "outside"
+        outside_account = outside / "account"
+        outside_account.mkdir(parents=True)
+        victim = outside_account / "2000-01.jsonl"
+        victim.write_text('{"ts":"2000-01-01T00:00:00Z","request_id":"r"}\n')
+
+        result = api.usage_history(days="7", month=None, provider="../outside")
+        assert result["rows"] == []
+        assert victim.is_file(), "a rejected provider must never delete files outside the ledger"
+        assert not (outside_account / "daily.json").exists()
 
     def test_days_param_parses_string_to_int(self, monkeypatch):
         from agent_takkub import usage_ledger
 
         seen = {}
 
-        def fake_query(*, days=None, month=None, provider=None):
+        def fake_query(*, days=None, month=None, provider=None, refresh=None):
             seen["days"] = days
+            seen["refresh"] = refresh
             return {
                 "start": "x",
                 "end": "y",
@@ -780,19 +824,19 @@ class TestUsageHistory:
                 "rows": [],
                 "uncountable": [],
                 "quota": [],
-                "rtk_gain": None,
             }
 
         monkeypatch.setattr(usage_ledger, "query_usage", fake_query)
         api.usage_history(days="30", month=None, provider=None)
         assert seen["days"] == 30
+        assert seen["refresh"] is False
 
     def test_malformed_days_param_falls_back_to_default(self, monkeypatch):
         from agent_takkub import usage_ledger
 
         seen = {}
 
-        def fake_query(*, days=None, month=None, provider=None):
+        def fake_query(*, days=None, month=None, provider=None, refresh=None):
             seen["days"] = days
             return {
                 "start": "x",
@@ -801,12 +845,33 @@ class TestUsageHistory:
                 "rows": [],
                 "uncountable": [],
                 "quota": [],
-                "rtk_gain": None,
             }
 
         monkeypatch.setattr(usage_ledger, "query_usage", fake_query)
         api.usage_history(days="not-a-number", month=None, provider=None)
         assert seen["days"] is None
+
+    def test_huge_days_param_is_clamped_not_a_crash(self, monkeypatch):
+        """L7: `days=999999999` previously reached `date.fromordinal`
+        unclamped and raised `ValueError` (surfaced as a 500)."""
+        from agent_takkub import usage_ledger
+
+        seen = {}
+
+        def fake_query(*, days=None, month=None, provider=None, refresh=None):
+            seen["days"] = days
+            return {
+                "start": "x",
+                "end": "y",
+                "month": None,
+                "rows": [],
+                "uncountable": [],
+                "quota": [],
+            }
+
+        monkeypatch.setattr(usage_ledger, "query_usage", fake_query)
+        api.usage_history(days="999999999", month=None, provider=None)
+        assert seen["days"] == usage_ledger._MAX_DAYS
 
     def test_includes_daily_series_for_the_sparkline(self):
         from agent_takkub import usage_ledger

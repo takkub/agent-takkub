@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import os
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -84,18 +84,57 @@ _CONTEXT_STRATEGY_CHOICES: tuple[tuple[str, str, str], ...] = (
 # ──────────────────────────────────────────────────────────────
 
 
+_ACTIVE_THREADS: set[_CallableThread] = set()
+_shutdown_hooked = False
+
+
+def _wait_for_active_threads() -> None:
+    """`aboutToQuit` hook (registered lazily the first time a
+    `_CallableThread` runs) — gives any still-in-flight worker a bounded
+    window to finish before the process exits, instead of leaving it to be
+    killed mid-write."""
+    for thread in list(_ACTIVE_THREADS):
+        thread.wait(3000)
+
+
 class _CallableThread(QThread):
+    """Generic background-callable worker (H3, 2026-09-07 hardening):
+    deliberately unparented (`QThread.__init__(None)`, ignoring `parent`
+    for Qt object-tree purposes) and kept alive by `_ACTIVE_THREADS`
+    instead of Qt parent/child ownership. A `QThread` parented to a
+    transient Settings dialog/window gets swept up in Qt's child-cleanup
+    the moment that dialog is destroyed — and destroying a `QThread` while
+    it `isRunning()` is a fatal abort (`QThread: Destroyed while thread is
+    still running`, reproduced as exit 0xC0000409 with `settings_usage
+    .py`'s own Refresh thread when its owning dialog was force-deleted
+    mid-import). `finished` removes this instance from the registry and
+    schedules `deleteLater()` once the run actually completes, so a closed
+    dialog no longer takes an in-flight import/probe down with it.
+    """
+
     resultReady: pyqtSignal = pyqtSignal(object)
 
     def __init__(self, fn, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(None)  # never Qt-parented — see class docstring
         self._fn = fn
+        _ACTIVE_THREADS.add(self)
+        self.finished.connect(self._cleanup)
+        global _shutdown_hooked
+        if not _shutdown_hooked:
+            app = QCoreApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(_wait_for_active_threads)
+                _shutdown_hooked = True
 
     def run(self) -> None:
         try:
             self.resultReady.emit(self._fn())
         except Exception as e:  # pragma: no cover - fail-open, surfaced in the UI
             self.resultReady.emit(e)
+
+    def _cleanup(self) -> None:
+        _ACTIVE_THREADS.discard(self)
+        self.deleteLater()
 
 
 def _status_dot_color(ok: bool | None) -> str:
@@ -228,6 +267,8 @@ class KnowledgeDesignSettingsMixin:
         return view
 
     def _on_kd_knowledge_refresh_clicked(self) -> None:
+        if self._kd_knowledge_thread is not None and self._kd_knowledge_thread.isRunning():
+            return
         for dot, detail in self._kd_knowledge_rows.values():
             dot.setStyleSheet(f"background: {cockpit_theme.TEXT_FAINT}; border-radius: 4px;")
             detail.setText("กำลังตรวจสอบ…")
@@ -353,6 +394,8 @@ class KnowledgeDesignSettingsMixin:
         return view
 
     def _on_kd_design_refresh_clicked(self) -> None:
+        if self._kd_design_thread is not None and self._kd_design_thread.isRunning():
+            return
         for dot, detail in self._kd_design_rows.values():
             dot.setStyleSheet(f"background: {cockpit_theme.TEXT_FAINT}; border-radius: 4px;")
             detail.setText("กำลังตรวจสอบ…")
@@ -402,6 +445,8 @@ class KnowledgeDesignSettingsMixin:
         self._kd_design_cred_status.setText(f"บันทึก credential ของ '{mcp_id}' แล้ว")
 
     def _on_kd_design_test_clicked(self) -> None:
+        if self._kd_design_thread is not None and self._kd_design_thread.isRunning():
+            return
         self._kd_design_test_btn.setEnabled(False)
         self._kd_design_result.setPlainText("กำลังทดสอบ…")
         thread = _CallableThread(_run_design_tools_test, self)

@@ -214,7 +214,12 @@ def test_import_codex_attributes_model_from_turn_context(tmp_path):
     assert stats["new_turns"] == 1
     rows = ul._read_jsonl(ul._turn_file("codex", "default", "2026-09"))
     assert rows[0]["model"] == "gpt-5.6-terra"
-    assert rows[0]["input"] == 10
+    # H5 (2026-09-07): codex's `input_tokens` already INCLUDES
+    # `cached_input_tokens` — stored net of the cached portion (10-5=5) so
+    # input+cache_read+output (5+5+7=17... plus cache_creation 2 = 19)
+    # reconciles with the provider's own total_tokens instead of double-
+    # counting the 5 cached tokens via both "input" and "cache_read".
+    assert rows[0]["input"] == 5
     assert rows[0]["cache_read"] == 5
     assert rows[0]["cache_creation"] == 2
     assert rows[0]["output"] == 7
@@ -263,6 +268,39 @@ def test_import_codex_is_idempotent_on_rerun(tmp_path):
     stats = ul.import_codex(profiles)
     assert stats["new_turns"] == 0
     assert stats["skipped_files"] == 1
+
+
+def test_import_codex_reported_total_matches_provider_total_not_double_counted(tmp_path):
+    """H5 (2026-09-07) — real fixture numbers from a live rollout event:
+    provider `total_tokens=19421` (`input_tokens=19275` already includes
+    `cached_input_tokens=12160`: 19275+146=19421, not 19275+12160+146).
+    Before the fix this reported 31,581."""
+    home = tmp_path / "codex-home"
+    _write_codex_rollout(
+        home,
+        lines=[
+            {
+                "timestamp": "2026-09-07T05:21:35.118Z",
+                "ordinal": 2,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 19275,
+                            "cached_input_tokens": 12160,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 146,
+                            "total_tokens": 19421,
+                        }
+                    },
+                },
+            }
+        ],
+    )
+    ul.import_codex([{"name": "default", "config_dir": str(home)}])
+    result = ul.query_usage(month="2026-09", provider="codex")
+    assert result["rows"][0]["total"] == 19421
 
 
 # ── import_opencode ──────────────────────────────────────────────────────
@@ -469,6 +507,253 @@ def test_rollup_daily_prunes_old_raw_month_but_keeps_the_data(monkeypatch):
     assert daily[f"{old_month}-01"]["m"]["input"] == 1
 
 
+def test_rollup_daily_does_not_erase_history_when_a_pruned_month_partially_reappears():
+    """H4 (2026-09-07): two historical requests roll up to a total, their
+    raw month file gets pruned — then a resumed session (or a rotated
+    source, or a rebuilt cursor) re-records ONE of the two original
+    request ids for that same already-pruned month. The next rollup must
+    not silently replace the day's published total with just that partial
+    file's contents (30 -> 10, the review's own repro numbers)."""
+    old_month = ul._month_n_ago(2)
+    ul.record_turn(
+        "claude",
+        "history",
+        f"{old_month}-01T00:00:00Z",
+        "one",
+        "m",
+        {"input": 10, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    ul.record_turn(
+        "claude",
+        "history",
+        f"{old_month}-01T01:00:00Z",
+        "two",
+        "m",
+        {"input": 20, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    before = ul.rollup_daily("claude", "history")[f"{old_month}-01"]["m"]["input"]
+    assert before == 30
+    assert not ul._turn_file("claude", "history", old_month).is_file()
+
+    # A resumed session re-records "one" — durable dedup (`_seen_ids.json`,
+    # folded in by the rollup above) must recognize it as already-counted
+    # and skip re-appending it, so the raw file never comes back at all.
+    appended = ul.record_turn(
+        "claude",
+        "history",
+        f"{old_month}-01T00:00:00Z",
+        "one",
+        "m",
+        {"input": 10, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    assert appended is False
+    assert not ul._turn_file("claude", "history", old_month).is_file()
+
+    after = ul.rollup_daily("claude", "history")[f"{old_month}-01"]["m"]["input"]
+    assert after == 30
+
+
+def test_rollup_daily_adds_genuinely_new_rows_to_an_already_pruned_month():
+    """The merge-not-replace path must still ADD real new data (not just
+    guard against exact-duplicate ids) — a third, previously-unseen
+    request for the same already-pruned month grows the total instead of
+    replacing it."""
+    old_month = ul._month_n_ago(2)
+    ul.record_turn(
+        "claude",
+        "grow",
+        f"{old_month}-01T00:00:00Z",
+        "one",
+        "m",
+        {"input": 10, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    ul.rollup_daily("claude", "grow")
+    ul.record_turn(
+        "claude",
+        "grow",
+        f"{old_month}-01T02:00:00Z",
+        "three",
+        "m",
+        {"input": 5, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    daily = ul.rollup_daily("claude", "grow")
+    assert daily[f"{old_month}-01"]["m"]["input"] == 15
+    assert daily[f"{old_month}-01"]["m"]["turns"] == 2
+
+
+def test_rollup_daily_writes_atomically_no_tmp_file_left_behind():
+    ul.record_turn(
+        "claude",
+        "atomic",
+        "2026-09-01T00:00:00Z",
+        "r1",
+        "m",
+        {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
+    )
+    ul.rollup_daily("claude", "atomic")
+    daily_path = ul._daily_file("claude", "atomic")
+    assert daily_path.is_file()
+    assert not daily_path.with_suffix(daily_path.suffix + ".tmp").exists()
+
+
+# ── H1: provider allowlist / path containment ───────────────────────────
+
+
+def test_all_accounts_rejects_a_traversal_provider():
+    victim_dir = ul.usage_root().parent / "outside" / "account"
+    victim_dir.mkdir(parents=True)
+    (victim_dir / "2000-01.jsonl").write_text('{"request_id":"r"}\n')
+
+    assert ul._all_accounts("../outside") == []
+    result = ul.query_usage(provider="../outside")
+    assert result["rows"] == []
+    # Nothing under the ledger, and nothing outside it, was touched.
+    assert not (victim_dir / "daily.json").exists()
+
+
+def test_all_accounts_rejects_an_unknown_provider_name():
+    assert ul._all_accounts("not-a-real-provider") == []
+
+
+# ── H7: concurrent writers ───────────────────────────────────────────────
+
+
+def test_record_turn_concurrent_writers_never_duplicate_a_request_id():
+    """Two threads calling `record_turn` for the SAME (provider, account,
+    month, request_id) concurrently, repeated to make a missing lock
+    likely to surface — before H7's write-time lock, both could read
+    "not yet recorded" before either appended, duplicating the row."""
+    import threading
+
+    for i in range(20):
+        account = f"concurrent{i}"
+
+        def record(account=account):
+            ul.record_turn("claude", account, "2026-09-07T00:00:00Z", "same", "m", {"input": 5})
+
+        threads = [threading.Thread(target=record) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        rows = ul._read_jsonl(ul._turn_file("claude", account, "2026-09"))
+        assert len(rows) == 1, f"iteration {i}: expected exactly 1 row, got {len(rows)}"
+
+
+def test_usage_lock_blocks_a_second_acquire_until_the_first_releases():
+    """Direct proof `_UsageLock` actually serializes — a second `with
+    _UsageLock()` started while the first is still held must not proceed
+    until the first exits."""
+    import threading
+    import time
+
+    order: list[str] = []
+    first_holding = threading.Event()
+    release_first = threading.Event()
+
+    def first():
+        with ul._UsageLock():
+            first_holding.set()
+            release_first.wait(timeout=5)
+            order.append("first-release")
+
+    def second():
+        first_holding.wait(timeout=5)
+        time.sleep(0.05)  # give `first` a head start actually holding the lock
+        with ul._UsageLock():
+            order.append("second-acquire")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    t1.join(timeout=0.01)  # not yet — first should still be holding
+    t2.start()
+    time.sleep(0.2)
+    assert order == [], "second acquired the lock while first still held it"
+    release_first.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert order == ["first-release", "second-acquire"]
+
+
+# ── M1: opencode WAL ──────────────────────────────────────────────────────
+
+
+def test_import_opencode_detects_a_wal_only_write(tmp_path, monkeypatch):
+    """A write committed to the `-wal` sidecar (autocheckpoint disabled, a
+    real busy-connection shape) leaves the MAIN db file's own stat
+    unchanged — the old size/mtime-only cursor key skipped the whole
+    import and missed it entirely."""
+    import sqlite3
+
+    from agent_takkub import opencode_helper
+
+    db_path = tmp_path / "opencode.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=wal")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("CREATE TABLE message(id TEXT, time_created INTEGER, data TEXT)")
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(truncate)")
+
+    def add(row_id):
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?)",
+            (
+                row_id,
+                1788739200000,
+                json.dumps({"role": "assistant", "modelID": "m", "tokens": {"input": 10}}),
+            ),
+        )
+        conn.commit()
+
+    add("1")
+    monkeypatch.setattr(opencode_helper, "opencode_db_path", lambda: db_path)
+    first = ul.import_opencode()
+    assert first["new_turns"] == 1
+
+    add("2")  # WAL-only write; main file's stat is untouched by this alone.
+    second = ul.import_opencode()
+    assert second["skipped_files"] == 0, "WAL-only write must not be skipped as unchanged"
+    assert second["new_turns"] == 1
+    conn.close()
+
+
+# ── M6: malformed rows never abort the whole import ─────────────────────
+
+
+def test_import_claude_skips_a_top_level_scalar_json_line(tmp_path):
+    base = tmp_path / "claude-config"
+    (base / "projects" / "p").mkdir(parents=True)
+    (base / "projects" / "p" / "s.jsonl").write_text(
+        "null\n" + json.dumps(_claude_assistant_line("2026-09-01T10:00:00Z", "r1")) + "\n"
+    )
+    stats = ul.import_claude([{"name": "default", "config_dir": str(base)}])
+    assert stats["new_turns"] == 1
+    assert stats.get("errors", 0) == 0
+
+
+def test_record_turn_skips_non_numeric_usage_field_instead_of_raising():
+    ok = ul.record_turn(
+        "claude", "default", "2026-09-01T00:00:00Z", "r1", "m", {"input": "not-a-number"}
+    )
+    assert ok is False
+    rows = ul._read_jsonl(ul._turn_file("claude", "default", "2026-09"))
+    assert rows == []
+
+
+def test_import_all_isolates_one_providers_crash_from_the_others(monkeypatch):
+    def _boom():
+        raise RuntimeError("blew up")
+
+    monkeypatch.setitem(ul._IMPORTERS, "claude", _boom)
+    result = ul.import_all()
+    assert "error" in result["claude"]
+    assert "error" not in result["codex"]
+    assert "error" not in result["opencode"]
+
+
 # ── query_usage / format_usage_table ───────────────────────────────────
 
 
@@ -516,6 +801,21 @@ def test_query_usage_quota_delta_sums_only_positive_movement():
     result = ul.query_usage(days=7, provider="claude")
     window = next(q for q in result["quota"] if q["window"] == "five_hour")
     assert window["delta_pct"] == 45.0  # (40-10) + (20-5), reset drop ignored
+
+
+def test_query_usage_quota_scans_every_month_in_a_multi_month_range():
+    """M9 (2026-09-07): the old `{start_month, end_month}` two-element set
+    silently skipped every month strictly between them — `--days 90` can
+    span 3-4 months and a middle month's quota samples never got read at
+    all (no error, just a quietly smaller %)."""
+    from datetime import UTC, datetime, timedelta
+
+    middle = datetime.now(tz=UTC) - timedelta(days=45)
+    ul.record_quota_sample("claude", "default", middle.isoformat(), "five_hour", 33.0, None)
+    result = ul.query_usage(days=90, provider="claude")
+    window = next((q for q in result["quota"] if q.get("window") == "five_hour"), None)
+    assert window is not None, "a quota sample in a middle month must not be skipped"
+    assert window["samples"] == 1
 
 
 def test_query_usage_never_crashes_with_empty_ledger():

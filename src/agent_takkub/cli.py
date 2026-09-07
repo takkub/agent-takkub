@@ -2516,6 +2516,11 @@ def cmd_usage(args: argparse.Namespace) -> dict:
 
     usage_ledger.import_all()
     result = usage_ledger.query_usage(days=args.days, month=args.month, provider=args.provider)
+    # rtk_gain moved out of query_usage itself (H2/H3, 2026-09-07) — a real
+    # ~0.5s subprocess call has no business running on every caller
+    # (remote poll, every Settings range switch); only this CLI print
+    # needs it.
+    result["rtk_gain"] = usage_ledger.rtk_gain_summary()
     print(usage_ledger.format_usage_table(result))
     return {"ok": True, "msg": "usage report printed"}
 

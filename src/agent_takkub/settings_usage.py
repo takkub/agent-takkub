@@ -136,9 +136,9 @@ class UsageSettingsMixin:
         self._usage_range_combo.setCurrentIndex(1)  # "week" default
         self._usage_range_combo.currentIndexChanged.connect(self._on_usage_range_changed)
         header_row.addWidget(self._usage_range_combo)
-        refresh_btn = cockpit_theme.secondary_button("Refresh", view)
-        refresh_btn.clicked.connect(self._on_usage_refresh_clicked)
-        header_row.addWidget(refresh_btn)
+        self._usage_refresh_btn = cockpit_theme.secondary_button("Refresh", view)
+        self._usage_refresh_btn.clicked.connect(self._on_usage_refresh_clicked)
+        header_row.addWidget(self._usage_refresh_btn)
         lay.addLayout(header_row)
 
         self._usage_status_label = QLabel(
@@ -278,9 +278,12 @@ class UsageSettingsMixin:
             ),
         )
 
-        rtk = result.get("rtk_gain")
+        # `rtk_gain` no longer rides `query_usage()`'s own result (H2/H3,
+        # 2026-09-07) — that subprocess call (~0.5s observed) has no
+        # business running on every range switch/Settings open. `takkub
+        # usage` (CLI) is the one place that still shows it.
         self._usage_rtk_label.setText(
-            f"rtk saved (ตามที่ rtk รายงาน — ไม่รวมกับตัวเลขข้างบน): {rtk or '—'}"
+            "rtk saved: รันคำสั่ง `takkub usage` (CLI) เพื่อดู — ไม่รวมกับตัวเลขข้างบน"
         )
 
     def _build_usage_card(self, provider: str, total: int) -> QWidget:
@@ -347,6 +350,14 @@ class UsageSettingsMixin:
     def _on_usage_refresh_clicked(self) -> None:
         from . import usage_ledger
 
+        # H5/H7 (2026-09-07): a rapid double-click previously started two
+        # concurrent `import_all` runs — each with its own dedup cache,
+        # each unaware of the other's in-flight writes — racing appends
+        # into the same raw jsonl/cursor/daily.json. Ignore the click
+        # while a refresh is already running instead.
+        if self._usage_import_thread is not None and self._usage_import_thread.isRunning():
+            return
+        self._usage_refresh_btn.setEnabled(False)
         self._usage_status_label.setText("กำลัง import ข้อมูลล่าสุด (รันเบื้องหลัง)…")
         thread = _CallableThread(usage_ledger.import_all, self)
         thread.resultReady.connect(self._on_usage_import_ready)
@@ -354,6 +365,7 @@ class UsageSettingsMixin:
         thread.start()
 
     def _on_usage_import_ready(self, result: object) -> None:
+        self._usage_refresh_btn.setEnabled(True)
         if isinstance(result, Exception):
             self._usage_status_label.setText(f"import ไม่สำเร็จ: {result}")
             return

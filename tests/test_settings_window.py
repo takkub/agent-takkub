@@ -118,6 +118,17 @@ class TestSettingsWindowStructure:
         assert dlg._stack.currentIndex() == settings_window.VIEW_PROVIDERS_ROLES
         dlg.deleteLater()
 
+    def test_closing_schedules_deletion_instead_of_leaking(self) -> None:
+        """H3 (cross-review 2026-09-07): a probe that opened/closed
+        SettingsWindow 5 times found every instance still alive — nothing
+        ever scheduled its deletion. `close()` (which `reject()`/`accept()`
+        both call) must now mark it `WA_DeleteOnClose`."""
+        from PyQt6.QtCore import Qt
+
+        dlg = settings_window.SettingsWindow()
+        assert dlg.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.deleteLater()
+
     def test_nav_click_switches_stack_page(self) -> None:
         dlg = settings_window.SettingsWindow()
         dlg._nav_buttons[settings_window.VIEW_MCP_MATRIX].click()
