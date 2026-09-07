@@ -400,6 +400,91 @@ class TestAssignCreatesShardGroup:
 
 
 # ──────────────────────────────────────────────────────────────
+# #510 — assign() rejects a role toggled off in Settings → Providers & Roles
+# ──────────────────────────────────────────────────────────────
+
+
+class TestAssignRejectsDisabledRole:
+    @pytest.fixture(autouse=True)
+    def _isolate_pipeline_config(self, tmp_path, monkeypatch):
+        import agent_takkub.pipeline_config as pipeline_config
+
+        monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+        monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+        return pipeline_config
+
+    def _disable_role(self, pipeline_config, role: str) -> None:
+        payload = pipeline_config.load(TEST_PROJECT)
+        payload["rolesEnabled"][role] = False
+        pipeline_config.save(payload, TEST_PROJECT)
+
+    def test_pane_mode_rejected(self, orch: Orchestrator, _isolate_pipeline_config) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa")
+
+        with patch.object(orch, "spawn") as spawn_mock:
+            ok, msg = orch.assign("qa", cwd="/web", task="smoke", project=TEST_PROJECT)
+
+        assert ok is False
+        assert "qa" in msg and "ปิด" in msg
+        spawn_mock.assert_not_called()
+
+    def test_subagent_mode_also_rejected(
+        self, orch: Orchestrator, _isolate_pipeline_config
+    ) -> None:
+        """#510 requirement 1: the check sits before the pane/subagent mode
+        branch so a disabled role can't be routed around via --mode subagent."""
+        self._disable_role(_isolate_pipeline_config, "qa")
+
+        with patch.object(orch, "_register_subagent") as register_mock:
+            ok, msg = orch.assign(
+                "qa", cwd="/web", task="smoke", project=TEST_PROJECT, mode="subagent"
+            )
+
+        assert ok is False
+        assert "qa" in msg
+        register_mock.assert_not_called()
+
+    def test_shard_suffix_reads_base_role_state(
+        self, orch: Orchestrator, _isolate_pipeline_config
+    ) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa")
+
+        with patch.object(orch, "spawn") as spawn_mock:
+            ok, _ = orch.assign("qa#3", cwd="/web", task="smoke", project=TEST_PROJECT)
+
+        assert ok is False
+        spawn_mock.assert_not_called()
+
+    def test_enabled_role_unaffected(self, orch: Orchestrator, _isolate_pipeline_config) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa")
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            ok, _ = orch.assign("backend", cwd="/api", task="add endpoint", project=TEST_PROJECT)
+
+        assert ok is True
+
+    def test_re_enabled_role_assigns_normally(
+        self, orch: Orchestrator, _isolate_pipeline_config
+    ) -> None:
+        payload = _isolate_pipeline_config.load(TEST_PROJECT)
+        payload["rolesEnabled"]["qa"] = False
+        _isolate_pipeline_config.save(payload, TEST_PROJECT)
+        payload["rolesEnabled"]["qa"] = True
+        _isolate_pipeline_config.save(payload, TEST_PROJECT)
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            ok, _ = orch.assign("qa", cwd="/web", task="smoke", project=TEST_PROJECT)
+
+        assert ok is True
+
+
+# ──────────────────────────────────────────────────────────────
 # #160 — shard fan-out output-path collision guard
 # ──────────────────────────────────────────────────────────────
 

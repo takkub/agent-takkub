@@ -2326,6 +2326,20 @@ class Orchestrator(
         it instead of running `git worktree add` inline on the main thread."""
         if mode not in {"pane", "subagent"}:
             return False, "mode must be pane or subagent"
+        # #510: enforce the Settings → Providers & Roles on/off toggle at the
+        # single choke point both pane and subagent assigns pass through —
+        # checked before mode branches so neither path silently substitutes a
+        # disabled role. `pipeline_config.is_role_enabled` strips any "#N"
+        # shard suffix itself, so `qa#2` reads as disabled when `qa` is.
+        role_check_project_ns = self._resolve_project(project)
+        from .pipeline_config import is_role_enabled
+
+        if not is_role_enabled(role_name, role_check_project_ns):
+            base_role_disabled = role_name.split("#", 1)[0].strip().lower()
+            return False, (
+                f"role {base_role_disabled} ถูกปิดใน Settings ของโปรเจคนี้ "
+                f"({role_check_project_ns}) — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+            )
         if mode == "subagent":
             if model:
                 return False, "model override is not supported in subagent mode"
@@ -4530,6 +4544,40 @@ class Orchestrator(
         self.providerStateChanged.emit(provider, disabled)
         _log_event("provider_toggled", provider=provider, disabled=disabled)
         return True, f"{provider} {word.lower()}"
+
+    def notify_roles_changed(self, project: str | None, changes: dict[str, bool]) -> None:
+        """Broadcast a `[system] role <name> ENABLED/DISABLED (this project)`
+        notice into *project*'s live Lead pane after Settings → Providers &
+        Roles flips `rolesEnabled` (#510). ``changes`` = ``{role: disabled}``
+        for every role whose on/off state actually changed.
+
+        Unlike ``toggle_provider`` (a global provider on/off, broadcast to
+        every project's Lead) this is scoped to the ONE project whose
+        ``pipelines.json`` changed — ``rolesEnabled`` is per-project. Best
+        effort / fire-and-forget: a Lead that isn't alive right now picks up
+        the fresh roster from `lead_context` on its next spawn regardless.
+        """
+        if not changes:
+            return
+        project_ns = self._resolve_project(project)
+        lines = [
+            f"[system] role {role} {'DISABLED' if disabled else 'ENABLED'} (this project)."
+            + (
+                " orchestrator.assign will reject it — do not propose/fire it."
+                if disabled
+                else " assignable again."
+            )
+            for role, disabled in sorted(changes.items())
+        ]
+        notice = "\n".join(lines)
+        panes = self._panes_by_project.get(project_ns, {})
+        lead = panes.get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            _roles_sess = lead.session
+            _roles_sess.write(notice)
+            _delayed_enter(lead, _roles_sess, 150)
+            self.leadInjected.emit(notice)
+        _log_event("roles_enabled_changed", project=project_ns, changes=changes)
 
     def set_plan_tier(self, tier: str) -> tuple[bool, str]:
         """Set the account plan (pro/max) globally and persist it.

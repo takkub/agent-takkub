@@ -295,6 +295,30 @@ def load(project: str | None = None) -> dict:
     return _normalize(data)
 
 
+def is_role_enabled(role: str, project: str | None = None) -> bool:
+    """True unless *role* was toggled off in this project's (or the global)
+    Settings → Providers & Roles page.
+
+    ``role`` may be bare (``"qa"``) or shard-suffixed (``"qa#2"``) — the
+    ``#N`` instance suffix is stripped before lookup so every shard of a
+    disabled role reads as disabled too. Unknown/custom roles and ``lead``
+    (never a pipeline role — see ``valid_roles``) default to enabled, since
+    ``rolesEnabled`` only ever holds an explicit override.
+
+    Single source of truth for #510 — every enforcement point (``assign``,
+    ``cli_server``, ``routing_planner``, ``pipeline_executor``) calls this
+    instead of re-parsing ``rolesEnabled`` or the ``#N`` suffix itself.
+    """
+    base = role.split("#", 1)[0].strip().lower()
+    return bool(load(project).get("rolesEnabled", {}).get(base, True))
+
+
+def disabled_roles(project: str | None = None) -> list[str]:
+    """Sorted list of role names currently OFF for *project* (or global)."""
+    enabled = load(project).get("rolesEnabled", {})
+    return sorted(role for role, on in enabled.items() if not on)
+
+
 def save(payload: object, project: str | None = None) -> None:
     """Validate ``payload`` and persist atomically.
 

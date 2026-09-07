@@ -31,6 +31,7 @@ from agent_takkub.doctor import (
     check_projects,
     check_providers,
     check_qt,
+    check_roles,
     check_runtime,
     run_all_checks,
 )
@@ -550,6 +551,61 @@ class TestCheckProjects:
         findings = check_projects()
         warns = [f for f in findings if f.status == Status.WARN and "active" in f.name]
         assert warns
+
+
+class TestCheckRoles:
+    """#510: `takkub doctor` must surface roles OFF for the active project."""
+
+    def _set_active_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "myapp"
+    ) -> None:
+        import agent_takkub.config as _cfg
+
+        data = {"active": name, "projects": {name: {"paths": {}}}}
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+
+    def _isolate_pipeline_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.pipeline_config as pipeline_config
+
+        monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+        monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+
+    def test_no_disabled_roles_is_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_active_project(tmp_path, monkeypatch)
+        self._isolate_pipeline_config(tmp_path, monkeypatch)
+
+        findings = check_roles()
+        assert findings[0].status == Status.OK
+
+    def test_disabled_role_warns_with_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._set_active_project(tmp_path, monkeypatch)
+        self._isolate_pipeline_config(tmp_path, monkeypatch)
+        import agent_takkub.pipeline_config as pipeline_config
+
+        payload = pipeline_config.load("myapp")
+        payload["rolesEnabled"]["qa"] = False
+        pipeline_config.save(payload, "myapp")
+
+        findings = check_roles()
+        warns = [f for f in findings if f.status == Status.WARN]
+        assert warns and "qa" in warns[0].detail
+
+    def test_no_active_project_is_informational(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as _cfg
+
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps({"active": None, "projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        self._isolate_pipeline_config(tmp_path, monkeypatch)
+
+        findings = check_roles()
+        assert findings[0].status == Status.INFO
 
 
 # ---------------------------------------------------------------------------
@@ -1455,6 +1511,7 @@ class TestRunAllChecks:
             "check_plugins",
             "check_mcps",
             "check_projects",
+            "check_roles",
             "check_providers",
             "check_provider_isolation",
             "check_provider_capabilities",

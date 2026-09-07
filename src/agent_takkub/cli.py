@@ -5275,6 +5275,13 @@ def main(argv: list[str] | None = None) -> int:
     elif "status" in resp:
         for role, state in resp["status"].items():
             print(f"  {role:12s} {state}")
+        # #510: roles OFF in Settings → Providers & Roles for this project —
+        # assign() rejects these, so surface it right on the command Lead/
+        # user checks most often instead of only discovering it via a
+        # rejected assign or a separate `takkub doctor` run.
+        disabled = resp.get("disabled_roles")
+        if disabled:
+            print(f"  (disabled in Settings: {', '.join(disabled)})")
     msg = resp.get("msg", "")
     if msg:
         print(("ok: " if ok else "err: ") + msg)

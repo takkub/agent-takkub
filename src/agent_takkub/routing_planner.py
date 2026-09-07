@@ -642,6 +642,61 @@ def _sub_note(role: str) -> str:
     return f"{role} disabled → claude substitutes (same slot)"
 
 
+# #510: a role turned OFF in Settings → Providers & Roles (`disabled_roles`
+# context, from `pipeline_config.rolesEnabled`) is a DIFFERENT thing from a
+# disabled PROVIDER (`disabled_providers` above, handled by `_sub_note`) — a
+# disabled provider still gets a claude-backed pane in the same slot, but a
+# disabled ROLE has no slot at all. `orchestrator.assign` rejects it outright,
+# so the routing table must never propose it in the first place.
+def _role_disabled_note(role: str) -> str:
+    return f"role '{role}' ถูกปิดใน Settings ของโปรเจคนี้ — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+
+
+_NO_ROLE_AVAILABLE = "ไม่มี role ที่เปิดรับงานนี้ (role ที่ควรใช้ถูกปิดอยู่ทั้งหมด)"
+
+
+def _filter_disabled_roles(routing: dict, disabled_roles: set[str]) -> dict:
+    """Strip any role in *disabled_roles* out of a `_route()` result.
+
+    Cross-check roles are just dropped (the primary work still fires; losing
+    an extra cross-check pane is a soft degrade). A disabled PRIMARY role, or
+    every role in a multi-role ``roles`` split, collapses to no proposal at
+    all rather than silently substituting or firing a disabled role.
+    """
+    if not disabled_roles:
+        return routing
+    routing = dict(routing)
+
+    if "roles" in routing:  # multi-role (UI + API) split
+        kept = [r for r in routing["roles"] if r not in disabled_roles]
+        dropped = [r for r in routing["roles"] if r in disabled_roles]
+        if not dropped:
+            return routing
+        if not kept:
+            return {"role": None, "reason": _NO_ROLE_AVAILABLE}
+        if routing.get("sequence"):
+            routing["sequence"] = [r for r in routing["sequence"] if r not in disabled_roles]
+            if len(routing["sequence"]) < 2:
+                routing["sequence"] = None
+        if len(kept) == 1:
+            return {
+                "role": kept[0],
+                "reason": routing.get("reason", "") + f"; ตัด {', '.join(dropped)} (ปิดอยู่)",
+            }
+        routing["roles"] = kept
+        routing["reason"] = routing.get("reason", "") + f"; ตัด {', '.join(dropped)} (ปิดอยู่)"
+        return routing
+
+    primary = routing.get("role")
+    cross_check = routing.get("cross_check") or []
+    kept_cc = [r for r in cross_check if r not in disabled_roles]
+    if primary in disabled_roles:
+        return {"role": None, "reason": _role_disabled_note(primary)}
+    if kept_cc != cross_check:
+        routing["cross_check"] = kept_cc or None
+    return routing
+
+
 def _route(msg: str) -> dict:
     """Apply routing decision table. Returns dict with role/roles/cross_check/reason."""
     # Multi-role: UI + API implementation together → parallel frontend + backend.
@@ -725,16 +780,28 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
             The only effect here is a substitution note in ``reason`` and a
             disabled FIRE_ONESHOT degrading to FIRE_ASSIGN (a claude-backed
             pane — one-shot has no substitute path).
+            ``disabled_roles`` (set[str]) — role names OFF via
+            ``pipeline_config.rolesEnabled`` (#510) for the current project.
+            Unlike ``disabled_providers`` these have NO substitute — the role
+            has no pane slot at all, so it is never proposed/fired here
+            (matching ``orchestrator.assign``'s outright reject).
 
     Returns:
         RoutingAction with kind, role(s), cross_check, reason, mixed.
     """
     msg = user_message.strip()
     disabled: set[str] = set((context or {}).get("disabled_providers") or set())
+    disabled_roles: set[str] = set((context or {}).get("disabled_roles") or set())
 
     # 1. Explicit role ("ให้ backend ทำ X") → FIRE_ASSIGN immediately
     explicit = _detect_explicit_role(msg)
     if explicit:
+        if explicit in disabled_roles:
+            return RoutingAction(
+                kind=ActionKind.INFORMATIONAL,
+                task_hint=msg,
+                reason=f"explicit role requested; {_role_disabled_note(explicit)}",
+            )
         # A disabled codex/gemini explicit role is fired anyway — the spawn
         # layer backs it with claude. Just note the substitution.
         reason = "explicit role specified by user"
@@ -750,6 +817,12 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
     # 2. One-shot codex/gemini → FIRE_ONESHOT (no pane spawn)
     oneshot = _detect_oneshot(msg)
     if oneshot:
+        if oneshot in disabled_roles:
+            return RoutingAction(
+                kind=ActionKind.INFORMATIONAL,
+                task_hint=msg,
+                reason=f"one-shot target requested; {_role_disabled_note(oneshot)}",
+            )
         if oneshot in disabled:
             # No CLI to one-shot against — substitute a claude-backed pane in
             # that role's slot instead (also matches "Lead never one-shots,
@@ -814,10 +887,16 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
         return RoutingAction(kind=ActionKind.INFORMATIONAL, reason="no actionable verb detected")
 
     # 8. Route actionable message to role(s)
-    routing = _route(msg)
+    routing = _filter_disabled_roles(_route(msg), disabled_roles)
     primary = routing.get("role")
     cross_check = routing.get("cross_check")
     reason = routing.get("reason", "")
+
+    # A disabled ROLE (#510) collapsed the routing table result to no
+    # proposal at all (see `_filter_disabled_roles`) — surface that as
+    # INFORMATIONAL rather than PROPOSE-ing a role that assign() would reject.
+    if primary is None and not routing.get("roles"):
+        return RoutingAction(kind=ActionKind.INFORMATIONAL, task_hint=msg, reason=reason)
 
     # A disabled codex/gemini — whether it's the primary (e.g. rollout→gemini
     # when gemini is off) or a cross-check (refactor→codex) — is no longer

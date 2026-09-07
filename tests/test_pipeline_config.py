@@ -369,3 +369,55 @@ def test_provider_helpers_round_trip_through_real_togglable():
     composed = pipeline_config.with_providers({}, disabled, provider_state.TOGGLABLE)
     targets = pipeline_config.provider_disabled_targets(composed, provider_state.TOGGLABLE)
     assert {p for p, d in targets.items() if d} == disabled
+
+
+# ── is_role_enabled / disabled_roles (#510) ─────────────────────────────
+
+
+def test_is_role_enabled_defaults_true_for_every_role(tmp_path_json):
+    for role in pipeline_config.valid_roles():
+        assert pipeline_config.is_role_enabled(role) is True
+    # lead is never a pipeline role — also defaults enabled, no special-case
+    assert pipeline_config.is_role_enabled("lead") is True
+
+
+def test_is_role_enabled_reflects_saved_toggle(tmp_path_json):
+    payload = pipeline_config.load()
+    payload["rolesEnabled"]["qa"] = False
+    pipeline_config.save(payload)
+    assert pipeline_config.is_role_enabled("qa") is False
+    assert pipeline_config.is_role_enabled("frontend") is True
+
+
+def test_is_role_enabled_strips_shard_suffix(tmp_path_json):
+    """'qa#2' reads as disabled when 'qa' (the base role) is toggled off —
+    every shard of a disabled role is disabled too."""
+    payload = pipeline_config.load()
+    payload["rolesEnabled"]["qa"] = False
+    pipeline_config.save(payload)
+    assert pipeline_config.is_role_enabled("qa#2") is False
+    assert pipeline_config.is_role_enabled("QA#7") is False  # case-insensitive too
+
+
+def test_is_role_enabled_per_project_isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+    a = pipeline_config.load(project="proj-a")
+    a["rolesEnabled"]["qa"] = False
+    pipeline_config.save(a, project="proj-a")
+
+    assert pipeline_config.is_role_enabled("qa", project="proj-a") is False
+    assert pipeline_config.is_role_enabled("qa", project="proj-b") is True
+    assert pipeline_config.is_role_enabled("qa") is True  # global untouched
+
+
+def test_disabled_roles_lists_only_off_roles(tmp_path_json):
+    payload = pipeline_config.load()
+    payload["rolesEnabled"]["qa"] = False
+    payload["rolesEnabled"]["reviewer"] = False
+    pipeline_config.save(payload)
+    assert pipeline_config.disabled_roles() == ["qa", "reviewer"]
+
+
+def test_disabled_roles_empty_when_all_enabled(tmp_path_json):
+    assert pipeline_config.disabled_roles() == []

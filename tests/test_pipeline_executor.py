@@ -961,6 +961,125 @@ class TestPipelineFailureHandling:
         assert any("abort" in w.lower() or "fail" in w.lower() for w in lead_writes)
 
 
+class TestPipelineDisabledRole:
+    """#510: a role toggled off in Settings → Providers & Roles must never
+    reach spawn() via the pipeline hop path (which bypasses assign()
+    entirely) — the hop skips it like a failed spawn but logs/reports it as
+    a deliberate skip, not a crash."""
+
+    def _disabled_pipeline(self, hops: list[list[dict]], disabled_role: str, template_id: str):
+        data = _simple_pipeline(hops, template_id=template_id)
+        data["rolesEnabled"][disabled_role] = False
+        return data
+
+    def test_disabled_solo_hop_never_calls_spawn_and_aborts(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, panes = _make_orch_with_panes("proj_a", ["lead"])
+        spawn_mock = MagicMock(return_value=(True, "ok"))
+        monkeypatch.setattr(orch, "spawn", spawn_mock)
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: self._disabled_pipeline(
+                [[{"role": "qa", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                "qa",
+                "disabled-solo",
+            ),
+        )
+
+        ok, _ = orch.run_pipeline("disabled-solo", project="proj_a")
+        assert ok  # run_pipeline started the sequence
+        spawn_mock.assert_not_called()
+        assert not orch._pipeline_runs  # aborted + cleaned up (every role skipped)
+
+        lead_writes = [str(c.args[0]) for c in panes["lead"].session.write.call_args_list]
+        assert any("disabled in Settings" in w for w in lead_writes)
+
+    def test_disabled_role_in_multirole_hop_lets_the_other_proceed(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, panes = _make_orch_with_panes("proj_a", ["lead", "frontend", "backend"])
+        spawn_mock = MagicMock(return_value=(True, "ok"))
+        monkeypatch.setattr(orch, "spawn", spawn_mock)
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: self._disabled_pipeline(
+                [
+                    [
+                        {
+                            "role": "frontend",
+                            "cwd": "",
+                            "requiresCommit": False,
+                            "autoChain": False,
+                        },
+                        {
+                            "role": "backend",
+                            "cwd": "",
+                            "requiresCommit": False,
+                            "autoChain": False,
+                        },
+                    ]
+                ],
+                "backend",
+                "disabled-multi",
+            ),
+        )
+
+        orch.run_pipeline("disabled-multi", project="proj_a")
+
+        spawned_roles = {c.args[0] for c in spawn_mock.call_args_list}
+        assert spawned_roles == {"frontend"}
+        run = next(iter(orch._pipeline_runs.values()))
+        assert "backend" in run.hop_skipped_disabled
+        assert "backend" in run.hop_failed
+
+        lead_writes = [str(c.args[0]) for c in panes["lead"].session.write.call_args_list]
+        assert any("disabled in Settings" in w for w in lead_writes)
+
+    def test_enabled_pipeline_unaffected(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Backward-compat: a pipeline where nothing is disabled behaves
+        exactly as before — no 'disabled in Settings' noise."""
+        orch, panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="all-enabled",
+            ),
+        )
+
+        orch.run_pipeline("all-enabled", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert run.hop_skipped_disabled == set()
+
+        lead_writes = [str(c.args[0]) for c in panes["lead"].session.write.call_args_list]
+        assert not any("disabled in Settings" in w for w in lead_writes)
+
+
 # ──────────────────────────────────────────────────────────────
 # Watchdog stuck-recovery × pipeline (suppress_pipeline guard)
 #

@@ -1901,7 +1901,7 @@ class SettingsWindow(QDialog, CoreV2SettingsMixin, KnowledgeDesignSettingsMixin)
         if show_enable_toggle:
             toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
             toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
-            toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม")
+            toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม — ปิดแล้ว assign จะถูกปฏิเสธ")
             toggle.toggled.connect(self._mark_dirty)
             row_lay.addWidget(toggle)
             self._role_toggles[role] = toggle

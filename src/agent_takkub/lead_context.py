@@ -605,6 +605,39 @@ provider ต่อไปนี้ใช้ไม่ได้ → **Claude รั
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """
+    # #510: roles toggled OFF in THIS project's Settings → Providers & Roles
+    # (`pipeline_config.rolesEnabled` — a whole role gone from the roster, not
+    # to be confused with the provider-availability substitution above, which
+    # keeps the role slot but swaps its backing CLI). `orchestrator.assign`
+    # rejects these outright, so Lead must know up front instead of
+    # discovering it from a rejected assign mid-task. Suppressed when every
+    # role is enabled (the default) to save tokens on every normal spawn.
+    from .pipeline_config import disabled_roles as _disabled_roles
+
+    _project_disabled_roles = _disabled_roles(project=name) if name else []
+    if _project_disabled_roles:
+        _disabled_roles_str = ", ".join(_project_disabled_roles)
+        _qa_gate_note = ""
+        if "qa" in _project_disabled_roles:
+            _qa_gate_note = (
+                "\n\n**QA ปกติเป็นปุ่มจบ (final gate) — โปรเจคนี้ปิด QA:** ห้าม "
+                "`takkub assign --role qa` (จะถูก reject) — พอ dev work เสร็จ (auto-chain "
+                "handoff หรือ manual) ให้ **ข้ามขั้น QA แล้วบอก user ตรงๆ ว่าไม่มี gate "
+                "อัตโนมัติสำหรับโปรเจคนี้** (แนะนำเปิด QA ที่ Settings หรือทดสอบเอง) "
+                "ห้ามเงียบเหมือนไม่มีอะไรเกิดขึ้น"
+            )
+        suffix += f"""
+
+---
+
+## 🚫 Role ที่ปิดในโปรเจคนี้ (Settings → Providers & Roles)
+
+**ปิดอยู่:** {_disabled_roles_str}
+
+ห้าม `takkub assign --role <role ที่ปิด>` (ถูก reject พร้อมเหตุผลเสมอ ไม่ substitute เงียบ) และห้ามเสนอ role เหล่านี้ในแผนงาน — ใช้ role อื่นที่เปิดอยู่แทน หรือถ้าไม่มี role ที่เหมาะ ให้บอก user ว่าไม่มี role ที่เปิดรับงานนี้{_qa_gate_note}
+
+Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] role <name> ENABLED/DISABLED (this project)` message
+"""
     # Append account-plan note ONLY under Pro (Max is the default and behaves
     # exactly as before — emitting nothing there saves tokens on every spawn).
     # A Pro owner can't reach the 1M-context model variant (usage-credits

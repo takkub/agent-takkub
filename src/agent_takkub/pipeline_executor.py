@@ -146,6 +146,7 @@ class PipelineRun:
     current_hop: int = 0
     hop_pending: set = field(default_factory=set)  # roles in current hop not yet done
     hop_failed: set = field(default_factory=set)  # roles closed without done
+    hop_skipped_disabled: set = field(default_factory=set)  # #510: subset of hop_failed
     closed: bool = False
 
 
@@ -312,12 +313,33 @@ class PipelineMixin:
         # Optimistic: every role is pending until its spawn proves otherwise.
         run.hop_pending = {e["role"] for e in entries}
         run.hop_failed = set()
+        run.hop_skipped_disabled = set()
         spawned_ok: set[str] = set()
 
         def _spawn_one(idx: int, entry: dict) -> None:
             if run.closed:
                 return  # a done()/close() already resolved this hop
             role = entry["role"]
+            # #510: a role toggled off in Settings → Providers & Roles never
+            # reaches spawn() — skip it like a failed spawn (the hop still
+            # advances once every OTHER role in it settles) but log a
+            # distinct event so this reads as a deliberate skip, not a crash.
+            from .pipeline_config import is_role_enabled
+
+            if not is_role_enabled(role, project_ns):
+                run.hop_pending.discard(role)
+                run.hop_failed.add(role)
+                run.hop_skipped_disabled.add(role)
+                _log_event(
+                    "pipeline_role_disabled_skip",
+                    project=project_ns,
+                    run_id=run_id,
+                    hop=hop_idx,
+                    role=role,
+                )
+                if idx == n - 1:
+                    self._finalize_pipeline_hop(project_ns, run_id, run, hop_idx, total, spawned_ok)
+                return
             cwd = (entry.get("cwd") or "").strip() or default_cwd_for_role(role, project_ns)
             ok, _msg = self.spawn(role, cwd=cwd, project=project_ns)
             if ok:
@@ -374,9 +396,16 @@ class PipelineMixin:
             # below, not an abort.)
             run.closed = True
             self._pipeline_runs.pop(f"{project_ns}::{run_id}", None)
-            failed_roles = ", ".join(sorted(run.hop_failed))
+            crashed_roles = sorted(run.hop_failed - run.hop_skipped_disabled)
+            reasons = []
+            if crashed_roles:
+                reasons.append(f"spawn failed: {', '.join(crashed_roles)}")
+            if run.hop_skipped_disabled:
+                reasons.append(
+                    f"disabled in Settings: {', '.join(sorted(run.hop_skipped_disabled))}"
+                )
             err = self._pipeline_tag(run) + (
-                f"hop {hop_idx + 1}/{total} aborted: all spawns failed ({failed_roles})"
+                f"hop {hop_idx + 1}/{total} aborted: {'; '.join(reasons)}"
             )
             self._inject_to_lead(project_ns, err, log_event="pipeline_hop_abort")
             return
@@ -395,8 +424,13 @@ class PipelineMixin:
             f"Panes spawned and ready: {roles_str}",
             "Assign each their task. Pipeline auto-advances when all done (no confirm needed).",
         ]
-        if run.hop_failed:
-            lines.append(f"⚠ spawn failed (skipped): {', '.join(sorted(run.hop_failed))}")
+        crashed_roles = sorted(run.hop_failed - run.hop_skipped_disabled)
+        if crashed_roles:
+            lines.append(f"⚠ spawn failed (skipped): {', '.join(crashed_roles)}")
+        if run.hop_skipped_disabled:
+            lines.append(
+                f"⛔ skipped (disabled in Settings): {', '.join(sorted(run.hop_skipped_disabled))}"
+            )
         if hop_idx + 1 < total:
             next_roles = [e["role"] for e in run.hops[hop_idx + 1]]
             lines.append(f"Next hop ({hop_idx + 2}/{total}): {', '.join(next_roles)}")
@@ -470,6 +504,40 @@ class PipelineMixin:
         gate. If the Lead pane is absent, the prompt is queued via
         _pending_done_notices and delivered when Lead next spawns.
         """
+        from .pipeline_config import is_role_enabled
+
+        # #510: QA is normally the terminal gate here — but a project that
+        # toggled QA off in Settings must not have Lead call it anyway. Swap
+        # step 3/4 for an explicit skip + user notice instead of pretending
+        # the gate ran.
+        if is_role_enabled("qa", project_ns):
+            qa_steps = (
+                "3. THEN fire QA LAST as the single final gate against the running "
+                "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
+                "terminal). Pass QA the live ports/URLs from devops.\n"
+                "   If QA is BROWSER e2e/smoke (Playwright / mb) spanning MULTIPLE "
+                "pages/flows, use `--plan --shards N` (N≈3–4): a planner pane splits "
+                "the pages into balanced parallel buckets so the slow browser work "
+                "finishes in parallel. For a single-flow smoke or non-browser test "
+                "(unit suite / API integration), use plain `qa` — the ~1-min planner "
+                "hop isn't worth it.\n"
+                "4. After the qa done event: resume normal propose-then-confirm "
+                "flow. (reviewer = at PR time per policy, not in this auto gate "
+                "unless a trust-boundary / schema / migration change.)\n"
+            )
+        else:
+            qa_steps = (
+                "3. QA is DISABLED in this project's Settings → Providers & Roles — "
+                "do NOT `takkub assign --role qa` (it will be rejected anyway). "
+                "SKIP the QA gate entirely.\n"
+                "4. Tell the user in your next reply that there is no automatic "
+                "QA gate for this project right now (QA is off) — dev work is "
+                "done but untested by the pipeline; suggest enabling QA in "
+                "Settings or testing manually. Then resume normal "
+                "propose-then-confirm flow. (reviewer = at PR time per policy, "
+                "not in this auto gate unless a trust-boundary / schema / "
+                "migration change.)\n"
+            )
         prompt = (
             "[auto-chain handoff] impl panes spawned with --auto-chain "
             "in this project have all reported done.\n"
@@ -490,23 +558,16 @@ class PipelineMixin:
             "then WAIT for the devops done event. Tell devops to report the "
             "live ports/URLs so QA knows where to test.\n"
             "   IF no compose file: skip this step.\n"
-            "3. THEN fire QA LAST as the single final gate against the running "
-            "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
-            "terminal). Pass QA the live ports/URLs from devops.\n"
-            "   If QA is BROWSER e2e/smoke (Playwright / mb) spanning MULTIPLE "
-            "pages/flows, use `--plan --shards N` (N≈3–4): a planner pane splits "
-            "the pages into balanced parallel buckets so the slow browser work "
-            "finishes in parallel. For a single-flow smoke or non-browser test "
-            "(unit suite / API integration), use plain `qa` — the ~1-min planner "
-            "hop isn't worth it.\n"
-            "4. After the qa done event: resume normal propose-then-confirm "
-            "flow. (reviewer = at PR time per policy, not in this auto gate "
-            "unless a trust-boundary / schema / migration change.)\n"
+            f"{qa_steps}"
             "\n"
             "Do NOT add --auto-chain on the devops or QA fire (terminal hops)."
         )
         self._notify_lead(project_ns, prompt, kind="auto-chain-handoff")
-        _log_event("auto_chain_handoff", project=project_ns)
+        _log_event(
+            "auto_chain_handoff",
+            project=project_ns,
+            qa_enabled=is_role_enabled("qa", project_ns),
+        )
 
     @staticmethod
     def _detect_shard_path_collisions(done: dict) -> dict[str, list[int]]:
