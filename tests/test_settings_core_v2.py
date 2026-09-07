@@ -14,10 +14,8 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import QCoreApplication, QSettings
 
-from agent_takkub import config, core_v2_settings, custom_roles, settings_window
+from agent_takkub import config, core_v2_settings, custom_roles, settings_window, user_profile
 from agent_takkub import roles as roles_mod
-from agent_takkub.core.accounts.registry import AccountPoolRegistry, AccountRegistry
-from agent_takkub.core.models.account import AccountPool, AccountStatus, ProviderAccount
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +24,12 @@ def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
+    # SettingsWindow now builds the #505 Accounts page eagerly, which reads
+    # user_profile's registry + per-project selections + credential paths —
+    # isolate them exactly like test_settings_window.py does.
+    monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
+    monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
+    monkeypatch.setattr(user_profile, "_BASE_DIR", tmp_path)
     # Sidebar's ADVANCED section fold state — see
     # test_settings_window.py's own `_isolate_settings_paths` fixture for why
     # this must be redirected off the real machine registry/INI store.
@@ -211,15 +215,14 @@ class TestFlagConfigFallback:
 
 
 class TestCoreV2Views:
-    def test_all_four_views_build_with_empty_stores(self) -> None:
-        """Every Core V2 (now ADVANCED-section) view must open cleanly with
-        flags off and every core store empty (task spec: "ทุกหน้าต้องเปิดได้
-        แม้ core store ว่าง/flag ปิด"). Overview and Migration were removed
-        in the settings-nav declutter (2026-08-24) — see `settings_window`'s
-        VIEW_* block for why."""
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
+    def test_remaining_views_build_with_empty_stores(self) -> None:
+        """Every remaining Core V2 (ADVANCED-section) view must open cleanly
+        with flags off and every core store empty (task spec: "ทุกหน้าต้อง
+        เปิดได้แม้ core store ว่าง/flag ปิด"). Accounts & Pools merged into
+        the unified Accounts page (#505) — its constant now redirects, see
+        `test_accounts_route_redirects` below."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ROUTING)
         for view in (
-            settings_window.VIEW_CORE_V2_ACCOUNTS,
             settings_window.VIEW_CORE_V2_ROUTING,
             settings_window.VIEW_CORE_V2_BRAIN,
             settings_window.VIEW_CORE_V2_SCHEDULER,
@@ -228,35 +231,11 @@ class TestCoreV2Views:
             assert dlg._stack.currentIndex() == view
         dlg.deleteLater()
 
-    def test_accounts_view_empty_state(self) -> None:
+    def test_accounts_route_redirects(self) -> None:
+        """The removed Accounts & Pools page's constant lands on the unified
+        Accounts page (#505) — old callers/tests must not break."""
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
-        assert dlg._cv2_accounts_list.count() == 1
-        assert "ยังไม่มี account" in dlg._cv2_accounts_list.item(0).text()
-        dlg.deleteLater()
-
-    def test_accounts_view_lists_existing_registry_rows(self) -> None:
-        AccountRegistry().upsert(
-            ProviderAccount(
-                id="acc-1", provider_id="codex", status=AccountStatus.ACTIVE, priority=5
-            )
-        )
-        AccountPoolRegistry().upsert(
-            AccountPool(id="pool-1", name="Codex pool", provider_id="codex", account_ids=("acc-1",))
-        )
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
-        assert dlg._cv2_accounts_list.count() == 1
-        assert "acc-1" in dlg._cv2_accounts_list.item(0).text()
-        assert dlg._cv2_pools_list.count() == 1
-        assert "pool-1" in dlg._cv2_pools_list.item(0).text()
-        dlg.deleteLater()
-
-    def test_remove_account_deletes_from_registry(self) -> None:
-        AccountRegistry().upsert(ProviderAccount(id="acc-1", provider_id="codex"))
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
-        dlg._cv2_accounts_list.setCurrentRow(0)
-        AccountRegistry().delete("acc-1")  # simulate the confirmed-delete path directly
-        dlg._reload_cv2_accounts()
-        assert AccountRegistry().get("acc-1") is None
+        assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
         dlg.deleteLater()
 
     def test_routing_view_shows_resolved_provider(self) -> None:

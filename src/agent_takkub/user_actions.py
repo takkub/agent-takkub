@@ -1,8 +1,8 @@
 """UserActionsMixin — toolbar/button handlers (refactor round 4, step A).
 
 Extracted from ``MainWindow`` as a mixin. All methods access ``self.*``
-attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_plan``,
-``_limit_store``, etc.) initialised in ``MainWindow.__init__``.
+attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_limit_store``,
+etc.) initialised in ``MainWindow.__init__``.
 
 **Import constraint:** this module MUST NOT import ``app`` or ``cli``.
 """
@@ -13,8 +13,6 @@ from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
-    QInputDialog,
-    QLabel,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -22,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
-from .config import REPO_ROOT, active_project, list_project_names
+from .config import active_project, list_project_names
 from .orchestrator import _log_event
 
 
@@ -195,114 +193,6 @@ class UserActionsMixin:
             menu.exec(self._btn_provider.mapToGlobal(self._btn_provider.rect().bottomLeft()))
         else:
             menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
-
-    # ──────────────────────────────────────────────────────────────
-    # session control
-    # ──────────────────────────────────────────────────────────────
-
-    def _on_end_session_clicked(self) -> None:
-        """🏁 End-Session button: prompt for note → close teammates → write summary.
-
-        The note becomes the body of `runtime/sessions/<date>/<project>/lead-*.md`
-        and is auto-injected into the next Lead spawn for this project via
-        `_recent_session_brief`. So a good note here is what makes the next
-        session "remember" today's work.
-        """
-        try:
-            from .config import active_project as _active_project
-
-            project_name, _ = _active_project()
-        except Exception:
-            project_name = None
-        scope = project_name or "active project"
-
-        note, ok = QInputDialog.getMultiLineText(
-            self,
-            "End Session",
-            (
-                f"Session-end note for **{scope}**.\n\n"
-                "เขียนสั้นๆ ว่า:\n"
-                "• เสร็จอะไรไปวันนี้\n"
-                "• ค้างอะไรไว้ที่ session หน้าควรหยิบต่อ\n\n"
-                "(note นี้จะ auto-inject เข้า Lead's prompt ใน session หน้า)"
-            ),
-            "session ended",
-        )
-        if not ok:
-            return
-        note = note.strip() or "session ended"
-
-        _closed_ok, closed_msg = self.orch.close_all_teammates(project=project_name)
-        end_ok, end_msg = self.orch.end_session(project=project_name, note=note)
-        _log_event(
-            "ui_end_session",
-            project=project_name or "",
-            closed=closed_msg,
-            written=end_msg,
-            ok=end_ok,
-        )
-        if end_ok:
-            self._status.showMessage(f"✅ {closed_msg} · {end_msg}", 10_000)
-            self._show_end_session_summary(project_name, end_msg, closed_msg)
-        else:
-            QMessageBox.warning(self, "End Session failed", end_msg)
-
-    def _show_end_session_summary(
-        self, project_name: str | None, end_msg: str, closed_msg: str
-    ) -> None:
-        """Render the just-written `lead-*.md` in a modal so user sees what got logged.
-
-        Status-bar feedback alone is too quiet — vanishes after 10s and the
-        user can miss it entirely. This dialog presents the markdown body
-        of the session summary plus the close-teammates result line, so
-        "did anything happen?" has an unambiguous answer.
-        """
-        import pathlib
-        import re
-
-        from PyQt6.QtWidgets import (
-            QDialog,
-            QDialogButtonBox,
-            QTextBrowser,
-            QVBoxLayout,
-        )
-
-        m = re.search(r"written:\s*(.+)$", end_msg.strip())
-        if not m:
-            return
-        rel_path = m.group(1).strip()
-        abs_path = pathlib.Path(rel_path)
-        if not abs_path.is_absolute():
-            abs_path = REPO_ROOT / rel_path
-        if not abs_path.is_file():
-            return
-        try:
-            body = abs_path.read_text(encoding="utf-8")
-        except OSError:
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"🏁 Session ended — {project_name or 'project'}")
-        dlg.resize(640, 520)
-        layout = QVBoxLayout(dlg)
-
-        browser = QTextBrowser(dlg)
-        browser.setMarkdown(body)
-        browser.setOpenExternalLinks(False)
-        layout.addWidget(browser)
-
-        footer = QLabel(f"📍 {closed_msg}\n📄 {rel_path}", dlg)
-        footer.setStyleSheet(
-            f"color: {cockpit_theme.TEXT_FAINT_ALT}; font-size: 11px; padding: 4px 0;"
-        )
-        footer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(footer)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, dlg)
-        buttons.accepted.connect(dlg.accept)
-        layout.addWidget(buttons)
-
-        dlg.exec()
 
     # ──────────────────────────────────────────────────────────────
     # broadcast actions (UI review, shell, bug check, doctor)
@@ -654,32 +544,6 @@ class UserActionsMixin:
 
         _log_event("ui_doctor_opened")
         dlg.exec()
-
-    # ──────────────────────────────────────────────────────────────
-    # plan chip handlers
-    # ──────────────────────────────────────────────────────────────
-
-    def _on_plan_chip_clicked(self) -> None:
-        """Flip the account plan on the orchestrator. It persists state,
-        broadcasts to live Lead panes, and emits planTierChanged → we repaint
-        the chip via _on_plan_tier_changed."""
-        from .plan_tier import MAX, PRO, is_pro
-
-        target = MAX if is_pro() else PRO
-        ok, msg = self.orch.set_plan_tier(target)
-        if not ok:
-            self._status.showMessage(f"Plan switch failed: {msg}", 4000)
-
-    def _on_plan_tier_changed(self, tier: str) -> None:
-        """Repaint the plan chip when the tier flips. Triggered by
-        Orchestrator.planTierChanged so both user click and any future
-        programmatic change land here."""
-        if not hasattr(self, "_chip_plan"):
-            return
-        is_pro = tier == "pro"
-        self._chip_plan.setText(self._plan_chip_label(is_pro))
-        self._chip_plan.setStyleSheet(self._plan_chip_style(is_pro))
-        self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
 
     def _on_exec_mode_chip_clicked(self) -> None:
         pass
