@@ -1,42 +1,26 @@
-"""Tests for the auto-resume (🌙) toggle (persist + defaults)."""
+"""Tests for auto-resume (🌙) — always-on since #515 (see module docstring),
+plus its tuning constants."""
 
 from __future__ import annotations
 
-import pytest
-
-from agent_takkub import auto_resume
+from agent_takkub import auto_resume, config
 
 
-@pytest.fixture
-def _isolated(tmp_path, monkeypatch):
-    monkeypatch.setattr(auto_resume, "_PATH", tmp_path / "autoresume.json")
-
-
-def test_default_is_on(_isolated):
+def test_always_on():
     assert auto_resume.current() is True
     assert auto_resume.is_enabled() is True
 
 
-def test_set_and_read_on(_isolated):
-    auto_resume.set_enabled(True)
-    assert auto_resume.current() is True
-    assert auto_resume.is_enabled() is True
+def test_archives_legacy_toggle_file_once(tmp_path, monkeypatch):
+    """A pre-#515 `autoresume.json` is moved to `backups/`, never deleted."""
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
+    legacy = tmp_path / "autoresume.json"
+    legacy.write_text('{"enabled": true}', encoding="utf-8")  # real prod shape
 
-
-def test_set_back_to_off_still_returns_on(_isolated):
-    auto_resume.set_enabled(True)
-    auto_resume.set_enabled(False)
     assert auto_resume.current() is True
 
-
-def test_corrupt_file_returns_on(_isolated):
-    auto_resume.path().write_text("{not json", encoding="utf-8")
-    assert auto_resume.current() is True
-
-
-def test_non_dict_json_returns_on(_isolated):
-    auto_resume.path().write_text("[1, 2, 3]", encoding="utf-8")
-    assert auto_resume.current() is True
+    assert not legacy.exists()
+    assert (tmp_path / "backups" / "autoresume.json").is_file()
 
 
 def test_constants_are_sane():

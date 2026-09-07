@@ -1,21 +1,14 @@
 """RTK install helper.
 
-We support a one-click enable of rtk's PreToolUse Bash hook. Historically
-this wrote the hook into every project's `.claude/settings.json`, which
-dirtied the user's repo (an rtk hook the cockpit added, not the user). As of
-the central-home migration (docs/design/2026-07-11-central-home-audit.md,
-item A3) rtk is a **personal, central** toggle instead:
-
-- Enabling flips a flag file in `SETTINGS_HOME` (`rtk-enabled.json`). No
-  project file is ever written.
-- At spawn time, `hook_wiring.ensure_hook_settings_file()` merges the rtk
-  PreToolUse Bash hook into the SAME central settings file it already passes
-  to every claude pane via `--settings` — so the hook reaches panes without
-  touching any repo. Gated by `rtk_should_inject()` so a pane never gets a
-  `rtk hook claude` command when rtk isn't actually on PATH (that would make
-  every Bash call fail).
-- `uninstall_rtk()` scrubs the legacy per-project entry a prior cockpit build
-  wrote, preserving the user's own keys.
+Injects rtk's PreToolUse Bash hook automatically — no per-user enable toggle
+any more (#515 Settings diet: "rtk on PATH = should always be used; not on
+PATH = unusable either way" made the toggle a choice with only one sane
+answer). `rtk_should_inject()` is a pure auto-detect: does spawn-time hook
+wiring need to carry the rtk hook? Yes iff the binary is actually reachable —
+`hook_wiring.ensure_hook_settings_file()` merges it into the SAME central
+settings file it already passes to every claude pane via `--settings`, so
+the hook reaches panes without touching any repo. `takkub doctor` reports
+whether rtk is on PATH; there is nothing left to flip.
 
 This is intentionally narrower than `rtk init --auto-patch`: we only register
 the hook (the mechanism that matters), skipping the 140-line CLAUDE.md doc
@@ -25,16 +18,9 @@ the user layer (orchestrator's `--setting-sources project,local` default).
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from shutil import which
 
-from . import config
-
-# Marker we look for inside a hook's `command` to consider it the rtk
-# hook. Picked to match what `rtk init -g` writes; using a substring match
-# lets us tolerate flag variants like `rtk hook claude --ultra-compact`.
-RTK_HOOK_COMMAND_MARKER = "rtk hook claude"
 RTK_HOOK_COMMAND = "rtk hook claude"
 
 # Well-known locations rtk lands in on each platform. We probe these
@@ -84,43 +70,6 @@ def rtk_binary_available() -> bool:
     return find_rtk_binary() is not None
 
 
-def _settings_path(project_root: Path) -> Path:
-    return project_root / ".claude" / "settings.json"
-
-
-def _enabled_flag_path() -> Path:
-    """Central per-user flag file recording whether rtk is enabled.
-
-    Under ``SETTINGS_HOME`` (``~/.takkub`` on a dev checkout, ``DATA_HOME`` on
-    an installed build) — resolved at call time so tests that monkeypatch
-    ``config.SETTINGS_HOME`` land it under their own tmp dir."""
-    return config.SETTINGS_HOME / "rtk-enabled.json"
-
-
-def rtk_hook_enabled() -> bool:
-    """True when rtk is enabled centrally. Forced to True always."""
-    return True
-
-
-def set_rtk_enabled(enabled: bool) -> None:
-    """Persist the central rtk enable flag. Creates ``SETTINGS_HOME`` if
-    missing; never raises on a write failure (best-effort toggle)."""
-    path = _enabled_flag_path()
-    payload = {"enabled": bool(enabled)}
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError:
-        return
-
-    from .core.storage.dual_write import dual_write_rtk_enabled
-
-    dual_write_rtk_enabled(payload)
-
-
 def rtk_hook_fragment() -> dict:
     """The PreToolUse ``Bash`` entry `hook_wiring` merges into the central
     ``--settings`` file when rtk should be injected. A fresh dict each call
@@ -131,101 +80,19 @@ def rtk_hook_fragment() -> dict:
     }
 
 
+def _archive_legacy_enabled_file() -> None:
+    """One-time cleanup of the pre-#515 ``rtk-enabled.json`` toggle state —
+    its value is meaningless now (rtk is auto-detected, not opted into), so
+    there is nothing to carry forward, just the file itself to keep around
+    per the "never delete, archive" rule."""
+    from . import config
+
+    config.archive_settings_file(config.SETTINGS_HOME / "rtk-enabled.json")
+
+
 def rtk_should_inject() -> bool:
-    """Whether spawn-time hook wiring should carry the rtk hook: enabled
-    centrally AND the binary is actually reachable. The availability check
-    is essential — injecting `rtk hook claude` when rtk isn't on PATH would
-    make every Bash tool call in the pane fail."""
-    return rtk_hook_enabled() and rtk_binary_available()
-
-
-def is_rtk_installed(project_root: str | Path | None = None) -> bool:
-    """True when rtk is enabled centrally. `project_root` is accepted and
-    ignored (kept for call-site compatibility with the old per-project
-    signature — the state is now central, not per-project)."""
-    return rtk_hook_enabled()
-
-
-def install_rtk(project_root: str | Path | None = None) -> tuple[bool, str]:
-    """Enable rtk centrally (personal, out of every repo) and scrub any
-    legacy per-project hook a prior cockpit build wrote.
-
-    Flips the central `rtk-enabled.json` flag; the hook itself is injected at
-    spawn time by `hook_wiring.ensure_hook_settings_file()` via the existing
-    `--settings` channel. When `project_root` is given, also removes the old
-    rtk entry from `<project_root>/.claude/settings.json` (preserving the
-    user's own keys) so the migration leaves no repo residue.
-
-    Refuses only when the rtk binary isn't reachable — enabling a hook that
-    would break every Bash call is never useful. Returns (ok, message).
-    """
-    if not rtk_binary_available():
-        return False, "rtk binary not on PATH — install it first"
-    set_rtk_enabled(True)
-    if project_root:
-        uninstall_rtk(project_root)  # best-effort legacy cleanup
-    return True, "rtk enabled (central — injected via --settings, no repo files touched)"
-
-
-def uninstall_rtk(project_root: str | Path) -> tuple[bool, str]:
-    """Remove the legacy rtk PreToolUse Bash hook from
-    `<project_root>/.claude/settings.json`, preserving every other key the
-    user has. No-op (reported as success) when the file is missing or carries
-    no rtk hook. Prunes now-empty `hooks`/`PreToolUse`/Bash-entry containers
-    the removal leaves behind, but never deletes the file itself (other keys
-    may remain, and it may be the user's own committed config). Returns
-    (ok, message); malformed JSON is left untouched (edit manually)."""
-    root = Path(project_root)
-    path = _settings_path(root)
-    if not path.is_file():
-        return True, "no project settings.json (nothing to clean)"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        return False, f"settings.json unreadable/malformed — left untouched: {e}"
-    if not isinstance(data, dict):
-        return True, "settings.json not an object (left untouched)"
-
-    hooks = data.get("hooks")
-    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
-    if not isinstance(pre, list):
-        return True, "no rtk hook present (nothing to clean)"
-
-    changed = False
-    for entry in pre:
-        if not isinstance(entry, dict) or entry.get("matcher") != "Bash":
-            continue
-        inner = entry.get("hooks")
-        if not isinstance(inner, list):
-            continue
-        kept = [
-            h
-            for h in inner
-            if not (isinstance(h, dict) and RTK_HOOK_COMMAND_MARKER in (h.get("command") or ""))
-        ]
-        if len(kept) != len(inner):
-            changed = True
-            entry["hooks"] = kept
-    if not changed:
-        return True, "no rtk hook present (nothing to clean)"
-
-    # Prune empty containers so we don't leave `{"hooks": {"PreToolUse":
-    # [{"matcher": "Bash", "hooks": []}]}}` skeletons behind.
-    pre[:] = [
-        e
-        for e in pre
-        if not (isinstance(e, dict) and e.get("matcher") == "Bash" and not e.get("hooks"))
-    ]
-    if not pre:
-        hooks.pop("PreToolUse", None)
-    if isinstance(hooks, dict) and not hooks:
-        data.pop("hooks", None)
-
-    try:
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as e:
-        return False, f"could not write settings.json: {e}"
-    return True, f"removed legacy rtk hook from {path}"
+    """Whether spawn-time hook wiring should carry the rtk hook — pure
+    auto-detect (#515 Settings diet): the binary being reachable is now the
+    ONLY condition, there is no separate "enabled" toggle to also check."""
+    _archive_legacy_enabled_file()
+    return rtk_binary_available()

@@ -1,27 +1,18 @@
 """Auto-resume (🌙) — park panes that hit Claude's usage limit and wake them
 automatically when the window resets, instead of just notifying the Lead.
 
-Toggled from the status bar and persisted across restart (same pattern as
-`exec_mode.py` / `provider_state.py`).  This module only stores the on/off
-*intent* plus the tuning constants; the actual detection/park/wake logic
-lives in the `AutoResumeMixin` (`limit_autoresume.py`) mixed into
-`Orchestrator`.
-
-State file: ``~/.takkub/autoresume.json``  Format: ``{"enabled": true|false}``.
-Missing / corrupt → OFF (a fresh install must never auto-inject into a
-teammate pane the user hasn't opted into).
+#515 Settings diet: this used to be a status-bar toggle persisted to
+``autoresume.json``, defaulting OFF. #514 replaced "park and wait for the
+same provider" with "reroute to another provider immediately" as the only
+correct behaviour, which made "notify-only" no longer a real alternative
+worth a toggle — so `current()`/`is_enabled()` below are now always True,
+with no on/off store left to keep in sync. The tuning constants below and
+the actual detection/park/wake (fallback path when there is no other
+provider to reroute to) logic live in the `AutoResumeMixin`
+(`limit_autoresume.py`) mixed into `Orchestrator`.
 """
 
 from __future__ import annotations
-
-import json
-from pathlib import Path
-
-from .config import SETTINGS_HOME
-
-_DEFAULT = False
-
-_PATH = SETTINGS_HOME / "autoresume.json"
 
 # How many park→wake cycles are allowed per pane for its CURRENT assigned
 # task before giving up and leaving it to the Lead. Reset whenever a fresh
@@ -55,29 +46,22 @@ GIVE_UP_TAIL_LINES = 12
 GIVE_UP_TASK_PREVIEW_CHARS = 220
 
 
-def path() -> Path:
-    """Where state lives. Function form so tests can monkeypatch `_PATH`."""
-    return _PATH
+def _archive_legacy_file() -> None:
+    """One-time cleanup of the pre-#515 ``autoresume.json`` toggle state —
+    its value is meaningless now (`is_enabled()` is always True), so there is
+    nothing to carry forward, just the file itself to keep around per the
+    "never delete, archive" rule."""
+    from . import config
+
+    config.archive_settings_file(config.SETTINGS_HOME / "autoresume.json")
 
 
 def current() -> bool:
-    """Return whether auto-resume is enabled. Forced to True always."""
+    """Return whether auto-resume is enabled. Always True — see module docstring."""
+    _archive_legacy_file()
     return True
 
 
 def is_enabled() -> bool:
-    """Alias for `current()` — reads more naturally at call sites. Forced to True always."""
-    return True
-
-
-def set_enabled(flag: bool) -> None:
-    """Persist the auto-resume toggle atomically."""
-    payload = {"enabled": bool(flag)}
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(_PATH)
-
-    from .core.storage.dual_write import dual_write_autoresume
-
-    dual_write_autoresume(payload)
+    """Alias for `current()` — reads more naturally at call sites."""
+    return current()

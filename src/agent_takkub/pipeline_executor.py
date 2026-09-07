@@ -522,69 +522,140 @@ class PipelineMixin:
         gate. If the Lead pane is absent, the prompt is queued via
         _pending_done_notices and delivered when Lead next spawns.
         """
+        from . import team_preset
         from .pipeline_config import is_role_enabled
 
-        # #510: QA is normally the terminal gate here — but a project that
-        # toggled QA off in Settings must not have Lead call it anyway. Swap
-        # step 3/4 for an explicit skip + user notice instead of pretending
-        # the gate ran.
-        if is_role_enabled("qa", project_ns):
-            qa_steps = (
-                "3. THEN fire QA LAST as the single final gate against the running "
-                "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
-                "terminal). Pass QA the live ports/URLs from devops.\n"
-                "   If QA is BROWSER e2e/smoke (Playwright / mb) spanning MULTIPLE "
-                "pages/flows, use `--plan --shards N` (N≈3–4): a planner pane splits "
-                "the pages into balanced parallel buckets so the slow browser work "
-                "finishes in parallel. For a single-flow smoke or non-browser test "
-                "(unit suite / API integration), use plain `qa` — the ~1-min planner "
-                "hop isn't worth it.\n"
-                "4. After the qa done event: resume normal propose-then-confirm "
-                "flow. (reviewer = at PR time per policy, not in this auto gate "
-                "unless a trust-boundary / schema / migration change.)\n"
+        # #510/#512 M8: QA was the hardcoded terminal gate here regardless of
+        # the project's active team preset — under `pair`/a custom preset
+        # whose checker is `reviewer`, QA can be excluded by
+        # `team_preset.can_spawn` while `rolesEnabled` still says it's on,
+        # so this used to instruct a fire `assign()` would reject. Resolve
+        # the terminal step through BOTH policies (rolesEnabled + the
+        # effective preset) and through the effective checker/self mode
+        # (`verify_mode`), not just rolesEnabled.
+        cfg = team_preset.current(project_ns)
+        mode = team_preset.verify_mode(cfg)  # "qa" | "reviewer" | "self"
+
+        devops_spawn_ok, _ = team_preset.can_spawn("devops", project_ns)
+        devops_allowed = is_role_enabled("devops", project_ns) and devops_spawn_ok
+        if devops_allowed:
+            bring_up_step = (
+                "2. Bring-up gate — IF the project has a compose file "
+                "(docker-compose.yml / compose.yaml / compose.yml):\n"
+                "   fire devops FIRST to `docker compose up -d` locally on ports "
+                "that do NOT clash with already-running containers (devops checks "
+                "`docker ps`, picks free ports / offsets compose, healthchecks), "
+                "then WAIT for the devops done event. Tell devops to report the "
+                "live ports/URLs so the verify step knows where to test.\n"
+                "   IF no compose file: skip this step.\n"
             )
         else:
-            qa_steps = (
-                "3. QA is DISABLED in this project's Settings → Providers & Roles — "
-                "do NOT `takkub assign --role qa` (it will be rejected anyway). "
-                "SKIP the QA gate entirely.\n"
-                "4. Tell the user in your next reply that there is no automatic "
-                "QA gate for this project right now (QA is off) — dev work is "
-                "done but untested by the pipeline; suggest enabling QA in "
-                "Settings or testing manually. Then resume normal "
-                "propose-then-confirm flow. (reviewer = at PR time per policy, "
-                "not in this auto gate unless a trust-boundary / schema / "
-                "migration change.)\n"
+            bring_up_step = (
+                "2. devops is disabled/excluded from this project's active team "
+                "preset — do NOT `takkub assign --role devops` (it will be "
+                "rejected anyway). If the project has a compose file, tell the "
+                "user in your next reply that the stack was not brought up "
+                "automatically; bring it up manually or enable devops first.\n"
             )
+
+        if mode == "self":
+            # solo-lead: no checker teammate is ever fired for this project —
+            # Lead itself is the verify step (lead_may_implement=True).
+            checker_steps = (
+                "3. This project's team preset has no checker teammate (verify "
+                "mode = self) — do NOT fire qa or reviewer. Verify the work "
+                "yourself (run the relevant tests/build) before reporting "
+                "back.\n"
+                "4. Resume normal propose-then-confirm flow once you've "
+                "self-verified.\n"
+            )
+        else:
+            checker_role = mode  # "qa" or "reviewer"
+            checker_spawn_ok, _ = team_preset.can_spawn(checker_role, project_ns)
+            checker_allowed = is_role_enabled(checker_role, project_ns) and checker_spawn_ok
+            if checker_allowed and checker_role == "qa":
+                checker_steps = (
+                    "3. THEN fire QA LAST as the single final gate against the running "
+                    "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
+                    "terminal). Pass QA the live ports/URLs from devops.\n"
+                    "   If QA is BROWSER e2e/smoke (Playwright / mb) spanning MULTIPLE "
+                    "pages/flows, use `--plan --shards N` (N≈3–4): a planner pane splits "
+                    "the pages into balanced parallel buckets so the slow browser work "
+                    "finishes in parallel. For a single-flow smoke or non-browser test "
+                    "(unit suite / API integration), use plain `qa` — the ~1-min planner "
+                    "hop isn't worth it.\n"
+                    "4. After the qa done event: resume normal propose-then-confirm "
+                    "flow. (reviewer = at PR time per policy, not in this auto gate "
+                    "unless a trust-boundary / schema / migration change.)\n"
+                )
+            elif checker_allowed and checker_role == "reviewer":
+                checker_steps = (
+                    "3. THEN fire reviewer LAST as this project's checker (this "
+                    "preset's verify mode is reviewer, not QA — reviewer is the "
+                    "auto-gate here, not a PR-time-only step): "
+                    "`takkub assign --role reviewer ...` (no --auto-chain — "
+                    "reviewer is terminal). Pass reviewer the live ports/URLs "
+                    "from devops if relevant.\n"
+                    "4. After the reviewer done event: resume normal "
+                    "propose-then-confirm flow.\n"
+                )
+            elif checker_role == "qa":
+                checker_steps = (
+                    "3. QA is DISABLED or excluded by this project's team preset — "
+                    "do NOT `takkub assign --role qa` (it will be rejected anyway). "
+                    "SKIP the QA gate entirely.\n"
+                    "4. Tell the user in your next reply that there is no automatic "
+                    "QA gate for this project right now — dev work is "
+                    "done but untested by the pipeline; suggest enabling QA "
+                    "or testing manually. Then resume normal "
+                    "propose-then-confirm flow.\n"
+                )
+            else:
+                checker_steps = (
+                    "3. reviewer (this project's checker) is disabled or excluded "
+                    "by its team preset — do NOT `takkub assign --role reviewer` "
+                    "(it will be rejected anyway). SKIP the verify gate entirely.\n"
+                    "4. Tell the user in your next reply that there is no "
+                    "automatic verify gate for this project right now — dev work "
+                    "is done but unreviewed by the pipeline. Then resume normal "
+                    "propose-then-confirm flow.\n"
+                )
+
+        rule_line = {
+            "qa": (
+                "Rule: QA runs LAST — only after ALL dev work is done AND (if the "
+                "project has docker compose) the stack is up on non-clashing ports."
+            ),
+            "reviewer": (
+                "Rule: reviewer runs LAST (this preset's checker) — only after "
+                "ALL dev work is done AND (if the project has docker compose) "
+                "the stack is up on non-clashing ports."
+            ),
+            "self": "Rule: no checker teammate — Lead self-verifies after dev work is done.",
+        }[mode]
+
         prompt = (
             "[auto-chain handoff] impl panes spawned with --auto-chain "
             "in this project have all reported done.\n"
             "You are pre-authorized to run the FINAL VERIFY SEQUENCE below "
             "WITHOUT proposing or waiting for user confirmation.\n"
             "\n"
-            "Rule: QA runs LAST — only after ALL dev work is done AND (if the "
-            "project has docker compose) the stack is up on non-clashing ports.\n"
+            f"{rule_line}\n"
             "\n"
             "Steps:\n"
             "1. Re-read the recent [<role> done] notes above; "
             "(optional) `git -C <project_path> diff --stat`.\n"
-            "2. Bring-up gate — IF the project has a compose file "
-            "(docker-compose.yml / compose.yaml / compose.yml):\n"
-            "   fire devops FIRST to `docker compose up -d` locally on ports "
-            "that do NOT clash with already-running containers (devops checks "
-            "`docker ps`, picks free ports / offsets compose, healthchecks), "
-            "then WAIT for the devops done event. Tell devops to report the "
-            "live ports/URLs so QA knows where to test.\n"
-            "   IF no compose file: skip this step.\n"
-            f"{qa_steps}"
+            f"{bring_up_step}"
+            f"{checker_steps}"
             "\n"
-            "Do NOT add --auto-chain on the devops or QA fire (terminal hops)."
+            "Do NOT add --auto-chain on the devops or checker fire (terminal hops)."
         )
         self._notify_lead(project_ns, prompt, kind="auto-chain-handoff")
         _log_event(
             "auto_chain_handoff",
             project=project_ns,
-            qa_enabled=is_role_enabled("qa", project_ns),
+            verify_mode=mode,
+            devops_allowed=devops_allowed,
         )
 
     @staticmethod

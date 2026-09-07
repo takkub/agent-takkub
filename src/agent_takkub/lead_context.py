@@ -707,7 +707,7 @@ Status เปลี่ยนระหว่าง session: cockpit จะ inject
     # keeps the Lead from firing everything at once without hardcoding a number.
     from . import exec_mode as _exec_mode
 
-    if _exec_mode.is_parallel():
+    if _exec_mode.is_parallel(name):
         suffix += """
 
 ---
@@ -796,6 +796,17 @@ def render_lead_agents_md(
 
     Returns the written path, or None if there's no cockpit CLAUDE.md, or
     the target AGENTS.md already exists and is user-owned (no marker).
+
+    **Known gap (#103, noted 2026-09-07 review):** when this returns None
+    for the user-owned-AGENTS.md reason, a non-Claude Lead in that project
+    gets ZERO cockpit policy text at all — role-disabled/team-preset
+    wording included — since there is no other delivery channel for it
+    (unlike Claude Lead, which reads its own `--append-system-prompt-file`
+    regardless of any project AGENTS.md). This does NOT bypass enforcement:
+    `is_role_enabled`/`team_preset.can_spawn` are checked in code at the
+    actual `spawn()` boundary (see spawn_engine.py, #510/#512 H6) no matter
+    which provider Lead runs as. The gap is purely informational — that
+    Lead has no way to know a role is off before trying it.
     """
     text = _build_lead_context_text(
         project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd

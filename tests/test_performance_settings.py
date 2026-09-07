@@ -16,18 +16,63 @@ def test_balanced_preset_is_machine_aware() -> None:
     assert large.max_heavy_global == 6
 
 
-def test_round_trip_is_atomic_and_validated(tmp_path) -> None:
+def test_round_trip_persists_only_mode(tmp_path) -> None:
+    """#515 Settings diet: `save()` only persists `mode` — every numeric
+    field is a live `preset(mode)` derivation from THIS machine, never a
+    stale number from whatever machine/OS produced the file."""
     target = tmp_path / "performance.json"
     desired = performance_settings.preset("maximum", logical_cpus=24, total_memory_gb=64)
     assert performance_settings.save(desired, target)
-    assert performance_settings.load(target) == desired
-    assert json.loads(target.read_text(encoding="utf-8"))["schema_version"] == 1
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert on_disk == {"schema_version": 1, "mode": "maximum"}
+    assert performance_settings.load(target).mode == "maximum"
 
 
-def test_invalid_or_partial_file_falls_back_to_balanced(tmp_path) -> None:
+def test_get_mode_round_trips(tmp_path) -> None:
     target = tmp_path / "performance.json"
-    target.write_text('{"mode":"maximum"}', encoding="utf-8")
+    assert performance_settings.set_mode("safe", target)
+    assert performance_settings.get_mode(target) == "safe"
+    assert performance_settings.load(target).mode == "safe"
+
+
+def test_invalid_or_missing_file_falls_back_to_balanced(tmp_path) -> None:
+    target = tmp_path / "performance.json"
     assert performance_settings.load(target).mode == "balanced"
+    target.write_text("not json", encoding="utf-8")
+    assert performance_settings.load(target).mode == "balanced"
+
+
+def test_legacy_full_shape_file_migrates_to_mode_only(tmp_path) -> None:
+    """A pre-#515 file (real prod shape: mode + every numeric field) reads
+    its `mode` once, archives the old file under `backups/` instead of
+    deleting it, and rewrites a slim mode-only file in its place."""
+    target = tmp_path / "performance-settings.json"
+    legacy = {
+        "schema_version": 1,
+        "mode": "balanced",
+        "max_heavy_global": 4,
+        "max_heavy_per_project": 2,
+        "max_browser_global": 2,
+        "max_build_global": 2,
+        "max_test_global": 2,
+        "max_package_install_global": 2,
+        "cpu_pause_percent": 85,
+        "cpu_resume_percent": 65,
+        "min_available_ram_percent": 20,
+        "resume_ram_percent": 25,
+        "hidden_render_ms": 300,
+    }
+    target.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert performance_settings.get_mode(target) == "balanced"
+
+    backup = target.parent / "backups" / target.name
+    assert backup.is_file()
+    assert json.loads(backup.read_text(encoding="utf-8")) == legacy
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "mode": "balanced",
+    }
 
 
 def test_hysteresis_and_per_project_invariants() -> None:
@@ -44,18 +89,16 @@ def test_safe_and_maximum_bound_balanced() -> None:
     assert safe.hidden_render_ms > balanced.hidden_render_ms > maximum.hidden_render_ms
 
 
-def test_missing_overload_deadband_field_defaults_instead_of_resetting(tmp_path) -> None:
+def test_from_dict_still_defaults_missing_overload_deadband_field() -> None:
     """#305: `overload_deadband_timeout_s` was added after the schema
-    shipped. A settings file saved before it existed is otherwise complete —
-    it must load with the new field defaulted, not be discarded wholesale
-    back to the balanced preset the way a genuinely-missing field is."""
-    target = tmp_path / "performance.json"
+    shipped. `from_dict` (still used to validate a fully-specified
+    `PerformanceSettings` payload, e.g. in tests) defaults it instead of
+    discarding the whole payload the way a genuinely-missing field would."""
     desired = performance_settings.preset("maximum", logical_cpus=24, total_memory_gb=64)
     payload = desired.to_dict()
     del payload["overload_deadband_timeout_s"]
-    target.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = performance_settings.load(target)
+    loaded = performance_settings.from_dict(payload)
     assert loaded.mode == "maximum"
     assert loaded.max_heavy_global == desired.max_heavy_global
     assert loaded.overload_deadband_timeout_s == 120.0

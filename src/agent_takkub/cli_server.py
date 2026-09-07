@@ -535,6 +535,35 @@ class CliServer(QObject):
             self._reply(sock, ok=False, msg=f"lead cannot call {cmd}")
             return
 
+        # #510/#512 M3 (review 2026-09-07): `assign --role lead --team
+        # <preset> "task"` sets a per-task team_preset override that, for
+        # solo-lead/pair, LIFTS Lead's own Edit/Write deny-list (see
+        # lead_context.render_lead_settings). `assign` is lead-only (Layer
+        # 1 above already requires from_role == "lead" to even reach here),
+        # so a running Lead pane calling this on itself is Lead granting
+        # itself write access to the very project the guard exists to
+        # restrict it from — the one caller this permission escalation must
+        # never come from. `--team` is only legitimate from a surface the
+        # user actually drives: Settings, `takkub team set` from a non-pane
+        # terminal (from_role empty), or the mobile app. cli_server already
+        # has from_role_norm computed above — reject here before the
+        # override ever reaches `Orchestrator.assign`.
+        if (
+            cmd == "assign"
+            and from_role_norm == "lead"
+            and (str(req.get("team", "") or "").strip())
+        ):
+            self._reply(
+                sock,
+                ok=False,
+                msg=(
+                    "lead cannot set --team on itself — this would let Lead lift its own "
+                    "edit-permission guard unsupervised. Use Settings or `takkub team set` "
+                    "from a non-pane terminal instead."
+                ),
+            )
+            return
+
         # Layer 4 — per-pane capability token for `done`, `progress`, `send`,
         # `answer-picker`, `design` (publish/approve/revise), and every
         # `preview` action except the read-only `status` (#365 phase 3+5

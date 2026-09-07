@@ -567,6 +567,23 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             "ok": False,
             "msg": "--team override ใช้ได้เฉพาะ --role lead (#512) — set project preset จาก Settings แทนสำหรับ role อื่น",
         }
+    # #510/#512 M3: Lead calling `assign --role lead --team ...` on ITSELF
+    # would lift its own Edit/Write deny-list (render_lead_settings) with no
+    # user in the loop — `assign` is already lead-only (only a Lead pane, or
+    # a bare terminal with TAKKUB_ROLE unset, can reach this far), so this
+    # is the one caller identity `--team` must never be accepted from.
+    # cli_server enforces this too (defense against a direct-socket caller
+    # spoofing `from`), matching the two-layer pattern already used for
+    # done/progress and the lead-spoof guard.
+    if team and (_from_role() or "").strip().lower() == "lead":
+        return {
+            "ok": False,
+            "msg": (
+                "lead cannot set --team on itself — this would let Lead lift its own "
+                "edit-permission guard unsupervised. Use Settings or `takkub team set` "
+                "from a non-pane terminal instead."
+            ),
+        }
     if team:
         from .team_preset import PRESET_IDS
 
@@ -1437,6 +1454,17 @@ def cmd_team(args: argparse.Namespace) -> dict:
         print(f"  lead_may_implement: {cfg['lead_may_implement']}")
         print(f"  template: {cfg['template']}  exec_mode: {cfg['exec_mode']}")
         return {"ok": True, "msg": "ok", **cfg, "standing": standing, "override": override}
+    if action == "suggest":
+        # #510/#512 M2 (review 2026-09-07): routing_planner.suggest_team_size
+        # had no way for Lead (a CLI-driving pane, not a Python caller) to
+        # reach it — role-and-workflow.md told Lead to use it, but nothing
+        # exposed it. Pure/local: no cockpit round-trip, advisory only.
+        from . import routing_planner
+
+        preset, reason = routing_planner.suggest_team_size(args.task)
+        print(f"  suggest: {team_preset.label(preset)} ({preset})")
+        print(f"  reason: {reason}")
+        return {"ok": True, "msg": "ok", "preset": preset, "reason": reason}
     if action == "set":
         preset = str(args.preset).strip().lower()
         if preset == "custom":
@@ -3059,13 +3087,20 @@ def _v1_only_write_report():
         except Exception:
             pass
     if not hits:
-        return StepReport("v1-only-write", "validate", True, "0 พบ — พร้อมสำหรับ #504")
+        # See doctor._v1_only_write_finding: a single on-demand snapshot, not
+        # a continuous monitor — #504's one-week drift=0 exit gate needs
+        # periodic sampling, not proof from one clean run.
+        return StepReport(
+            "v1-only-write", "validate", True, "0 พบใน snapshot นี้ (on-demand, ไม่ใช่ monitor ต่อเนื่อง)"
+        )
     names = ", ".join(sorted(h.name for h in hits))
+    missing_count = sum(1 for h in hits if h.reason == "missing_mirror")
     return StepReport(
         "v1-only-write",
         "validate",
         True,
-        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names})",
+        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names})"
+        + (f" — {missing_count} ไม่มี mirror เลย" if missing_count else ""),
         detail={"hits": [h.name for h in hits]},
     )
 
@@ -4366,6 +4401,13 @@ def main(argv: list[str] | None = None) -> int:
         "clear-override", help="clear this project's active per-task team-preset override"
     )
     steam_clear.set_defaults(func=cmd_team)
+    steam_suggest = steam_sub.add_parser(
+        "suggest",
+        help="advisory preset suggestion for preset=='auto' (#512 item 5) — "
+        "prints a preset + one-line reason, changes nothing",
+    )
+    steam_suggest.add_argument("task", help="the task text to classify")
+    steam_suggest.set_defaults(func=cmd_team)
 
     sdz = sub.add_parser(
         "design", help="design artifact registry — publish/approve/revise (#365 phase 5)"

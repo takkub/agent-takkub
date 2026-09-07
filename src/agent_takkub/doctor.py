@@ -3342,15 +3342,32 @@ def _v1_only_write_finding() -> Finding:
     for hit in hits:
         _log_v1_only_write(hit)
     if not hits:
-        return Finding("storage-layout", "v1-only-write", Status.OK, "0 พบ — พร้อมสำหรับ #504")
-    names = ", ".join(sorted(h.name for h in hits))
-    return Finding(
-        "storage-layout",
-        "v1-only-write",
-        Status.WARN,
-        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names}) — "
-        "`dual_write.py` มี writer ที่หลุด",
-    )
+        # #502/#504 review (2026-09-07): this is a single on-demand snapshot,
+        # never a continuous monitor — a writer that skipped dual-write and
+        # then got mirrored correctly on its very next save erases its own
+        # drift before the next `doctor`/`migrate validate` run. "0 พบ" here
+        # is NOT proof of #504's one-week drift=0 exit gate on its own; that
+        # needs periodic sampling across the week, not one clean run.
+        return Finding(
+            "storage-layout",
+            "v1-only-write",
+            Status.OK,
+            "0 พบใน snapshot นี้ (on-demand, ไม่ใช่ monitor ต่อเนื่อง)",
+        )
+    missing = [h for h in hits if h.reason == "missing_mirror"]
+    stale = [h for h in hits if h.reason != "missing_mirror"]
+    parts = []
+    if missing:
+        parts.append(
+            f"{len(missing)} domain(s) มี V1 file แต่ไม่มี v2/ mirror เลย "
+            f"({', '.join(sorted(h.name for h in missing))}) — dual_write อาจไม่เคยรันสำหรับ domain นี้"
+        )
+    if stale:
+        parts.append(
+            f"{len(stale)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ "
+            f"({', '.join(sorted(h.name for h in stale))}) — `dual_write.py` มี writer ที่หลุด"
+        )
+    return Finding("storage-layout", "v1-only-write", Status.WARN, "; ".join(parts))
 
 
 def _log_v1_only_write(hit) -> None:
@@ -3556,6 +3573,59 @@ def check_context() -> list[Finding]:
     ]
 
 
+def check_core_v2() -> list[Finding]:
+    """[core-v2] — #515 Settings diet: the Routing/Brain/Scheduler ADVANCED
+    Settings pages and the Knowledge page's Context Debug tab folded away —
+    every one of their flags has been default-ON since 1.0.84/2.0.0 with no
+    real reason left to flip one off from a UI, so there was nothing left to
+    toggle, only status to show. This is that status now: each flag's
+    effective value plus whether an env var is overriding it, the active
+    Context Strategy, and a quick Second Brain memory count. The interactive
+    bits those pages also had (a live routing-resolution preview, a brain
+    search box) were debug actions, not status, and are not reproduced here.
+    """
+    findings: list[Finding] = []
+
+    from .auto_migrate_boot import auto_migrate_enabled
+    from .core.brain.flag import context_strategy, v2_brain_enabled, v2_context_enabled
+    from .core.conversation.flag import v2_conversation_enabled
+    from .core.routing.flag import v2_router_enabled
+    from .core.scheduling.flag import v2_scheduler_enabled
+    from .core.storage.v2_authority import v2_authority_enabled
+
+    flag_checks = (
+        ("router", "TAKKUB_V2_ROUTER", v2_router_enabled),
+        ("brain", "TAKKUB_V2_BRAIN", v2_brain_enabled),
+        ("context", "TAKKUB_V2_CONTEXT", v2_context_enabled),
+        ("scheduler", "TAKKUB_V2_SCHEDULER", v2_scheduler_enabled),
+        ("conversation", "TAKKUB_V2_CONVERSATION", v2_conversation_enabled),
+        ("v2_authority", "TAKKUB_V2_AUTHORITY", v2_authority_enabled),
+        ("auto_migrate", "TAKKUB_AUTO_MIGRATE", auto_migrate_enabled),
+    )
+    for name, env_name, getter in flag_checks:
+        enabled = getter()
+        env_raw = os.environ.get(env_name)
+        detail = "ON" if enabled else "OFF"
+        detail += " (default)" if env_raw is None else f" — env {env_name}={env_raw!r} override"
+        findings.append(Finding("core-v2", name, Status.OK if enabled else Status.WARN, detail))
+
+    findings.append(Finding("core-v2", "context-strategy", Status.INFO, context_strategy()))
+
+    try:
+        from .core.brain.store import BrainStore
+
+        total = sum(1 for _ in BrainStore(None).load_active())
+        findings.append(
+            Finding(
+                "core-v2", "brain-memory-count", Status.INFO, f"{total} record(s) (global scope)"
+            )
+        )
+    except Exception as e:  # pragma: no cover - best-effort, never fail doctor
+        findings.append(Finding("core-v2", "brain-memory-count", Status.INFO, f"unavailable: {e}"))
+
+    return findings
+
+
 def check_rtk_ripgrep() -> list[Finding]:
     """[rtk] — #402: rtk (the external `rg`-based grep/read proxy every
     pane's Bash PreToolUse hook routes commands through, see `rtk_helper`)
@@ -3649,6 +3719,7 @@ def run_all_checks() -> list[Finding]:
         ("check_ready_markers", check_ready_markers),
         ("check_paste_placeholders", check_paste_placeholders),
         ("check_context", check_context),
+        ("check_core_v2", check_core_v2),
         ("check_resilience", check_resilience),
         ("check_rtk_ripgrep", check_rtk_ripgrep),
         ("check_version", check_version),

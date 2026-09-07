@@ -53,7 +53,6 @@ from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _log_event
 from .provider_config import CLAUDE, effective_provider_for
-from .roles import LEAD
 from .spawn_engine import PaneState
 
 
@@ -179,33 +178,7 @@ def _read_progress_marker(project: str, role: str) -> dict | None:
 class AutoResumeMixin:
     """Methods assume `self` is an `Orchestrator` (SpawnEngineMixin's
     `_ps`/`_pane_state`/`_panes_by_project`, LeadInboxMixin's `_notify_lead`,
-    and the `limitUsageConfirmed` / `autoResumeChanged` signals declared on
-    the class)."""
-
-    # ── toggle (status-bar chip) ─────────────────────────────────────────
-    def set_auto_resume(self, enabled: bool) -> tuple[bool, str]:
-        """Persist the auto-resume toggle and broadcast it to every live
-        Lead pane, mirroring `set_exec_mode`."""
-        enabled = bool(enabled)
-        auto_resume.set_enabled(enabled)
-        notice = (
-            "[system] auto-resume 🌙 ON — a teammate pane that hits its usage "
-            "limit while a task is still pending is now parked and woken "
-            "automatically when the window resets, instead of only "
-            "notifying you."
-            if enabled
-            else "[system] auto-resume 🌙 OFF — usage-limit panes are notify-only again."
-        )
-        for _project_ns, panes in self._panes_by_project.items():
-            lead = panes.get(LEAD.name)
-            if lead and lead.session and lead.session.is_alive:
-                _ar_sess = lead.session
-                _ar_sess.write(notice)
-                _delayed_enter(lead, _ar_sess, 150)
-                self.leadInjected.emit(notice)
-        self.autoResumeChanged.emit(enabled)
-        _log_event("auto_resume_set", enabled=enabled)
-        return True, f"auto-resume {'enabled' if enabled else 'disabled'}"
+    and the `limitUsageConfirmed` signal declared on the class)."""
 
     # ── entry point — called from the idle watchdog once signal (a) fired ──
     def _maybe_auto_resume_park(self, project: str, role: str, pane: AgentPane, now: float) -> None:

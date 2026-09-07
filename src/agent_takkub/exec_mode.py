@@ -1,12 +1,9 @@
 """Execution mode — how aggressively the Lead parallelises a request.
 
-Two modes, toggled from the status bar and persisted across restart (same UX as
-`plan_tier.py` / `provider_state.py`):
-
-  • SOLO (1:1, default)  — one agent per role, the cockpit's original behaviour.
+  • SOLO (1:1)       — one agent per role, the cockpit's original behaviour.
     Lead spawns a single frontend / backend / … and works features in sequence.
 
-  • PARALLEL (multi)     — when a request decomposes into K independent features,
+  • PARALLEL (multi) — when a request decomposes into K independent features,
     the Lead fans out K instances per relevant role (frontend#1..#K,
     backend#1..#K) and runs them concurrently, like a team of several devs per
     position, to finish faster. K is the Lead's call (one per independent
@@ -18,28 +15,22 @@ Two modes, toggled from the status bar and persisted across restart (same UX as
     `orchestrator._warn_lead_over_cap` / the opt-in `TAKKUB_QUEUE_FANOUT` queue)
     — that safety path is unchanged and never fed into the Lead's planning text.
 
-This module only stores the *intent* (a flag + the cap). The engine already
-supports the `role#N` instances this produces (`takkub assign --role <role>
---shards N`, and direct `--role frontend#2` assigns).
-
-State file: ``~/.takkub/exec-mode.json``  Format: ``{"mode": "solo"}`` |
-``{"mode": "parallel"}``. Missing / corrupt → SOLO (no surprise parallelism for
-an install that predates this setting).
+#515 Settings diet: this used to be its own status-bar chip persisted to
+``exec-mode.json`` — but it duplicates the team preset (#512) switch one
+level up: "ทำเอง"/"คู่" is always 1 agent per role, "ทีมเต็ม" always fans
+out. `is_parallel()` now derives straight from the project's effective
+preset (`team_preset.current(project)["exec_mode"]`) instead of reading its
+own file — a "custom" preset carries its own explicit `exec_mode` field, and
+"auto" resolves to PARALLEL (see `team_preset._resolve`). No more standalone
+toggle/chip/file to keep in sync with the preset.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
-
-from .config import SETTINGS_HOME
 
 SOLO = "solo"
 PARALLEL = "parallel"
-
-MODES: frozenset[str] = frozenset({SOLO, PARALLEL})
-_DEFAULT = SOLO
 
 # Ceiling used by machine_fanout_cap() below. NOT surfaced to the Lead's
 # planning prompt (see module docstring, #2 2026-07-09) — kept only as the
@@ -56,22 +47,31 @@ _PANE_RAM_GB = 0.5
 # RAM as reclaimable headroom so a momentary sample cannot collapse the cap.
 _RAM_HEADROOM_FRACTION = 0.25
 
-_PATH = SETTINGS_HOME / "exec-mode.json"
+
+def _archive_legacy_file() -> None:
+    """One-time cleanup of the pre-#515 ``exec-mode.json`` chip state — its
+    value is meaningless now (`current()` derives from the team preset
+    instead), so there is nothing to carry forward, just the file itself to
+    keep around per the "never delete, archive" rule."""
+    from . import config
+
+    config.archive_settings_file(config.SETTINGS_HOME / "exec-mode.json")
 
 
-def path() -> Path:
-    """Where state lives. Function form so tests can monkeypatch `_PATH`."""
-    return _PATH
+def current(project: str | None = None) -> str:
+    """SOLO or PARALLEL, derived from the project's effective team preset
+    (#512) — see module docstring. `project=None` resolves the "default"
+    project slug, same fallback `team_preset.current()` itself uses."""
+    _archive_legacy_file()
+    from . import team_preset
+
+    return team_preset.current(project).get("exec_mode", PARALLEL)
 
 
-def current() -> str:
-    """Return the current execution mode. Forced to PARALLEL (power mode always)."""
-    return PARALLEL
-
-
-def is_parallel() -> bool:
-    """True iff the Lead should fan out independent features across instances. Forced to True."""
-    return True
+def is_parallel(project: str | None = None) -> bool:
+    """True iff the Lead should fan out independent features across
+    instances for this project right now."""
+    return current(project) == PARALLEL
 
 
 def _base_pane_cap() -> int:
@@ -132,19 +132,3 @@ def machine_total_pane_cap() -> int:
     so it never raises.
     """
     return _base_pane_cap()
-
-
-def set_current(mode: str) -> None:
-    """Persist `mode` atomically. Raises ValueError on an unknown mode."""
-    mode = str(mode).lower().strip()
-    if mode not in MODES:
-        raise ValueError(f"unknown execution mode: {mode!r}")
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    payload = {"mode": mode}
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(_PATH)
-
-    from .core.storage.dual_write import dual_write_exec_mode
-
-    dual_write_exec_mode(payload)

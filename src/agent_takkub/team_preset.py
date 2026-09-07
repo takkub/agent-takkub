@@ -159,15 +159,23 @@ def path(project: str | None) -> Path:
     return _BASE_DIR / "projects" / slug / "team_preset.json"
 
 
-def _custom_role_names(project: str | None) -> frozenset[str]:
+def _custom_role_names() -> frozenset[str]:
+    """Every registered custom role. `roles.custom_roles()` itself is global,
+    not per-project (it reads one shared registry — see its own module),
+    so this takes no `project` argument either — L4 cleanup, 2026-09-07
+    review: the parameter used to be threaded through with nothing behind
+    it to scope."""
     from .roles import custom_roles
 
     return frozenset(r.name for r in custom_roles())
 
 
 def _position_roles(project: str | None) -> tuple[str, ...]:
-    """POSITION_ROLES plus this project's registered custom roles."""
-    return POSITION_ROLES + tuple(sorted(_custom_role_names(project)))
+    """POSITION_ROLES plus every registered custom role. `project` is kept
+    for callers that scope other parts of the resolved config even though
+    the custom-role registry itself isn't project-scoped (see
+    `_custom_role_names`)."""
+    return POSITION_ROLES + tuple(sorted(_custom_role_names()))
 
 
 def _governed_roles(project: str | None) -> frozenset[str]:
@@ -235,7 +243,7 @@ def _resolve(preset_id: str, project: str | None, raw: dict) -> dict:
     if preset_id in BUILTIN_PRESETS:
         cfg = {**BUILTIN_PRESETS[preset_id], "roles": dict(BUILTIN_PRESETS[preset_id]["roles"])}
         # custom roles ride along disabled-by-default under a built-in preset
-        for extra in _custom_role_names(project):
+        for extra in _custom_role_names():
             cfg["roles"].setdefault(extra, False)
         cfg["preset"] = preset_id
         return cfg
@@ -373,12 +381,14 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     """True unless *role* is a preset-governed position/checker role that the
     project's EFFECTIVE preset (standing or task-override) doesn't include.
 
-    Roles outside the preset roster (providers, `shell`, `critic`, `qa`/
-    `reviewer` when neither is the active checker's OTHER option... no —
-    see below) always pass through untouched. ``lead`` always passes (it's
-    the coordinator, not something Lead "spawns").  ``"auto"`` never
-    restricts (advisory-only, #512 item 5) — nothing to enforce until a task
-    override pins a concrete preset.
+    ``role`` outside the preset roster entirely (providers, `shell`,
+    `critic`) always passes through untouched — see `_governed_roles`.
+    ``qa``/``reviewer`` ARE governed (both are checker-mappable): whichever
+    one is NOT the preset's active `checker` is blocked, unless it's also
+    turned on as a plain POSITION in a custom preset's roster. ``lead``
+    always passes (it's the coordinator, not something Lead "spawns").
+    ``"auto"`` never restricts (advisory-only, #512 item 5) — nothing to
+    enforce until a task override pins a concrete preset.
     """
     base = role.split("#", 1)[0].strip().lower()
     if base == "lead":

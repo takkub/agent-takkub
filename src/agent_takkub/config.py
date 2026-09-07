@@ -141,6 +141,29 @@ def _write_json_atomic(path: Path, data: dict) -> bool:
             return True
 
 
+def archive_settings_file(source: Path) -> bool:
+    """Move a deprecated ``SETTINGS_HOME`` store into ``SETTINGS_HOME/backups/``
+    instead of deleting it (#515 Settings diet — "เอาออก = ถอน dead code
+    ทั้งสาย" but never the user's own data). No-op (returns True) when
+    *source* doesn't exist. If a backup with the same name is already there
+    from an earlier run, *source* is left in place rather than overwritten or
+    silently dropped — one archived copy per filename is enough, and this
+    only ever runs once per store's one-time migration anyway."""
+    if not source.exists():
+        return True
+    backups_dir = source.parent / "backups"
+    dest = backups_dir / source.name
+    if dest.exists():
+        return True
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        source.replace(dest)
+        return True
+    except OSError:
+        _log.exception("could not archive deprecated settings file %s", source)
+        return False
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -281,10 +304,17 @@ PROVIDER_ISOLATION_GAPS: dict[str, str] = {
         "override, which would break gh/uv/npm in the same pane"
     ),
     "cursor": (
-        "cursor-agent CLI is not installed on this machine (checked PATH + every "
-        "known install location 2026-09-07; `~/.cursor` here is IDE state with no "
-        "bin/) — no binary to probe, so the CURSOR_HOME guess in cursor_helper "
-        "stays unverified"
+        # #103/M6 (review 2026-09-07): this used to state a specific dev
+        # machine's probe result ("not installed on this machine, checked
+        # 2026-09-07") as if it were a fact about the provider — wrong on
+        # any machine that actually has cursor-agent installed. Keep it as
+        # a fact about VERIFICATION STATUS instead; probe history/method
+        # lives in issue #103, not in a string every user sees.
+        "cursor-agent's home-isolation knob (CURSOR_HOME, guessed in "
+        "cursor_helper) has not been verified against a real cursor-agent "
+        "install — no confirmed test run yet on any machine (see #103 for "
+        "probe history). If cursor-agent is installed here, isolation may "
+        "still work correctly; it just hasn't been proven."
     ),
 }
 

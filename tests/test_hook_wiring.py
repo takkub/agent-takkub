@@ -180,7 +180,6 @@ class TestGuardInjection:
         self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        rtk_helper.set_rtk_enabled(True)
         cmds = self._pre_cmds(hook_wiring.ensure_hook_settings_file())
         assert hook_wiring.GUARD_COMMAND in cmds
         assert rtk_helper.RTK_HOOK_COMMAND in cmds
