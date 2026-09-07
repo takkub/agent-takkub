@@ -329,6 +329,52 @@
     padding: 2px 14px 12px;
   }
 
+  /* ---------- #507 usage history (real token/quota, provider→account→model) ---------- */
+  #usage-history { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
+  .usage-history-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin: 10px 0 8px;
+  }
+  .usage-history-title { font-family: var(--mono); font-weight: 640; font-size: 0.82rem; color: var(--fg); }
+  .usage-history-range { display: flex; gap: 4px; }
+  .usage-history-range button {
+    font-family: var(--mono); font-size: 0.68rem; color: var(--fg-dim);
+    background: var(--card); border: 1px solid var(--line2); border-radius: 999px;
+    padding: 3px 9px; cursor: pointer;
+  }
+  .usage-history-range button.active { color: var(--accent); border-color: var(--accent); background: rgba(227, 179, 65, 0.1); }
+  .usage-history-spark {
+    display: flex; align-items: flex-end; gap: 2px; height: 40px;
+    padding: 2px 0 8px; margin-bottom: 4px;
+  }
+  .usage-history-spark-bar { flex: 1; min-width: 3px; background: var(--accent); border-radius: 2px 2px 0 0; }
+  .usage-history-spark-empty { font-size: 0.72rem; color: var(--faint); margin: 0 auto; }
+  .usage-history-cards { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .usage-history-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 11px;
+    padding: 8px 11px; min-width: 84px;
+  }
+  .usage-history-card-name {
+    font-family: var(--mono); font-size: 0.66rem; color: var(--faint);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .usage-history-card-value { font-family: var(--mono); font-size: 1.05rem; font-weight: 700; color: var(--fg); }
+  .usage-history-table { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .usage-history-row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 6px; align-items: baseline;
+    font-family: var(--mono); font-size: 0.68rem; color: var(--fg-dim);
+    padding: 5px 8px; background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .usage-history-row.head { background: transparent; border: none; color: var(--faint); padding: 0 8px; }
+  .usage-history-row .total { color: var(--fg); font-weight: 650; text-align: right; }
+  .usage-history-quota { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+  .usage-history-quota-row {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 0.7rem; color: var(--fg-dim);
+  }
+  .usage-history-quota-row .delta { color: var(--fg); font-weight: 650; }
+  .usage-history-note { font-size: 0.68rem; color: var(--faint); line-height: 1.5; margin-bottom: 4px; }
+
   /* ---------- resume / session picker sheet ---------- */
   .sheet-overlay {
     display: none;
@@ -1439,6 +1485,27 @@
         <button id="usage-sheet-close" type="button" aria-label="ปิด">✕</button>
       </div>
       <div id="usage-sheet-list" class="usage-sheet-list"></div>
+      <!-- #507: token/quota HISTORY — a separate section from the quota
+           cards above (which read GET /api/usage). This reads
+           GET /api/usage/history, same cache-only contract, just a bigger
+           less-frequently-needed payload (fetched only on sheet open, not
+           on the 5-min poll — see fetchUsageHistory's own comment). -->
+      <div id="usage-history">
+        <div class="usage-history-head">
+          <span class="usage-history-title">ประวัติ token/quota จริง</span>
+          <div id="usage-history-range" class="usage-history-range">
+            <button type="button" data-range="today">วันนี้</button>
+            <button type="button" data-range="week" class="active">7 วัน</button>
+            <button type="button" data-range="month">เดือนนี้</button>
+          </div>
+        </div>
+        <div id="usage-history-spark" class="usage-history-spark"></div>
+        <div id="usage-history-cards" class="usage-history-cards"></div>
+        <div id="usage-history-table" class="usage-history-table"></div>
+        <div id="usage-history-quota" class="usage-history-quota"></div>
+        <div id="usage-history-uncountable" class="usage-history-note"></div>
+        <div id="usage-history-rtk" class="usage-history-note"></div>
+      </div>
       <div id="usage-sheet-caption">อัปเดตจากค่าที่ cockpit บนเดสก์ท็อปดึงมาแล้ว — ไม่ยิงขอเพิ่มจาก provider</div>
     </div>
   </div>

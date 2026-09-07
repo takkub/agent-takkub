@@ -236,6 +236,7 @@ forbidden_modules = [
     "agent_takkub.codex_agents_md",
     "agent_takkub.provider_state",
     "agent_takkub.claude_auth_config",
+    "agent_takkub.usage_ledger",
 ]
 
 [[tool.importlinter.contracts]]

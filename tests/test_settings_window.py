@@ -94,15 +94,21 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 class TestSettingsWindowStructure:
     def test_has_sixteen_stacked_views(self) -> None:
-        # Settings-nav declutter (2026-08-24): 9 nav-visible views + New Role
-        # (reached via its own button) + 4 ADVANCED-section views (Routing/
-        # Brain/Scheduler/Performance) + 1 placeholder slot = 15. The slot at
-        # VIEW_CORE_V2_ACCOUNTS is an empty placeholder since #505 merged
-        # Accounts & Pools into the unified Accounts page — kept so the
-        # VIEW_* indices after it don't shift; `_goto_view` redirects it.
-        # +1 (2026-09-07, #506): the top-level General view (theme mode) = 16.
+        # Settings-nav declutter (2026-08-24): 9 nav-visible views (Pipeline
+        # Builder/Templates/Providers & Roles/MCP Matrix/Plugins Matrix/
+        # Skill Catalog/Skill Matrix/Accounts/Knowledge) + New Role (reached
+        # via its own button, not the nav list) + 4 ADVANCED-section views
+        # (Routing/Brain/Scheduler/Performance) + 1 placeholder slot = 15.
+        # Down from 21 — Role Overlap, Core V2 Overview, Core V2 Migration,
+        # and OpenViking were removed outright; Knowledge/Design Tools/
+        # Context Debug collapsed into one tabbed page. The placeholder slot
+        # at VIEW_CORE_V2_ACCOUNTS is empty since #505 merged Accounts &
+        # Pools into the unified Accounts page — kept so the VIEW_* indices
+        # after it don't shift; `_goto_view` redirects it. +1 (2026-09-07,
+        # #506): the top-level General view (theme mode) = 16. +1
+        # (2026-09-07, #507): the Usage view (token/quota report) = 17.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 16
+        assert dlg._stack.count() == 17
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:

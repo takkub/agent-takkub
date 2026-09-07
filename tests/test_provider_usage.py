@@ -1380,3 +1380,95 @@ def test_remote_usage_card_renders_the_stale_hint_for_stale_snapshots():
 
     js = (Path(pu.__file__).parent / "remote" / "static" / "app.js").read_text(encoding="utf-8")
     assert 'p.status === "stale" && p.error' in js
+
+
+# ── usage ledger hook (#507) ────────────────────────────────────────────
+
+
+class TestQuotaLedgerHook:
+    """The provider-level (`config_dir=None`) poll branch records every
+    successful fetch's windows into the usage ledger — no extra request,
+    just an append onto an already-scheduled fetch (#507's "ไม่เพิ่ม
+    request" rule)."""
+
+    def test_provider_level_fetch_records_windows_into_ledger(self, monkeypatch):
+        recorded: list[tuple] = []
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name,
+                status="active",
+                fetched_at=datetime(2026, 9, 5, 12, 0, 0, tzinfo=UTC),
+                windows=[
+                    {"name": "five_hour", "utilization": 10.0, "resets_at": None},
+                    {"name": "seven_day", "utilization": None, "resets_at": None},
+                ],
+            ),
+        )
+        from agent_takkub import usage_ledger
+
+        monkeypatch.setattr(
+            usage_ledger,
+            "record_quota_sample",
+            lambda *a, **k: recorded.append((a, k)),
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude")
+        # One call per window — the None-utilization guard lives inside
+        # `record_quota_sample` itself, not the caller.
+        assert len(recorded) == 2
+        five_hour = next(c for c in recorded if c[0][3] == "five_hour")
+        assert five_hour[0][0] == "claude"
+        assert five_hour[0][4] == 10.0
+
+    def test_account_scoped_fetch_never_touches_the_ledger(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name, status="active", utilization=50.0
+            ),
+        )
+        from agent_takkub import usage_ledger
+
+        called = []
+        monkeypatch.setattr(
+            usage_ledger, "record_quota_sample", lambda *a, **k: called.append((a, k))
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude", tmp_path)
+        assert called == []
+
+    def test_uncountable_provider_never_recorded(self, monkeypatch):
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name, status="active", utilization=50.0
+            ),
+        )
+        from agent_takkub import usage_ledger
+
+        store = pu.ProviderUsageStore()
+        store._fetch_one("opencode")
+        rows = usage_ledger._read_jsonl(usage_ledger._quota_file("opencode", "default", "2026-09"))
+        assert rows == []
+
+    def test_ledger_failure_never_breaks_the_poll(self, monkeypatch):
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name, status="active", utilization=50.0
+            ),
+        )
+        from agent_takkub import usage_ledger
+
+        def boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(usage_ledger, "record_quota_sample", boom)
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude")  # must not raise
+        assert store.get("claude").utilization == 50.0

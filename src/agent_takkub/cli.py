@@ -2439,6 +2439,48 @@ def cmd_docs_verify(args: argparse.Namespace) -> dict:
     return {"ok": True, "msg": f"{len(broken)} broken ref(s)"}
 
 
+def cmd_usage(args: argparse.Namespace) -> dict:
+    """`takkub usage [--days N | --month YYYY-MM] [--provider p]` (#507).
+
+    Runs a cheap incremental import first (unchanged source files are
+    skipped via their on-disk cursor, so this never re-scans everything)
+    so the report is never stale just because nobody ran `usage import`
+    explicitly, then prints the aggregated table.
+    """
+    from . import usage_ledger
+
+    usage_ledger.import_all()
+    result = usage_ledger.query_usage(days=args.days, month=args.month, provider=args.provider)
+    print(usage_ledger.format_usage_table(result))
+    return {"ok": True, "msg": "usage report printed"}
+
+
+def cmd_usage_import(args: argparse.Namespace) -> dict:
+    """`takkub usage import [--provider p] [--source DIR]` — idempotent
+    historical backfill. `--source` (requires `--provider`) reads
+    transcripts from that directory instead of the normal profile
+    registry — read-only, never writes there — for a cross-machine
+    cross-check (combine with env `TAKKUB_USAGE_LEDGER_DIR` to also keep
+    the ledger itself out of this process's own DATA_HOME)."""
+    from . import usage_ledger
+
+    source = getattr(args, "source", None)
+    provider = getattr(args, "provider", None)
+    if source and not provider:
+        print("error: --source requires --provider", file=sys.stderr)
+        return {"ok": False, "msg": "--source requires --provider"}
+    stats = usage_ledger.import_all(provider=provider, source=source)
+    for provider, s in stats.items():
+        if "error" in s:
+            print(f"{provider}: นับไม่ได้ ({s['error']})")
+            continue
+        print(
+            f"{provider}: scanned={s.get('scanned_files', 0)} "
+            f"skipped={s.get('skipped_files', 0)} new_turns={s.get('new_turns', 0)}"
+        )
+    return {"ok": True, "msg": "usage import complete"}
+
+
 def cmd_audit_skills(args: argparse.Namespace) -> dict:
     """Compute TF-IDF cosine similarity across role docs, produce a boundary report."""
     from pathlib import Path
@@ -4642,6 +4684,33 @@ def main(argv: list[str] | None = None) -> int:
         help="disable auto-exclusion of docs/reviews/*.md",
     )
     sdv.set_defaults(func=cmd_docs_verify)
+
+    su = sub.add_parser(
+        "usage",
+        help="usage ledger — real token/quota report per provider→account→model (#507)",
+    )
+    su.add_argument("--days", type=int, default=None, help="days back from today (default: 7)")
+    su.add_argument("--month", default=None, help="YYYY-MM instead of --days")
+    su.add_argument("--provider", default=None, help="limit to one provider")
+    su.set_defaults(func=cmd_usage)
+    # Deliberately `required=False` (unlike every other nested subparser in
+    # this file) — #507 specifies the bare `takkub usage [--days N] [...]`
+    # form as the primary UX; `import` is the one extra action bolted on.
+    su_sub = su.add_subparsers(dest="usage_cmd", required=False)
+    su_import = su_sub.add_parser(
+        "import", help="idempotent historical backfill from provider transcripts"
+    )
+    su_import.add_argument("--provider", default=None, help="limit to one provider")
+    su_import.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "read transcripts from this dir instead of the profile registry "
+            "(requires --provider; read-only, never writes there — combine with "
+            "env TAKKUB_USAGE_LEDGER_DIR to also redirect the ledger itself)"
+        ),
+    )
+    su_import.set_defaults(func=cmd_usage_import)
 
     sas = sub.add_parser("audit-skills", help="TF-IDF role boundary audit")
     sas.add_argument("--threshold", type=float, default=0.6)

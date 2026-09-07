@@ -820,6 +820,26 @@ def usage() -> dict:
     return {"providers": providers, "cockpit_version": __version__}
 
 
+def usage_history(days: str | int | None, month: str | None, provider: str | None) -> dict:
+    """View-mode safe (read-only, #507). Reads whatever `usage_ledger`
+    already has on disk — like `usage()` above, this must NEVER trigger the
+    expensive transcript import itself (that's desktop-Settings-triggered,
+    or a future scheduled job); a phone poll only ever reads, same
+    provider-usage design doc §4 contract `usage()` follows.
+    """
+    from .. import usage_ledger
+
+    try:
+        days_int = int(days) if days not in (None, "") else None
+    except (TypeError, ValueError):
+        days_int = None
+    result = usage_ledger.query_usage(
+        days=days_int, month=(month or None), provider=(provider or None)
+    )
+    result["daily_series"] = usage_ledger.daily_series(provider or None, days=14)
+    return result
+
+
 def projects(from_project: str | None, mode: str = "view") -> dict:
     """View-mode. In-process, no loopback: reads the same `projects.json`
     the desktop UI reads. Safe from the H2 cross-thread race because this
