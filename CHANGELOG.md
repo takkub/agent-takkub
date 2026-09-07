@@ -2,7 +2,37 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT]
+## [vNEXT] — (ร่าง 2026-09-07, ยังไม่ปล่อย — user สั่งไม่ publish วันนี้)
+
+หลักของรอบนี้ (user directive): **"V2 ทำทุกอย่างแยกให้ชัดเจน อ่านง่าย"** — ตัวเลือกที่ค่าถูกมีค่าเดียวไม่ใช่ตัวเลือก, ตัวเลขที่โชว์ต้องเป็นของจริงจาก provider, เอาออก = ถอน dead code ทั้งสาย · batch นี้ผ่าน cross-review 3 รอบ (reviewer claude + gemini) — HIGH ที่เจอทั้งหมดแก้ก่อนปล่อย (`docs/audit/2026-09-07-batch-2.0.x-review-*.md`)
+
+### Added (เพิ่ม)
+
+- **โหมดสว่าง (#506)** — theme token 2 ชุด (dark/light) ใน `cockpit_theme`, Settings → General เลือก ตามระบบ/สว่าง/มืด มีผลทันที (Windows registry + macOS `defaults` detection) · terminal pane คงมืดเสมอโดยตั้งใจ · แถบ project/task ที่วาดค้างครบ 100% หลัง restart
+- **หน้า Accounts หน้าเดียวทุก provider (#505)** — แทน Users + Accounts & Pools: provider เป็นแถว บัญชีเป็นการ์ด (สถานะ login · plan จาก credential จริง · ใช้กับโปรเจคไหน) เพิ่มบัญชีแค่ตั้งชื่อ ปุ่ม login เปิด pane จริง · provider ที่ยังแยกบ้านไม่ได้แสดงเป็น gap พร้อมเหตุผล · ปุ่ม 🏁 End Session + สวิตช์ plan Pro/Max ถอด (dead code ถอนครบ) แทนด้วยป้าย plan อ่านอย่างเดียวของบัญชีที่โปรเจคใช้
+- **Usage report ของจริง (#507)** — ledger สะสม token ส่ง/รับจริงต่อ turn จาก usage block ของ provider (claude/codex/opencode; gemini/kimi/cursor = "นับไม่ได้" ไม่ประมาณ) แยก provider→บัญชี→model + % โควตาที่ provider หักจริง (บันทึกจาก poll เดิม ไม่เพิ่ม request) · `takkub usage [--days|--month|--provider]`, `takkub usage import --provider p --source DIR` (อ่านอย่างเดียว ย้ายเครื่องได้), `TAKKUB_USAGE_LEDGER_DIR` · หน้า Settings → Usage (sparkline, ตาราง) + ลิ้นชัก Usage บนมือถือ (`GET /api/usage/history` อ่านอย่างเดียว off-thread) · rtk saved โชว์แยกป้ายใน CLI เท่านั้น
+- **Team preset — ขนาดทีมต่อโปรเจค (#512)** — ทำเอง / คู่ / ทีมเต็ม / custom / อัตโนมัติ เลือกที่ chip "ทีม" บน status bar, Settings → ทีม&ตำแหน่ง, หรือมือถือ (`/api/team-preset`) · preset ครอบของเดิม (rolesEnabled + template + exec-mode) และฉีด policy block เข้า prompt ของ Lead ทุก provider · `takkub team status|set|suggest|clear-override`, `assign --team <preset>` ต่องาน (Lead สั่งเองไม่ได้ — กันยกสิทธิ์ตัวเอง) · โหมดทำเอง = Lead แก้เอง ทดสอบเอง ไม่ spawn ใคร (บังคับที่ `spawn()` ครอบ restore/recovery/queue)
+- **`takkub doctor --boot-context [--role]` (#516)** — วัดว่า pane เปิดมากิน context เท่าไหร่ต่อหมวด + baseline/ceiling ใน CI (ratchet: ห้ามโตกว่าเดิม) + `token_estimate` ถ่วงภาษาไทย (chars/4 เดิมต่ำกว่าจริง ~3.5×)
+- **มือถือแสดงเวลาจริงของข้อความ (#517)** — history/SSE ทุก provider แนบ `ts` จาก transcript (claude/codex/opencode; ไม่มี = ไม่โชว์ ไม่ปลอม) แทนเวลาตอนวาด · V2 conversation store เก็บ `created_at` ของ codex/opencode ที่เคยหาย
+
+### Changed (เปลี่ยน)
+
+- **Settings 17 หน้า → 8 หน้า / 4 section ไม่มี ADVANCED (#515)** — General (ธีม · โหมดเครื่อง เงียบ/สมดุล/เต็มที่ แทนตัวเลข cap) · TEAM ทีม&ตำแหน่ง + Pipeline (Builder+Templates รวม) · TOOLS Tools (MCP+Plugins) + Skills (Catalog+Matrix) + Knowledge · ACCOUNT Accounts + Usage · ถอด Routing/Brain/Scheduler/Performance/Context Debug (status ย้ายไป `takkub doctor`) · New Role เป็น dialog · route เก่า redirect
+- **ตัวเลือกที่ค่าถูกมีค่าเดียว → ค่าตายตัว (#515)**: V2 flags always-on (env `TAKKUB_V2_*=0` ยังเป็น escape hatch), exec-mode derive จาก team preset, rtk auto-detect จาก PATH, auto-resume เปิดเสมอ · `role-providers.json` ยุบเข้า `role-models.json` (migration ครั้งเดียว) · ไฟล์ store ที่เลิกใช้ย้ายเข้า `backups/` ไม่ลบ
+- **สวิตช์ปิด role ใน Settings มีผลจริง (#510)** — assign/spawn/routing/pipeline/auto-chain ปฏิเสธ role ที่ปิดพร้อมเหตุผล, Lead เห็นรายชื่อ role ที่ปิดใน prompt + broadcast เมื่อสลับ
+- **pane เปิดมาเบาลง (#516)** — role file ทุกตำแหน่งแยก core / on-demand (`docs/roles/<role>/`, −39..60%), CLAUDE.md root −54%, learned notes ต่อ role cap 1,500 chars, **pane ที่ไม่ใช่ Lead ไม่โหลด MEMORY.md ของ Lead อีก** (project-dir-name ต่อ role; session เก่ายัง resume ได้ผ่าน fallback) · Tools/Skills โชว์ต้นทุน token ต่อ plugin/skill
+- **kimi มีบ้านแยกใน DATA_HOME (#103)** — `KIMI_SHARE_DIR` → `providers/kimi/default` (พิสูจน์กับ kimi-cli 1.50.0) · gemini/agy 1.1.27 ไม่มี knob (พิสูจน์แล้ว) · cursor ยังไม่ verify
+- **`v1_only_write` exit gate (#502)** — `doctor --storage-layout` / `migrate validate` รายงาน writer ที่แตะ V1 โดยไม่ mirror (รวมกรณี mirror หายและ role-providers fan-out) — ข้อความบอกชัดว่าเป็น on-demand snapshot ไม่ใช่ monitor · ด่านก่อน 2.1.0 (#504)
+
+### Fixed (แก้)
+
+- จาก cross-review รอบ 1–2 (ทั้งหมดมีเทส reproduce): endpoint มือถือ `usage/history` เคยเดิน path ออกนอก ledger และเขียน/ลบไฟล์ตอน GET · `rtk gain` subprocess + rollup วิ่งบน Qt main thread ทุกครั้งที่เปิด Settings/มือถือ · SettingsWindow ไม่เคยถูกลบ + QThread abort ตอนปิด · rollup ทับยอดประวัติ (30→10) และคูณ 2 ตอนขึ้นเดือนใหม่ · codex นับ cached token ซ้ำ (19,421→31,581) · import ซ้อนไม่มี lock · quota ของบัญชีชื่อถูกบันทึกเป็น default · OpenCode WAL ไม่ถูกจับ · JSON เสียรูปล้มทั้ง import · migration #515 รันซ้ำทับ role-models · ladder/v1_only_write ยังชี้ role-providers.json หลังยุบ (V2 routing ค้าง — boot ครั้งแรกหลังอัปซ่อมเอง ไม่ rollback) · `--team`/`team set` ยกสิทธิ์ Lead เองได้ · auto-chain ไม่รู้ preset · retheme ไม่ครอบ inline QSS · เทส Accounts ตกสุ่มจาก worker ไม่ถูก join
+
+### หมายเหตุอัปเกรด
+
+- boot ครั้งแรกบน 2.0.1: auto-migrate ยุบ `role-providers.json`/`exec-mode.json`/`rtk-enabled.json`/`autoresume.json`/ตัวเลข performance เข้าที่ใหม่ (ของเดิมย้ายเข้า `backups/`) และ re-mirror `v2/config/routing.json` จาก role-models — `takkub migrate validate` ควรเขียวครบหลัง boot
+- ไม่มี toggle exec-mode / rtk / auto-resume / V2 flags ใน UI อีก — ถ้าเคยตั้งไว้ ค่าถูกจัดให้เป็นค่าเดียวที่ถูกต้อง
+- session ของ teammate ที่เปิดก่อนอัปยังหาเจอ/resume ได้ (fallback dir เดิม)
 
 ## [v2.0.0] - 2026-09-06
 
