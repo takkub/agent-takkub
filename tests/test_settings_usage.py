@@ -8,6 +8,9 @@ it dynamically, so it picks up the isolation automatically).
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -123,6 +126,49 @@ class TestUsageViewSmoke:
         dlg.deleteLater()
 
 
+class TestUsageViewLazyConstruction:
+    """H3 (cross-review 2026-09-07): the Usage view must not be built (and
+    must not run `query_usage()`) just because Settings was opened on a
+    DIFFERENT page — only the CLI-visible cost of the view a user actually
+    navigates to should be paid."""
+
+    def test_opening_a_different_view_never_builds_usage(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            usage_ledger,
+            "query_usage",
+            lambda **k: (
+                calls.append(1)
+                or {
+                    "start": "x",
+                    "end": "y",
+                    "month": None,
+                    "rows": [],
+                    "uncountable": [],
+                    "quota": [],
+                }
+            ),
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert calls == []
+        assert settings_window.VIEW_USAGE in dlg._lazy_view_builders
+        assert not hasattr(dlg, "_usage_range_combo")
+        dlg.deleteLater()
+
+    def test_navigating_to_usage_later_builds_it_exactly_once(self, monkeypatch):
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._goto_view(settings_window.VIEW_USAGE)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_USAGE
+        assert hasattr(dlg, "_usage_range_combo")
+        assert settings_window.VIEW_USAGE not in dlg._lazy_view_builders
+        # A second visit must not rebuild it.
+        widget_before = dlg._stack.widget(settings_window.VIEW_USAGE)
+        dlg._goto_view(settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._goto_view(settings_window.VIEW_USAGE)
+        assert dlg._stack.widget(settings_window.VIEW_USAGE) is widget_before
+        dlg.deleteLater()
+
+
 class TestRangeQueryKwargs:
     def test_today_maps_to_one_day(self):
         assert _range_query_kwargs("today") == {"days": 1}
@@ -135,3 +181,54 @@ class TestRangeQueryKwargs:
 
         expected = datetime.now(tz=UTC).strftime("%Y-%m")
         assert _range_query_kwargs("month") == {"month": expected}
+
+
+class TestUsageRefreshThreadLifecycle:
+    """H3 (gemini cross-review 2026-09-07) — a `_CallableThread` parented
+    to a transient Settings dialog aborts the process
+    (`QThread: Destroyed while thread is still running`, exit
+    0xC0000409) if that dialog is destroyed while the thread is still
+    running. Isolated subprocess: this crash, if it regressed, would take
+    the whole test process down with it otherwise. Converted from the
+    review's own repro (`thread_lifecycle.py`)."""
+
+    def test_dialog_destroyed_mid_refresh_does_not_abort(self):
+        script = textwrap.dedent(
+            """
+            import os, sys, time
+            os.environ["QT_QPA_PLATFORM"] = "offscreen"
+            if sys.platform == "win32":
+                import ctypes
+                ctypes.windll.kernel32.SetErrorMode(3)
+            from PyQt6 import sip
+            from PyQt6.QtWidgets import QApplication, QDialog, QLabel
+            from PyQt6.QtCore import QTimer
+            from agent_takkub import usage_ledger
+            from agent_takkub.settings_usage import UsageSettingsMixin
+
+            app = QApplication([])
+
+            class Dialog(QDialog, UsageSettingsMixin):
+                def _on_usage_import_ready(self, result):
+                    pass
+
+            dlg = Dialog()
+            dlg._usage_status_label = QLabel(dlg)
+            dlg._usage_refresh_btn = QLabel(dlg)
+            dlg._usage_import_thread = None
+            usage_ledger.import_all = lambda: time.sleep(1)
+            dlg._on_usage_refresh_clicked()
+            QTimer.singleShot(100, lambda: sip.delete(dlg))
+            QTimer.singleShot(2000, app.quit)
+            app.exec()
+            print("OK")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "OK" in result.stdout

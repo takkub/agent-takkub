@@ -1209,6 +1209,28 @@ class TestUsageHistoryRoute:
         assert (status, payload) == (200, {})
         assert seen == {"days": None, "month": "2026-08", "provider": "codex"}
 
+    def test_dispatch_runs_off_the_qt_main_thread(self, monkeypatch):
+        """H2 (2026-09-07): unlike `usage`, `usage_history` does real
+        ledger file I/O + rollup + (before the same fix) a `rtk gain`
+        subprocess (measured ~0.46-0.47s) — it must be routed through
+        `_OFF_THREAD_ACTIONS`, never dispatched inline on the Qt thread."""
+        seen: dict[str, threading.Thread] = {}
+
+        def _fake_usage_history(days, month, provider):
+            seen["thread"] = threading.current_thread()
+            return {}
+
+        monkeypatch.setattr(api, "usage_history", _fake_usage_history)
+        assert "usage_history" in http_server._Bridge._OFF_THREAD_ACTIONS
+        bridge = http_server._Bridge(_FakeOrch())
+        pending = http_server._PendingRequest(
+            action="usage_history", params={"days": None, "month": None, "provider": None}
+        )
+        bridge._handle(pending)
+        status, payload = pending.reply.get(timeout=5)
+        assert (status, payload) == (200, {})
+        assert seen["thread"] is not threading.main_thread()
+
 
 class TestStaticFileTraversal:
     def test_path_traversal_outside_static_root_rejected(self, server):

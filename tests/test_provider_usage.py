@@ -1178,6 +1178,89 @@ class TestProviderUsageStore:
         assert done.wait(timeout=2.0), "refresh_now() never triggered a fetch"
         assert seen == [("codex", tmp_path)]
 
+    # ── quota-ledger account attribution (M2, 2026-09-07) ──────────────────
+
+    def test_provider_level_fetch_records_quota_under_the_active_named_account(
+        self, tmp_path, monkeypatch
+    ):
+        """A named claude profile's quota sample must land in ITS OWN
+        ledger account — a hardcoded 'default' label previously mixed two
+        unrelated accounts' percentages into the same series and left the
+        named account's own history empty forever."""
+        from agent_takkub import usage_ledger, user_profile
+
+        monkeypatch.setattr(usage_ledger, "usage_root", lambda: tmp_path / "usage")
+        office_dir = tmp_path / "office-claude-config"
+        office_dir.mkdir()
+        monkeypatch.setattr(
+            user_profile,
+            "profiles_for_provider",
+            lambda provider: (
+                [{"name": "office", "config_dir": str(office_dir), "provider": provider}]
+                if provider == "claude"
+                else []
+            ),
+        )
+        monkeypatch.setattr(pu, "_resolve_claude_config_dir", lambda: office_dir)
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name,
+                status="active",
+                windows=[{"name": "five_hour", "utilization": 42.0, "resets_at": None}],
+                fetched_at=datetime.now(tz=UTC),
+            ),
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("claude")
+
+        month = datetime.now(tz=UTC).strftime("%Y-%m")
+        office_samples = usage_ledger._read_jsonl(
+            usage_ledger._quota_file("claude", "office", month)
+        )
+        assert office_samples and office_samples[-1]["utilization"] == 42.0
+        default_samples = usage_ledger._read_jsonl(
+            usage_ledger._quota_file("claude", "default", month)
+        )
+        assert default_samples == []
+
+    def test_account_scoped_fetch_now_records_quota_history(self, tmp_path, monkeypatch):
+        """The config_dir-scoped branch previously called `fetch_provider_
+        usage` but never `_record_quota_ledger` at all — a named account's
+        own quota history stayed empty even though it was being fetched
+        every refresh."""
+        from agent_takkub import usage_ledger, user_profile
+
+        monkeypatch.setattr(usage_ledger, "usage_root", lambda: tmp_path / "usage")
+        pool_dir = tmp_path / "pool-codex-config"
+        pool_dir.mkdir()
+        monkeypatch.setattr(
+            user_profile,
+            "profiles_for_provider",
+            lambda provider: (
+                [{"name": "pool1", "config_dir": str(pool_dir), "provider": provider}]
+                if provider == "codex"
+                else []
+            ),
+        )
+        monkeypatch.setattr(
+            pu,
+            "fetch_provider_usage",
+            lambda name, config_dir=None: pu.ProviderUsage(
+                provider=name,
+                status="active",
+                windows=[{"name": "primary", "utilization": 17.5, "resets_at": None}],
+                fetched_at=datetime.now(tz=UTC),
+            ),
+        )
+        store = pu.ProviderUsageStore()
+        store._fetch_one("codex", pool_dir)
+
+        month = datetime.now(tz=UTC).strftime("%Y-%m")
+        samples = usage_ledger._read_jsonl(usage_ledger._quota_file("codex", "pool1", month))
+        assert samples and samples[-1]["utilization"] == 17.5
+
 
 class TestFetchProviderUsageConfigDir:
     """`fetch_provider_usage(provider, config_dir=...)` dispatch — epic #309
@@ -1422,7 +1505,10 @@ class TestQuotaLedgerHook:
         assert five_hour[0][0] == "claude"
         assert five_hour[0][4] == 10.0
 
-    def test_account_scoped_fetch_never_touches_the_ledger(self, tmp_path, monkeypatch):
+    def test_account_scoped_fetch_now_also_records_into_the_ledger(self, tmp_path, monkeypatch):
+        """M2 (2026-09-07): this branch previously never recorded quota
+        history at all — a named account's own series stayed empty
+        forever even though it was being fetched every refresh."""
         monkeypatch.setattr(
             pu,
             "fetch_provider_usage",
@@ -1438,7 +1524,8 @@ class TestQuotaLedgerHook:
         )
         store = pu.ProviderUsageStore()
         store._fetch_one("claude", tmp_path)
-        assert called == []
+        assert len(called) == 1
+        assert called[0][0][0] == "claude"
 
     def test_uncountable_provider_never_recorded(self, monkeypatch):
         monkeypatch.setattr(

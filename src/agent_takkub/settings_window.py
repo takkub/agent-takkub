@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSettings, QSize, Qt, QThread, pyqtSignal
@@ -810,6 +811,14 @@ class SettingsWindow(
         initial_view: int = VIEW_PROVIDERS_ROLES,
     ) -> None:
         super().__init__(parent)
+        # H3 (cross-review 2026-09-07): every field open re-constructs a
+        # fresh SettingsWindow (see class docstring) parented to the main
+        # window, but nothing ever scheduled its deletion — a probe that
+        # opened/closed it 5 times found all 5 instances (17 views' worth
+        # of widgets each, Usage/Accounts included) still alive. `close()`
+        # (accept/reject both call it) now schedules `deleteLater()`
+        # instead of leaking the instance for the process's lifetime.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._project = project
         self._dirty = False
         # Which views (VIEW_* indices) have unsaved staged edits right now —
@@ -878,6 +887,22 @@ class SettingsWindow(
         # dots + a duplicate title string); the OS titlebar + status strip
         # brand still identify the window.
         outer.addWidget(self._build_status_strip())
+
+        # H3 (cross-review 2026-09-07): every OTHER view here is built
+        # eagerly at construction (matches this class's own docstring —
+        # "always reflects on-disk state at open time"), which is fine for
+        # a form/table read. Usage is not: `_build_usage_view()` calls
+        # `_render_usage()`, which does real ledger file I/O (and, before
+        # H2's separate fix, a ~0.5s `rtk gain` subprocess) — paid on
+        # EVERY Settings open, even when the user never visits Usage.
+        # `_lazy_view_builders` (populated in `_build_content` below,
+        # consumed by `_ensure_view_built` from `_goto_view`) defers a
+        # registered view's real construction to its first navigation.
+        # Mixins other than Usage can opt into the same lazy pattern by
+        # registering their own `VIEW_*: builder` entry here before
+        # `_build_content()` runs, instead of adding an eager
+        # `self._stack.addWidget(...)` call.
+        self._lazy_view_builders: dict[int, Callable[[], QWidget]] = {}
 
         body = QWidget(self)
         body_lay = QHBoxLayout(body)
@@ -1093,6 +1118,21 @@ class SettingsWindow(
         except Exception:
             pass
 
+    def _ensure_view_built(self, view_idx: int) -> None:
+        """Replace `view_idx`'s placeholder with its real widget on first
+        navigation there (H3, 2026-09-07) — a no-op for every index not
+        registered in `_lazy_view_builders` (already built eagerly, or
+        already replaced by an earlier visit)."""
+        builder = self._lazy_view_builders.pop(view_idx, None)
+        if builder is None:
+            return
+        old = self._stack.widget(view_idx)
+        if old is not None:
+            self._stack.removeWidget(old)
+        self._stack.insertWidget(view_idx, builder())
+        if old is not None:
+            old.deleteLater()
+
     def _goto_view(self, view_idx: int) -> None:
         # #505: the ADVANCED "Accounts & Pools" page was folded into the
         # unified Accounts page — any old route/constant lands there instead
@@ -1116,6 +1156,7 @@ class SettingsWindow(
             btn.style().polish(btn)
         for idx, indicator in self._nav_indicators.items():
             indicator.setVisible(idx == view_idx)
+        self._ensure_view_built(view_idx)
         self._stack.setCurrentIndex(view_idx)
         title, sub = _VIEW_HEADERS.get(view_idx, ("", ""))
         self._content_title.setText(title)
@@ -1173,7 +1214,9 @@ class SettingsWindow(
         self._stack.addWidget(self._wrap_scroll(self._build_core_v2_scheduler_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_general_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_usage_view()))
+        usage_placeholder = QWidget(content)
+        self._stack.addWidget(usage_placeholder)
+        self._lazy_view_builders[VIEW_USAGE] = lambda: self._wrap_scroll(self._build_usage_view())
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
