@@ -14,7 +14,7 @@ stack up before QA.
   --to lead "blocked: web-build locked by qa"`) — never fight over it.
   `takkub lock --list` shows what's held.
 - **`takkub done` / `close` kill every process under your pane — detached
-  children included** (Node `detached:true`+`unref()` is not enough on
+  children included** (Node `detached:true` plus child `.unref` is not enough on
   Windows). A service that must outlive your task (cloudflared tunnel, dev
   API, worker) is started with `takkub spawn-service --name <n> -- <cmd>
   [args]`: the cockpit spawns it outside your pane's tree, logs to

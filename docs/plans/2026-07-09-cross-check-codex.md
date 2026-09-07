@@ -76,7 +76,7 @@ Better approach: move the trigger to the successful Lead spawn path or `paneResu
 
 ## Item 5. QA screenshot evidence on every done
 
-Evidence check: qa role docs do mandate screenshot paths under `runtime/exports/<date>/<project>/screenshots/` (`.claude/agents/qa.md:116` and examples around `122`/`162`). `done()` starts at `src/agent_takkub/orchestrator.py:1506`; normal notice creation is at `orchestrator.py:1551-1565`. Screenshot directories are scanned for status/stall only for `qa`, `critic`, and `designer` at `orchestrator.py:1986-1994` and `2084-2095`.
+Evidence check: qa role docs do mandate screenshot paths under `runtime/exports/<date>/<project>/screenshots/` (qa role file — screenshot rule now lives in `docs/roles/qa/e2e-verification.md` after the 2026-09-07 #516 role-file diet; the `qa.md:116`/`122`/`162` line refs of the original review no longer exist). `done()` starts at `src/agent_takkub/orchestrator.py:1506`; normal notice creation is at `orchestrator.py:1551-1565`. Screenshot directories are scanned for status/stall only for `qa`, `critic`, and `designer` at `orchestrator.py:1986-1994` and `2084-2095`.
 
 Verdict: agree feasible, **M** not S-M unless warning scope is narrow.
 
