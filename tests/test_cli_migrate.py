@@ -77,6 +77,33 @@ def test_migrate_text_output_shows_step_id(capsys):
     assert "version-marker" in out
 
 
+def test_migrate_validate_reports_v1_only_write(capsys, tmp_path):
+    """#502 — `migrate validate` appends a `v1-only-write` report of its
+    own, on top of the ladder's own step reports."""
+    import os
+    import time
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    # A writer that skipped dual-write: touch the V1 source with a later
+    # mtime than the mirror `apply` just wrote.
+    settings_home = tmp_path / "settings_home"
+    provider_models = settings_home / "provider-models.json"
+    provider_models.parent.mkdir(parents=True, exist_ok=True)
+    provider_models.write_text("{}", encoding="utf-8")
+    future = time.time() + 100
+    os.utime(provider_models, (future, future))
+
+    rc = cli.main(["migrate", "validate", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    report = next(r for r in out if r["step_id"] == "v1-only-write")
+    assert report["ok"] is True
+    assert "provider-models" in report["detail"]["hits"]
+
+
 def test_migrate_requires_a_subcommand():
     with pytest.raises(SystemExit) as exc:
         cli.main(["migrate"])

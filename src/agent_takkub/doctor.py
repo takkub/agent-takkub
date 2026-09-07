@@ -3221,8 +3221,63 @@ def check_storage_layout_state() -> list[Finding]:
                 "(plan §2, Phase 10) removes V1; not itself a problem",
             )
         )
+    findings.append(_v1_only_write_finding())
     findings.extend(_auto_migrate_boot_findings())
     return findings
+
+
+def _v1_only_write_finding() -> Finding:
+    """[storage-layout/v1-only-write] — #502: a V1 file written more
+    recently than its dual-write mirror means some writer skipped
+    ``core.storage.dual_write`` and the ``v2/`` copy went stale silently.
+    Exit criteria for #504 (V1 removal) is this at 0 continuously alongside
+    `model_pin_v2_drift`, so a hit here is WARN, never FAIL — a still-mixed
+    V1/V2 machine finding one is exactly what this check exists to surface,
+    not itself a broken install."""
+    try:
+        from . import config
+        from .core.storage.v1_only_write import scan_v1_only_writes
+    except Exception as e:
+        return Finding("storage-layout", "v1-only-write", Status.INFO, f"unavailable: {e}")
+
+    # Explicit `config.DATA_HOME`, not the bare no-arg default: `scan_v1_
+    # only_writes` resolves its "effective data home" through `core.storage.
+    # dual_write`'s deliberately late-bound `storage_layout_v2` lookup (same
+    # reason `core.routing.router` needs the same care — see that module's
+    # own docstring), which only agrees with `config.DATA_HOME` when told so
+    # explicitly. `layout_state()` right above already resolves the same way.
+    hits = scan_v1_only_writes(data_home=config.DATA_HOME)
+    for hit in hits:
+        _log_v1_only_write(hit)
+    if not hits:
+        return Finding("storage-layout", "v1-only-write", Status.OK, "0 พบ — พร้อมสำหรับ #504")
+    names = ", ".join(sorted(h.name for h in hits))
+    return Finding(
+        "storage-layout",
+        "v1-only-write",
+        Status.WARN,
+        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names}) — "
+        "`dual_write.py` มี writer ที่หลุด",
+    )
+
+
+def _log_v1_only_write(hit) -> None:
+    """Best-effort `events.log` breadcrumb — `orchestrator_text` has zero Qt
+    imports (same rule `auto_migrate_boot._log_boot_event` follows), so this
+    stays safe to call from a plain headless `takkub doctor` with no
+    QApplication running."""
+    try:
+        from .orchestrator_text import _log_event
+
+        _log_event(
+            "v1_only_write",
+            name=hit.name,
+            source=str(hit.source),
+            target=str(hit.target),
+            lag_s=hit.lag_s,
+        )
+    except Exception:
+        pass
 
 
 def _auto_migrate_boot_findings() -> list[Finding]:
