@@ -281,10 +281,17 @@ PROVIDER_ISOLATION_GAPS: dict[str, str] = {
         "override, which would break gh/uv/npm in the same pane"
     ),
     "cursor": (
-        "cursor-agent CLI is not installed on this machine (checked PATH + every "
-        "known install location 2026-09-07; `~/.cursor` here is IDE state with no "
-        "bin/) — no binary to probe, so the CURSOR_HOME guess in cursor_helper "
-        "stays unverified"
+        # #103/M6 (review 2026-09-07): this used to state a specific dev
+        # machine's probe result ("not installed on this machine, checked
+        # 2026-09-07") as if it were a fact about the provider — wrong on
+        # any machine that actually has cursor-agent installed. Keep it as
+        # a fact about VERIFICATION STATUS instead; probe history/method
+        # lives in issue #103, not in a string every user sees.
+        "cursor-agent's home-isolation knob (CURSOR_HOME, guessed in "
+        "cursor_helper) has not been verified against a real cursor-agent "
+        "install — no confirmed test run yet on any machine (see #103 for "
+        "probe history). If cursor-agent is installed here, isolation may "
+        "still work correctly; it just hasn't been proven."
     ),
 }
 

@@ -285,6 +285,71 @@ class TestSendAsLeadSpoofGuard:
         assert resp["ok"] is False
         assert "unauthorized" in resp["msg"].lower()
 
+
+class TestAssignTeamSelfEscalationGuard:
+    """#510/#512 M3 (review 2026-09-07): `assign --role lead --team <preset>`
+    lets Lead lift its own Edit/Write deny-list via a command only Lead
+    itself can pass the from=="lead" role gate to invoke. Reject the
+    combination server-side (defense against a raw socket caller spoofing
+    `from`), independent of cli.py's own client-side rejection."""
+
+    def test_lead_with_team_rejected_even_with_valid_token(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "assign",
+                "from": "lead",
+                "role": "lead",
+                "task": "fix a typo",
+                "team": "solo-lead",
+                "auth": _GATE_TEST_TOKEN,
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "team" in resp["msg"].lower()
+        assert "lead" in resp["msg"].lower()
+
+    def test_lead_without_team_still_allowed(self, srv_sock) -> None:
+        """Sanity: the guard is scoped to `team`, not assign-as-lead itself."""
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "assign",
+                "from": "lead",
+                "role": "backend",
+                "task": "fix bug",
+                "auth": _GATE_TEST_TOKEN,
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_empty_team_string_not_blocked(self, srv_sock) -> None:
+        """cli.py always sends `team` (possibly ""/None) — only a genuinely
+        non-empty value should trip the guard."""
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "assign",
+                "from": "lead",
+                "role": "lead",
+                "task": "fix a typo",
+                "team": "",
+                "auth": _GATE_TEST_TOKEN,
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+
+class TestSendAsLeadSpoofGuardMembership:
     def test_only_send_is_currently_guarded(self) -> None:
         # Pin the membership so a future contributor doesn't quietly add
         # a new spoof-guarded command without updating this test bank.

@@ -916,7 +916,10 @@ class SettingsWindow(
         if active_name:
             # Critic visual-review round-2 #3 — a bare template name (e.g.
             # "Feature (UI+API)") read as an unlabeled, unexplained pill that
-            # looked like it had leaked in from the main window's plan chip.
+            # looked like it had leaked in from the main window's status bar
+            # (the plan indicator there was an editable chip at the time;
+            # #505 replaced it with a read-only badge — the visual-collision
+            # concern this comment is about is unchanged either way).
             # It's a real per-project summary (see the walkthrough #56 note
             # below), so it stays — just prefixed + given a tooltip so its
             # purpose is self-evident instead of relying on the reader

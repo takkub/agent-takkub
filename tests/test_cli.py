@@ -1956,6 +1956,26 @@ class TestAssignTeamFlag:
         cli.main(["assign", "--role", "lead", "do work"])
         assert fake_request[-1]["team"] is None
 
+    def test_team_flag_rejected_when_caller_is_lead_itself(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#510/#512 M3: a running Lead pane (TAKKUB_ROLE=lead) must not be
+        able to lift its own edit-permission guard via --team — only a bare
+        terminal (TAKKUB_ROLE unset) or the mobile/Settings surface may."""
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        rc = cli.main(["assign", "--role", "lead", "--team", "solo-lead", "fix a typo"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_team_flag_allowed_from_bare_terminal(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No TAKKUB_ROLE (manual terminal use, not a running pane) is still
+        a legitimate --team surface."""
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        cli.main(["assign", "--role", "lead", "--team", "solo-lead", "fix a typo"])
+        assert fake_request[-1]["team"] == "solo-lead"
+
     def test_team_flag_forwarded_on_shard_fanout(self, fake_request: list[dict[str, Any]]) -> None:
         # --team is only meaningful for --role lead, but a fan-out shard key
         # (e.g. "lead#1") still starts with the base role — assert the field
@@ -2014,3 +2034,23 @@ class TestTeamCommand:
         cli.main(["team", "clear-override"])
         assert fake_request[-1]["cmd"] == "team"
         assert fake_request[-1]["action"] == "clear-override"
+
+    def test_suggest_is_pure_local_no_request(
+        self, fake_request: list[dict[str, Any]], capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#510/#512 M2: `takkub team suggest` is the CLI surface Lead
+        actually has for routing_planner.suggest_team_size — pure/local,
+        same shape as `team status`, never round-trips through the socket."""
+        from agent_takkub import routing_planner
+
+        monkeypatch.setattr(
+            routing_planner,
+            "suggest_team_size",
+            lambda task, context=None: ("solo-lead", "งานเดี่ยว scope ชัด"),
+        )
+        rc = cli.main(["team", "suggest", "fix a typo"])
+        assert rc == 0
+        assert fake_request == []
+        out = capsys.readouterr().out
+        assert "solo-lead" in out
+        assert "งานเดี่ยว scope ชัด" in out

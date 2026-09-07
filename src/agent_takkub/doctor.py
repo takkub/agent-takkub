@@ -3342,15 +3342,32 @@ def _v1_only_write_finding() -> Finding:
     for hit in hits:
         _log_v1_only_write(hit)
     if not hits:
-        return Finding("storage-layout", "v1-only-write", Status.OK, "0 พบ — พร้อมสำหรับ #504")
-    names = ", ".join(sorted(h.name for h in hits))
-    return Finding(
-        "storage-layout",
-        "v1-only-write",
-        Status.WARN,
-        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names}) — "
-        "`dual_write.py` มี writer ที่หลุด",
-    )
+        # #502/#504 review (2026-09-07): this is a single on-demand snapshot,
+        # never a continuous monitor — a writer that skipped dual-write and
+        # then got mirrored correctly on its very next save erases its own
+        # drift before the next `doctor`/`migrate validate` run. "0 พบ" here
+        # is NOT proof of #504's one-week drift=0 exit gate on its own; that
+        # needs periodic sampling across the week, not one clean run.
+        return Finding(
+            "storage-layout",
+            "v1-only-write",
+            Status.OK,
+            "0 พบใน snapshot นี้ (on-demand, ไม่ใช่ monitor ต่อเนื่อง)",
+        )
+    missing = [h for h in hits if h.reason == "missing_mirror"]
+    stale = [h for h in hits if h.reason != "missing_mirror"]
+    parts = []
+    if missing:
+        parts.append(
+            f"{len(missing)} domain(s) มี V1 file แต่ไม่มี v2/ mirror เลย "
+            f"({', '.join(sorted(h.name for h in missing))}) — dual_write อาจไม่เคยรันสำหรับ domain นี้"
+        )
+    if stale:
+        parts.append(
+            f"{len(stale)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ "
+            f"({', '.join(sorted(h.name for h in stale))}) — `dual_write.py` มี writer ที่หลุด"
+        )
+    return Finding("storage-layout", "v1-only-write", Status.WARN, "; ".join(parts))
 
 
 def _log_v1_only_write(hit) -> None:

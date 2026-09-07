@@ -168,7 +168,6 @@ STATE_WARN_ALT = "#f59e0b"
 # tokenized (not gold) so the identities survive migration. The "off" state of
 # all of them is the neutral TEXT_MUTED.
 # ──────────────────────────────────────────────────────────────
-CHIP_PLAN_MAX = "#8b5cf6"  # violet — Max plan (1M context)
 CHIP_EXEC_PARALLEL = "#10b981"  # emerald — PARALLEL execution mode active
 CHIP_REMOTE_ON = "#14b8a6"  # teal — Remote server live
 
@@ -339,7 +338,6 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "STATE_EXITED",
     "STATE_WARN_ALT",
     # status-bar chip identities
-    "CHIP_PLAN_MAX",
     "CHIP_EXEC_PARALLEL",
     "CHIP_REMOTE_ON",
     "ROLE_COLOR_FALLBACK",
@@ -444,7 +442,6 @@ LIGHT_TOKENS: dict[str, object] = {
     "STATE_EXITED": "#c2410c",
     "STATE_WARN_ALT": "#b45309",
     # status-bar chip identities
-    "CHIP_PLAN_MAX": "#7c3aed",
     "CHIP_EXEC_PARALLEL": "#047857",
     "CHIP_REMOTE_ON": "#0f766e",
     "ROLE_COLOR_FALLBACK": "#64748b",

@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config
+from agent_takkub import config, team_preset
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator, PaneState
 
@@ -56,6 +56,17 @@ def _stub_verify_chain(monkeypatch: pytest.MonkeyPatch) -> None:
             on_settled()
 
     monkeypatch.setattr(orch_mod, "_delayed_enter_verified", _fake_verified)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_team_preset(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#510/#512 M8: _inject_auto_chain_handoff now reads team_preset.current()
+    — team_preset._BASE_DIR is bound at import time from config.SETTINGS_HOME
+    and is NOT covered by conftest's SETTINGS_HOME isolation (nested
+    `projects/<slug>/` path, outside the top-level-only write guard), so
+    every test in this file must redirect it itself or it reads/writes the
+    real ~/.takkub on the dev machine."""
+    monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path / "team_preset_store")
 
 
 @pytest.fixture
@@ -219,6 +230,99 @@ class TestInjectAutoChainHandoff:
         assert "SKIP the QA gate" in body
         assert "no automatic QA gate" in body
         assert "takkub assign --role qa ..." not in body
+
+    def test_pair_preset_handoff_fires_reviewer_not_qa(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#510/#512 M8: under `pair` (checker=reviewer), QA is excluded by
+        team_preset.can_spawn even though rolesEnabled still says qa is on —
+        the handoff must propose reviewer, not an assign() the gate would
+        reject, and must not call reviewer a PR-time-only step."""
+        team_preset.set_current("pair", "proj_a")
+
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._inject_auto_chain_handoff("proj_a")
+        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        assert "takkub assign --role reviewer" in body
+        assert "takkub assign --role qa" not in body
+        assert "reviewer = at PR time" not in body
+
+    def test_solo_lead_preset_handoff_tells_lead_to_self_verify(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """solo-lead has no checker role at all (verify_mode == 'self')."""
+        team_preset.set_current("solo-lead", "proj_a")
+
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._inject_auto_chain_handoff("proj_a")
+        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        assert "takkub assign --role qa" not in body
+        assert "takkub assign --role reviewer" not in body
+        assert "self" in body.lower()
+
+    def test_custom_preset_excludes_qa_from_roster_blocks_qa_gate(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A custom preset whose checker IS qa but whose roster otherwise
+        matches full — sanity that the qa branch still fires normally when
+        both policies allow it (custom isn't just pair/solo)."""
+        team_preset.set_current(
+            "custom",
+            "proj_a",
+            custom={
+                "roles": {"frontend": True, "backend": True, "mobile": False, "devops": True},
+                "checker": "qa",
+                "lead_may_implement": False,
+                "template": "feature",
+                "exec_mode": "parallel",
+            },
+        )
+
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._inject_auto_chain_handoff("proj_a")
+        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        assert "takkub assign --role qa" in body
+        assert "DISABLED" not in body
+
+    def test_devops_excluded_by_preset_handoff_skips_devops(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A custom preset with devops off in the roster must not tell Lead
+        to fire devops — assign() would reject it (#510/#512 M8)."""
+        team_preset.set_current(
+            "custom",
+            "proj_a",
+            custom={
+                "roles": {"frontend": True, "backend": True, "mobile": False, "devops": False},
+                "checker": "qa",
+                "lead_may_implement": False,
+                "template": "feature",
+                "exec_mode": "parallel",
+            },
+        )
+
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._inject_auto_chain_handoff("proj_a")
+        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        assert "fire devops FIRST" not in body
+        assert "devops is disabled" in body
+        assert "do NOT `takkub assign --role devops`" in body
 
 
 class TestDoneAutoChainTrigger:

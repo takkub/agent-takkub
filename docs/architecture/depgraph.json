@@ -397,6 +397,7 @@
         "agent_takkub.qa_gate",
         "agent_takkub.release",
         "agent_takkub.resource_lock",
+        "agent_takkub.routing_planner",
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
@@ -409,7 +410,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 40
+      "fan_out": 41
     },
     {
       "module": "agent_takkub.cli_server",
@@ -3297,9 +3298,10 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_window",
+        "agent_takkub.spawn_engine",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 2
     },
     {
@@ -4046,9 +4048,10 @@
       "module": "agent_takkub.routing_planner",
       "imports": [],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -4789,6 +4792,7 @@
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.permission_gates",
+        "agent_takkub.pipeline_config",
         "agent_takkub.pipeline_executor",
         "agent_takkub.provider_bootstrap",
         "agent_takkub.provider_config",
@@ -4803,6 +4807,7 @@
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_gate",
+        "agent_takkub.team_preset",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile",
         "agent_takkub.worktree_manager"
@@ -4813,7 +4818,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 39
+      "fan_out": 41
     },
     {
       "module": "agent_takkub.spawn_gate",
@@ -4919,9 +4924,10 @@
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
-        "agent_takkub.settings_window"
+        "agent_takkub.settings_window",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 2
     },
     {

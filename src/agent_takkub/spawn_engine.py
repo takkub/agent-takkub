@@ -1790,6 +1790,30 @@ class SpawnEngineMixin:
         if pane.session is not None and pane.session.is_alive:
             return True, f"{role_name} already running"
 
+        # #510/#512 H6: `assign`/`cli_server`/`pipeline_executor` check
+        # is_role_enabled + can_spawn before *calling* spawn(), but several
+        # routes call spawn() directly — session restore (restore_teammates),
+        # stuck-pane recovery (_auto_recover_stuck), and the deferred-spawn /
+        # queue-drain retries in this file. A role disabled (or dropped from
+        # the active team preset) after it was scheduled must not get a new
+        # pane through any of those routes, so the same two policies are
+        # re-checked here, at the actual point a NEW session gets launched
+        # (an already-alive pane above is reconnected, never blocked).
+        from .pipeline_config import is_role_enabled
+        from .team_preset import can_spawn as _team_can_spawn
+
+        if not is_role_enabled(role_name, project_ns):
+            base_role_disabled = role_name.split("#", 1)[0].strip().lower()
+            _log_event("spawn_blocked_role_disabled", role=role_name, project=project_ns)
+            return False, (
+                f"role {base_role_disabled} ถูกปิดใน Settings ของโปรเจคนี้ "
+                f"({project_ns}) — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+            )
+        _team_spawn_ok, _team_spawn_msg = _team_can_spawn(role_name, project_ns)
+        if not _team_spawn_ok:
+            _log_event("spawn_blocked_team_preset", role=role_name, project=project_ns)
+            return False, _team_spawn_msg
+
         # A task-bearing assign stages a one-shot payload before entering
         # spawn(). Accept it only for a provider with a confirmed file-backed
         # append-system-prompt flag. Marking it pending above the gate/FIFO

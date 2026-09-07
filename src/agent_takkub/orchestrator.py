@@ -1270,8 +1270,9 @@ class Orchestrator(
     # Emitted when user toggles a provider on/off via status bar. main_window
     # listens to refresh chip color/label without polling.
     providerStateChanged = pyqtSignal(str, bool)  # (provider, disabled)
-    # Emitted when user flips the account plan (Pro/Max) via the status bar.
-    # main_window listens to repaint the plan chip without polling.
+    # Emitted when the detected account plan (Pro/Max) changes. #505 replaced
+    # the editable status-bar chip with a read-only badge (status_header.py's
+    # `_refresh_plan_badge`), which listens here to repaint without polling.
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
     execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
     # Emitted when a project's team preset (#512) changes — status-bar chip
@@ -2364,6 +2365,26 @@ class Orchestrator(
         if team is not None:
             if role_name != LEAD.name:
                 return False, "--team override ใช้ได้เฉพาะ --role lead"
+            # M7: a live Lead pane already has its edit-permission guard
+            # (render_lead_settings) and Lead system-prompt policy text baked
+            # in from its last spawn — team_preset.set_override only takes
+            # effect at Lead's NEXT spawn (render_lead_settings' own
+            # docstring says so), so silently accepting the override here
+            # would tell the operator it governs "งานนี้" while the already-
+            # running Lead keeps its old edit permissions. Report the
+            # restart requirement instead of pretending the override is live.
+            _lead_pane = self._project_panes(role_check_project_ns).get(LEAD.name)
+            if (
+                _lead_pane is not None
+                and _lead_pane.session is not None
+                and _lead_pane.session.is_alive
+            ):
+                return False, (
+                    "Lead ของโปรเจคนี้กำลังรันอยู่ — --team override จะมีผลตอน Lead "
+                    "spawn รอบหน้าเท่านั้น (permission guard ถูกสร้างตอน spawn) "
+                    "restart Lead ก่อน (`takkub close --role lead` แล้ว assign ใหม่) "
+                    "ถึงจะ apply ได้จริงสำหรับงานนี้"
+                )
             from . import team_preset
 
             try:
@@ -2379,6 +2400,34 @@ class Orchestrator(
                 f"lead แก้โค้ดเองได้: {'ใช่' if cfg['lead_may_implement'] else 'ไม่'}\n\n"
             )
             task = notice + task
+        elif role_name == LEAD.name and task:
+            # #510/#512 M2 (review 2026-09-07): `routing_planner.
+            # suggest_team_size` had no production caller — role-and-
+            # workflow.md tells Lead to use it, but Lead drives everything
+            # through the CLI and can't call Python directly, so a project
+            # left on preset=="auto" (the default for every NEW project)
+            # never got an actual suggestion. Wire it into a fresh Lead
+            # assign: advisory only (matches team_preset.can_spawn's own
+            # "auto never restricts" stance) — prepend the one-liner so Lead
+            # sees it and can `--team <preset>` it into an override itself
+            # if it agrees; nothing here is enforced.
+            from . import team_preset
+
+            if team_preset.current_preset_id(
+                role_check_project_ns
+            ) == "auto" and not team_preset.active_override(role_check_project_ns):
+                try:
+                    from . import routing_planner
+
+                    _sugg_preset, _sugg_reason = routing_planner.suggest_team_size(task)
+                    task = (
+                        f"[system] auto team-preset suggestion: "
+                        f"{team_preset.label(_sugg_preset)} ({_sugg_preset}) — {_sugg_reason}. "
+                        "Advisory only — nothing is enforced. Apply it for this task with "
+                        f"`takkub assign --role lead --team {_sugg_preset} ...` if you agree.\n\n"
+                    ) + task
+                except Exception:
+                    pass
         if mode == "subagent":
             if model:
                 return False, "model override is not supported in subagent mode"
