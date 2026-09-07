@@ -1174,6 +1174,28 @@ def check_boot_context(role: str | None, project: str) -> tuple[list[Finding], s
                 f"categor(y/ies) — see detail report below for the breakdown",
             )
         )
+        # #516b: learned_notes is per-machine dynamic state (excluded from
+        # the CI ceiling ratchet — see boot_context.DYNAMIC_STATE_CATEGORIES)
+        # but still worth flagging here when it drifts past role_memory's own
+        # live-content cap — normally impossible right after
+        # `ensure_role_memory` just curated it (this call's own side effect),
+        # so a hit here means curation itself failed silently (OSError) and
+        # the pane is still injecting the uncurated, oversized file.
+        from .role_memory import _MEM_MAX_LIVE_CHARS
+
+        for cat in rep.categories:
+            if cat.category == "learned_notes" and cat.chars > _MEM_MAX_LIVE_CHARS:
+                findings.append(
+                    Finding(
+                        "boot-context",
+                        f"{r}.learned_notes",
+                        Status.WARN,
+                        f"{cat.chars} chars > {_MEM_MAX_LIVE_CHARS} live-content cap at "
+                        f"{cat.detail} — role_memory curation should have trimmed this on "
+                        "this same read; investigate why it did not (e.g. a filesystem "
+                        "error silently swallowed by ensure_role_memory)",
+                    )
+                )
 
     try:
         native_mem = boot_context.measure_native_project_memory(project)
@@ -1184,12 +1206,13 @@ def check_boot_context(role: str | None, project: str) -> tuple[list[Finding], s
             Finding(
                 "boot-context",
                 "native_project_memory",
-                Status.WARN,
+                Status.INFO,
                 f"{native_mem.chars} chars (~{native_mem.est_tokens} tok lower bound) at "
-                f"{native_mem.detail} — auto-loaded into EVERY role's pane for this "
-                "project (Claude's native /memory feature keys off "
-                "CLAUDE_CODE_PROJECT_DIR_NAME, which cockpit sets to the same value "
-                "for every role); not role-specific",
+                f"{native_mem.detail} — Lead's own native /memory (#516 F1 fix: "
+                "CLAUDE_CODE_PROJECT_DIR_NAME is now suffixed per non-Lead role, so "
+                "this file no longer pools into every teammate's pane; each role's own "
+                "row above already includes its own native_project_memory category, "
+                "which is None/absent until that role is respawned under the new name)",
             )
         )
 

@@ -207,6 +207,59 @@ class TestClaudeProjectDirectoryName:
         inject_claude_project_dir_name_env(env, project_ns, "claude")
         assert env["CLAUDE_CODE_PROJECT_DIR_NAME"] == "takkub-project-project-name_with.dot"
 
+
+class TestClaudeProjectDirNameRoleSuffix:
+    """#516 F1: a non-Lead role gets its own transcript dir (and therefore
+    its own native `/memory` file) instead of piggy-backing on Lead's."""
+
+    def test_lead_keeps_bare_unsuffixed_name(self) -> None:
+        from agent_takkub.pane_env import claude_project_dir_name
+
+        assert claude_project_dir_name("proj") == "takkub-project-proj"
+        assert claude_project_dir_name("proj", "lead") == "takkub-project-proj"
+        assert claude_project_dir_name("proj", None) == "takkub-project-proj"
+
+    def test_non_lead_role_gets_suffixed_name(self) -> None:
+        from agent_takkub.pane_env import claude_project_dir_name
+
+        assert claude_project_dir_name("proj", "backend") == "takkub-project-proj-backend"
+        assert claude_project_dir_name("proj", "qa") == "takkub-project-proj-qa"
+
+    def test_inject_env_forwards_base_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.pane_env import inject_claude_project_dir_name_env
+
+        completed = MagicMock(returncode=0, stdout="2.1.234 (Claude Code)")
+        monkeypatch.setattr(
+            "agent_takkub.pane_env.subprocess.run", lambda *_args, **_kwargs: completed
+        )
+        env: dict[str, str] = {}
+        inject_claude_project_dir_name_env(env, "proj", "claude", "backend")
+        assert env["CLAUDE_CODE_PROJECT_DIR_NAME"] == "takkub-project-proj-backend"
+
+    def test_resume_uuid_matches_cwd_uses_role_suffixed_dir(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resume validated for `backend` must look under `backend`'s own
+        dir, not the Lead/legacy one — passing the wrong (or no) base_role
+        must not silently fall back to a dir the session never wrote to."""
+        from agent_takkub.pane_env import claude_project_dir_name
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = tmp_path / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+
+        backend_dir = config_dir / "projects" / claude_project_dir_name("default", "backend")
+        backend_dir.mkdir(parents=True)
+        (backend_dir / "sess-1.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd), "backend") is True
+        # Without the matching base_role, the role-suffixed dir isn't checked
+        # and there's no legacy/lead session either — correctly False.
+        assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd)) is False
+        assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd), "qa") is False
+
     def test_new_directory_wins_and_legacy_directory_stays_resolvable(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -397,7 +450,7 @@ class TestSpawnResumeUuid:
         cwd = tmp_path / "proj"
         cwd.mkdir()
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c, r=None: True
         )
         argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="picked-uuid")
         assert result[0] is True
@@ -414,7 +467,7 @@ class TestSpawnResumeUuid:
         cwd = tmp_path / "proj"
         cwd.mkdir()
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: False
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c, r=None: False
         )
         argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="forged-uuid")
         assert result[0] is False
@@ -432,7 +485,7 @@ class TestSpawnResumeUuid:
         cwd = tmp_path / "proj"
         cwd.mkdir()
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c, r=None: True
         )
         assert _exit_key(_PROJECT, "backend") not in orch._recent_exits
         argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="old-session")

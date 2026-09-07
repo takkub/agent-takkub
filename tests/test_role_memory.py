@@ -255,6 +255,37 @@ class TestCuration:
         # deliberately lowered from 16000 to 6000 bytes/spawn.
         assert rm._MEM_MAX_BYTES == 6_000
 
+    def test_live_content_cap_is_1500_chars(self) -> None:
+        # #516b: a separate, tighter cap on actual bullet content (not the
+        # fixed header/seed skeleton) than the whole-document byte cap above.
+        assert rm._MEM_MAX_LIVE_CHARS == 1_500
+
+    def test_oldest_bullets_rotate_to_archive_once_live_cap_exceeded(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        path = ensure_role_memory("p", "backend")
+        base = path.read_text(encoding="utf-8")
+        # Plenty of small, distinct bullets that individually clear every
+        # OTHER cap (byte/entry/per-entry) but together blow the new
+        # content-char budget — the scenario #516b actually hit in the wild
+        # (many small learned-notes entries accumulated over a busy day).
+        bullets = "\n".join(f"- learned fact number {i} about this project" for i in range(80))
+        path.write_text(base + "\n" + bullets + "\n", encoding="utf-8")
+        assert rm._bullet_content_chars(rm._split_doc(path.read_text(encoding="utf-8"))[1]) > (
+            rm._MEM_MAX_LIVE_CHARS
+        )
+
+        ensure_role_memory("p", "backend")
+
+        curated = path.read_text(encoding="utf-8")
+        _, sections = rm._split_doc(curated)
+        assert rm._bullet_content_chars(sections) <= rm._MEM_MAX_LIVE_CHARS
+        # The oldest entries were rotated out to the L2 archive, not deleted.
+        archive_text = rm.role_memory_archive_path("p", "backend").read_text(encoding="utf-8")
+        assert "learned fact number 0 about this project" in archive_text
+        # The newest entries survive live (oldest-first trim).
+        assert "learned fact number 79 about this project" in curated
+
     def test_header_states_entry_length_rule(self, isolated_role_memory: pathlib.Path) -> None:
         text = ensure_role_memory("p", "qa").read_text(encoding="utf-8")
         assert "2-3 บรรทัด" in text

@@ -156,6 +156,18 @@ def _seed(project: str, base_role: str) -> str:
 _MEM_MAX_BYTES = 6_000
 _MEM_MAX_ENTRIES = 120
 
+# #516b (addendum, Lead 2026-09-07): the whole-document byte/entry budgets
+# above still allow a single role's bullet content to drift up over a busy
+# day (measured: frontend's learned_notes reached 4,933 chars / ~1,233 est.
+# tok before any of the other caps tripped) — real per-spawn token growth
+# that isn't a repo regression (see docs/audit/2026-09-07-boot-context.md,
+# boot_context.DYNAMIC_STATE_CATEGORIES). Cap the LIVE bullet content
+# (marker + continuation lines, not the fixed header/seed skeleton) tighter
+# than the whole-document byte cap, using the exact same oldest-first
+# trim-and-archive loop in `_curate_text` below — nothing is lost, it just
+# rotates into the L2 archive sooner.
+_MEM_MAX_LIVE_CHARS = 1_500
+
 # Per-entry cap (token-reduction task, 2026-08): agents were observed pasting a
 # whole done-report paragraph as ONE bullet (~1,500 tok seen in the wild) — the
 # byte/entry budget above can't stop that since a single oversized entry can
@@ -356,6 +368,19 @@ def _trim_oldest_bullet(sections: list[list]) -> str | None:
     return None
 
 
+def _bullet_content_chars(sections: list[list]) -> int:
+    """Total characters in real bullet blocks across every section — the
+    part of the file that actually grows as an agent learns things, as
+    opposed to the fixed header/seed skeleton `_MEM_MAX_LIVE_CHARS` is not
+    meant to count against."""
+    total = 0
+    for sec in sections:
+        for is_bullet, lines in _block_split(sec[1]):
+            if is_bullet:
+                total += sum(len(ln) for ln in lines)
+    return total
+
+
 def _curate_text(text: str) -> tuple[str, bool, list[str]]:
     """Return ``(curated_text, changed, archived_entries)``. Best-effort — any
     error → ``(text, False, [])``.
@@ -379,6 +404,8 @@ def _curate_text(text: str) -> tuple[str, bool, list[str]]:
         def _over_budget() -> bool:
             n_bul = sum(1 for sec in sections for ln in sec[1] if _BULLET_RE.match(ln))
             if n_bul > _MEM_MAX_ENTRIES:
+                return True
+            if _bullet_content_chars(sections) > _MEM_MAX_LIVE_CHARS:
                 return True
             return len(_render(header, sections).encode("utf-8")) > _MEM_MAX_BYTES
 

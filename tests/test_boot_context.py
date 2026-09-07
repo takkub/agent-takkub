@@ -66,6 +66,32 @@ def test_doctor_check_boot_context_scoped_to_one_role():
     assert "backend" in report_text
 
 
+def test_doctor_check_boot_context_warns_when_learned_notes_exceeds_live_cap(
+    monkeypatch,
+) -> None:
+    """#516b: role_memory's own curation should make this unreachable in
+    practice (it self-trims on every read) — this test fabricates the
+    oversized-report case directly so the doctor-side WARN wiring itself
+    is covered even though the normal pipeline is self-correcting."""
+    from agent_takkub import boot_context, role_memory
+    from agent_takkub.doctor import Status, check_boot_context
+
+    oversized = boot_context.CategoryMeasurement(
+        "learned_notes", role_memory._MEM_MAX_LIVE_CHARS + 500, 999, "fake/path.md"
+    )
+
+    def _fake_build_report(base_role, project_ns):
+        rep = boot_context.RoleBootReport(role=base_role, project=project_ns)
+        rep.categories.append(oversized)
+        return rep
+
+    monkeypatch.setattr(boot_context, "build_report", _fake_build_report)
+    findings, _ = check_boot_context(role="backend", project="agent-takkub")
+    warn = [f for f in findings if f.name == "backend.learned_notes"]
+    assert len(warn) == 1
+    assert warn[0].status == Status.WARN
+
+
 def test_doctor_check_boot_context_not_in_run_all_checks_default_set():
     import inspect
 
