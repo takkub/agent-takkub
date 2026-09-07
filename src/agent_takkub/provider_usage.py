@@ -1267,6 +1267,14 @@ _store_lock = threading.Lock()
 _store: ProviderUsageStore | None = None
 
 
+def peek_store() -> ProviderUsageStore | None:
+    """The singleton IF it has already been started, else None — for readers
+    (e.g. the Settings Accounts page's cached codex planType) that must never
+    be the thing that starts the background poll thread."""
+    with _store_lock:
+        return _store
+
+
 def get_store() -> ProviderUsageStore:
     """Process-wide singleton. First call starts the background poll thread
     — it never blocks on a fetch itself, so callers (like the remote HTTP

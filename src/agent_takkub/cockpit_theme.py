@@ -113,6 +113,7 @@ ERROR_CHIP_TEXT = "#e58080"
 # Role.color for the matching roles; equality is guarded by
 # tests/test_role_registry_sync.py so the two never drift.
 # ──────────────────────────────────────────────────────────────
+PROVIDER_CLAUDE = "#d97757"  # Anthropic clay — same brand hue as METER_CLAY
 PROVIDER_CODEX = "#10a37f"  # OpenAI teal
 PROVIDER_GEMINI = "#4285f4"  # Google blue
 PROVIDER_OPENCODE = "#f97316"  # sst orange
