@@ -1226,6 +1226,7 @@ class ProviderUsageStore:
             with self._lock:
                 self._cache[provider] = data
             self._emit(provider, data)
+            _record_quota_ledger(provider, "default", data)
             return
         key = (provider, str(config_dir))
         with self._lock:
@@ -1261,6 +1262,47 @@ class ProviderUsageStore:
                 if cached is not None and cached.status == STATUS_UNSUPPORTED:
                     continue
                 self._fetch_one(provider)
+
+
+def _record_quota_ledger(provider: str, account: str, data: ProviderUsage) -> None:
+    """Best-effort append of `data`'s windows into the usage ledger (#507).
+
+    Only called from the provider-level (`config_dir=None`) poll branch —
+    the standing background loop every provider already runs every
+    `interval_s` for the status chip/Settings summary — never adds a
+    request of its own, per #507's "ไม่เพิ่ม request" rule. Any failure
+    here (ledger unwritable, unexpected shape) is swallowed, same
+    catch-all policy as every adapter above: a ledger hiccup must never
+    take down the usage poll.
+    """
+    if data.status not in (STATUS_ACTIVE, STATUS_STALE):
+        return
+    try:
+        from . import usage_ledger
+
+        if not usage_ledger.QUOTA_COUNTABLE.get(provider, False):
+            return
+        ts = (data.fetched_at or datetime.now(tz=UTC)).isoformat()
+        windows = data.windows
+        if not windows and data.utilization is not None:
+            windows = [
+                {
+                    "name": "primary",
+                    "utilization": data.utilization,
+                    "resets_at": data.resets_at.isoformat() if data.resets_at else None,
+                }
+            ]
+        for w in windows or ():
+            usage_ledger.record_quota_sample(
+                provider,
+                account,
+                ts,
+                w.get("name") or "primary",
+                w.get("utilization"),
+                w.get("resets_at"),
+            )
+    except Exception:
+        _log.exception("usage ledger quota recording failed for %s", provider)
 
 
 _store_lock = threading.Lock()
