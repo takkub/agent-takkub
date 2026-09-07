@@ -123,7 +123,7 @@ class TutorialOverlay(QWidget):
             f" color:{cockpit_theme.GOLD_TEXT_ON}; border:none;"
             f" border-radius:{cockpit_theme.RADIUS_SM}px; padding:4px 14px; font-weight:700; }}"
             "QPushButton#goldButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            f" stop:0 #f2cd75, stop:1 {cockpit_theme.GOLD_GRAD_TOP}); }}"
+            f" stop:0 {cockpit_theme.GOLD_GRAD_HOVER_TOP}, stop:1 {cockpit_theme.GOLD_GRAD_TOP}); }}"
         )
         self._skip_btn.clicked.connect(lambda: self.finish(mark=True))
         self._next_btn.clicked.connect(self._advance)

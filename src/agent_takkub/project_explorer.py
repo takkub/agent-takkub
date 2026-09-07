@@ -93,7 +93,11 @@ _GIT_STATUS_COLORS = {
 # per-row badges (_GIT_STATUS_COLORS above) never see it, porcelain v1.
 _GIT_CHANGE_COLORS = {**_GIT_STATUS_COLORS, "R": cockpit_theme.STATE_INFO_BRIGHT}
 
-_TREE_QSS = f"""
+
+def _tree_qss() -> str:
+    # (#506) built per call, not at import — an import-time f-string froze the
+    # dark token values before app.py's apply_variant() could ever run.
+    return f"""
 QTreeWidget {{
     background: {cockpit_theme.GROUND_SIDEBAR};
     border: none;
@@ -182,7 +186,7 @@ class ProjectExplorer(QWidget):
 
         self.tree = QTreeWidget(self)
         self.tree.setHeaderHidden(True)
-        self.tree.setStyleSheet(_TREE_QSS)
+        self.tree.setStyleSheet(_tree_qss())
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.itemExpanded.connect(self._on_item_expanded)

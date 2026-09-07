@@ -35,12 +35,16 @@ from agent_takkub.core.models.spawn_plan import SpawnPlan
 # Only providers with a real, documented isolation knob today
 # (config.py's `_PROVIDER_HOME_SUBDIRS` / `pane_env.inject_user_profile_env`)
 # get an account-driven env override. A provider with no knob
-# (config.PROVIDER_ISOLATION_GAPS: gemini/kimi/cursor) cannot be
+# (config.PROVIDER_ISOLATION_GAPS: gemini/cursor) cannot be
 # differentiated per-account yet — silently doing nothing is correct here,
-# not a bug to paper over.
+# not a bug to paper over. (opencode is absent for a different reason: its
+# knob is the XDG *pair*, which this single-var mapping cannot express.)
 _ACCOUNT_ENV_VAR: dict[str, str] = {
     "claude": "CLAUDE_CONFIG_DIR",
     "codex": "CODEX_HOME",
+    # kimi-cli's whole share dir (config+credentials+sessions) moves with
+    # this one var — proven 2026-09-07, see config._PROVIDER_HOME_SUBDIRS.
+    "kimi": "KIMI_SHARE_DIR",
 }
 
 

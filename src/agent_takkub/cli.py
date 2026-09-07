@@ -2947,6 +2947,49 @@ def cmd_qa_gate(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": "qa-gate: failed — see table above", "exit_code": report.exit_code}
 
 
+def _v1_only_write_report():
+    """#502 — appended to `takkub migrate validate`'s own report list (never
+    to `apply`/`inspect`/etc, and never fed back into `MigrationEngine`
+    itself, which stays untouched so the boot-time auto-migrate gate's
+    `engine.validate()` call keeps seeing exactly the ladder's own step
+    reports). Always `ok=True`: a hit here is telemetry for #504's exit
+    criteria, not a validation failure — same WARN-never-FAIL posture
+    `doctor --storage-layout` uses for the same signal."""
+    from . import config
+    from .core.migration.report import StepReport
+    from .core.storage.v1_only_write import scan_v1_only_writes
+
+    # Explicit `config.DATA_HOME` — same basis `MigrationEngine()` itself
+    # resolves to when `cmd_migrate` builds it with no override, not the
+    # bare no-arg default (`scan_v1_only_writes`/`dual_write._effective_
+    # data_home` resolve that late, per-call, same reason `core.routing.
+    # router` needs the same care — see that module's own docstring).
+    hits = scan_v1_only_writes(data_home=config.DATA_HOME)
+    for hit in hits:
+        try:
+            from .orchestrator_text import _log_event
+
+            _log_event(
+                "v1_only_write",
+                name=hit.name,
+                source=str(hit.source),
+                target=str(hit.target),
+                lag_s=hit.lag_s,
+            )
+        except Exception:
+            pass
+    if not hits:
+        return StepReport("v1-only-write", "validate", True, "0 พบ — พร้อมสำหรับ #504")
+    names = ", ".join(sorted(h.name for h in hits))
+    return StepReport(
+        "v1-only-write",
+        "validate",
+        True,
+        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names})",
+        detail={"hits": [h.name for h in hits]},
+    )
+
+
 def cmd_migrate(args: argparse.Namespace) -> dict:
     """`takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` — Core
     V2 storage migration (#309 Phase 4, docs/v2/V2_IMPLEMENTATION_PLAN.md
@@ -2964,6 +3007,8 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
         "rollback": engine.rollback,
     }
     reports = dispatch[args.migrate_cmd]()
+    if args.migrate_cmd == "validate":
+        reports = [*reports, _v1_only_write_report()]
 
     if args.json:
         import json as _json

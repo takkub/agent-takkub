@@ -14,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import codex_helper, config, opencode_helper, pane_env, provider_bootstrap
+from agent_takkub import (
+    codex_helper,
+    config,
+    kimi_helper,
+    opencode_helper,
+    pane_env,
+    provider_bootstrap,
+)
 
 
 @pytest.fixture
@@ -38,21 +45,43 @@ class TestProviderHomeEnv:
             "XDG_CONFIG_HOME": str(installed_home / "opencode-home" / "config"),
         }
 
+    def test_kimi_moves_into_data_home(self, installed_home: Path):
+        # KIMI_SHARE_DIR moves kimi-cli's whole `~/.kimi` (config, credentials,
+        # sessions — kimi_cli 1.50.0 source + live ConPTY probe, 2026-09-07).
+        # Uses the #504 `providers/<name>/default` layout, unlike the two
+        # pre-#504 entries above which keep their paths until the boot-time
+        # migration moves them.
+        kimi = config.provider_home_env("kimi")
+        assert kimi == {"KIMI_SHARE_DIR": str(installed_home / "providers" / "kimi" / "default")}
+
     def test_dev_checkout_keeps_the_os_wide_homes(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
         assert config.provider_home_env("codex") == {}
         assert config.provider_home_env("opencode") == {}
+        assert config.provider_home_env("kimi") == {}
 
     def test_provider_without_a_knob_yields_nothing(self, installed_home: Path):
-        # gemini/kimi/cursor have no directory env var — the gap is declared,
+        # gemini/cursor have no usable directory env var — the gap is declared,
         # not silently papered over with an env var they would ignore.
         for provider in config.PROVIDER_ISOLATION_GAPS:
             assert config.provider_home_env(provider) == {}
+
+    def test_gap_set_matches_the_probed_reality(self):
+        # Re-probed 2026-09-07: kimi HAS a knob (KIMI_SHARE_DIR) and must not
+        # drift back into the gap list; agy 1.1.27 ignored every candidate var
+        # and cursor-agent isn't installed to probe.
+        assert set(config.PROVIDER_ISOLATION_GAPS) == {"gemini", "cursor"}
+        assert config.isolated_providers() == ("codex", "kimi", "opencode")
 
     def test_env_injection_overrides_an_inherited_value(self, installed_home: Path):
         env = {"CODEX_HOME": "/somewhere/else"}
         pane_env.inject_provider_home_env(env, "codex")
         assert env["CODEX_HOME"] == str(installed_home / "codex-home")
+
+    def test_env_injection_overrides_an_inherited_kimi_value(self, installed_home: Path):
+        env = {"KIMI_SHARE_DIR": "/somewhere/else"}
+        pane_env.inject_provider_home_env(env, "kimi")
+        assert env["KIMI_SHARE_DIR"] == str(installed_home / "providers" / "kimi" / "default")
 
     def test_env_injection_is_a_noop_for_claude(self, installed_home: Path):
         env: dict[str, str] = {}
@@ -77,6 +106,23 @@ class TestReadSideAgreesWithSpawnSide:
         monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom"))
         assert codex_helper.codex_sessions_root() == tmp_path / "custom" / "sessions"
+
+    def test_kimi_share_dir_follows_the_isolated_home(
+        self, installed_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Same contract as codex above: an inherited KIMI_SHARE_DIR must NOT
+        # win over the isolated home the pane actually writes to.
+        monkeypatch.setenv("KIMI_SHARE_DIR", str(installed_home / "not-this-one"))
+        isolated = installed_home / "providers" / "kimi" / "default"
+        assert kimi_helper.kimi_share_dir() == isolated
+        assert kimi_helper.kimi_metadata_file() == isolated / "kimi.json"
+
+    def test_kimi_share_dir_honours_env_on_a_dev_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
+        monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "custom"))
+        assert kimi_helper.kimi_share_dir() == tmp_path / "custom"
 
     def test_opencode_db_prefers_the_isolated_data_home(
         self, installed_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -145,3 +191,61 @@ class TestSeeding:
         monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
         assert provider_bootstrap.ensure_provider_home("codex") is False
         assert provider_bootstrap.ensure_provider_home("gemini") is False
+        assert provider_bootstrap.ensure_provider_home("kimi") is False
+
+    def test_kimi_seed_copies_auth_and_config_but_not_bulk_state(
+        self, installed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        legacy = tmp_path / "dot-kimi"
+        legacy.mkdir()
+        (legacy / "credentials").write_text("{}", encoding="utf-8")
+        (legacy / "device_id").write_text("dev-1", encoding="utf-8")
+        (legacy / "config.toml").write_text("x = 1", encoding="utf-8")
+        (legacy / "kimi.json").write_text('{"work_dirs": []}', encoding="utf-8")
+        # bulk state: must NOT be copied
+        (legacy / "sessions" / "abc" / "sid").mkdir(parents=True)
+        (legacy / "sessions" / "abc" / "sid" / "wire.jsonl").write_text("noise", encoding="utf-8")
+        (legacy / "logs").mkdir()
+        (legacy / "logs" / "kimi.log").write_text("noise", encoding="utf-8")
+        monkeypatch.setattr(provider_bootstrap, "_legacy_kimi_share", lambda: legacy)
+
+        assert provider_bootstrap.ensure_provider_home("kimi") is True
+
+        dest = installed_home / "providers" / "kimi" / "default"
+        for name in ("credentials", "device_id", "config.toml", "kimi.json"):
+            assert (dest / name).is_file()
+        assert not (dest / "sessions").exists()
+        assert not (dest / "logs").exists()
+
+    def test_kimi_seed_runs_once_and_leaves_the_source_untouched(
+        self, installed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        legacy = tmp_path / "dot-kimi"
+        legacy.mkdir()
+        (legacy / "credentials").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(provider_bootstrap, "_legacy_kimi_share", lambda: legacy)
+
+        assert provider_bootstrap.ensure_provider_home("kimi") is True
+        assert provider_bootstrap.ensure_provider_home("kimi") is False
+        assert (legacy / "credentials").is_file()  # copy, never move
+
+
+class TestDoctorSurfacesTheState:
+    def test_kimi_reports_ok_and_the_remaining_gaps_stay_visible(self, installed_home: Path):
+        from agent_takkub import doctor
+
+        findings = {f.name: f for f in doctor.check_provider_isolation()}
+        assert findings["kimi"].status is doctor.Status.OK
+        assert "KIMI_SHARE_DIR" in findings["kimi"].detail
+        assert findings["codex"].status is doctor.Status.OK
+        assert findings["opencode"].status is doctor.Status.OK
+        for gap in ("gemini", "cursor"):
+            assert findings[gap].status is doctor.Status.INFO
+            assert "not isolated" in findings[gap].detail
+
+    def test_capability_matrix_reflects_the_probe(self):
+        from agent_takkub import provider_spec
+
+        assert provider_spec.capability_state("kimi", "provider_isolation") == "supported"
+        assert provider_spec.capability_state("gemini", "provider_isolation") == "unsupported"
+        assert provider_spec.capability_state("cursor", "provider_isolation") == "unsupported"

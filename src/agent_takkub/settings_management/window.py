@@ -41,6 +41,7 @@ class SettingsManagementWindow(QWidget):
         self.resize(1320, 848)
 
         fonts = theme.ensure_fonts_loaded()
+        self._fonts = fonts
         self.setStyleSheet(theme.build_stylesheet(fonts["sans"], fonts["mono"]))
         # QSS `::placeholder` only styles QLineEdit — QPlainTextEdit (used by
         # SkillsPage/RolesPage/McpPage) reads QPalette.PlaceholderText
@@ -130,6 +131,15 @@ class SettingsManagementWindow(QWidget):
             self._placeholder_index[name] = idx
 
         self.sidebar.setCurrentRow(0)
+
+    def retheme(self) -> None:
+        """#506: re-apply the window stylesheet with the currently-bound
+        theme tokens (called via ``cockpit_theme.retheme_open_windows``)."""
+        fonts = self._fonts
+        self.setStyleSheet(theme.build_stylesheet(fonts["sans"], fonts["mono"]))
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(theme.TEXT_MUTED))
+        self.setPalette(palette)
 
     def _go_to_roles(self) -> None:
         self.sidebar.setCurrentRow(_SIDEBAR_ENTITIES.index("Roles"))

@@ -541,7 +541,7 @@ def inject_claude_project_dir_name_env(
 
 def inject_provider_home_env(env: dict[str, str], provider: str) -> None:
     """Point a non-claude provider's state at DATA_HOME (user directive
-    2026-08-19) — the codex/opencode counterpart of
+    2026-08-19) — the codex/opencode/kimi counterpart of
     ``inject_user_profile_env``'s ``CLAUDE_CONFIG_DIR``.
 
     Scoped to the pane being spawned, never to the cockpit process: the

@@ -1,6 +1,6 @@
 """First-use seeding of a non-claude provider's isolated home (2026-08-19).
 
-``config.provider_home_env`` moves an installed cockpit's codex/opencode
+``config.provider_home_env`` moves an installed cockpit's codex/opencode/kimi
 state into DATA_HOME. Without this module that move would read to the user
 as data loss: the pane comes up logged out, with no config and an empty
 session picker, because everything it had is still sitting in ``~/.codex`` /
@@ -54,6 +54,12 @@ def _legacy_codex_home() -> Path:
     """Codex's OS-wide home — the seed source, never the cockpit's own."""
     configured = os.environ.get("CODEX_HOME", "").strip()
     return Path(configured) if configured else Path.home() / ".codex"
+
+
+def _legacy_kimi_share() -> Path:
+    """kimi-cli's OS-wide share dir — the seed source, never the cockpit's own."""
+    configured = os.environ.get("KIMI_SHARE_DIR", "").strip()
+    return Path(configured) if configured else Path.home() / ".kimi"
 
 
 def _legacy_opencode_data() -> Path | None:
@@ -166,6 +172,19 @@ _CODEX_CORE_ITEMS: tuple[str, ...] = (
 )
 _OPENCODE_DATA_ITEMS: tuple[str, ...] = ("auth.json", "opencode.db")
 _OPENCODE_CONFIG_ITEMS: tuple[str, ...] = ("opencode.json", "opencode.jsonc", "config.json")
+# kimi-cli share-dir items (kimi_cli 1.50.0 source, 2026-09-07): credentials =
+# OAuth token store, device_id pairs with it, config.toml/mcp.json = config,
+# kimi.json = work-dir registry (tiny; keeps the session resolver working for
+# pre-isolation cwds). sessions/, logs/, telemetry/, plugins/ are bulk state —
+# left behind, same policy as codex's log/ tree. kimi is a teammate-only role,
+# so unlike codex there are no Lead conversations worth cloning.
+_KIMI_CORE_ITEMS: tuple[str, ...] = (
+    "credentials",
+    "device_id",
+    "config.toml",
+    "mcp.json",
+    "kimi.json",
+)
 
 
 def _seed_codex(dest: Path) -> bool:
@@ -181,6 +200,21 @@ def _seed_codex(dest: Path) -> bool:
     for name in _CODEX_CORE_ITEMS:
         _copy_item(src / name, partial / name)
     _clone_codex_sessions(src, partial)
+    return _promote(partial, dest)
+
+
+def _seed_kimi(dest: Path) -> bool:
+    src = _legacy_kimi_share()
+    if not src.is_dir() or src.resolve() == dest.resolve():
+        return False
+    partial = dest.with_name(dest.name + ".partial")
+    shutil.rmtree(partial, ignore_errors=True)
+    try:
+        partial.mkdir(parents=True)
+    except OSError:
+        return False
+    for name in _KIMI_CORE_ITEMS:
+        _copy_item(src / name, partial / name)
     return _promote(partial, dest)
 
 
@@ -251,6 +285,11 @@ def ensure_provider_home(provider: str) -> bool:
             if dest_data.exists():
                 return False
             return _seed_opencode(dest_data, Path(env["XDG_CONFIG_HOME"]))
+        if name == "kimi":
+            dest = Path(env["KIMI_SHARE_DIR"])
+            if dest.exists():
+                return False
+            return _seed_kimi(dest)
     except Exception:
         _log.exception("provider home seeding failed for %s; spawning with an empty home", name)
     return False

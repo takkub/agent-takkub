@@ -1,25 +1,52 @@
 ---
 name: cockpit-ui-style
-description: The single design system for the Takkub Cockpit PyQt6 UI — gold #E3B341 + IBM Plex on tinted-dark grounds, all tokens in cockpit_theme.py. Read BEFORE touching ANY .py file that sets a color, font, border, radius, or QSS/stylesheet in src/agent_takkub/ (status_header, project_nav, task_dock, agent_pane, update_panel, main_window, user_actions, meters, dialogs, etc.). Trigger whenever styling cockpit UI, adding/restyling a widget, chip, button, list, dialog, or toggle, or when the user says the UI "doesn't match / looks inconsistent / ไม่เป็นไปในทางเดียวกัน".
+description: The single design system for the Takkub Cockpit PyQt6 UI — gold accent + IBM Plex, TWO theme variants (dark + light, #506) with every token in cockpit_theme.py. Read BEFORE touching ANY .py file that sets a color, font, border, radius, or QSS/stylesheet in src/agent_takkub/ (status_header, project_nav, task_dock, agent_pane, update_panel, main_window, user_actions, meters, dialogs, etc.). Trigger whenever styling cockpit UI, adding/restyling a widget, chip, button, list, dialog, or toggle, or when the user says the UI "doesn't match / looks inconsistent / ไม่เป็นไปในทางเดียวกัน".
 ---
 
 # Cockpit UI Style
 
-**One design system for the whole cockpit.** The canonical tokens live in
-`src/agent_takkub/cockpit_theme.py` (gold `#E3B341` + IBM Plex, tinted-dark
-grounds, white-overlay borders). `settings_window.py` is the reference
-implementation — every widget there is built the right way. Everything else in
-the cockpit predates this system and still hardcodes its own palette (zinc greys
-+ indigo/amber accents + Segoe defaults). That drift is exactly the "ไม่เป็นไป
-ในทางเดียวกัน" the user complains about.
+**One design system for the whole cockpit — in TWO variants.** The canonical
+tokens live in `src/agent_takkub/cockpit_theme.py` (gold accent + IBM Plex).
+Since #506 the cockpit has a **dark** variant (the historical gold-on-tinted-dark
+look) and a **light** variant (paper-light grounds, white cards, darkened gold),
+switched at runtime from Settings → General (ตามระบบ/สว่าง/มืด, persisted in
+`theme_settings.py`). `settings_window.py` is the reference implementation —
+every widget there is built the right way.
 
 **Rule: never invent a hex, font, radius, or spacing value. Import the constant
 from `cockpit_theme`.** If the value you need isn't there, add it to
-`cockpit_theme.py` and import it — do not inline a new literal.
+`cockpit_theme.py` — as a dark constant **plus a `LIGHT_TOKENS` entry plus its
+name in `_THEMED_TOKEN_NAMES`** — and import it. Never inline a literal:
+`tests/test_no_hardcoded_ui_colors.py` fails the build on any new `#rrggbb`
+outside `cockpit_theme.py` (allowlisted files carry a written reason).
 
 ```python
-from . import cockpit_theme as theme   # or: from .cockpit_theme import ACCENT_GOLD, TEXT_PRIMARY, ...
+from . import cockpit_theme as theme   # ALWAYS the module object
 ```
+
+## ⚠️ Theme-variant rules (dark-only code is a bug now)
+
+1. **Import the module, read attributes late.** `from .cockpit_theme import
+   ACCENT_GOLD` freezes the dark value forever — `apply_variant()` rebinds
+   *module* globals. Always `cockpit_theme.ACCENT_GOLD` at style-build time.
+2. **No module-level f-string QSS / token captures.** A module-level
+   `_QSS = f"...{cockpit_theme.X}..."` (or a status→color dict) snapshots
+   whichever variant was bound at import. Make it a function called at widget
+   construction (see `project_nav._sidebar_qss()`, `task_dock._dock_qss()`).
+   `app.py` binds the persisted variant *before* importing `main_window`, so
+   remaining import-time captures at least get the right variant per process —
+   but they will not follow a live switch; prefer functions.
+3. **Live switch:** `theme_settings.save(mode)` → `cockpit_theme.apply_variant(
+   theme_settings.resolve_variant(mode))` → `cockpit_theme.retheme_open_windows()`.
+   A long-lived window opts in by exposing `retheme()` that re-applies its
+   stylesheet (SettingsWindow, MainWindow, SettingsManagementWindow do).
+4. **Never theme identity colors:** `ROLE_COLORS`, `PROVIDER_*`, `AVATAR_TINTS`
+   are the same in both variants on purpose (a role keeps one hue).
+5. **Terminal panes stay dark in both variants** (xterm ANSI palette in
+   `static/terminal.html`) — deliberate; do not "fix" it.
+6. **Baked-color SVGs need a `-light` twin** (see `static/icons/*-light.svg` and
+   `nav/*-light.svg`); pick via `cockpit_theme.current_variant()` — precedent:
+   `build_stylesheet`'s spin/combo arrows, `settings_window._nav_icon`.
 
 ---
 
@@ -87,6 +114,27 @@ the hex is shown so you recognize it, not to retype.**
 
 (Also `TEXT_SECONDARY_ALT`, `TEXT_MUTED_ALT`, `TEXT_FAINT_ALT` for near-neighbors —
 prefer the base name unless matching an existing pixel.)
+
+### Light variant (#506) — same token NAMES, different values
+
+The tables above show the **dark** values (the module defaults). The light set
+lives in `cockpit_theme.LIGHT_TOKENS` — same key set (guarded by
+`test_cockpit_theme.py::TestThemeVariants`), so code that reads tokens by name
+needs zero changes. Orientation values (do not retype — read the dict):
+
+| Token | Light value | Note |
+|---|---|---|
+| `GROUND_BODY` / `GROUND_WINDOW` / `GROUND_PANEL` | `#e8eaee` / `#f5f6f8` / `#ffffff` | paper grounds, white cards |
+| `GROUND_SIDEBAR` / `GROUND_INPUT` / `GROUND_SELECT` | `#eef0f3` / `#f1f3f6` / `#e3e7ee` | |
+| `BORDER_*` / `HOVER_*` | `rgba(16,24,40,…)` | dark overlays (white overlays are invisible on light) |
+| `ACCENT_GOLD` | `#a87b16` | darkened fill accent — 3.8:1 on white (3:1 component minimum) |
+| `ACCENT_GOLD_TEXT` / `GOLD_CHIP_TEXT` | `#7a5a10` | gold-as-TEXT darkens further (4.5:1 small-text minimum) |
+| `TEXT_PRIMARY` → `TEXT_FAINT` | `#1c2026` → `#8a919c` | dark-on-light ramp |
+| `STATE_*` / `CHIP_*` / `USAGE_*` | darker hues | e.g. warn `#b45309`, ok `#1f7a3d` — readable as text on white |
+| `BANNER_*` triples | pastel bg + dark text | e.g. warn `#fef3c7`/`#d97706`/`#92400e` |
+
+New-token checklist: dark constant → name in `_THEMED_TOKEN_NAMES` → entry in
+`LIGHT_TOKENS` (contrast-checked on `#f5f6f8`/white, not a naive inversion).
 
 ### Semantic colors (keep the *meaning*, tokenize the *value*)
 These are intentional and must survive migration — do **not** turn them gold.
@@ -166,12 +214,15 @@ theme-stylesheet window.
 
 ---
 
-## Known inconsistencies (not yet migrated — expect these until fixed)
+## Known inconsistencies — MIGRATED (historical table below)
 
-These files still ship their **own** palette. This is the tracked drift; don't be
-surprised, and when you touch one of these, migrate the tokens you touch. Full
-per-file audit + migration spec:
-`docs/design-review/2026-07-11-cockpit-ui-consistency-audit.md`.
+**Status 2026-09-07 (#506): the hex migration is DONE.** Every file below now
+reads `cockpit_theme` tokens — `tests/test_no_hardcoded_ui_colors.py` enforces
+zero `#rrggbb` literals outside `cockpit_theme.py` (allowlist: roles.py /
+custom_roles.py role-identity data, issues.py GitHub label colors,
+design_review_html.py browser artifact, roles_page.py's default color text).
+The table is kept only as a map of which file owns which *semantic* colors.
+Full per-file audit: `docs/design-review/2026-07-11-cockpit-ui-consistency-audit.md`.
 
 | File | What's off vs. this system |
 |---|---|
