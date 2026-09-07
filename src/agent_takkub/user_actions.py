@@ -212,6 +212,85 @@ class UserActionsMixin:
 
         self._open_settings_window(VIEW_PROVIDERS_ROLES)
 
+    def _on_team_preset_chip_clicked(self) -> None:
+        """👥 team-size chip (#512, the spot #505 freed by making the plan
+        badge read-only): a quick-pick menu of the 4 built-in presets
+        (solo-lead/pair/full/auto) — writes through `orch.set_team_preset`
+        on pick (the project's STANDING preset, same as choosing a card in
+        Settings → "ทีม & ตำแหน่ง" and hitting Save & Apply, just one click).
+        "custom" needs a roles/checker payload this one-line menu can't
+        carry, so it routes to Settings instead of being a 5th choice —
+        same reasoning as the CLI's `--team` flag rejecting it."""
+        from PyQt6.QtGui import QAction, QActionGroup
+        from PyQt6.QtWidgets import QMenu
+
+        from . import team_preset
+        from .settings_window import VIEW_PROVIDERS_ROLES
+
+        try:
+            proj, _ = active_project()
+        except Exception:
+            proj = None
+
+        menu = QMenu(self)
+        if not proj:
+            act = QAction("ยังไม่มีโปรเจคที่เปิดอยู่", self)
+            act.setEnabled(False)
+            menu.addAction(act)
+            menu.exec(
+                self._chip_team_preset.mapToGlobal(self._chip_team_preset.rect().bottomLeft())
+            )
+            return
+
+        standing_id = team_preset.current_preset_id(proj)
+        override_id = team_preset.active_override(proj)
+        effective_id = override_id or standing_id
+
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        for pid in team_preset.QUICK_PRESET_IDS:
+            label = team_preset.label(pid)
+            desc = team_preset.description(pid)
+            pane_note = team_preset.pane_note(pid)
+            act = QAction(f"{label} — {desc} ({pane_note})", self)
+            act.setCheckable(True)
+            act.setChecked(pid == effective_id)
+            group.addAction(act)
+            act.triggered.connect(
+                lambda _checked, p=pid, proj_ns=proj: self._on_team_preset_menu_pick(p, proj_ns)
+            )
+            menu.addAction(act)
+
+        menu.addSeparator()
+        act_custom = QAction("ตั้งค่าละเอียด (custom)…", self)
+        act_custom.triggered.connect(lambda: self._open_settings_window(VIEW_PROVIDERS_ROLES))
+        menu.addAction(act_custom)
+
+        if override_id:
+            menu.addSeparator()
+            act_note = QAction(
+                f"override งานนี้: {team_preset.label(override_id)}"
+                f" (ค่าโปรเจค: {team_preset.label(standing_id)})",
+                self,
+            )
+            act_note.setEnabled(False)
+            menu.addAction(act_note)
+            act_clear = QAction("ล้าง override งานนี้", self)
+            act_clear.triggered.connect(
+                lambda proj_ns=proj: self._on_team_preset_clear_override(proj_ns)
+            )
+            menu.addAction(act_clear)
+
+        menu.exec(self._chip_team_preset.mapToGlobal(self._chip_team_preset.rect().bottomLeft()))
+
+    def _on_team_preset_menu_pick(self, preset_id: str, project: str) -> None:
+        ok, msg = self.orch.set_team_preset(preset_id, project)
+        if not ok:
+            self._status.showMessage(f"ตั้งค่าทีมไม่สำเร็จ: {msg}", 6_000)
+
+    def _on_team_preset_clear_override(self, project: str) -> None:
+        self.orch.clear_team_preset_override(project)
+
     def _open_settings_window(self, initial_view: int) -> None:
         """Single choke point every entry point calls (👥 Team chip →
         Providers & Roles, "Add / Remove user…" menu entry → Users tab).
@@ -562,18 +641,6 @@ class UserActionsMixin:
 
         _log_event("ui_doctor_opened")
         dlg.exec()
-
-    def _on_exec_mode_chip_clicked(self) -> None:
-        pass
-
-    def _on_exec_mode_changed(self, mode: str) -> None:
-        pass
-
-    def _on_auto_resume_chip_clicked(self) -> None:
-        pass
-
-    def _on_auto_resume_changed(self, enabled: bool) -> None:
-        pass
 
     # ──────────────────────────────────────────────────────────────
     # 🌐 Remote chip: settings dialog + live enable/disable

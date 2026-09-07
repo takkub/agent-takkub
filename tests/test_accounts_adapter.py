@@ -102,9 +102,60 @@ class TestCodexLoginStatus:
         (tmp_path / "auth.json").write_text("not json", encoding="utf-8")
         assert accounts_adapter.codex_login_status(tmp_path).state == accounts_adapter.UNKNOWN
 
-    def test_plan_comes_only_from_a_running_usage_store(self) -> None:
+    def test_plan_comes_only_from_a_running_usage_store(self, tmp_path: Path) -> None:
         # No store started in tests → no plan, never a probe.
-        assert accounts_adapter._codex_plan_cached() is None
+        assert accounts_adapter._codex_plan_cached(tmp_path, is_default=True) is None
+
+    def test_named_account_never_borrows_the_default_providerwide_plan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#505 review M3: a named codex home with no evidence of its own
+        plan must never report the DEFAULT identity's cached plan."""
+        from agent_takkub import provider_usage
+
+        class _FakeUsage:
+            plan = "pro"
+
+        class _FakeStore:
+            def get(self, provider, config_dir=None):
+                # Only the provider-wide (default) cache has anything.
+                if config_dir is None:
+                    return _FakeUsage()
+                return None
+
+        monkeypatch.setattr(provider_usage, "peek_store", lambda: _FakeStore())
+        named_home = tmp_path / "named-codex"
+        assert accounts_adapter._codex_plan_cached(named_home, is_default=False) is None
+        assert accounts_adapter._codex_plan_cached(tmp_path, is_default=True) == "pro"
+
+    def test_named_account_reports_its_own_fetched_plan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import provider_usage
+
+        class _FakeUsage:
+            plan = "team"
+
+        class _FakeStore:
+            def get(self, provider, config_dir=None):
+                if config_dir is not None and str(config_dir) == str(tmp_path):
+                    return _FakeUsage()
+                return None
+
+        monkeypatch.setattr(provider_usage, "peek_store", lambda: _FakeStore())
+        assert accounts_adapter._codex_plan_cached(tmp_path, is_default=False) == "team"
+
+    def test_codex_login_status_passes_is_default_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict = {}
+        monkeypatch.setattr(
+            accounts_adapter,
+            "_codex_plan_cached",
+            lambda home, *, is_default: seen.update(home=home, is_default=is_default) or None,
+        )
+        accounts_adapter.codex_login_status(tmp_path, is_default=True)
+        assert seen == {"home": tmp_path, "is_default": True}
 
 
 class TestProjectsBySelection:
@@ -139,13 +190,26 @@ class TestProviderRows:
         monkeypatch.setattr(config, "PROVIDER_ISOLATION_GAPS", gaps)
         rows = {r.provider: r for r in accounts_adapter.provider_rows()}
         assert rows["codex"].gap_reason == "fake gap for this test"
-        assert rows["codex"].accounts == []
         assert rows["codex"].can_add is False
 
     def test_gap_providers_are_shown_not_hidden(self) -> None:
         rows = {r.provider: r for r in accounts_adapter.provider_rows()}
         for provider, reason in config.PROVIDER_ISOLATION_GAPS.items():
             assert rows[provider].gap_reason == reason
+
+    def test_gap_provider_still_lists_its_existing_accounts(self) -> None:
+        """#505 review M7: a gap only blocks adding a NEW account /
+        `login_launch` (never claude/codex-only) — an ALREADY-registered
+        account of a gap provider (gemini/cursor) must still be listed, not
+        silently dropped by the gap check."""
+        gap_provider = next(iter(config.PROVIDER_ISOLATION_GAPS))
+        user_profile.add_profile(
+            "office", str(Path("/tmp/gap-account")), provider=gap_provider, share_sessions=False
+        )
+        rows = {r.provider: r for r in accounts_adapter.provider_rows()}
+        row = rows[gap_provider]
+        assert row.gap_reason  # still a gap — add/login stay blocked
+        assert any(a.name == "office" for a in row.accounts)
 
     def test_claude_row_has_default_account_and_selections(self, tmp_path: Path) -> None:
         user_profile.add_profile("office", str(tmp_path / "office-cfg"), share_sessions=False)

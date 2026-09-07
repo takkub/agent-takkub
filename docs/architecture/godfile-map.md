@@ -137,8 +137,9 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
 - No drift — matches the original doc exactly.
 
 **`mw_status_bar_builder`** → `StatusHeader` QWidget (`status_header.py`)
-- `_build_status_bar` (was `__init__` in the old doc — renamed), `_make_status_separator`, `_provider_chip_style`, `_provider_chip_state`, `_provider_chip_tooltip`, `_plan_chip_style`, `_plan_chip_tooltip`, `_ghost_button_style`, `_danger_button_style`, `_update_status`, `_refresh_rtk_button`
-- New chips added since 2026-06-21 (not in the old doc): `_exec_mode_chip_style/_tooltip`, `_auto_resume_chip_style/_tooltip`, `_remote_chip_style/_tooltip`, `_refresh_remote_chip`.
+- `_build_status_bar` (was `__init__` in the old doc — renamed), `_make_status_separator`, `_provider_chip_style`, `_provider_chip_state`, `_provider_chip_tooltip`, `_ghost_button_style`, `_update_status`, `_refresh_rtk_button`
+- Removed (2026-09-07, #505 scope addition): `_plan_chip_style`/`_plan_chip_tooltip` — the clickable Pro/Max chip they styled was replaced by the read-only `_plan_badge` (`_plan_badge_style`, no click handler); `_danger_button_style` — styled the 🏁 End Session button, also removed (`takkub end-session` is CLI-only now). Guarded by `TestRemovedControlsStayRemoved` in `test_status_header_plan_badge.py`.
+- Chips as of 2026-09-07 (#512; the 2026-06-21 doc's `_exec_mode_chip_style`/`_auto_resume_chip_style` never actually existed as separate style functions here and are gone from every layer, stub handlers included — see `test_status_header_team_preset_chip.py`'s `TestExecModeAutoResumeChipDeadCodeRemoved`-style guards): `_team_preset_chip_style` (#512, `_refresh_team_preset_chip`), `_overage_chip_style`, `_remote_chip_style`/`_remote_chip_tooltip` (`_refresh_remote_chip`), `_graft_chip_style`/`_graft_chip_tooltip` (`_refresh_graft_chip`), `_performance_chip_style` (`_refresh_performance_health_chip`).
 
 **`mw_limit_status`** — usage/limit telemetry (`limit_panel.py`)
 - `_init_limit_store`, `_on_usage_updated`, `_refresh_limit_label`

@@ -102,9 +102,39 @@ BUILTIN_PRESETS: dict[str, dict] = {
 
 _DEFAULT_PRESET = "auto"
 
+#: The 4 presets a quick picker (status-bar chip menu, Settings team-size
+#: cards, mobile drawer) offers directly — "custom" needs a roles/checker
+#: payload none of those one-tap UIs can carry, so it's reached through
+#: Settings' full role toggles instead (see settings_window's own docstring).
+QUICK_PRESET_IDS: tuple[str, ...] = ("solo-lead", "pair", "full", "auto")
+
+_DESCRIPTIONS: dict[str, str] = {
+    "solo-lead": "Lead อ่าน → แก้ → ทดสอบเอง ไม่ spawn ใคร",
+    "pair": "Lead ทำเอง + reviewer 1 คน อ่านอย่างเดียว",
+    "full": "แยก role ตาม template, QA ปิดท้ายเสมอ",
+    "custom": "เลือกเอง: role ไหนบ้าง · Lead แก้โค้ดได้ไหม · ตรวจด้วยอะไร",
+    "auto": "Lead เสนอขนาดจาก scope ของงานแต่ละครั้ง",
+}
+
+_PANE_NOTES: dict[str, str] = {
+    "solo-lead": "0 pane · ประหยัดสุด",
+    "pair": "1 pane",
+    "full": "2–5 pane",
+    "custom": "แล้วแต่ตั้งค่า",
+    "auto": "แล้วแต่งาน",
+}
+
 
 def label(preset_id: str) -> str:
     return _LABELS.get(preset_id, preset_id)
+
+
+def description(preset_id: str) -> str:
+    return _DESCRIPTIONS.get(preset_id, "")
+
+
+def pane_note(preset_id: str) -> str:
+    return _PANE_NOTES.get(preset_id, "")
 
 
 def verify_mode(cfg: dict) -> str:
@@ -236,6 +266,19 @@ def current(project: str | None = None) -> dict:
     effective_id = raw.get("override") if raw.get("override") in PRESET_IDS else None
     effective_id = effective_id or current_preset_id(project)
     return _resolve(effective_id, project, raw)
+
+
+def resolve(preset_id: str, project: str | None = None) -> dict:
+    """The config `preset_id` WOULD produce for `project`, ignoring any
+    active per-task override — unlike `current()`. UI surfaces that are
+    about to WRITE the project's standing preset (Settings' team-size cards,
+    the status-bar chip's quick menu) preview each choice through this, not
+    `current()`, so they never read a preview through an override they
+    aren't touching. Raises ValueError on an unknown id."""
+    preset_id = str(preset_id).strip()
+    if preset_id not in PRESET_IDS:
+        raise ValueError(f"unknown team preset: {preset_id!r}")
+    return _resolve(preset_id, project, _load_raw(project))
 
 
 def set_current(preset_id: str, project: str | None = None, *, custom: dict | None = None) -> dict:

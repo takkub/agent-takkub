@@ -3,7 +3,7 @@
 A dark translucent scrim over the whole window with a rounded "spotlight" hole
 cut over one widget at a time, plus a callout card (title + body + Skip/Next).
 Walks a new user through "how to start": add a project → talk to the Lead →
-the key status-bar chips → wrap up with End Session.
+the key status-bar chips.
 
 Trigger: auto on first launch (persisted via a flag under RUNTIME_DIR so it
 fires once per install) and replayable any time from the status-bar ❓ Tour

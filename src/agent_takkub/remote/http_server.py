@@ -300,6 +300,22 @@ class _Bridge(QObject):
                     )
             elif pending.action == "activity":
                 pending.reply.put((200, api.activity(self._orch)))
+            elif pending.action == "team_preset_status":
+                project_ns = self._resolve_scoped_project(pending.params.get("project"))
+                pending.reply.put((200, api.team_preset_status(self._orch, project_ns)))
+            elif pending.action == "team_preset_set":
+                project_ns = self._resolve_scoped_project(pending.params.get("project"))
+                try:
+                    pending.reply.put(
+                        (
+                            200,
+                            api.team_preset_set(
+                                self._orch, project_ns, pending.params.get("preset")
+                            ),
+                        )
+                    )
+                except api.RemoteApiError as exc:
+                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
             elif pending.action == "usage":
                 pending.reply.put((200, api.usage()))
             elif pending.action == "usage_history":
@@ -625,6 +641,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         elif rest == "/api/image":
             if self._check_bearer() and self._check_password_gate():
                 self._serve_image(query)
+        elif rest == "/api/team-preset":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled("team_preset_status", {"project": query.get("project")})
         elif rest == "/api/usage":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("usage", {})
@@ -772,6 +791,21 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "msg": "bad json"})
                 return
             self._respond_marshaled("close", {"project": payload.get("project")})
+        elif rest == "/api/team-preset":
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled(
+                "team_preset_set",
+                {"project": payload.get("project"), "preset": payload.get("preset")},
+            )
         elif rest == "/api/lead/resume":
             if not self._check_bearer() or not self._check_password_gate():
                 return

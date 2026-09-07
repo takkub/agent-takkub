@@ -48,21 +48,26 @@ from .token_meter import usage_color
 EXPANDED_MIN_W = 260
 COLLAPSED_W = 64
 
-# (glyph, hex color) per ledger row status — mirrors task_ledger._ROW_SYMBOL
-# but with the dock's own richer glyphs/colors (INDEX.md uses plain ASCII
-# checkboxes since markdown can't carry color). Colors are cockpit_theme state
-# tokens (semantic — never gold): the value survives migration, only the
-# literal is tokenized. superseded reuses the parallel-chip purple.
-_STATUS_GLYPH = {
-    "working": ("◔", cockpit_theme.STATE_WARN_BRIGHT),  # ◔ amber
-    "ok": ("✓", cockpit_theme.STATE_OK_BRIGHT),  # ✓ green
-    "fail": ("✕", cockpit_theme.STATE_ERROR),  # ✕ red
-    "closed": ("➖", cockpit_theme.TEXT_MUTED),  # ➖ gray
-    "superseded": ("›", cockpit_theme.PARALLEL_CHIP_TEXT),  # › purple
+# (glyph, cockpit_theme attribute NAME) per ledger row status — mirrors
+# task_ledger._ROW_SYMBOL but with the dock's own richer glyphs/colors
+# (INDEX.md uses plain ASCII checkboxes since markdown can't carry color).
+# #505 review M5: this used to store the resolved color STRING
+# (`cockpit_theme.STATE_WARN_BRIGHT` evaluated once, at import time) — a
+# live theme switch (`cockpit_theme.apply_variant`) rebinds those module
+# attributes, but a value already copied into this dict stays the old
+# variant's color forever. Storing the attribute NAME and resolving it via
+# `getattr` inside `status_glyph()` reads the CURRENT value on every call
+# instead. superseded reuses the parallel-chip purple.
+_STATUS_GLYPH: dict[str, tuple[str, str]] = {
+    "working": ("◔", "STATE_WARN_BRIGHT"),  # ◔ amber
+    "ok": ("✓", "STATE_OK_BRIGHT"),  # ✓ green
+    "fail": ("✕", "STATE_ERROR"),  # ✕ red
+    "closed": ("➖", "TEXT_MUTED"),  # ➖ gray
+    "superseded": ("›", "PARALLEL_CHIP_TEXT"),  # › purple
 }
 # Any status the ledger doesn't emit yet (e.g. a future "queued" row) falls
 # back to an empty checkbox in neutral gray instead of crashing render.
-_STATUS_FALLBACK = ("☐", cockpit_theme.TEXT_MUTED)  # ☐
+_STATUS_FALLBACK: tuple[str, str] = ("☐", "TEXT_MUTED")  # ☐
 
 # Extra QTreeWidgetItem data role (column 0): the row's un-prefixed label
 # text — goal/feature items re-derive their ▸/▾-prefixed text from this on
@@ -260,8 +265,11 @@ class _WrapItemDelegate(QStyledItemDelegate):
 
 
 def status_glyph(status: str) -> tuple[str, str]:
-    """(unicode glyph, hex color) for a ledger row's `status` field."""
-    return _STATUS_GLYPH.get(status, _STATUS_FALLBACK)
+    """(unicode glyph, hex color) for a ledger row's `status` field — the
+    color is read from `cockpit_theme` live on every call (#505 review M5),
+    so it always matches whichever theme variant is currently applied."""
+    glyph, color_attr = _STATUS_GLYPH.get(status, _STATUS_FALLBACK)
+    return glyph, getattr(cockpit_theme, color_attr)
 
 
 def project_progress(state: dict) -> tuple[int, int]:

@@ -3800,6 +3800,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.roles",
         "agent_takkub.spawn_engine",
+        "agent_takkub.team_preset",
         "agent_takkub.usage_ledger",
         "agent_takkub.worktree_manager"
       ],
@@ -3807,7 +3808,7 @@
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.remote.auth",
@@ -4847,6 +4848,7 @@
         "agent_takkub.project_tab",
         "agent_takkub.provider_config",
         "agent_takkub.ram_report",
+        "agent_takkub.team_preset",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
       ],
@@ -4854,7 +4856,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.system_baseline",
@@ -4919,9 +4921,12 @@
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
-        "agent_takkub.settings_window"
+        "agent_takkub.remote.api",
+        "agent_takkub.settings_window",
+        "agent_takkub.status_header",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 7,
+      "fan_in": 10,
       "fan_out": 2
     },
     {
@@ -5093,13 +5098,14 @@
         "agent_takkub.settings_management.feature_flags",
         "agent_takkub.settings_management.window",
         "agent_takkub.settings_window",
+        "agent_takkub.team_preset",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.user_profile",
