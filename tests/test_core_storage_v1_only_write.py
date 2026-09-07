@@ -185,9 +185,8 @@ def test_role_providers_fanout_missing_target_is_a_hit(tmp_path):
     home = _migrated_home(tmp_path)
     from agent_takkub import config
 
-    # Global scope is sourced from `role-models.json` now (B-H2, 2026-09-07
-    # round-2 review) — #515 archives the global `role-providers.json` on
-    # first read, so it's no longer a live V1 source.
+    # #515: global routing lives in role-models.json now — see
+    # steps_v1.py's `_global_routing_source`.
     global_source = config.SETTINGS_HOME / "role-models.json"
     global_source.write_text('{"backend": {"provider": "claude"}}', encoding="utf-8")
     # routing.json target deliberately never created
@@ -228,7 +227,6 @@ def test_role_providers_fanout_stale_project_scope_is_a_hit(tmp_path):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"schema": 1, "global": {}, "projects": {}}', encoding="utf-8")
 
-    (config.SETTINGS_HOME / "role-models.json").write_text("{}", encoding="utf-8")
     proj_source = config.SETTINGS_HOME / "projects" / "proj_a" / "role-providers.json"
     proj_source.parent.mkdir(parents=True, exist_ok=True)
     proj_source.write_text('{"backend": "codex"}', encoding="utf-8")

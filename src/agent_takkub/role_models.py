@@ -132,9 +132,28 @@ def _save(entries: dict[str, dict[str, str]]) -> None:
     tmp.write_text(json.dumps(cleaned, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(_PATH)
 
-    from .core.storage.dual_write import dual_write_role_models
+    from . import config as _config
+    from . import provider_config
+    from .core.storage.dual_write import dual_write_role_models, dual_write_routing
+    from .core.storage.legacy_reader import read_json
 
     dual_write_role_models(cleaned)
+    # #515 folded the standalone global-routing file into this one — this
+    # is now the only global-routing writer, so it must mirror `routing.json`
+    # itself instead of relying on `provider_config.save_providers` (which
+    # this call never goes through — see B-H2 in
+    # docs/audit/2026-09-07-batch-2.0.x-review-round2.md). The global half
+    # comes straight from `cleaned` (this save's own in-memory result), not
+    # a re-read, for the same reason `provider_config.save_providers`
+    # passes `load_providers(None)` rather than trusting some other source.
+    dual_write_routing(
+        {role: entry["provider"] for role, entry in cleaned.items()},
+        {
+            name: read_json(provider_config.config_path(name))
+            for name in _config.list_project_names()
+            if provider_config.config_path(name).exists()
+        },
+    )
 
     from . import provider_config
 
