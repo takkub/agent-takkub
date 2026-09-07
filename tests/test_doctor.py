@@ -609,6 +609,72 @@ class TestCheckRoles:
 
 
 # ---------------------------------------------------------------------------
+# check_team_preset (#512)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTeamPreset:
+    def _set_active_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "myapp"
+    ) -> None:
+        import agent_takkub.config as _cfg
+
+        data = {"active": name, "projects": {name: {"paths": {}}}}
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+
+    def _isolate_team_preset(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.team_preset as team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+
+    def test_default_project_shows_auto(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._set_active_project(tmp_path, monkeypatch)
+        self._isolate_team_preset(tmp_path, monkeypatch)
+
+        from agent_takkub.doctor import check_team_preset
+
+        findings = check_team_preset()
+        assert findings[0].status == Status.INFO
+        assert "auto" in findings[0].detail
+
+    def test_standing_preset_and_override_both_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._set_active_project(tmp_path, monkeypatch)
+        self._isolate_team_preset(tmp_path, monkeypatch)
+        import agent_takkub.team_preset as team_preset
+
+        team_preset.set_current("full", "myapp")
+        team_preset.set_override("solo-lead", "myapp")
+
+        from agent_takkub.doctor import check_team_preset
+
+        findings = check_team_preset()
+        assert "full" in findings[0].detail
+        assert "solo-lead" in findings[0].detail
+        assert "override" in findings[0].detail
+
+    def test_no_active_project_is_informational(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as _cfg
+
+        projects_file = tmp_path / "projects.json"
+        projects_file.write_text(json.dumps({"active": None, "projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        self._isolate_team_preset(tmp_path, monkeypatch)
+
+        from agent_takkub.doctor import check_team_preset
+
+        findings = check_team_preset()
+        assert findings[0].status == Status.INFO
+
+
+# ---------------------------------------------------------------------------
 # check_plugins
 # ---------------------------------------------------------------------------
 
@@ -1512,6 +1578,7 @@ class TestRunAllChecks:
             "check_mcps",
             "check_projects",
             "check_roles",
+            "check_team_preset",
             "check_providers",
             "check_provider_isolation",
             "check_provider_capabilities",

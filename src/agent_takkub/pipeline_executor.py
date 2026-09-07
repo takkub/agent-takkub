@@ -340,6 +340,24 @@ class PipelineMixin:
                 if idx == n - 1:
                     self._finalize_pipeline_hop(project_ns, run_id, run, hop_idx, total, spawned_ok)
                 return
+            # #512: same skip, for a role the project's team preset doesn't
+            # include in its roster (rather than #510's rolesEnabled toggle).
+            from .team_preset import can_spawn as _team_can_spawn
+
+            if not _team_can_spawn(role, project_ns)[0]:
+                run.hop_pending.discard(role)
+                run.hop_failed.add(role)
+                run.hop_skipped_disabled.add(role)
+                _log_event(
+                    "pipeline_role_team_preset_skip",
+                    project=project_ns,
+                    run_id=run_id,
+                    hop=hop_idx,
+                    role=role,
+                )
+                if idx == n - 1:
+                    self._finalize_pipeline_hop(project_ns, run_id, run, hop_idx, total, spawned_ok)
+                return
             cwd = (entry.get("cwd") or "").strip() or default_cwd_for_role(role, project_ns)
             ok, _msg = self.spawn(role, cwd=cwd, project=project_ns)
             if ok:

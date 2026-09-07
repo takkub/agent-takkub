@@ -656,6 +656,16 @@ class CliServer(QObject):
                         ),
                     )
                     return
+                # #512: same "reply synchronously" reasoning as the #510 check
+                # just above — a role the project's team preset doesn't
+                # include in its roster never reaches the deferred assign()/
+                # spawn() either.
+                from .team_preset import can_spawn as _team_can_spawn_precheck
+
+                _team_ok, _team_msg = _team_can_spawn_precheck(str(role), project_ns_role)
+                if not _team_ok:
+                    self._reply(sock, ok=False, msg=_team_msg)
+                    return
                 # #143: cwd escaping the project's configured paths used to be
                 # caught only inside spawn() — which runs AFTER the "task
                 # queued" ack below (async, next event-loop tick). The Lead
@@ -789,6 +799,7 @@ class CliServer(QObject):
                         project=from_project,
                         feature=str(req.get("feature", "") or ""),
                         mode=mode,
+                        team=(str(req.get("team", "") or "").strip().lower() or None),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -823,6 +834,7 @@ class CliServer(QObject):
                         model=(str(req.get("model", "") or "").strip() or None),
                         provider=(str(req.get("provider", "") or "").strip().lower() or None),
                         effort=(str(req.get("effort", "") or "").strip().lower() or None),
+                        team=(str(req.get("team", "") or "").strip().lower() or None),
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
@@ -1325,6 +1337,22 @@ class CliServer(QObject):
                     device=req.get("device"),
                 )
                 self._reply(sock, ok=ok_p, msg=msg_p, **payload_p)
+                return
+            elif cmd == "team":
+                # #512: `takkub team set|clear-override` — round-trips through
+                # the socket (unlike `status`, read directly by the CLI) so a
+                # LIVE Lead pane gets the `[system]` broadcast this project's
+                # orchestrator instance owns.
+                team_action = req.get("action", "")
+                if team_action == "set":
+                    ok_t, msg_t = self._orch.set_team_preset(
+                        req.get("preset", ""), project=from_project
+                    )
+                elif team_action == "clear-override":
+                    ok_t, msg_t = self._orch.clear_team_preset_override(project=from_project)
+                else:
+                    ok_t, msg_t = False, f"unknown team action: {team_action!r}"
+                self._reply(sock, ok=ok_t, msg=msg_t)
                 return
             elif cmd == "design":
                 design_action = req.get("action", "")

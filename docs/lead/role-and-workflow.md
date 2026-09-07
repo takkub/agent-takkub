@@ -9,7 +9,7 @@
 >
 > **ใช้กับทุก provider โดยไม่มีข้อยกเว้น:** Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ใหม่ และ provider substitution ต้องใช้กฎเดียวกัน การเปลี่ยน provider ห้ามเปลี่ยน Lead ให้กลายเป็น Developer
 >
-> **ข้อยกเว้นเดียว:** งานเล็กจริงตามเกณฑ์ "Lead direct-edit policy" ด้านล่างเท่านั้น เช่น read-only inspection หรือ typo/นโยบาย/config/docs ของ cockpit แบบเล็กมาก งาน source code/tests/provider behavior ต้อง delegate แม้อยู่ใน `agent-takkub` เอง
+> **ข้อยกเว้น:** (1) งานเล็กจริงตามเกณฑ์ "Lead direct-edit policy" ด้านล่าง เช่น read-only inspection หรือ typo/นโยบาย/config/docs ของ cockpit แบบเล็กมาก งาน source code/tests/provider behavior ต้อง delegate แม้อยู่ใน `agent-takkub` เอง (2) **โปรเจค (หรืองาน) ที่ตั้ง Team preset เป็น "ทำเอง"/"คู่" หรือ custom ที่ `lead_may_implement=true`** (#512, ดู "Team preset" ด้านล่าง) — ตรงนั้น Lead แก้โค้ด**ของโปรเจค**เองได้ตามที่ preset อนุญาต ข้อ (1) ยังใช้แยกต่างหากสำหรับ cockpit เอง
 
 Teammates: **frontend** (React/Next/TS) · **backend** (API/DB) · **mobile** (RN/Capacitor) · **devops** (CI/Docker/infra) · **qa** (tests/e2e) · **reviewer** (code review) · **critic** (Design Critic — รีวิว UI หลัง QA + เขียน proposal) · **gemini** (Antigravity CLI `agy` — "สมองที่ 3" planning/second opinion/long-context) · **codex** (OpenAI Codex CLI — "สมองที่ 2" refactor/cross-check) · **opencode / kimi / cursor** (provider เสริมใน registry — ready/busy marker ของ kimi/cursor ยังไม่ calibrate อย่าใช้เป็น role หลัก)
 
@@ -37,6 +37,26 @@ Lead spawn เฉพาะ role ที่จำเป็น ใช้ `takkub` C
 ## Multi-project tabs
 
 1 tab = 1 Lead = 1 project · pane รู้ project ผ่าน env `TAKKUB_PROJECT` → `send/list/done` ไม่ cross-talk
+
+## Team preset (#512)
+
+**ขนาดทีมต่อโปรเจค** (+override ต่องาน) — งานเล็ก/bug scope ชัดไม่ต้อง boot ทั้งทีม ตั้งได้ที่ Settings → Providers & Roles หรือ `takkub team set <preset>`:
+
+| preset | roster ที่เปิด | checker (qa/reviewer) | Lead แก้โค้ดเอง? |
+|---|---|---|---|
+| **ทำเอง** (`solo-lead`) | ไม่มี position เปิดเลย | ไม่มี | ได้ — ทดสอบเอง (targeted/screenshot) แล้วรายงาน **ห้าม spawn ใครทั้งสิ้น** |
+| **คู่** (`pair`) | ไม่มี position เปิดเลย | reviewer | ได้ — แก้เองแล้วสั่ง `takkub assign --role reviewer` ให้ตรวจอย่างเดียว |
+| **ทีมเต็ม** (`full`) | frontend/backend/mobile/devops | qa (ปิดท้ายเหมือนเดิม) | **ไม่ได้** — มอบหมายผ่าน `takkub assign` ตามปกติ |
+| **custom** | เลือกเอง (Settings) | เลือกเอง | ตามที่ตั้ง |
+| **อัตโนมัติ** (`auto`, ค่าเริ่มต้น) | — ไม่ fix roster | — | Lead เสนอขนาดเองต่องานจาก `routing_planner.suggest_team_size()` แล้วพิมพ์เหตุผล 1 บรรทัดก่อนเริ่ม (ไม่ enforce อะไร) |
+
+Roster ของ preset ครอบเฉพาะ**ตำแหน่ง** frontend/backend/mobile/devops (+custom role ของโปรเจค) และ checker slot (reviewer/qa) — **provider pane (codex/gemini/opencode/kimi/cursor) กับ `shell`/`critic` ไม่ถูก preset แตะเลย** ยัง `takkub assign` ตรงได้ตามปกติเสมอไม่ว่า preset จะเป็นอะไร
+
+**Override เฉพาะงานถัดไป** (ไม่แก้ preset มาตรฐานของโปรเจค): `takkub assign --role lead --team solo-lead|pair|full|auto "task"` — ใช้เมื่อโปรเจคตั้ง "ทีมเต็ม" ไว้แต่งานที่กำลังจะสั่งเล็กจริงๆ (หรือกลับกัน) เคลียร์ด้วย `takkub team clear-override`
+
+**Enforcement จริง (ไม่ใช่แค่ prompt):** `takkub assign --role <X>` ที่ preset ไม่เปิด roster ให้ถูก **reject ทันที** (choke point เดียวกับ #510's rolesEnabled — `orchestrator.assign()` + `cli_server` sync pre-check + `pipeline_executor` hop-skip) — อย่าพยายาม spawn role ที่ preset ปิดไว้ ("ทำเอง"/"คู่" spawn dev role ไม่ได้เลยแม้จะสั่งตรงๆ)
+
+**สถานะเปลี่ยนระหว่าง session:** cockpit inject `[system] team preset ...` message เข้า pane ทันทีเมื่อมีคน set/override/clear จาก Settings หรือ CLI — อ่านแล้วปรับแผนตาม ไม่ต้องถามยืนยันซ้ำ
 
 ## Quick reference (ที่ใช้บ่อย — ฉบับเต็ม + tooling → `docs/lead/cli-reference.md`)
 

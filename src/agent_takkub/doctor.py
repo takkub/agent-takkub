@@ -1235,6 +1235,51 @@ def check_roles() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [team-preset] — #512: surface this project's team-size preset (and any
+# active per-task override) so `takkub doctor`/`doctor --project` shows it
+# alongside `[roles]` — same read-only, local-file-only shape.
+# ---------------------------------------------------------------------------
+
+
+def check_team_preset() -> list[Finding]:
+    from . import team_preset
+    from .config import active_project
+
+    findings: list[Finding] = []
+    try:
+        name, _ = active_project()
+    except Exception as e:
+        findings.append(Finding("team-preset", "active project", Status.FAIL, str(e)))
+        return findings
+
+    if not name:
+        findings.append(Finding("team-preset", "team preset", Status.INFO, "no active project"))
+        return findings
+
+    try:
+        standing = team_preset.current_preset_id(name)
+        override = team_preset.active_override(name)
+        cfg = team_preset.current(name)
+    except Exception as e:
+        findings.append(Finding("team-preset", name, Status.FAIL, str(e)))
+        return findings
+
+    detail = f"{team_preset.label(standing)} ({standing})"
+    if override:
+        detail += f" — override THIS task: {team_preset.label(override)} ({override})"
+    findings.append(
+        Finding(
+            "team-preset",
+            name,
+            Status.INFO,
+            f"{detail}; verify={team_preset.verify_mode(cfg)}; "
+            f"lead_may_implement={cfg['lead_may_implement']}",
+        )
+    )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [installed] — integrity checks for a pip/npm-installed build (skipped for
 # dev checkouts, which read these paths straight from the repo already).
 # ---------------------------------------------------------------------------
@@ -3593,6 +3638,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mcps", check_mcps),
         ("check_projects", check_projects),
         ("check_roles", check_roles),
+        ("check_team_preset", check_team_preset),
         ("check_providers", check_providers),
         ("check_provider_isolation", check_provider_isolation),
         ("check_provider_capabilities", check_provider_capabilities),

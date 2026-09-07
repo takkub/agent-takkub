@@ -924,3 +924,41 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     action = _classify_core(user_message, context)
     action.suggested_mode, action.mode_reason = suggest_assign_mode(user_message)
     return action
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #512 "auto" team-preset advisory. Deliberately reuses classify()'s
+# EXISTING role-count/kind signal rather than building a smarter scope
+# classifier (out of scope for #512 — see its issue body) — just enough for
+# the Lead to print one line before starting, per the acceptance examples:
+# a bare typo/question fix -> ทำเอง (Lead alone); an N-role feature -> เต็ม.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def suggest_team_size(user_message: str, context: dict | None = None) -> tuple[str, str]:
+    """Advisory team-preset suggestion for preset == "auto" (#512 item 5).
+
+    Returns ``(preset_id, reason)`` — ``preset_id`` is one of "solo-lead" /
+    "pair" / "full" (never "custom"/"auto"). Purely advisory: the Lead prints
+    the one-liner and proceeds: nothing here enforces anything (only a fixed
+    project preset does, via `team_preset.can_spawn`).
+    """
+    action = classify(user_message, context)
+    if action.kind in (
+        ActionKind.INFORMATIONAL,
+        ActionKind.EXPLAIN_SYSTEM,
+        ActionKind.GENERATE_GUIDE_HTML,
+        ActionKind.ASK_CLARIFY,
+    ):
+        return "solo-lead", "ไม่ใช่งาน dev handoff (คำถาม/อธิบาย/เอกสาร) — ทำเองพอ"
+    if action.kind == ActionKind.FIRE_ONESHOT:
+        return "solo-lead", "งาน one-shot (codex/gemini ไม่ spawn pane) — ไม่ต้องเปิดทีม"
+    if action.roles and len(action.roles) >= 2:
+        return "full", f"หลาย role ทำงานพร้อมกัน ({', '.join(action.roles)}) — ต้องทีมเต็ม"
+    if action.sequence and len(action.sequence) >= 2:
+        return "full", f"หลาย role ต่อกันตามลำดับ ({', '.join(action.sequence)}) — ต้องทีมเต็ม"
+    if action.mixed:
+        return "full", "มีทั้งคำถามและงานจริงปนกัน — เปิดทีมเผื่อ scope ขยาย"
+    if action.role:
+        return "solo-lead", f"งานเดี่ยว scope ชัด ({action.role}) — ทำเองได้ ไม่ต้อง spawn"
+    return "full", "จำแนก scope ไม่ได้ชัดเจน — เปิดทีมไว้ก่อนเพื่อความปลอดภัย"
