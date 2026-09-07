@@ -864,3 +864,41 @@ class TestReconcileInheritedPaneEnv:
         monkeypatch.delenv(config._AUTO_PORT_FILE_ENV, raising=False)
         assert config.reconcile_inherited_pane_env() == []
         assert os.environ["TAKKUB_PORT_FILE"] == str(own)
+
+
+class TestArchiveSettingsFile:
+    """MED-1 (round2 gemini review, #515 migration): a pre-existing backup
+    with the same name used to make `archive_settings_file` leave *source*
+    in place instead of moving it — so a one-time migration (e.g.
+    `provider_config._migrate_legacy_global_overrides_once`) re-ran on
+    every read and clobbered whatever the destination file had since been
+    changed to."""
+
+    def test_missing_source_is_a_noop(self, tmp_path: Path) -> None:
+        assert config.archive_settings_file(tmp_path / "nope.json") is True
+
+    def test_moves_source_into_backups(self, tmp_path: Path) -> None:
+        source = tmp_path / "role-providers.json"
+        source.write_text('{"a": "codex"}', encoding="utf-8")
+
+        assert config.archive_settings_file(source) is True
+
+        assert not source.exists()
+        backup = tmp_path / "backups" / "role-providers.json"
+        assert backup.read_text(encoding="utf-8") == '{"a": "codex"}'
+
+    def test_existing_backup_still_moves_source_out(self, tmp_path: Path) -> None:
+        """Second run (e.g. a recreated legacy file) must still remove
+        *source* even though a same-named backup already exists — leaving it
+        behind is what let the migration it guards re-fire indefinitely."""
+        source = tmp_path / "role-providers.json"
+        source.write_text('{"first": "codex"}', encoding="utf-8")
+        assert config.archive_settings_file(source) is True
+
+        source.write_text('{"second": "gemini"}', encoding="utf-8")
+        assert config.archive_settings_file(source) is True
+
+        assert not source.exists()
+        backups_dir = tmp_path / "backups"
+        contents = {p.read_text(encoding="utf-8") for p in backups_dir.glob("role-providers*")}
+        assert contents == {'{"first": "codex"}', '{"second": "gemini"}'}

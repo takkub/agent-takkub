@@ -19,6 +19,7 @@ from agent_takkub.token_meter import (
     find_latest_session,
     find_session_by_uuid,
     read_last_usage,
+    session_project_dirs_for_cwd,
 )
 
 
@@ -333,3 +334,67 @@ class TestFindSessionByUuid:
         (fake_default / ".claude").mkdir(parents=True)
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_default))
         assert find_session_by_uuid(cwd, "profile-uuid", config_dir=None) is None
+
+
+class TestSessionProjectDirsForCwdRoleFallback:
+    """MED-3 (round2 gemini review, #516 F1 follow-up): a teammate role's
+    directory got a `-<role>` suffix; a session spawned *before* that
+    upgrade still lives in the bare, unsuffixed `takkub-project-<ns>` dir
+    every role used to share. That directory must stay a fallback candidate
+    so pre-upgrade teammate sessions remain resumable."""
+
+    def test_role_suffixed_dir_falls_back_to_unsuffixed_legacy_dir(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home",
+            cwd,
+            project_ns="myproj",
+            project_dir_name="takkub-project-myproj-backend",
+        )
+        names = [d.name for d in dirs]
+        assert "takkub-project-myproj-backend" in names
+        assert "takkub-project-myproj" in names
+        assert names.index("takkub-project-myproj-backend") < names.index("takkub-project-myproj")
+
+    def test_lead_unsuffixed_dir_is_not_duplicated(self, tmp_path: pathlib.Path) -> None:
+        # Lead's project_dir_name is already the bare name — must not appear twice.
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home",
+            cwd,
+            project_ns="myproj",
+            project_dir_name="takkub-project-myproj",
+        )
+        names = [d.name for d in dirs]
+        assert names.count("takkub-project-myproj") == 1
+
+    def test_no_project_ns_no_fallback_added(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home", cwd, project_dir_name="takkub-project-myproj-backend"
+        )
+        names = [d.name for d in dirs]
+        assert names == ["takkub-project-myproj-backend", encode_path_for_claude(cwd)]
+
+    def test_resume_finds_legacy_pre_upgrade_teammate_session(self, tmp_path: pathlib.Path) -> None:
+        """End-to-end: a session planted only in the old unsuffixed dir must
+        still be found once the role-suffixed dir is also being searched."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        config_home = tmp_path / "home"
+        legacy_dir = config_home / "projects" / "takkub-project-myproj"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "old-teammate-uuid.jsonl").write_text("{}", encoding="utf-8")
+
+        dirs = session_project_dirs_for_cwd(
+            config_home,
+            cwd,
+            project_ns="myproj",
+            project_dir_name="takkub-project-myproj-backend",
+        )
+        assert any((d / "old-teammate-uuid.jsonl").is_file() for d in dirs)

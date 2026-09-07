@@ -457,6 +457,7 @@ def _resume_uuid_matches_cwd(
         project_dirs = session_project_dirs_for_cwd(
             config_dir_for(project_ns),
             cwd,
+            project_ns=project_ns,
             project_dir_name=claude_project_dir_name(project_ns, base_role),
         )
     except OSError:

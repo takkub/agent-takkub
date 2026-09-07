@@ -117,10 +117,10 @@ class _WorkerSignals(QObject):
 
 class _AutoMigrateWorker(QThread):
     """Runs `auto_migrate_boot.run_boot_stage()` off the Qt main thread
-    (#361) — same `QThread` + `resultReady` signal shape as
-    `settings_core_v2._MigrationReportThread`. `stepReady` streams the
-    stage's own progress lines onto the splash footer so a slow first-run
-    copy never reads as a frozen window."""
+    (#361) — same `QThread` + `resultReady` signal shape as the migration
+    engine's own worker thread (`core/migration/engine.py`). `stepReady`
+    streams the stage's own progress lines onto the splash footer so a slow
+    first-run copy never reads as a frozen window."""
 
     stepReady = pyqtSignal(str)
     resultReady = pyqtSignal(object)  # auto_migrate_boot.BootMigrationResult

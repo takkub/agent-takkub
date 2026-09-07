@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -146,15 +147,17 @@ def archive_settings_file(source: Path) -> bool:
     instead of deleting it (#515 Settings diet — "เอาออก = ถอน dead code
     ทั้งสาย" but never the user's own data). No-op (returns True) when
     *source* doesn't exist. If a backup with the same name is already there
-    from an earlier run, *source* is left in place rather than overwritten or
-    silently dropped — one archived copy per filename is enough, and this
-    only ever runs once per store's one-time migration anyway."""
+    from an earlier run, the new backup is given a timestamp suffix so
+    *source* still gets moved out (MED-1 round2: leaving *source* in place
+    made a one-time migration re-run on every read and clobber whatever the
+    user had since changed in the file it migrates into)."""
     if not source.exists():
         return True
     backups_dir = source.parent / "backups"
     dest = backups_dir / source.name
     if dest.exists():
-        return True
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        dest = backups_dir / f"{source.stem}.{stamp}{source.suffix}"
     try:
         backups_dir.mkdir(parents=True, exist_ok=True)
         source.replace(dest)

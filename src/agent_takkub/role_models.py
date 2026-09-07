@@ -212,7 +212,7 @@ def _set_field(role: str, provider: str, field: str, value: str) -> None:
         merged.pop(field, None)
         if provider:
             merged["provider"] = provider
-    if merged.get("model") or merged.get("effort"):
+    if merged.get("provider") or merged.get("model") or merged.get("effort"):
         entries[role] = merged
     else:
         entries.pop(role, None)
