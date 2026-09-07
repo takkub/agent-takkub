@@ -3005,18 +3005,21 @@ def check_provider_isolation() -> list[Finding]:
     sessions, config or logins with a dev checkout or with the user's own
     hand-run CLI. claude has done this since the C5 audit
     (``CLAUDE_CONFIG_DIR``); codex and opencode joined via
-    ``config.provider_home_env``.
+    ``config.provider_home_env``; kimi joined 2026-09-07 (``KIMI_SHARE_DIR``,
+    proven by ConPTY probe + kimi-cli 1.50.0 source).
 
-    gemini/kimi/cursor expose no directory env var at all, so they still
-    write to their OS-wide homes. That is reported as INFO, not FAIL: it is
-    an upstream gap (#103), not a broken install, and hiding it is how the
-    isolation story silently looked complete while two thirds of the
+    gemini/cursor expose no usable directory env var (probed — see
+    ``config.PROVIDER_ISOLATION_GAPS`` for the per-provider evidence), so
+    they still write to their OS-wide homes. That is reported as INFO, not
+    FAIL: it is an upstream gap (#103), not a broken install, and hiding it
+    is how the isolation story silently looked complete while most of the
     providers were outside it.
     """
     from .config import (
         DATA_HOME,
         PROVIDER_ISOLATION_GAPS,
         REPO_ROOT,
+        isolated_providers,
         provider_home_env,
     )
 
@@ -3031,7 +3034,7 @@ def check_provider_isolation() -> list[Finding]:
         ]
 
     findings: list[Finding] = []
-    for provider in ("codex", "opencode"):
+    for provider in isolated_providers():
         env = provider_home_env(provider)
         if not env:
             continue

@@ -1338,8 +1338,8 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
         from .config import PROVIDER_ISOLATION_GAPS
 
         # GAPS is the single authority on "no isolation knob upstream";
-        # everything else has one (claude/codex/opencode) — state of the
-        # knob, not whether this checkout currently applies it.
+        # everything else has one (claude/codex/opencode/kimi) — state of
+        # the knob, not whether this checkout currently applies it.
         m["provider_isolation"] = (
             "unsupported" if spec.name in PROVIDER_ISOLATION_GAPS else "supported"
         )
