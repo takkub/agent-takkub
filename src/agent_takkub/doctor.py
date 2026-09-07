@@ -1191,6 +1191,95 @@ def check_projects() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [roles] — #510: surface roles OFF in Settings → Providers & Roles for the
+# current project, so a user (or Lead, via `takkub doctor`) can see the
+# switch actually took effect instead of only inferring it from a rejected
+# assign. Read-only, no network — pipeline_config.load() is local-file-only.
+# ---------------------------------------------------------------------------
+
+
+def check_roles() -> list[Finding]:
+    from . import pipeline_config
+    from .config import active_project
+
+    findings: list[Finding] = []
+    try:
+        name, _ = active_project()
+    except Exception as e:
+        findings.append(Finding("roles", "active project", Status.FAIL, str(e)))
+        return findings
+
+    if not name:
+        findings.append(Finding("roles", "rolesEnabled", Status.INFO, "no active project"))
+        return findings
+
+    try:
+        off = pipeline_config.disabled_roles(project=name)
+    except Exception as e:
+        findings.append(Finding("roles", "rolesEnabled", Status.FAIL, str(e)))
+        return findings
+
+    if off:
+        findings.append(
+            Finding(
+                "roles",
+                name,
+                Status.WARN,
+                f"disabled: {', '.join(off)} — orchestrator.assign rejects these",
+                "Settings → Providers & Roles to re-enable",
+            )
+        )
+    else:
+        findings.append(Finding("roles", name, Status.OK, "every role enabled"))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [team-preset] — #512: surface this project's team-size preset (and any
+# active per-task override) so `takkub doctor`/`doctor --project` shows it
+# alongside `[roles]` — same read-only, local-file-only shape.
+# ---------------------------------------------------------------------------
+
+
+def check_team_preset() -> list[Finding]:
+    from . import team_preset
+    from .config import active_project
+
+    findings: list[Finding] = []
+    try:
+        name, _ = active_project()
+    except Exception as e:
+        findings.append(Finding("team-preset", "active project", Status.FAIL, str(e)))
+        return findings
+
+    if not name:
+        findings.append(Finding("team-preset", "team preset", Status.INFO, "no active project"))
+        return findings
+
+    try:
+        standing = team_preset.current_preset_id(name)
+        override = team_preset.active_override(name)
+        cfg = team_preset.current(name)
+    except Exception as e:
+        findings.append(Finding("team-preset", name, Status.FAIL, str(e)))
+        return findings
+
+    detail = f"{team_preset.label(standing)} ({standing})"
+    if override:
+        detail += f" — override THIS task: {team_preset.label(override)} ({override})"
+    findings.append(
+        Finding(
+            "team-preset",
+            name,
+            Status.INFO,
+            f"{detail}; verify={team_preset.verify_mode(cfg)}; "
+            f"lead_may_implement={cfg['lead_may_implement']}",
+        )
+    )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [installed] — integrity checks for a pip/npm-installed build (skipped for
 # dev checkouts, which read these paths straight from the repo already).
 # ---------------------------------------------------------------------------
@@ -3548,6 +3637,8 @@ def run_all_checks() -> list[Finding]:
         ("check_plugins", check_plugins),
         ("check_mcps", check_mcps),
         ("check_projects", check_projects),
+        ("check_roles", check_roles),
+        ("check_team_preset", check_team_preset),
         ("check_providers", check_providers),
         ("check_provider_isolation", check_provider_isolation),
         ("check_provider_capabilities", check_provider_capabilities),

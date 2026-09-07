@@ -605,6 +605,80 @@ provider ต่อไปนี้ใช้ไม่ได้ → **Claude รั
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """
+    # #510: roles toggled OFF in THIS project's Settings → Providers & Roles
+    # (`pipeline_config.rolesEnabled` — a whole role gone from the roster, not
+    # to be confused with the provider-availability substitution above, which
+    # keeps the role slot but swaps its backing CLI). `orchestrator.assign`
+    # rejects these outright, so Lead must know up front instead of
+    # discovering it from a rejected assign mid-task. Suppressed when every
+    # role is enabled (the default) to save tokens on every normal spawn.
+    from .pipeline_config import disabled_roles as _disabled_roles
+
+    _project_disabled_roles = _disabled_roles(project=name) if name else []
+    if _project_disabled_roles:
+        _disabled_roles_str = ", ".join(_project_disabled_roles)
+        _qa_gate_note = ""
+        if "qa" in _project_disabled_roles:
+            _qa_gate_note = (
+                "\n\n**QA ปกติเป็นปุ่มจบ (final gate) — โปรเจคนี้ปิด QA:** ห้าม "
+                "`takkub assign --role qa` (จะถูก reject) — พอ dev work เสร็จ (auto-chain "
+                "handoff หรือ manual) ให้ **ข้ามขั้น QA แล้วบอก user ตรงๆ ว่าไม่มี gate "
+                "อัตโนมัติสำหรับโปรเจคนี้** (แนะนำเปิด QA ที่ Settings หรือทดสอบเอง) "
+                "ห้ามเงียบเหมือนไม่มีอะไรเกิดขึ้น"
+            )
+        suffix += f"""
+
+---
+
+## 🚫 Role ที่ปิดในโปรเจคนี้ (Settings → Providers & Roles)
+
+**ปิดอยู่:** {_disabled_roles_str}
+
+ห้าม `takkub assign --role <role ที่ปิด>` (ถูก reject พร้อมเหตุผลเสมอ ไม่ substitute เงียบ) และห้ามเสนอ role เหล่านี้ในแผนงาน — ใช้ role อื่นที่เปิดอยู่แทน หรือถ้าไม่มี role ที่เหมาะ ให้บอก user ว่าไม่มี role ที่เปิดรับงานนี้{_qa_gate_note}
+
+Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] role <name> ENABLED/DISABLED (this project)` message
+"""
+    # #512: team preset — the project's fixed team-size switch (a per-task
+    # override, from `takkub assign --role lead --team ...`, wins over the
+    # project's standing preset; see `team_preset.current`). Suppressed
+    # under "auto" (the default — nothing fixed to tell Lead about beyond
+    # what routing_planner already suggests per-task) to save tokens on
+    # every normal spawn, same pattern as the Pro-plan/PARALLEL blocks below.
+    from . import team_preset as _team_preset
+
+    _tp_cfg = _team_preset.current(project=name) if name else None
+    if _tp_cfg is not None and _tp_cfg["preset"] != "auto":
+        _tp_verify = _team_preset.verify_mode(_tp_cfg)
+        if _tp_cfg["lead_may_implement"]:
+            _tp_rule = (
+                "**คุณ (Lead) แก้โค้ดในโปรเจคนี้ได้เอง** (Edit/Write ไม่ถูกบล็อก) — "
+                "อ่าน → แก้ → **ทดสอบเอง** (targeted test/screenshot ตามที่โปรเจคมี) → "
+                "รายงาน user **ห้าม `takkub assign`/spawn teammate ใดๆ**"
+                if _tp_verify == "self"
+                else (
+                    "**คุณ (Lead) แก้โค้ดในโปรเจคนี้ได้เอง** — อ่าน → แก้ → ทดสอบเบื้องต้น → "
+                    f"แล้ว `takkub assign --role {_team_preset.CHECKER_ROLES.get(_tp_verify, _tp_verify)}` "
+                    "ให้ตรวจอย่างเดียว (อ่าน+รายงาน ไม่แก้โค้ด) — ห้าม spawn role ทำงานอื่น"
+                )
+            )
+        else:
+            _tp_rule = (
+                "**ห้ามแก้โค้ดโปรเจคเอง** (นโยบายเดิม) — มอบหมายผ่าน `takkub assign` "
+                "ตามปกติ; QA/checker ปิดท้ายเป็น gate สุดท้ายเสมอ"
+            )
+        suffix += f"""
+
+---
+
+## 👥 Team preset (#512): {_team_preset.label(_tp_cfg["preset"])}
+
+โปรเจคนี้ตั้งขนาดทีมเป็น **{_team_preset.label(_tp_cfg["preset"])}** (verify: {_tp_verify})
+
+{_tp_rule}
+
+Override เฉพาะงานถัดไป: `takkub assign --role lead --team <solo-lead|pair|full|auto> "task"`
+Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] team preset ...` message
+"""
     # Append account-plan note ONLY under Pro (Max is the default and behaves
     # exactly as before — emitting nothing there saves tokens on every spawn).
     # A Pro owner can't reach the 1M-context model variant (usage-credits
@@ -781,7 +855,29 @@ def render_lead_settings(project: str) -> pathlib.Path:
 
     Idempotent: regenerates the file on every call so path changes in
     projects.json are picked up on the next Lead spawn.
+
+    #512: a team preset with ``lead_may_implement=True`` (solo-lead/pair, or
+    a custom preset that opts in) lifts this deny-list entirely — the whole
+    point of "ทำเอง"/"คู่" is Lead editing the project itself. Read via the
+    per-task override same as the prompt-text block above, so an
+    `assign --team` override takes effect at the Lead's NEXT spawn just like
+    a preset change from Settings does.
     """
+    from .team_preset import lead_may_implement as _lead_may_implement
+
+    if _lead_may_implement(project):
+        settings = {
+            "permissions": {
+                "allow": list(_LEAD_GUARD_ALLOW_TOOLS) + list(_LEAD_GUARD_WRITE_TOOLS),
+                "deny": [],
+                "defaultMode": "acceptEdits",
+            }
+        }
+        ensure_runtime()
+        out = RUNTIME_DIR / f"lead-guard-{safe_segment(project)}.json"
+        out.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        return out
+
     roots = _allowed_project_roots(project)
     deny_rules: list[str] = []
     for root in roots:

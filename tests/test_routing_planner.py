@@ -804,6 +804,72 @@ class TestDisabledProviders:
         assert action_none.cross_check == action_empty.cross_check == ["codex"]
 
 
+class TestDisabledRoles:
+    """#510: a role OFF in Settings → Providers & Roles (`disabled_roles`
+    context) has NO substitute — unlike a disabled provider (claude backs the
+    same slot), a disabled role must never be proposed/fired at all."""
+
+    def test_explicit_disabled_role_not_fired(self):
+        action = classify(
+            "ให้ qa ทำ test นี้",
+            context={"disabled_roles": {"qa"}},
+        )
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+        assert "qa" in action.reason and "ปิด" in action.reason
+
+    def test_oneshot_disabled_role_not_fired(self):
+        action = classify(
+            "ขอ codex review function นี้",
+            context={"disabled_roles": {"codex"}},
+        )
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+
+    def test_disabled_primary_role_not_proposed(self):
+        """'test the login flow' routes to qa; qa disabled → no proposal."""
+        action = classify("test the login flow", context={"disabled_roles": {"qa"}})
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+        assert "qa" in action.reason
+
+    def test_disabled_cross_check_role_dropped_not_refused(self):
+        """Refactor proposes backend + codex cross-check; codex disabled as a
+        ROLE (not just provider) → dropped from cross_check, backend still fires."""
+        action = classify(
+            "refactor the auth module to use the new session helper",
+            context={"disabled_roles": {"codex"}},
+        )
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "backend"
+        assert action.cross_check is None
+
+    def test_multirole_split_one_disabled_falls_back_to_other(self):
+        """UI+API implementation normally proposes frontend+backend; backend
+        role disabled → collapses to a single frontend proposal."""
+        action = classify(
+            "add a login form component that calls the backend API endpoint",
+            context={"disabled_roles": {"backend"}},
+        )
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "frontend"
+        assert action.roles is None
+
+    def test_multirole_split_both_disabled_no_proposal(self):
+        action = classify(
+            "add a login form component that calls the backend API endpoint",
+            context={"disabled_roles": {"frontend", "backend"}},
+        )
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+
+    def test_none_disabled_roles_is_backward_compat(self):
+        action_none = classify("test the login flow")
+        action_empty = classify("test the login flow", context={"disabled_roles": set()})
+        assert action_none.kind == action_empty.kind == ActionKind.PROPOSE
+        assert action_none.role == action_empty.role == "qa"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Explain / review the system → HTML explainer
 # ─────────────────────────────────────────────────────────────────────

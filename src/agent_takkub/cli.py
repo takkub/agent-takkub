@@ -561,6 +561,20 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     model = (getattr(args, "model", None) or "").strip() or None
     provider = (getattr(args, "provider", None) or "").strip().lower() or None
     effort = (getattr(args, "effort", None) or "").strip().lower() or None
+    team = (getattr(args, "team", None) or "").strip().lower() or None
+    if team and args.role != "lead":
+        return {
+            "ok": False,
+            "msg": "--team override ใช้ได้เฉพาะ --role lead (#512) — set project preset จาก Settings แทนสำหรับ role อื่น",
+        }
+    if team:
+        from .team_preset import PRESET_IDS
+
+        if team not in PRESET_IDS or team == "custom":
+            return {
+                "ok": False,
+                "msg": f"--team must be one of {', '.join(p for p in PRESET_IDS if p != 'custom')}",
+            }
     if mode == "subagent" and model:
         return {
             "ok": False,
@@ -657,6 +671,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "effort": effort,
                     "feature": getattr(args, "feature", "") or "",
                     "mode": mode_requested,
+                    "team": team,
                 }
             )
         )
@@ -689,6 +704,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "effort": effort,
                         "feature": getattr(args, "feature", "") or "",
                         "mode": mode_requested,
+                        "team": team,
                     }
                 )
             )
@@ -739,6 +755,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "effort": effort,
                 "feature": getattr(args, "feature", "") or "",
                 "mode": mode,
+                "team": team,
             }
         )
     )
@@ -1391,6 +1408,54 @@ def cmd_preview(args: argparse.Namespace) -> dict:
         else:
             print("  (no open preview)")
     return resp
+
+
+def cmd_team(args: argparse.Namespace) -> dict:
+    """`takkub team status|set|clear-override` (#512) — project team preset.
+
+    `status` reads `team_preset.json` directly (no cockpit/IPC needed — same
+    "works even without a live cockpit" shape as `doctor`), so it's usable in
+    scripts/CI without a running pane. `set`/`clear-override` change the
+    LIVE orchestrator's state (so a running Lead pane gets the `[system]`
+    broadcast) and therefore round-trip through the socket like `assign`.
+    """
+    from . import team_preset
+
+    action = args.team_action
+    project = _from_project()
+    if action == "status":
+        cfg = team_preset.current(project)
+        standing = team_preset.current_preset_id(project)
+        override = team_preset.active_override(project)
+        print(f"  project={project or '(default)'}")
+        print(f"  standing preset: {team_preset.label(standing)} ({standing})")
+        if override:
+            print(f"  active override (this task): {team_preset.label(override)} ({override})")
+        print(f"  effective: {team_preset.label(cfg['preset'])} ({cfg['preset']})")
+        print(f"  roles: {cfg['roles']}")
+        print(f"  checker: {cfg['checker'] or '(none — self-verify)'}")
+        print(f"  lead_may_implement: {cfg['lead_may_implement']}")
+        print(f"  template: {cfg['template']}  exec_mode: {cfg['exec_mode']}")
+        return {"ok": True, "msg": "ok", **cfg, "standing": standing, "override": override}
+    if action == "set":
+        preset = str(args.preset).strip().lower()
+        if preset == "custom":
+            return {
+                "ok": False,
+                "msg": "custom preset needs a roles/checker payload — use Settings, not this CLI",
+            }
+        if preset not in team_preset.PRESET_IDS:
+            return {
+                "ok": False,
+                "msg": f"--preset must be one of {', '.join(team_preset.PRESET_IDS)}",
+            }
+        return _request(
+            _with_project({"cmd": "team", "action": "set", "preset": preset, "from": _from_role()})
+        )
+    # clear-override
+    return _request(
+        _with_project({"cmd": "team", "action": "clear-override", "from": _from_role()})
+    )
 
 
 def cmd_design_integrations(args: argparse.Namespace) -> dict:
@@ -3928,6 +3993,16 @@ def main(argv: list[str] | None = None) -> int:
         "already-running pane keeps its current effort",
     )
     sa.add_argument(
+        "--team",
+        default=None,
+        metavar="PRESET",
+        help="one-task team-preset override (#512), --role lead only: "
+        "solo-lead|pair|full|auto. Sets the project's active override "
+        "(wins over the project's standing preset until cleared/reassigned) "
+        "and prepends a [system] notice to this task's text. Not 'custom' — "
+        "that needs a roles/checker payload this one-line flag can't carry.",
+    )
+    sa.add_argument(
         "task",
         nargs="?",
         default=None,
@@ -4272,6 +4347,20 @@ def main(argv: list[str] | None = None) -> int:
     spv_close.set_defaults(func=cmd_preview)
     spv_status = spv_sub.add_parser("status", help="show this project's preview state")
     spv_status.set_defaults(func=cmd_preview)
+
+    steam = sub.add_parser(
+        "team", help="project team preset — #512 (solo-lead/pair/full/custom/auto)"
+    )
+    steam_sub = steam.add_subparsers(dest="team_action", required=True)
+    steam_status = steam_sub.add_parser("status", help="show this project's effective team preset")
+    steam_status.set_defaults(func=cmd_team)
+    steam_set = steam_sub.add_parser("set", help="set this project's standing team preset")
+    steam_set.add_argument("preset", choices=("solo-lead", "pair", "full", "auto"))
+    steam_set.set_defaults(func=cmd_team)
+    steam_clear = steam_sub.add_parser(
+        "clear-override", help="clear this project's active per-task team-preset override"
+    )
+    steam_clear.set_defaults(func=cmd_team)
 
     sdz = sub.add_parser(
         "design", help="design artifact registry — publish/approve/revise (#365 phase 5)"
@@ -5344,6 +5433,13 @@ def main(argv: list[str] | None = None) -> int:
     elif "status" in resp:
         for role, state in resp["status"].items():
             print(f"  {role:12s} {state}")
+        # #510: roles OFF in Settings → Providers & Roles for this project —
+        # assign() rejects these, so surface it right on the command Lead/
+        # user checks most often instead of only discovering it via a
+        # rejected assign or a separate `takkub doctor` run.
+        disabled = resp.get("disabled_roles")
+        if disabled:
+            print(f"  (disabled in Settings: {', '.join(disabled)})")
     msg = resp.get("msg", "")
     if msg:
         print(("ok: " if ok else "err: ") + msg)

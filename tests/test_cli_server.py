@@ -74,12 +74,14 @@ class _FakeOrch:
         provider=None,
         effort=None,
         mode="pane",
+        team=None,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
         self.last_assign_provider = provider
         self.last_assign_effort = effort
         self.last_assign_mode = mode
+        self.last_assign_team = team
         return True, "ok"
 
     def subagent_done(self, role, note="", project=None, failed=False):
@@ -851,6 +853,115 @@ class TestSyncWorktreeCollisionCheck:
         srv._dispatch(
             sock,
             _auth({"cmd": "assign", "role": "backend", "task": "x", "isolation": "worktree"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert len(orch.assign_calls) == 1
+
+
+class TestSyncRoleEnabledCheck:
+    """#510: a role toggled OFF in Settings → Providers & Roles must be
+    rejected synchronously, before the "task queued" ack — assign()/spawn()
+    run deferred off a QTimer, so without this pre-check the caller would see
+    a false ok=True while the pane never spawns."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_pipeline_config(self, tmp_path, monkeypatch):
+        import agent_takkub.pipeline_config as pipeline_config
+
+        monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+        monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+        return pipeline_config
+
+    def _disable_role(self, pipeline_config, role: str, project: str | None = None) -> None:
+        payload = pipeline_config.load(project)
+        payload["rolesEnabled"][role] = False
+        pipeline_config.save(payload, project)
+
+    def test_assign_rejects_disabled_role_before_ack(
+        self, qapp: QCoreApplication, _isolate_pipeline_config
+    ) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa", project="myproject")
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "qa", "task": "x", "from_project": "myproject"}),
+        )
+
+        r = _replies(sock)
+        assert len(r) == 1
+        assert r[0]["ok"] is False
+        assert "qa" in r[0]["msg"] and "ปิด" in r[0]["msg"]
+        qapp.processEvents()
+        assert orch.assign_calls == [], "disabled role must never reach assign(), even async"
+
+    def test_spawn_rejects_disabled_role_before_ack(
+        self, qapp: QCoreApplication, _isolate_pipeline_config
+    ) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa", project="myproject")
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "spawn", "role": "qa", "from_project": "myproject"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is False
+        qapp.processEvents()
+        assert orch.spawn_calls == []
+
+    def test_disabled_role_shard_suffix_also_rejected(
+        self, qapp: QCoreApplication, _isolate_pipeline_config
+    ) -> None:
+        self._disable_role(_isolate_pipeline_config, "qa", project="myproject")
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "qa#2", "task": "x", "from_project": "myproject"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is False
+        qapp.processEvents()
+        assert orch.assign_calls == []
+
+    def test_other_project_unaffected(
+        self, qapp: QCoreApplication, _isolate_pipeline_config
+    ) -> None:
+        """rolesEnabled is per-project — disabling qa in 'myproject' must not
+        affect a different project."""
+        self._disable_role(_isolate_pipeline_config, "qa", project="myproject")
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "qa", "task": "x", "from_project": "otherproject"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert len(orch.assign_calls) == 1
+
+    def test_enabled_role_proceeds_normally(
+        self, qapp: QCoreApplication, _isolate_pipeline_config
+    ) -> None:
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "x", "from_project": "myproject"}),
         )
 
         assert _replies(sock)[0]["ok"] is True

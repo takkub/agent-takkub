@@ -1372,6 +1372,14 @@ class SettingsWindow(
             pipeline_config.save(payload, self._project)
             self._pipeline_payload = pipeline_config.load(self._project)
 
+            # #512 acceptance: hand-toggling a role here while the project
+            # sits on a FIXED team preset flips it to "custom" (carrying the
+            # other resolved fields along) so the preset doesn't silently
+            # overwrite the user's manual choice on its next apply.
+            from . import team_preset as _team_preset
+
+            _team_preset.note_manual_roles_change(roles_enabled, self._project)
+
             updated_mcps = pane_tools_dialog.matrix_to_role_items(
                 {
                     role: {item: t.isChecked() for item, t in items.items()}
@@ -2021,7 +2029,7 @@ class SettingsWindow(
         if show_enable_toggle:
             toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
             toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
-            toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม")
+            toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม — ปิดแล้ว assign จะถูกปฏิเสธ")
             toggle.toggled.connect(self._mark_dirty)
             row_lay.addWidget(toggle)
             self._role_toggles[role] = toggle

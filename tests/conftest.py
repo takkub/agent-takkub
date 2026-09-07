@@ -611,6 +611,26 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if _m is not None and hasattr(_m, _attr):
             monkeypatch.setattr(_m, _attr, tmp_path / "_isolated_takkub" / _fname, raising=False)
 
+    # #510: pipeline_config._PATH / _BASE_DIR are the same import-time-bound-
+    # to-SETTINGS_HOME shape as the constants above — missed by the 2026-08-23
+    # audit because nothing on the hot path read pipelines.json back then.
+    # orchestrator.assign()'s new rolesEnabled enforcement (#510) now calls
+    # pipeline_config.is_role_enabled() on every assign, so any orchestrator
+    # test exercising assign() without its own isolation would silently read
+    # (and a settings_window/pipeline test would silently write) the REAL
+    # ~/.takkub/pipelines.json / projects/<slug>/pipelines.json on the machine
+    # running the suite — same class of bug the audit above fixed for
+    # provider-models.json et al. _BASE_DIR also has to move (not just _PATH)
+    # since per-project files live under `_BASE_DIR / "projects" / <slug>`.
+    pc_mod = _maybe_module("agent_takkub.pipeline_config", force=True)
+    if pc_mod is not None:
+        if hasattr(pc_mod, "_PATH"):
+            monkeypatch.setattr(
+                pc_mod, "_PATH", tmp_path / "_isolated_takkub" / "pipelines.json", raising=False
+            )
+        if hasattr(pc_mod, "_BASE_DIR"):
+            monkeypatch.setattr(pc_mod, "_BASE_DIR", tmp_path / "_isolated_takkub", raising=False)
+
     # CUSTOM_AGENTS_DIR (a directory of <role>.md files, not a single json
     # file) is bound the same way in BOTH config.py and custom_roles.py
     # (`from .config import CUSTOM_AGENTS_DIR`) — custom_roles.create_role()

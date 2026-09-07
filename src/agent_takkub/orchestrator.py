@@ -1274,6 +1274,9 @@ class Orchestrator(
     # main_window listens to repaint the plan chip without polling.
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
     execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
+    # Emitted when a project's team preset (#512) changes — status-bar chip
+    # and Settings listen to repaint without polling. (project, preset_id)
+    teamPresetChanged = pyqtSignal(str, str)
     # Emitted when user flips the auto-resume (🌙) toggle via the status bar.
     # main_window listens to repaint the chip without polling.
     autoResumeChanged = pyqtSignal(bool)
@@ -2316,6 +2319,7 @@ class Orchestrator(
         provider: str | None = None,
         effort: str | None = None,
         mode: str = "pane",
+        team: str | None = None,
         _resource_token: ResourceToken | None = None,
         worktree_prepared: tuple | None = None,
     ) -> tuple[bool, str]:
@@ -2323,9 +2327,58 @@ class Orchestrator(
         `WorktreeManager.create` the caller already ran OFF the Qt thread
         (`cli_server` does this for `--isolation worktree`, fed by
         `worktree_assign_inputs`). When given, `_assign_with_worktree` uses
-        it instead of running `git worktree add` inline on the main thread."""
+        it instead of running `git worktree add` inline on the main thread.
+
+        *team* (#512 item 4): a per-task team-preset OVERRIDE — only
+        meaningful with ``role_name == "lead"`` (``takkub assign --role lead
+        --team <preset> "task"``). Sets the project's active override
+        (`team_preset.set_override`) and prepends a `[system]` notice ahead
+        of *task* so the Lead sees it in the same message; ignored for every
+        other role (spawning a teammate doesn't change the project's size)."""
         if mode not in {"pane", "subagent"}:
             return False, "mode must be pane or subagent"
+        # #510: enforce the Settings → Providers & Roles on/off toggle at the
+        # single choke point both pane and subagent assigns pass through —
+        # checked before mode branches so neither path silently substitutes a
+        # disabled role. `pipeline_config.is_role_enabled` strips any "#N"
+        # shard suffix itself, so `qa#2` reads as disabled when `qa` is.
+        role_check_project_ns = self._resolve_project(project)
+        from .pipeline_config import is_role_enabled
+
+        if not is_role_enabled(role_name, role_check_project_ns):
+            base_role_disabled = role_name.split("#", 1)[0].strip().lower()
+            return False, (
+                f"role {base_role_disabled} ถูกปิดใน Settings ของโปรเจคนี้ "
+                f"({role_check_project_ns}) — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+            )
+        # #512: a role the project's (or the task's override) team preset
+        # doesn't include in its roster never reaches spawn() — same choke
+        # point as the #510 check just above. `lead`/providers/`shell`/
+        # `critic` are never governed (see `team_preset.can_spawn`).
+        from .team_preset import can_spawn as _team_can_spawn
+
+        _team_spawn_ok, _team_spawn_msg = _team_can_spawn(role_name, role_check_project_ns)
+        if not _team_spawn_ok:
+            return False, _team_spawn_msg
+
+        if team is not None:
+            if role_name != LEAD.name:
+                return False, "--team override ใช้ได้เฉพาะ --role lead"
+            from . import team_preset
+
+            try:
+                cfg = team_preset.set_override(team, role_check_project_ns)
+            except ValueError as exc:
+                return False, str(exc)
+            _log_event(
+                "team_preset_override_set", project=role_check_project_ns, preset=cfg["preset"]
+            )
+            notice = (
+                f"[system] team preset (งานนี้) → {team_preset.label(cfg['preset'])} "
+                f"— verify: {team_preset.verify_mode(cfg)}, "
+                f"lead แก้โค้ดเองได้: {'ใช่' if cfg['lead_may_implement'] else 'ไม่'}\n\n"
+            )
+            task = notice + task
         if mode == "subagent":
             if model:
                 return False, "model override is not supported in subagent mode"
@@ -4531,6 +4584,40 @@ class Orchestrator(
         _log_event("provider_toggled", provider=provider, disabled=disabled)
         return True, f"{provider} {word.lower()}"
 
+    def notify_roles_changed(self, project: str | None, changes: dict[str, bool]) -> None:
+        """Broadcast a `[system] role <name> ENABLED/DISABLED (this project)`
+        notice into *project*'s live Lead pane after Settings → Providers &
+        Roles flips `rolesEnabled` (#510). ``changes`` = ``{role: disabled}``
+        for every role whose on/off state actually changed.
+
+        Unlike ``toggle_provider`` (a global provider on/off, broadcast to
+        every project's Lead) this is scoped to the ONE project whose
+        ``pipelines.json`` changed — ``rolesEnabled`` is per-project. Best
+        effort / fire-and-forget: a Lead that isn't alive right now picks up
+        the fresh roster from `lead_context` on its next spawn regardless.
+        """
+        if not changes:
+            return
+        project_ns = self._resolve_project(project)
+        lines = [
+            f"[system] role {role} {'DISABLED' if disabled else 'ENABLED'} (this project)."
+            + (
+                " orchestrator.assign will reject it — do not propose/fire it."
+                if disabled
+                else " assignable again."
+            )
+            for role, disabled in sorted(changes.items())
+        ]
+        notice = "\n".join(lines)
+        panes = self._panes_by_project.get(project_ns, {})
+        lead = panes.get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            _roles_sess = lead.session
+            _roles_sess.write(notice)
+            _delayed_enter(lead, _roles_sess, 150)
+            self.leadInjected.emit(notice)
+        _log_event("roles_enabled_changed", project=project_ns, changes=changes)
+
     def set_plan_tier(self, tier: str) -> tuple[bool, str]:
         """Set the account plan (pro/max) globally and persist it.
 
@@ -4624,6 +4711,67 @@ class Orchestrator(
         self.execModeChanged.emit(mode)
         _log_event("exec_mode_set", mode=mode)
         return True, f"execution mode set to {mode}"
+
+    def set_team_preset(
+        self, preset_id: str, project: str | None = None, *, custom: dict | None = None
+    ) -> tuple[bool, str]:
+        """Set this PROJECT's standing team preset (#512) — unlike plan tier
+        and exec mode, team size is per-project, not global, so the broadcast
+        below only reaches that project's own Lead pane, not every tab's.
+
+        Returns (ok, message). Fails only on an unknown preset id (or a
+        missing/invalid `custom` payload when `preset_id == "custom"`, via
+        the ValueError `team_preset.set_current` raises).
+        """
+        from . import team_preset
+
+        project_ns = self._resolve_project(project)
+        try:
+            cfg = team_preset.set_current(preset_id, project_ns, custom=custom)
+        except ValueError as exc:
+            return False, str(exc)
+
+        notice = (
+            f"[system] team preset (โปรเจคนี้) → {team_preset.label(cfg['preset'])} "
+            f"— verify: {team_preset.verify_mode(cfg)}, "
+            f"lead แก้โค้ดเองได้: {'ใช่' if cfg['lead_may_implement'] else 'ไม่'}"
+        )
+
+        panes = self._panes_by_project.get(project_ns, {})
+        lead = panes.get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            _tp_sess = lead.session
+            _tp_sess.write(notice)
+            _delayed_enter(lead, _tp_sess, 150)
+            self.leadInjected.emit(notice)
+
+        self.teamPresetChanged.emit(project_ns, cfg["preset"])
+        _log_event("team_preset_set", project=project_ns, preset=cfg["preset"])
+        return True, f"team preset set to {cfg['preset']}"
+
+    def clear_team_preset_override(self, project: str | None = None) -> tuple[bool, str]:
+        """Clear this project's active per-task team-preset override (#512
+        item 4), restoring the standing preset. Always succeeds."""
+        from . import team_preset
+
+        project_ns = self._resolve_project(project)
+        cfg = team_preset.clear_override(project_ns)
+
+        panes = self._panes_by_project.get(project_ns, {})
+        lead = panes.get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            notice = (
+                f"[system] team preset override cleared — กลับไปใช้ค่าโปรเจค "
+                f"({team_preset.label(cfg['preset'])})"
+            )
+            _co_sess = lead.session
+            _co_sess.write(notice)
+            _delayed_enter(lead, _co_sess, 150)
+            self.leadInjected.emit(notice)
+
+        self.teamPresetChanged.emit(project_ns, cfg["preset"])
+        _log_event("team_preset_override_cleared", project=project_ns, preset=cfg["preset"])
+        return True, f"team preset override cleared (standing: {cfg['preset']})"
 
     @staticmethod
     def _uncommitted_warning(from_role: str, porcelain_out: str) -> str | None:

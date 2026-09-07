@@ -624,6 +624,48 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
+                # #510: same "reply synchronously, don't just let the deferred
+                # orch.assign()/spawn() reject it" reasoning as the cwd/
+                # worktree-collision pre-checks below — a disabled role's
+                # spawn is fired off the QTimer AFTER the "queued" ack goes
+                # out, so without this the caller sees a false ok=True.
+                from .pipeline_config import is_role_enabled
+
+                _resolve_project_role = getattr(self._orch, "_resolve_project", None)
+                project_ns_role = (
+                    _resolve_project_role(from_project)
+                    if _resolve_project_role is not None
+                    else None
+                )
+                if not isinstance(project_ns_role, str):
+                    # A stub orchestrator without a real `_resolve_project`
+                    # (or one returning something un-project-like, e.g. a
+                    # bare `MagicMock()` in tests) degrades to the same
+                    # "default namespace" fallback the cwd-validation
+                    # pre-check above uses, rather than handing a non-string
+                    # into pipeline_config's on-disk path resolution.
+                    project_ns_role = from_project or "default"
+                if not is_role_enabled(str(role), project_ns_role):
+                    base_role_disabled = str(role).split("#", 1)[0].strip().lower()
+                    self._reply(
+                        sock,
+                        ok=False,
+                        msg=(
+                            f"role {base_role_disabled} ถูกปิดใน Settings ของโปรเจคนี้ "
+                            f"({project_ns_role}) — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+                        ),
+                    )
+                    return
+                # #512: same "reply synchronously" reasoning as the #510 check
+                # just above — a role the project's team preset doesn't
+                # include in its roster never reaches the deferred assign()/
+                # spawn() either.
+                from .team_preset import can_spawn as _team_can_spawn_precheck
+
+                _team_ok, _team_msg = _team_can_spawn_precheck(str(role), project_ns_role)
+                if not _team_ok:
+                    self._reply(sock, ok=False, msg=_team_msg)
+                    return
                 # #143: cwd escaping the project's configured paths used to be
                 # caught only inside spawn() — which runs AFTER the "task
                 # queued" ack below (async, next event-loop tick). The Lead
@@ -757,6 +799,7 @@ class CliServer(QObject):
                         project=from_project,
                         feature=str(req.get("feature", "") or ""),
                         mode=mode,
+                        team=(str(req.get("team", "") or "").strip().lower() or None),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -791,6 +834,7 @@ class CliServer(QObject):
                         model=(str(req.get("model", "") or "").strip() or None),
                         provider=(str(req.get("provider", "") or "").strip().lower() or None),
                         effort=(str(req.get("effort", "") or "").strip().lower() or None),
+                        team=(str(req.get("team", "") or "").strip().lower() or None),
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
@@ -990,7 +1034,27 @@ class CliServer(QObject):
                     if model:
                         state = f"{state} [{model}]"
                     status[role] = state
-                self._reply(sock, ok=True, msg="status", status=status)
+                # #510: surface roles OFF in Settings → Providers & Roles for
+                # this project right on `takkub list` — the command Lead/user
+                # checks most often — instead of only via `takkub doctor` or
+                # a rejected assign.
+                from .pipeline_config import disabled_roles as _disabled_roles_fn
+
+                _resolve_project_list = getattr(self._orch, "_resolve_project", None)
+                project_ns_list = (
+                    _resolve_project_list(from_project)
+                    if _resolve_project_list is not None
+                    else None
+                )
+                if not isinstance(project_ns_list, str):
+                    project_ns_list = from_project or "default"
+                self._reply(
+                    sock,
+                    ok=True,
+                    msg="status",
+                    status=status,
+                    disabled_roles=_disabled_roles_fn(project=project_ns_list),
+                )
                 return
             elif cmd == "instance-identity":
                 # #354: read-only, same trust level as `list` — lets
@@ -1273,6 +1337,22 @@ class CliServer(QObject):
                     device=req.get("device"),
                 )
                 self._reply(sock, ok=ok_p, msg=msg_p, **payload_p)
+                return
+            elif cmd == "team":
+                # #512: `takkub team set|clear-override` — round-trips through
+                # the socket (unlike `status`, read directly by the CLI) so a
+                # LIVE Lead pane gets the `[system]` broadcast this project's
+                # orchestrator instance owns.
+                team_action = req.get("action", "")
+                if team_action == "set":
+                    ok_t, msg_t = self._orch.set_team_preset(
+                        req.get("preset", ""), project=from_project
+                    )
+                elif team_action == "clear-override":
+                    ok_t, msg_t = self._orch.clear_team_preset_override(project=from_project)
+                else:
+                    ok_t, msg_t = False, f"unknown team action: {team_action!r}"
+                self._reply(sock, ok=ok_t, msg=msg_t)
                 return
             elif cmd == "design":
                 design_action = req.get("action", "")

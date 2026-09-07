@@ -1925,3 +1925,92 @@ class TestRequestDeadline:
         result = cli._request({"cmd": "assign"})
 
         assert result == {"ok": True, "msg": "done"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #512: `--team` assign override + `takkub team` subcommand
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestAssignTeamFlag:
+    def test_team_flag_forwarded_for_lead(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "lead", "--team", "solo-lead", "fix a typo"])
+        assert fake_request[-1]["team"] == "solo-lead"
+
+    def test_team_flag_rejected_for_non_lead_role(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(["assign", "--role", "backend", "--team", "solo-lead", "do work"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_team_flag_rejects_custom(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(["assign", "--role", "lead", "--team", "custom", "do work"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_team_flag_rejects_unknown_preset(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(["assign", "--role", "lead", "--team", "nonsense", "do work"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_omitted_team_flag_defaults_to_none(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "lead", "do work"])
+        assert fake_request[-1]["team"] is None
+
+    def test_team_flag_forwarded_on_shard_fanout(self, fake_request: list[dict[str, Any]]) -> None:
+        # --team is only meaningful for --role lead, but a fan-out shard key
+        # (e.g. "lead#1") still starts with the base role — assert the field
+        # rides along on every shard request regardless.
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "reviewer",
+                "--mode",
+                "subagent",
+                "--shards",
+                "2",
+                "scan",
+            ]
+        )
+        assert all(p["team"] is None for p in fake_request)
+
+
+class TestTeamCommand:
+    @pytest.fixture(autouse=True)
+    def _isolate_team_preset(self, tmp_path, monkeypatch):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_from_project", lambda: "proj")
+        monkeypatch.setattr(cli, "_from_role", lambda: "lead")
+
+    def test_status_reads_directly_without_request(
+        self, fake_request: list[dict[str, Any]], capsys
+    ) -> None:
+        rc = cli.main(["team", "status"])
+        assert rc == 0
+        assert fake_request == []  # pure local read, no socket round-trip
+        out = capsys.readouterr().out
+        assert "auto" in out
+
+    def test_set_round_trips_through_request(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["team", "set", "solo-lead"])
+        assert fake_request[-1] == {
+            "cmd": "team",
+            "action": "set",
+            "preset": "solo-lead",
+            "from": "lead",
+            "from_project": "proj",
+        }
+
+    def test_set_rejects_custom_without_request(self, fake_request: list[dict[str, Any]]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["team", "set", "custom"])
+        assert fake_request == []
+
+    def test_clear_override_round_trips_through_request(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        cli.main(["team", "clear-override"])
+        assert fake_request[-1]["cmd"] == "team"
+        assert fake_request[-1]["action"] == "clear-override"

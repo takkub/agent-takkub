@@ -267,9 +267,27 @@ class UserActionsMixin:
         except Exception:
             _proj = None
 
+        # #510: snapshot rolesEnabled BEFORE the dialog runs so a role
+        # toggled off/on can be diffed after Save & Apply and broadcast to a
+        # live Lead — the dialog itself only persists rolesEnabled straight
+        # to disk (no pending_* staging like the provider toggle below), so
+        # this is the one place able to notice the change without touching
+        # the Settings page widget itself.
+        from . import pipeline_config as _pipeline_config
+
+        _roles_before = dict(_pipeline_config.load(_proj).get("rolesEnabled", {}))
+
         dlg = SettingsWindow(self, project=_proj, initial_view=initial_view)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
+        _roles_after = dict(_pipeline_config.load(_proj).get("rolesEnabled", {}))
+        _role_disabled_changes = {
+            role: (not enabled)
+            for role, enabled in _roles_after.items()
+            if _roles_before.get(role, True) != enabled
+        }
+        if _role_disabled_changes:
+            self.orch.notify_roles_changed(_proj, _role_disabled_changes)
         # Same apply pattern as _open_pipeline_settings_dialog: only route
         # providers whose target state differs from disk through
         # orchestrator.toggle_provider (it always broadcasts, so a no-op call

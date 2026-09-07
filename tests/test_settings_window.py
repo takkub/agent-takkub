@@ -30,6 +30,7 @@ from agent_takkub import (
     settings_window,
     shared_dev_tools,
     skill_policy,
+    team_preset,
     user_profile,
 )
 from agent_takkub import roles as roles_mod
@@ -45,6 +46,7 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+    monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
     monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
@@ -425,6 +427,29 @@ class TestProvidersRolesView:
         assert payload["rolesEnabled"]["qa"] is False
         assert provider_config.provider_for("backend") == "codex"
         assert dlg.result() == QDialog.DialogCode.Accepted
+        dlg.deleteLater()
+
+    def test_save_apply_hand_toggle_flips_fixed_team_preset_to_custom(self) -> None:
+        """#512 acceptance: hand-toggling a role on this page while the
+        project sits on a fixed team preset flips it to "custom"."""
+        team_preset.set_current("solo-lead", None)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._role_toggles["backend"].setChecked(True)
+        dlg._on_save_apply_clicked()
+
+        cfg = team_preset.current(None)
+        assert cfg["preset"] == "custom"
+        assert cfg["roles"]["backend"] is True
+        dlg.deleteLater()
+
+    def test_save_apply_matching_preset_does_not_flip_to_custom(self) -> None:
+        team_preset.set_current("full", None)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        # No role toggles changed — save with the preset's own values intact.
+        dlg._role_toggles["backend"].setChecked(True)
+        dlg._on_save_apply_clicked()
+
+        assert team_preset.current_preset_id(None) == "full"
         dlg.deleteLater()
 
     def test_save_apply_stages_provider_disable_without_writing_disk(self) -> None:
