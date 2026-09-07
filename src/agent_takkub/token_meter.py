@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 # Default context window for Claude 4 family. TAKKUB_CONTEXT_LIMIT is a
@@ -546,14 +547,29 @@ def format_tokens(n: int) -> str:
     return f"{n / 1_000_000:.1f}M"
 
 
+# Fallback = cockpit_theme's dark USAGE_* values verbatim (sync guarded by
+# tests/test_token_meter.py). Kept as literals, NOT an import: even a lazy
+# `from . import cockpit_theme` is a static edge that puts PyQt6 under
+# `agent_takkub.core` via the ingest adapter's import of this module
+# (import-linter `core-is-bottom-layer`).
+_USAGE_FALLBACK = ("#9ca3af", "#facc15", "#f97316", "#ef4444")
+
+
 def usage_color(pct: float) -> str:
     """Map a 0..1 context-fill ratio to a status colour (hex), matching the
-    palette used elsewhere in the cockpit.
+    palette used elsewhere in the cockpit — theme-aware via cockpit_theme's
+    USAGE_* tokens (#506) whenever that module is loaded (always true in the
+    GUI process), falling back to the dark values in Qt-free processes.
     """
+    theme = sys.modules.get("agent_takkub.cockpit_theme")
+    if theme is not None:
+        ramp = (theme.USAGE_NEUTRAL, theme.USAGE_WARN, theme.USAGE_HIGH, theme.USAGE_CRIT)
+    else:
+        ramp = _USAGE_FALLBACK
     if pct < 0.5:
-        return "#9ca3af"  # neutral grey
+        return ramp[0]  # neutral grey
     if pct < 0.8:
-        return "#facc15"  # yellow
+        return ramp[1]  # yellow
     if pct < 0.95:
-        return "#f97316"  # orange
-    return "#ef4444"  # red
+        return ramp[2]  # orange
+    return ramp[3]  # red

@@ -929,7 +929,11 @@ class TerminalWidget(QWidget):
 
     def _set_drop_highlight(self, active: bool) -> None:
         if active:
-            self._view.setStyleSheet("border: 2px solid #3b82f6;")
+            # Lazy import, matching this module's config imports — the theme
+            # token keeps the drop-target ring readable in both variants.
+            from . import cockpit_theme
+
+            self._view.setStyleSheet(f"border: 2px solid {cockpit_theme.STATE_INFO};")
         else:
             self._view.setStyleSheet("")
 

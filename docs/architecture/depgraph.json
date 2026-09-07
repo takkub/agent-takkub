@@ -96,6 +96,7 @@
         "agent_takkub.skill_scan",
         "agent_takkub.smoke_gate",
         "agent_takkub.status_header",
+        "agent_takkub.theme_settings",
         "agent_takkub.tidy_gate",
         "agent_takkub.update_helper",
         "agent_takkub.update_panel",
@@ -103,7 +104,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 43,
+      "fan_in": 44,
       "fan_out": 0
     },
     {
@@ -154,11 +155,13 @@
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_update_window",
+        "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.service_spawner",
+        "agent_takkub.theme_settings",
         "agent_takkub.update_worker",
         "agent_takkub.user_profile"
       ],
@@ -166,7 +169,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.auto_issue_capture",
@@ -413,6 +416,7 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.app",
         "agent_takkub.boot_update_window",
         "agent_takkub.headless_window",
         "agent_takkub.logs_panel",
@@ -421,6 +425,7 @@
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
+        "agent_takkub.remote.settings_dialog",
         "agent_takkub.settings_core_v2",
         "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.pages.mcp_page",
@@ -438,12 +443,13 @@
         "agent_takkub.settings_window",
         "agent_takkub.status_header",
         "agent_takkub.task_dock",
+        "agent_takkub.terminal_widget",
         "agent_takkub.tutorial_overlay",
         "agent_takkub.update_panel",
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 30,
+      "fan_in": 33,
       "fan_out": 0
     },
     {
@@ -580,6 +586,7 @@
         "agent_takkub.status_header",
         "agent_takkub.task_ledger",
         "agent_takkub.terminal_widget",
+        "agent_takkub.theme_settings",
         "agent_takkub.tutorial_overlay",
         "agent_takkub.update_helper",
         "agent_takkub.update_panel",
@@ -3867,12 +3874,13 @@
       "module": "agent_takkub.remote.settings_dialog",
       "imports": [
         "agent_takkub._win_console",
+        "agent_takkub.cockpit_theme",
         "agent_takkub.remote.auth",
         "agent_takkub.remote.config"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.remote.tunnel",
@@ -4568,6 +4576,7 @@
         "agent_takkub.skill_audit",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
+        "agent_takkub.theme_settings",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
@@ -4576,7 +4585,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 28
+      "fan_out": 29
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -4820,13 +4829,27 @@
     {
       "module": "agent_takkub.terminal_widget",
       "imports": [
+        "agent_takkub.cockpit_theme",
         "agent_takkub.config"
       ],
       "imported_by": [
         "agent_takkub.agent_pane"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.theme_settings",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.app",
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.tidy_gate",

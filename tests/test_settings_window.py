@@ -89,7 +89,7 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_fifteen_stacked_views(self) -> None:
+    def test_has_sixteen_stacked_views(self) -> None:
         # Settings-nav declutter (2026-08-24): 9 nav-visible views (Pipeline
         # Builder/Templates/Providers & Roles/MCP Matrix/Plugins Matrix/
         # Skill Catalog/Skill Matrix/Users/Knowledge) + New Role (reached via
@@ -97,9 +97,10 @@ class TestSettingsWindowStructure:
         # (Accounts & Pools/Routing/Brain/Scheduler/Performance) = 15. Down
         # from 21 — Role Overlap, Core V2 Overview, Core V2 Migration, and
         # OpenViking were removed outright; Knowledge/Design Tools/Context
-        # Debug collapsed into one tabbed page.
+        # Debug collapsed into one tabbed page. +1 (2026-09-07, #506): the
+        # top-level General view (theme mode) = 16.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 15
+        assert dlg._stack.count() == 16
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
