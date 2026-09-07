@@ -1,10 +1,18 @@
-"""Design tokens + QSS/widget helpers for the Takkub Cockpit Settings window.
+"""Design tokens + QSS/widget helpers for the whole Takkub Cockpit UI.
 
 Source of truth: `docs/design-review/2026-07-10-cockpit-settings-design-system.md`
 (extracted from the user's canonical `Takkub Cockpit.dc.html` design) — gold
 `#E3B341` + IBM Plex, NOT the older teal/indigo palette used elsewhere in the
-cockpit. This module is scoped to `settings_window.py` only; it does not
-reskin any other dialog.
+cockpit.
+
+Theme variants (#506): the module-level constants below ARE the live token
+values — they default to the dark set and are rebound in place by
+``apply_variant("light"|"dark")`` (see the "Theme variants" section near the
+bottom). Consumers must import the *module* (``from . import cockpit_theme``)
+and read attributes at style-build time, never ``from .cockpit_theme import
+ACCENT_GOLD`` — a from-import freezes the dark value forever. The persisted
+mode + OS detection live in :mod:`theme_settings`; this module deliberately
+never imports it so it stays a leaf.
 
 Pure-Qt leaf module: no `agent_takkub` imports beyond stdlib/PyQt6, so it is
 safe for any UI module to depend on without import-linter risk.
@@ -47,6 +55,10 @@ GROUND_SELECT = "#232732"
 # delta, so an off toggle's rounded-rect shape barely read against the card
 # behind it (design review 2026-07-24 #4, gemini + critic both flagged it).
 TOGGLE_TRACK_OFF = "#2d323e"
+# ToggleSwitch's off-track inner border, as QColor RGBA components (painted,
+# not QSS) — the white overlay that defines the shape on dark needs to flip
+# to a dark overlay on light grounds.
+TOGGLE_TRACK_EDGE_RGBA: tuple[int, int, int, int] = (255, 255, 255, 20)
 
 # ──────────────────────────────────────────────────────────────
 # Borders
@@ -55,6 +67,10 @@ BORDER_HAIRLINE = "rgba(255,255,255,0.06)"
 BORDER_MED = "rgba(255,255,255,0.09)"
 BORDER_STRONG = "rgba(255,255,255,0.12)"
 BORDER_STRONG2 = "rgba(255,255,255,0.14)"
+# Hover washes — a translucent overlay of the *text* pole (white on dark,
+# near-black on light), so the same QSS reads correctly in both variants.
+HOVER_FAINT = "rgba(255,255,255,0.04)"
+HOVER_WEAK = "rgba(255,255,255,0.05)"
 RADIUS_SM = 8
 RADIUS_MD = 10
 RADIUS_LG = 14
@@ -63,10 +79,16 @@ RADIUS_LG = 14
 # Accent gold
 # ──────────────────────────────────────────────────────────────
 ACCENT_GOLD = "#E3B341"
+# Gold used as *text/glyph color* on a plain ground (contentPreTitle, selected
+# tab). Same as ACCENT_GOLD in dark; the light variant darkens it further than
+# the fill accent so small gold text still passes contrast on light grounds.
+ACCENT_GOLD_TEXT = "#E3B341"
 GOLD_GRAD_TOP = "#EEC25A"
 GOLD_GRAD_BOTTOM = "#E3B341"
+GOLD_GRAD_HOVER_TOP = "#f2cd75"
 GOLD_TEXT_ON = "#241a00"
 GOLD_CHIP_BG = "rgba(227,179,65,0.12)"
+GOLD_CHIP_BG_HOVER = "rgba(227,179,65,0.18)"
 GOLD_CHIP_BORDER = "rgba(227,179,65,0.35)"
 GOLD_CHIP_TEXT = "#ECCB6A"
 
@@ -113,6 +135,7 @@ ERROR_CHIP_TEXT = "#e58080"
 # Role.color for the matching roles; equality is guarded by
 # tests/test_role_registry_sync.py so the two never drift.
 # ──────────────────────────────────────────────────────────────
+PROVIDER_CLAUDE = "#d97757"  # Anthropic clay — same brand hue as METER_CLAY
 PROVIDER_CODEX = "#10a37f"  # OpenAI teal
 PROVIDER_GEMINI = "#4285f4"  # Google blue
 PROVIDER_OPENCODE = "#f97316"  # sst orange
@@ -164,6 +187,14 @@ METER_CLAY_ALT = "#e08968"
 # install nudge) — the mid "getting full / attention" fill.
 METER_AMBER = "#fbbf24"
 METER_AMBER_LIGHT = "#fcd34d"
+
+# Context-usage fill ramp (token_meter.usage_color) — neutral → warn → high →
+# critical. Dark values are the historical literals; light overrides darken
+# them so the badge text stays readable on light grounds.
+USAGE_NEUTRAL = "#9ca3af"
+USAGE_WARN = "#facc15"
+USAGE_HIGH = "#f97316"
+USAGE_CRIT = "#ef4444"
 
 # ──────────────────────────────────────────────────────────────
 # Banner state triples (bg / border / text) for inline notice banners
@@ -232,6 +263,259 @@ ROLE_COLORS: dict[str, str] = {
     "kimi": PROVIDER_KIMI,
     "cursor": PROVIDER_CURSOR,
 }
+
+# ──────────────────────────────────────────────────────────────
+# Theme variants (#506) — the constants above are the DARK set and double as
+# the live values. `apply_variant()` rebinds them in place, so every module
+# that reads `cockpit_theme.X` at style-build time follows the switch; only
+# stylesheets already applied to a live widget need a `retheme()` re-apply
+# (see `retheme_open_windows`). Identity colors (ROLE_COLORS, PROVIDER_*,
+# AVATAR_TINTS) are deliberately NOT themed — a role/provider keeps one hue
+# in both variants.
+# ──────────────────────────────────────────────────────────────
+
+_THEMED_TOKEN_NAMES: tuple[str, ...] = (
+    # grounds
+    "GROUND_BODY",
+    "GROUND_WINDOW",
+    "GROUND_TITLEBAR",
+    "STATUS_STRIP_GRAD_TOP",
+    "STATUS_STRIP_GRAD_BOTTOM",
+    "GROUND_SIDEBAR",
+    "GROUND_PANEL",
+    "GROUND_PANEL_ALT",
+    "GROUND_INPUT",
+    "GROUND_SELECT",
+    "TOGGLE_TRACK_OFF",
+    "TOGGLE_TRACK_EDGE_RGBA",
+    # borders / hovers
+    "BORDER_HAIRLINE",
+    "BORDER_MED",
+    "BORDER_STRONG",
+    "BORDER_STRONG2",
+    "HOVER_FAINT",
+    "HOVER_WEAK",
+    # gold accent
+    "ACCENT_GOLD",
+    "ACCENT_GOLD_TEXT",
+    "GOLD_GRAD_TOP",
+    "GOLD_GRAD_BOTTOM",
+    "GOLD_GRAD_HOVER_TOP",
+    "GOLD_TEXT_ON",
+    "GOLD_CHIP_BG",
+    "GOLD_CHIP_BG_HOVER",
+    "GOLD_CHIP_BORDER",
+    "GOLD_CHIP_TEXT",
+    # text
+    "TEXT_PRIMARY",
+    "TEXT_PRIMARY_ALT",
+    "TEXT_SECONDARY",
+    "TEXT_SECONDARY_ALT",
+    "TEXT_MUTED",
+    "TEXT_MUTED_ALT",
+    "TEXT_FAINT",
+    "TEXT_FAINT_ALT",
+    # badges / chips
+    "SUBSTITUTE_BADGE_TEXT",
+    "SUBSTITUTE_BADGE_BORDER",
+    "PARALLEL_CHIP_BG",
+    "PARALLEL_CHIP_BORDER",
+    "PARALLEL_CHIP_TEXT",
+    "NEUTRAL_CHIP_BG",
+    "NEUTRAL_CHIP_BORDER",
+    "NEUTRAL_CHIP_TEXT",
+    "ERROR_CHIP_BG",
+    "ERROR_CHIP_BORDER",
+    "ERROR_CHIP_TEXT",
+    # state colors
+    "STATE_OK",
+    "STATE_WARN",
+    "STATE_ERROR",
+    "STATE_INFO",
+    "STATE_OK_BRIGHT",
+    "STATE_WARN_BRIGHT",
+    "STATE_ERROR_BRIGHT",
+    "STATE_INFO_BRIGHT",
+    "STATE_EXITED",
+    "STATE_WARN_ALT",
+    # status-bar chip identities
+    "CHIP_PLAN_MAX",
+    "CHIP_EXEC_PARALLEL",
+    "CHIP_REMOTE_ON",
+    "ROLE_COLOR_FALLBACK",
+    # meters / usage ramp
+    "METER_CLAY",
+    "METER_CLAY_ALT",
+    "METER_AMBER",
+    "METER_AMBER_LIGHT",
+    "USAGE_NEUTRAL",
+    "USAGE_WARN",
+    "USAGE_HIGH",
+    "USAGE_CRIT",
+    # banner triples
+    "BANNER_WARN_BG",
+    "BANNER_WARN_BORDER",
+    "BANNER_WARN_TEXT",
+    "BANNER_WARN_HOVER",
+    "BANNER_OK_BG",
+    "BANNER_OK_BORDER",
+    "BANNER_OK_TEXT",
+    "BANNER_OK_HOVER",
+    "BANNER_ERROR_BG",
+    "BANNER_ERROR_BORDER",
+    "BANNER_ERROR_TEXT",
+    "BANNER_INFO_BG",
+    "BANNER_INFO_BORDER",
+    "BANNER_INFO_TEXT",
+    "BANNER_INFO_HOVER",
+)
+
+# Snapshot of the dark values above, taken at import time — the constants ARE
+# the dark set, so this never drifts from them.
+DARK_TOKENS: dict[str, object] = {name: globals()[name] for name in _THEMED_TOKEN_NAMES}
+
+# Light variant — NOT a naive inversion. Grounds go paper-light with white
+# cards; borders/hovers flip to dark overlays; the gold accent darkens to
+# ~#a87b16 (3.8:1 vs white — passes the 3:1 non-text component minimum) and
+# gold-as-*text* darkens further (#7a5a10, 5.5:1); state/chip hues shift to
+# their dark-on-light equivalents so small colored text stays readable.
+LIGHT_TOKENS: dict[str, object] = {
+    # grounds
+    "GROUND_BODY": "#e8eaee",
+    "GROUND_WINDOW": "#f5f6f8",
+    "GROUND_TITLEBAR": "#e9ebef",
+    "STATUS_STRIP_GRAD_TOP": "#f2f3f6",
+    "STATUS_STRIP_GRAD_BOTTOM": "#e9ebef",
+    "GROUND_SIDEBAR": "#eef0f3",
+    "GROUND_PANEL": "#ffffff",
+    "GROUND_PANEL_ALT": "#fafbfc",
+    "GROUND_INPUT": "#f1f3f6",
+    "GROUND_SELECT": "#e3e7ee",
+    "TOGGLE_TRACK_OFF": "#c9cfda",
+    "TOGGLE_TRACK_EDGE_RGBA": (16, 24, 40, 36),
+    # borders / hovers
+    "BORDER_HAIRLINE": "rgba(16,24,40,0.10)",
+    "BORDER_MED": "rgba(16,24,40,0.14)",
+    "BORDER_STRONG": "rgba(16,24,40,0.20)",
+    "BORDER_STRONG2": "rgba(16,24,40,0.24)",
+    "HOVER_FAINT": "rgba(16,24,40,0.04)",
+    "HOVER_WEAK": "rgba(16,24,40,0.06)",
+    # gold accent
+    "ACCENT_GOLD": "#a87b16",
+    "ACCENT_GOLD_TEXT": "#7a5a10",
+    "GOLD_GRAD_TOP": "#c2941f",
+    "GOLD_GRAD_BOTTOM": "#a87b16",
+    "GOLD_GRAD_HOVER_TOP": "#d0a52c",
+    "GOLD_TEXT_ON": "#241a00",
+    "GOLD_CHIP_BG": "rgba(168,123,22,0.12)",
+    "GOLD_CHIP_BG_HOVER": "rgba(168,123,22,0.18)",
+    "GOLD_CHIP_BORDER": "rgba(168,123,22,0.45)",
+    "GOLD_CHIP_TEXT": "#7a5a10",
+    # text
+    "TEXT_PRIMARY": "#1c2026",
+    "TEXT_PRIMARY_ALT": "#23272e",
+    "TEXT_SECONDARY": "#3d4450",
+    "TEXT_SECONDARY_ALT": "#49505c",
+    "TEXT_MUTED": "#5f6774",
+    "TEXT_MUTED_ALT": "#68707d",
+    "TEXT_FAINT": "#8a919c",
+    "TEXT_FAINT_ALT": "#7d8490",
+    # badges / chips
+    "SUBSTITUTE_BADGE_TEXT": "#a34d21",
+    "SUBSTITUTE_BADGE_BORDER": "rgba(163,77,33,0.45)",
+    "PARALLEL_CHIP_BG": "rgba(124,58,237,0.10)",
+    "PARALLEL_CHIP_BORDER": "rgba(124,58,237,0.35)",
+    "PARALLEL_CHIP_TEXT": "#6d28d9",
+    "NEUTRAL_CHIP_BG": "rgba(16,24,40,0.06)",
+    "NEUTRAL_CHIP_BORDER": "rgba(16,24,40,0.20)",
+    "NEUTRAL_CHIP_TEXT": "#3d4450",
+    "ERROR_CHIP_BG": "rgba(185,28,28,0.08)",
+    "ERROR_CHIP_BORDER": "rgba(185,28,28,0.35)",
+    "ERROR_CHIP_TEXT": "#b91c1c",
+    # state colors
+    "STATE_OK": "#1f7a3d",
+    "STATE_WARN": "#b45309",
+    "STATE_ERROR": "#dc2626",
+    "STATE_INFO": "#2563eb",
+    "STATE_OK_BRIGHT": "#16a34a",
+    "STATE_WARN_BRIGHT": "#b45309",
+    "STATE_ERROR_BRIGHT": "#dc2626",
+    "STATE_INFO_BRIGHT": "#0369a1",
+    "STATE_EXITED": "#c2410c",
+    "STATE_WARN_ALT": "#b45309",
+    # status-bar chip identities
+    "CHIP_PLAN_MAX": "#7c3aed",
+    "CHIP_EXEC_PARALLEL": "#047857",
+    "CHIP_REMOTE_ON": "#0f766e",
+    "ROLE_COLOR_FALLBACK": "#64748b",
+    # meters / usage ramp
+    "METER_CLAY": "#c05a34",
+    "METER_CLAY_ALT": "#b04e2a",
+    "METER_AMBER": "#d97706",
+    "METER_AMBER_LIGHT": "#b45309",
+    "USAGE_NEUTRAL": "#6b7280",
+    "USAGE_WARN": "#b45309",
+    "USAGE_HIGH": "#c2410c",
+    "USAGE_CRIT": "#dc2626",
+    # banner triples
+    "BANNER_WARN_BG": "#fef3c7",
+    "BANNER_WARN_BORDER": "#d97706",
+    "BANNER_WARN_TEXT": "#92400e",
+    "BANNER_WARN_HOVER": "#fde68a",
+    "BANNER_OK_BG": "#dcfce7",
+    "BANNER_OK_BORDER": "#16a34a",
+    "BANNER_OK_TEXT": "#166534",
+    "BANNER_OK_HOVER": "#bbf7d0",
+    "BANNER_ERROR_BG": "#fee2e2",
+    "BANNER_ERROR_BORDER": "#dc2626",
+    "BANNER_ERROR_TEXT": "#991b1b",
+    "BANNER_INFO_BG": "#dbeafe",
+    "BANNER_INFO_BORDER": "#2563eb",
+    "BANNER_INFO_TEXT": "#1e40af",
+    "BANNER_INFO_HOVER": "#bfdbfe",
+}
+
+_current_variant = "dark"
+
+
+def current_variant() -> str:
+    """The variant whose tokens are currently bound: ``"dark"`` or ``"light"``."""
+    return _current_variant
+
+
+def apply_variant(variant: str) -> None:
+    """Rebind every themed module-level token to *variant*'s value set.
+
+    Takes effect for any stylesheet built AFTER this call; stylesheets already
+    applied to live widgets keep rendering the old values until re-applied —
+    call :func:`retheme_open_windows` right after to refresh long-lived
+    windows immediately.
+    """
+    global _current_variant
+    if variant not in ("dark", "light"):
+        raise ValueError(f"unknown theme variant: {variant!r}")
+    globals().update(DARK_TOKENS if variant == "dark" else LIGHT_TOKENS)
+    _current_variant = variant
+
+
+def retheme_open_windows() -> None:
+    """Ask every open top-level widget that exposes a ``retheme()`` hook to
+    re-apply its stylesheet with the currently-bound tokens. Windows without
+    the hook are untouched (transient dialogs pick up the new tokens on their
+    next construction anyway)."""
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in QApplication.topLevelWidgets():
+        hook = getattr(widget, "retheme", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                _log.exception("retheme() hook failed for %r", widget)
+
 
 # ──────────────────────────────────────────────────────────────
 # Fonts — bundled IBM Plex (OFL, github.com/IBM/plex) with a graceful
@@ -402,11 +686,14 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     # measurement — see docs/design-review/2026-07-10-settings-ui-visual-critic.md
     # round 3): only url() pointing at a real file on disk renders the glyph.
     _icons_dir = Path(__file__).parent / "static" / "icons"
-    _up_arrow_svg = (_icons_dir / "spin-up.svg").as_posix()
-    _down_arrow_svg = (_icons_dir / "spin-down.svg").as_posix()
-    _up_arrow_svg_disabled = (_icons_dir / "spin-up-disabled.svg").as_posix()
-    _down_arrow_svg_disabled = (_icons_dir / "spin-down-disabled.svg").as_posix()
-    _combo_arrow_on_svg = (_icons_dir / "combo-down-on.svg").as_posix()
+    # SVG fills are baked into the files, so each variant ships its own set
+    # (the dark arrows are near-invisible on light inputs and vice versa).
+    _suffix = "-light" if _current_variant == "light" else ""
+    _up_arrow_svg = (_icons_dir / f"spin-up{_suffix}.svg").as_posix()
+    _down_arrow_svg = (_icons_dir / f"spin-down{_suffix}.svg").as_posix()
+    _up_arrow_svg_disabled = (_icons_dir / f"spin-up-disabled{_suffix}.svg").as_posix()
+    _down_arrow_svg_disabled = (_icons_dir / f"spin-down-disabled{_suffix}.svg").as_posix()
+    _combo_arrow_on_svg = (_icons_dir / f"combo-down-on{_suffix}.svg").as_posix()
     _sans_stack = _sans_font_stack(sans_family)
     return f"""
     QDialog#settingsWindow, QWidget#settingsWindow {{
@@ -481,7 +768,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         border-radius: 0px;
     }}
     QPushButton#navButton:hover {{
-        background: rgba(255,255,255,0.04);
+        background: {HOVER_FAINT};
         color: {TEXT_PRIMARY};
     }}
     QPushButton#navButton[active="true"] {{
@@ -503,7 +790,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         font-weight: 600;
     }}
     QPushButton#newRoleButton:hover {{
-        background: rgba(227,179,65,0.18);
+        background: {GOLD_CHIP_BG_HOVER};
     }}
     QWidget#content {{
         background: {GROUND_WINDOW};
@@ -513,7 +800,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         font-size: 10px;
         font-weight: 600;
         letter-spacing: 1.5px;
-        color: {ACCENT_GOLD};
+        color: {ACCENT_GOLD_TEXT};
     }}
     QLabel#contentTitle {{
         font-size: 20px;
@@ -555,7 +842,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     }}
     QPushButton#goldButton:hover {{
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-            stop:0 #f2cd75, stop:1 {GOLD_GRAD_TOP});
+            stop:0 {GOLD_GRAD_HOVER_TOP}, stop:1 {GOLD_GRAD_TOP});
     }}
     QPushButton#goldButton:disabled {{
         background: {GROUND_SELECT};
@@ -569,7 +856,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         padding: 8px 16px;
     }}
     QPushButton#secondaryButton:hover {{
-        background: rgba(255,255,255,0.05);
+        background: {HOVER_WEAK};
         color: {TEXT_PRIMARY};
     }}
     QPushButton#secondaryButton:checked {{
@@ -766,7 +1053,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         background: none;
     }}
     QLabel#placeholderBadge {{
-        background: rgba(255,255,255,0.05);
+        background: {HOVER_WEAK};
         border: 1px dashed {BORDER_STRONG};
         border-radius: {RADIUS_MD}px;
         color: {TEXT_MUTED};
@@ -803,7 +1090,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         color: {TEXT_PRIMARY};
     }}
     QTabBar::tab:selected {{
-        color: {ACCENT_GOLD};
+        color: {ACCENT_GOLD_TEXT};
         border-bottom: 2px solid {ACCENT_GOLD};
     }}
     QCheckBox {{
@@ -866,7 +1153,7 @@ class ToggleSwitch(QAbstractButton):
             # Extra definition beyond the lighter track fill alone — a thin
             # inner border so the switch's rounded-rect shape reads clearly
             # against a card background close in value to the track color.
-            pen = QPen(QColor(255, 255, 255, 20))
+            pen = QPen(QColor(*TOGGLE_TRACK_EDGE_RGBA))
             pen.setWidth(1)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -900,7 +1187,9 @@ def gold_button(text: str, parent: QWidget | None = None) -> QPushButton:
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     glow = QGraphicsDropShadowEffect(btn)
     glow.setBlurRadius(18)
-    glow.setColor(QColor(227, 179, 65, 153))
+    glow_color = QColor(ACCENT_GOLD)
+    glow_color.setAlpha(153)
+    glow.setColor(glow_color)
     glow.setOffset(0, 6)
     btn.setGraphicsEffect(glow)
     return btn
@@ -938,7 +1227,7 @@ def themed_message_box(parent: QWidget | None = None) -> QMessageBox:
             min-width: 64px;
         }}
         QMessageBox QPushButton:hover {{
-            background: rgba(255,255,255,0.05);
+            background: {HOVER_WEAK};
             color: {TEXT_PRIMARY};
         }}
         QMessageBox QPushButton:default {{

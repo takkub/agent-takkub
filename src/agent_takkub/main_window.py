@@ -175,6 +175,31 @@ class MainWindow(
     def teammate_panes(self) -> dict[str, AgentPane]:
         return self._current_tab().teammate_panes
 
+    def _apply_base_stylesheet(self) -> None:
+        """The main-window chrome QSS, built from the currently-bound theme
+        tokens — split out of __init__ so `retheme()` (#506) can re-apply it
+        after a live variant switch."""
+        self.setStyleSheet(
+            f"QMainWindow {{ background-color: {cockpit_theme.GROUND_BODY}; }}"
+            f"QStatusBar {{ background: {cockpit_theme.GROUND_PANEL}; "
+            f"color: {cockpit_theme.TEXT_MUTED}; }}"
+            f"QSplitter::handle {{ background: {cockpit_theme.GROUND_SELECT}; }}"
+            f"QSplitter::handle:hover {{ background: {cockpit_theme.BORDER_STRONG2}; }}"
+        )
+
+    def retheme(self) -> None:
+        """#506 live theme switch: re-apply the window chrome with the newly
+        bound tokens. Status-bar chips/meters restyle themselves on their
+        next periodic `_update_status` refresh (they compute style strings
+        per tick); pane-internal chrome built once at construction (project
+        nav rows, task dock cards, pane tab strips) completes on restart —
+        each pane's terminal keeps its own dark ANSI palette by design."""
+        self._apply_base_stylesheet()
+        try:
+            self._update_status()
+        except Exception:
+            pass
+
     def __init__(self) -> None:
         super().__init__()
         from .config import instance_window_title
@@ -201,13 +226,7 @@ class MainWindow(
         self.resize(1500, 900)
 
         self._settings = QSettings("agent-takkub", "cockpit")
-        self.setStyleSheet(
-            f"QMainWindow {{ background-color: {cockpit_theme.GROUND_BODY}; }}"
-            f"QStatusBar {{ background: {cockpit_theme.GROUND_PANEL}; "
-            f"color: {cockpit_theme.TEXT_MUTED}; }}"
-            f"QSplitter::handle {{ background: {cockpit_theme.GROUND_SELECT}; }}"
-            f"QSplitter::handle:hover {{ background: {cockpit_theme.BORDER_STRONG2}; }}"
-        )
+        self._apply_base_stylesheet()
 
         # ── orchestrator + cli server ───────────────────────────
         self.orch = Orchestrator(self)
@@ -812,12 +831,9 @@ class MainWindow(
                 "เช็คว่าเครื่องพร้อม — เวอร์ชัน core, plugins, MCPs, providers ครบไหม "
                 "กด Fix ซ่อมอัตโนมัติได้เลย",
             ),
-            TutorialStep(
-                lambda: getattr(self, "_btn_end_session", None),
-                "5 · จบงาน",
-                "พอเสร็จกด End Session — เขียนสรุปสั้นๆ ปิด teammate ทั้งหมด แล้วบันทึกไว้ "
-                "session หน้าเปิดมา Lead จะจำได้ว่าทำอะไรค้างไว้",
-            ),
+            # Step 5 (🏁 End Session) removed with the button itself (#505
+            # scope addition 2026-09-07) — sessions wrap up via `takkub
+            # end-session` now.
         ]
 
     def _start_tutorial(self) -> None:

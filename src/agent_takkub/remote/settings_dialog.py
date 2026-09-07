@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import cockpit_theme
 from .._win_console import SUBPROCESS_NO_WINDOW
 from .auth import hash_password
 from .config import RemoteConfig, TunnelConfig
@@ -312,7 +313,7 @@ class RemoteSettingsDialog(QDialog):
 
         self._quick_note = QLabel(_QUICK_TUNNEL_NOTE)
         self._quick_note.setWordWrap(True)
-        self._quick_note.setStyleSheet("color:#71717a;")
+        self._quick_note.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         layout.addWidget(self._quick_note)
 
         self._bin_row = QHBoxLayout()
@@ -360,11 +361,11 @@ class RemoteSettingsDialog(QDialog):
 
         self._ngrok_note = QLabel(_NGROK_NOTE)
         self._ngrok_note.setWordWrap(True)
-        self._ngrok_note.setStyleSheet("color:#71717a;")
+        self._ngrok_note.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         layout.addWidget(self._ngrok_note)
 
         port_label = QLabel(str(_FIXED_PORT))
-        port_label.setStyleSheet("color:#71717a;")
+        port_label.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         self._form.addRow("Port (fixed):", port_label)
 
         access_row = QHBoxLayout()
@@ -380,7 +381,7 @@ class RemoteSettingsDialog(QDialog):
 
         self._access_warning = QLabel(_CONTROL_WARNING)
         self._access_warning.setWordWrap(True)
-        self._access_warning.setStyleSheet("color:#f59e0b;")
+        self._access_warning.setStyleSheet(f"color:{cockpit_theme.STATE_WARN_ALT};")
         self._access_warning.setVisible(current.mode == "control")
         layout.addWidget(self._access_warning)
         self._access_control.toggled.connect(self._access_warning.setVisible)
@@ -408,7 +409,7 @@ class RemoteSettingsDialog(QDialog):
             "leaked link alone still can't get in without this password."
         )
         password_note.setWordWrap(True)
-        password_note.setStyleSheet("color:#71717a;")
+        password_note.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         layout.addWidget(password_note)
 
         # #252 item 3: was hardcoded to 240 with no UI knob — now a real
@@ -458,7 +459,7 @@ class RemoteSettingsDialog(QDialog):
 
         defaults_note = QLabel("Preset: lockout after 5 fails · tunnel auto-start.")
         defaults_note.setWordWrap(True)
-        defaults_note.setStyleSheet("color:#71717a;")
+        defaults_note.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         layout.addWidget(defaults_note)
 
         self._toggle_btn = QPushButton()
@@ -475,7 +476,7 @@ class RemoteSettingsDialog(QDialog):
 
         self._pairing_label = QLabel(_PAIRING_WARNING)
         self._pairing_label.setWordWrap(True)
-        self._pairing_label.setStyleSheet("color:#f59e0b;")
+        self._pairing_label.setStyleSheet(f"color:{cockpit_theme.STATE_WARN_ALT};")
         self._pairing_edit = QLineEdit()
         self._pairing_edit.setReadOnly(True)
         self._copy_btn = QPushButton("📋 Copy")

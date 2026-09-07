@@ -55,6 +55,10 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # store above so tests never read/write the real ~/.takkub registry.
     monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
     monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
+    # The Accounts page (#505) also scans per-project selections under
+    # user_profile._BASE_DIR/projects — captured at import time from
+    # SETTINGS_HOME, so the config.SETTINGS_HOME patch below doesn't cover it.
+    monkeypatch.setattr(user_profile, "_BASE_DIR", tmp_path)
     # Providers & Roles' per-role model/effort combos write through
     # role_models.set_model/set_effort on every Save & Apply — isolate like
     # every other store above so a test never touches the real
@@ -89,17 +93,16 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_fifteen_stacked_views(self) -> None:
-        # Settings-nav declutter (2026-08-24): 9 nav-visible views (Pipeline
-        # Builder/Templates/Providers & Roles/MCP Matrix/Plugins Matrix/
-        # Skill Catalog/Skill Matrix/Users/Knowledge) + New Role (reached via
-        # its own button, not the nav list) + 5 ADVANCED-section views
-        # (Accounts & Pools/Routing/Brain/Scheduler/Performance) = 15. Down
-        # from 21 — Role Overlap, Core V2 Overview, Core V2 Migration, and
-        # OpenViking were removed outright; Knowledge/Design Tools/Context
-        # Debug collapsed into one tabbed page.
+    def test_has_sixteen_stacked_views(self) -> None:
+        # Settings-nav declutter (2026-08-24): 9 nav-visible views + New Role
+        # (reached via its own button) + 4 ADVANCED-section views (Routing/
+        # Brain/Scheduler/Performance) + 1 placeholder slot = 15. The slot at
+        # VIEW_CORE_V2_ACCOUNTS is an empty placeholder since #505 merged
+        # Accounts & Pools into the unified Accounts page — kept so the
+        # VIEW_* indices after it don't shift; `_goto_view` redirects it.
+        # +1 (2026-09-07, #506): the top-level General view (theme mode) = 16.
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 15
+        assert dlg._stack.count() == 16
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -159,7 +162,7 @@ class TestAdvancedSectionFold:
         assert dlg._nav_section_bodies["ADVANCED"].isHidden() is True
         # A row inside the folded section still exists and is reachable —
         # only the sidebar row is hidden, not the underlying page.
-        assert dlg._nav_buttons[settings_window.VIEW_CORE_V2_ACCOUNTS] is not None
+        assert dlg._nav_buttons[settings_window.VIEW_CORE_V2_ROUTING] is not None
         dlg.deleteLater()
 
     def test_toggling_expands_section_and_persists_across_reopen(self) -> None:
@@ -1261,78 +1264,94 @@ class TestTemplatesView:
         dlg.deleteLater()
 
 
-class TestUsersView:
-    """2026-07-11 — Users tab (#8), ported from the old standalone
-    open_user_profiles_dialog modal QDialog. Covers the task spec's tofu
-    checklist: nav item present + clickable, widgets present, real profile
-    list render, and the config-persist wiring (add/remove profile,
-    Claude Auth save) — mirrors TestNewRoleView's pattern for a non-matrix
-    "list ธรรมดา" view."""
+class TestAccountsView:
+    """#505 — the unified Accounts page at VIEW_USERS (replaces the old Users
+    Profiles tab + the ADVANCED Accounts & Pools page). Widget-tofu checks +
+    the write-through wiring via `accounts_adapter` (pure adapter behavior is
+    covered separately in tests/test_accounts_adapter.py)."""
 
-    def test_users_nav_item_present_and_clickable(self) -> None:
+    def test_accounts_nav_item_present_and_clickable(self) -> None:
         dlg = settings_window.SettingsWindow()
         assert settings_window.VIEW_USERS in dlg._nav_buttons
         dlg._nav_buttons[settings_window.VIEW_USERS].click()
         assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
-        assert dlg._content_title.text() == "Users"
+        assert dlg._content_title.text() == "Accounts"
         dlg.deleteLater()
 
-    def test_profiles_tab_renders_real_profile_list(self, tmp_path: Path) -> None:
-        user_profile.add_profile("work", str(tmp_path / "work-cfg"), share_sessions=False)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
-        assert dlg._up_profile_list.count() == 2
-        assert dlg._up_auth_combo.count() == 2
-        assert "work" in dlg._up_profile_list.item(1).text()
+    def test_accounts_pools_route_redirects_to_accounts(self) -> None:
+        """The old ADVANCED → Accounts & Pools constant must not break —
+        it lands on the unified Accounts page now."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_CORE_V2_ACCOUNTS)
+        assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
+        assert dlg._content_title.text() == "Accounts"
         dlg.deleteLater()
 
-    def test_remove_and_share_disabled_for_default_row(self) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
-        dlg._up_profile_list.setCurrentRow(0)
-        assert dlg._up_remove_btn.isEnabled() is False
-        assert dlg._up_share_btn.isEnabled() is False
+    def test_accounts_pools_not_in_sidebar_nav(self) -> None:
+        dlg = settings_window.SettingsWindow()
+        assert settings_window.VIEW_CORE_V2_ACCOUNTS not in dlg._nav_buttons
         dlg.deleteLater()
 
-    def test_add_profile_persists_and_updates_both_tabs(self, tmp_path: Path) -> None:
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
-        dlg._up_add_name.setText("work")
-        dlg._up_add_dir.setText(str(tmp_path / "work-cfg"))
-        dlg._up_add_share_chk.setChecked(False)  # isolated — skip junction provisioning
+    def test_renders_one_panel_per_provider(self) -> None:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
-        dlg._on_users_add_profile_clicked()
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        assert dlg._accounts_rows_box.count() == len(PROVIDER_REGISTRY)
+        dlg.deleteLater()
+
+    def test_add_account_persists_and_updates_auth_combo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import settings_accounts
+
+        class _FakeDialog:
+            def __init__(self, *_a, **_k) -> None:
+                pass
+
+            def exec(self) -> int:
+                from PyQt6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def values(self):
+                return ("work", str(tmp_path / "work-cfg"), False)
+
+        monkeypatch.setattr(settings_accounts, "_AddAccountDialog", _FakeDialog)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        dlg._on_accounts_add_clicked("claude")
 
         assert any(p["name"] == "work" for p in user_profile.list_profiles())
-        assert dlg._up_profile_list.count() == 2
         assert dlg._up_auth_combo.count() == 2
-        assert dlg._up_add_name.text() == ""  # form clears on success
+        assert "work" in dlg._up_status.text()
         dlg.deleteLater()
 
-    def test_invalid_profile_name_rejected_without_creating(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_remove_account_persists_and_updates_auth_combo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
-        dlg._up_add_name.setText("default")  # reserved name
-        dlg._up_add_dir.setText("whatever")
+        from agent_takkub import accounts_adapter
 
-        dlg._on_users_add_profile_clicked()
-
-        assert dlg._up_profile_list.count() == 1  # unchanged — still just default
-        dlg.deleteLater()
-
-    def test_remove_profile_persists_and_updates_auth_combo(self, tmp_path: Path) -> None:
         user_profile.add_profile("work", str(tmp_path / "work-cfg"), share_sessions=False)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
-        row = next(
-            i
-            for i in range(dlg._up_profile_list.count())
-            if "work" in dlg._up_profile_list.item(i).text()
-        )
-        dlg._up_profile_list.setCurrentRow(row)
 
-        dlg._on_users_remove_profile_clicked()
+        class _FakeBox:
+            def setWindowTitle(self, *_a) -> None: ...
+            def setText(self, *_a) -> None: ...
+            def setStandardButtons(self, *_a) -> None: ...
+            def exec(self):
+                return QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(
+            settings_window.cockpit_theme, "themed_message_box", lambda *_a: _FakeBox()
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        account = accounts_adapter.AccountInfo(
+            provider="claude",
+            name="work",
+            config_dir=str(tmp_path / "work-cfg"),
+            is_default=False,
+            login=accounts_adapter.LoginStatus(accounts_adapter.UNKNOWN),
+        )
+        dlg._on_accounts_remove_clicked(account)
 
         assert not any(p["name"] == "work" for p in user_profile.list_profiles())
-        assert dlg._up_profile_list.count() == 1
         assert dlg._up_auth_combo.count() == 1
         dlg.deleteLater()
 

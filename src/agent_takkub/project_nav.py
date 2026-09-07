@@ -98,7 +98,10 @@ class _PendingScanWorker(QRunnable):
             pass  # widget already destroyed during shutdown
 
 
-_SIDEBAR_QSS = f"""
+def _sidebar_qss() -> str:
+    # (#506) built per call, not at import — an import-time f-string froze the
+    # dark token values before app.py's apply_variant() could ever run.
+    return f"""
 #projectSidebar {{
     background: {cockpit_theme.GROUND_SIDEBAR};
     border-right: 1px solid {cockpit_theme.BORDER_HAIRLINE};
@@ -210,6 +213,7 @@ QPushButton#projectRowChevron[expanded="true"] {{
     border-top: 1px solid {cockpit_theme.BORDER_HAIRLINE};
 }}
 """
+
 
 # Sidebar widths: full list vs. the collapsed avatar-only rail. Expanded is
 # resizable (via the QSplitter between sidebar and pane stack) up to
@@ -490,7 +494,7 @@ class ProjectNav(QWidget):
         # below) up to _SIDEBAR_MAX_W instead of pinned at _EXPANDED_W.
         sidebar.setMinimumWidth(_EXPANDED_W)
         sidebar.setMaximumWidth(_SIDEBAR_MAX_W)
-        sidebar.setStyleSheet(_SIDEBAR_QSS)
+        sidebar.setStyleSheet(_sidebar_qss())
         # Held so the header's ☰ toggle can slide it between the full list and
         # the narrow avatar rail. _collapsed tracks the rail state; _anim keeps
         # the running width animation alive (else PyQt GCs it mid-flight).
