@@ -260,6 +260,27 @@ class TestClaudeProjectDirNameRoleSuffix:
         assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd)) is False
         assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd), "qa") is False
 
+    def test_resume_uuid_falls_back_to_pre_upgrade_unsuffixed_dir(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MED-3 (round2 gemini review): a teammate spawned before #516 F1
+        shipped wrote its session under the bare, unsuffixed
+        `takkub-project-<ns>` directory every role used to share — that
+        session must still resolve for a `base_role` lookup today, not
+        disappear because the lookup now prefers the role-suffixed dir."""
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = tmp_path / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+
+        legacy_dir = config_dir / "projects" / "takkub-project-default"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "pre-upgrade-sess.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert _resume_uuid_matches_cwd("default", "pre-upgrade-sess", str(cwd), "backend") is True
+
     def test_new_directory_wins_and_legacy_directory_stays_resolvable(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

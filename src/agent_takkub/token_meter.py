@@ -126,12 +126,23 @@ def session_project_dirs_for_cwd(
     encoded-cwd directory.  Keep both candidates so an upgrade never hides a
     resumable session. ``project_dir_name`` lets a live pane carry the exact
     spawn-side choice without re-deriving it from state.
+
+    MED-3 (round2 gemini review): when ``project_dir_name`` is a role-
+    suffixed directory (``#516 F1`` — every non-Lead role got its own
+    ``…-<role>`` transcript dir), a teammate pane spawned *before* that
+    upgrade still has its old sessions sitting in the bare, unsuffixed
+    ``takkub-project-<project_ns>`` directory — the one every role used to
+    share. Fall back to reading that directory too (read-only; nothing here
+    ever moves a session file) so those pre-upgrade sessions stay resumable
+    instead of silently disappearing from every lookup keyed by uuid.
     """
     root = _claude_projects_dir(config_dir)
     new_name = project_dir_name or (
         f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}" if project_ns else None
     )
     names = [new_name, encode_path_for_claude(cwd)] if new_name else [encode_path_for_claude(cwd)]
+    if project_ns and new_name and new_name != f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}":
+        names.append(f"{_CLAUDE_PROJECT_DIR_NAME_PREFIX}{project_ns}")
     seen: set[str] = set()
     return tuple(root / name for name in names if name and not (name in seen or seen.add(name)))
 

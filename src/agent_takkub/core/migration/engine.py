@@ -211,7 +211,7 @@ class MigrationEngine:
                 "root; every per-step rollback above succeeded but leaving "
                 "v2/ in place would make this an incomplete rollback. Pass "
                 "data_home=... to the constructor (real callers always do — "
-                "cli.py and settings_core_v2.py both use the default "
+                "cli.py and auto_migrate_boot.py both use the default "
                 "MigrationEngine() which resolves it from config.DATA_HOME)."
             )
         # copy-never-move (module docstring): everything under v2/ is a

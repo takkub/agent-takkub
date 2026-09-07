@@ -83,6 +83,28 @@ def test_custom_role_names_allowed() -> None:
     assert role_models.model_for("maintainer", "claude") == "sonnet"
 
 
+def test_clearing_model_preserves_provider_only_entry() -> None:
+    """MED-2 (round2 gemini review): a role that only carries a provider
+    override (no model/effort pinned — the shape `provider_config.
+    set_provider` writes) must survive `set_model(role, provider, "")`
+    instead of being popped entirely, per this module's own docstring
+    ("An entry is only dropped once it carries neither a provider nor a
+    model nor an effort")."""
+    role_models.set_provider("backend", "codex")
+    assert role_models.all_models() == {"backend": {"provider": "codex"}}
+
+    role_models.set_model("backend", "codex", "")
+
+    assert role_models.all_models() == {"backend": {"provider": "codex"}}
+    assert role_models.raw_model_for("backend") == ("codex", "")
+
+
+def test_clearing_effort_preserves_provider_only_entry() -> None:
+    role_models.set_provider("qa", "gemini")
+    role_models.set_effort("qa", "gemini", "")
+    assert role_models.all_models() == {"qa": {"provider": "gemini"}}
+
+
 def test_raw_model_for_reports_binding() -> None:
     role_models.set_model("backend", "codex", "gpt-5.6")
     assert role_models.raw_model_for("backend") == ("codex", "gpt-5.6")
