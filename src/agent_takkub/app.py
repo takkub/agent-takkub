@@ -233,6 +233,16 @@ from PyQt6.QtCore import QLockFile  # noqa: E402
 from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+# #506: bind the persisted theme variant BEFORE importing main_window — its
+# import tree (project_nav/task_dock/agent_pane/…) snapshots some token values
+# in module-level constants, so the variant must already be correct here, not
+# just before the first window is constructed. (Qt isn't needed: "system"
+# resolves via the OS registry/`defaults`; the Qt colorScheme probe is only a
+# fallback and degrades safely with no QGuiApplication yet.)
+from . import cockpit_theme, theme_settings  # noqa: E402
+
+cockpit_theme.apply_variant(theme_settings.resolve_variant(theme_settings.load()))
+
 from .main_window import MainWindow  # noqa: E402
 from .update_worker import try_silent_self_update  # noqa: E402
 

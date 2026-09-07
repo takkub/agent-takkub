@@ -60,9 +60,13 @@ _TAB_STATUS_COLORS = {
 _TAB_STATUS_DEFAULT = cockpit_theme.TEXT_FAINT  # idle/active/empty — grey
 _TAB_STATUS_POLL_MS = 600
 
+
 # Modern flat tab strip for the panes inside a project. Selected accent = gold
 # (the design system's one active accent — was indigo #6366f1).
-_PANE_TABS_QSS = f"""
+def _pane_tabs_qss() -> str:
+    # (#506) built per call, not at import — an import-time f-string froze the
+    # dark token values before app.py's apply_variant() could ever run.
+    return f"""
 QTabWidget::pane {{
     border: none;
     background: {cockpit_theme.GROUND_SIDEBAR};
@@ -137,7 +141,7 @@ class ProjectTab(QWidget):
         self.pane_tabs.setDocumentMode(True)
         self.pane_tabs.setMovable(True)
         self.pane_tabs.setTabsClosable(True)
-        self.pane_tabs.setStyleSheet(_PANE_TABS_QSS)
+        self.pane_tabs.setStyleSheet(_pane_tabs_qss())
         self.pane_tabs.tabCloseRequested.connect(self._on_pane_tab_close)
         self.pane_tabs.currentChanged.connect(self._on_pane_tab_changed)
 
