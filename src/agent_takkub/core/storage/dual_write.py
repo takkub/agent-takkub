@@ -150,8 +150,14 @@ def dual_write_disabled_providers(state: dict, *, data_home: Path | None = None)
 
 
 def dual_write_exec_mode(payload: dict, *, data_home: Path | None = None) -> None:
-    """Mirror ``exec_mode.set_current()``'s ``{"mode": ...}`` into
-    ``config/execution.json`` (ladder step 1's target)."""
+    """Mirror ``{"mode": ...}`` into ``config/execution.json`` (ladder step
+    1's target) — the shape ``exec_mode.set_current()`` used to write before
+    #515 removed that setter entirely (exec mode now derives from the team
+    preset instead of its own file — see ``exec_mode.py``'s own docstring).
+    B-L2 (round2 review 2026-09-07): no production caller left as of this
+    writing — kept, not deleted, deliberately (per the #515 commit message)
+    until #504 decides whether the whole V1 config/execution.json domain
+    still has a reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
         return
@@ -165,8 +171,16 @@ def dual_write_exec_mode(payload: dict, *, data_home: Path | None = None) -> Non
 
 
 def dual_write_rtk_enabled(payload: dict, *, data_home: Path | None = None) -> None:
-    """Mirror ``rtk_helper.set_rtk_enabled()``'s ``{"enabled": bool}`` into
-    ``config/features/rtk.json`` (ladder step 1's target)."""
+    """Mirror ``{"enabled": bool}`` into ``config/features/rtk.json``
+    (ladder step 1's target) — the shape rtk_helper's per-user enable toggle
+    used to write before #515 removed it entirely (rtk is now a pure
+    auto-detect off PATH, no on/off state at all — see ``rtk_helper.py``'s
+    own module docstring; the setter this used to mirror,
+    ``set_rtk_enabled()``, no longer exists). B-L2 (round2 review
+    2026-09-07): no production caller left as of this writing — kept, not
+    deleted, deliberately (per the #515 commit message) until #504 decides
+    whether the whole V1 config/features/rtk.json domain still has a
+    reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
         return
@@ -321,8 +335,14 @@ def dual_write_issue_dedup(state: dict, *, data_home: Path | None = None) -> Non
 
 
 def dual_write_autoresume(payload: dict, *, data_home: Path | None = None) -> None:
-    """Mirror ``auto_resume.set_enabled()``'s ``{"enabled": bool}`` into
-    ``state/sessions/autoresume.json`` (ladder step 5's target)."""
+    """Mirror ``{"enabled": bool}`` into ``state/sessions/autoresume.json``
+    (ladder step 5's target) — the shape ``auto_resume.set_enabled()`` used
+    to write before #515 removed that setter entirely (#514 made auto-resume
+    always-on, no on/off store left — see ``auto_resume.py``'s own module
+    docstring). B-L2 (round2 review 2026-09-07): no production caller left
+    as of this writing — kept, not deleted, deliberately (per the #515
+    commit message) until #504 decides whether the whole V1
+    state/sessions/autoresume.json domain still has a reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
         return

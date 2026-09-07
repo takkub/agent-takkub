@@ -2251,9 +2251,10 @@
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.storage.v2_authority",
-        "agent_takkub.provider_config"
+        "agent_takkub.provider_config",
+        "agent_takkub.role_models"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 1
     },
     {
@@ -3556,6 +3557,7 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
         "agent_takkub.remote.notify",
+        "agent_takkub.role_models",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
@@ -3568,7 +3570,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 25,
+      "fan_in": 26,
       "fan_out": 7
     },
     {
@@ -4027,7 +4029,9 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.storage.dual_write",
+        "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_authority",
+        "agent_takkub.provider_config",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -4040,7 +4044,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 7,
-      "fan_out": 4
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.roles",

@@ -1373,6 +1373,36 @@ class CliServer(QObject):
                 # LIVE Lead pane gets the `[system]` broadcast this project's
                 # orchestrator instance owns.
                 team_action = req.get("action", "")
+                if team_action == "set" and from_role_norm == "lead":
+                    # B-M1 (round2 review 2026-09-07): the same escalation
+                    # M3 above already blocks for `assign --team` — a running
+                    # Lead setting the project's STANDING preset to one with
+                    # `lead_may_implement=True` (solo-lead/pair) lifts its
+                    # own Edit/Write deny-list for every future task in this
+                    # project, not just the current one, unsupervised. `team
+                    # suggest`/`clear-override` aren't gated: suggest never
+                    # writes, and clear-override only reverts to whatever
+                    # standing preset a human already set via Settings.
+                    from . import team_preset
+
+                    try:
+                        would_unlock = team_preset.resolve(
+                            str(req.get("preset", "") or "").strip(), project=from_project
+                        )["lead_may_implement"]
+                    except ValueError:
+                        would_unlock = False  # unknown id — reported below as normal
+                    if would_unlock:
+                        self._reply(
+                            sock,
+                            ok=False,
+                            msg=(
+                                "lead cannot set a team preset that unlocks its own edit "
+                                "permission ('solo-lead'/'pair') — this would let Lead lift "
+                                "its own edit-guard unsupervised. Use Settings or `takkub "
+                                "team set` from a non-pane terminal instead."
+                            ),
+                        )
+                        return
                 if team_action == "set":
                     ok_t, msg_t = self._orch.set_team_preset(
                         req.get("preset", ""), project=from_project

@@ -349,6 +349,81 @@ class TestAssignTeamSelfEscalationGuard:
         assert resp["ok"] is True
 
 
+class TestTeamSetSelfEscalationGuard:
+    """B-M1 (round2 review 2026-09-07): `takkub team set solo-lead`/`pair`
+    grants Lead the exact same `lead_may_implement` escalation `assign
+    --team` already blocks above (M3) — but as the project's STANDING
+    preset rather than a one-task override, so a running Lead calling this
+    on itself would unlock its own Edit/Write deny-list for every future
+    task in the project, not just the current one."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_team_preset(self, monkeypatch, tmp_path):
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path / "settings")
+
+    def test_lead_set_solo_lead_rejected(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "solo-lead", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "team" in resp["msg"].lower()
+        assert "lead" in resp["msg"].lower()
+
+    def test_lead_set_pair_rejected(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "pair", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+
+    def test_lead_set_full_still_allowed(self, srv_sock) -> None:
+        """'full' has lead_may_implement=False — no escalation, so this must
+        still go through: Lead calling `takkub team set <preset>` on itself
+        is the documented workflow (docs/lead/role-and-workflow.md), only
+        the escalating presets are blocked."""
+        srv, sock = srv_sock
+        srv._orch.set_team_preset.return_value = (True, "team preset set to full")
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "full", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_non_lead_caller_still_allowed(self, srv_sock) -> None:
+        """The guard only fires for from=='lead' — Settings/mobile call this
+        with no `from` at all, same scoping as the M3 guard above."""
+        srv, sock = srv_sock
+        srv._orch.set_team_preset.return_value = (True, "team preset set to solo-lead")
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "solo-lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_lead_clear_override_still_allowed(self, srv_sock) -> None:
+        """clear-override only reverts to a standing preset a human already
+        chose via Settings — never an escalation, so it isn't gated."""
+        srv, sock = srv_sock
+        srv._orch.clear_team_preset_override.return_value = (True, "cleared")
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "clear-override", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_unknown_preset_falls_through_to_normal_error(self, srv_sock) -> None:
+        """An unknown preset id isn't an escalation — let it reach
+        `set_team_preset`, which reports the real "unknown preset" error
+        instead of this guard's message."""
+        srv, sock = srv_sock
+        srv._orch.set_team_preset.return_value = (False, "unknown team preset: 'bogus'")
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "bogus", "from": "lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "unknown team preset" in resp["msg"]
+
+
 class TestSendAsLeadSpoofGuardMembership:
     def test_only_send_is_currently_guarded(self) -> None:
         # Pin the membership so a future contributor doesn't quietly add

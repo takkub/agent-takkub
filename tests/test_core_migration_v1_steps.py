@@ -192,8 +192,11 @@ def test_role_agent_round_trip_with_custom_role_and_project_routing(
         json.dumps({"researcher": {"label": "Researcher", "color": "#123456"}}), encoding="utf-8"
     )
     (custom_agents_dir / "researcher.md").write_text("# Researcher role\n", encoding="utf-8")
-    (settings_home / "role-providers.json").write_text(
-        json.dumps({"backend": "codex"}), encoding="utf-8"
+    # #515: global routing lives in role-models.json now, not the (archived)
+    # standalone role-providers.json — see steps_v1.py's
+    # `_global_routing_source`.
+    (settings_home / "role-models.json").write_text(
+        json.dumps({"backend": {"provider": "codex"}}), encoding="utf-8"
     )
 
     (data_home / "projects.json").write_text(
@@ -235,8 +238,10 @@ def test_role_agent_apply_omits_project_with_no_v1_routing_file(v1_homes, journa
     check does."""
     data_home, settings_home = v1_homes
     journal, backups = journal_backups
-    (settings_home / "role-providers.json").write_text(
-        json.dumps({"backend": "codex"}), encoding="utf-8"
+    # #515: global routing lives in role-models.json now — see
+    # `test_role_agent_round_trip_with_custom_role_and_project_routing`.
+    (settings_home / "role-models.json").write_text(
+        json.dumps({"backend": {"provider": "codex"}}), encoding="utf-8"
     )
     (data_home / "projects.json").write_text(
         json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "/tmp/web"}}}}),

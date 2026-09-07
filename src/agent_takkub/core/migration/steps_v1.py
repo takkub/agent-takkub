@@ -184,8 +184,30 @@ class RoleAgentMigrationStep:
         slug = re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
         return self.settings_home / "projects" / slug / "role-providers.json"
 
+    def _global_routing_source(self) -> Path:
+        # #515 folded the standalone global-override file into
+        # `role-models.json` (see `role_models.py`'s module docstring and
+        # `provider_config.load_providers`'s global branch) — this is now
+        # the ONLY V1 source for the global half of routing.json, not the
+        # (archived, no-longer-written) `role-providers.json`.
+        return self.settings_home / "role-models.json"
+
+    def _global_routing_mapping(self) -> dict[str, str]:
+        """Flat ``{role: provider}`` extracted from `role-models.json`'s
+        per-role entries — the same shape `role-providers.json` used to
+        store directly, and what `dual_write_routing`'s `global_data` param
+        and `v2/config/routing.json`'s `"global"` key both expect."""
+        data = read_json(self._global_routing_source())
+        mapping: dict[str, str] = {}
+        for role, entry in data.items():
+            if isinstance(entry, dict):
+                provider = entry.get("provider")
+                if isinstance(provider, str) and provider:
+                    mapping[str(role)] = provider
+        return mapping
+
     def _routing_sources(self) -> dict[str, Path]:
-        sources: dict[str, Path] = {"global": self.settings_home / "role-providers.json"}
+        sources: dict[str, Path] = {"global": self._global_routing_source()}
         for name in self._project_names():
             sources[name] = self._project_routing_source(name)
         return sources
@@ -224,11 +246,11 @@ class RoleAgentMigrationStep:
         # same `{}`, silently losing global-inheritance for every project
         # that had never saved its own override.
         sources = self._routing_sources()
-        global_src = sources.pop("global")
+        sources.pop("global")
         return {
             "schema": 1,
             "migrated_at": time.time(),
-            "global": read_json(global_src),
+            "global": self._global_routing_mapping(),
             "projects": {name: read_json(p) for name, p in sources.items() if p.exists()},
         }
 
@@ -265,8 +287,8 @@ class RoleAgentMigrationStep:
         registry_changed = read_json(self._custom_roles_target()).get("data") != read_json(
             self._custom_roles_source()
         )
-        routing_changed = read_json(self._routing_target()).get("global") != read_json(
-            self._routing_sources()["global"]
+        routing_changed = (
+            read_json(self._routing_target()).get("global") != self._global_routing_mapping()
         )
         md_changed = [
             name
@@ -327,7 +349,7 @@ class RoleAgentMigrationStep:
             self._custom_roles_source()
         )
         routing_doc = read_json(self._routing_target())
-        routing_ok = routing_doc.get("global") == read_json(self._routing_sources()["global"])
+        routing_ok = routing_doc.get("global") == self._global_routing_mapping()
         md_mismatched = [
             name
             for name, src, dest in self._role_md_pairs()

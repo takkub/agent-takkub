@@ -398,3 +398,69 @@ class TestSessionProjectDirsForCwdRoleFallback:
             project_dir_name="takkub-project-myproj-backend",
         )
         assert any((d / "old-teammate-uuid.jsonl").is_file() for d in dirs)
+
+
+class TestSessionProjectDirsForCwdBaseRole:
+    """B-M3 (round2 cross review, #516 F1 follow-up): a caller that only
+    knows `(project_ns, base_role)` — not a live pane's exact spawn-side
+    `project_dir_name` — used to have no way to reach the role-suffixed
+    directory at all: without an explicit `project_dir_name`, `new_name` was
+    derived from `project_ns` alone, reproducing the bare pre-F1 name and
+    silently missing every teammate session filed under the real
+    `-<role>`-suffixed one."""
+
+    def test_base_role_derives_role_suffixed_dir(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home", cwd, project_ns="myproj", base_role="backend"
+        )
+        names = [d.name for d in dirs]
+        assert names == [
+            "takkub-project-myproj-backend",
+            encode_path_for_claude(cwd),
+            "takkub-project-myproj",
+        ]
+
+    def test_lead_base_role_stays_bare_no_duplicate(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home", cwd, project_ns="myproj", base_role="lead"
+        )
+        names = [d.name for d in dirs]
+        assert names.count("takkub-project-myproj") == 1
+
+    def test_explicit_project_dir_name_wins_over_base_role(self, tmp_path: pathlib.Path) -> None:
+        """A live pane's own resolved name is authoritative — a stale/wrong
+        `base_role` guess must never override it."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        dirs = session_project_dirs_for_cwd(
+            tmp_path / "home",
+            cwd,
+            project_ns="myproj",
+            project_dir_name="takkub-project-myproj-frontend",
+            base_role="backend",
+        )
+        names = [d.name for d in dirs]
+        assert names[0] == "takkub-project-myproj-frontend"
+        assert "takkub-project-myproj-backend" not in names
+
+    def test_resume_finds_teammate_session_via_base_role_alone(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """End-to-end: a caller with no live pane to read `project_dir_name`
+        off of — only `(project_ns, base_role)` — must still find a session
+        filed under the real role-suffixed directory."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        config_home = tmp_path / "home"
+        role_dir = config_home / "projects" / "takkub-project-myproj-backend"
+        role_dir.mkdir(parents=True)
+        (role_dir / "teammate-uuid.jsonl").write_text("{}", encoding="utf-8")
+
+        dirs = session_project_dirs_for_cwd(
+            config_home, cwd, project_ns="myproj", base_role="backend"
+        )
+        assert any((d / "teammate-uuid.jsonl").is_file() for d in dirs)
