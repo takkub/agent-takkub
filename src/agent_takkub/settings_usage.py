@@ -111,7 +111,11 @@ class _Sparkline(QWidget):
                 return
             vmax = max(values)
             step = (width - 2 * pad) / (len(values) - 1)
-            pen = QPen(QColor(cockpit_theme.ACCENT_GOLD))
+            # METER_CLAY, not the primary indigo accent — cockpit_theme
+            # reserves this Anthropic-clay token for meter/usage surfaces
+            # specifically, so token trend lines read distinctly from the
+            # rest of the UI's indigo CTAs/selection state.
+            pen = QPen(QColor(cockpit_theme.METER_CLAY))
             pen.setWidthF(2.0)
             painter.setPen(pen)
             prev: QPointF | None = None

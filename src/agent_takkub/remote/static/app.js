@@ -3295,7 +3295,7 @@
     var chip = $("team-chip");
     if (!chip) return;
     var data = teamPresetState.data;
-    chip.textContent = "ทีม: " + (data ? (data.override_label || data.preset_label || "—") : "—");
+    chip.textContent = "ตั้งค่า: " + (data ? (data.override_label || data.preset_label || "—") : "—");
   }
 
   function renderTeamSheet() {

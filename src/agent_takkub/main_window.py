@@ -839,7 +839,7 @@ class MainWindow(
             ),
             TutorialStep(
                 lambda: getattr(self, "_btn_pipelines", None),
-                "3 · Team",
+                "3 · Settings",
                 "ตั้งค่าว่าแต่ละ role จะได้ MCP / plugin อะไรบ้าง (เช่น browser automation ให้ QA) "
                 "หรือสร้าง role ใหม่ — มีผลกับ pane ที่ spawn ใหม่ทันที",
             ),
