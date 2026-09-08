@@ -45,7 +45,6 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QGridLayout,
@@ -143,16 +142,23 @@ def _status_dot_color(ok: bool | None) -> str:
     return cockpit_theme.STATE_OK if ok else cockpit_theme.STATE_WARN
 
 
-class _RolePermissionsDialog(QDialog):
+class _RolePermissionsDialog(cockpit_theme.CockpitDialog):
     """role x design-MCP grant matrix (`allow_item`/`deny_item`, kind
     "mcps") — the same on-disk policy the real MCP Matrix view and every
     pane-spawn permission check already read (`pane_tools_policy.
-    effective_mcps`), so a grant made here takes effect identically."""
+    effective_mcps`), so a grant made here takes effect identically.
+
+    2026-09-08 design review: used to copy ``parent.styleSheet()`` onto
+    itself without also copying the ``#settingsWindow`` objectName that
+    stylesheet's background rule is scoped to — the copied QSS never
+    actually matched this dialog, leaving it on the OS's native (light)
+    background regardless of theme (the "checkboxes render as solid black
+    squares" finding). ``CockpitDialog`` applies its own themed stylesheet
+    correctly instead."""
 
     def __init__(self, parent: QWidget, *, fonts: dict) -> None:
         super().__init__(parent)
         self.setWindowTitle("Design Tools — Permissions")
-        self.setStyleSheet(parent.styleSheet())
         self.resize(420, 420)
         self._fonts = fonts
 

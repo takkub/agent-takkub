@@ -82,6 +82,51 @@ class TestUsageViewSmoke:
         assert "นับไม่ได้" in dlg._usage_uncountable_label.text()
         dlg.deleteLater()
 
+    def test_uncountable_reason_shown_inline_hides_internal_citation(self):
+        """2026-09-08 design review: the inline label must not leak the raw
+        python-identifier citation (e.g. `token_meter.
+        _GEMINI_UNSUPPORTED_REASON`) — only the human-readable half. The
+        full string stays reachable via the Diagnostics button instead."""
+        usage_ledger.account_dir("gemini", "default").mkdir(parents=True, exist_ok=True)
+        dlg = _open_usage_view()
+        assert "_GEMINI_UNSUPPORTED_REASON" not in dlg._usage_uncountable_label.text()
+        assert dlg._usage_diagnostics_btn.isHidden() is False
+        assert "_GEMINI_UNSUPPORTED_REASON" in dlg._usage_diagnostics_raw
+        dlg.deleteLater()
+
+    def test_diagnostics_button_click_opens_the_full_reason(self, monkeypatch):
+        """Exercises the real click signal (not a direct method call) end to
+        end through `QMessageBox.exec`, mocked so the modal never blocks."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        usage_ledger.account_dir("gemini", "default").mkdir(parents=True, exist_ok=True)
+        dlg = _open_usage_view()
+        seen: dict = {}
+
+        def _fake_exec(self):
+            seen["title"] = self.windowTitle()
+            seen["informative"] = self.informativeText()
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", _fake_exec)
+        dlg._usage_diagnostics_btn.click()
+        assert "Diagnostics" in seen["title"]
+        assert "_GEMINI_UNSUPPORTED_REASON" in seen["informative"]
+        dlg.deleteLater()
+
+    def test_diagnostics_button_hidden_when_nothing_uncountable(self):
+        usage_ledger.record_turn(
+            "claude",
+            "default",
+            "2026-09-05T10:00:00Z",
+            "r1",
+            "claude-sonnet-5",
+            {"input": 10, "cache_creation": 20, "cache_read": 30, "output": 40},
+        )
+        dlg = _open_usage_view()
+        assert dlg._usage_diagnostics_btn.isHidden() is True
+        dlg.deleteLater()
+
     def test_construction_never_touches_import_all(self, monkeypatch):
         """Building the view must be cheap (no transcript scan) — only the
         explicit Refresh click may call the expensive import."""

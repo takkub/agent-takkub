@@ -1,9 +1,16 @@
 """Design tokens + QSS/widget helpers for the whole Takkub Cockpit UI.
 
-Source of truth: `docs/design-review/2026-07-10-cockpit-settings-design-system.md`
-(extracted from the user's canonical `Takkub Cockpit.dc.html` design) — gold
-`#E3B341` + IBM Plex, NOT the older teal/indigo palette used elsewhere in the
-cockpit.
+Source of truth (2026-09-08 redesign): `docs/design-review/
+2026-09-08-cockpit-ui-e2e-critic-and-redesign-spec.md` +
+`2026-09-08-cockpit-ui-audit-redesign-gemini.md` — the gold `#E3B341` +
+IBM Plex Mono-for-labels system was replaced end to end with an Indigo
+`#6366F1` (dark) / `#4F46E5` (light) accent + slate neutrals, WCAG
+AA-checked. The `GOLD_*`/`ACCENT_GOLD*` constant NAMES were kept as-is
+(renaming every call site across ~15 modules was judged not worth the
+blast radius for a values-only redesign) — they now hold Indigo hex, not
+gold. Read them as "primary accent", not literally "gold". Superseded:
+`docs/design-review/2026-07-10-cockpit-settings-design-system.md` (the
+original gold system this replaces).
 
 Theme variants (#506): the module-level constants below ARE the live token
 values — they default to the dark set and are rebound in place by
@@ -27,6 +34,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFontDatabase, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
+    QDialog,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
@@ -38,23 +46,23 @@ from PyQt6.QtWidgets import (
 _log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────
-# Grounds
+# Grounds — "Deep Obsidian" (2026-09-08 redesign)
 # ──────────────────────────────────────────────────────────────
-GROUND_BODY = "#050608"
-GROUND_WINDOW = "#15171c"
-GROUND_TITLEBAR = "#0f1114"
-STATUS_STRIP_GRAD_TOP = "#181b21"
-STATUS_STRIP_GRAD_BOTTOM = "#141519"
-GROUND_SIDEBAR = "#101216"
-GROUND_PANEL = "#181b21"
-GROUND_PANEL_ALT = "#191c22"
-GROUND_INPUT = "#1c1f26"
-GROUND_SELECT = "#232732"
+GROUND_BODY = "#08090D"
+GROUND_WINDOW = "#111318"
+GROUND_TITLEBAR = "#0B0C10"
+STATUS_STRIP_GRAD_TOP = "#171A21"
+STATUS_STRIP_GRAD_BOTTOM = "#121419"
+GROUND_SIDEBAR = "#0D0F14"
+GROUND_PANEL = "#181B22"
+GROUND_PANEL_ALT = "#1C2029"
+GROUND_INPUT = "#0F172A"
+GROUND_SELECT = "#222630"
 # ToggleSwitch's unchecked track — deliberately lighter than GROUND_SELECT.
-# GROUND_SELECT against card background GROUND_PANEL (#181b21) had almost no
-# delta, so an off toggle's rounded-rect shape barely read against the card
-# behind it (design review 2026-07-24 #4, gemini + critic both flagged it).
-TOGGLE_TRACK_OFF = "#2d323e"
+# GROUND_SELECT against card background GROUND_PANEL had almost no delta, so
+# an off toggle's rounded-rect shape barely read against the card behind it
+# (design review 2026-07-24 #4, gemini + critic both flagged it).
+TOGGLE_TRACK_OFF = "#2D3341"
 # ToggleSwitch's off-track inner border, as QColor RGBA components (painted,
 # not QSS) — the white overlay that defines the shape on dark needs to flip
 # to a dark overlay on light grounds.
@@ -63,8 +71,8 @@ TOGGLE_TRACK_EDGE_RGBA: tuple[int, int, int, int] = (255, 255, 255, 20)
 # ──────────────────────────────────────────────────────────────
 # Borders
 # ──────────────────────────────────────────────────────────────
-BORDER_HAIRLINE = "rgba(255,255,255,0.06)"
-BORDER_MED = "rgba(255,255,255,0.09)"
+BORDER_HAIRLINE = "rgba(255,255,255,0.07)"
+BORDER_MED = "rgba(255,255,255,0.10)"
 BORDER_STRONG = "rgba(255,255,255,0.12)"
 BORDER_STRONG2 = "rgba(255,255,255,0.14)"
 # Hover washes — a translucent overlay of the *text* pole (white on dark,
@@ -76,33 +84,35 @@ RADIUS_MD = 10
 RADIUS_LG = 14
 
 # ──────────────────────────────────────────────────────────────
-# Accent gold
+# Accent — Electric Indigo (2026-09-08 redesign; names kept as GOLD_* /
+# ACCENT_GOLD*, see module docstring — values are Indigo, not gold).
 # ──────────────────────────────────────────────────────────────
-ACCENT_GOLD = "#E3B341"
-# Gold used as *text/glyph color* on a plain ground (contentPreTitle, selected
-# tab). Same as ACCENT_GOLD in dark; the light variant darkens it further than
-# the fill accent so small gold text still passes contrast on light grounds.
-ACCENT_GOLD_TEXT = "#E3B341"
-GOLD_GRAD_TOP = "#EEC25A"
-GOLD_GRAD_BOTTOM = "#E3B341"
-GOLD_GRAD_HOVER_TOP = "#f2cd75"
-GOLD_TEXT_ON = "#241a00"
-GOLD_CHIP_BG = "rgba(227,179,65,0.12)"
-GOLD_CHIP_BG_HOVER = "rgba(227,179,65,0.18)"
-GOLD_CHIP_BORDER = "rgba(227,179,65,0.35)"
-GOLD_CHIP_TEXT = "#ECCB6A"
+ACCENT_GOLD = "#6366F1"
+# Accent used as *text/glyph color* on a plain ground (contentPreTitle,
+# selected tab). Same as ACCENT_GOLD in dark; the light variant darkens it
+# further than the fill accent so small accent text still passes contrast on
+# light grounds.
+ACCENT_GOLD_TEXT = "#6366F1"
+GOLD_GRAD_TOP = "#7B7FF4"
+GOLD_GRAD_BOTTOM = "#6366F1"
+GOLD_GRAD_HOVER_TOP = "#8B8EF6"
+GOLD_TEXT_ON = "#FFFFFF"
+GOLD_CHIP_BG = "rgba(99,102,241,0.16)"
+GOLD_CHIP_BG_HOVER = "rgba(99,102,241,0.22)"
+GOLD_CHIP_BORDER = "rgba(99,102,241,0.4)"
+GOLD_CHIP_TEXT = "#A5A6F5"
 
 # ──────────────────────────────────────────────────────────────
 # Text
 # ──────────────────────────────────────────────────────────────
-TEXT_PRIMARY = "#f2f3f5"
-TEXT_PRIMARY_ALT = "#e9ebef"
-TEXT_SECONDARY = "#c7ccd4"
-TEXT_SECONDARY_ALT = "#cfd3da"
-TEXT_MUTED = "#7b828f"
-TEXT_MUTED_ALT = "#828a95"
-TEXT_FAINT = "#5b626e"
-TEXT_FAINT_ALT = "#6b7280"
+TEXT_PRIMARY = "#F3F4F6"
+TEXT_PRIMARY_ALT = "#F8FAFC"
+TEXT_SECONDARY = "#9CA3AF"
+TEXT_SECONDARY_ALT = "#A6ADB8"
+TEXT_MUTED = "#6B7280"
+TEXT_MUTED_ALT = "#7C8493"
+TEXT_FAINT = "#4B5563"
+TEXT_FAINT_ALT = "#525A66"
 
 # ──────────────────────────────────────────────────────────────
 # Misc badges
@@ -148,8 +158,8 @@ PROVIDER_CURSOR = "#38bdf8"  # Cursor sky-blue
 # the value. `_BRIGHT` variants are for small dots/glyphs on dark grounds
 # where the base ramp reads too dim (task_dock / agent_pane status dots).
 # ──────────────────────────────────────────────────────────────
-STATE_OK = "#43B562"
-STATE_WARN = "#d97706"
+STATE_OK = "#10B981"
+STATE_WARN = "#F59E0B"
 STATE_ERROR = "#ef4444"
 STATE_INFO = "#4E86F7"
 STATE_OK_BRIGHT = "#22c55e"
@@ -373,23 +383,24 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
 DARK_TOKENS: dict[str, object] = {name: globals()[name] for name in _THEMED_TOKEN_NAMES}
 
 # Light variant — NOT a naive inversion. Grounds go paper-light with white
-# cards; borders/hovers flip to dark overlays; the gold accent darkens to
-# ~#a87b16 (3.8:1 vs white — passes the 3:1 non-text component minimum) and
-# gold-as-*text* darkens further (#7a5a10, 5.5:1); state/chip hues shift to
-# their dark-on-light equivalents so small colored text stays readable.
+# cards; borders/hovers flip to dark overlays; the accent darkens to
+# #4F46E5 (8.2:1 vs white) and accent-as-*text* darkens further (#4338CA);
+# state/chip hues shift to their dark-on-light equivalents so small colored
+# text stays readable. Replaces the old gold system's "muddy mustard" light
+# variant (#a87b16/#7a5a10 — 2026-09-08 redesign, design-review audit).
 LIGHT_TOKENS: dict[str, object] = {
-    # grounds
-    "GROUND_BODY": "#e8eaee",
-    "GROUND_WINDOW": "#f5f6f8",
-    "GROUND_TITLEBAR": "#e9ebef",
-    "STATUS_STRIP_GRAD_TOP": "#f2f3f6",
-    "STATUS_STRIP_GRAD_BOTTOM": "#e9ebef",
-    "GROUND_SIDEBAR": "#eef0f3",
-    "GROUND_PANEL": "#ffffff",
-    "GROUND_PANEL_ALT": "#fafbfc",
-    "GROUND_INPUT": "#f1f3f6",
-    "GROUND_SELECT": "#e3e7ee",
-    "TOGGLE_TRACK_OFF": "#c9cfda",
+    # grounds — "Pure Crisp Slate"
+    "GROUND_BODY": "#E2E8F0",
+    "GROUND_WINDOW": "#F8FAFC",
+    "GROUND_TITLEBAR": "#EEF2F7",
+    "STATUS_STRIP_GRAD_TOP": "#FFFFFF",
+    "STATUS_STRIP_GRAD_BOTTOM": "#F1F5F9",
+    "GROUND_SIDEBAR": "#F1F5F9",
+    "GROUND_PANEL": "#FFFFFF",
+    "GROUND_PANEL_ALT": "#F8FAFC",
+    "GROUND_INPUT": "#F8FAFC",
+    "GROUND_SELECT": "#E2E8F0",
+    "TOGGLE_TRACK_OFF": "#CBD5E1",
     "TOGGLE_TRACK_EDGE_RGBA": (16, 24, 40, 36),
     # borders / hovers
     "BORDER_HAIRLINE": "rgba(16,24,40,0.10)",
@@ -398,26 +409,26 @@ LIGHT_TOKENS: dict[str, object] = {
     "BORDER_STRONG2": "rgba(16,24,40,0.24)",
     "HOVER_FAINT": "rgba(16,24,40,0.04)",
     "HOVER_WEAK": "rgba(16,24,40,0.06)",
-    # gold accent
-    "ACCENT_GOLD": "#a87b16",
-    "ACCENT_GOLD_TEXT": "#7a5a10",
-    "GOLD_GRAD_TOP": "#c2941f",
-    "GOLD_GRAD_BOTTOM": "#a87b16",
-    "GOLD_GRAD_HOVER_TOP": "#d0a52c",
-    "GOLD_TEXT_ON": "#241a00",
-    "GOLD_CHIP_BG": "rgba(168,123,22,0.12)",
-    "GOLD_CHIP_BG_HOVER": "rgba(168,123,22,0.18)",
-    "GOLD_CHIP_BORDER": "rgba(168,123,22,0.45)",
-    "GOLD_CHIP_TEXT": "#7a5a10",
+    # accent — Deep Indigo
+    "ACCENT_GOLD": "#4F46E5",
+    "ACCENT_GOLD_TEXT": "#4338CA",
+    "GOLD_GRAD_TOP": "#5B54EE",
+    "GOLD_GRAD_BOTTOM": "#4F46E5",
+    "GOLD_GRAD_HOVER_TOP": "#4338CA",
+    "GOLD_TEXT_ON": "#FFFFFF",
+    "GOLD_CHIP_BG": "rgba(79,70,229,0.10)",
+    "GOLD_CHIP_BG_HOVER": "rgba(79,70,229,0.16)",
+    "GOLD_CHIP_BORDER": "rgba(79,70,229,0.35)",
+    "GOLD_CHIP_TEXT": "#4338CA",
     # text
-    "TEXT_PRIMARY": "#1c2026",
-    "TEXT_PRIMARY_ALT": "#23272e",
-    "TEXT_SECONDARY": "#3d4450",
-    "TEXT_SECONDARY_ALT": "#49505c",
-    "TEXT_MUTED": "#5f6774",
-    "TEXT_MUTED_ALT": "#68707d",
-    "TEXT_FAINT": "#8a919c",
-    "TEXT_FAINT_ALT": "#7d8490",
+    "TEXT_PRIMARY": "#0F172A",
+    "TEXT_PRIMARY_ALT": "#1E293B",
+    "TEXT_SECONDARY": "#475569",
+    "TEXT_SECONDARY_ALT": "#52607A",
+    "TEXT_MUTED": "#64748B",
+    "TEXT_MUTED_ALT": "#5D6B85",
+    "TEXT_FAINT": "#94A3B8",
+    "TEXT_FAINT_ALT": "#8592A8",
     # badges / chips
     "SUBSTITUTE_BADGE_TEXT": "#a34d21",
     "SUBSTITUTE_BADGE_BORDER": "rgba(163,77,33,0.45)",
@@ -431,8 +442,8 @@ LIGHT_TOKENS: dict[str, object] = {
     "ERROR_CHIP_BORDER": "rgba(185,28,28,0.35)",
     "ERROR_CHIP_TEXT": "#b91c1c",
     # state colors
-    "STATE_OK": "#1f7a3d",
-    "STATE_WARN": "#b45309",
+    "STATE_OK": "#059669",
+    "STATE_WARN": "#D97706",
     "STATE_ERROR": "#dc2626",
     "STATE_INFO": "#2563eb",
     "STATE_OK_BRIGHT": "#16a34a",
@@ -521,7 +532,8 @@ def retheme_open_windows() -> None:
 # comes back False so the caller can flag it.
 # ──────────────────────────────────────────────────────────────
 FONT_SANS_FALLBACK_CANDIDATES: tuple[str, ...] = (
-    "Segoe UI",  # Windows
+    "Segoe UI Variable",  # Windows 11 (2026-09-08 redesign preference)
+    "Segoe UI",  # Windows 10 fallback
     "Helvetica Neue",  # macOS
     "Noto Sans",  # common Linux distro default
     "DejaVu Sans",  # near-universal Linux fallback
@@ -693,7 +705,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     _combo_arrow_on_svg = (_icons_dir / f"combo-down-on{_suffix}.svg").as_posix()
     _sans_stack = _sans_font_stack(sans_family)
     return f"""
-    QDialog#settingsWindow, QWidget#settingsWindow {{
+    QDialog#settingsWindow, QWidget#settingsWindow, QDialog#cockpitDialog {{
         background: {GROUND_WINDOW};
         color: {TEXT_PRIMARY};
         font-family: {_sans_stack};
@@ -734,7 +746,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         border-right: 1px solid {BORDER_HAIRLINE};
     }}
     QLabel#sidebarSection {{
-        font-family: "{mono_family}";
+        font-family: {_sans_stack};
         color: {TEXT_FAINT};
         font-size: 10px;
         font-weight: 600;
@@ -742,7 +754,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         padding: 12px 14px 4px 14px;
     }}
     QPushButton#sidebarSectionToggle {{
-        font-family: "{mono_family}";
+        font-family: {_sans_stack};
         color: {TEXT_FAINT};
         font-size: 10px;
         font-weight: 600;
@@ -781,7 +793,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         background: {GROUND_WINDOW};
     }}
     QLabel#contentPreTitle {{
-        font-family: "{mono_family}";
+        font-family: {_sans_stack};
         font-size: 10px;
         font-weight: 600;
         letter-spacing: 1.5px;
@@ -878,7 +890,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         border-radius: {RADIUS_SM}px;
     }}
     QLabel#matrixHeaderCell {{
-        font-family: "{mono_family}";
+        font-family: {_sans_stack};
         font-weight: 600;
         font-size: 11px;
         color: {TEXT_SECONDARY};
@@ -1226,6 +1238,33 @@ def themed_message_box(parent: QWidget | None = None) -> QMessageBox:
     return box
 
 
+class CockpitDialog(QDialog):
+    """Base class for every standalone (non-Settings-window) dialog.
+
+    A plain ``QDialog(parent)`` does NOT inherit the parent window's QSS —
+    Qt style sheets only cascade to child *widgets* inside the same
+    top-level window, and a ``QDialog`` is always its own top-level window
+    even when parented. Every raw ``QDialog`` in this codebase (Add
+    Account, Remote Settings, Map Paths, Rules Editor, New Project's picker)
+    rendered with the OS's native light chrome regardless of the active
+    theme because of this — the "blinding white dialog in dark mode" /
+    "invisible Cancel button" bugs from the 2026-09-08 design review.
+    Subclass this instead of ``QDialog`` (or swap an existing ``QDialog``
+    subclass's base) to fix it; call :meth:`retheme` again after
+    :func:`apply_variant` to follow a live theme switch (or rely on
+    :func:`retheme_open_windows`, which calls it automatically for every
+    open top-level widget that has the hook)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("cockpitDialog")
+        self.retheme()
+
+    def retheme(self) -> None:
+        fonts = ensure_fonts_loaded()
+        self.setStyleSheet(build_stylesheet(str(fonts["sans"]), str(fonts["mono"])))
+
+
 def color_dot(color: str, parent: QWidget | None = None, size: int = 8) -> QWidget:
     """A small solid-color circle — a real painted widget, not the "●" text
     glyph (design review 2026-07-24 #4: that glyph tofus on fonts lacking it,
@@ -1237,8 +1276,12 @@ def color_dot(color: str, parent: QWidget | None = None, size: int = 8) -> QWidg
 
 
 def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
-    """Colored dot + label, matching the design system's role-chip component."""
-    mono = ensure_fonts_loaded()["mono"]
+    """Colored dot + label, matching the design system's role-chip component.
+
+    Uses the sans stack, not mono (2026-09-08 redesign) — *label* is a human
+    role/name string, not code/an identifier, and mono was flagged for
+    causing premature truncation of longer role/template names."""
+    sans = ensure_fonts_loaded()["sans"]
     chip = QWidget(parent)
     lay = QHBoxLayout(chip)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -1246,9 +1289,7 @@ def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
     dot = color_dot(color, chip)
     lay.addWidget(dot)
     text = QLabel(label, chip)
-    # Gemini #14 — chips/badges spec IBM Plex Mono; left unset here they
-    # silently inherited the dialog's sans font instead.
-    text.setStyleSheet(f'font-family: "{mono}"; color: {color}; font-weight: 600; font-size: 12px;')
+    text.setStyleSheet(f'font-family: "{sans}"; color: {color}; font-weight: 600; font-size: 12px;')
     lay.addWidget(text)
     return chip
 
@@ -1265,13 +1306,16 @@ def gold_soft_chip(text: str, parent: QWidget | None = None, *, compact: bool = 
     """The gold "soft chip" — e.g. the active-template badge in the status strip.
 
     ``compact=True`` shrinks padding/font-size for tight spaces (e.g. a
-    QListWidget row) so it stops crowding out the sibling label's text."""
-    mono = ensure_fonts_loaded()["mono"]
+    QListWidget row) so it stops crowding out the sibling label's text.
+
+    Sans, not mono (2026-09-08 redesign) — chip text is usually a human
+    template/project name, and mono caused premature truncation."""
+    sans = ensure_fonts_loaded()["sans"]
     chip = QLabel(text, parent)
     pad = f"1px {COMPACT_CHIP_HPAD // 2}px" if compact else "2px 10px"
     font_size = "10px" if compact else "11px"
     chip.setStyleSheet(
-        f'font-family: "{mono}"; background: {GOLD_CHIP_BG}; border: 1px solid {GOLD_CHIP_BORDER};'
+        f'font-family: "{sans}"; background: {GOLD_CHIP_BG}; border: 1px solid {GOLD_CHIP_BORDER};'
         f" border-radius: 999px; color: {GOLD_CHIP_TEXT}; padding: {pad};"
         f" font-size: {font_size}; font-weight: 600;"
     )

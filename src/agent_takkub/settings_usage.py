@@ -41,6 +41,19 @@ from . import cockpit_theme
 from .settings_knowledge_design import _CallableThread
 from .token_meter import format_tokens
 
+
+def _short_reason(reason: str) -> str:
+    """The user-facing half of a ledger `reason` string.
+
+    `usage_ledger.TURN_UNCOUNTABLE_REASON`/`QUOTA_UNCOUNTABLE_REASON` pair a
+    plain-language sentence with an em-dash-separated internal citation
+    (e.g. "— ยืนยันแล้วใน token_meter._GEMINI_UNSUPPORTED_REASON") meant for
+    whoever verified the gap, not for the Usage page's end user (2026-09-08
+    design review). The full string stays available via the Diagnostics
+    button (`_on_usage_diagnostics_clicked`)."""
+    return reason.split("—", 1)[0].strip()
+
+
 _RANGE_CHOICES: tuple[tuple[str, str], ...] = (
     ("today", "วันนี้"),
     ("week", "7 วันที่ผ่านมา"),
@@ -182,10 +195,21 @@ class UsageSettingsMixin:
         self._usage_table_grid.setHorizontalSpacing(14)
         self._usage_table_grid.setVerticalSpacing(4)
         table_lay.addLayout(self._usage_table_grid)
+        unc_row = QHBoxLayout()
         self._usage_uncountable_label = QLabel("", table_panel)
         self._usage_uncountable_label.setObjectName("panelHint")
         self._usage_uncountable_label.setWordWrap(True)
-        table_lay.addWidget(self._usage_uncountable_label)
+        unc_row.addWidget(self._usage_uncountable_label, 1)
+        # 2026-09-08 design review: the raw reason string (internal python
+        # identifiers like `token_meter._GEMINI_UNSUPPORTED_REASON`) used to
+        # render inline — now only the human-readable half shows inline
+        # (`_short_reason`), full text behind this button.
+        self._usage_diagnostics_btn = cockpit_theme.secondary_button("Diagnostics", table_panel)
+        self._usage_diagnostics_btn.clicked.connect(self._on_usage_diagnostics_clicked)
+        self._usage_diagnostics_btn.hide()
+        self._usage_diagnostics_raw = ""
+        unc_row.addWidget(self._usage_diagnostics_btn)
+        table_lay.addLayout(unc_row)
         lay.addWidget(table_panel)
 
         quota_panel = QWidget(view)
@@ -272,7 +296,9 @@ class UsageSettingsMixin:
 
         uncountable = result.get("uncountable") or []
         self._usage_uncountable_label.setText(
-            " · ".join(f"{u['provider']}: นับไม่ได้ ({u['reason']})" for u in uncountable)
+            " · ".join(
+                f"{u['provider']}: นับไม่ได้ ({_short_reason(u['reason'])})" for u in uncountable
+            )
         )
 
         quota_rows = [q for q in (result.get("quota") or ()) if q.get("window") is not None]
@@ -290,9 +316,15 @@ class UsageSettingsMixin:
             ),
             empty_text="(ไม่มีตัวอย่าง quota ในช่วงนี้)",
             trailer=" · ".join(
-                f"{q['provider']}: นับไม่ได้ ({q.get('reason')})" for q in quota_uncountable
+                f"{q['provider']}: นับไม่ได้ ({_short_reason(q.get('reason') or '')})"
+                for q in quota_uncountable
             ),
         )
+
+        self._usage_diagnostics_raw = "\n".join(
+            f"{r['provider']}: {r['reason']}" for r in (*uncountable, *quota_uncountable)
+        )
+        self._usage_diagnostics_btn.setVisible(bool(self._usage_diagnostics_raw))
 
         # `rtk_gain` no longer rides `query_usage()`'s own result (H2/H3,
         # 2026-09-07) — that subprocess call (~0.5s observed) has no
@@ -362,6 +394,13 @@ class UsageSettingsMixin:
 
     def _on_usage_range_changed(self, _index: int) -> None:
         self._render_usage()
+
+    def _on_usage_diagnostics_clicked(self) -> None:
+        box = cockpit_theme.themed_message_box(self)
+        box.setWindowTitle("Usage — Diagnostics")
+        box.setText("รายละเอียดทางเทคนิคของ provider ที่ยังนับไม่ได้:")
+        box.setInformativeText(self._usage_diagnostics_raw or "(ไม่มี)")
+        box.exec()
 
     def _on_usage_refresh_clicked(self) -> None:
         from . import usage_ledger

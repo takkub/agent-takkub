@@ -191,14 +191,32 @@ class MainWindow(
         """#506 live theme switch: re-apply the window chrome with the newly
         bound tokens. Status-bar chips/meters restyle themselves on their
         next periodic `_update_status` refresh (they compute style strings
-        per tick); pane-internal chrome built once at construction (project
-        nav rows, task dock cards, pane tab strips) completes on restart —
-        each pane's terminal keeps its own dark ANSI palette by design."""
+        per tick). Project nav rows, task dock cards, and pane tab strips
+        used to complete only on restart (2026-09-08 design review finding)
+        — each now exposes its own `retheme()` hook, called below; each
+        pane's terminal keeps its own dark ANSI palette by design, untouched
+        here."""
         self._apply_base_stylesheet()
         try:
             self._update_status()
         except Exception:
             pass
+        try:
+            self.tabs.retheme()
+        except Exception:
+            pass
+        try:
+            self._tasks_dock_widget.retheme()
+        except Exception:
+            pass
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            hook = getattr(tab, "retheme", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    pass
 
     def __init__(self) -> None:
         super().__init__()
@@ -1262,7 +1280,10 @@ class MainWindow(
         open_names = set(self._open_projects())
         available = [n for n in list_project_names() if n not in open_names]
 
-        box = QMessageBox(self)
+        # 2026-09-08 design review: a plain QMessageBox(self) never picks up
+        # the app's theme, the confirmed root cause of the "blinding white
+        # dialog in dark mode" finding for this exact dialog ("New Project").
+        box = cockpit_theme.themed_message_box(self)
         box.setWindowTitle("โปรเจคใหม่")
         box.setText("เปิดโปรเจคที่ตั้งไว้ หรือเพิ่มโปรเจคใหม่?")
         box.setInformativeText(

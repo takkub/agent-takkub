@@ -53,12 +53,23 @@ _TAB_ICON_SIZE = QSize(16, 10)
 # done/exited/error, see agent_pane.py) but emits no change signal, and
 # agent_pane.py is out of scope for this task — so the tab dot is refreshed
 # by a light poll timer instead of a push signal.
-_TAB_STATUS_COLORS = {
-    "working": cockpit_theme.STATE_WARN_BRIGHT,  # yellow — actively running
-    "done": cockpit_theme.STATE_OK_BRIGHT,  # green — finished
+# Attribute NAMES, not resolved color strings (2026-09-08 design review,
+# same fix as task_dock._STATUS_GLYPH's own comment describes) — a dict of
+# `cockpit_theme.STATE_WARN_BRIGHT` etc. evaluated once here at import time
+# would freeze whatever variant happened to be bound then; `_tab_status_
+# color()` resolves the live attribute on every poll tick instead, so a
+# theme switch shows up within one `_TAB_STATUS_POLL_MS` tick.
+_TAB_STATUS_COLOR_ATTRS = {
+    "working": "STATE_WARN_BRIGHT",  # yellow — actively running
+    "done": "STATE_OK_BRIGHT",  # green — finished
 }
-_TAB_STATUS_DEFAULT = cockpit_theme.TEXT_FAINT  # idle/active/empty — grey
+_TAB_STATUS_DEFAULT_ATTR = "TEXT_FAINT"  # idle/active/empty — grey
 _TAB_STATUS_POLL_MS = 600
+
+
+def _tab_status_color(state: str | None) -> str:
+    attr = _TAB_STATUS_COLOR_ATTRS.get(state, _TAB_STATUS_DEFAULT_ATTR)
+    return getattr(cockpit_theme, attr)
 
 
 # Modern flat tab strip for the panes inside a project. Selected accent = gold
@@ -334,6 +345,15 @@ class ProjectTab(QWidget):
         self._tab_status_icons[key] = icon
         return icon
 
+    def retheme(self) -> None:
+        """#506 live-switch fix (2026-09-08 design review): `_pane_tabs_qss()`
+        reads live tokens already, but `setStyleSheet()` was only ever
+        called once, at construction — re-apply it, then repaint the
+        per-tab status/role dot icons immediately instead of waiting for
+        the next `_TAB_STATUS_POLL_MS` poll tick."""
+        self.pane_tabs.setStyleSheet(_pane_tabs_qss())
+        self._refresh_teammate_tab_icons()
+
     def _refresh_teammate_tab_icons(self) -> None:
         """Repaint every teammate pane-tab's role/status dot from the live
         pane state. Cheap no-op when there are no teammate tabs."""
@@ -345,7 +365,7 @@ class ProjectTab(QWidget):
                 continue
             role = getattr(pane, "role", None)
             role_color = getattr(role, "color", None) or cockpit_theme.ROLE_COLOR_FALLBACK
-            status_color = _TAB_STATUS_COLORS.get(getattr(pane, "state", None), _TAB_STATUS_DEFAULT)
+            status_color = _tab_status_color(getattr(pane, "state", None))
             self.pane_tabs.setTabIcon(idx, self._tab_status_icon(role_color, status_color))
 
     # ------------------------------------------------------------------

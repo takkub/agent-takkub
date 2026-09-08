@@ -107,7 +107,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__ as _COCKPIT_VERSION
 from . import (
     auto_issue_signals,
     autoskills_installer,
@@ -300,7 +299,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_PROVIDERS_ROLES: (
         "ทีม & ตำแหน่ง",
-        "ขนาดทีมของโปรเจคนี้ (#512) + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
+        "ขนาดทีมของโปรเจคนี้ + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
     ),
     VIEW_PIPELINE_BUILDER: (
         "Pipeline",
@@ -313,7 +312,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_USERS: (
         "Accounts",
-        "บัญชีของทุก provider — ใครเข้าสู่ระบบอยู่ ใช้กับโปรเจคไหน เพิ่ม/ลบบัญชี (#505)",
+        "บัญชีของทุก provider — ใครเข้าสู่ระบบอยู่ ใช้กับโปรเจคไหน เพิ่ม/ลบบัญชี",
     ),
     VIEW_KNOWLEDGE: (
         "Knowledge",
@@ -321,7 +320,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_USAGE: (
         "Usage",
-        "token/quota จริงที่ provider รายงาน แยก provider→บัญชี→model (#507) — กด Refresh เพื่อ import ล่าสุด",
+        "token/quota จริงที่ provider รายงาน แยก provider→บัญชี→model — กด Refresh เพื่อ import ล่าสุด",
     ),
 }
 
@@ -927,16 +926,19 @@ class SettingsWindow(
     # ──────────────────────────────────────────────────────────
 
     def _build_status_strip(self) -> QWidget:
+        # 2026-09-08 design review — "header ซ้ำซ้อนกับ OS title bar": the
+        # brand label ("takkub COCKPIT") and version number used to render
+        # here too, repeating `setWindowTitle("Takkub Cockpit — Settings")`
+        # above and adding little of their own. Dropped both; the template
+        # chip + provider dots below are the only per-project info this
+        # strip needs (same reasoning as the earlier faux-titlebar removal,
+        # see the "Header ซ้ำ 3 ที่" comment in __init__ above).
         strip = QWidget(self)
         strip.setObjectName("statusStrip")
         strip.setFixedHeight(56)
         lay = QHBoxLayout(strip)
         lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(10)
-
-        brand = QLabel("takkub COCKPIT", strip)
-        brand.setObjectName("statusBrand")
-        lay.addWidget(brand)
 
         payload = pipeline_config.load(self._project)
         active_id = payload.get("activeTemplate", "")
@@ -975,9 +977,6 @@ class SettingsWindow(
             dot.setToolTip(f"{provider}: {'enabled' if enabled else 'disabled'}")
             lay.addWidget(dot)
 
-        version = QLabel(f"v{_COCKPIT_VERSION}", strip)
-        version.setObjectName("statusVersion")
-        lay.addWidget(version)
         return strip
 
     # ──────────────────────────────────────────────────────────
@@ -4274,7 +4273,13 @@ class SettingsWindow(
             self._pb_hops_lay.addWidget(panel)
 
             if idx < len(self._pb_hops) - 1:
-                conn = QLabel("v wait for all", self._pb_hops_container)
+                # 2026-09-08 design review: was a literal ASCII "v" doing
+                # double duty as a flowchart arrow. U+2193 (↓), not the
+                # more obvious ▼/▾ triangle glyphs — pixel/glyph-coverage
+                # check against the bundled IBM Plex fonts showed neither
+                # triangle is actually present (renders as a tofu box),
+                # while U+2193 is.
+                conn = QLabel("↓ wait for all", self._pb_hops_container)
                 conn.setObjectName("panelHint")
                 conn.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._pb_hops_lay.addWidget(conn)
