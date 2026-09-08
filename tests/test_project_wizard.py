@@ -204,6 +204,24 @@ def test_new_tab_dialog_routes_import_to_import_flow(monkeypatch):
     assert host.calls == [("import_existing",)]
 
 
+def test_new_tab_dialog_wide_enough_to_not_clip_button_text(monkeypatch):
+    """QA live e2e (round 3): with 4 long buttons in one row, QMessageBox
+    sized its width off the label/icon area alone and squeezed the button
+    row, clipping button text even though each button's own sizeHint was
+    wide enough. Regression guard for the width-forcing spacer fix."""
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    picked = _stub_dialog(monkeypatch, None)
+
+    MainWindow._on_new_tab_clicked(host)
+
+    box = picked["box"]
+    grid = box.layout()
+    last_item = grid.itemAt(grid.count() - 1)
+    assert last_item.spacerItem() is not None, "expected a width-forcing spacer in the layout"
+    assert last_item.spacerItem().sizeHint().width() >= 400
+
+
 def test_new_tab_dialog_existing_button_disabled_when_nothing_to_open(monkeypatch):
     monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
     host = _NewTabHost()
