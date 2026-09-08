@@ -1439,6 +1439,38 @@ class WorktreeManager:
             "port": 0,
         }
 
+    # -- finalize (done-time) ------------------------------------------------
+
+    def auto_commit_snapshot(self, info: WorktreeInfo, role: str) -> bool:
+        """Commit whatever is sitting uncommitted in *info*'s worktree as a
+        ``wip: <role> done snapshot`` (#525).
+
+        Root problem: a worktree-isolated pane that reports `done()` with
+        real uncommitted changes but zero commits on its branch used to fall
+        straight into the "no commit kept" warning path — no merge proposal
+        ever went out, and Lead had to notice the warning, `cd` into the
+        worktree, commit by hand, then merge. Observed twice in one batch
+        (backend + frontend, same round). This makes `_finalize_worktree`'s
+        zero-commits branch self-heal: commit the pane's own work on its own
+        branch before deciding there is nothing to propose merging.
+
+        Returns True only when a commit was actually created — HEAD moved.
+        Never trust `git commit`'s exit code alone for that (#527 taught the
+        same lesson for `merge_isolated`: exit 0 does not imply a new commit,
+        e.g. `git add -A` staging nothing when every change turns out to be a
+        CRLF-only phantom). A failed add/commit (hook rejection, nothing
+        real to stage) returns False and the caller's existing warn-and-keep
+        path runs unchanged — this is additive, never a new way to lose
+        state.
+        """
+        before = self.head_sha(info.path)
+        add = self._run(["-C", info.path, "add", "-A"], None)
+        if not add.ok:
+            return False
+        commit = self._run(["-C", info.path, "commit", "-m", f"wip: {role} done snapshot"], None)
+        after = self.head_sha(info.path)
+        return bool(commit.ok and after and after != before)
+
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
 
     def _delete_pushed_remote_branch(self, git_root: str, branch: str) -> str:

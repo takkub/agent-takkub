@@ -60,6 +60,7 @@ class _FakeMgr:
         remove_reason: str = "",
         uncommitted: int = 0,
         merge_conflicts: bool | None = False,
+        auto_commit_result: bool = False,
     ):
         self._info = info
         self._reason = reason
@@ -68,7 +69,9 @@ class _FakeMgr:
         self._remove = (remove_ok, remove_reason)
         self._uncommitted = uncommitted
         self._merge_conflicts = merge_conflicts
+        self._auto_commit_result = auto_commit_result
         self.safe_remove_calls = 0
+        self.auto_commit_calls = 0
 
     def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset()):
         self.last_exclude_ports = set(exclude_ports)
@@ -105,6 +108,18 @@ class _FakeMgr:
 
     def diffstat(self, info):
         return " src/x.ts | 3 +++"
+
+    def auto_commit_snapshot(self, info, role):
+        # #525: mirrors the real method — a successful snapshot commit moves
+        # HEAD, so a subsequent `commit_count`/`real_dirty`/`real_uncommitted_
+        # count` read must see the post-commit state, not the pre-commit
+        # script the test set up.
+        self.auto_commit_calls += 1
+        if self._auto_commit_result:
+            self._commits += 1
+            self._dirty = False
+            self._uncommitted = 0
+        return self._auto_commit_result
 
     def safe_remove(self, info):
         self.safe_remove_calls += 1
@@ -375,17 +390,41 @@ class TestFinalizeWorktree:
 
         orch._finalize_worktree("proj", "qa", _info().as_dict())
         assert fake.safe_remove_calls == 0  # never removed automatically
+        assert fake.auto_commit_calls == 0  # nothing dirty — never attempted
         assert orch._notify_lead.called
         warn = orch._notify_lead.call_args[0][1]
         assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn
         assert "ไม่มี commit" in warn
         assert "worktree clean" in warn
 
-    def test_dirty_worktree_kept_and_warns(self, orch, monkeypatch):
-        fake = _FakeMgr(info=_info(), commits=0, dirty=True)
+    def test_dirty_worktree_with_no_commits_gets_auto_committed_and_proposed(
+        self, orch, monkeypatch
+    ):
+        """#525: a pane that reports done with real uncommitted work but zero
+        commits used to get only the "no commit kept" warning below — no
+        merge proposal ever went out, and Lead had to commit by hand before
+        anything could merge. The zero-commits branch must now try an
+        auto-commit snapshot first and, on success, propose a merge exactly
+        like a pane that remembered to commit itself."""
+        fake = _FakeMgr(info=_info(), commits=0, dirty=True, uncommitted=3, auto_commit_result=True)
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
 
         orch._finalize_worktree("proj", "qa", _info().as_dict())
+        assert fake.auto_commit_calls == 1
+        assert fake.safe_remove_calls == 0  # still never auto-removed
+        msg = orch._notify_lead.call_args[0][1]
+        assert "merge --no-ff" in msg  # a real proposal, not the warn-only path
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" not in msg
+
+    def test_dirty_worktree_kept_and_warns_when_auto_commit_fails(self, orch, monkeypatch):
+        """The fallback path from before #525 must still hold when the
+        auto-commit attempt itself fails (e.g. a rejected pre-commit hook) —
+        this must never become a NEW way to lose state."""
+        fake = _FakeMgr(info=_info(), commits=0, dirty=True, auto_commit_result=False)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "qa", _info().as_dict())
+        assert fake.auto_commit_calls == 1
         assert fake.safe_remove_calls == 0  # never removed automatically
         warn = orch._notify_lead.call_args[0][1]
         assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn  # kept, not lost

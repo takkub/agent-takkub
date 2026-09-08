@@ -110,6 +110,20 @@ cmd_guard`, via the same `progress` IPC path `takkub progress` uses) — the
 severity here (user loses internet access with no warning) warrants Lead
 knowing immediately, not just the blocked pane.
 
+An eighth rule, ``full_suite`` (#528), blocks a raw, un-narrowed test-runner
+invocation for every guarded role, no allowlist: `pytest`/`python -m pytest`
+with no path/`-k`/`-m`, `vitest run` with no path, bare `jest`, `turbo run
+test` with no `--filter`, `pnpm`/`yarn -r test`. `#485`'s "targeted mid-batch,
+full gate once via `takkub qa-gate --auto`" was prose-only in the root
+CLAUDE.md every pane already reads — nothing technical stopped a pane (or
+Lead, mid-task) from reaching for the raw runner anyway, repeatedly pinning
+the user's box at 100% CPU/RAM across sessions. `takkub qa-gate` itself is
+never caught by this: `qa_gate.py` calls `subprocess.run` directly inside the
+CLI process, never through a Bash tool call this hook ever observes, so
+gating the raw path here cannot also gate the gate's own internal runs — no
+exception needed in the pattern set for that. `FULL_SUITE_RULE_TEXT` is the
+prose counterpart pointing at `takkub qa-gate --targeted <paths>`.
+
 Carve-outs for `--isolation worktree`: `git commit` is allowed unconditionally
 when the pane's cwd is inside a cockpit-managed `.../worktrees/...` checkout;
 `git push` is allowed ONLY when every target it names is that pane's own
@@ -545,6 +559,103 @@ _PIP_EDITABLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Raw full-suite test runner invocations (#528). #485 said "targeted mid-
+# batch, full gate once via `takkub qa-gate --auto`" in prose only — nothing
+# technical stopped a pane from typing the raw runner itself. Repeat offense
+# across sessions: a pane (or Lead, mid-task) reaches for `pytest` / `vitest
+# run` / `pnpm -r test` with no narrowing, forking every worker the runner
+# owns and pinning the box at 100% CPU/RAM for everyone else on it — the same
+# shape of harm `host_destructive` exists for, just from a tool instead of a
+# kill command. `takkub qa-gate` itself never trips this: `qa_gate.py` calls
+# `subprocess.run` directly inside the CLI process, never through a Bash tool
+# call this hook ever sees — so gating a raw runner here cannot also gate the
+# gate's own internal narrowed/full runs, by construction, no exception coded.
+#
+# Each rule's *tail* — captured with the SAME `[^\n|;&]*` used by `_GIT_PUSH_
+# TAIL` above, so a follow-on command past `&&`/`;`/`|` is never read as this
+# command's own arguments — decides narrow vs full via `_tail_is_narrow`: any
+# non-flag positional token that is not a bare `.`/`./`/`*` (a real path or
+# node id), or a recognised filter flag (`-k`/`-m` for pytest, `-t`/
+# `--testNamePattern`/`--testPathPattern`/`--grep` for jest/vitest/mocha-
+# shaped runners, `--filter` for turbo/pnpm workspace scoping) counts as
+# targeted. A file/dir path or `-k EXPR` is exactly the shape
+# `docs/qa-gate-policy.md` and this project's own sessions already use
+# (`pytest tests/test_x.py tests/test_y.py -k 'foo or bar'`) — that must stay
+# allowed, only the zero-argument reflex is what caused the incidents.
+_NARROW_FLAG = re.compile(
+    r"^(?:-k|-m|-t|--testNamePattern|--testPathPattern|--grep|--filter)(?:=.*)?$", re.I
+)
+
+
+def _tail_is_narrow(tail: str) -> bool:
+    """True when *tail* (the text after the test-runner invocation) carries
+    a real path/node-id argument or an explicit filter flag (`-k`/`-m` match
+    `_NARROW_FLAG` as a bare token — pytest always takes the expression as a
+    separate token, never `-kEXPR`) — see the `_FULL_SUITE_*` block above for
+    the full contract."""
+    for tok in tail.split():
+        if tok.startswith("-"):
+            if _NARROW_FLAG.match(tok):
+                return True
+            continue
+        if tok not in (".", "./", "*"):
+            return True
+    return False
+
+
+_PYTEST_INVOKE = re.compile(
+    rf"{_CMD_START}(?:pytest|py\.test|python3?\s+-m\s+pytest)(?![\w-])(?P<tail>[^\n|;&]*)",
+    re.I | re.M,
+)
+_PM_RUNNER_PREFIX = r"(?:(?:npx|bunx)\s+|(?:npm|pnpm|yarn|bun)\s+(?:exec|dlx)\s+)?"
+_VITEST_RUN_INVOKE = re.compile(
+    rf"{_CMD_START}{_PM_RUNNER_PREFIX}vitest(?![\w-]){_SAME_CMD}\brun\b(?P<tail>[^\n|;&]*)",
+    re.I | re.M,
+)
+_JEST_INVOKE = re.compile(
+    rf"{_CMD_START}{_PM_RUNNER_PREFIX}jest(?![\w-])(?P<tail>[^\n|;&]*)", re.I | re.M
+)
+_TURBO_RUN_TEST = re.compile(
+    rf"{_CMD_START}turbo(?![\w-]){_SAME_CMD}\brun\b{_SAME_CMD}\btest\b(?P<tail>[^\n|;&]*)",
+    re.I | re.M,
+)
+_PM_RECURSIVE_TEST = re.compile(
+    rf"{_CMD_START}(?:pnpm|yarn)(?![\w-]){_SAME_CMD}"
+    rf"(?:-r\b|--recursive\b|\bworkspaces\s+run\b){_SAME_CMD}\btest\b(?P<tail>[^\n|;&]*)",
+    re.I | re.M,
+)
+
+FULL_SUITE_RULE_TEXT = (
+    "ห้ามรัน test runner แบบเต็ม suite ตรงๆ ผ่าน Bash เอง — `pytest`/`python -m pytest` "
+    "ไม่มี target แคบ, `vitest run` ไม่มี path, `jest` เปล่า, `turbo run test` ไม่มี "
+    "`--filter`, `pnpm`/`yarn -r test` (workspace ทั้งหมด) ล้วนกิน CPU/RAM ทุก worker "
+    "จนเครื่อง user ค้างทั้งเครื่อง (#485/#528 — กติกาเดิมเป็นแค่ text ไม่มีตัวบังคับ). "
+    "ใช้ `takkub qa-gate --targeted <paths>` แทน — full gate เต็ม suite เป็นหน้าที่ qa "
+    "ครั้งเดียวท้าย batch เท่านั้น (`takkub qa-gate --auto`). ต้องการรัน test runner ตรงๆ "
+    "จริงๆ ให้ระบุ path/pattern แคบตรงกับไฟล์ที่แก้เสมอ เช่น "
+    "`pytest tests/test_x.py -k 'foo or bar'`, `vitest run src/x.test.ts`, "
+    "`jest src/x.test.js`, `turbo run test --filter=<pkg>`."
+)
+
+_FULL_SUITE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("pytest", _PYTEST_INVOKE),
+    ("vitest-run", _VITEST_RUN_INVOKE),
+    ("jest", _JEST_INVOKE),
+    ("turbo-run-test", _TURBO_RUN_TEST),
+    ("pm-recursive-test", _PM_RECURSIVE_TEST),
+)
+
+
+def _full_suite_rule(cmd: str) -> str | None:
+    """First matched raw-full-suite rule name in *cmd*, or None when every
+    match found is narrowly targeted (or there is no match at all)."""
+    for rule, pattern in _FULL_SUITE_PATTERNS:
+        m = pattern.search(cmd)
+        if m and not _tail_is_narrow(m.group("tail")):
+            return rule
+    return None
+
+
 # git subcommand gate (#314): "only Lead commits" — see module docstring for
 # why prose alone wasn't enough. Flags between `git` and the subcommand are
 # skipped ONLY when they look like bare flags (`-c foo=bar` style two-token
@@ -873,6 +984,16 @@ def classify(
                 rule=f"pip_editable:{rule}",
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
             )
+
+    full_suite = _full_suite_rule(cmd)
+    if full_suite is not None:
+        return Verdict(
+            False,
+            rule=f"full_suite:{full_suite}",
+            reason=(
+                f"role `{name}` รัน raw full-suite ไม่ได้ (นโยบาย cockpit). {FULL_SUITE_RULE_TEXT}"
+            ),
+        )
 
     in_worktree = _in_worktree(cmd, cwd)
 
