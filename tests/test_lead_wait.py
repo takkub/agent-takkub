@@ -361,6 +361,30 @@ class TestPollWait:
         assert not result["pending"]
         assert not result["expired"]
 
+    def test_closed_pane_with_past_report_is_gone_not_never_spawned(
+        self, orch: Orchestrator
+    ) -> None:
+        """#524: `wait --role qa --role qa2` used to fail the WHOLE command
+        when qa2's pane had already fully auto-closed after an earlier
+        `done()` — its stale `_wait_done_events` entry proves it WAS spawned
+        and did report, but the pane-is-None branch used to hand back the
+        same "never spawned" reason a genuine typo'd role name gets, which
+        `cmd_wait`'s #428 typo-protection then turns into a hard error for
+        the entire multi-role wait. It must instead resolve as an
+        unresolvable "gone" with a reason that does NOT trip that check, so
+        `cmd_wait` still reports overall success once every OTHER watched
+        role resolves normally."""
+        orch._wait_done_events[(PROJECT, "qa2")] = {"ts": time.time() - 5000.0, "failed": False}
+        begin = orch.begin_wait(PROJECT, ["qa2"], 3600.0)
+        orch._active_waits[PROJECT]["started_ts"] = time.time() - 1000.0
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert "qa2" in result["gone"]
+        assert "ไม่เคยถูก spawn" not in result["gone"]["qa2"]
+        assert not result["pending"]
+        assert not result["expired"]
+
     def test_timeout_marks_expired_and_removes_registration(self, orch: Orchestrator) -> None:
         _register_working(orch, "backend")
         begin = orch.begin_wait(PROJECT, ["backend"], 1.0)

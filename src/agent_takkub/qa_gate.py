@@ -1582,6 +1582,32 @@ def _non_python_gate(
         )
 
     for index, check in enumerate(checks):
+        # #529: a check that actually runs the test suite ("test", a
+        # narrowed "test:<runner>-related", or "verify" which combines
+        # everything and can't be split out) is exactly the one that dies
+        # with N connection-refused failures when the test DB container is
+        # missing/not started — preflight it right before THIS check runs
+        # (not the whole tier) so typecheck/lint above it are unaffected.
+        if check.name == "verify" or check.name == "test" or check.name.startswith("test:"):
+            from .db_preflight import check_test_db_reachable
+
+            db_finding = check_test_db_reachable(env)
+            if db_finding is not None:
+                report.steps.append(
+                    StepResult(
+                        "test-db-preflight",
+                        db_finding.ok,
+                        db_finding.skipped,
+                        0.0,
+                        db_finding.detail,
+                    )
+                )
+                if not db_finding.ok:
+                    for rest in checks[index:]:
+                        report.steps.append(
+                            _skip(rest.name, "test-db-preflight failed — fail-fast (#529)")
+                        )
+                    break
         if lock_base is not None:
             step = _run_step_contended(
                 check.name,
@@ -1802,6 +1828,27 @@ def run_gate(
             return finish()
 
         py = _resolve_tool(bin_dir, "python") or sys.executable
+
+        # #529: preflight the test DB (if this project's env even names one)
+        # right before pytest runs — a missing/not-started container
+        # otherwise fails every DB-touching test with connection-refused,
+        # looking exactly like a code regression instead of infra.
+        from .db_preflight import check_test_db_reachable
+
+        db_finding = check_test_db_reachable(env)
+        if db_finding is not None:
+            report.steps.append(
+                StepResult(
+                    "test-db-preflight", db_finding.ok, db_finding.skipped, 0.0, db_finding.detail
+                )
+            )
+            if not db_finding.ok:
+                report.steps.append(_skip("pytest", "test-db-preflight failed — fail-fast (#529)"))
+                report.steps.append(_skip("ruff", "test-db-preflight failed — fail-fast (#529)"))
+                report.steps.append(
+                    _skip("lint-imports", "test-db-preflight failed — fail-fast (#529)")
+                )
+                return finish()
 
         # #401: only the LOCAL venv path ever produces an ENV_GAP — --exec
         # trusts its target to have everything it needs (a missing tool

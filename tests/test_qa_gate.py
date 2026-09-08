@@ -10,6 +10,7 @@ the actual full suite recursively from inside a test of the suite itself.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 
@@ -168,6 +169,55 @@ def test_full_gate_success_runs_all_three_steps_in_order(repo, monkeypatch):
     assert recorder[1][0][0].endswith(("ruff", "ruff.exe"))
     assert recorder[1][0][1] == "check", "ruff must be invoked as `check`, never bare"
     assert recorder[2][0][0].endswith(("lint-imports", "lint-imports.exe"))
+
+
+class TestDbPreflight:
+    """#529: a missing/not-started test DB must fail fast with one clear
+    message instead of letting pytest/the Node test suite run and print N
+    connection-refused failures that read like a code regression."""
+
+    def _closed_port(self) -> int:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_python_gate_fails_fast_when_test_db_unreachable(self, repo, monkeypatch):
+        _make_complete_venv(repo)
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+        monkeypatch.setenv("DATABASE_URL", f"postgres://u:p@127.0.0.1:{self._closed_port()}/x")
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        assert [s.name for s in report.steps] == [
+            "tidy",
+            "venv-check",
+            "test-db-preflight",
+            "pytest",
+            "ruff",
+            "lint-imports",
+        ]
+        preflight = next(s for s in report.steps if s.name == "test-db-preflight")
+        assert preflight.ok is False
+        assert "unreachable" in preflight.detail
+        assert report.steps[3].skipped is True  # pytest
+        assert report.steps[4].skipped is True  # ruff
+        assert report.steps[5].skipped is True  # lint-imports
+        assert report.ok is False
+        # pytest/ruff/lint-imports were never actually invoked
+        assert recorder == []
+
+    def test_python_gate_runs_normally_when_no_db_url_configured(self, repo, monkeypatch):
+        _make_complete_venv(repo)
+        recorder: list = []
+        monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
+
+        report = qa_gate.run_gate(cwd=repo, write_report=False)
+
+        assert "test-db-preflight" not in [s.name for s in report.steps]
+        assert report.ok is True
 
 
 def test_full_gate_writes_report_file_outside_the_repo(repo, monkeypatch, tmp_path):
@@ -510,6 +560,35 @@ class TestNodeProjectGate:
         qa_gate.run_gate(cwd=node_repo, targeted=["src/x.ts"], write_report=False)
 
         assert any("tsc" in " ".join(map(str, cmd)) for cmd, _ in recorder)
+
+    def test_db_preflight_fails_fast_before_the_test_check_but_typecheck_still_ran(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """#529: typecheck doesn't touch the DB — only `test` does — so a
+        missing test DB must fail-fast right before `test`, not skip
+        typecheck too."""
+        closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        monkeypatch.setenv("DATABASE_URL", f"postgres://u:p@127.0.0.1:{port}/x")
+        recorder: list = []
+        # rc for the one real check that runs before the DB preflight fires: typecheck=0
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, [0]))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        names = [s.name for s in report.steps]
+        assert "test-db-preflight" in names
+        preflight = next(s for s in report.steps if s.name == "test-db-preflight")
+        assert preflight.ok is False
+        typecheck = next(s for s in report.steps if s.name == "typecheck")
+        assert typecheck.ok is True and not typecheck.skipped
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert test_step.skipped is True
+        assert not report.ok
+        # `test` was never actually invoked once the preflight failed
+        assert len(recorder) == 1
 
     def test_a_node_project_with_nothing_runnable_refuses_clearly(
         self, node_repo, monkeypatch
