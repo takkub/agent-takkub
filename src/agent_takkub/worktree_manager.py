@@ -2359,3 +2359,42 @@ def build_merge_proposal(
         f"#226/#358) — หรือรวมเป็นคำสั่งเดียว: `takkub worktree merge --role {role}` "
         "(propose-then-fire — ให้ user confirm ก่อน fire)"
     )
+
+
+def build_merge_proposal_line(
+    role: str,
+    info: WorktreeInfo,
+    *,
+    dirty: bool = False,
+    uncommitted: int = 0,
+    merge_conflicts: bool | None = None,
+    conflict_files: list[str] | None = None,
+    crlf_phantom: bool = False,
+) -> str:
+    """Single-line merge-readiness bit, folded straight into the SAME
+    `done()` digest notice as the fact line (#519 — this used to be its own
+    `_notify_lead(kind="worktree-proposal")` ping, duplicating branch/
+    commits/files the digest bullet right above it already showed).
+
+    Only ever called for `commits > 0` — the "nothing to merge yet" case
+    stays the existing separate `worktree-no-commit-kept` warning.
+    """
+    if dirty:
+        return (
+            f"merge: ⚠ {uncommitted} ไฟล์ยังไม่ commit ใน worktree — ยังไม่พร้อม merge "
+            f"(commit ให้ครบที่ {info.path})"
+        )
+    if merge_conflicts is True:
+        names = ", ".join(f"`{f}`" for f in (conflict_files or [])[:5])
+        more = f" +{len(conflict_files) - 5}" if conflict_files and len(conflict_files) > 5 else ""
+        where = f": {names}{more}" if names else ""
+        return (
+            f"merge: ⚠ conflict กับ base ปัจจุบัน{where} — resolve ก่อน "
+            f"(`takkub worktree merge --check --branch {info.branch}`)"
+        )
+    if merge_conflicts is False:
+        readiness = "✅ พร้อม merge"
+    else:
+        readiness = "merge-tree ตรวจไม่ได้ (unknown) — review diff ก่อน"
+    phantom_note = " (CRLF phantom เฉยๆ)" if crlf_phantom else ""
+    return f"merge:{readiness}{phantom_note} → `takkub worktree merge --role {role}`"

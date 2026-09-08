@@ -117,6 +117,30 @@ class _PosixBackend(_BackendBase):
         )
         return cls(proc)
 
+    def isalive(self) -> bool:
+        try:
+            return self._proc.isalive()
+        except (ChildProcessError, ProcessLookupError):
+            # #511: ptyprocess's isalive() calls os.waitpid(self.pid, ...)
+            # internally — if the child was already reaped by something
+            # else first, waitpid itself raises this (ECHILD). No waitpid-
+            # able child left means the process is definitively gone, so
+            # this is exactly "not alive", not an error.
+            return False
+        except Exception as exc:
+            # Same race, but ptyprocess's own isalive() already caught the
+            # ECHILD OSError above and re-raised it as *its* PtyProcessError
+            # ("did someone else call waitpid() on our process?") instead of
+            # returning cleanly — this is what the caller's read loop
+            # actually sees on macOS (issue #511). Import lazily; this
+            # backend only exists once `spawn()` above has already imported
+            # ptyprocess successfully.
+            from ptyprocess import PtyProcessError
+
+            if isinstance(exc, PtyProcessError):
+                return False
+            raise
+
     def read(self, size: int) -> bytes:
         return self._proc.read(size)  # bytes; raises EOFError at EOF
 
