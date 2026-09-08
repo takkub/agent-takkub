@@ -412,6 +412,16 @@ class ProviderSpec:
     # wrong guess either matches ordinary conversation text or never fires).
     quota_markers: tuple[str, ...] = field(default_factory=tuple)
 
+    # ─── 18. In-session feedback/survey prompt detection (#509) ───
+    # Substrings that unambiguously mean "this provider's CLI is presenting an
+    # interactive feedback/survey prompt" (e.g. Antigravity/agy's "How's the
+    # CLI experience so far? [1] Good [2] Fine [3] Bad [0] Skip"). When seen,
+    # the orchestrator/spawn/delivery logic automatically skips it by sending
+    # feedback_prompt_skip_key so the pane cannot stall waiting for input.
+    feedback_prompt_markers: tuple[str, ...] = field(default_factory=tuple)
+    feedback_prompt_skip_key: str = "0\r"
+    auto_skip_feedback: bool = False
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -835,6 +845,8 @@ gemini_spec = ProviderSpec(
         # ready gate until the transient check clears (#126).
         "signing in",
         "verifying your account",
+        # #509: in-session CLI feedback survey prompt blocks ready until skipped
+        "cli experience so far",
     ),  # pty_session.py:205-209 (agy's own trust/account gates observed on first boot)
     ready_rules=(
         ReadyRule("? for shortcuts", True),  # pty_session.py:222 (agy idle footer)
@@ -989,6 +1001,12 @@ gemini_spec = ProviderSpec(
     # ellipsis so both the ASCII "..." and a rendered unicode "…" hit.
     tool_running_markers=("running command",),
     tool_stuck_auto_esc=True,
+    # CONFIRMED (#509, 2026-09-08): agy raises an interactive survey modal
+    # ("How's the CLI experience so far? Help us improve: [1] Good [2] Fine [3] Bad [0] Skip")
+    # that stalls waiting for stdin. Auto-skip by sending '0\r'.
+    feedback_prompt_markers=("how's the cli experience so far", "cli experience so far"),
+    feedback_prompt_skip_key="0\r",
+    auto_skip_feedback=True,
 )
 
 
@@ -1308,6 +1326,7 @@ CAPABILITY_NAMES: tuple[str, ...] = (
     "file_read_tool",  # structured file-read tool (long-task handoff pointer)
     "modal_detection",  # ready/blocker markers known (permission/modal prompts)
     "tool_stuck_detection",  # shell-tool running markers known
+    "feedback_prompt_skip",  # in-session feedback/survey prompt detection and auto-skip (#509)
     "provider_isolation",  # provider home isolated under DATA_HOME
 )
 
@@ -1334,6 +1353,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     m["file_read_tool"] = "supported" if spec.supports_agent_file_read else "unsupported"
     m["modal_detection"] = "supported" if spec.ready_hard_blockers else "partial"
     m["tool_stuck_detection"] = "supported" if spec.tool_running_markers else "unsupported"
+    m["feedback_prompt_skip"] = "supported" if spec.auto_skip_feedback else "unsupported"
     try:
         from .config import PROVIDER_ISOLATION_GAPS
 
@@ -1589,6 +1609,28 @@ def tool_running_markers_for(provider: str) -> tuple[str, ...]:
     not a cross-provider phrase."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.tool_running_markers if spec is not None else ()
+
+
+def feedback_prompt_markers_for(provider: str) -> tuple[str, ...]:
+    """In-session feedback/survey prompt markers for `provider` (see
+    ``ProviderSpec.feedback_prompt_markers``, #509). Empty for providers with
+    none confirmed (or an unknown provider name)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.feedback_prompt_markers if spec is not None else ()
+
+
+def feedback_prompt_skip_key_for(provider: str) -> str:
+    """Keystroke sequence to auto-skip an interactive feedback/survey prompt for
+    `provider` (default '0\r', #509)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.feedback_prompt_skip_key if spec is not None else "0\r"
+
+
+def auto_skip_feedback_for(provider: str) -> bool:
+    """Whether feedback prompts should be automatically skipped for `provider`
+    (#509)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return bool(spec.auto_skip_feedback) if spec is not None else False
 
 
 # ── ready-marker calibration status (#257) ──────────────────────────────────

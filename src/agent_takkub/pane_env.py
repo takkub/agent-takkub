@@ -368,6 +368,14 @@ def _apply_non_interactive_env(env: dict[str, str]) -> None:
     env still wins — same contract as ``MCP_TOOL_TIMEOUT``.  A pane that
     genuinely needs interactive npx (rare) can set ``npm_config_yes=false``
     in the cockpit shell before spawning.
+
+    Note on provider feedback/survey prompts (issue #509):
+    A binary and CLI audit of Gemini / Antigravity CLI (`agy`) confirms that
+    `agy` does not provide an environment variable or flag to disable its
+    in-session survey prompts ("How's the CLI experience so far? [0] Skip").
+    Therefore, survey prompt handling is performed at runtime via PTY session
+    pattern detection (`is_at_feedback_prompt`) and auto-skip in `spawn_engine`,
+    `lead_inbox`, and `orchestrator`.
     """
     env.setdefault("npm_config_yes", "true")
     env.setdefault("GIT_TERMINAL_PROMPT", "0")

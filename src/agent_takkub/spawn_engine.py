@@ -811,6 +811,9 @@ class PaneState:
     pipeline_run_id: str | None = None
     # splash_dismiss_ts: last time Enter was sent to dismiss an update-splash modal (#62)
     splash_dismiss_ts: float = 0.0
+    # feedback_prompt_dismiss_ts / attempts: auto-skip tracking for in-session CLI feedback/survey (#509)
+    feedback_prompt_dismiss_ts: float = 0.0
+    feedback_prompt_dismiss_attempts: int = 0
     # stop_gate_notified: True once the Stop-hook done-gate has already blocked
     # this pane once for its CURRENT assignment. stop_hook_active alone only
     # stops Claude Code from recursively re-entering the same Stop event — it
@@ -3796,6 +3799,30 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         def _check() -> None:
             if pane.session is None or not pane.session.is_alive:
                 return
+            try:
+                from .provider_config import effective_provider_for
+                from .provider_spec import feedback_prompt_skip_key_for
+
+                _prov = effective_provider_for(role_name, project=project)
+                _at_fb = getattr(pane.session, "is_at_feedback_prompt", None)
+                if callable(_at_fb):
+                    _fb_val = _at_fb(_prov)
+                    if isinstance(_fb_val, bool) and _fb_val:
+                        _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
+                        pane.session.write(_skip_key)
+                        _key = f"{self._resolve_project(project)}::{role_name}"
+                        _ps_fb = self._ps(_key)
+                        _ps_fb.feedback_prompt_dismiss_ts = time.time()
+                        _ps_fb.feedback_prompt_dismiss_attempts += 1
+                        _log_event(
+                            "feedback_prompt_auto_skipped",
+                            role=role_name,
+                            project=self._resolve_project(project),
+                            provider=_prov,
+                            at="spawn_auto_trust",
+                        )
+            except Exception:
+                pass
             at_prompt = pane.session.is_at_trust_prompt()
             if at_prompt:
                 due = elapsed[0] - last_press_ms[0] >= _AUTO_TRUST_RETRY_EVERY_MS

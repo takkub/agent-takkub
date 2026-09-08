@@ -1220,6 +1220,16 @@ def _qt_session_app():
     # fixtures run) must be caught too, not just ones after this point.
     _install_qt_exception_guard()
     _install_qtimer_leak_tracker()
+    try:
+        from PyQt6.QtCore import QCoreApplication, Qt
+
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    except Exception:
+        pass
+    try:
+        import PyQt6.QtWebEngineWidgets  # noqa: F401
+    except Exception:
+        pass
 
     app = QApplication.instance()
     if app is None:
