@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 334,
+  "module_count": 335,
   "modules": [
     {
       "module": "agent_takkub",
@@ -2428,6 +2428,15 @@
       "fan_out": 4
     },
     {
+      "module": "agent_takkub.db_preflight",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.qa_gate"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.delivery_readiness",
       "imports": [],
       "imported_by": [
@@ -3773,6 +3782,7 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.config",
+        "agent_takkub.db_preflight",
         "agent_takkub.prisma_gate",
         "agent_takkub.smoke_gate",
         "agent_takkub.tidy_gate",
@@ -3782,7 +3792,7 @@
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.ram_report",

@@ -98,6 +98,16 @@ _WAIT_RESOLVED_ECHO_GRACE_S = 30.0
 _GONE_NEVER_SPAWNED = "ไม่เคยถูก spawn"
 _GONE_NEVER_SPAWNED_DETAIL = f"role ไม่พบ — {_GONE_NEVER_SPAWNED} ในโปรเจคนี้ (เช็คชื่อ role)"
 
+# #524: the other "gone" reason — a role whose pane has fully disappeared
+# (auto-closed after done, or closed by Lead) but that DID exist and report
+# at least once before. Deliberately does NOT contain `_GONE_NEVER_SPAWNED`
+# so `cli.cmd_wait`'s typo-protection check (`never_spawned`) never flags it
+# as an error: a `wait --role a --role b` where `b` already finished and
+# closed must skip+warn on `b`, not fail the whole command (#524).
+_GONE_ALREADY_REPORTED_DETAIL = (
+    "role ปิดไปแล้ว (เคยมีรายงาน done/failed มาก่อน) — ไม่มีอะไรต้องรอเพิ่มจาก role นี้"
+)
+
 
 class LeadWaitMixin:
     """Provides `begin_wait` / `poll_wait` / `end_wait` on `Orchestrator`.
@@ -294,6 +304,13 @@ class LeadWaitMixin:
             # "never spawned" (#249 item 2).
             if time.time() - started_ts < _WAIT_NEVER_SPAWNED_GRACE_S:
                 return "pending", "ยังไม่พบ pane ของ role นี้ — กำลังรอ spawn"
+            # #524: reaching here means `event` already failed the `fresh`
+            # check above (stale relative to both this wait and the role's
+            # current assign) — so any event still on record here is proof
+            # this role WAS spawned and reported at least once before its
+            # pane fully disappeared, not a typo'd/never-existed role name.
+            if event is not None:
+                return "gone", _GONE_ALREADY_REPORTED_DETAIL
             return "gone", _GONE_NEVER_SPAWNED_DETAIL
 
         info = detailed.get(role, {})
