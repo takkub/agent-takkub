@@ -2,7 +2,7 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT] — (ร่าง 2026-09-07, ยังไม่ปล่อย — user สั่งไม่ publish วันนี้)
+## [2.0.1] - 2026-09-08
 
 หลักของรอบนี้ (user directive): **"V2 ทำทุกอย่างแยกให้ชัดเจน อ่านง่าย"** — ตัวเลือกที่ค่าถูกมีค่าเดียวไม่ใช่ตัวเลือก, ตัวเลขที่โชว์ต้องเป็นของจริงจาก provider, เอาออก = ถอน dead code ทั้งสาย · batch นี้ผ่าน cross-review 3 รอบ (reviewer claude + gemini) — HIGH ที่เจอทั้งหมดแก้ก่อนปล่อย (`docs/audit/2026-09-07-batch-2.0.x-review-*.md`)
 
@@ -23,10 +23,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **pane เปิดมาเบาลง (#516)** — role file ทุกตำแหน่งแยก core / on-demand (`docs/roles/<role>/`, −39..60%), CLAUDE.md root −54%, learned notes ต่อ role cap 1,500 chars, **pane ที่ไม่ใช่ Lead ไม่โหลด MEMORY.md ของ Lead อีก** (project-dir-name ต่อ role; session เก่ายัง resume ได้ผ่าน fallback) · Tools/Skills โชว์ต้นทุน token ต่อ plugin/skill
 - **kimi มีบ้านแยกใน DATA_HOME (#103)** — `KIMI_SHARE_DIR` → `providers/kimi/default` (พิสูจน์กับ kimi-cli 1.50.0) · gemini/agy 1.1.27 ไม่มี knob (พิสูจน์แล้ว) · cursor ยังไม่ verify
 - **`v1_only_write` exit gate (#502)** — `doctor --storage-layout` / `migrate validate` รายงาน writer ที่แตะ V1 โดยไม่ mirror (รวมกรณี mirror หายและ role-providers fan-out) — ข้อความบอกชัดว่าเป็น on-demand snapshot ไม่ใช่ monitor · ด่านก่อน 2.1.0 (#504)
+- **Cockpit UI redesign — Apex Slate/Titanium (2026-09-08)** — พาเลทใหม่ทั้งแอพ (indigo primary แทน gold/มัสตาร์ดเดิม), semantic status colors (success/warning/error/info) แทน indigo ทับทุกจุด, role-colored border บน pane frame, ตัวอักษรใหญ่ขึ้นทั่วแอพ (เยอะสุดที่หน้า Roles), section "Team"/"Settings" เปลี่ยนชื่อเป็น "Roles" ทุกจุดที่ user เห็น (แก้ปัญหาชื่อซ้อนกับ Settings window เอง), dialog ทุกบานสืบทอด QSS ธีมแอพแล้ว (แก้ white-bleed ธีมมืด) — ตรวจสอบครบทั้ง dark/light ผ่าน e2e จริงบน dev cockpit
 
 ### Fixed (แก้)
 
 - จาก cross-review รอบ 1–2 (ทั้งหมดมีเทส reproduce): endpoint มือถือ `usage/history` เคยเดิน path ออกนอก ledger และเขียน/ลบไฟล์ตอน GET · `rtk gain` subprocess + rollup วิ่งบน Qt main thread ทุกครั้งที่เปิด Settings/มือถือ · SettingsWindow ไม่เคยถูกลบ + QThread abort ตอนปิด · rollup ทับยอดประวัติ (30→10) และคูณ 2 ตอนขึ้นเดือนใหม่ · codex นับ cached token ซ้ำ (19,421→31,581) · import ซ้อนไม่มี lock · quota ของบัญชีชื่อถูกบันทึกเป็น default · OpenCode WAL ไม่ถูกจับ · JSON เสียรูปล้มทั้ง import · migration #515 รันซ้ำทับ role-models · ladder/v1_only_write ยังชี้ role-providers.json หลังยุบ (V2 routing ค้าง — boot ครั้งแรกหลังอัปซ่อมเอง ไม่ rollback) · `--team`/`team set` ยกสิทธิ์ Lead เองได้ · auto-chain ไม่รู้ preset · retheme ไม่ครอบ inline QSS · เทส Accounts ตกสุ่มจาก worker ไม่ถูก join
+- Skills Catalog เปิดครั้งแรกบางทีเป็น blank canvas (#526 follow-up) · "+ New Role" dialog ปิดแล้วเปิด skill form ใหม่ครัช (RuntimeError deleted QVBoxLayout, #526) · `user_profile` add/remove_profile กลืน OSError เงียบตอนชน Windows file lock (#518) · `takkub worktree merge` รายงาน "merged" ทั้งที่ HEAD ไม่ขยับจริง (#527) · pane_guard ไม่บล็อกคำสั่ง test แบบเต็ม (#528) · worktree pane รายงาน done ทั้งที่ยังไม่ commit → auto-commit snapshot แล้ว propose merge (#525) · qa-gate ไม่ preflight เช็ค test DB ก่อนรัน คายเทส fail หลอกเวลา DB หาย (#529) · `takkub wait` fail ทั้งก้อนเมื่อ role หนึ่งปิดไปแล้ว (#524) · Lead noise จาก worktree-spawn/proposal ซ้ำซ้อน (#519) · macOS PtyProcessError จาก waitpid ECHILD race (#511) · CLI feedback/survey prompt (Gemini) บล็อก pane ค้างรอ input (#509)
 
 ### หมายเหตุอัปเกรด
 
