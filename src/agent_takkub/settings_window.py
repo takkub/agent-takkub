@@ -2825,6 +2825,24 @@ class SettingsWindow(
         return roots
 
     def _reload_new_role_skills(self) -> None:
+        # #526: `_nr_skills_lay` lives on `self` (long-lived SettingsWindow)
+        # but is actually built fresh inside `_open_new_role_dialog`'s
+        # QDialog every open (`_build_new_role_view`'s own docstring) — once
+        # that dialog's C++ widgets are gone, the attribute is a dangling
+        # reference into a deleted QVBoxLayout. `hasattr(self, "_nr_skills_
+        # lay")` at both call sites (`_reload_skill_catalog`'s post-create
+        # refresh, and this method's own initial-build caller) only proves
+        # the attribute was set at some point, never that it still points to
+        # something alive — so guard the actual dereference here, once, for
+        # every caller, and self-heal by dropping the stale attributes so a
+        # later hasattr() check correctly reports "no New Role dialog open".
+        try:
+            self._nr_skills_lay.count()
+        except RuntimeError:
+            del self._nr_skills_lay
+            if hasattr(self, "_nr_skills_container"):
+                del self._nr_skills_container
+            return
         while self._nr_skills_lay.count():
             item = self._nr_skills_lay.takeAt(0)
             w = item.widget()
