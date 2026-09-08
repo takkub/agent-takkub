@@ -664,3 +664,96 @@ class TestRuleTextSyncedWithRoleFiles:
         assert "git commit" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
         assert "314" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
         assert "worktree" in pane_guard.GIT_LEAD_ONLY_RULE_TEXT
+
+    def test_full_suite_rule_text_is_actionable(self) -> None:
+        """Same contract as GUARD_RULE_TEXT: name the safe alternative
+        (qa-gate --targeted), not just the prohibition."""
+        assert "qa-gate --targeted" in pane_guard.FULL_SUITE_RULE_TEXT
+        assert "528" in pane_guard.FULL_SUITE_RULE_TEXT
+
+
+class TestFullSuiteDenied:
+    """#528: a raw, un-narrowed test-runner invocation forks every worker the
+    runner owns and has pinned the user's box at 100% CPU/RAM more than once
+    — #485's "targeted mid-batch, full gate once via qa-gate" was prose-only
+    until this rule."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pytest",
+            "pytest .",
+            "pytest ./",
+            "python -m pytest",
+            "python3 -m pytest",
+            "py.test",
+            "pytest -v --tb=short",
+            "vitest run",
+            "npx vitest run",
+            "pnpm exec vitest run",
+            "yarn dlx vitest run",
+            "jest",
+            "npx jest",
+            "jest --ci",
+            "turbo run test",
+            "turbo run test --cache-dir=.turbo",
+            "pnpm -r test",
+            "pnpm --recursive test",
+            "yarn workspaces run test",
+        ],
+    )
+    def test_denied_for_backend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("full_suite:")
+        assert "qa-gate" in verdict.reason
+
+    @pytest.mark.parametrize("role", ["qa", "frontend", "devops", "reviewer"])
+    def test_denied_for_every_role_including_qa(self, role: str) -> None:
+        """qa is the role that ultimately owns full-suite verification, but
+        it must reach for `takkub qa-gate --auto` too, never a raw runner —
+        no role-based allowlist for this rule."""
+        assert not pane_guard.classify("pytest", role).allowed
+
+    def test_denied_for_shard(self) -> None:
+        assert not pane_guard.classify("vitest run", "frontend#2").allowed
+
+
+class TestFullSuiteAllowed:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # exactly the shape this project's own sessions already use
+            "pytest tests/test_worktree_manager.py tests/test_cli.py -k 'worktree or Merge'",
+            "pytest tests/test_pane_guard.py",
+            "pytest -k test_something",
+            "pytest -m 'not slow'",
+            "python -m pytest tests/test_x.py::TestY::test_z",
+            "vitest run src/foo.test.ts",
+            "npx vitest run src/foo.test.ts",
+            "vitest related --run src/foo.ts",
+            "vitest --run -t 'renders correctly'",
+            "jest src/foo.test.js",
+            "jest -t 'renders correctly'",
+            "jest --findRelatedTests src/foo.ts",
+            "turbo run test --filter=web",
+            "turbo run test --filter web",
+            "pnpm --recursive test --filter=web",
+            # unrelated commands that merely mention these words in passing
+            "npm run test:unit",
+            "npm test",
+            "cat vitest.config.ts",
+            "grep -rn pytest tests/",
+            "echo 'run pytest before you push'",
+        ],
+    )
+    def test_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+    def test_qa_gate_itself_never_matches(self) -> None:
+        """`takkub qa-gate`'s internal test runs happen inside the CLI
+        process via subprocess.run — never through a Bash tool call this
+        hook can see — so the literal `takkub qa-gate ...` invocation must
+        never itself trip this rule for any role."""
+        assert pane_guard.classify("takkub qa-gate --targeted src/foo.ts", "qa").allowed
+        assert pane_guard.classify("takkub qa-gate --auto", "qa").allowed

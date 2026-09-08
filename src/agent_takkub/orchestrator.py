@@ -3411,6 +3411,26 @@ class Orchestrator(
             info = WorktreeInfo.from_dict(worktree)
             mgr = WorktreeManager()
             commits = precomputed["commits"] if precomputed is not None else mgr.commit_count(info)
+            if commits == 0:
+                # #525: real uncommitted work but nothing committed used to
+                # fall straight to the "no commit kept" warning below with no
+                # merge proposal ever sent — auto-commit a snapshot on the
+                # pane's own branch first so it gets one like a pane that
+                # remembered to commit itself. `precomputed` (if any) is now
+                # stale the moment a commit lands, so it is dropped and every
+                # fact below this point is re-read fresh via `mgr.*`.
+                dirty_before = (
+                    precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
+                )
+                if dirty_before and mgr.auto_commit_snapshot(info, from_role):
+                    _log_event(
+                        "worktree_auto_commit_snapshot",
+                        role=from_role,
+                        project=project_ns,
+                        branch=info.branch,
+                    )
+                    precomputed = None
+                    commits = mgr.commit_count(info)
             if commits > 0:
                 # #244: commits > 0 does NOT mean "ready to merge" — the
                 # branch can carry accepted commits AND still hold fresh
