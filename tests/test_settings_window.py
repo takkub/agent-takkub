@@ -1280,6 +1280,35 @@ class TestNewSkillForm:
         assert "picker-visible" in {s.name for s, _chk in dlg._nr_skill_checks}
         dlg.deleteLater()
 
+    def test_reload_after_new_role_dialog_layout_deleted_does_not_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """#526: `_nr_skills_lay` is built fresh inside the "+ New Role"
+        QDialog every open (`_open_new_role_dialog`) but cached on `self` —
+        once that dialog's C++ widgets are gone, `_reload_skill_catalog`'s
+        `hasattr(self, "_nr_skills_lay")` guard alone doesn't catch a
+        dangling reference, and creating a skill afterwards used to raise
+        ``RuntimeError: wrapped C/C++ object of type QVBoxLayout has been
+        deleted`` from `_reload_new_role_skills`."""
+        from PyQt6 import sip
+
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._build_new_role_view()
+        assert hasattr(dlg, "_nr_skills_lay")
+
+        # Simulate the New Role dialog's widgets having been torn down
+        # (its real container is a QDialog child, but the C++-deletion
+        # class of bug is identical regardless of the exact parent).
+        sip.delete(dlg._nr_skills_lay)
+
+        dlg._ns_name.setText("post-delete-skill")
+        dlg._on_create_skill_clicked()  # -> _reload_skill_catalog() -> must not raise
+
+        assert not hasattr(dlg, "_nr_skills_lay")
+        dlg.deleteLater()
+
 
 class TestPipelineBuilderView:
     def test_hops_render_for_active_template(self) -> None:
