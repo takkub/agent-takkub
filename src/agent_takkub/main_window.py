@@ -42,6 +42,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QMainWindow,
     QMessageBox,
+    QSizePolicy,
+    QSpacerItem,
     QStyle,
     QSystemTrayIcon,
     QWidget,
@@ -1297,6 +1299,16 @@ class MainWindow(
         if not available:
             btn_existing.setEnabled(False)
             btn_existing.setToolTip("ทุกโปรเจคที่มีถูกเปิดหมดแล้ว")
+        # QA live e2e (2026-09-08, round 3): with 4 buttons this long,
+        # QMessageBox sizes its width off the label/icon area alone and then
+        # squeezes the button row to fit — the buttons' own text got clipped
+        # even though each button's sizeHint was wide enough. A zero-height
+        # spacer stretched across the layout's full column span is the
+        # standard Qt workaround: it forces the dialog itself wide enough
+        # for the button row to lay out unclipped, in both themes.
+        spacer = QSpacerItem(560, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        grid = box.layout()
+        grid.addItem(spacer, grid.rowCount(), 0, 1, grid.columnCount())
         box.exec()
         clicked = box.clickedButton()
 

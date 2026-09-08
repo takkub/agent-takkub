@@ -222,8 +222,17 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     # 2026-09-08 polish round 2: section/page label literally renamed
     # "TEAM"->"SETTINGS" per direct user feedback (display text only — every
     # VIEW_*/internal identifier below is untouched).
-    (VIEW_PROVIDERS_ROLES, "Settings & ตำแหน่ง", "SETTINGS"),
-    (VIEW_PIPELINE_BUILDER, "Pipeline", "SETTINGS"),
+    # 2026-09-08 polish round 3 (QA live e2e): "SETTINGS" section header sat
+    # directly on top of a "Settings & ตำแหน่ง" nav item — same word twice,
+    # read as one redundant blob. Renamed section -> "WORKFLOW" (covers both
+    # entries: who's on the roster AND what order hops run in) and the nav
+    # item -> "Roles & ตำแหน่ง" so it no longer echoes the section header.
+    # "CONFIGURATION" was ruled out — already used as the generic content
+    # pretitle above every page (`_content_pretitle`, would collide);
+    # "PROJECT" was ruled out — "Project" already means a repo/tab elsewhere
+    # in this app, which is exactly the kind of overload we're fixing here.
+    (VIEW_PROVIDERS_ROLES, "Roles & ตำแหน่ง", "WORKFLOW"),
+    (VIEW_PIPELINE_BUILDER, "Pipeline", "WORKFLOW"),
     (VIEW_MCP_MATRIX, "Tools", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skills", "TOOLS"),
     (VIEW_KNOWLEDGE, "Knowledge", "TOOLS"),
@@ -301,7 +310,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
         "ธีมสี · โหมดเครื่อง · ภาษา — ทุกอย่างในหน้านี้มีผลทันทีและจำค่าไว้",
     ),
     VIEW_PROVIDERS_ROLES: (
-        "Settings & ตำแหน่ง",
+        "Roles & ตำแหน่ง",
         "ขนาดทีมของโปรเจคนี้ + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
     ),
     VIEW_PIPELINE_BUILDER: (
@@ -1923,7 +1932,7 @@ class SettingsWindow(
         top_lay.setContentsMargins(0, 0, 0, 0)
         top_lay.setSpacing(8)
         mono = cockpit_theme.ensure_fonts_loaded()["mono"]
-        kicker_lbl = QLabel("SETTINGS SIZE", top_row)
+        kicker_lbl = QLabel("ROLES SIZE", top_row)
         kicker_lbl.setStyleSheet(
             f'font-family: "{mono}"; font-size: 11px; font-weight: 600; '
             f"letter-spacing: 1.5px; color: {cockpit_theme.TEXT_FAINT};"
@@ -2088,7 +2097,7 @@ class SettingsWindow(
         roster_header_row = QHBoxLayout()
         roster_header_row.addWidget(
             self._build_card_header(
-                "SETTINGS ROSTER",
+                "ROLES ROSTER",
                 "ตำแหน่งในทีม",
                 f"{n_positions_enabled}/{n_positions} active",
                 role_panel,

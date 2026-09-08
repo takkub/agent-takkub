@@ -252,7 +252,7 @@ class TestViewRedirects:
         dlg = settings_window.SettingsWindow()
         assert len(settings_window._NAV_VIEWS) == 8
         sections = {section for _view, _label, section in settings_window._NAV_VIEWS}
-        assert sections == {"GENERAL", "SETTINGS", "TOOLS", "ACCOUNT"}
+        assert sections == {"GENERAL", "WORKFLOW", "TOOLS", "ACCOUNT"}
         assert len(dlg._nav_buttons) == 8
         dlg.deleteLater()
 
@@ -2049,10 +2049,10 @@ class TestTeamPresetView:
 
     def test_nav_renamed_and_grouped_under_team_section(self) -> None:
         entries = {label: section for _idx, label, section in settings_window._NAV_VIEWS}
-        assert entries["Settings & ตำแหน่ง"] == "SETTINGS"
+        assert entries["Roles & ตำแหน่ง"] == "WORKFLOW"
         # #515: Pipeline Builder + Templates merged into one "Pipeline" nav
-        # item under the same SETTINGS section.
-        assert entries["Pipeline"] == "SETTINGS"
+        # item under the same WORKFLOW section.
+        assert entries["Pipeline"] == "WORKFLOW"
         assert "Pipeline Builder" not in entries
         assert "Templates" not in entries
         assert "Providers & Roles" not in entries
