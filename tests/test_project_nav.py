@@ -181,6 +181,30 @@ class TestTunnelIndicator:
         nav.set_tunnel_status("bogus", "?")  # must not raise
         assert cockpit_theme.TEXT_FAINT in nav._tunnel_indicator.styleSheet()
 
+    def test_color_reflects_live_variant_not_a_frozen_snapshot(self, qapp):
+        """2026-09-08 design review, live-retheme fix — a ClassVar dict of
+        already-resolved `cockpit_theme.STATE_OK`/`STATE_ERROR` strings would
+        freeze whichever variant was bound at class-definition time; the dot
+        must reflect whatever variant is bound at paint time instead."""
+        nav = ProjectNav()
+        try:
+            cockpit_theme.apply_variant("light")
+            nav.set_tunnel_status("running", "Tunnel: running")
+            assert cockpit_theme.LIGHT_TOKENS["STATE_OK"] in nav._tunnel_indicator.styleSheet()
+        finally:
+            cockpit_theme.apply_variant("dark")
+
+    def test_retheme_repaints_with_the_last_known_state(self, qapp):
+        nav = ProjectNav()
+        nav.set_tunnel_status("running", "Tunnel: running")
+        try:
+            cockpit_theme.apply_variant("light")
+            nav.retheme()
+            assert cockpit_theme.LIGHT_TOKENS["STATE_OK"] in nav._tunnel_indicator.styleSheet()
+            assert nav._tunnel_indicator.toolTip() == "Tunnel: running"
+        finally:
+            cockpit_theme.apply_variant("dark")
+
 
 class TestSidebarCollapse:
     def test_toggle_flips_collapsed_state(self, qapp):
@@ -265,6 +289,48 @@ class TestUsageBadgeLegend:
         nav.set_usage(0, None)
         assert row._badge.text() == ""
         assert row._badge.toolTip() == ""
+
+
+class TestLiveRetheme:
+    """2026-09-08 design review — a project row's name color / avatar ring
+    and the sidebar's own container QSS were only ever painted once, at
+    construction, and never followed a live `apply_variant()` switch (the
+    "project navigation rows... constructed once at boot" finding)."""
+
+    def test_row_retheme_repaints_avatar_ring_and_name_color(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        row = nav._row_widget(0)
+        row.set_selected(True)
+        try:
+            cockpit_theme.apply_variant("light")
+            row.retheme()
+            assert cockpit_theme.LIGHT_TOKENS["TEXT_PRIMARY"] in row._name.styleSheet()
+            assert cockpit_theme.LIGHT_TOKENS["ACCENT_GOLD"] in row._avatar.styleSheet()
+        finally:
+            cockpit_theme.apply_variant("dark")
+
+    def test_row_retheme_repaints_usage_badge_from_stored_ratio(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        row = nav._row_widget(0)
+        nav.set_usage(0, 0.99)  # high ratio -> a "critical" usage color
+        try:
+            cockpit_theme.apply_variant("light")
+            row.retheme()
+            assert "33%" not in row._badge.text()  # untouched text, sanity
+            assert cockpit_theme.LIGHT_TOKENS["USAGE_CRIT"] in row._badge.styleSheet()
+        finally:
+            cockpit_theme.apply_variant("dark")
+
+    def test_projectnav_retheme_reapplies_sidebar_qss(self, qapp):
+        nav = ProjectNav()
+        try:
+            cockpit_theme.apply_variant("light")
+            nav.retheme()
+            assert cockpit_theme.LIGHT_TOKENS["GROUND_SIDEBAR"] in nav._sidebar.styleSheet()
+        finally:
+            cockpit_theme.apply_variant("dark")
 
 
 class TestPendingProjectsSection:

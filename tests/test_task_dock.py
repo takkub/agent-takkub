@@ -148,6 +148,26 @@ class TestTaskDockWidget:
         widget.refresh_project("neverassigned")
         assert widget._tree.topLevelItemCount() == 0
 
+    def test_retheme_reapplies_container_qss_and_rebuilds_the_active_card(self) -> None:
+        """2026-09-08 design review, live-retheme fix — `_dock_qss()` and the
+        active project's per-item QColors were only ever applied once, at
+        construction; `retheme()` must re-apply both after a live
+        `apply_variant()` switch instead of waiting for a restart."""
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
+        )
+        widget.set_project(PROJECT)
+        assert widget._tree.topLevelItemCount() == 1
+        try:
+            cockpit_theme.apply_variant("light")
+            widget.retheme()
+            assert cockpit_theme.LIGHT_TOKENS["GROUND_SIDEBAR"] in widget.styleSheet()
+            # refresh_all() tore down and rebuilt the card, not just skipped it.
+            assert widget._tree.topLevelItemCount() == 1
+        finally:
+            cockpit_theme.apply_variant("dark")
+
 
 # ──────────────────────────────────────────────────────────────
 # Task List shows only the active project's tab, not every open project

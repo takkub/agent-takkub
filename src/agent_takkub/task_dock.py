@@ -837,6 +837,17 @@ class TaskDockWidget(QWidget):
         self._relayout_tree()
         self._git_view.set_project(project)
 
+    def retheme(self) -> None:
+        """#506 live-switch fix (2026-09-08 design review): `_dock_qss()`
+        reads live tokens already, but `setStyleSheet()` was only ever
+        called once, at construction. The tree's own QColor/inline styles
+        (per-row status glyphs, chevrons, project cards) were baked in at
+        build time too — `refresh_all()` already fully tears down and
+        rebuilds the active project's card from the ledger, so re-running it
+        is the cheapest correct way to repaint everything at once."""
+        self.setStyleSheet(_dock_qss())
+        self.refresh_all()
+
     def refresh_all(self) -> None:
         """Reload the active project's ledger state and rebuild its card.
 

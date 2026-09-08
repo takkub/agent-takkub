@@ -292,7 +292,6 @@ class ProjectWizardMixin:
         Returns a dict of {key: posix_path} on accept, or None on cancel.
         """
         from PyQt6.QtWidgets import (
-            QDialog,
             QDialogButtonBox,
             QFormLayout,
             QLabel,
@@ -300,10 +299,14 @@ class ProjectWizardMixin:
             QVBoxLayout,
         )
 
+        from . import cockpit_theme
         from .config import load_projects
 
         name = project_name if project_name is not None else p.name
-        dialog = QDialog(self)
+        # 2026-09-08 design review: was a plain QDialog — never picked up the
+        # app's theme (see cockpit_theme.CockpitDialog's own docstring), the
+        # root cause of the "unstyled Windows dialog" finding for Map Paths.
+        dialog = cockpit_theme.CockpitDialog(self)
         dialog.setWindowTitle(f"Configure Project Paths: {name}")
         dialog.resize(400, 300)
         layout = QVBoxLayout(dialog)
@@ -348,7 +351,7 @@ class ProjectWizardMixin:
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if dialog.exec() != cockpit_theme.CockpitDialog.DialogCode.Accepted:
             return None
 
         paths: dict[str, str] = {}
@@ -476,15 +479,19 @@ class ProjectWizardMixin:
         Returns str (save), True (regenerate), or None (cancel).
         """
         from PyQt6.QtWidgets import (
-            QDialog,
             QHBoxLayout,
             QLabel,
             QPlainTextEdit,
-            QPushButton,
             QVBoxLayout,
         )
 
-        dlg = QDialog(self)
+        from . import cockpit_theme
+
+        # 2026-09-08 design review: was a plain QDialog — never picked up the
+        # app's theme (see cockpit_theme.CockpitDialog's own docstring), the
+        # root cause of the "unstyled light dialog with dark text area"
+        # finding for the Rules Editor.
+        dlg = cockpit_theme.CockpitDialog(self)
         dlg.setWindowTitle(f"Project rules — {project_name}/CLAUDE.md")
         dlg.resize(680, 500)
         lay = QVBoxLayout(dlg)
@@ -494,12 +501,12 @@ class ProjectWizardMixin:
         lay.addWidget(editor)
 
         btn_row = QHBoxLayout()
-        btn_save = QPushButton("💾 Save")
-        btn_cancel = QPushButton("Cancel")
+        btn_save = cockpit_theme.gold_button("💾 Save", dlg)
+        btn_cancel = cockpit_theme.secondary_button("Cancel", dlg)
         outcome: list = [None]
 
         if allow_regenerate:
-            btn_regen = QPushButton("🔄 Regenerate from new prompt")
+            btn_regen = cockpit_theme.secondary_button("🔄 Regenerate from new prompt", dlg)
             btn_row.addWidget(btn_regen)
 
             def do_regen() -> None:

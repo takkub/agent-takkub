@@ -319,6 +319,21 @@ class TestThemeVariants:
             for tone in ("muted", "gold"):
                 assert (nav_dir / f"nav-{base}-{tone}-light.svg").exists(), f"{base}-{tone}"
 
+    def test_accent_is_indigo_not_gold(self) -> None:
+        """2026-09-08 redesign: the gold `#E3B341`/`#a87b16` (dark/light)
+        accent and its "muddy mustard" light-mode darkening were replaced
+        with Indigo. Pins the exact hex so a future edit can't silently
+        regress back toward gold."""
+        assert cockpit_theme.DARK_TOKENS["ACCENT_GOLD"] == "#6366F1"
+        assert cockpit_theme.LIGHT_TOKENS["ACCENT_GOLD"] == "#4F46E5"
+
+    def test_old_gold_hex_is_gone_from_every_token_set(self) -> None:
+        old_gold_hexes = ("#E3B341", "#e3b341", "#a87b16", "#7a5a10")
+        for token_set in (cockpit_theme.DARK_TOKENS, cockpit_theme.LIGHT_TOKENS):
+            for name, value in token_set.items():
+                if isinstance(value, str):
+                    assert value not in old_gold_hexes, f"{name} still holds old gold: {value}"
+
     def test_retheme_open_windows_calls_hooks_and_survives_failures(
         self, _restore_dark_variant
     ) -> None:
@@ -341,3 +356,36 @@ class TestThemeVariants:
         finally:
             for w in (good, bad, plain):
                 w.deleteLater()
+
+
+class TestCockpitDialog:
+    """2026-09-08 design review — a plain `QDialog(parent)` never inherits
+    the app's QSS (only child widgets in the same top-level window do),
+    which was the confirmed root cause of the "blinding white dialog in
+    dark mode" / "invisible Cancel button" findings. `CockpitDialog` fixes
+    this by applying the theme's own stylesheet directly to itself."""
+
+    def test_sets_object_name_matched_by_the_stylesheet(self) -> None:
+        dlg = cockpit_theme.CockpitDialog()
+        try:
+            assert dlg.objectName() == "cockpitDialog"
+            assert "#cockpitDialog" in cockpit_theme.build_stylesheet("Sans", "Mono")
+        finally:
+            dlg.deleteLater()
+
+    def test_applies_a_stylesheet_at_construction(self) -> None:
+        dlg = cockpit_theme.CockpitDialog()
+        try:
+            assert dlg.styleSheet() != ""
+            assert cockpit_theme.GROUND_WINDOW in dlg.styleSheet()
+        finally:
+            dlg.deleteLater()
+
+    def test_retheme_follows_a_live_variant_switch(self, _restore_dark_variant) -> None:
+        dlg = cockpit_theme.CockpitDialog()
+        try:
+            cockpit_theme.apply_variant("light")
+            dlg.retheme()
+            assert cockpit_theme.LIGHT_TOKENS["GROUND_WINDOW"] in dlg.styleSheet()
+        finally:
+            dlg.deleteLater()

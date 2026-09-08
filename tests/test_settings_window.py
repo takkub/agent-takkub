@@ -154,6 +154,29 @@ class TestSettingsWindowStructure:
         assert dlg._content_title.text() == "Knowledge"
         dlg.deleteLater()
 
+    def test_view_headers_never_leak_a_raw_github_issue_number(self) -> None:
+        """2026-09-08 design review — settings descriptions used to embed
+        raw issue tags like "(#512)"/"(#505)"/"(#507)" straight into
+        user-facing copy."""
+        import re
+
+        for _title, subtitle in settings_window._VIEW_HEADERS.values():
+            assert not re.search(r"#\d+", subtitle), subtitle
+
+    def test_status_strip_drops_the_redundant_brand_and_version_labels(self) -> None:
+        """2026-09-08 design review — the status strip repeated the OS title
+        bar's own "Takkub Cockpit — Settings" text (a "takkub COCKPIT" brand
+        label + a version number), adding little beyond duplication."""
+        from PyQt6.QtWidgets import QLabel, QWidget
+
+        dlg = settings_window.SettingsWindow()
+        strip = dlg.findChild(QWidget, "statusStrip")
+        assert strip is not None
+        strip_texts = [w.text() for w in strip.findChildren(QLabel)]
+        assert "takkub COCKPIT" not in strip_texts
+        assert not any(t.startswith("v") and "." in t for t in strip_texts)
+        dlg.deleteLater()
+
     def test_machine_mode_change_persists_and_requests_live_reload(self) -> None:
         """#515: replaces the old Performance page's preset dropdown — same
         machine-aware `performance_settings.preset()` underneath, but
@@ -1015,6 +1038,18 @@ class TestSkillMatrixView:
 class TestSkillCatalogView:
     """The new, real skill browser backed by skill_scan (SKILL section)."""
 
+    def test_tab_widget_has_a_minimum_height_floor(self) -> None:
+        """2026-09-08 design review (critic §2.4 "Skills View Blank Canvas
+        Collapse") — the Catalog/Matrix QTabWidget is swapped into its
+        QScrollArea lazily and can compute a near-zero sizeHint on a
+        first-paint race; a hard minimumHeight makes a full visual collapse
+        structurally impossible regardless of the exact timing."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        tabs = dlg._stack.currentWidget().widget()
+        assert isinstance(tabs, settings_window.QTabWidget)
+        assert tabs.minimumHeight() >= 420
+        dlg.deleteLater()
+
     def test_lists_scanned_skills_with_desc_and_referencing_roles(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1284,6 +1319,24 @@ class TestPipelineBuilderView:
         assert len(tpl["hops"]) == expected_len
         dlg.deleteLater()
 
+    def test_hop_connector_is_not_a_bare_ascii_v(self) -> None:
+        """2026-09-08 design review — the connector between hops used to be
+        the literal text "v wait for all" (a lowercase letter doing double
+        duty as a flowchart arrow); must be a real arrow glyph instead."""
+        from PyQt6.QtWidgets import QLabel
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._on_palette_role_clicked("backend")  # ensure at least 2 hops exist
+        connector_texts = []
+        for i in range(dlg._pb_hops_lay.count()):
+            w = dlg._pb_hops_lay.itemAt(i).widget()
+            if isinstance(w, QLabel) and "wait for all" in w.text():
+                connector_texts.append(w.text())
+        assert connector_texts, "expected at least one connector label between hops"
+        for text in connector_texts:
+            assert not text.startswith("v "), f"bare-ascii-v connector regressed: {text!r}"
+        dlg.deleteLater()
+
 
 class TestSaveApplyAtomicity:
     def test_failed_tools_policy_write_rolls_back_provider_and_pipeline_writes(
@@ -1473,6 +1526,46 @@ class TestAccountsView:
             if not was_hooked and app is not None:
                 app.aboutToQuit.disconnect(settings_accounts._wait_for_accounts_refresh_jobs)
             settings_accounts._accounts_refresh_shutdown_hooked = was_hooked
+
+    def test_gap_reason_full_text_moved_behind_diagnostics_button(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """2026-09-08 design review — a provider isolation-gap panel used to
+        render the FULL raw probe note (internal env-var names, provider
+        version, sqlite table names — `accounts_adapter.PROVIDER_ISOLATION_
+        GAPS`) inline as a wrapped paragraph. Now only a short, generic
+        sentence shows inline; the raw note is reachable via a Diagnostics
+        button that opens a themed message box."""
+        from PyQt6.QtWidgets import QLabel, QPushButton
+
+        from agent_takkub import accounts_adapter
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        row = accounts_adapter.ProviderRow(
+            provider="gemini",
+            display_name="Gemini",
+            gap_reason="agy 1.1.27 (probed 2026-09-07): binary-string sweep found no home knob",
+            accounts=[],
+            can_add=False,
+            add_hint="",
+        )
+        panel = dlg._build_provider_panel(row)
+        panel_labels = [w.text() for w in panel.findChildren(QLabel)]
+        assert not any(row.gap_reason in text for text in panel_labels)
+        buttons = [b for b in panel.findChildren(QPushButton) if b.text() == "Diagnostics"]
+        assert len(buttons) == 1
+
+        seen: dict = {}
+
+        def _fake_exec(self):
+            seen["title"] = self.windowTitle()
+            seen["informative"] = self.informativeText()
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", _fake_exec)
+        buttons[0].click()  # real click signal, not a direct method call
+        assert row.gap_reason in seen["informative"]
+        dlg.deleteLater()
 
     def test_renders_loading_placeholder_before_the_background_refresh_lands(self) -> None:
         """#505 review M4: the account rows must never block construction —

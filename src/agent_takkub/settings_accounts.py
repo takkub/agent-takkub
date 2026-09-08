@@ -109,9 +109,14 @@ def _login_dot_and_text(login: accounts_adapter.LoginStatus) -> tuple[str, str]:
     return cockpit_theme.STATE_WARN, f"ไม่ทราบสถานะ{detail}"
 
 
-class _AddAccountDialog(QDialog):
+class _AddAccountDialog(cockpit_theme.CockpitDialog):
     """เพิ่มบัญชี = พิมพ์ชื่ออย่างเดียว. Advanced options (ใช้โฟลเดอร์ที่มีอยู่ /
-    แชร์ session กับ default) fold away under one toggle."""
+    แชร์ session กับ default) fold away under one toggle.
+
+    2026-09-08 design review: this used to inherit plain ``QDialog``, which
+    never picks up the app's dark/light theme (see `CockpitDialog`'s own
+    docstring) — the root cause of the "Cancel button contrast 1.22:1,
+    invisible" finding."""
 
     def __init__(self, parent: QWidget | None, provider: str) -> None:
         super().__init__(parent)
@@ -389,18 +394,34 @@ class AccountsSettingsMixin:
             # provider but claude/codex, so an existing account's own
             # "เข้าสู่ระบบ" button never renders below either) — an existing
             # account must still be listed, never hidden by this notice.
+            gap_row = QHBoxLayout()
             gap_lbl = QLabel("ยังแยกบัญชีใหม่ไม่ได้ — ใช้บัญชีของเครื่องทั้งเครื่อง", panel)
             gap_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED};")
             gap_lbl.setToolTip(row.gap_reason)
-            lay.addWidget(gap_lbl)
-            why_lbl = QLabel(row.gap_reason, panel)
-            why_lbl.setObjectName("panelHint")
-            why_lbl.setWordWrap(True)
-            lay.addWidget(why_lbl)
+            gap_row.addWidget(gap_lbl, 1)
+            # 2026-09-08 design review: the full technical probe note (internal
+            # env-var names, provider version, sqlite table names) used to
+            # render inline as a wrapped paragraph — moved behind a
+            # Diagnostics button instead of always-on developer-jargon leak.
+            diag_btn = cockpit_theme.secondary_button("Diagnostics", panel)
+            diag_btn.clicked.connect(
+                lambda _=False, name=row.display_name, reason=row.gap_reason: (
+                    self._on_show_gap_diagnostics(name, reason)
+                )
+            )
+            gap_row.addWidget(diag_btn)
+            lay.addLayout(gap_row)
 
         for account in row.accounts:
             lay.addWidget(self._build_account_card(account, panel))
         return panel
+
+    def _on_show_gap_diagnostics(self, provider_name: str, reason: str) -> None:
+        box = cockpit_theme.themed_message_box(self)
+        box.setWindowTitle(f"{provider_name} — Diagnostics")
+        box.setText("รายละเอียดทางเทคนิคว่าทำไมยังแยกบัญชีใหม่ไม่ได้:")
+        box.setInformativeText(reason)
+        box.exec()
 
     def _build_account_card(
         self, account: accounts_adapter.AccountInfo, parent: QWidget

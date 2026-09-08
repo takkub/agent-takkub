@@ -12,10 +12,9 @@
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
         "agent_takkub.ram_report",
-        "agent_takkub.remote.api",
-        "agent_takkub.settings_window"
+        "agent_takkub.remote.api"
       ],
-      "fan_in": 8,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -470,6 +469,7 @@
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
+        "agent_takkub.project_wizard",
         "agent_takkub.remote.settings_dialog",
         "agent_takkub.settings_accounts",
         "agent_takkub.settings_knowledge_design",
@@ -495,7 +495,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 34,
+      "fan_in": 35,
       "fan_out": 0
     },
     {
@@ -3510,6 +3510,7 @@
     {
       "module": "agent_takkub.project_wizard",
       "imports": [
+        "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.project_rules",
         "agent_takkub.project_tab"
@@ -3518,7 +3519,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.provider_bootstrap",
@@ -4634,7 +4635,6 @@
     {
       "module": "agent_takkub.settings_window",
       "imports": [
-        "agent_takkub",
         "agent_takkub.auto_issue_signals",
         "agent_takkub.autoskills_installer",
         "agent_takkub.claude_auth_config",
@@ -4673,7 +4673,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 32
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.shared_dev_tools",

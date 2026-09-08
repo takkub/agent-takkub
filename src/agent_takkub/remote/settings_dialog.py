@@ -50,7 +50,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
-    QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
@@ -227,8 +226,12 @@ def _run_ngrok_authtoken(token: str) -> tuple[bool, str]:
     return True, ""
 
 
-class RemoteSettingsDialog(QDialog):
+class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
     """🌐 Remote chip's dialog: pick a tunnel mode, flip Enable/Disable.
+
+    2026-09-08 design review: used to inherit plain ``QDialog`` — never
+    picked up the app's theme (see `cockpit_theme.CockpitDialog`), the root
+    cause of the "pitch black inputs on a light frame" finding.
 
     `on_apply` does the actual live start/stop (owned by MainWindow, which
     holds the `_remote` handle) — this dialog only collects input and

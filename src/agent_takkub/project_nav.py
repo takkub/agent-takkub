@@ -293,6 +293,7 @@ class _ProjectRow(QWidget):
         self._rail_collapsed = False
         self._explorer = explorer
         self._expanded = expanded
+        self._usage_ratio: float | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -379,6 +380,7 @@ class _ProjectRow(QWidget):
         self._update_explorer_visibility()
 
     def set_usage(self, ratio: float | None) -> None:
+        self._usage_ratio = ratio
         if ratio is None:
             self._badge.setText("")
             self._badge.setToolTip("")
@@ -392,6 +394,17 @@ class _ProjectRow(QWidget):
         self._badge.setText(f"\U0001f9e0 {pct}%")
         self._badge.setStyleSheet(f"color: {usage_color(ratio)}; font-size: 11px;")
         self._badge.setToolTip(f"Context window usage {pct}% — pane ที่ใช้เยอะสุดในโปรเจคนี้ตอนนี้")
+
+    def retheme(self) -> None:
+        """#506 live-switch gap (2026-09-08 design review): the name label
+        and avatar ring were only ever painted once, at construction or on
+        the next state change — never on a bare `apply_variant()` switch.
+        Re-run the exact same painting calls with the now-current tokens."""
+        color = cockpit_theme.TEXT_PRIMARY if self._selected else cockpit_theme.TEXT_SECONDARY
+        self._name.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: 600;")
+        self._paint_avatar()
+        if self._usage_ratio is not None:
+            self.set_usage(self._usage_ratio)
 
     def set_collapsed(self, collapsed: bool) -> None:
         """Hide/show the name + badge; re-center the avatar in the rail."""
@@ -524,6 +537,8 @@ class ProjectNav(QWidget):
         self._tunnel_indicator.setObjectName("tunnelIndicator")
         self._tunnel_indicator.setFixedSize(10, 10)
         self._tunnel_indicator.setToolTip("Tunnel: not enabled")
+        self._tunnel_state = "off"
+        self._tunnel_tooltip = "Tunnel: not enabled"
         hr.addWidget(self._tunnel_indicator)
         sb.addWidget(header_row)
 
@@ -693,10 +708,20 @@ class ProjectNav(QWidget):
     # ------------------------------------------------------------------
     # top-left tunnel-status dot
     # ------------------------------------------------------------------
-    _TUNNEL_STATE_COLORS: ClassVar[dict[str, str]] = {
-        "running": cockpit_theme.STATE_OK,
-        "error": cockpit_theme.STATE_ERROR,
+    # NOT a ClassVar dict of resolved colors — that would freeze
+    # `cockpit_theme.STATE_OK`/`STATE_ERROR` at class-definition time
+    # (whatever variant happened to be bound at import), the same stale-
+    # snapshot bug `task_dock._STATUS_GLYPH`'s own comment documents.
+    # `_tunnel_state_color()` resolves the live attribute on every call
+    # instead (2026-09-08 design review, live-retheme fix).
+    _TUNNEL_STATE_ATTRS: ClassVar[dict[str, str]] = {
+        "running": "STATE_OK",
+        "error": "STATE_ERROR",
     }
+
+    def _tunnel_state_color(self, state: str) -> str:
+        attr = self._TUNNEL_STATE_ATTRS.get(state, "TEXT_FAINT")
+        return getattr(cockpit_theme, attr)
 
     def set_tunnel_status(self, state: str, tooltip: str) -> None:
         """Paint the sidebar-header tunnel dot. `state` is one of
@@ -705,12 +730,28 @@ class ProjectNav(QWidget):
         rather than raising, since this is a passive status readout, not
         input validation. Pure presentation: the caller (MainWindow) is
         responsible for deciding the state from `RemoteControl`."""
-        color = self._TUNNEL_STATE_COLORS.get(state, cockpit_theme.TEXT_FAINT)
+        self._tunnel_state = state
+        self._tunnel_tooltip = tooltip
+        color = self._tunnel_state_color(state)
         self._tunnel_indicator.setStyleSheet(
             f"#tunnelIndicator {{ border-radius:5px; background:{color}; "
             "border:1px solid rgba(0,0,0,0.25); }"
         )
         self._tunnel_indicator.setToolTip(tooltip)
+
+    def retheme(self) -> None:
+        """#506 live-switch fix (2026-09-08 design review): this sidebar's
+        container QSS and every row's per-widget inline styles were only
+        ever applied once, at construction — a live `apply_variant()`
+        switch left them on the old variant's colors until the whole
+        cockpit restarted. Re-apply the container QSS, re-paint every row,
+        and re-run the tunnel dot with its last known state."""
+        self._sidebar.setStyleSheet(_sidebar_qss())
+        for i in range(self._list.count()):
+            rw = self._row_widget(i)
+            if rw is not None:
+                rw.retheme()
+        self.set_tunnel_status(self._tunnel_state, self._tunnel_tooltip)
 
     # ------------------------------------------------------------------
     # sidebar collapse/expand (the ☰ "slide menu" toggle)
