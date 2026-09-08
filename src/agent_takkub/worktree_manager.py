@@ -1688,6 +1688,12 @@ class WorktreeManager:
         it, and had already committed everything only by luck in the
         incident that motivated this). The merge itself still happens; only
         the removal step is skipped.
+
+        #527: a "merged" result is only ever reported once HEAD is verified
+        to have actually moved — `git merge --no-ff` can exit 0 without
+        creating a commit ("Already up to date."), and trusting the exit
+        code alone previously reported success (and deleted the worktree
+        and branch) even though nothing landed on the target branch.
         """
         rows = [r for r in self.list_isolated(git_root) if r["branch"] == branch]
         if not rows:
@@ -1713,6 +1719,7 @@ class WorktreeManager:
                 True,
                 f"{branch}: {row['ahead']} commit ahead · merge-tree {state} — ยังไม่ได้ merge",
             )
+        head_before = self.head_sha(git_root)
         merge = self._run(["-C", git_root, "merge", "--no-ff", "--no-edit", branch], None)
         if not merge.ok:
             self._run(["-C", git_root, "merge", "--abort"], None)
@@ -1720,6 +1727,20 @@ class WorktreeManager:
             return False, (
                 f"merge conflict/ล้มเหลว ({tail[-1] if tail else merge.returncode}) — "
                 f"abort แล้ว worktree ยังอยู่ครบที่ {row['path']}"
+            )
+        # #527: `git merge --no-ff` exits 0 ("Already up to date.") without
+        # creating any commit when *branch* is already an ancestor of HEAD —
+        # trusting merge.ok alone reported "merged" and went on to delete the
+        # branch/worktree even though nothing ever landed on the target
+        # branch. Verify HEAD actually moved before claiming success or
+        # touching the worktree/branch.
+        head_after = self.head_sha(git_root)
+        if not head_after or head_after == head_before:
+            tail = merge.stdout.strip().splitlines()
+            detail = tail[-1] if tail else "HEAD ไม่ขยับหลัง merge"
+            return False, (
+                f"merge ไม่ได้สร้าง commit จริง ({detail}) — HEAD ของ {git_root} ยังเป็น "
+                f"{head_before or '?'} เดิม worktree ยังอยู่ครบที่ {row['path']}"
             )
         if keep:
             return True, f"merged {branch} (–keep: worktree ยังอยู่)"

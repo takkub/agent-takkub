@@ -81,7 +81,10 @@ class FakeRunner:
     """Scripts git responses by matching a subsequence of the arg list.
 
     Records every call for assertions. Rules are (needle_tokens, GitResult);
-    the first rule whose tokens all appear in the call's args wins. Unmatched
+    the first rule whose tokens all appear in the call's args wins. A rule's
+    result may also be a list of GitResults, consumed in order across
+    repeated matching calls (e.g. successive `rev-parse HEAD` probes before
+    vs. after a merge) — the last item repeats once exhausted. Unmatched
     calls default to a clean empty success.
     """
 
@@ -93,6 +96,8 @@ class FakeRunner:
         self.calls.append(args)
         for needles, result in self.rules:
             if all(n in args for n in needles):
+                if isinstance(result, list):
+                    return result.pop(0) if len(result) > 1 else result[0]
                 return result
         return GitResult(0, "", "")
 
@@ -1714,6 +1719,10 @@ class TestMergeIsolated:
             (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
             (["rev-list", "--count"], _ok("1\n")),
             (["status", "--porcelain"], _ok("")),
+            # HEAD before the merge, then after — advances by default so a
+            # real merge commit is simulated; #527's regression test below
+            # overrides this to hold HEAD still instead.
+            (["rev-parse", "HEAD"], [_ok("aaaa111\n"), _ok("ffff999\n")]),
         ]
         return FakeRunner(rules)
 
@@ -1729,6 +1738,28 @@ class TestMergeIsolated:
         assert swept  # link sweep before removal
         assert r.ran("worktree", "remove")
         assert r.ran("branch", "-d", "wt/frontend-9")
+
+    def test_merge_exit_zero_without_head_advance_is_not_reported_merged(self, monkeypatch):
+        """#527: `git merge --no-ff` can exit 0 ("Already up to date.")
+        without ever creating a commit — e.g. *branch* is already an
+        ancestor of HEAD. Trusting the exit code alone reported "merged"
+        and went on to delete the branch/worktree even though nothing
+        landed on the target branch. HEAD must be verified to have moved."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(
+            extra=[
+                (["merge", "--no-ff", "--no-edit"], _ok("Already up to date.\n")),
+                # HEAD reads the SAME sha before and after — no commit landed.
+                (["rev-parse", "HEAD"], [_ok("aaaa111\n"), _ok("aaaa111\n")]),
+            ]
+        )
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert not ok, msg
+        assert "merged" not in msg.lower()
+        assert not r.ran("worktree", "remove")  # branch/worktree left intact
+        assert not r.ran("branch", "-d")
 
     def test_merge_conflict_aborts_and_keeps_worktree(self, monkeypatch):
         from agent_takkub import worktree_manager as wm
@@ -2108,6 +2139,7 @@ class TestMergeIsolatedRemoteCleanup:
             (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
             (["rev-list", "--count"], _ok("1\n")),
             (["status", "--porcelain"], _ok("")),
+            (["rev-parse", "HEAD"], [_ok("aaaa111\n"), _ok("ffff999\n")]),
         ]
         return FakeRunner(rules)
 
