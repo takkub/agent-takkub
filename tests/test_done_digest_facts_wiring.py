@@ -183,12 +183,50 @@ class TestWorktreePaneDigestFacts:
         # `_finalize_worktree` (fired later in done()) must reuse the SAME
         # git reads instead of re-running them — each probe ran exactly once
         # even though both digest-fact computation AND the merge-proposal
-        # notice need the same numbers.
+        # line need the same numbers.
         assert fake.commit_count_calls == 1
         assert fake.is_dirty_calls == 1
         assert fake.merge_calls == 1
         assert fake.diffstat_calls == 1
         assert fake.remote_branch_exists_calls == 1
+
+        # #519: the merge-readiness line is folded into THIS one done
+        # notice — no separate `worktree-proposal` notice fires at all.
+        assert len(captured) == 1
+        assert "merge:" in done_calls[0][0]
+        assert "takkub worktree merge --role backend" in done_calls[0][0]
+
+    def test_shard_suppressed_done_still_gets_separate_proposal_notice(self, orch, monkeypatch):
+        """#519: folding only applies to a done notice that's actually SENT.
+        A shard pane's clean report is suppressed in favour of the
+        consolidated shard handoff — `_finalize_worktree` must still send
+        its own `worktree-proposal` notice in that case, exactly as before,
+        instead of silently dropping the merge info."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend#1", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend#1"] = PaneState(
+            last_assigned_task="fix issue #245 please",
+            worktree=_wt_info().as_dict(),
+            shard_total=2,
+        )
+        orch._shard_groups = {}
+
+        fake = _FakeMgr(commits=2, dirty=False, merge_conflicts=False)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("backend#1", note="แก้เสร็จแล้ว", project=proj)
+
+        # No "[backend#1 done]" digest notice fires at all (suppressed for
+        # shard consolidation) ...
+        assert not any(n.startswith("[backend#1 done]") for n, _kw in captured)
+        # ... but the merge-readiness info still reaches Lead, as its own
+        # `worktree-proposal`-shaped notice carrying the full command.
+        proposal = next(n for n, _kw in captured if "merge --no-ff wt/backend-1" in n)
+        assert "พร้อม merge" in proposal
 
     def test_pushed_branch_surfaces_as_pushed_true(self, orch, monkeypatch):
         """#462 — a worktree pane may push its own `wt/*` branch (#438); the
@@ -278,7 +316,7 @@ class TestWorktreeRediscoveryAfterRestart:
             },
         )
 
-        _done_notice, done_kw = next(c for c in captured if c[0].startswith("[backend done]"))
+        done_notice, done_kw = next(c for c in captured if c[0].startswith("[backend done]"))
         facts = done_kw["digest_facts"]
         assert facts.branch == "wt/backend-1"
         assert facts.commits_ahead == 2
@@ -287,10 +325,14 @@ class TestWorktreeRediscoveryAfterRestart:
             != "ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ — cwd ไม่ใช่ git repo, HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
         )
 
-        proposal = next(n for n, _kw in captured if "merge --no-ff wt/backend-1" in n)
-        # #464: the proposal no longer repeats the commit count — the digest
-        # bullet above (facts.commits_ahead, asserted already) carries it.
-        assert "พร้อม merge" in proposal
+        # #519: the merge proposal is folded into THIS SAME done notice as
+        # one line, not sent as a separate `worktree-proposal` notice.
+        assert "พร้อม merge" in done_notice
+        assert "takkub worktree merge --role backend" in done_notice
+        assert not any(
+            n is not done_notice and ("merge" in n.lower() or "worktree" in n.lower())
+            for n, _kw in captured
+        )
 
         # Everything came from git_facts / the rediscovered dict — the fake
         # manager must never have been asked to compute anything itself.

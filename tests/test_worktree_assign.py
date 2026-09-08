@@ -127,7 +127,7 @@ class TestAssignWithWorktree:
         orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
         orch._tag_pane_worktree = MagicMock()  # type: ignore[assignment]
 
-        ok, _ = orch._assign_with_worktree(
+        ok, msg = orch._assign_with_worktree(
             "frontend", "/repo/web", "build X", False, False, 0, False, "proj"
         )
         assert ok
@@ -140,8 +140,11 @@ class TestAssignWithWorktree:
         # pane not to commit, so finalize could never propose a merge)
         assert "workspace isolation" in args[2]
         assert "wt/frontend-1" in args[2]
-        # Lead told it's isolated; pane tagged with the branch chip
-        assert orch._notify_lead.called
+        # #519: no more separate "worktree-spawn" Lead notice — the
+        # confirmation rides in the assign ack Lead already reads.
+        assert not orch._notify_lead.called
+        assert "wt/frontend-1" in msg
+        assert "isolated worktree" in msg
         orch._tag_pane_worktree.assert_called_once_with("proj", "frontend", "wt/frontend-1")
 
     def test_fallback_when_not_git_repo(self, orch, monkeypatch):

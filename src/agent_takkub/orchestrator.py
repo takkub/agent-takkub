@@ -3289,14 +3289,17 @@ class Orchestrator(
         linked_note = f" · linked: {', '.join(info.links)}" if info.links else ""
         if info.port:
             linked_note += f" · dev port {info.port}"
-        self._notify_lead(
-            project_ns,
-            f"🌿 [{role_name}] isolated worktree — branch `{info.branch}` "
+        # #519: this used to be its own `_notify_lead(kind="worktree-spawn")`
+        # ping — 17x/24h in practice, every one of them "safe, no action
+        # needed" (the branch reappears in the done digest + merge-proposal
+        # line once the pane actually finishes). `_log_event("worktree_created",
+        # ...)` a few lines up already gives the audit trail; the
+        # confirmation Lead actually reads is folded into THIS call's own
+        # `takkub assign` ack string below instead of a separate notice.
+        worktree_spawn_note = (
+            f" · 🌿 isolated worktree branch `{info.branch}` "
             f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)"
-            f"{linked_note}{env_note}",
-            from_role=role_name,
-            note="",
-            kind="worktree-spawn",
+            f"{linked_note}{env_note}"
         )
         # #444: a fresh `--isolation worktree` cwd is a path Claude Code has
         # never seen before, and its folder-trust dialog's auto-answer gives
@@ -3348,7 +3351,11 @@ class Orchestrator(
             self._tag_pane_worktree(project_ns, role_name, info.branch)
         except Exception:
             pass
-        return result
+        # #519: append the worktree confirmation to the ack Lead already
+        # reads from `takkub assign`'s own stdout instead of a separate
+        # Lead-inbox notice.
+        ok, msg = result
+        return ok, f"{msg}{worktree_spawn_note}"
 
     def request_restart(self) -> tuple[bool, str]:
         """`takkub restart` — full cockpit restart without touching the GUI.
@@ -3376,7 +3383,12 @@ class Orchestrator(
                 setter(branch)
 
     def _finalize_worktree(
-        self, project_ns: str, from_role: str, worktree: dict, precomputed: dict | None = None
+        self,
+        project_ns: str,
+        from_role: str,
+        worktree: dict,
+        precomputed: dict | None = None,
+        skip_proposal_notice: bool = False,
     ) -> None:
         """Wrap up an isolated pane's worktree when it reports done/close.
 
@@ -3404,6 +3416,16 @@ class Orchestrator(
         "merge_conflicts", "diffstat"}``. None (the `close()` call site,
         which never computes digest facts) falls back to the original
         compute-here-every-time behaviour, unchanged.
+
+        *skip_proposal_notice* (#519): True when `done()` already folded the
+        one-line merge-readiness bit into the SAME digest notice it sent a
+        moment earlier for this event (only possible when that notice was
+        actually sent AND `precomputed` was available) — in that case the
+        commits>0 branch here still logs `worktree_merge_proposed` for the
+        audit trail but does not send a second, duplicate
+        `_notify_lead(kind="worktree-proposal")`. False (default) for every
+        other caller (`close()`, subagent-done) — those never had a digest
+        notice to fold into, so this keeps sending its own.
         """
         try:
             from .worktree_manager import WorktreeInfo, WorktreeManager, build_merge_proposal
@@ -3445,17 +3467,6 @@ class Orchestrator(
                         else mgr.merge_conflicts_with_base(info.git_root, info.branch)
                     )
                     diffstat_text = mgr.diffstat(info)
-                proposal = build_merge_proposal(
-                    from_role,
-                    info,
-                    commits,
-                    diffstat_text,
-                    dirty=dirty,
-                    uncommitted=uncommitted,
-                    merge_conflicts=merge_conflicts,
-                    conflict_files=conflict_files,
-                    crlf_phantom=crlf_phantom,
-                )
                 _log_event(
                     "worktree_merge_proposed",
                     role=from_role,
@@ -3465,10 +3476,23 @@ class Orchestrator(
                     dirty=dirty,
                     merge_conflicts=merge_conflicts,
                     conflict_files=(conflict_files or [])[:20],
+                    folded_into_digest=skip_proposal_notice,
                 )
-                self._notify_lead(
-                    project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
-                )
+                if not skip_proposal_notice:
+                    proposal = build_merge_proposal(
+                        from_role,
+                        info,
+                        commits,
+                        diffstat_text,
+                        dirty=dirty,
+                        uncommitted=uncommitted,
+                        merge_conflicts=merge_conflicts,
+                        conflict_files=conflict_files,
+                        crlf_phantom=crlf_phantom,
+                    )
+                    self._notify_lead(
+                        project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
+                    )
                 return
             dirty = precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
             _log_event(
@@ -5829,7 +5853,39 @@ class Orchestrator(
         # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
         # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
         # Non-shard, non-planner panes use the normal notice path.
-        if failed or (had_shard_total == 0 and not had_plan_fanout):
+        will_send_notice = failed or (had_shard_total == 0 and not had_plan_fanout)
+        # #519: fold the merge-readiness bit straight into THIS notice
+        # instead of `_finalize_worktree` sending a second, separate
+        # `worktree-proposal` ping a few lines below that only repeats
+        # branch/commits/files the digest bullet above it already has.
+        # Only possible when this notice is actually about to be sent
+        # (never for a shard/planner pane whose clean report is suppressed
+        # here — those still get `_finalize_worktree`'s own notice, same as
+        # before) and the digest git-reads ran (never true for `failed`).
+        merge_folded_into_notice = False
+        if (
+            not failed
+            and will_send_notice
+            and had_worktree
+            and _worktree_digest_precomputed is not None
+            and _worktree_digest_precomputed.get("commits", 0) > 0
+        ):
+            from .worktree_manager import WorktreeInfo, build_merge_proposal_line
+
+            _wt_info = WorktreeInfo.from_dict(had_worktree)
+            merge_line = build_merge_proposal_line(
+                from_role,
+                _wt_info,
+                dirty=_worktree_digest_precomputed["dirty"],
+                uncommitted=_worktree_digest_precomputed["uncommitted"],
+                merge_conflicts=_worktree_digest_precomputed["merge_conflicts"],
+                conflict_files=_worktree_digest_precomputed.get("conflict_files"),
+                crlf_phantom=_worktree_digest_precomputed.get("crlf_phantom", False),
+            )
+            notice = f"{notice}\n{merge_line}"
+            merge_folded_into_notice = True
+
+        if will_send_notice:
             # Route through _notify_lead so concurrent done notices are serialised
             # and never injected while Lead is mid-generation (the root cause of the
             # "Lead goes silent after parallel dispatch" bug).
@@ -5876,7 +5932,11 @@ class Orchestrator(
         # otherwise safe-remove the empty worktree.
         if had_worktree:
             self._finalize_worktree(
-                project_ns, from_role, had_worktree, precomputed=_worktree_digest_precomputed
+                project_ns,
+                from_role,
+                had_worktree,
+                precomputed=_worktree_digest_precomputed,
+                skip_proposal_notice=merge_folded_into_notice,
             )
         else:
             # graft code-graph refresh (debounced): the pane wrote directly
