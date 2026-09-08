@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from agent_takkub import qa_gate
+from agent_takkub import db_preflight, qa_gate
 
 from .test_qa_gate import _fake_run_factory, _make_complete_venv
 
@@ -171,6 +171,14 @@ def test_run_gate_from_worktree_injects_main_env_into_subprocess(main_and_worktr
     recorder: list = []
     monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory(recorder, [0, 0, 0]))
     monkeypatch.setattr(qa_gate, "_qa_gate_lock_dir", lambda: wt.parent / "locks")
+    # This test's fixture DATABASE_URL ("postgres://main/db") is realistic
+    # env-injection test data (#471), not a reachable DB — it's incidental
+    # that its shape also matches the #529 preflight's env-var pattern. The
+    # preflight itself does a real (unmocked) TCP connect, which must not
+    # run here: this test is about env injection into the subprocess, not
+    # DB reachability (see test_db_preflight.py / the #529 test above for
+    # that).
+    monkeypatch.setattr(db_preflight, "check_test_db_reachable", lambda env: None)
 
     report = qa_gate.run_gate(cwd=wt, write_report=False)
 
