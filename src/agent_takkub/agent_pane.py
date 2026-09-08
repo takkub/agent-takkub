@@ -1159,10 +1159,17 @@ class AgentPane(QFrame):
     # ──────────────────────────────────────────────────────────────
     def _stylesheet(self) -> str:
         _css_safe = self.role.name.replace("#", "-")
+        # Role-identity accent strip (2026-09-08 polish round 2 — user
+        # feedback: role color was buried in the title text alone next to
+        # the indigo-everywhere chrome). A colored left border, not a
+        # background tint, so it reads at a glance without competing with
+        # the status dot or fighting text contrast.
+        role_color = cockpit_theme.ROLE_COLORS.get(self.role.name, self.role.color)
         return (
             f"#pane_{_css_safe} {{"
             f"  background-color: {cockpit_theme.GROUND_PANEL};"
             f"  border: 1px solid {cockpit_theme.BORDER_STRONG};"
+            f"  border-left: 3px solid {role_color};"
             "  border-radius: 6px;"
             "}"
             "#paneHeader {"

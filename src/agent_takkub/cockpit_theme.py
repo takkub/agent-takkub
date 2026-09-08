@@ -748,7 +748,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QLabel#sidebarSection {{
         font-family: {_sans_stack};
         color: {TEXT_FAINT};
-        font-size: 10px;
+        font-size: 11px;
         font-weight: 600;
         letter-spacing: 1.5px;
         padding: 12px 14px 4px 14px;
@@ -756,7 +756,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QPushButton#sidebarSectionToggle {{
         font-family: {_sans_stack};
         color: {TEXT_FAINT};
-        font-size: 10px;
+        font-size: 11px;
         font-weight: 600;
         letter-spacing: 1.5px;
         text-align: left;
@@ -877,12 +877,12 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     }}
     QLabel#panelTitle {{
         font-weight: 600;
-        font-size: 13px;
+        font-size: 14px;
         color: {TEXT_PRIMARY};
     }}
     QLabel#panelHint {{
         color: {TEXT_MUTED};
-        font-size: 12px;
+        font-size: 13px;
     }}
     QWidget#providerRow, QWidget#roleRow {{
         background: {GROUND_PANEL_ALT};
@@ -892,7 +892,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QLabel#matrixHeaderCell {{
         font-family: {_sans_stack};
         font-weight: 600;
-        font-size: 11px;
+        font-size: 12px;
         color: {TEXT_SECONDARY};
         padding-bottom: 6px;
         border-bottom: 1px solid {BORDER_HAIRLINE};
@@ -1289,7 +1289,7 @@ def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
     dot = color_dot(color, chip)
     lay.addWidget(dot)
     text = QLabel(label, chip)
-    text.setStyleSheet(f'font-family: "{sans}"; color: {color}; font-weight: 600; font-size: 12px;')
+    text.setStyleSheet(f'font-family: "{sans}"; color: {color}; font-weight: 600; font-size: 13px;')
     lay.addWidget(text)
     return chip
 

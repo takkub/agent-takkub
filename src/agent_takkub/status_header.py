@@ -350,7 +350,7 @@ class StatusHeaderMixin:
         # EFFECTIVE team preset (standing, or the per-task override when one
         # is active) — click opens a quick-pick menu of the 4 built-in
         # presets (user_actions._on_team_preset_chip_clicked).
-        self._chip_team_preset = QPushButton("ทีม: —", self)
+        self._chip_team_preset = QPushButton("ตั้งค่า: —", self)
         self._chip_team_preset.setStyleSheet(self._team_preset_chip_style())
         self._chip_team_preset.clicked.connect(self._on_team_preset_chip_clicked)
         self._refresh_team_preset_chip()
@@ -549,8 +549,10 @@ class StatusHeaderMixin:
         # redundant with 👥 Team's own Pipeline Builder / Templates views. The
         # profile-switch section stayed on RIGHT-click so the common case
         # (manage the team) is a single click, not a menu.
-        self._btn_pipelines = QPushButton("👥 Team", self)
-        self._btn_pipelines.setToolTip("Click: open Team & Roles (roster + create a custom role).")
+        self._btn_pipelines = QPushButton("👥 Settings", self)
+        self._btn_pipelines.setToolTip(
+            "Click: open Settings & Roles (roster + create a custom role)."
+        )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
         self._btn_pipelines.clicked.connect(self._on_team_chip_clicked)
 
@@ -1063,7 +1065,7 @@ class StatusHeaderMixin:
         except Exception:
             proj = None
         if not proj:
-            self._chip_team_preset.setText("ทีม: —")
+            self._chip_team_preset.setText("ตั้งค่า: —")
             self._chip_team_preset.setToolTip("ยังไม่มีโปรเจคที่เปิดอยู่")
             return
         cfg = team_preset.current(proj)
@@ -1072,7 +1074,7 @@ class StatusHeaderMixin:
         # No trailing dropdown glyph ("▾" tofus on IBM Plex, 2026-07-24
         # design review #4) — matches the sibling 👥 Team/🤖 Accounts chips'
         # plain-text style; the tooltip below already says "คลิกเพื่อเปลี่ยน".
-        self._chip_team_preset.setText(f"ทีม: {label}")
+        self._chip_team_preset.setText(f"ตั้งค่า: {label}")
         tooltip = f"ขนาดทีมของโปรเจคนี้ตอนนี้: {label} — ตรวจงานด้วย: {team_preset.verify_mode(cfg)}"
         if override:
             tooltip += f"\noverride เฉพาะงานนี้ (ค่าโปรเจคจริง: {team_preset.label(team_preset.current_preset_id(proj))})"

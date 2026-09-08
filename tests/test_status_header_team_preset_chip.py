@@ -33,20 +33,20 @@ class TestTeamPresetChipRefresh:
         fake = _fake_self()
         with patch("agent_takkub.config.active_project", return_value=(None, None)):
             StatusHeaderMixin._refresh_team_preset_chip(fake)
-        fake._chip_team_preset.setText.assert_called_once_with("ทีม: —")
+        fake._chip_team_preset.setText.assert_called_once_with("ตั้งค่า: —")
 
     def test_default_project_shows_auto_label(self) -> None:
         fake = _fake_self()
         with patch("agent_takkub.config.active_project", return_value=("demo", None)):
             StatusHeaderMixin._refresh_team_preset_chip(fake)
-        fake._chip_team_preset.setText.assert_called_once_with(f"ทีม: {team_preset.label('auto')}")
+        fake._chip_team_preset.setText.assert_called_once_with(f"ตั้งค่า: {team_preset.label('auto')}")
 
     def test_standing_preset_reflected(self) -> None:
         team_preset.set_current("full", "demo")
         fake = _fake_self()
         with patch("agent_takkub.config.active_project", return_value=("demo", None)):
             StatusHeaderMixin._refresh_team_preset_chip(fake)
-        fake._chip_team_preset.setText.assert_called_once_with("ทีม: ทีมเต็ม")
+        fake._chip_team_preset.setText.assert_called_once_with("ตั้งค่า: ทีมเต็ม")
 
     def test_active_override_wins_over_standing_in_the_chip_text(self) -> None:
         team_preset.set_current("full", "demo")
@@ -54,7 +54,7 @@ class TestTeamPresetChipRefresh:
         fake = _fake_self()
         with patch("agent_takkub.config.active_project", return_value=("demo", None)):
             StatusHeaderMixin._refresh_team_preset_chip(fake)
-        fake._chip_team_preset.setText.assert_called_once_with("ทีม: ทำเอง")
+        fake._chip_team_preset.setText.assert_called_once_with("ตั้งค่า: ทำเอง")
         tooltip = fake._chip_team_preset.setToolTip.call_args[0][0]
         assert "override" in tooltip
         assert "ทีมเต็ม" in tooltip  # names the standing preset it's overriding

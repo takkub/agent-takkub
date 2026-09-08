@@ -219,8 +219,11 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     # preset first, roster/provider detail below it — with Pipeline grouped
     # under the same section since "which hop sequence runs" is part of the
     # same team question.
-    (VIEW_PROVIDERS_ROLES, "ทีม & ตำแหน่ง", "TEAM"),
-    (VIEW_PIPELINE_BUILDER, "Pipeline", "TEAM"),
+    # 2026-09-08 polish round 2: section/page label literally renamed
+    # "TEAM"->"SETTINGS" per direct user feedback (display text only — every
+    # VIEW_*/internal identifier below is untouched).
+    (VIEW_PROVIDERS_ROLES, "Settings & ตำแหน่ง", "SETTINGS"),
+    (VIEW_PIPELINE_BUILDER, "Pipeline", "SETTINGS"),
     (VIEW_MCP_MATRIX, "Tools", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skills", "TOOLS"),
     (VIEW_KNOWLEDGE, "Knowledge", "TOOLS"),
@@ -298,7 +301,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
         "ธีมสี · โหมดเครื่อง · ภาษา — ทุกอย่างในหน้านี้มีผลทันทีและจำค่าไว้",
     ),
     VIEW_PROVIDERS_ROLES: (
-        "ทีม & ตำแหน่ง",
+        "Settings & ตำแหน่ง",
         "ขนาดทีมของโปรเจคนี้ + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
     ),
     VIEW_PIPELINE_BUILDER: (
@@ -1920,9 +1923,9 @@ class SettingsWindow(
         top_lay.setContentsMargins(0, 0, 0, 0)
         top_lay.setSpacing(8)
         mono = cockpit_theme.ensure_fonts_loaded()["mono"]
-        kicker_lbl = QLabel("TEAM SIZE", top_row)
+        kicker_lbl = QLabel("SETTINGS SIZE", top_row)
         kicker_lbl.setStyleSheet(
-            f'font-family: "{mono}"; font-size: 10px; font-weight: 600; '
+            f'font-family: "{mono}"; font-size: 11px; font-weight: 600; '
             f"letter-spacing: 1.5px; color: {cockpit_theme.TEXT_FAINT};"
         )
         top_lay.addWidget(kicker_lbl)
@@ -2085,7 +2088,7 @@ class SettingsWindow(
         roster_header_row = QHBoxLayout()
         roster_header_row.addWidget(
             self._build_card_header(
-                "TEAM ROSTER",
+                "SETTINGS ROSTER",
                 "ตำแหน่งในทีม",
                 f"{n_positions_enabled}/{n_positions} active",
                 role_panel,
@@ -2232,7 +2235,7 @@ class SettingsWindow(
         mono = cockpit_theme.ensure_fonts_loaded()["mono"]
         kicker_lbl = QLabel(kicker.upper(), top)
         kicker_lbl.setStyleSheet(
-            f'font-family: "{mono}"; font-size: 10px; font-weight: 600; '
+            f'font-family: "{mono}"; font-size: 11px; font-weight: 600; '
             f"letter-spacing: 1.5px; color: {cockpit_theme.TEXT_FAINT};"
         )
         top_lay.addWidget(kicker_lbl)
