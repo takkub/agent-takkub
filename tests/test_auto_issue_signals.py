@@ -150,6 +150,30 @@ class TestIssueBody:
         assert "C:/Users/secret" not in body
         assert "เกณฑ์" in body
 
+    def test_body_carries_hostname_and_pid(self, tmp_path: Path) -> None:
+        """#531: a repeat incident must be traceable back to its origin
+        machine without cross-referencing which machine's events.log the
+        window even belongs to."""
+        import os
+        import socket
+
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _log(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": (now - timedelta(minutes=m)).isoformat(),
+                    "event": "stuck_pane_recover",
+                    "role": role,
+                }
+                for m, role in ((1, "qa"), (2, "devops"), (3, "reviewer"))
+            ],
+        )
+        hit = sig.scan_for_signals(log, now=now)[0]
+        _title, body = sig.build_issue(hit)
+        assert f"hostname: {socket.gethostname()}" in body
+        assert f"pid: {os.getpid()}" in body
+
 
 class TestEnableSwitch:
     def test_default_is_on(self, tmp_path, monkeypatch) -> None:

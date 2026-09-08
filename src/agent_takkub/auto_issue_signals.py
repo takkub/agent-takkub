@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -326,6 +327,8 @@ def build_issue(hit: SignalHit, *, window_hours: float | None = None) -> tuple[s
     lines += [
         f"- เหตุผลของเกณฑ์: {hit.rule.why}",
         f"- version: {__version__}",
+        f"- hostname: {socket.gethostname()}",
+        f"- pid: {os.getpid()}",
         "",
         "ตัวอย่างเวลาที่เกิด:",
         "```",
