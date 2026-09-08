@@ -96,18 +96,34 @@ class TestUsageViewSmoke:
 
     def test_diagnostics_button_click_opens_the_full_reason(self, monkeypatch):
         """Exercises the real click signal (not a direct method call) end to
-        end through `QMessageBox.exec`, mocked so the modal never blocks."""
+        end through `QMessageBox.exec`, mocked so the modal never blocks.
+
+        Captures the title via `setWindowTitle`'s call argument rather than
+        reading `QMessageBox.windowTitle()` back afterwards: Qt's own docs
+        for QMessageBox say "the window title is ignored" on macOS (per
+        Apple's HIG), and in practice `setWindowTitle()` on that platform
+        does not persist it — `windowTitle()` reads back "" there while
+        every other platform returns the real string (CI: macOS-latest was
+        the only red leg). The sibling test in test_settings_window.py hits
+        the same box-building code and already sidesteps this by never
+        asserting on `windowTitle()`, only on `informativeText()`."""
         from PyQt6.QtWidgets import QMessageBox
 
         usage_ledger.account_dir("gemini", "default").mkdir(parents=True, exist_ok=True)
         dlg = _open_usage_view()
         seen: dict = {}
 
+        original_set_window_title = QMessageBox.setWindowTitle
+
+        def _fake_set_window_title(self, title):
+            seen["title"] = title
+            return original_set_window_title(self, title)
+
         def _fake_exec(self):
-            seen["title"] = self.windowTitle()
             seen["informative"] = self.informativeText()
             return 0
 
+        monkeypatch.setattr(QMessageBox, "setWindowTitle", _fake_set_window_title)
         monkeypatch.setattr(QMessageBox, "exec", _fake_exec)
         dlg._usage_diagnostics_btn.click()
         assert "Diagnostics" in seen["title"]
