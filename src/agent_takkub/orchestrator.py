@@ -8732,6 +8732,8 @@ class Orchestrator(
         # Surface panes whose idle prompt no marker recognises (structural #20
         # staleness detector) — makes an upstream-reword silent break LOUD.
         self._check_stale_markers(now)
+        # Check and auto-skip in-session feedback / CLI survey prompts (issue #509).
+        self._check_feedback_prompts(now)
         # Proactive idle compaction (issue #161) — independent of the
         # forgot-`done` loop below (which only tracks pane.state=="working"):
         # this targets panes that ARE done (or Lead, which never reports
@@ -9176,13 +9178,22 @@ class Orchestrator(
                     if sess.is_at_ready_prompt():
                         self._stale_marker_streak.pop(key, None)
                         continue  # recognised idle → markers working
+                    _at_fb_raw = getattr(sess, "is_at_feedback_prompt", None)
+                    _is_fb = False
+                    if callable(_at_fb_raw):
+                        try:
+                            _res = _at_fb_raw(getattr(pane, "provider", None))
+                            _is_fb = isinstance(_res, bool) and _res
+                        except Exception:
+                            _is_fb = False
                     if (
                         sess.is_blocked_on_tty_prompt()
                         or sess.is_at_trust_prompt()
                         or sess.is_blocked_on_permission_prompt()
+                        or _is_fb
                     ):
                         self._stale_marker_streak.pop(key, None)
-                        continue  # recognised shell/trust/permission prompt
+                        continue  # recognised shell/trust/permission/feedback prompt
                     if sess.is_at_update_splash():
                         self._stale_marker_streak.pop(key, None)
                         continue  # recognised codex splash (handled elsewhere)
@@ -9862,6 +9873,63 @@ class Orchestrator(
                         err=f"{type(e).__name__}: {e}",
                     )
 
+    def _check_feedback_prompts(self, now: float) -> None:
+        """Scan open panes for in-session feedback / CLI survey prompts (#509).
+
+        When a provider (such as Gemini / agy) emits an interactive survey
+        (e.g., "How's the CLI experience so far? [0] Skip"), the pane is
+        blocked waiting on stdin. Auto-skip it immediately by sending the
+        configured skip key (e.g. '0\\r') so the pane can complete its task.
+
+        Respects cooldown (3s) and max dismiss attempts (3) per episode.
+        """
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                try:
+                    if role == LEAD.name:
+                        continue
+                    sess = pane.session
+                    if sess is None or not sess.is_alive:
+                        continue
+                    provider = getattr(pane, "provider", None) or getattr(pane, "_provider", None)
+                    key = f"{project_name}::{role}"
+                    ps = self._ps(key)
+                    _at_fb_raw = getattr(sess, "is_at_feedback_prompt", None)
+                    _is_fb = False
+                    if callable(_at_fb_raw):
+                        try:
+                            _res = _at_fb_raw(provider)
+                            _is_fb = isinstance(_res, bool) and _res
+                        except Exception:
+                            _is_fb = False
+                    if not _is_fb:
+                        if (
+                            ps.feedback_prompt_dismiss_attempts > 0
+                            and (now - ps.feedback_prompt_dismiss_ts) > 10.0
+                        ):
+                            ps.feedback_prompt_dismiss_attempts = 0
+                        continue
+                    if (now - ps.feedback_prompt_dismiss_ts) < 3.0:
+                        continue
+                    if ps.feedback_prompt_dismiss_attempts >= 3:
+                        continue
+
+                    from .provider_spec import feedback_prompt_skip_key_for
+
+                    skip_key = feedback_prompt_skip_key_for(provider) or "0\r"
+                    sess.write(skip_key)
+                    ps.feedback_prompt_dismiss_ts = now
+                    ps.feedback_prompt_dismiss_attempts += 1
+                    _log_event(
+                        "feedback_prompt_auto_skipped",
+                        role=role,
+                        project=project_name,
+                        provider=provider,
+                        attempts=ps.feedback_prompt_dismiss_attempts,
+                    )
+                except Exception:
+                    continue
+
     def _check_shell_open_dialog(
         self, project_name: str, role: str, pane: AgentPane, key: str, now: float
     ) -> None:
@@ -10108,6 +10176,38 @@ class Orchestrator(
                         if (now - _ps_sp.splash_dismiss_ts) < SPLASH_DISMISS_COOLDOWN_S:
                             continue
                         # Dismiss didn't clear the splash — fall through to close→respawn
+                    # Issue #509: in-session feedback/survey prompt blocks ready-prompt
+                    try:
+                        _at_fb_fn = getattr(pane.session, "is_at_feedback_prompt", None)
+                        if callable(_at_fb_fn):
+                            _at_fb_res = _at_fb_fn(getattr(pane, "provider", None))
+                            _at_feedback = isinstance(_at_fb_res, bool) and _at_fb_res
+                        else:
+                            _at_feedback = False
+                    except Exception:
+                        _at_feedback = False
+                    if _at_feedback:
+                        _ps_fb = self._ps(key)
+                        if (
+                            now - _ps_fb.feedback_prompt_dismiss_ts
+                        ) >= 3.0 and _ps_fb.feedback_prompt_dismiss_attempts < 3:
+                            from .provider_spec import feedback_prompt_skip_key_for
+
+                            _provider = getattr(pane, "provider", None)
+                            skip_key = feedback_prompt_skip_key_for(_provider) or "0\r"
+                            pane.session.write(skip_key)
+                            _ps_fb.feedback_prompt_dismiss_ts = now
+                            _ps_fb.feedback_prompt_dismiss_attempts += 1
+                            _log_event(
+                                "feedback_prompt_auto_skipped_stuck_watchdog",
+                                role=role,
+                                project=project_name,
+                                provider=_provider,
+                                attempts=_ps_fb.feedback_prompt_dismiss_attempts,
+                            )
+                            continue
+                        if (now - _ps_fb.feedback_prompt_dismiss_ts) < 3.0:
+                            continue
                     # #288: LAST gate before the kill. A static screen is not
                     # proof of a wedge — a QA pane that writes a Playwright
                     # script and runs `node <script>.js` prints nothing for

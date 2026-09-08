@@ -220,6 +220,11 @@ def _prompt_block_reason(session) -> str | None:
         _at_trust = session.is_at_trust_prompt()
         if isinstance(_at_trust, bool) and _at_trust:
             return "trust"
+        _at_feedback = getattr(session, "is_at_feedback_prompt", None)
+        if callable(_at_feedback):
+            _fb_res = _at_feedback()
+            if isinstance(_fb_res, bool) and _fb_res:
+                return "feedback"
         _blocked_permission = session.is_blocked_on_permission_prompt()
         if isinstance(_blocked_permission, str) and _blocked_permission:
             return "permission"
@@ -1681,6 +1686,26 @@ class LeadInboxMixin:
             # directly over a footer that still reads idle, so a stale
             # "already warned" flag must not let the streak keep advancing.
             _reason = _prompt_block_reason(pane.session)
+            if _reason == "feedback":
+                try:
+                    from .provider_spec import feedback_prompt_skip_key_for
+
+                    _prov = (
+                        getattr(getattr(pane, "model", None), "provider_name", None)
+                        or getattr(pane, "provider", None)
+                        or "gemini"
+                    )
+                    _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
+                    pane.session.write(_skip_key)
+                    _log_event(
+                        "feedback_prompt_auto_skipped",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        provider=_prov,
+                        at="delivery",
+                    )
+                except Exception:
+                    pass
             if _reason and not prompt_blocked_warned[0]:
                 prompt_blocked_warned[0] = True
                 _log_event(
@@ -2441,6 +2466,7 @@ class LeadInboxMixin:
         kind = {
             "trust": "trust/onboarding modal",
             "permission": "tool-permission approval dialog",
+            "feedback": "CLI survey/feedback prompt",
         }.get(reason, "interactive shell prompt")
         msg = (
             f"⚠️ [delivery-blocked-prompt] {role_name} pane ติดอยู่ที่ {kind} "

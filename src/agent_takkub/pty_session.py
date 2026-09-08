@@ -288,6 +288,18 @@ _ENTER_CONFIRM_RE = re.compile(r"enter\s+(?:to\s+)?confirm", re.IGNORECASE)
 # exit instead of proceeding.
 _TRUST_CURSOR_ON_NO_RE = re.compile(r"^\s*[❯>]\s*(?:\d+\.\s*)?No\b", re.IGNORECASE | re.MULTILINE)
 
+# Antigravity / Gemini CLI in-session survey modal (#509):
+# "How's the CLI experience so far? Help us improve:
+#  [1] Good  [2] Fine  [3] Bad  [0] Skip"
+_FEEDBACK_PROMPT_QUESTION_RE = re.compile(
+    r"how's\s+the\s+cli\s+experience\s+so\s+far\??|cli\s+experience\s+so\s+far",
+    re.IGNORECASE,
+)
+_FEEDBACK_PROMPT_OPTION_RE = re.compile(
+    r"\[0\]\s*skip|\b0[.)]\s*skip|help\s+us\s+improve|\[1\]\s*good|\[2\]\s*fine|\[3\]\s*bad",
+    re.IGNORECASE,
+)
+
 
 # ── Ready-prompt detection markers (M4#17) ──────────────────────────────────
 # is_at_ready_prompt() decides whether a pane is idle at its input prompt. The
@@ -2427,6 +2439,32 @@ class PtySession(QObject):
         rate_limit_reset_at() having detected a live banner."""
         text = "\n".join(self.display_lines()).lower()
         return "stop and wait for limit to reset" in text
+
+    def is_at_feedback_prompt(self, provider: str | None = None) -> bool:
+        """True when the CLI is presenting an interactive feedback/survey prompt
+        (e.g. agy's "How's the CLI experience so far? [1] Good [2] Fine [3] Bad [0] Skip", #509).
+
+        Confirmed on Antigravity CLI (agy, #509): the CLI periodically pops up
+        an interactive survey asking for user rating with a [0] Skip option.
+        Because it waits for interactive stdin, teammate panes stall indefinitely
+        unless auto-skipped with '0'.
+        """
+        text = "\n".join(self.display_lines()).lower()
+        if provider:
+            from .provider_spec import auto_skip_feedback_for, feedback_prompt_markers_for
+
+            if not auto_skip_feedback_for(provider):
+                return False
+            markers = feedback_prompt_markers_for(provider)
+            if markers and any(m in text for m in markers):
+                if _FEEDBACK_PROMPT_OPTION_RE.search(text) or _FEEDBACK_PROMPT_QUESTION_RE.search(
+                    text
+                ):
+                    return True
+            return False
+        return bool(
+            _FEEDBACK_PROMPT_QUESTION_RE.search(text) and _FEEDBACK_PROMPT_OPTION_RE.search(text)
+        )
 
     def seconds_since_output(self) -> float:
         """Monotonic seconds since the PTY last produced output — a structural
