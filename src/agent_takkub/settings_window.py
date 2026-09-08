@@ -3614,6 +3614,22 @@ class SettingsWindow(
         tabs = QTabWidget(self)
         tabs.addTab(self._build_skill_catalog_view(), "Catalog")
         tabs.addTab(self._build_skill_matrix_view(), "Matrix")
+        # 2026-09-08 design review (critic §2.4 "Skills View Blank Canvas
+        # Collapse") — this QTabWidget is swapped into the VIEW_SKILL_CATALOG
+        # stack slot lazily (`_ensure_view_built`: `_stack.insertWidget()` +
+        # `setCurrentIndex()` in the same call, before Qt's layout engine has
+        # necessarily processed a LayoutRequest for the freshly-inserted
+        # widget) and then wrapped in a `QScrollArea` (`_wrap_scroll`) whose
+        # `setWidgetResizable(True)` sizes it off `sizeHint()` — a
+        # QTabWidget's sizeHint is derived from whatever its current tab
+        # page reports, which is exactly the kind of value that can come
+        # back near-zero on a first-paint race. `setWidgetResizable(True)`
+        # itself was already correct (verified) — the actual gap was
+        # nothing enforcing a size FLOOR, so a bad first-paint hint could
+        # render as a fully blank page instead of merely a tight one. A hard
+        # minimum height makes that collapse structurally impossible
+        # regardless of the exact timing.
+        tabs.setMinimumHeight(420)
         return tabs
 
     # ──────────────────────────────────────────────────────────

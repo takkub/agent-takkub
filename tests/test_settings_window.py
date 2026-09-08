@@ -1038,6 +1038,18 @@ class TestSkillMatrixView:
 class TestSkillCatalogView:
     """The new, real skill browser backed by skill_scan (SKILL section)."""
 
+    def test_tab_widget_has_a_minimum_height_floor(self) -> None:
+        """2026-09-08 design review (critic §2.4 "Skills View Blank Canvas
+        Collapse") — the Catalog/Matrix QTabWidget is swapped into its
+        QScrollArea lazily and can compute a near-zero sizeHint on a
+        first-paint race; a hard minimumHeight makes a full visual collapse
+        structurally impossible regardless of the exact timing."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        tabs = dlg._stack.currentWidget().widget()
+        assert isinstance(tabs, settings_window.QTabWidget)
+        assert tabs.minimumHeight() >= 420
+        dlg.deleteLater()
+
     def test_lists_scanned_skills_with_desc_and_referencing_roles(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
