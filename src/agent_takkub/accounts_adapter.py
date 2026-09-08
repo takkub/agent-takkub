@@ -378,7 +378,8 @@ def add_account(
 ) -> tuple[Path, list[str]]:
     """Register a new account. Blank *config_dir* → the provider-conventional
     home from :func:`default_account_home`. Returns (home, linked_items).
-    Raises ``ValueError`` on invalid/duplicate names (from user_profile)."""
+    Raises ``ValueError`` on invalid/duplicate names, or ``OSError`` if the
+    registry write itself failed (both from user_profile, #518)."""
     name = str(name).strip()
     home = (
         Path(config_dir).expanduser()
@@ -393,7 +394,8 @@ def add_account(
 
 def remove_account(account: AccountInfo) -> None:
     """Remove one account from whichever store owns it. Raises ``ValueError``
-    for the reserved default profile (from user_profile)."""
+    for the reserved default profile, or ``OSError`` if the registry write
+    itself failed (both from user_profile, #518)."""
     if account.origin == "v2":
         from .core.accounts.registry import AccountRegistry
 

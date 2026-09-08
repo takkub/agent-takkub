@@ -26,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -52,8 +53,21 @@ def _project_profile_path(project: str) -> Path:
     return _BASE_DIR / "projects" / _project_slug(project) / "user-profile.json"
 
 
+# Windows can transiently reject a rename onto *path* while another reader
+# (e.g. SettingsWindow's background `_AccountsRefreshWorker`, which polls this
+# same registry off the main thread — #518) still has it open for read. A
+# short bounded retry absorbs that race without the caller ever seeing it —
+# same shape as `config.py`'s `_write_json_atomic` / `editor_service.py`.
+_REPLACE_RETRY_DELAYS: tuple[float, ...] = (0.0, 0.02, 0.05, 0.1, 0.2)
+
+
 def _atomic_write(path: Path, data: object) -> None:
-    """Write JSON to *path* atomically (tmp → rename)."""
+    """Write JSON to *path* atomically (tmp → rename).
+
+    Raises ``OSError`` if the destination is still locked after every retry —
+    callers must not swallow it silently (#518): a write that never lands
+    leaves the user believing an add/remove succeeded when it didn't.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2) + "\n"
     # Write to a sibling temp file then rename for atomicity.
@@ -61,7 +75,17 @@ def _atomic_write(path: Path, data: object) -> None:
     try:
         with open(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        Path(tmp).replace(path)
+        last_exc: OSError | None = None
+        for delay in _REPLACE_RETRY_DELAYS:
+            if delay:
+                time.sleep(delay)
+            try:
+                Path(tmp).replace(path)
+                return
+            except OSError as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
     except Exception:
         try:
             Path(tmp).unlink(missing_ok=True)
@@ -278,9 +302,10 @@ def add_profile(
     switching users changes ONLY the login/credentials. Returns the list of
     shared items linked ([] when not sharing). (Only applies to 'claude' provider).
 
-    Raises ``ValueError`` if *name* is invalid or already taken.
-    No-ops on I/O errors to keep callers fault-tolerant (caller should
-    handle the ValueError for UX, but not OSError).
+    Raises ``ValueError`` if *name* is invalid or already taken, or
+    ``OSError`` if the registry file could not be persisted (#518 — a
+    transient lock that outlasted `_atomic_write`'s retries, or a real disk
+    error). Callers must surface both to the user rather than assume success.
     """
     name = str(name).strip()
     provider = normalize_provider(provider)
@@ -306,27 +331,23 @@ def add_profile(
             raise ValueError(f"Cannot create profile dir {config_dir_s}: {e}") from e
 
     profiles.append({"name": name, "config_dir": config_dir_s, "provider": provider})
-    try:
-        _atomic_write(_REGISTRY_PATH, profiles)
-    except OSError:
-        pass
+    _atomic_write(_REGISTRY_PATH, profiles)
     return linked
 
 
 def remove_profile(name: str) -> None:
     """Remove a registered profile by name.
 
-    Silent if not found.  Raises ``ValueError`` for the reserved default.
+    Silent if not found. Raises ``ValueError`` for the reserved default, or
+    ``OSError`` if the registry file could not be persisted (#518 — see
+    :func:`add_profile`).
     """
     name = str(name).strip()
     if name == DEFAULT_PROFILE:
         raise ValueError("Cannot remove the implicit 'default' profile")
     profiles = _load_registry()
     updated = [p for p in profiles if p["name"] != name]
-    try:
-        _atomic_write(_REGISTRY_PATH, updated)
-    except OSError:
-        pass
+    _atomic_write(_REGISTRY_PATH, updated)
 
 
 def profile_for(project: str, provider: str = "claude") -> str:

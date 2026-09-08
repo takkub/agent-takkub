@@ -527,7 +527,7 @@ class AccountsSettingsMixin:
             home, linked = accounts_adapter.add_account(
                 provider, name, config_dir, share_sessions=share
             )
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "เพิ่มบัญชีไม่สำเร็จ", str(exc))
             return
         note = f"บัญชี '{name}' สร้างแล้ว ({home})"
@@ -547,7 +547,7 @@ class AccountsSettingsMixin:
             return
         try:
             accounts_adapter.remove_account(account)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "ลบไม่ได้", str(exc))
             return
         self._users_status(f"ลบบัญชี '{account.name}' แล้ว")

@@ -110,6 +110,93 @@ class TestRemoveProfile:
             up.remove_profile("default")
 
 
+# ──────────────────── #518: transient-lock write failures ──────────────────
+#
+# Repro: SettingsWindow's background _AccountsRefreshWorker reads the
+# registry off the main thread while add_profile/remove_profile do their
+# atomic tmp -> os.replace write. On Windows that read lock can make
+# os.replace raise transiently. `_atomic_write` retries a bounded number of
+# times before giving up; add_profile/remove_profile must no longer swallow
+# the eventual OSError (they used to, so the write silently never landed).
+
+
+class TestPersistFailureNotSwallowed:
+    def test_add_profile_retries_transient_lock_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(up.time, "sleep", lambda _seconds: None)
+        real_replace = Path.replace
+        calls = {"n": 0}
+
+        def flaky_replace(self: Path, target: Path) -> Path:
+            if target == up._REGISTRY_PATH:
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError(13, "The process cannot access the file")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", flaky_replace)
+
+        up.add_profile("work", "/a")
+
+        assert calls["n"] == 3
+        assert any(p["name"] == "work" for p in up.list_profiles())
+
+    def test_remove_profile_retries_transient_lock_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        up.add_profile("work", "/a")
+        monkeypatch.setattr(up.time, "sleep", lambda _seconds: None)
+        real_replace = Path.replace
+        calls = {"n": 0}
+
+        def flaky_replace(self: Path, target: Path) -> Path:
+            if target == up._REGISTRY_PATH:
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError(13, "The process cannot access the file")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", flaky_replace)
+
+        up.remove_profile("work")
+
+        assert calls["n"] == 3
+        assert not any(p["name"] == "work" for p in up.list_profiles())
+
+    def test_add_profile_raises_after_exhausting_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Was silently dropped pre-fix (add_profile caught and discarded
+        OSError) — the caller believed the account had been created."""
+        monkeypatch.setattr(up.time, "sleep", lambda _seconds: None)
+
+        def always_locked(self: Path, target: Path) -> Path:
+            raise PermissionError(13, "The process cannot access the file")
+
+        monkeypatch.setattr(Path, "replace", always_locked)
+
+        with pytest.raises(OSError):
+            up.add_profile("work", "/a")
+        # And the failed write must not silently persist a corrupt/partial
+        # registry either — nothing was ever added.
+        assert not any(p["name"] == "work" for p in up.list_profiles())
+
+    def test_remove_profile_raises_after_exhausting_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        up.add_profile("work", "/a")
+        monkeypatch.setattr(up.time, "sleep", lambda _seconds: None)
+
+        def always_locked(self: Path, target: Path) -> Path:
+            raise PermissionError(13, "The process cannot access the file")
+
+        monkeypatch.setattr(Path, "replace", always_locked)
+
+        with pytest.raises(OSError):
+            up.remove_profile("work")
+
+
 # ─────────────────────────── profile_for ──────────────────────────────────
 
 
