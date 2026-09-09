@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.5] - 2026-09-09
+
+### Added (เพิ่ม)
+
+- **เปิดใช้ตำแหน่งเสริมได้จาก Settings** — tester/analyst/designer/docs/security ตอนนี้โชว์เป็นแถว toggle ได้ในหน้า Settings → Roles & ตำแหน่ง (ปิดอยู่โดย default ทุก preset รวม "ทีมเต็ม") และเลือกได้เป็น hop ในหน้า Pipeline builder ด้วย — เดิมมีแต่ `.claude/agents/<name>.md` ใช้ได้เฉพาะทาง `takkub assign --role <name>` ตรงๆ เท่านั้น
+
 ## [2.0.4] - 2026-09-09
 
 ### Fixed (แก้)
