@@ -521,6 +521,50 @@ class TestGeminiAdapter:
         # Fresh data must not carry the "go open the app" hint.
         assert result.error is None
 
+    def test_pooled_models_in_cache_file_collapse_to_one_row(self, monkeypatch, tmp_path):
+        """#552: the cache-file fallback (no live RPC access) built one
+        `windows` row per `models` dict key with no dedup at all -- models
+        sharing one real pooled quota tier (identical fraction/resetTime)
+        must collapse to a single row, same as the live RPC path already
+        does (#549/#551)."""
+        cache_dir = tmp_path / "authorized"
+        cache_dir.mkdir()
+        now = datetime.now(tz=UTC)
+        now_ms = int(now.timestamp() * 1000)
+        future_iso = (now + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        pooled_models = {
+            f"gemini-catalog-model-{i}": {
+                "quotaInfo": {"remainingFraction": 0.4, "resetTime": future_iso}
+            }
+            for i in range(25)
+        }
+        payload = {
+            "email": "user@example.com",
+            "updatedAt": now_ms,
+            "payload": {
+                "models": {
+                    **pooled_models,
+                    "gemini-3-pro-distinct-tier": {
+                        "quotaInfo": {"remainingFraction": 0.1, "resetTime": future_iso}
+                    },
+                }
+            },
+        }
+        (cache_dir / "acct.json").write_text(json.dumps(payload), encoding="utf-8")
+        monkeypatch.setattr(pu, "_antigravity_authorized_cache_dir", lambda: cache_dir)
+        result = pu.fetch_gemini_usage()
+        assert result.status == "active"
+        # 26 model dict entries, but only 2 REAL tiers -> 2 windows, not 26.
+        assert len(result.windows) == 2
+        assert result.raw_data["model_count"] == 26
+        pooled_window = next(
+            w for w in result.windows if w["name"].startswith("gemini-catalog-model-")
+        )
+        assert pooled_window["name"] == "gemini-catalog-model-0 +24 more"
+        assert pooled_window["utilization"] == pytest.approx(60.0)
+        # The worst-case (lowest remaining fraction) tier drives the headline.
+        assert result.utilization == pytest.approx(90.0)
+
     def test_stale_data_is_flagged_stale_not_active(self, monkeypatch, tmp_path):
         cache_dir = tmp_path / "authorized"
         cache_dir.mkdir()
