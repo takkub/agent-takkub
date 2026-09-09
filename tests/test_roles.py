@@ -24,7 +24,7 @@ class TestDefaults:
         assert roles.LEAD.name == "lead"
 
     def test_default_teammates_registry(self) -> None:
-        assert len(roles.DEFAULT_TEAMMATES) == 13
+        assert len(roles.DEFAULT_TEAMMATES) == 18
         names = {r.name for r in roles.DEFAULT_TEAMMATES}
         assert names == {
             "frontend",
@@ -40,13 +40,24 @@ class TestDefaults:
             "opencode",
             "kimi",
             "cursor",
+            "tester",
+            "analyst",
+            "designer",
+            "docs",
+            "security",
         }
-        # Designer was retired from defaults but the agent file
-        # `.claude/agents/designer.md` is preserved for custom add.
-        # Critic (Design Critic) replaces designer with a post-QA visual
-        # review workflow (shots → gemini → propose) rather than the old
-        # Figma-to-code spec.
-        assert "designer" not in names
+
+    def test_secondary_positions_resolve_and_have_cockpit_theme_colors(self) -> None:
+        # 2026-09-09 — same doc-file/registry gap bug #162 fixed for
+        # opencode/kimi/cursor: tester/analyst/designer/docs/security each
+        # shipped a `.claude/agents/<name>.md` doc but no Role() row.
+        from agent_takkub import cockpit_theme
+
+        for name in ("tester", "analyst", "designer", "docs", "security"):
+            role = roles.by_name(name)
+            assert role is not None, f"{name} must resolve via by_name()"
+            assert role.color == cockpit_theme.ROLE_COLORS[name]
+            assert role.column == 2
 
     def test_default_columns_assigned(self) -> None:
         cols = {r.name: r.column for r in roles.DEFAULT_TEAMMATES}
