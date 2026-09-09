@@ -798,7 +798,7 @@ def test_usage_lock_survives_permission_error_from_os_open(monkeypatch):
     real_open = ul.os.open
     calls = {"n": 0}
 
-    def flaky_open(path, flags, mode=0o777):
+    def flaky_open(path, flags, mode=0o600):
         if path == str(ul._usage_lock_path()) and flags & ul.os.O_EXCL:
             calls["n"] += 1
             if calls["n"] == 1:
@@ -826,7 +826,7 @@ def test_usage_lock_reclaims_stale_lock_after_permission_error(monkeypatch):
     real_open = ul.os.open
     calls = {"n": 0}
 
-    def flaky_open(path, flags, mode=0o777):
+    def flaky_open(path, flags, mode=0o600):
         if path == str(lock_path) and flags & ul.os.O_EXCL:
             calls["n"] += 1
             if calls["n"] == 1:
