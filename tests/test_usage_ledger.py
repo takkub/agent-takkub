@@ -789,6 +789,57 @@ def test_usage_lock_blocks_a_second_acquire_until_the_first_releases():
     assert order == ["first-release", "second-acquire"]
 
 
+def test_usage_lock_survives_permission_error_from_os_open(monkeypatch):
+    """#533: on Windows, O_CREAT|O_EXCL against a lock file another process
+    (or a transient AV scan) still has open can raise `PermissionError`
+    instead of `FileExistsError`. Before the fix that escaped `__enter__`
+    as an unhandled crash; it must be treated the same as `FileExistsError`
+    (retry until the transient holder releases it)."""
+    real_open = ul.os.open
+    calls = {"n": 0}
+
+    def flaky_open(path, flags, mode=0o777):
+        if path == str(ul._usage_lock_path()) and flags & ul.os.O_EXCL:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(ul.os, "open", flaky_open)
+
+    with ul._UsageLock() as lock:
+        assert lock._acquired
+    assert calls["n"] >= 1
+
+
+def test_usage_lock_reclaims_stale_lock_after_permission_error(monkeypatch):
+    """A `PermissionError` against a genuinely stale lock file (crashed
+    holder, not just a transient read lock) must still be reclaimed rather
+    than retried forever — same staleness check as the `FileExistsError`
+    path."""
+    lock_path = ul._usage_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_bytes(b"")
+    old = ul._time.time() - ul._STALE_LOCK_S - 1
+    ul.os.utime(lock_path, (old, old))
+
+    real_open = ul.os.open
+    calls = {"n": 0}
+
+    def flaky_open(path, flags, mode=0o777):
+        if path == str(lock_path) and flags & ul.os.O_EXCL:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(ul.os, "open", flaky_open)
+
+    with ul._UsageLock() as lock:
+        assert lock._acquired
+    assert calls["n"] >= 1
+
+
 # ── M1: opencode WAL ──────────────────────────────────────────────────────
 
 
