@@ -1224,3 +1224,63 @@ class TestClassifyPreconditionMismatch:
         from agent_takkub.routing_planner import classify_precondition_mismatch
 
         assert classify_precondition_mismatch("") == (False, "")
+
+
+class TestClassifyCodeRootCause:
+    """#538: a BLOCKED/PARTIAL-shaped note that names a concrete file or
+    function is a code bug, not something missing from outside the codebase.
+    Field case: qa reported a parser bug ("extractLauncherTargetUrl ถอด URL
+    ไม่ได้") that also phrased the symptom near an absence-cue word, so
+    `classify_blocked` fired and the cockpit rendered the "no role can fix
+    this" credential template over a report that named the exact function to
+    fix."""
+
+    def test_camel_case_function_name_is_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        note = "extractLauncherTargetUrl ถอด URL ไม่ได้ — missing token in the decoded payload"
+        is_code_bug, what = classify_code_root_cause(note)
+        assert is_code_bug is True
+        assert what == "extractLauncherTargetUrl"
+
+    def test_camel_case_note_overrides_blocked_classification(self) -> None:
+        # The exact shape from the field case: the note independently
+        # matches classify_blocked's credential rule...
+        from agent_takkub.routing_planner import classify_blocked, classify_code_root_cause
+
+        note = "extractLauncherTargetUrl ถอด URL ไม่ได้ — missing token in the decoded payload"
+        assert classify_blocked(note)[0] is True
+        # ...but callers must check classify_code_root_cause first and skip
+        # the credential template when it says True.
+        assert classify_code_root_cause(note)[0] is True
+
+    def test_file_with_code_extension_is_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        note = "ไม่มี access ไปเปิดหน้าเกม เพราะ launcher.ts ถอด query param ไม่ได้"
+        is_code_bug, what = classify_code_root_cause(note)
+        assert is_code_bug is True
+        assert what == "launcher.ts"
+
+    def test_function_call_syntax_is_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        note = "missing permission — parseUrl() throws before it can run"
+        assert classify_code_root_cause(note)[0] is True
+
+    def test_genuine_missing_credential_without_code_ref_is_not_a_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        note = "สร้าง tenant ทดสอบไม่ได้เพราะไม่มีรหัสผ่าน super admin"
+        assert classify_code_root_cause(note)[0] is False
+
+    def test_all_caps_acronym_is_not_a_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        note = "Cannot run the suite: missing API credentials for the staging tenant"
+        assert classify_code_root_cause(note)[0] is False
+
+    def test_empty_note_is_not_a_code_bug(self) -> None:
+        from agent_takkub.routing_planner import classify_code_root_cause
+
+        assert classify_code_root_cause("") == (False, "")
