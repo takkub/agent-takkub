@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from agent_takkub import settings_window, usage_ledger
+from agent_takkub.settings_knowledge_design import _ACTIVE_THREADS
 from agent_takkub.settings_usage import _range_query_kwargs
 
 
@@ -175,7 +176,17 @@ class TestUsageViewSmoke:
         race as #526. `.isRunning()` on it then raises RuntimeError instead
         of returning False. Reproduce by `sip.delete()`-ing the thread
         object directly, then confirm the click handler self-heals instead
-        of propagating the crash."""
+        of propagating the crash.
+
+        `sip.delete()` bypasses the normal `finished` → `_cleanup` path, so
+        the stale wrapper would otherwise keep sitting in the *module-global*
+        `_ACTIVE_THREADS` registry (shared with every other Settings test in
+        the session, not scoped to this dialog) — later tripping `RuntimeError`
+        in an unrelated test's `aboutToQuit` (#344 auto-captured crash: this
+        leaked into `test_headless_entrypoint.py::test_boot_success_runs_
+        event_loop`'s `qapp.quit()`). Discard it ourselves, same as
+        `_wait_for_active_threads` now self-heals for any leak this doesn't
+        catch."""
         from PyQt6 import sip
 
         monkeypatch.setattr(usage_ledger, "import_all", lambda: {})
@@ -184,6 +195,7 @@ class TestUsageViewSmoke:
         dlg._usage_import_thread.wait(2000)
         stale_thread = dlg._usage_import_thread
         sip.delete(stale_thread)  # C++ side gone; dlg._usage_import_thread still refs it
+        _ACTIVE_THREADS.discard(stale_thread)
 
         dlg._on_usage_refresh_clicked()  # must not raise RuntimeError
 
