@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.6] - 2026-09-09
+
+### Fixed (แก้)
+
+- **[live e2e ของฟีเจอร์ optional roles ใน 2.0.5]** preset "อัตโนมัติ" เผลอเปิดตำแหน่งเสริมทั้ง 5 (tester/analyst/designer/docs/security) เป็น default ทั้งที่ตั้งใจให้ปิด (#555) · preset "กำหนดเอง" ปิด toggle แล้วไม่บันทึก ค้าง state เก่า เปิด Settings ใหม่ toggle เด้งกลับมาเปิด (#556)
+
 ## [2.0.5] - 2026-09-09
 
 ### Added (เพิ่ม)
