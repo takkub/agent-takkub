@@ -271,6 +271,7 @@ ROLE_COLORS: dict[str, str] = {
     "opencode": PROVIDER_OPENCODE,
     "kimi": PROVIDER_KIMI,
     "cursor": PROVIDER_CURSOR,
+    "tester": "#B5D33D",
 }
 
 # ──────────────────────────────────────────────────────────────

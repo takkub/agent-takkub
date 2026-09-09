@@ -111,9 +111,10 @@ severity here (user loses internet access with no warning) warrants Lead
 knowing immediately, not just the blocked pane.
 
 An eighth rule, ``full_suite`` (#528), blocks a raw, un-narrowed test-runner
-invocation for every guarded role, no allowlist: `pytest`/`python -m pytest`
-with no path/`-k`/`-m`, `vitest run` with no path, bare `jest`, `turbo run
-test` with no `--filter`, `pnpm`/`yarn -r test`. `#485`'s "targeted mid-batch,
+invocation for every guarded role except `tester` (see below): `pytest`/
+`python -m pytest` with no path/`-k`/`-m`, `vitest run` with no path, bare
+`jest`, `turbo run test` with no `--filter`, `pnpm`/`yarn -r test`.
+`#485`'s "targeted mid-batch,
 full gate once via `takkub qa-gate --auto`" was prose-only in the root
 CLAUDE.md every pane already reads — nothing technical stopped a pane (or
 Lead, mid-task) from reaching for the raw runner anyway, repeatedly pinning
@@ -123,6 +124,13 @@ CLI process, never through a Bash tool call this hook ever observes, so
 gating the raw path here cannot also gate the gate's own internal runs — no
 exception needed in the pattern set for that. `FULL_SUITE_RULE_TEXT` is the
 prose counterpart pointing at `takkub qa-gate --targeted <paths>`.
+
+One role IS allowlisted for this specific rule: `tester` (optional, spawned
+on demand — `.claude/agents/tester.md`), whose entire job is running a raw
+test suite on its own pane so other roles don't each fork one in parallel.
+It stays subject to every other rule in this module (version control,
+browser driving, host-destructive commands, ...) — the exemption is narrow
+to `_full_suite_rule` alone.
 
 Carve-outs for `--isolation worktree`: `git commit` is allowed unconditionally
 when the pane's cwd is inside a cockpit-managed `.../worktrees/...` checkout;
@@ -985,15 +993,20 @@ def classify(
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
             )
 
-    full_suite = _full_suite_rule(cmd)
-    if full_suite is not None:
-        return Verdict(
-            False,
-            rule=f"full_suite:{full_suite}",
-            reason=(
-                f"role `{name}` รัน raw full-suite ไม่ได้ (นโยบาย cockpit). {FULL_SUITE_RULE_TEXT}"
-            ),
-        )
+    # `tester` (optional role, on-demand — see .claude/agents/tester.md) exists
+    # specifically to run the raw, un-narrowed test runner on a pane of its
+    # own instead of every other role reaching for one in parallel — so it is
+    # exempt from this one rule while every other guarded role stays denied.
+    if name != "tester":
+        full_suite = _full_suite_rule(cmd)
+        if full_suite is not None:
+            return Verdict(
+                False,
+                rule=f"full_suite:{full_suite}",
+                reason=(
+                    f"role `{name}` รัน raw full-suite ไม่ได้ (นโยบาย cockpit). {FULL_SUITE_RULE_TEXT}"
+                ),
+            )
 
     in_worktree = _in_worktree(cmd, cwd)
 

@@ -2615,6 +2615,7 @@
     codex: "#93c5fd",
     gemini: "#67e8f9",
     designer: "#f0abfc",
+    tester: "#a3e635",
   };
 
   function roleColor(role) {
