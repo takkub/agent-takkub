@@ -2,6 +2,21 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.2] - 2026-09-09
+
+Reliability sweep — 20 issues closed today, all from real repro cases hit during normal use (no synthetic/hypothetical reports). Every fix has a regression test proving the failure before the fix and the pass after. Excludes the 2.1.0-scoped epics (#504, #508, #513, #514, #516), which stay deferred per the roadmap, and #534 (a genuine open follow-up waiting on external log evidence).
+
+### Fixed (แก้)
+
+- **Cockpit UI redesign — Apex Slate/Titanium** — พาเลทใหม่ทั้งแอพ (indigo primary), semantic status colors, role-colored pane border, ตัวอักษรใหญ่ขึ้น, "Team"→"Roles" rename ทุกจุด, dialog ทุกบานสืบทอดธีมแอพแล้ว (แก้ white-bleed), ถอนปุ่ม Usage/Team-preset ที่ไม่ได้ขอออกจาก mobile PWA
+- **New optional `tester` role** — รันเทสแทน role อื่นเพื่อรวม CPU/RAM contention เป็น pane เดียว, opt-in ต่องาน ไม่บังคับ
+- Pane viewport เป็นจอว่างเปล่าทั้งที่ process ทำงานจริง หลัง respawn ซ้ำหลายรอบ (#535) — QWebEnginePage lifecycle transition หลุดเงียบ ไม่มี retry
+- `takkub worktree merge` รายงาน "merged" ทั้งที่ HEAD ไม่ขยับจริง (#527), false "done แต่ไม่มี commit" alarm ทั้งที่ merge ไปแล้ว (#536), cleanup ล้มเหลว WinError 32 ทิ้ง worktree ค้าง (#539), `--orphans` ลบ worktree ที่ยังใช้งานจริงโดยไม่ถาม (#547), pane_guard บล็อก checkout/reset แม้ในผ worktree ของ pane เอง (#545), เพิ่ม `assign --base <ref>` กำหนด base ตอนสร้าง worktree ได้ (#544)
+- pane close หลัง done ฆ่า subprocess ที่ยังวิ่งอยู่ทันที (#537), pane ตายหลัง banner แล้วงานหายเงียบไม่ retry (#540), spawn ถูก hold เพราะ overload แบบเงียบไม่แจ้ง Lead (#543), `takkub wait` ถูก interrupt จาก notification ของ Lead เอง (#548), BLOCKED-credential template จับผิดประเภททับรายงาน code bug จริง (#538)
+- watchdog เข้าใจผิดว่า pane ค้างหลังเครื่อง sleep/wake (#520), task state หายหลัง cockpit restart ที่ไม่ graceful (#532), pane_guard เพิ่มกฎบล็อก raw full-suite test command (#528), qa-gate preflight เช็ค test DB ก่อนรัน (#529), `takkub wait --role` หลาย role ไม่ fail ทั้งก้อนเมื่อ role หนึ่งปิดไปแล้ว (#524)
+- `user_profile` กลืน OSError เงียบตอนชน Windows file lock (#518), `usage_ledger` PermissionError ไม่ถูก handle บน Windows lock race (#533), macOS PtyProcessError จาก waitpid ECHILD race (#511), Gemini CLI feedback/survey prompt บล็อก pane ค้างรอ input (#509)
+- `takkub status`/`tail` เพิ่มดู transcript ของ pane ที่ exited แล้ว + strip spinner animation frames (#541, #542), Settings→Usage หน้า gemini โชว์แถวซ้ำ 25+ แถวแทนที่จะ consolidate (#549), Lead noise จาก worktree-spawn/proposal ซ้ำซ้อน (#519), done digest project attribution ผิดสำหรับงานข้ามรีโป + dirty-files noise (#546)
+
 ## [2.0.1] - 2026-09-08
 
 หลักของรอบนี้ (user directive): **"V2 ทำทุกอย่างแยกให้ชัดเจน อ่านง่าย"** — ตัวเลือกที่ค่าถูกมีค่าเดียวไม่ใช่ตัวเลือก, ตัวเลขที่โชว์ต้องเป็นของจริงจาก provider, เอาออก = ถอน dead code ทั้งสาย · batch นี้ผ่าน cross-review 3 รอบ (reviewer claude + gemini) — HIGH ที่เจอทั้งหมดแก้ก่อนปล่อย (`docs/audit/2026-09-07-batch-2.0.x-review-*.md`)
