@@ -906,6 +906,37 @@ class TestGeminiLiveBucketAggregation:
         assert result is not None
         assert len(result.windows) == 1
 
+    def test_catalog_models_sharing_one_tier_collapse_to_one_row(self):
+        """#549: the RPC returns one bucket per CATALOG model id (25+), but
+        models pooled under one real quota tier report an identical
+        (fraction, resetTime) pair — those must collapse into a single
+        `windows` row instead of one identical-looking row per catalog
+        entry."""
+        reset = "2026-09-06T00:00:00Z"
+        pooled_models = [f"gemini-catalog-model-{i}" for i in range(25)]
+        buckets = [
+            {"modelId": model_id, "remainingFraction": 0.4, "resetTime": reset}
+            for model_id in pooled_models
+        ] + [
+            {"modelId": "gemini-3-pro-distinct-tier", "remainingFraction": 0.1, "resetTime": reset}
+        ]
+        result = pu._gemini_usage_from_live_buckets(buckets, email=None)
+        assert result is not None
+        # 26 catalog buckets, but only 2 REAL tiers -> 2 windows, not 26.
+        assert len(result.windows) == 2
+        assert result.raw_data["model_count"] == 26
+        pooled_window = next(
+            w for w in result.windows if w["name"].startswith("gemini-catalog-model-")
+        )
+        assert pooled_window["name"] == "gemini-catalog-model-0 +24 more"
+        assert pooled_window["utilization"] == pytest.approx(60.0)
+        distinct_window = next(
+            w for w in result.windows if w["name"] == "gemini-3-pro-distinct-tier"
+        )
+        assert distinct_window["utilization"] == pytest.approx(90.0)
+        # The worst-case (lowest remaining fraction) tier drives the headline.
+        assert result.utilization == pytest.approx(90.0)
+
 
 # ── opencode adapter ──────────────────────────────────────────────────────
 
