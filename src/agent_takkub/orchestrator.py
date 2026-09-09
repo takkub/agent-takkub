@@ -2623,7 +2623,7 @@ class Orchestrator(
                     blocked_by=[f"{pane}@{proj}" for proj, pane in holders],
                     queue_len=queue_len,
                 )
-                return True, _describe_resource_wait(
+                wait_msg = _describe_resource_wait(
                     role_name,
                     resource_class,
                     decision.reason,
@@ -2632,6 +2632,35 @@ class Orchestrator(
                     own_project=project_ns,
                     queue_len=queue_len,
                 )
+                # #543: an overload-latch hold (machine-wide CPU/RAM, not a
+                # per-class slot wait) used to be silent — the message above
+                # only ever reached Lead if whoever called `assign()` was
+                # still there to read its synchronous return value. Most
+                # `assign` calls from the CLI socket are dispatched off a
+                # QTimer (`_fire_staggered` in cli_server.py) with the ack
+                # already sent before this ever runs, so the hold reason was
+                # dropped on the floor and Lead only found out by manually
+                # running `takkub status` (see #543's repro). Push it through
+                # the same inbox `_notify_lead` uses for every other
+                # unsolicited notice instead — it degrades to the durable
+                # pending-notice queue if Lead isn't alive yet, same as any
+                # other kind. Scoped to the overload latch only: ordinary
+                # per-class slot waits (browser/heavy/... limits) already
+                # name their blocking pane in `takkub list`/`status`, so
+                # paging Lead for every one of those would be noise; a
+                # machine-wide overload hold has no such existing signal.
+                if decision.reason in _OVERLOAD_LATCH_REASONS:
+                    notify_fn = getattr(self, "_notify_lead", None)
+                    if callable(notify_fn):
+                        notify_fn(
+                            project_ns,
+                            f"⏸️ {wait_msg} — จะสั่ง spawn ให้อัตโนมัติทันทีที่ CPU/RAM ว่าง "
+                            "(เช็คทุก 1s, ไม่ต้องรัน `takkub status` เอง)",
+                            from_role=role_name,
+                            note="resource-overload-queued",
+                            kind="resource-overload-queued",
+                        )
+                return True, wait_msg
             if decision.token is not None:
                 self._resource_tokens[resource_key] = decision.token
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
