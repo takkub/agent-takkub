@@ -39,7 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -788,6 +788,50 @@ def _gemini_bucket_group_key(
     )
 
 
+def _group_gemini_quota_entries(
+    entries: Iterable[tuple[str, float, datetime | None]],
+) -> tuple[list[dict[str, Any]], float | None, datetime | None]:
+    """Shared (fraction, resetTime) grouping (#549/#551) for every Gemini
+    quota source — the live RPC's per-catalog-model buckets and, as of
+    #552, the cache-file fallback's `models` dict too (which had no dedup
+    at all before this: one `windows` row per catalog model key, with none
+    of the pooled-tier collapsing the live path already got in #549).
+
+    `entries` is already-parsed/validated (label, fraction, resets_at)
+    triples — the two callers differ only in where those come from (a live
+    bucket's `modelId`, or the cache's model dict key / displayName).
+    Returns (windows, best_fraction, best_resets_at); `best_fraction` is
+    None when `entries` was empty, same "nothing usable" signal both
+    callers already handled before this was split out.
+    """
+    best_fraction: float | None = None
+    best_resets_at: datetime | None = None
+    groups: dict[tuple[float, str | None], dict[str, Any]] = {}
+    group_order: list[tuple[float, str | None]] = []
+    for label, fraction, resets_at in entries:
+        key = _gemini_bucket_group_key(fraction, resets_at)
+        if key not in groups:
+            groups[key] = {
+                "model_ids": [],
+                "utilization": max(0.0, min(100.0, (1.0 - fraction) * 100.0)),
+                "resets_at": resets_at,
+            }
+            group_order.append(key)
+        groups[key]["model_ids"].append(label)
+        if best_fraction is None or fraction < best_fraction:
+            best_fraction = fraction
+            best_resets_at = groups[key]["resets_at"]
+    windows = [
+        {
+            "name": _gemini_bucket_group_name(groups[key]["model_ids"]),
+            "utilization": groups[key]["utilization"],
+            "resets_at": groups[key]["resets_at"].isoformat() if groups[key]["resets_at"] else None,
+        }
+        for key in group_order
+    ]
+    return windows, best_fraction, best_resets_at
+
+
 def _gemini_usage_from_live_buckets(
     buckets: list[dict[str, Any]], email: str | None
 ) -> ProviderUsage | None:
@@ -799,7 +843,8 @@ def _gemini_usage_from_live_buckets(
     #549: the RPC returns one bucket per CATALOG model id (25+), but models
     sharing one real pooled quota tier report an identical (fraction,
     resetTime) pair — that was exploding into one identical-looking `windows`
-    row per catalog entry. Buckets are grouped on that pair first, so the
+    row per catalog entry. Buckets are grouped on that pair first (shared
+    with the cache-file path via `_group_gemini_quota_entries`, #552), so the
     Settings > Usage table (and the ledger rows `_record_quota_ledger` writes
     from `windows`) get one row per REAL tier instead of one per catalog
     noise entry.
@@ -807,11 +852,8 @@ def _gemini_usage_from_live_buckets(
     #551: exact (fraction, resetTime) equality was too strict — see
     `_gemini_bucket_group_key` for the loosened grouping this now uses.
     """
-    best_fraction: float | None = None
-    resets_at: datetime | None = None
-    groups: dict[tuple[float, str | None], dict[str, Any]] = {}
-    group_order: list[tuple[float, str | None]] = []
     model_count = 0
+    entries: list[tuple[str, float, datetime | None]] = []
     for bucket in buckets:
         if not isinstance(bucket, dict):
             continue
@@ -831,28 +873,10 @@ def _gemini_usage_from_live_buckets(
                 m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
             except ValueError:
                 m_resets_at = None
-        key = _gemini_bucket_group_key(fraction, m_resets_at)
-        if key not in groups:
-            groups[key] = {
-                "model_ids": [],
-                "utilization": max(0.0, min(100.0, (1.0 - fraction) * 100.0)),
-                "resets_at": m_resets_at,
-            }
-            group_order.append(key)
-        groups[key]["model_ids"].append(str(model_id) if model_id else "?")
-        if best_fraction is None or fraction < best_fraction:
-            best_fraction = fraction
-            resets_at = groups[key]["resets_at"]
+        entries.append((str(model_id) if model_id else "?", fraction, m_resets_at))
+    windows, best_fraction, resets_at = _group_gemini_quota_entries(entries)
     if best_fraction is None:
         return None
-    windows = [
-        {
-            "name": _gemini_bucket_group_name(groups[key]["model_ids"]),
-            "utilization": groups[key]["utilization"],
-            "resets_at": groups[key]["resets_at"].isoformat() if groups[key]["resets_at"] else None,
-        }
-        for key in group_order
-    ]
     return ProviderUsage(
         provider="gemini",
         status=STATUS_ACTIVE,
@@ -950,10 +974,12 @@ def fetch_gemini_usage() -> ProviderUsage:
 
     # Aggregate to the worst-case (lowest remaining fraction) tracked model —
     # a single meter is what a status-bar chip needs; per-model detail rides
-    # along in raw_data and windows for anything that wants more.
-    best_fraction: float | None = None
-    resets_at: datetime | None = None
-    windows: list[dict[str, Any]] = []
+    # along in raw_data and windows for anything that wants more. Grouped on
+    # (fraction, resetTime) via the same helper the live RPC path uses
+    # (#549/#551) — this cache-file path had no dedup at all before #552,
+    # so a pooled tier spanning several catalog model keys used to explode
+    # into one identical-looking `windows` row per key.
+    cache_entries: list[tuple[str, float, datetime | None]] = []
     for model_name, info in models.items():
         if not isinstance(info, dict):
             continue
@@ -967,33 +993,16 @@ def fetch_gemini_usage() -> ProviderUsage:
             fraction = float(fraction)
         except (TypeError, ValueError):
             continue
-        m_utilization = max(0.0, min(100.0, (1.0 - fraction) * 100.0))
         m_reset_raw = quota.get("resetTime")
-        m_resets_at_iso = None
+        m_resets_at: datetime | None = None
         if isinstance(m_reset_raw, str):
             try:
-                m_resets_at_iso = datetime.fromisoformat(
-                    m_reset_raw.replace("Z", "+00:00")
-                ).isoformat()
+                m_resets_at = datetime.fromisoformat(m_reset_raw.replace("Z", "+00:00"))
             except ValueError:
-                m_resets_at_iso = None
-        display_name = info.get("displayName") or model_name
-        windows.append(
-            {
-                "name": str(display_name),
-                "utilization": m_utilization,
-                "resets_at": m_resets_at_iso,
-            }
-        )
-        if best_fraction is None or fraction < best_fraction:
-            best_fraction = fraction
-            reset_raw = quota.get("resetTime")
-            resets_at = None
-            if isinstance(reset_raw, str):
-                try:
-                    resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
-                except ValueError:
-                    resets_at = None
+                m_resets_at = None
+        display_name = str(info.get("displayName") or model_name)
+        cache_entries.append((display_name, fraction, m_resets_at))
+    windows, best_fraction, resets_at = _group_gemini_quota_entries(cache_entries)
 
     now = datetime.now(tz=UTC)
     age_s = (now - fetched_at).total_seconds() if fetched_at else None
