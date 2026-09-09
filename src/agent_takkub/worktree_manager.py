@@ -556,6 +556,26 @@ def _registered_isolated_worktree_paths(git_root: str, git_run: GitRunner) -> se
     }
 
 
+def _all_registered_worktree_paths(git_root: str, git_run: GitRunner) -> set[Path]:
+    """Resolved paths of EVERY worktree git currently knows about for
+    *git_root*, regardless of branch name (#547).
+
+    `_registered_isolated_worktree_paths` only matches the `wt/*` isolation
+    scheme — fine for finding candidate project dirs, but wrong as the
+    "does git still know about this checkout" exclusion `list_orphans`
+    needs: a worktree a human created directly with `git worktree add`
+    (e.g. a Lead's manually-named `prodtest-taktempmain` base checkout)
+    lives right alongside `wt/*` ones on disk, is very much still
+    registered and in active use, yet its branch name doesn't start with
+    `wt/` — so the isolated-only set silently let it through as
+    "forgotten" and `--orphans` deleted it with zero warning. Anything
+    `git worktree list` still reports is, by definition, not forgotten."""
+    res = git_run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+    if not res.ok:
+        return set()
+    return {Path(ent["path"]).resolve() for ent in parse_worktree_list(res.stdout)}
+
+
 def _candidate_project_worktree_dirs(git_root: Path, registered_paths: set[Path]) -> set[Path]:
     """Best-effort set of ``<DATA_HOME>/worktrees/<project>`` dirs that may
     hold checkouts of *git_root*, for :meth:`WorktreeManager.list_orphans`.
@@ -958,6 +978,12 @@ class WorktreeManager:
         res = self._run(["-C", cwd, "rev-parse", "HEAD"], None)
         return res.stdout.strip() if res.ok and res.stdout.strip() else None
 
+    def resolve_ref(self, root: str, ref: str) -> str | None:
+        """SHA *ref* resolves to in the repo at *root*, or None when git
+        doesn't recognize it (#544 — `create`'s `base_ref` validation)."""
+        res = self._run(["-C", root, "rev-parse", "--verify", f"{ref}^{{commit}}"], None)
+        return res.stdout.strip() if res.ok and res.stdout.strip() else None
+
     def shared_tree_baseline(
         self, cwd: str
     ) -> tuple[str | None, str | None, DirtyTreeSnapshot | None]:
@@ -988,8 +1014,19 @@ class WorktreeManager:
         role: str,
         ts: int,
         exclude_ports: frozenset[int] | set[int] = frozenset(),
+        base_ref: str | None = None,
     ) -> tuple[WorktreeInfo | None, str]:
-        """Create an isolated worktree+branch off *base_cwd*'s HEAD.
+        """Create an isolated worktree+branch off *base_cwd*'s HEAD, or off
+        *base_ref* when given (#544 — ``takkub assign --base <ref>``).
+
+        Before #544 the branch always forked from *base_cwd*'s checked-out
+        HEAD, so a task needing a different base (e.g. a long-lived release
+        branch) forced the Lead to `git checkout` that ref in the MAIN repo
+        first — a hack that changed the user's own checkout out from under
+        them just to seed one isolated worktree. *base_ref* lets the caller
+        name that ref directly instead; it is resolved with the repo at
+        *base_cwd* as context (so a short ref like a local or `origin/`
+        branch name works the same as it would typed at that repo's prompt).
 
         Returns ``(info, "")`` on success or ``(None, reason)`` when the pane
         must fall back to the shared cwd — *reason* is a short human string for
@@ -1001,9 +1038,14 @@ class WorktreeManager:
         root = self.git_root(base_cwd)
         if root is None:
             return None, "ไม่ใช่ git repo (worktree isolation ต้องมี .git) — ใช้ shared cwd แทน"
-        base_sha = self.head_sha(base_cwd)
-        if not base_sha:
-            return None, "repo ยังไม่มี commit (HEAD ว่าง) — ใช้ shared cwd แทน"
+        if base_ref:
+            base_sha = self.resolve_ref(root, base_ref)
+            if not base_sha:
+                return None, f"--base '{base_ref}' หา ref นี้ไม่เจอ — ใช้ shared cwd แทน"
+        else:
+            base_sha = self.head_sha(base_cwd)
+            if not base_sha:
+                return None, "repo ยังไม่มี commit (HEAD ว่าง) — ใช้ shared cwd แทน"
 
         attempt_ts = ts
         dest: Path
@@ -1675,9 +1717,16 @@ class WorktreeManager:
         unbounded scan of an unrelated, potentially huge directory tree; the
         managed-root check below is the actual guard, kept even though the
         anchor is already filtered to isolated ``wt/*`` entries.
+
+        Exclusion from the report uses EVERY worktree git currently
+        registers, not just ``wt/*`` ones (#547) — a checkout a human made
+        directly with ``git worktree add`` under a different branch name is
+        just as "not forgotten" as an isolated one, and must never be
+        treated as an orphan eligible for ``--orphans`` deletion.
         """
         root = Path(git_root).resolve()
         registered_isolated = _registered_isolated_worktree_paths(git_root, self._run)
+        registered_all = _all_registered_worktree_paths(git_root, self._run)
         live = {str(Path(p).resolve()) for p in live_paths}
         managed_root = worktrees_managed_root()
         orphans: list[dict] = []
@@ -1694,7 +1743,7 @@ class WorktreeManager:
                 if child.name.startswith(_TRASH_PREFIX):
                     continue  # `sweep_trash` handles these unconditionally (#411)
                 child_r = child.resolve()
-                if child_r in registered_isolated or str(child_r) in live:
+                if child_r in registered_all or str(child_r) in live:
                     continue
                 size, count = dir_stats(child)
                 orphans.append(

@@ -114,12 +114,26 @@ class TestGitDashCUppercaseFlagSeenThrough:
     @pytest.mark.parametrize(
         "command",
         [
-            "git -C . reset --hard HEAD~1",  # no carve-out even inside a worktree
+            "git -C . reset --hard HEAD~1",  # #545: carved out inside the pane's own worktree
             f"git -C {_WT} branch -D main",
         ],
     )
-    def test_other_subcommands_still_gated_with_dash_c(self, command: str) -> None:
-        assert not pane_guard.classify(command, "backend", cwd=self._WT).allowed, command
+    def test_reset_hard_and_branch_delete_carved_out_with_dash_c(self, command: str) -> None:
+        """#545 flipped this from denied to allowed — but the point this
+        class pins still holds: `-C`'s value must be correctly parsed as
+        part of the in-worktree detection, not swallow the subcommand and
+        "allow" for the wrong reason (a silent bypass, not a real grant)."""
+        assert pane_guard.classify(command, "backend", cwd=self._WT).allowed, command
+
+    def test_reset_hard_still_denied_with_dash_c_outside_a_worktree(self) -> None:
+        """The #466 `-C` parsing fix must still correctly SEE the
+        subcommand when there's no worktree carve-out to grant — `reset
+        --hard` outside any worktree context stays Lead-only."""
+        verdict = pane_guard.classify(
+            "git -C . reset --hard HEAD~1", "backend", cwd=r"C:\Users\dev\proj"
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "git_lead_only:reset-hard"
 
     def test_commit_with_dash_c_still_gated_outside_a_worktree(self) -> None:
         """`commit` DOES carve out inside a worktree (asserted elsewhere) —

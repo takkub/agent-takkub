@@ -2081,6 +2081,7 @@ class Orchestrator(
         isolation: str = "shared",
         project: str | None = None,
         feature: str = "",
+        base_ref: str | None = None,
     ) -> tuple[bool, str]:
         """Register a native child without opening a cockpit pane (#268).
 
@@ -2114,7 +2115,12 @@ class Orchestrator(
 
             if run_cwd:
                 info, warning = WorktreeManager().create(
-                    run_cwd, project_ns, role_name, int(time.time()), exclude_ports=set()
+                    run_cwd,
+                    project_ns,
+                    role_name,
+                    int(time.time()),
+                    exclude_ports=set(),
+                    base_ref=base_ref,
                 )
             else:
                 info, warning = None, "ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)"
@@ -2368,12 +2374,20 @@ class Orchestrator(
         team: str | None = None,
         _resource_token: ResourceToken | None = None,
         worktree_prepared: tuple | None = None,
+        base_ref: str | None = None,
     ) -> tuple[bool, str]:
         """*worktree_prepared* (#408): ``(WorktreeInfo | None, reason)`` from a
         `WorktreeManager.create` the caller already ran OFF the Qt thread
         (`cli_server` does this for `--isolation worktree`, fed by
         `worktree_assign_inputs`). When given, `_assign_with_worktree` uses
         it instead of running `git worktree add` inline on the main thread.
+
+        *base_ref* (#544, ``--isolation worktree`` only): fork the new
+        worktree's branch off this ref instead of *cwd*'s checked-out HEAD —
+        lets a task target a different base (e.g. a long-lived release
+        branch) without the Lead first `git checkout`-ing it in the shared
+        repo just to seed one isolated worktree. Ignored (never applied) for
+        ``isolation == "shared"``.
 
         *team* (#512 item 4): a per-task team-preset OVERRIDE — only
         meaningful with ``role_name == "lead"`` (``takkub assign --role lead
@@ -2492,6 +2506,7 @@ class Orchestrator(
                 isolation=isolation,
                 project=project,
                 feature=feature,
+                base_ref=base_ref,
             )
         provider = (provider or "").strip().lower() or None
         if provider:
@@ -2719,6 +2734,7 @@ class Orchestrator(
                 provider,
                 effort,
                 prepared=worktree_prepared,
+                base_ref=base_ref,
             )
         else:
             result = self._assign_dispatch(
@@ -3198,7 +3214,11 @@ class Orchestrator(
         return True, f"task queued for {role_name} (sending when ready)"
 
     def worktree_assign_inputs(
-        self, role_name: str, cwd: str | None, project: str | None
+        self,
+        role_name: str,
+        cwd: str | None,
+        project: str | None,
+        base_ref: str | None = None,
     ) -> dict | None:
         """(#408) The cheap, main-thread half of `--isolation worktree`: the
         arguments `WorktreeManager.create` needs, so `cli_server` can run the
@@ -3206,7 +3226,11 @@ class Orchestrator(
         through `assign(worktree_prepared=...)`. Returns None whenever the
         synchronous path would not create a worktree anyway (bare-role
         collision → `assign` rejects; no resolvable cwd → `_assign_with_worktree`
-        falls back) so nothing is ever created that `assign` then discards."""
+        falls back) so nothing is ever created that `assign` then discards.
+
+        *base_ref* (#544) rides straight through into the returned dict —
+        `cli_server`'s worker thread passes it to `mgr.create` unchanged, the
+        same as every other field here."""
         try:
             role_name = validate_name(role_name, "role")
         except Exception:
@@ -3229,6 +3253,7 @@ class Orchestrator(
             "role": role_name,
             "ts": int(time.time()),
             "exclude_ports": sibling_ports,
+            "base_ref": base_ref,
         }
 
     def done_git_inputs(self, from_role: str, project: str | None = None) -> dict | None:
@@ -3269,6 +3294,7 @@ class Orchestrator(
         provider: str | None = None,
         effort: str | None = None,
         prepared: tuple | None = None,
+        base_ref: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -3277,6 +3303,12 @@ class Orchestrator(
         worktree` assign must never be worse than a plain assign. The worktree
         add is a bounded synchronous git op (matches the existing on-thread spawn
         cost envelope; a Phase-2 optimisation can move it to QProcess).
+
+        *base_ref* (#544): only consulted on the synchronous `prepared is
+        None` path — when `prepared` is given, the worktree (and whatever
+        base it forked from) was already decided by the worker thread that
+        built it (see `worktree_assign_inputs`, which threads `base_ref`
+        into that same `mgr.create` call instead).
         """
         from .worktree_manager import WorktreeManager
 
@@ -3344,7 +3376,12 @@ class Orchestrator(
             info, reason = prepared
         else:
             info, reason = mgr.create(
-                base_cwd, project_ns, role_name, int(time.time()), exclude_ports=sibling_ports
+                base_cwd,
+                project_ns,
+                role_name,
+                int(time.time()),
+                exclude_ports=sibling_ports,
+                base_ref=base_ref,
             )
         if info is None:
             return _fallback(reason)

@@ -829,6 +829,7 @@ class CliServer(QObject):
                         feature=str(req.get("feature", "") or ""),
                         mode=mode,
                         team=(str(req.get("team", "") or "").strip().lower() or None),
+                        base_ref=(str(req.get("base_ref", "") or "").strip() or None),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -864,6 +865,7 @@ class CliServer(QObject):
                         provider=(str(req.get("provider", "") or "").strip().lower() or None),
                         effort=(str(req.get("effort", "") or "").strip().lower() or None),
                         team=(str(req.get("team", "") or "").strip().lower() or None),
+                        base_ref=(str(req.get("base_ref", "") or "").strip() or None),
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
@@ -871,7 +873,9 @@ class CliServer(QObject):
                         # ordinary assign with the prepared worktree.
                         def _staged_worktree_assign(_role=role, _kw=_assign_kwargs):
                             try:
-                                inputs = _wt_inputs_fn(_role, _kw["cwd"], _kw["project"])
+                                inputs = _wt_inputs_fn(
+                                    _role, _kw["cwd"], _kw["project"], _kw.get("base_ref")
+                                )
                             except Exception:
                                 inputs = None
                             if not isinstance(inputs, dict) or not inputs:
@@ -887,6 +891,7 @@ class CliServer(QObject):
                                     _inp["role"],
                                     _inp["ts"],
                                     exclude_ports=_inp["exclude_ports"],
+                                    base_ref=_inp.get("base_ref"),
                                 )
 
                             def _dispatch_prepared(prepared, _role=_role, _kw=_kw):

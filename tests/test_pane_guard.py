@@ -499,9 +499,10 @@ class TestGitLeadOnlyWorktreeCarveOut:
     """#81: an `--isolation worktree` pane owns a private branch and is
     explicitly told (by `orchestrator_text._append_worktree_hint`) to commit
     there itself — "the 'wait for Lead' policy is for the shared tree only".
-    `commit` and (#385) `merge` are carved out — a worktree pane may pull
-    base INTO its own branch; push/rebase/checkout stay blocked even there,
-    matching that same hint's "ห้าม push · ห้าม switch branch/rebase"."""
+    `commit`, (#385) `merge`, and (#545) `reset --hard`/`checkout`/
+    `branch -D` are carved out — a worktree pane may pull base INTO its own
+    branch and freely rewrite/switch/delete branches inside its own
+    disposable checkout; `push`/`rebase`/`tag -d` stay blocked even there."""
 
     _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
     _WT_CWD_POSIX = "/home/dev/.agent-takkub/worktrees/myproj/backend-3-1700000000"
@@ -512,11 +513,43 @@ class TestGitLeadOnlyWorktreeCarveOut:
 
     @pytest.mark.parametrize(
         "command",
-        ["git push", "git rebase main", "git checkout main"],
+        ["git push", "git rebase main", "git tag -d v1.0.0"],
     )
-    def test_push_rebase_checkout_still_denied_from_worktree_cwd(self, command: str) -> None:
+    def test_push_rebase_tagdelete_still_denied_from_worktree_cwd(self, command: str) -> None:
         verdict = pane_guard.classify(command, "backend", cwd=self._WT_CWD)
         assert not verdict.allowed, f"should still block from a worktree cwd: {command}"
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git checkout main",
+            "git checkout -b new-branch",
+            "git reset --hard",
+            "git reset --hard HEAD~1",
+            "git branch -D feature-x",
+        ],
+    )
+    def test_checkout_reset_branchdelete_allowed_from_worktree_cwd(
+        self, command: str, cwd: str
+    ) -> None:
+        """#545: the checkout is disposable by definition — blocking these
+        protected nothing and forced worse workarounds in practice (`merge`
+        used in place of `reset --hard`, `git archive | tar -x` used in
+        place of `checkout`)."""
+        assert pane_guard.classify(command, "backend", cwd=cwd).allowed, (
+            f"should now be allowed from the pane's own worktree cwd: {command}"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        ["git checkout main", "git reset --hard", "git branch -D feature-x"],
+    )
+    def test_checkout_reset_branchdelete_still_denied_from_shared_tree(self, command: str) -> None:
+        shared = r"C:\Users\dev\my-project"
+        verdict = pane_guard.classify(command, "backend", cwd=shared)
+        assert not verdict.allowed, f"should still block outside a worktree: {command}"
+        assert not pane_guard.classify(command, "backend").allowed
 
     @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
     @pytest.mark.parametrize(

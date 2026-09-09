@@ -454,6 +454,59 @@ class TestArgparse:
         assert rc != 0
         assert len(fake_request) == n_before  # nothing dispatched
 
+    def test_assign_base_forwarded_with_isolation_worktree(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        """#544: --base rides through to the request when isolation=worktree."""
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "frontend",
+                "--isolation",
+                "worktree",
+                "--base",
+                "origin/release",
+                "build X",
+            ]
+        )
+        assert fake_request[-1]["isolation"] == "worktree"
+        assert fake_request[-1]["base_ref"] == "origin/release"
+
+    def test_assign_base_defaults_none(self, fake_request: list[dict[str, Any]]) -> None:
+        """Without --base the payload carries None, never an empty string."""
+        cli.main(["assign", "--role", "frontend", "--isolation", "worktree", "build X"])
+        assert fake_request[-1]["base_ref"] is None
+
+    def test_assign_base_rejected_without_isolation_worktree(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        """#544: --base without --isolation worktree is refused before dispatch —
+        there is no isolated worktree for it to apply to."""
+        n_before = len(fake_request)
+        rc = cli.main(["assign", "--role", "frontend", "--base", "origin/release", "build X"])
+        assert rc != 0
+        assert len(fake_request) == n_before
+
+    def test_assign_base_forwarded_on_shards(self, fake_request: list[dict[str, Any]]) -> None:
+        """Each shard inherits --base so a fan-out can share the same custom base."""
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "qa",
+                "--shards",
+                "2",
+                "--isolation",
+                "worktree",
+                "--base",
+                "origin/release",
+                "build X",
+            ]
+        )
+        assert fake_request[-1]["base_ref"] == "origin/release"
+        assert fake_request[-2]["base_ref"] == "origin/release"
+
 
 class TestTaskFileAndFromFile:
     """#491: shell interpolation on the SENDING side eats backticks/$()/parens
