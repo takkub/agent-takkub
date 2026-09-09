@@ -20,7 +20,7 @@ class TestRenderPulseShowsTeamState:
     def test_role_chip_reads_state_from_server_not_hardcoded_false(self):
         js = _read("app.js")
         render_start = js.index("function renderPulse(projects)")
-        render_end = js.index("function fmtPct(", render_start)
+        render_end = js.index('if ("serviceWorker" in navigator)', render_start)
         body = js[render_start:render_end]
         # Pre-#200 this was a hardcoded `false` — every teammate chip always
         # rendered as "working" because `roles` only ever contained working
@@ -35,7 +35,7 @@ class TestRenderPulseShowsTeamState:
     def test_visible_count_no_longer_requires_working_roles(self):
         js = _read("app.js")
         render_start = js.index("function renderPulse(projects)")
-        render_end = js.index("function fmtPct(", render_start)
+        render_end = js.index('if ("serviceWorker" in navigator)', render_start)
         body = js[render_start:render_end]
         # `visible` must count a project as long as it has *any* role (idle
         # included) or a lead entry — not only ones the old roleCount-as-
