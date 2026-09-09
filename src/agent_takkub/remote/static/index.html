@@ -1104,6 +1104,187 @@
     padding: 4px 4px 0;
   }
 
+  /* ---------- usage page (bottom-nav tab: "เหลือ" / "ภาพรวม") ---------- */
+  #view-usage {
+    align-items: stretch;
+    justify-content: flex-start;
+    padding: 16px 14px 24px;
+  }
+  .usage-page-wrap {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+  }
+  .usage-subtabs {
+    flex: none;
+    display: flex;
+    gap: 8px;
+  }
+  .usage-subtab-btn {
+    flex: 1 1 0;
+    background: var(--card);
+    border: 1px solid var(--line2);
+    color: var(--fg-dim);
+    border-radius: 999px;
+    padding: 8px 0;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .usage-subtab-btn.active { background: var(--card2); color: var(--fg); border-color: var(--accent); }
+  .usage-subtab-panel {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .usage-subtab-panel.active { display: flex; }
+  .usage-overview-range {
+    flex: none;
+    font-family: var(--mono);
+    color: var(--faint);
+    font-size: 0.68rem;
+    padding: 0 2px;
+  }
+  .usage-sheet-list {
+    overflow-y: auto;
+    padding: 2px 2px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .usage-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 13px;
+  }
+  .usage-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .usage-card-name {
+    font-family: var(--mono);
+    font-weight: 640;
+    font-size: 0.86rem;
+    color: var(--fg);
+  }
+  .usage-card-plan {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--faint);
+  }
+  .usage-card-pct {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 0.9rem;
+  }
+  .usage-bar-track {
+    height: 7px;
+    border-radius: 999px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .usage-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  .usage-bar-fill.warn { background: var(--work); }
+  .usage-bar-fill.danger { background: var(--danger); }
+  /* #204: one row per rolling quota window (5h/7d/…) when a provider has
+     more than one — replaces the single headline % + bar above, never both
+     at once (buildUsageCard only appends one or the other). */
+  .usage-windows {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-bottom: 8px;
+  }
+  .usage-window-row-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+  }
+  .usage-window-label { color: var(--fg-dim); }
+  .usage-window-pct { font-weight: 650; color: var(--fg); }
+  .usage-window-pct.warn { color: var(--work); }
+  .usage-window-pct.danger { color: var(--danger); }
+  .usage-window-pct.unknown { color: var(--faint); font-weight: 500; }
+  .usage-window-bar-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    margin: 3px 0 2px;
+  }
+  .usage-window-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+  }
+  .usage-window-bar-fill.warn { background: var(--work); }
+  .usage-window-bar-fill.danger { background: var(--danger); }
+  .usage-window-reset {
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    color: var(--faint);
+  }
+  .usage-card-meta {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--faint);
+    line-height: 1.6;
+  }
+  .usage-card-meta .stale-tag { color: var(--work); }
+  .usage-card-note {
+    font-size: 0.76rem;
+    color: var(--fg-dim);
+    line-height: 1.5;
+  }
+  .usage-card-detail {
+    margin-top: 6px;
+    font-size: 0.68rem;
+  }
+  .usage-card-detail summary {
+    color: var(--faint);
+    cursor: pointer;
+  }
+  .usage-card-detail-body {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: rgba(127, 127, 127, 0.08);
+    border-radius: 6px;
+    font-family: var(--mono);
+    color: var(--faint);
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  .usage-card.unsupported { opacity: 0.6; }
+  #usage-remaining-caption {
+    flex: none;
+    font-family: var(--mono);
+    color: var(--faint);
+    font-size: 0.66rem;
+    text-align: center;
+    line-height: 1.6;
+    padding: 2px 4px 0;
+  }
+
   /* ---------- bottom nav ---------- */
   nav#bottom-nav {
     flex: none;
@@ -1254,12 +1435,31 @@
         <div id="pulse-caption">แสดงเฉพาะ role + สถานะ + เวลาทำงาน — ดู task จริงที่หน้า Lead</div>
       </div>
     </section>
+
+    <!-- usage: "เหลือ" (per-provider quota/limit) + "ภาพรวม" (aggregate turns/tokens) -->
+    <section id="view-usage" class="view">
+      <div class="usage-page-wrap">
+        <div class="usage-subtabs">
+          <button type="button" class="usage-subtab-btn active" data-usage-tab="remaining">เหลือ</button>
+          <button type="button" class="usage-subtab-btn" data-usage-tab="overview">ภาพรวม</button>
+        </div>
+        <div id="usage-tab-remaining" class="usage-subtab-panel active">
+          <div id="usage-remaining-list" class="usage-sheet-list"></div>
+          <div id="usage-remaining-caption">อัปเดตจากค่าที่ cockpit บนเดสก์ท็อปดึงมาแล้ว — ไม่ยิงขอเพิ่มจาก provider</div>
+        </div>
+        <div id="usage-tab-overview" class="usage-subtab-panel">
+          <div id="usage-overview-range" class="usage-overview-range"></div>
+          <div id="usage-overview-list" class="usage-sheet-list"></div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <nav id="bottom-nav">
     <button data-view="projects"><span class="icon">📂</span>Projects</button>
     <button data-view="lead" aria-label="Claude"><span class="icon" id="nav-lead-icon" aria-hidden="true">🧠</span><span id="nav-lead-text">Claude</span></button>
     <button data-view="pulse"><span class="icon">◍</span>Pulse</button>
+    <button data-view="usage"><span class="icon">◔</span>Usage</button>
   </nav>
 
   <div id="toast" class="toast"></div>
