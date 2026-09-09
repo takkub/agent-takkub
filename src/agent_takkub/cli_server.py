@@ -1197,6 +1197,8 @@ class CliServer(QObject):
                     for _info in (report.get("panes") or {}).values():
                         if isinstance(_info, dict):
                             _info.pop("transcript_tail", None)
+                            _info.pop("transcript_path", None)
+                            _info.pop("exit_hint", None)
                             _info.pop("last_screenshot", None)
                 self._reply(sock, ok=True, msg="status report", report=report)
                 return
@@ -1311,6 +1313,27 @@ class CliServer(QObject):
                     limit=int(req.get("limit", 20) or 20),
                 )
                 self._reply(sock, ok=ok_m, msg=msg_m, lines=lines_m)
+                return
+            elif cmd == "tail":
+                lines_count = int(req.get("lines", 20) or 20)
+                role = (req.get("role") or "").strip()
+                if not role:
+                    self._reply(sock, ok=False, msg="missing required argument: 'role'")
+                    return
+                from_role = (req.get("from") or "").lower().strip()
+                if from_role and from_role != "lead":
+                    self._reply(sock, ok=False, msg="role gate: only lead can tail")
+                    return
+                if not self._caller_is_lead(req) and from_role == "lead":
+                    self._reply(sock, ok=False, msg="unauthorized: tail as lead requires token")
+                    return
+                ok_t, msg_t, payload_t = self._orch.tail_role_transcript(
+                    role, project=from_project, lines=lines_count
+                )
+                if ok_t:
+                    self._reply(sock, ok=True, msg=msg_t, **payload_t)
+                else:
+                    self._reply(sock, ok=False, msg=msg_t)
                 return
             elif cmd == "task-reconcile":
                 ok, msg = self._orch.task_reconcile(

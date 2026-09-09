@@ -12,6 +12,8 @@ from __future__ import annotations
 import pathlib
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestTranscriptOpen:
     """spawn() opens the transcript file when transcript_path is given."""
@@ -205,3 +207,119 @@ class TestDisableTranscriptOptOut:
         monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
         monkeypatch.setenv("TAKKUB_DISABLE_TRANSCRIPTS", "0")
         assert _build_transcript_path("proj", "qa") is not None
+
+
+class TestProgressLineCleaning:
+    """Issue #542: strip spinner animation frames and CR-overwrite from progress lines."""
+
+    def test_resolve_cr_simulates_carriage_return(self) -> None:
+        from agent_takkub.orchestrator_text import _resolve_cr
+
+        assert _resolve_cr("hello\rworld") == "world"
+        assert _resolve_cr("foo\rbar\rbaz") == "baz"
+        assert _resolve_cr("12345\rAB") == "AB345"
+        assert _resolve_cr("no carriage return") == "no carriage return"
+
+    def test_dedupe_spinner_tokens_collapses_animation_frames(self) -> None:
+        from agent_takkub.orchestrator_text import _dedupe_spinner_tokens
+
+        raw_spinner = (
+            "W  Wo •Wor  •Work  •Worki  Workin •Working  •Working 7 •Working  •Working orking •"
+        )
+        cleaned = _dedupe_spinner_tokens(raw_spinner)
+        assert cleaned == "•Working 7"
+
+    def test_dedupe_spinner_tokens_preserves_plain_text(self) -> None:
+        from agent_takkub.orchestrator_text import _dedupe_spinner_tokens
+
+        plain = "just some [bracketed] text and a ? question mark"
+        assert _dedupe_spinner_tokens(plain) == plain
+
+    def test_dedupe_spinner_tokens_preserves_single_spinner_line(self) -> None:
+        from agent_takkub.orchestrator_text import _dedupe_spinner_tokens
+
+        single = "• Working... (12s)"
+        assert _dedupe_spinner_tokens(single) == single
+
+    def test_clean_progress_line_strips_ansi_and_resolves_cr(self) -> None:
+        from agent_takkub.orchestrator_text import _clean_progress_line
+
+        dirty = "\x1b[32mStarting...\r\x1b[31mDone!\x1b[0m\x1bM"
+        assert _clean_progress_line(dirty) == "Done!"
+
+    def test_extract_transcript_lines_splits_real_newlines_and_cleans(self) -> None:
+        from agent_takkub.orchestrator_text import _extract_transcript_lines
+
+        raw = (
+            b"Building project...\n"
+            b"W\rWo\r\xe2\x80\xa2Wor\r\xe2\x80\xa2Work\r\xe2\x80\xa2Working\n"
+            b"10 passed, 0 failed\n"
+        )
+        lines = _extract_transcript_lines(raw, max_lines=5)
+        assert lines == [
+            "Building project...",
+            "•Working",
+            "10 passed, 0 failed",
+        ]
+
+
+class TestTailRoleTranscript:
+    """Issue #541: tail_role_transcript reads latest transcript of live and exited panes."""
+
+    def test_tail_role_transcript_finds_live_pane(self, tmp_path: pathlib.Path) -> None:
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        log = tmp_path / "qa-120000.transcript.log"
+        log.write_bytes(b"line 1\nline 2\nline 3\n")
+
+        orch = Orchestrator.__new__(Orchestrator)
+        pane = MagicMock()
+        pane._transcript_path = str(log)
+        orch._panes_by_project = {"default": {"qa": pane}}
+
+        ok, _msg, payload = orch.tail_role_transcript("qa", project="default", lines=2)
+        assert ok is True
+        assert payload["path"] == str(log)
+        assert payload["lines"] == ["line 2", "line 3"]
+
+    def test_tail_role_transcript_finds_exited_pane_from_sessions(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import orchestrator as orch_mod
+        from agent_takkub.orchestrator import Orchestrator
+
+        runtime = tmp_path / "runtime"
+        proj_dir = runtime / "sessions" / "2026-09-09" / "myproj"
+        proj_dir.mkdir(parents=True)
+        old_log = proj_dir / "codex-100000.transcript.log"
+        old_log.write_bytes(b"old\n")
+        new_log = proj_dir / "codex-110000.transcript.log"
+        new_log.write_bytes(b"banner\nrunning\nerror: limit reached\n")
+
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._panes_by_project = {"myproj": {}}
+
+        ok, _msg, payload = orch.tail_role_transcript("codex", project="myproj", lines=2)
+        assert ok is True
+        assert payload["path"] == str(new_log)
+        assert payload["lines"] == ["running", "error: limit reached"]
+
+    def test_tail_role_transcript_missing_returns_false(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import orchestrator as orch_mod
+        from agent_takkub.orchestrator import Orchestrator
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir(parents=True)
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._panes_by_project = {"default": {}}
+
+        ok, msg, _payload = orch.tail_role_transcript("nonexistent", project="default")
+        assert ok is False
+        assert "no transcript found" in msg

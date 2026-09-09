@@ -27,6 +27,7 @@ from pathlib import Path
 
 from . import config
 from .config import read_port
+from .orchestrator_text import _clean_progress_line
 
 # Commands that orchestrate the cockpit (spawn/route/close panes). Only the
 # Lead pane is allowed to invoke these; teammates must work on their assigned
@@ -61,6 +62,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         # server-side, since `cmd_report` never talks to cli_server (see its
         # docstring).
         "report",
+        "tail",  # reads recent transcript output of other panes — #541
     }
 )
 
@@ -2116,10 +2118,20 @@ def _print_status_report(report: object) -> None:
         model = info.get("model")
         if model:
             print(f"    model: {model}")
-        tail = (info.get("transcript_tail") or "").strip()
-        if tail:
-            for line in tail.splitlines()[-3:]:
-                print(f"    │ {line[:120]}")
+        is_exited = state == "exited" or info.get("state") == "exited"
+        t_path = info.get("transcript_path")
+        if t_path and is_exited:
+            print(f"    transcript: {t_path}")
+        hint = (info.get("exit_hint") or "").strip()
+        if hint and is_exited:
+            print("    exit hint:")
+            for line in hint.splitlines()[-3:]:
+                print(f"    │ {_clean_progress_line(line)[:120]}")
+        else:
+            tail = (info.get("transcript_tail") or "").strip()
+            if tail:
+                for line in tail.splitlines()[-3:]:
+                    print(f"    │ {_clean_progress_line(line)[:120]}")
         shot = info.get("last_screenshot") or ""
         if shot:
             print(f"    screenshot: {shot}")
@@ -2168,6 +2180,34 @@ def cmd_status(args: argparse.Namespace) -> dict:
     if getattr(args, "since", None):
         payload["since"] = args.since
     return _request(payload)
+
+
+def cmd_tail(args: argparse.Namespace) -> dict:
+    """`takkub tail --role <r> [--lines N]` — read recent PTY output/transcript
+    of a role, including exited panes (#541)."""
+    lines_n = getattr(args, "lines", 20) or 20
+    resp = _request(
+        _with_project(
+            {
+                "cmd": "tail",
+                "role": args.role,
+                "lines": int(lines_n),
+                "from": _from_role(),
+            }
+        )
+    )
+    if not resp.get("ok"):
+        return {"ok": False, "msg": resp.get("msg", "tail failed"), "exit_code": 1}
+    path = resp.get("path")
+    lines = resp.get("lines") or []
+    if path:
+        print(f"[{args.role}] {path}")
+    if not lines:
+        print(f"[{args.role}] (transcript is empty)")
+    else:
+        for line in lines:
+            _utf8_print(line)
+    return {"ok": True, "msg": resp.get("msg", "ok")}
 
 
 def cmd_inbox(args: argparse.Namespace) -> dict:
@@ -4713,6 +4753,16 @@ def main(argv: list[str] | None = None) -> int:
         help="window start for done-event scan (default: 1h ago)",
     )
     sst.set_defaults(func=cmd_status)
+
+    stail = sub.add_parser(
+        "tail",
+        help="(lead) read recent PTY output/transcript of a role (including exited panes) — #541",
+    )
+    stail.add_argument("--role", required=True, help="role to inspect (e.g. codex, qa)")
+    stail.add_argument(
+        "-n", "--lines", type=int, default=20, help="number of lines to show (default 20)"
+    )
+    stail.set_defaults(func=cmd_tail)
 
     sib = sub.add_parser(
         "inbox",

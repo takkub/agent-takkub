@@ -262,6 +262,137 @@ _HOT_MD_INTERVAL_MS = 60_000
 # ── functions ─────────────────────────────────────────────────────────────────
 
 
+_ANSI_STRIP_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI sequences
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC sequences
+    r"|\x1b[@-Z\\-_]"  # 2-character escape sequences (e.g. ESC M)
+)
+
+
+def _resolve_cr(text: str) -> str:
+    """Resolve in-place carriage-return (\\r) overwrites within a line (#542).
+
+    Simulates terminal cursor-return to column 0 on bare \\r, so animation
+    frames that overwrite the same row on screen collapse to the final
+    rendered content instead of piling up.
+    """
+    if "\r" not in text:
+        return text
+    buf: list[str] = []
+    pos = 0
+    for ch in text:
+        if ch == "\r":
+            pos = 0
+        else:
+            if pos < len(buf):
+                buf[pos] = ch
+            else:
+                buf.append(ch)
+            pos += 1
+    return "".join(buf)
+
+
+def _dedupe_spinner_tokens(text: str) -> str:
+    """Strip spinner animation frames, progressive typing fragments, and
+    repeated tokens from a single status/progress line (#542).
+
+    E.g. transforms:
+      'W  Wo •Wor  •Work  •Worki  Workin •Working  •Working 7 •Working  •Working orking •'
+    into:
+      '•Working 7'
+    """
+    tokens = text.split()
+    if not tokens:
+        return text
+
+    # Check if there are repeated/spinner tokens in the line
+    # (e.g. bullets '•', braille, or words repeated multiple times)
+    clean_words = [re.sub(r"^\W+|\W+$", "", t).lower() for t in tokens]
+    clean_words = [w for w in clean_words if w]
+
+    from collections import Counter
+
+    counts = Counter(clean_words)
+    has_repetition = any(c > 1 for w, c in counts.items() if len(w) >= 3)
+    has_spinner_char = bool(re.search(r"[•*⠀-⣿●○◐◑◒◓]", text))
+
+    if not (has_repetition or has_spinner_char):
+        # Plain text with no spinner symbols and no repeated words: return as-is
+        return text
+
+    # Phase 1: collapse progressive animation frames where token i is a
+    # prefix or suffix shimmer of token i+1.
+    result: list[str] = []
+    for t in tokens:
+        if not result:
+            result.append(t)
+            continue
+        prev = result[-1]
+        p_norm = re.sub(r"^\W+|\W+$", "", prev).lower()
+        t_norm = re.sub(r"^\W+|\W+$", "", t).lower()
+
+        # If prev is an incomplete prefix of current (growing by 1-3 chars and sharing prefix)
+        # e.g. w -> wo -> wor -> work -> worki -> workin -> working
+        if p_norm and t_norm and t_norm.startswith(p_norm) and len(t_norm) > len(p_norm):
+            if any(w.startswith(p_norm) for w, c in counts.items() if c > 1 or len(w) >= 4):
+                result[-1] = t
+                continue
+
+        # If current is suffix fragment of prev (e.g. working -> orking -> rking)
+        if (
+            p_norm
+            and t_norm
+            and p_norm.endswith(t_norm)
+            and len(t_norm) >= 2
+            and len(p_norm) > len(t_norm)
+        ):
+            if any(w.endswith(t_norm) for w, c in counts.items() if c > 1 or len(w) >= 4):
+                continue
+
+        # If identical token
+        if prev == t:
+            continue
+
+        result.append(t)
+
+    # Phase 2: dedupe remaining repeated non-trivial tokens
+    final_tokens: list[str] = []
+    seen: set[str] = set()
+    for t in result:
+        norm = re.sub(r"^\W+|\W+$", "", t).lower()
+        if norm and len(norm) >= 4:
+            if norm in seen:
+                continue
+            seen.add(norm)
+        final_tokens.append(t)
+
+    cleaned = " ".join(final_tokens)
+    cleaned = re.sub(r"[\s•*]+$", "", cleaned).strip()
+    return cleaned
+
+
+def _clean_progress_line(line: str) -> str:
+    """Clean a single transcript/progress line: resolves CR overwrite,
+    strips ANSI escapes, and dedupes spinner animation frames (#542)."""
+    line = _resolve_cr(line)
+    line = _ANSI_STRIP_RE.sub("", line)
+    line = _dedupe_spinner_tokens(line)
+    return line.strip()
+
+
+def _extract_transcript_lines(raw: bytes, max_lines: int = 5) -> list[str]:
+    """Extract clean trailing lines from raw PTY transcript bytes (#541, #542).
+
+    Splits on real newlines (\\n), resolves carriage returns (\\r) on each line,
+    strips ANSI escapes, and dedupes spinner animation frames.
+    """
+    decoded = raw.decode("utf-8", errors="replace")
+    raw_lines = decoded.split("\n")
+    clean_lines = [_clean_progress_line(ln) for ln in raw_lines]
+    clean_lines = [ln for ln in clean_lines if ln]
+    return clean_lines[-max_lines:] if max_lines > 0 else clean_lines
+
+
 def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
     """Return at most the last ``max_bytes`` bytes of ``path`` without reading
     the whole file into memory. Pure (no Qt) so it can be unit-tested. Raises
