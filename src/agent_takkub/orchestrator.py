@@ -694,6 +694,19 @@ def _stale_marker_footer(sess: PtySession) -> str:
 # the recent-exit timestamp and UUID are still fresh). 10 minutes is generous enough
 # that a heavy `npm install` or a slow Lighthouse audit won't trip it.
 STUCK_THRESHOLD_S = 10 * 60
+# #520: minimum wall-clock gap between two consecutive 5s watchdog ticks
+# (IDLE_WATCHDOG_INTERVAL_MS) that counts as "the machine was asleep", not
+# normal Qt-timer jitter. A suspended process runs no code at all — the
+# QTimer simply doesn't fire — so on wake the very next tick sees a jump
+# far larger than 5s. Verified this can't be told apart from real elapsed
+# time via time.monotonic(): on Windows CPython's monotonic clock is
+# QueryPerformanceCounter, which Microsoft documents as continuing to
+# advance through sleep/standby, so a wall-vs-monotonic delta shows nothing
+# there. The missed-heartbeat signal below works on every platform because
+# it doesn't depend on which clock a suspended CPU stops ticking. Sized well
+# above any plausible single-tick stall yet far below STUCK_THRESHOLD_S so a
+# real wedge is still caught promptly after the gap is absorbed.
+WATCHDOG_SLEEP_GAP_THRESHOLD_S = 30
 # Once a recover fires for a pane, wait this long before another one
 # is allowed — otherwise a chronically-stuck workload restarts on a loop.
 STUCK_RECOVER_COOLDOWN_S = 5 * 60
@@ -1672,6 +1685,9 @@ class Orchestrator(
         # least one teammate is currently working, or the project has never
         # been observed all-idle yet. See `_team_idle_since_for`.
         self._team_idle_since: dict[str, float] = {}
+        # #520: wall-clock timestamp of the previous watchdog tick, used by
+        # _absorb_watchdog_sleep_gap to detect a missed-heartbeat sleep gap.
+        self._watchdog_last_tick_wall_ts: float = 0.0
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -8696,6 +8712,10 @@ class Orchestrator(
         gets nudged. Idle-state keys are namespaced `<project>::<role>`
         to keep two projects' state from colliding."""
         now = time.time()
+        # #520: absorb any machine-sleep gap BEFORE the stuck-pane clock reads
+        # `now` below — otherwise the wall-clock time spent suspended reads as
+        # pane inactivity and trips a false-positive close→respawn.
+        self._absorb_watchdog_sleep_gap(now)
         # Stuck-pane detection rides the same 5 s tick so we don't pay
         # for another QTimer. Runs before the idle-reminder logic so a
         # recover (which closes the pane) doesn't fight with reminder
@@ -10008,6 +10028,46 @@ class Orchestrator(
             QTimer.singleShot(0, _finish)
 
         threading.Thread(target=_scan_worker, daemon=True, name="shell-dialog-scan").start()
+
+    def _absorb_watchdog_sleep_gap(self, now: float) -> None:
+        """#520: detect a system sleep/suspend between two watchdog ticks and
+        shift every tracked pane's activity clock forward by the missed
+        duration, so time the machine spent asleep is never counted as pane
+        inactivity by `_check_stuck_panes` below.
+
+        This tick fires every IDLE_WATCHDOG_INTERVAL_MS (5s) via a QTimer.
+        A QTimer cannot fire while the process is suspended — no code runs
+        at all during sleep — so the wall-clock gap between two consecutive
+        calls here is itself the missed-heartbeat signal: on wake, the next
+        tick sees `now - <previous tick's now>` far larger than 5s. This
+        can't be replaced with a monotonic-vs-wall-clock delta: on Windows,
+        CPython's `time.monotonic()` uses QueryPerformanceCounter, which
+        Microsoft documents as continuing to advance through sleep/standby,
+        so it shows no divergence from wall-clock time there at all.
+
+        Only corrects the two clocks that feed the stuck-pane kill decision
+        (`PaneState.last_content_change_ts`, `AgentPane._last_output_ts`) —
+        ponytail: other wall-clock cooldowns (idle-done reminder, rate-limit
+        parking, TTY-block notice spacing) still count sleep time too, but
+        those only affect notification cadence, never an auto-respawn, so
+        they're left alone rather than widening this fix beyond #520.
+        """
+        prev = getattr(self, "_watchdog_last_tick_wall_ts", 0.0)
+        self._watchdog_last_tick_wall_ts = now
+        if prev <= 0.0:
+            return
+        gap = now - prev
+        if gap < WATCHDOG_SLEEP_GAP_THRESHOLD_S:
+            return
+        _log_event("watchdog_clock_sleep_gap_absorbed", gap_s=int(gap))
+        for ps in self._pane_state.values():
+            if ps.last_content_change_ts is not None:
+                ps.last_content_change_ts += gap
+        for project_panes in self._panes_by_project.values():
+            for pane in project_panes.values():
+                last_out = getattr(pane, "_last_output_ts", 0.0)
+                if isinstance(last_out, (int, float)) and last_out > 0:
+                    pane._last_output_ts = last_out + gap
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
