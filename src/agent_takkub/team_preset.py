@@ -13,9 +13,14 @@ already existed piecemeal:
   * whether **Lead** may edit project files itself (``lead_may_implement``,
     enforced by :func:`lead_context.render_lead_settings`)
 
-Preset roster (2026-09-07 Lead scope addition): a preset only sees/toggles
-five **positions** — ``frontend`` / ``backend`` / ``mobile`` / ``devops`` +
-any project custom role — plus one **checker** slot. ``qa`` and ``critic``
+Preset roster (2026-09-07 Lead scope addition; extended 2026-09-09 with five
+secondary positions): a preset sees/toggles **nine positions** — the four
+"core" ones (``frontend`` / ``backend`` / ``mobile`` / ``devops``, on by
+default under the ``full`` preset) plus five "extra" ones (``tester`` /
+``analyst`` / ``designer`` / ``docs`` / ``security``, OFF by default under
+every built-in preset — they only spawn once a project (or a task's
+``custom`` preset) explicitly turns one on) — plus any project custom role —
+plus one **checker** slot. ``qa`` and ``critic``
 stay separate roles today (#513 will fold them into ``reviewer`` with a
 code|e2e|ui mode and drop providers from the role list); until then the
 checker slot maps to a real role through the single :data:`CHECKER_ROLES`
@@ -54,11 +59,20 @@ from .config import SETTINGS_HOME as _BASE_DIR
 # Preset roster & built-ins
 # ─────────────────────────────────────────────────────────────────────
 
-#: The four "position" roles a preset's roster ever shows/toggles. Custom
+#: The four "core" position roles — on by default under the `full` preset.
+CORE_POSITION_ROLES: tuple[str, ...] = ("frontend", "backend", "mobile", "devops")
+
+#: Five "extra" position roles (2026-09-09) — shown/toggleable exactly like
+#: the core four, but OFF by default in every BUILTIN_PRESETS entry so
+#: enabling one is always an explicit per-project (or per-task `custom`)
+#: choice, never something a built-in preset flips on for you.
+EXTRA_POSITION_ROLES: tuple[str, ...] = ("tester", "analyst", "designer", "docs", "security")
+
+#: Every "position" role a preset's roster ever shows/toggles. Custom
 #: project roles are appended dynamically (see `_position_roles`) — provider
 #: panes (codex/gemini/opencode/kimi/cursor) and `shell` are deliberately
 #: excluded, per the 2026-09-07 Lead scope addition.
-POSITION_ROLES: tuple[str, ...] = ("frontend", "backend", "mobile", "devops")
+POSITION_ROLES: tuple[str, ...] = CORE_POSITION_ROLES + EXTRA_POSITION_ROLES
 
 #: checker slot value -> the real role it spawns. Single seam for #513 (qa +
 #: critic -> reviewer with a mode) to repoint without touching preset logic.
@@ -92,7 +106,12 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "exec_mode": "solo",
     },
     "full": {
-        "roles": dict.fromkeys(POSITION_ROLES, True),
+        # Core positions on, extras stay off — a preset never auto-enables
+        # tester/analyst/designer/docs/security (see EXTRA_POSITION_ROLES).
+        "roles": {
+            **dict.fromkeys(CORE_POSITION_ROLES, True),
+            **dict.fromkeys(EXTRA_POSITION_ROLES, False),
+        },
         "checker": "qa",
         "lead_may_implement": False,
         "template": "feature",

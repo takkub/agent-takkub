@@ -1327,6 +1327,27 @@ class TestPipelineBuilderView:
         assert dlg._dirty is True
         dlg.deleteLater()
 
+    def test_secondary_positions_are_pipeline_palette_selectable(self) -> None:
+        """Lead report (2026-09-09): tester was missing from the Pipeline
+        hop editor's "+ hop เดี่ยวจาก role" chip list — the palette is built
+        from `_pipeline_palette_roles()` -> `pipeline_config.valid_roles()`
+        -> `roles.all_role_names()`, the same registry `team_preset`'s
+        POSITION_ROLES gate governs, so registering tester/analyst/designer/
+        docs/security as real Role()s (roles.py) fixes both surfaces at
+        once. This does NOT reserve them a permanent slot in the main
+        cockpit pane grid — `main_window._ensure_teammate_pane` only reads
+        Role.column/row when a pane for that role is actually spawned."""
+        for role in team_preset.EXTRA_POSITION_ROLES:
+            assert role in settings_window._pipeline_palette_roles()
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        before = len(dlg._pb_hops)
+        dlg._on_palette_role_clicked("tester")
+        assert len(dlg._pb_hops) == before + 1
+        assert dlg._pb_hops[-1] == [
+            {"role": "tester", "cwd": "", "requiresCommit": False, "autoChain": False}
+        ]
+        dlg.deleteLater()
+
     def test_remove_hop_shrinks_list(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         dlg._on_palette_role_clicked("backend")
@@ -2114,9 +2135,22 @@ class TestTeamPresetView:
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("full")
-        for role in team_preset.POSITION_ROLES:
+        for role in team_preset.CORE_POSITION_ROLES:
             assert dlg._role_toggles[role].isChecked() is True
         assert dlg._role_toggles["qa"].isChecked() is True
+        dlg.deleteLater()
+
+    def test_clicking_full_leaves_extra_positions_off_but_visible(self) -> None:
+        """2026-09-09: tester/analyst/designer/docs/security show up as
+        toggle rows under every preset, but `full` doesn't switch them on —
+        a project must opt in by hand."""
+        dlg = settings_window.SettingsWindow(
+            project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
+        )
+        dlg._on_team_preset_card_clicked("full")
+        for role in team_preset.EXTRA_POSITION_ROLES:
+            assert role in dlg._role_toggles
+            assert dlg._role_toggles[role].isChecked() is False
         dlg.deleteLater()
 
     def test_clicking_solo_lead_disables_every_position_and_drops_checker_row(self) -> None:
@@ -2170,7 +2204,8 @@ class TestTeamPresetView:
         dlg._on_save_apply_clicked()
         assert team_preset.current_preset_id("proj-a") == "full"
         cfg = team_preset.current("proj-a")
-        assert all(cfg["roles"].values())
+        assert all(cfg["roles"][r] is True for r in team_preset.CORE_POSITION_ROLES)
+        assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
         assert cfg["checker"] == "qa"
 
     def test_hand_toggle_after_save_still_flips_a_fixed_preset_to_custom(self) -> None:

@@ -35,12 +35,28 @@ def test_pair_checker_is_reviewer():
     assert team_preset.verify_mode(cfg) == "reviewer"
 
 
-def test_full_enables_positions_and_qa_checker():
+def test_full_enables_core_positions_and_qa_checker():
     team_preset.set_current("full", "proj")
     cfg = team_preset.current("proj")
-    assert all(v is True for v in cfg["roles"].values())
+    assert all(cfg["roles"][r] is True for r in team_preset.CORE_POSITION_ROLES)
     assert cfg["checker"] == "qa"
     assert cfg["lead_may_implement"] is False
+
+
+def test_full_keeps_extra_positions_off_by_default():
+    """2026-09-09: tester/analyst/designer/docs/security are toggleable like
+    any other position, but no built-in preset — including `full` — turns
+    one on for you; a project must opt in explicitly."""
+    team_preset.set_current("full", "proj")
+    cfg = team_preset.current("proj")
+    assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
+
+
+def test_solo_lead_and_pair_keep_extra_positions_off():
+    for preset_id in ("solo-lead", "pair"):
+        team_preset.set_current(preset_id, "proj")
+        cfg = team_preset.current("proj")
+        assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
 
 
 def test_set_current_rejects_unknown_preset():
@@ -156,6 +172,22 @@ def test_full_allows_positions_and_qa_not_reviewer():
     assert team_preset.can_spawn("backend", "proj")[0] is True
     assert team_preset.can_spawn("qa", "proj")[0] is True
     assert team_preset.can_spawn("reviewer", "proj")[0] is False
+
+
+def test_full_blocks_extra_positions_until_toggled_on():
+    team_preset.set_current("full", "proj")
+    assert team_preset.can_spawn("tester", "proj")[0] is False
+    team_preset.set_current(
+        "custom",
+        "proj",
+        custom={
+            "roles": {**dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "tester": True},
+            "checker": "qa",
+            "lead_may_implement": False,
+        },
+    )
+    assert team_preset.can_spawn("tester", "proj")[0] is True
+    assert team_preset.can_spawn("analyst", "proj")[0] is False
 
 
 def test_auto_never_blocks():

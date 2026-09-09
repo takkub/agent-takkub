@@ -185,10 +185,12 @@ def test_parse_install_form_rejects_missing_command():
 
 
 def test_matrix_roles_covers_expected_builtin_roles():
-    # designer/analyst/security/docs were never real roles (no roles.py entry,
-    # never spawnable) — a hand-maintained copy of this tuple had drifted to
-    # include them; codex/gemini/shell are an intentional exclusion (their
-    # panes never load --mcp-config, see matrix_roles()'s own docstring).
+    # tester/analyst/designer/docs/security became real roles.py entries
+    # 2026-09-09 (same doc-file/registry gap bug #162 fixed for opencode/
+    # kimi/cursor) — they're claude-backed like frontend/backend, so they DO
+    # load --mcp-config and belong in the matrix. shell/codex/gemini stay an
+    # intentional exclusion (see _MATRIX_EXCLUDED_ROLES's own note — their
+    # panes never load --mcp-config).
     # Subset (not equality): matrix_roles() correctly appends live custom
     # roles from ~/.takkub/custom-roles.json, so an equality assert breaks on
     # any machine where the user has created one (e.g. `maintainer`).
@@ -202,9 +204,14 @@ def test_matrix_roles_covers_expected_builtin_roles():
         "qa",
         "reviewer",
         "critic",
+        "tester",
+        "analyst",
+        "designer",
+        "docs",
+        "security",
     }
     assert builtin <= got
-    assert got.isdisjoint({"designer", "analyst", "security", "docs"})
+    assert got.isdisjoint({"codex", "gemini", "shell"})
     assert got.isdisjoint({"codex", "gemini", "shell"})
 
 

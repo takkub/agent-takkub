@@ -39,11 +39,11 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     Role("devops", "DevOps", "#43B562", column=1, row=3),
     # Gemini is a non-claude pane: orchestrator launches the `gemini`
     # binary directly (interactive TUI) and skips all claude flags +
-    # ECC mutes. Sits at col=2 row=0 (the slot designer used to occupy)
-    # because Gemini's role is "third brain" planning / second opinion,
-    # which lives alongside qa/reviewer in the support column.
-    # Designer was removed from defaults; .claude/agents/designer.md
-    # is preserved so custom-slot add still works for users who want it.
+    # ECC mutes. Sits at col=2 row=0 (the slot designer used to occupy
+    # before it was pulled from defaults — see the tester/analyst/designer/
+    # docs/security block below, which puts it back) because Gemini's role
+    # is "third brain" planning / second opinion, which lives alongside
+    # qa/reviewer in the support column.
     # Colour is Google's signature blue so it visually stands apart
     # from claude-backed (cyan) and codex (teal) roles.
     Role("gemini", "Gemini", "#4285f4", column=2, row=0),
@@ -82,6 +82,22 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     Role("opencode", "OpenCode", "#f97316", column=1, row=5),
     Role("kimi", "Kimi", "#6366f1", column=1, row=6),
     Role("cursor", "Cursor", "#38bdf8", column=1, row=7),
+    # Secondary specialist positions (2026-09-09): each already shipped a
+    # `.claude/agents/<name>.md` doc and a cockpit_theme.ROLE_COLORS entry,
+    # but no Role() row — the same doc-file/registry gap bug #162 fixed for
+    # opencode/kimi/cursor, so `roles.by_name`/`all_role_names` (and every
+    # registry-driven surface built on them: Pipeline Builder palette,
+    # Providers & Roles override list, MCP/Plugins matrix, Skill Catalog)
+    # silently omitted these five. Off by default in every built-in team
+    # preset (team_preset.EXTRA_POSITION_ROLES) — a project must explicitly
+    # toggle one on (Settings, or `--team` override) before it's spawnable,
+    # same as any other preset-governed position. Column 2 (support/review),
+    # continuing after critic/shell.
+    Role("tester", "Tester", "#B5D33D", column=2, row=5),
+    Role("analyst", "Analyst", "#45C4D6", column=2, row=6),
+    Role("designer", "Designer", "#C77DF0", column=2, row=7),
+    Role("docs", "Docs", "#8FA3B8", column=2, row=8),
+    Role("security", "Security", "#E0574F", column=2, row=9),
 )
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
