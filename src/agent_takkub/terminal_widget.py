@@ -52,6 +52,19 @@ _CLIPBOARD_KEEP = 50  # max clipboard-*.png files kept in runtime/
 # for tests/spikes that can't wait out a real 25s timer.
 _DISCARD_DEBOUNCE_MS_DEFAULT = 25_000
 
+# #535: how long _reattach() waits for the real bridge.ready() round trip
+# (QWebEnginePage LifecycleState.Discarded -> Active triggering a fresh page
+# load) before assuming that transition silently no-op'd and forcing a hard
+# reload itself. setLifecycleState() has no return value and _begin_discard's
+# own transition into Discarded is verified (see _after_snapshot) before
+# _discarded is ever trusted, but the *reverse* transition requested here is
+# still a single fire-and-forget call into Chromium — if it is ever refused
+# or dropped, nothing else would otherwise ask again, and _page_ready would
+# stay False forever (every future PTY byte queues into _pending_writes,
+# never painted) even though the underlying agent process keeps running
+# normally. Overridable for tests.
+_REATTACH_TIMEOUT_MS_DEFAULT = 6_000
+
 # Cap on replayed scrollback text after a discard/reattach cycle. xterm.js's
 # own `scrollback: 500` setting (terminal.html) already keeps termGetBufferText()
 # well under this, but the cap is kept as an explicit belt-and-suspenders bound
@@ -396,6 +409,22 @@ class TerminalWidget(QWidget):
         )
         self._discard_timer.timeout.connect(self._on_discard_timeout)
 
+        # #535: bounded wait for _reattach()'s requested reload to actually
+        # land (see _REATTACH_TIMEOUT_MS_DEFAULT above). Only ever armed
+        # while a reattach is outstanding; _on_page_ready stops it the
+        # moment the real reload confirms.
+        self._reattach_timer = QTimer(self)
+        self._reattach_timer.setSingleShot(True)
+        self._reattach_timer.setInterval(
+            max(
+                500,
+                int(
+                    os.environ.get("TAKKUB_PANE_REATTACH_TIMEOUT_MS", _REATTACH_TIMEOUT_MS_DEFAULT)
+                ),
+            )
+        )
+        self._reattach_timer.timeout.connect(self._on_reattach_timeout)
+
         # Pane cwd (set by AgentPane.attach_session) so clicked relative
         # paths resolve against the project this pane is working in.
         self._cwd: str | None = None
@@ -535,7 +564,12 @@ class TerminalWidget(QWidget):
             self._view.removeEventFilter(self)
         except Exception:
             pass
-        for timer in (self._flush_timer, self._heartbeat, self._discard_timer):
+        for timer in (
+            self._flush_timer,
+            self._heartbeat,
+            self._discard_timer,
+            self._reattach_timer,
+        ):
             try:
                 if timer.isActive():
                     timer.stop()
@@ -639,6 +673,11 @@ class TerminalWidget(QWidget):
 
     def _on_page_ready(self) -> None:
         self._page_ready = True
+        # #535: the reload we were waiting on (fresh boot or a post-reattach
+        # one) just confirmed — cancel the fallback-reload watchdog so it
+        # doesn't fire a redundant _view.load() later.
+        if self._reattach_timer.isActive():
+            self._reattach_timer.stop()
         if self._font_px is not None:
             self._view.page().runJavaScript(f"termSetFontSize({self._font_px});")
         # Re-assert the lock state now that JS can receive it — the initial
@@ -814,13 +853,37 @@ class TerminalWidget(QWidget):
         triggers Chromium to reload the page from scratch. `_on_page_ready`
         (the same bridge.ready() callback normal boot uses — confirmed to
         survive discard/undiscard in the #364 spike) does the rest: replay
-        the snapshot, then flush whatever queued while hidden."""
+        the snapshot, then flush whatever queued while hidden.
+
+        #535: that reload is a single fire-and-forget request into Chromium
+        with no return value — if it is ever silently refused or dropped,
+        nothing else would ask again, and `_page_ready` would stay False
+        forever (every future PTY byte queues into `_pending_writes`, never
+        painted, while the agent process itself keeps running normally — the
+        pane just goes permanently blank). Arm a bounded watchdog here so a
+        missing `bridge.ready()` forces a real `_view.load()` instead.
+        """
         if not self._discarded:
             return
         self._discarded = False
         self._page_ready = False
         try:
             self._view.page().setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        except Exception:
+            pass
+        self._reattach_timer.start()
+
+    def _on_reattach_timeout(self) -> None:
+        """#535 fallback: `_reattach()`'s requested reload never confirmed
+        via `bridge.ready()` within the watchdog window. Force a real
+        top-level navigation — unlike `setLifecycleState()`, `QWebEngineView.load()`
+        is not conditional on Chromium's own notion of the page's current
+        lifecycle state, so it recovers even when that state transition
+        itself silently no-op'd."""
+        if self._page_ready:
+            return  # a genuine reload landed between the timer firing and this slot running
+        try:
+            self._view.load(_INDEX_URL)
         except Exception:
             pass
 
