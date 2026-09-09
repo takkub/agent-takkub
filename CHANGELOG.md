@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.3] - 2026-09-09
+
+### Fixed (แก้)
+
+- **#549 follow-up** — Settings→Usage หน้า gemini ยัง dedup ไม่ครบ (พบจาก live e2e หลัง 2.0.2 ออก): key ที่ใช้รวมแถวต้องเท่ากันเป๊ะ (floating-point) ทำให้ bucket ที่เป็น quota tier เดียวกันจริงแต่มี epsilon drift เล็กน้อยไม่ถูกรวม — ปัดเศษ fraction ให้ตรงกับความละเอียดที่แสดงผลจริงก่อน key + ตัด resetTime เหลือระดับนาที
+
 ## [2.0.2] - 2026-09-09
 
 Reliability sweep — 20 issues closed today, all from real repro cases hit during normal use (no synthetic/hypothetical reports). Every fix has a regression test proving the failure before the fix and the pass after. Excludes the 2.1.0-scoped epics (#504, #508, #513, #514, #516), which stay deferred per the roadmap, and #534 (a genuine open follow-up waiting on external log evidence).
