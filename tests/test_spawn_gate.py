@@ -925,20 +925,30 @@ class TestCodexExitSpawnTsGuard:
     """Stale codex exit must NOT clobber new session's codex_spawn_ts."""
 
     def test_stale_exit_does_not_clobber_new_spawn_ts(self, qapp, monkeypatch):
-        """If pane has new session attached, stale processExited must return early."""
+        """If a NEW session has since attached (generation bumped), a late
+        processExited from the OLD session must return early.
+
+        #540: staleness is decided by `_session_generation`, not
+        `pane.session is session` — the exited session is never `is`
+        `pane.session` by the time this runs regardless of staleness
+        (AgentPane's own exit handler, connected first, already nulled it),
+        so the generation captured at connect time is the only signal that
+        actually tells "replaced by a newer session" apart from "just an
+        ordinary exit"."""
         orch = Orchestrator.__new__(Orchestrator)
         orch._panes_by_project = {}
         orch._pane_state = {}
 
         old_session = MagicMock()
-        new_session = MagicMock()
 
         project = "proj"
         role = "codex"
 
-        # Register pane pointing at NEW session
+        # Register pane already on generation 2 — a fresh attach_session
+        # (a respawn) ran and bumped past the stale exit's captured gen (1).
         pane = MagicMock()
-        pane.session = new_session
+        pane.session = MagicMock()
+        pane._session_generation = 2
         orch._panes_by_project[project] = {role: pane}
 
         # Plant spawn_ts for new session in pane state
@@ -949,8 +959,8 @@ class TestCodexExitSpawnTsGuard:
         ps.codex_spawn_ts = 999.0  # new session's timestamp
         orch._pane_state[ekey] = ps
 
-        # Fire stale exit from old_session
-        orch._on_codex_exit(0, role, "/cwd", project, old_session)
+        # Fire stale exit from old_session, carrying its connect-time gen (1)
+        orch._on_codex_exit(0, role, "/cwd", project, old_session, gen=1)
 
         # spawn_ts must NOT have been cleared
         assert orch._pane_state[ekey].codex_spawn_ts == 999.0, (

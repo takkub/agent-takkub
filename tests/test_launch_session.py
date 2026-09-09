@@ -194,3 +194,90 @@ class TestLaunchSessionCommonTail:
         ps.last_spawn_resumed = True
         _launch(orch, _pane(), label="gemini", auto_trust=True)
         assert orch._ps(f"{TEST_PROJECT}::gemini").last_spawn_resumed is False
+
+
+class TestExitGuardSurvivesOwnHandlerRace:
+    """#540: a pane that dies right after spawn (banner, then exit) never
+    triggered auto-respawn or the unexpected-exit Lead notice.
+
+    Root cause: AgentPane/HeadlessPane's OWN `processExited` handler is
+    connected first (inside `attach_session`, called by `_launch_session`
+    before it wires its own handler below) and always nulls `pane.session`
+    via `detach_session()` on its way out — for a genuinely stale exit
+    (session already replaced) exactly as much as for an ordinary one. The
+    old guard compared `pane.session is <the exited session object>`, which
+    is therefore False in both cases, so the second-connected handler
+    (`_on_session_exit` / `_on_codex_exit`) never ran for a plain, first-ever
+    exit — only a `_session_generation` comparison tells the two apart.
+
+    These build a REAL `HeadlessPane` (not a MagicMock) so the pane's own
+    `_on_exit` genuinely runs and genuinely nulls `session` before the
+    orchestrator's wrapped handler fires, exactly mirroring Qt's
+    connect-order signal dispatch.
+    """
+
+    def _real_pane(self):
+        from agent_takkub.headless_pane import HeadlessPane
+        from agent_takkub.roles import by_name
+
+        return HeadlessPane(by_name("backend"))
+
+    def test_non_codex_exit_fires_despite_own_handler_nulling_session(self, orch):
+        """The pane's own exit handler runs first and clears `pane.session`
+        — the orchestrator's handler must still fire (generic/non-codex
+        path), not read that as a stale signal."""
+        pane = self._real_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        _ok, _msg, mock_session, _first_handler = _launch(
+            orch, pane, label="backend", codex_exit=False
+        )
+        # Real `HeadlessPane.attach_session` connects its own `_on_exit`
+        # before `_launch_session` wires its own handler below — two
+        # handlers total, connected in that order. `_launch` only surfaces
+        # the first (`connected[0]`); recover the full list from the mock's
+        # recorded connect calls to fire both, in connection order.
+        handlers = [c.args[0] for c in mock_session.processExited.connect.call_args_list]
+        assert len(handlers) == 2
+
+        for handler in handlers:
+            handler(1)  # exit code 1, dispatched in connection order
+
+        assert pane.session is None  # own handler really did detach
+        assert pane.state == "exited"
+        orch._on_session_exit.assert_called_once()
+        orch._on_codex_exit.assert_not_called()
+
+    def test_codex_exit_fires_despite_own_handler_nulling_session(self, orch):
+        """Same race, codex branch (`_on_codex_exit`, gated separately)."""
+        pane = self._real_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
+        _ok, _msg, mock_session, _last = _launch(orch, pane, label="codex", codex_exit=True)
+        handlers = [c.args[0] for c in mock_session.processExited.connect.call_args_list]
+        assert len(handlers) == 2
+
+        for handler in handlers:
+            handler(1)
+
+        assert pane.session is None
+        orch._on_codex_exit.assert_called_once()
+        orch._on_session_exit.assert_not_called()
+
+    def test_late_exit_from_a_replaced_session_is_still_dropped(self, orch):
+        """The generation check must still reject a genuinely stale signal —
+        a late `processExited` from an OLD session after a NEW one already
+        attached — so the fix doesn't turn the guard into a no-op."""
+        pane = self._real_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        _ok, _msg, mock_session, _last = _launch(orch, pane, label="backend", codex_exit=False)
+        handlers = [c.args[0] for c in mock_session.processExited.connect.call_args_list]
+        assert len(handlers) == 2
+        own_handler, orch_handler = handlers
+
+        # A replacement session attaches (bumps the pane's generation) before
+        # the OLD session's queued exit signal is finally dispatched.
+        pane.attach_session(MagicMock(), cwd="/work/dir", provider_name="claude")
+
+        own_handler(1)  # old handler is generation-guarded internally too
+        orch_handler(1)
+
+        orch._on_session_exit.assert_not_called()

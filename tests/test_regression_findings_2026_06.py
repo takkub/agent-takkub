@@ -480,22 +480,34 @@ class TestDoneCloseSessionGuard:
 
 
 class TestCodexExitStaleSessionGuard:
-    """_on_codex_exit must apply the same current-session guard as the
-    shell/gemini/claude processExited lambdas.
+    """_on_codex_exit's guard rejects a signal only from a session a NEWER
+    one has since replaced (`_session_generation` bumped past what was
+    captured at connect time) — see #540.
+
+    It deliberately does NOT try to also decide "was this exit expected"
+    (closed/done vs a genuine crash) — that is `_on_session_exit`'s own
+    `pane.state != "exited"` check, using the state `decide_exit_state`
+    already set. The guard used to compare `pane.session is session`
+    instead, which looked equivalent but is not: AgentPane's own exit
+    handler is connected earlier (inside attach_session) and always nulls
+    `pane.session` via detach_session() before this one runs — for an
+    ordinary, first-ever exit exactly as much as a genuinely superseded
+    one — so that check silently swallowed every ordinary exit too, not
+    just stale ones (the actual #540 bug).
 
     Tests call the production Orchestrator._on_codex_exit unbound so they
     exercise the actual guard rather than a locally-reconstructed closure.
     """
 
-    def _make_orch(self, pane_session):
+    def _make_orch(self, pane_generation):
         orch = MagicMock()
         pane = MagicMock()
-        pane.session = pane_session
+        pane._session_generation = pane_generation
         orch._panes_by_project = {"proj": {"backend": pane}}
         orch._pane_state = {}
         return orch
 
-    def _call(self, orch, session):
+    def _call(self, orch, session, gen):
         from agent_takkub.orchestrator import Orchestrator
 
         Orchestrator._on_codex_exit(
@@ -505,30 +517,41 @@ class TestCodexExitStaleSessionGuard:
             cwd="/cwd",
             project="proj",
             session=session,
+            gen=gen,
         )
 
-    def test_current_session_fires_on_session_exit(self) -> None:
+    def test_current_generation_fires_on_session_exit(self) -> None:
         sess = object()
-        orch = self._make_orch(pane_session=sess)
-        self._call(orch, sess)
+        orch = self._make_orch(pane_generation=1)
+        self._call(orch, sess, gen=1)
         # #397: also threads the exit code + session through for the
         # pane-exited notice / last-output snapshot.
         orch._on_session_exit.assert_called_once_with(
             "backend", "/cwd", "proj", session=sess, exit_code=0
         )
 
-    def test_stale_session_does_not_fire_on_session_exit(self) -> None:
+    def test_stale_generation_does_not_fire_on_session_exit(self) -> None:
+        """A late exit signal from a session a NEW attach_session has
+        already superseded (generation bumped past what this signal
+        carries) must not fire."""
         sess_a = object()
-        sess_b = object()
-        orch = self._make_orch(pane_session=sess_b)  # pane already on B
-        self._call(orch, sess_a)  # exit from A
+        orch = self._make_orch(pane_generation=2)  # a new session already attached
+        self._call(orch, sess_a, gen=1)  # exit carries the OLD generation
         orch._on_session_exit.assert_not_called()
 
-    def test_exit_after_close_does_not_fire(self) -> None:
+    def test_no_generation_provided_still_fires(self) -> None:
+        """A caller that doesn't thread a generation (gen=None — e.g. an
+        older/direct call site) gets no staleness gating here at all;
+        `_on_session_exit`'s own `pane.state` check is the real arbiter of
+        expected vs unexpected, exactly as for an already-detached (closed)
+        pane — this must not be misread as 'stale' the way `pane.session is
+        session` used to."""
         sess_a = object()
-        orch = self._make_orch(pane_session=None)  # closed
-        self._call(orch, sess_a)
-        orch._on_session_exit.assert_not_called()
+        orch = self._make_orch(pane_generation=1)
+        self._call(orch, sess_a, gen=None)
+        orch._on_session_exit.assert_called_once_with(
+            "backend", "/cwd", "proj", session=sess_a, exit_code=0
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
