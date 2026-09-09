@@ -171,7 +171,14 @@ class _UsageLock:
                 os.close(fd)
                 self._acquired = True
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Windows can raise PermissionError (WinError 5) instead of
+                # FileExistsError for O_CREAT|O_EXCL against an existing file
+                # that another process (or a transient AV scan) still has
+                # open — same race as #518, just surfacing through a
+                # different errno here. Treat it identically: check staleness
+                # and retry/wait rather than let it escape as an unhandled
+                # crash (this module's "degrade, never crash" policy below).
                 try:
                     age = _time.time() - self._path.stat().st_mtime
                 except OSError:
