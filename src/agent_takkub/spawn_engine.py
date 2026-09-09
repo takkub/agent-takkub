@@ -1645,19 +1645,32 @@ class SpawnEngineMixin:
                 self._ps(_ekey).session_uuid = resume_uuid
                 self._ps(_ekey).session_uuid_cwd = spawn_cwd
             _sess = session
+            # #540: staleness is decided by the pane's OWN session generation
+            # (bumped only by attach_session), captured right now — NOT by
+            # `pane.session is _sess`. AgentPane/HeadlessPane's own exit
+            # handler is connected earlier (inside attach_session above) and
+            # always runs first, nulling `pane.session` via detach_session()
+            # on EVERY exit, a genuinely stale one (session already replaced)
+            # or not. A `pane.session is _sess` check therefore read every
+            # ordinary exit as stale too — including a cold-spawn pane that
+            # dies right after its banner, before anything ever replaced its
+            # session — so auto-respawn and the unexpected-exit notice
+            # silently never fired and an in-flight delivery just sat until
+            # the stale-reap TTL cancelled it with no retry (issue #540).
+            _pane_gen = pane._session_generation
             if codex_exit:
                 self._ps(_ekey).codex_spawn_ts = time.time()
                 session.processExited.connect(
-                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess: (
-                        self._on_codex_exit(code, r, c, p, sess)
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess, g=_pane_gen: (
+                        self._on_codex_exit(code, r, c, p, sess, g)
                     )
                 )
             else:
                 session.processExited.connect(
-                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess: (
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess, g=_pane_gen: (
                         self._on_session_exit(r, c, p, session=s, exit_code=code)
                         if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                        and pp.session is s
+                        and getattr(pp, "_session_generation", None) == g
                         else None
                     )
                 )
@@ -3317,11 +3330,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # stale exit signals from an old session don't trigger respawn on a
             # replacement that's already attached.
             _sess_claude = session
+            # #540: generation-based staleness check — see the matching
+            # comment in _launch_session for why `pane.session is s` always
+            # reads as stale (AgentPane's own exit handler, connected inside
+            # attach_session just above, nulls pane.session on every exit,
+            # not only a replaced one).
+            _pane_gen_claude = pane._session_generation
             session.processExited.connect(
-                lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude: (
+                lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude, g=_pane_gen_claude: (
                     self._on_session_exit(r, c, p, session=s, exit_code=code)
                     if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                    and pp.session is s
+                    and getattr(pp, "_session_generation", None) == g
                     else None
                 )
             )
@@ -3491,6 +3510,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         cwd: str,
         project: str,
         session: PtySession,
+        gen: int | None = None,
     ) -> None:
         """Codex-specific exit handler. Detects early crashes and writes a
         diagnostic dump before delegating to the generic _on_session_exit.
@@ -3504,11 +3524,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _ps_cx = self._pane_state.get(ekey)
         spawn_ts = _ps_cx.codex_spawn_ts if _ps_cx is not None else None
 
-        # Guard: drop stale exit BEFORE resetting codex_spawn_ts.
-        # If a new session has already spawned and registered its own spawn_ts,
-        # clearing it here would clobber its crash-diagnostic window.
+        # Guard: drop stale exit BEFORE resetting codex_spawn_ts — by
+        # `_session_generation` (#540), not `pane.session is session`.
+        # AgentPane/HeadlessPane's own exit handler runs first (connected
+        # inside attach_session, before this one is wired) and always nulls
+        # `pane.session` via detach_session() on its way out, for an
+        # ordinary exit exactly as much as a genuinely stale one — so a
+        # `pane.session is session` check read every exit as stale and
+        # returned here before _on_session_exit ever got a chance to
+        # auto-respawn or notify Lead. `gen` (captured at connect time) only
+        # changes on a NEW attach_session, so it still tells a truly stale
+        # signal (session already replaced) apart from an ordinary one
+        # (session merely detached on its own exit).
         _pane_cdx = self._panes_by_project.get(project, {}).get(role_name)
-        if _pane_cdx is not None and _pane_cdx.session is not session:
+        if (
+            _pane_cdx is not None
+            and gen is not None
+            and getattr(_pane_cdx, "_session_generation", None) != gen
+        ):
             return
 
         if _ps_cx is not None:
