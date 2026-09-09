@@ -712,11 +712,35 @@ class TestFullSuiteDenied:
     def test_denied_for_every_role_including_qa(self, role: str) -> None:
         """qa is the role that ultimately owns full-suite verification, but
         it must reach for `takkub qa-gate --auto` too, never a raw runner —
-        no role-based allowlist for this rule."""
+        no role-based allowlist for this rule, except `tester` (see
+        TestFullSuiteTesterExemption below)."""
         assert not pane_guard.classify("pytest", role).allowed
 
     def test_denied_for_shard(self) -> None:
         assert not pane_guard.classify("vitest run", "frontend#2").allowed
+
+
+class TestFullSuiteTesterExemption:
+    """`tester` is an optional, on-demand role (.claude/agents/tester.md)
+    whose entire job is running the raw test runner on its own pane so other
+    roles stop each forking one in parallel — it is the one deliberate
+    allowlist entry for this rule."""
+
+    @pytest.mark.parametrize(
+        "command",
+        ["pytest", "python -m pytest", "vitest run", "jest", "turbo run test", "pnpm -r test"],
+    )
+    def test_raw_runner_allowed_for_tester(self, command: str) -> None:
+        assert pane_guard.classify(command, "tester").allowed, f"should have allowed: {command}"
+
+    def test_raw_runner_allowed_for_tester_shard(self) -> None:
+        assert pane_guard.classify("pytest", "tester#2").allowed
+
+    def test_tester_still_denied_by_other_rules(self) -> None:
+        """The exemption is narrow to `_full_suite_rule` — every other guard
+        (version control, host-destructive, ...) still applies to `tester`."""
+        assert not pane_guard.classify("git commit -m 'x'", "tester").allowed
+        assert not pane_guard.classify("git push --force", "tester").allowed
 
 
 class TestFullSuiteAllowed:
