@@ -99,7 +99,7 @@ def test_subagent_mode_rejects_provider_override(orch: Orchestrator, tmp_path: P
 
 def test_every_builtin_role_has_conditional_subagent_rule() -> None:
     role_files = sorted((REPO_ROOT / ".claude" / "agents").glob("*.md"))
-    assert len(role_files) == 16
+    assert len(role_files) == 17
     for role_file in role_files:
         header = "\n".join(role_file.read_text(encoding="utf-8").splitlines()[:10])
         assert "--mode subagent" in header, role_file.name
