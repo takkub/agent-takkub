@@ -959,6 +959,21 @@ IDLE_REMINDER_TEXT = (
 _LAST_SESSION_FILE = RUNTIME_DIR / "last-session.json"
 _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 
+# #532: the comment above has always promised "at the moment of shutdown (or
+# at the last periodic tick)", but until now nothing ever called
+# write_session_snapshot() from a periodic tick — only the two graceful
+# shutdown/restart call sites (MainWindow.closeEvent, UpdatePanel.
+# _restart_cockpit) did. A cockpit that dies WITHOUT going through either of
+# those (a hard kill, an OS/task-manager kill of an unresponsive UI, a crash)
+# skips both, so `last_assigned_task` — which has lived in memory only since
+# assign() set it — never reaches disk, and the next launch's
+# restore_teammates() respawns the pane fresh with no task to re-paste (the
+# "last task was not saved" notice). Piggybacking a throttled write on the
+# existing 5s idle/stuck-watchdog tick (`_check_idle_teammates`) bounds that
+# loss to this interval regardless of how the process ends, without adding a
+# new timer.
+_PERIODIC_SNAPSHOT_INTERVAL_S = 3 * 60
+
 
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
@@ -8697,6 +8712,22 @@ class Orchestrator(
 
         threading.Thread(target=_hot_md_worker, daemon=True, name="hot-md-writer").start()
 
+    def _maybe_write_periodic_snapshot(self, now: float) -> None:
+        """#532: throttled periodic call to `write_session_snapshot()` so a
+        long-`working` pane's `last_assigned_task` reaches disk well before
+        any eventual close, not only at the two graceful shutdown/restart
+        call sites (see `_PERIODIC_SNAPSHOT_INTERVAL_S`). Best-effort —
+        `write_session_snapshot` already swallows its own I/O errors, and a
+        stray exception here must never break the watchdog tick that calls
+        this."""
+        if now - getattr(self, "_last_periodic_snapshot_ts", 0.0) < _PERIODIC_SNAPSHOT_INTERVAL_S:
+            return
+        self._last_periodic_snapshot_ts = now
+        try:
+            self.write_session_snapshot()
+        except Exception:
+            pass
+
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — surface teammates that forgot to `takkub done`
     # ──────────────────────────────────────────────────────────────
@@ -8716,6 +8747,9 @@ class Orchestrator(
         # `now` below — otherwise the wall-clock time spent suspended reads as
         # pane inactivity and trips a false-positive close→respawn.
         self._absorb_watchdog_sleep_gap(now)
+        # #532: periodic session-state persistence rides the same tick — see
+        # _PERIODIC_SNAPSHOT_INTERVAL_S docstring.
+        self._maybe_write_periodic_snapshot(now)
         # Stuck-pane detection rides the same 5 s tick so we don't pay
         # for another QTimer. Runs before the idle-reminder logic so a
         # recover (which closes the pane) doesn't fight with reminder
