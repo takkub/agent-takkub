@@ -649,6 +649,12 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             ),
         }
     isolation = getattr(args, "isolation", "shared") or "shared"
+    base_ref = (getattr(args, "base", None) or "").strip() or None
+    if base_ref and isolation != "worktree":
+        return {
+            "ok": False,
+            "msg": "--base ใช้ได้เฉพาะกับ --isolation worktree (#544)",
+        }
     plan = bool(getattr(args, "plan", False))
     if isolation == "worktree" and plan:
         return {
@@ -716,6 +722,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "auto_chain": bool(getattr(args, "auto_chain", False)),
                         "shard_total": shards,
                         "isolation": isolation,
+                        "base_ref": base_ref,
                         "model": model,
                         "provider": provider,
                         "effort": effort,
@@ -767,6 +774,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "requires_commit": bool(getattr(args, "requires_commit", False)),
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
+                "base_ref": base_ref,
                 "model": model,
                 "provider": provider,
                 "effort": effort,
@@ -4115,6 +4123,16 @@ def main(argv: list[str] | None = None) -> int:
         "in its OWN git worktree + branch (wt/<role>-<ts>) so parallel feature "
         "builds don't race; on done the Lead gets a merge PROPOSAL (never "
         "auto-merged). Falls back to shared + warns if the cwd isn't a git repo.",
+    )
+    sa.add_argument(
+        "--base",
+        default=None,
+        metavar="REF",
+        help="(#544, --isolation worktree only) fork the new worktree's branch "
+        "off this ref (e.g. 'origin/release') instead of --cwd's checked-out "
+        "HEAD — no need to `git checkout` a different base in the shared repo "
+        "first just to seed one isolated worktree. Falls back to shared cwd + "
+        "warns if the ref doesn't resolve.",
     )
     sa.add_argument(
         "--feature",

@@ -136,10 +136,17 @@ Carve-outs for `--isolation worktree`: `git commit` is allowed unconditionally
 when the pane's cwd is inside a cockpit-managed `.../worktrees/...` checkout;
 `git push` is allowed ONLY when every target it names is that pane's own
 `wt/<role>-<ts>` branch (#438 — see `_push_is_own_worktree_branch`), never a
-bare/unnamed push and never any other branch. `reset --hard`/`rebase`/
-`checkout` stay Lead-only with no exception; `merge` has its own narrow
-carve-out (merging the CURRENT base into the pane's own branch only — see
-`_GIT_MERGE_PATTERN`). That is `--isolation worktree` (issue #81):
+bare/unnamed push and never any other branch. `reset --hard`/`checkout`/
+`branch -D` are likewise allowed unconditionally from inside that same
+checkout (#545 — see `_WORKTREE_SAFE_RULES`): that checkout is disposable by
+definition, so blocking them there protects nothing and only forces worse
+workarounds (a real incident: `merge` used in place of `reset --hard` to
+rewrite a branch, `git archive | tar -x` used in place of `checkout` to
+materialize a different ref). `rebase`/`tag -d` stay Lead-only with no
+exception — both act on refs a worktree pane can't safely disown its own copy
+of. `merge` has its own narrow carve-out (merging the CURRENT base into the
+pane's own branch only — see `_GIT_MERGE_PATTERN`). That is `--isolation
+worktree` (issue #81):
 the pane owns a private branch nobody else touches, and
 `orchestrator_text._append_worktree_hint` already instructs it to commit
 there itself — "the 'wait for Lead' policy is for the shared tree only".
@@ -700,16 +707,19 @@ _GIT_COMMIT_PATTERN = re.compile(
     rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit{_SUBCMD_END}", re.M
 )
 
-# reset --hard/branch -D/tag -d/rebase/checkout stay Lead-only with NO
-# exception even from an isolated worktree branch (the worktree carve-out
-# never means "rewrite/switch it"). `push` and `merge` are the two rules
-# that DO carve out a worktree exception, each gated narrowly in `classify()`
-# rather than here: `push` only when every target is the pane's own
-# `wt/<role>-<ts>` branch by name (#438, `_push_is_own_worktree_branch`),
-# `merge` only against the current base into that same branch (#385,
-# `_GIT_MERGE_PATTERN` below). Kept as full deny patterns in this tuple —
-# `classify()` overrides the verdict for those two rules when the carve-out
-# actually applies, so this list itself needs no per-rule cwd branching.
+# tag -d/rebase stay Lead-only with NO exception even from an isolated
+# worktree branch — both act on refs a worktree pane can't safely own a
+# private copy of. `push`, `merge`, and (#545) `reset-hard`/`checkout`/
+# `branch-delete` DO carve out a worktree exception: `push` only when every
+# target is the pane's own `wt/<role>-<ts>` branch by name (#438,
+# `_push_is_own_worktree_branch`), `merge` only against the current base
+# into that same branch (#385, `_GIT_MERGE_PATTERN` below), and
+# `reset-hard`/`checkout`/`branch-delete` unconditionally inside the pane's
+# own worktree checkout (#545, `_WORKTREE_SAFE_RULES` below — that checkout
+# is disposable by definition, so there is nothing narrower to shape-check).
+# Kept as full deny patterns in this tuple — `classify()` overrides the
+# verdict for the carved-out rules when the exception actually applies, so
+# this list itself needs no per-rule cwd branching.
 _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}", re.M)),
     (
@@ -739,6 +749,19 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout{_SUBCMD_END}", re.M),
     ),
 )
+
+# #545: unlike `push`/`merge` (each shape-checked to a narrow safe form),
+# these three are safe UNCONDITIONALLY inside the pane's own worktree
+# checkout — there is nothing left to rewrite that isn't already scoped to
+# a private, disposable branch nobody else touches. Before this carve-out
+# both were still Lead-only even in-worktree, which forced worse
+# workarounds in practice: a `merge` used in place of `reset --hard` to land
+# a rewritten branch (mangling its history), and `git archive | tar -x`
+# used in place of `checkout` to materialize a different ref's files.
+# `tag-delete`/`rebase` are deliberately excluded — both act on refs a
+# worktree pane can't safely disown its own copy of, unlike a plain branch
+# reset/switch/delete confined to the checkout itself.
+_WORKTREE_SAFE_RULES = frozenset({"reset-hard", "checkout", "branch-delete"})
 
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
 # pane's own `--isolation worktree` checkout. There the pane's branch is the
@@ -1027,6 +1050,8 @@ def classify(
     for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
         if rule == "push" and in_worktree and _push_is_own_worktree_branch(cmd, role):
             continue  # #438: own wt/<role>-<ts> branch, named explicitly, no force
+        if rule in _WORKTREE_SAFE_RULES and in_worktree:
+            continue  # #545: pane's own disposable worktree checkout
         if pattern.search(cmd):
             if rule == "push" and in_worktree:
                 # #466 point 3: a push that's already inside the pane's own

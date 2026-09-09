@@ -295,6 +295,12 @@ def test_worktree_assign_inputs_none_on_collision_or_no_cwd(monkeypatch) -> None
     assert Orchestrator.worktree_assign_inputs(fake, "frontend", None, None) is None
     got = Orchestrator.worktree_assign_inputs(fake, "frontend", "/repo", None)
     assert got is not None and got["base_cwd"] == "/repo" and got["role"] == "frontend"
+    assert got["base_ref"] is None
+    # #544: --base rides straight through into the returned dict
+    got_with_base = Orchestrator.worktree_assign_inputs(
+        fake, "frontend", "/repo", None, base_ref="origin/release"
+    )
+    assert got_with_base["base_ref"] == "origin/release"
     fake._worktree_bare_role_collision = lambda r, p: "collision"
     assert Orchestrator.worktree_assign_inputs(fake, "frontend", "/repo", None) is None
 
@@ -338,13 +344,14 @@ class _Orch:
         self.done_calls.append((role, git_facts))
         return True, "done ok"
 
-    def worktree_assign_inputs(self, role, cwd, project):
+    def worktree_assign_inputs(self, role, cwd, project, base_ref=None):
         return {
             "base_cwd": "/repo",
             "project_ns": "proj",
             "role": role,
             "ts": 1,
             "exclude_ports": set(),
+            "base_ref": base_ref,
         }
 
     def assign(self, role, **kw):
@@ -409,10 +416,12 @@ def test_worktree_assign_creates_off_thread_then_assigns_with_prepared(qapp, mon
     info = _info()
 
     class _FakeMgr:
-        def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset()):
+        def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset(), base_ref=None):
+            self.last_base_ref = base_ref
             return info, ""
 
-    monkeypatch.setattr(wm_mod, "WorktreeManager", _FakeMgr)
+    fake_mgr = _FakeMgr()
+    monkeypatch.setattr(wm_mod, "WorktreeManager", lambda: fake_mgr)
     orch = _Orch()
     srv = CliServer(orch)
     monkeypatch.setattr(srv, "_next_spawn_delay_ms", lambda role, project: 0)
@@ -427,6 +436,7 @@ def test_worktree_assign_creates_off_thread_then_assigns_with_prepared(qapp, mon
             "role": "frontend",
             "task": "build",
             "isolation": "worktree",
+            "base_ref": "origin/release",
             "mode": "pane",
         },
     )
@@ -436,3 +446,5 @@ def test_worktree_assign_creates_off_thread_then_assigns_with_prepared(qapp, mon
     assert call["role"] == "frontend"
     assert call["isolation"] == "worktree"
     assert call["worktree_prepared"] == (info, "")
+    # #544: --base rode through worktree_assign_inputs → the off-thread create()
+    assert fake_mgr.last_base_ref == "origin/release"

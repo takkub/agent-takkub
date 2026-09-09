@@ -167,6 +167,42 @@ class TestCreate:
         assert info is None
         assert "commit" in reason
 
+    # ── #544: `takkub assign --base <ref>` — fork off a named ref instead of
+    # base_cwd's checked-out HEAD ──
+
+    def test_create_with_base_ref_resolves_ref_not_head(self):
+        r = self._repo_runner(
+            extra=[
+                (
+                    ["rev-parse", "--verify", "origin/release^{commit}"],
+                    _ok("releasesha456\n"),
+                )
+            ]
+        )
+        info, reason = WorktreeManager(r).create(
+            "/repo/web", "proj", "frontend", 555, base_ref="origin/release"
+        )
+        assert reason == ""
+        assert info is not None
+        assert info.base_sha == "releasesha456"
+        assert r.ran("worktree", "add", "-b", "wt/frontend-555", "releasesha456")
+        # HEAD of base_cwd must never be consulted once --base is given
+        assert not any(
+            "HEAD" in call and "--verify" not in call and "^{commit}" not in " ".join(call)
+            for call in r.calls
+        )
+
+    def test_create_falls_back_when_base_ref_unresolvable(self):
+        r = self._repo_runner(
+            extra=[
+                (["rev-parse", "--verify", "no-such-ref^{commit}"], _fail("unknown revision", 128))
+            ]
+        )
+        info, reason = WorktreeManager(r).create("/repo", "proj", "qa", 1, base_ref="no-such-ref")
+        assert info is None
+        assert "no-such-ref" in reason
+        assert not r.ran("worktree", "add")  # never attempted on a bad ref
+
     def test_create_falls_back_when_add_fails(self):
         r = self._repo_runner(
             extra=[(["worktree", "add"], _fail("fatal: branch checked out elsewhere", 128))]
@@ -1561,6 +1597,36 @@ class TestListOrphans:
         r = FakeRunner([(["worktree", "list", "--porcelain"], _ok("worktree /elsewhere\n"))])
 
         assert WorktreeManager(r).list_orphans("/some/repo") == []
+
+    def test_non_wt_branch_worktree_never_counted_as_orphan(self, tmp_path):
+        """#547 — a worktree a human created directly with `git worktree
+        add` (branch name outside the `wt/*` isolation scheme) must never
+        be classified as an orphan just because it isn't `wt/*`: git still
+        registers it, so it is not "forgotten" and must be excluded from
+        the report regardless of branch prefix."""
+        project_dir = tmp_path / "worktrees" / "p"
+        (project_dir / "frontend-1").mkdir(parents=True)  # wt/* anchor
+        manual = project_dir / "prodtest-taktempmain"
+        manual.mkdir()
+
+        porcelain = (
+            "worktree /repo\n"
+            "HEAD aaaa111\n"
+            "branch refs/heads/main\n"
+            "\n"
+            f"worktree {project_dir / 'frontend-1'}\n"
+            "HEAD bbbb222\n"
+            "branch refs/heads/wt/frontend-1\n"
+            "\n"
+            f"worktree {manual}\n"
+            "HEAD cccc333\n"
+            "branch refs/heads/prodtest-taktempmain\n"
+        )
+        r = FakeRunner([(["worktree", "list", "--porcelain"], _ok(porcelain))])
+
+        rows = WorktreeManager(r).list_orphans("/repo")
+
+        assert rows == []
 
     def test_trash_dirs_excluded_from_generic_orphan_report(self, tmp_path):
         """#411 — a `.trash-*` staging dir is handled unconditionally by

@@ -72,9 +72,11 @@ class _FakeMgr:
         self._auto_commit_result = auto_commit_result
         self.safe_remove_calls = 0
         self.auto_commit_calls = 0
+        self.last_base_ref: str | None = None
 
-    def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset()):
+    def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset(), base_ref=None):
         self.last_exclude_ports = set(exclude_ports)
+        self.last_base_ref = base_ref
         return self._info, self._reason
 
     def commit_count(self, info):
@@ -161,6 +163,50 @@ class TestAssignWithWorktree:
         assert "wt/frontend-1" in msg
         assert "isolated worktree" in msg
         orch._tag_pane_worktree.assert_called_once_with("proj", "frontend", "wt/frontend-1")
+
+    def test_base_ref_forwarded_to_manager_create(self, orch, monkeypatch):
+        """#544: `takkub assign --base <ref>` must reach `mgr.create` on the
+        synchronous (`prepared is None`) path."""
+        fake = _FakeMgr(info=_info())
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+        orch._tag_pane_worktree = MagicMock()  # type: ignore[assignment]
+
+        orch._assign_with_worktree(
+            "frontend",
+            "/repo/web",
+            "build X",
+            False,
+            False,
+            0,
+            False,
+            "proj",
+            base_ref="origin/release",
+        )
+        assert fake.last_base_ref == "origin/release"
+
+    def test_prepared_path_never_touches_manager_create(self, orch, monkeypatch):
+        """A `prepared` result (the #408 off-thread path) already decided its
+        base — `_assign_with_worktree` must not call `mgr.create` again, with
+        or without a `base_ref`."""
+        fake = _FakeMgr()
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+        orch._tag_pane_worktree = MagicMock()  # type: ignore[assignment]
+
+        orch._assign_with_worktree(
+            "frontend",
+            "/repo/web",
+            "build X",
+            False,
+            False,
+            0,
+            False,
+            "proj",
+            prepared=(_info(), ""),
+            base_ref="origin/release",
+        )
+        assert fake.last_base_ref is None  # create() never called
 
     def test_fallback_when_not_git_repo(self, orch, monkeypatch):
         fake = _FakeMgr(info=None, reason="ไม่ใช่ git repo — ใช้ shared cwd แทน")
