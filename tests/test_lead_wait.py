@@ -892,6 +892,109 @@ class TestPollWaitUserInputInterrupt:
         assert "backend" in result["pending"]
         assert PROJECT not in orch._lead_last_user_input_ts
 
+    def test_busy_lead_terminal_reply_well_past_write_grace_does_not_interrupt(
+        self, orch: Orchestrator
+    ) -> None:
+        """#548: a real incident — 3 spurious `takkub wait` interrupts in one
+        session, 4s/62s/142s after Lead's own injected notice, with nothing
+        actually typed. The `_LEAD_INJECT_GRACE_S` (5s) window used to be
+        the only correlation available; once Lead's CLI stayed busy (no PTY
+        output at all) responding to the injection for over 5s, a later
+        reply-shaped chunk fell through and was stamped as genuine
+        "user_input". While the pane is confirmed NOT at its own ready
+        prompt, `_is_post_inject_terminal_reply` must still recognise this
+        as terminal chrome."""
+        from unittest.mock import MagicMock
+
+        _register_working(orch, "backend")
+        lead_pane = MagicMock()
+        lead_pane.role.name = "lead"
+        lead_pane.session = MagicMock()
+        lead_pane.session.last_write_ts = time.time() - 62.0
+        lead_pane.session.is_at_ready_prompt.return_value = False
+        lead_pane._last_output_ts = time.time() - 62.0  # no output since — Lead is silently busy
+        orch._panes_by_project.setdefault(PROJECT, {})["lead"] = lead_pane
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        # Push the registration's start slightly into the past so a stamp
+        # from `_on_pane_input` below (a real `time.time()` call, same
+        # tick on a fast machine/CI) is unambiguously newer — same
+        # timestamp-control need `test_unsubmitted_draft_still_interrupts`
+        # solves the other way (bumping the stamp forward instead).
+        orch._active_waits[PROJECT]["started_ts"] -= 1.0
+
+        # Fragmented/unrecognized OSC (no BEL/ST terminator) — not a full
+        # `_is_terminal_auto_reply_chunk` match on its own (unlike a bare
+        # CPR, which never reaches `_is_post_inject_terminal_reply` at all
+        # since it's filtered out earlier), so this actually exercises the
+        # busy-window fallback under test.
+        orch._on_pane_input("lead", b"\x1b]11;rgb:0000/0000/0000")
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+        assert "backend" in result["pending"]
+        assert PROJECT not in orch._lead_last_user_input_ts
+
+    def test_busy_lead_terminal_reply_still_interrupts_once_ready_again(
+        self, orch: Orchestrator
+    ) -> None:
+        """Sibling of the test above: once Lead's pane genuinely returns to
+        its own ready prompt, the busy-window fallback must NOT suppress a
+        later reply-shaped chunk — that's the real owner interrupting
+        again, and #265's "never suppress a genuine keystroke" guarantee
+        must hold."""
+        from unittest.mock import MagicMock
+
+        _register_working(orch, "backend")
+        lead_pane = MagicMock()
+        lead_pane.role.name = "lead"
+        lead_pane.session = MagicMock()
+        lead_pane.session.last_write_ts = time.time() - 62.0
+        lead_pane.session.is_at_ready_prompt.return_value = True
+        lead_pane._last_output_ts = time.time() - 62.0
+        orch._panes_by_project.setdefault(PROJECT, {})["lead"] = lead_pane
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        orch._active_waits[PROJECT]["started_ts"] -= 1.0
+
+        # Fragmented/unrecognized OSC (no BEL/ST terminator) — not a full
+        # `_is_terminal_auto_reply_chunk` match on its own (unlike a bare
+        # CPR), so this only clears the wait via the structural
+        # `_is_post_inject_terminal_reply` check, same shape #498 used.
+        orch._on_pane_input("lead", b"\x1b]11;rgb:0000/0000/0000")
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is not None
+        assert result["interrupt"]["reason"] == "user_input"
+
+    def test_busy_lead_reply_beyond_the_outer_bound_still_interrupts(
+        self, orch: Orchestrator
+    ) -> None:
+        """The busy-window fallback is bounded, not indefinite — well past
+        `_LEAD_BUSY_REPLY_GRACE_S` a reply-shaped chunk resumes normal
+        interrupt behaviour even if the pane still reads not-ready (a
+        stuck/hung Lead must not permanently swallow owner input)."""
+        from unittest.mock import MagicMock
+
+        _register_working(orch, "backend")
+        lead_pane = MagicMock()
+        lead_pane.role.name = "lead"
+        lead_pane.session = MagicMock()
+        stale = time.time() - orch._LEAD_BUSY_REPLY_GRACE_S - 30
+        lead_pane.session.last_write_ts = stale
+        lead_pane.session.is_at_ready_prompt.return_value = False
+        lead_pane._last_output_ts = stale
+        orch._panes_by_project.setdefault(PROJECT, {})["lead"] = lead_pane
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        orch._active_waits[PROJECT]["started_ts"] -= 1.0
+
+        orch._on_pane_input("lead", b"\x1b]11;rgb:0000/0000/0000")
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is not None
+        assert result["interrupt"]["reason"] == "user_input"
+
     def test_no_pending_roles_never_computes_user_input_interrupt(self, orch: Orchestrator) -> None:
         """Matches the existing #253/#259 gating: once every watched role
         has already resolved, the poll is about to end the registration on

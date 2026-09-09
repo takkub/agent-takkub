@@ -509,6 +509,98 @@ class TestSharedTreePaneDigestFacts:
         assert "shared tree" in facts.merge_note
         assert "path/mtime/size" in facts.files_note
 
+    def test_all_dirty_predates_assign_flags_uncommitted_unrelated(self, orch, monkeypatch):
+        """#546: a real incident — an ops/devops report on a shared tree
+        showed "⚠3 ไฟล์ยังไม่ commit" for files another pane/Lead had
+        already dirtied BEFORE this assignment started. When the current
+        porcelain is identical to the assign-time snapshot (nothing this
+        pane touched changed), `uncommitted_unrelated` must be True even
+        though `uncommitted` itself stays an honest nonzero count."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "devops", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::devops"] = PaneState(
+            last_assigned_task="restart service",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={
+                "stale.png": ("??", None, None),
+                "src/other.py": (" M", None, None),
+            },
+        )
+
+        class _UnrelatedDirtyFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def diffstat_since(self, cwd, base_sha):
+                return ""
+
+            def commits_since(self, cwd, base_sha):
+                return 0
+
+            def shared_tree_status_porcelain(self, cwd):
+                # Exactly the same two paths as the assign-time snapshot —
+                # nothing this pane did changed the dirty set.
+                return "?? stale.png\n M src/other.py\n"
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _UnrelatedDirtyFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("devops", note="restarted the api container", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[devops"))
+        assert facts.uncommitted == 2
+        assert facts.uncommitted_unrelated is True
+
+    def test_own_dirty_change_keeps_uncommitted_unrelated_false(self, orch, monkeypatch):
+        """Sibling of the test above: this pane DID change the dirty set
+        (a new path not in the assign-time snapshot) — the count is at
+        least partly this task's own doing, so the flag must stay False."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="fix #245",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+
+        class _OwnDirtyFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def diffstat_since(self, cwd, base_sha):
+                return ""
+
+            def commits_since(self, cwd, base_sha):
+                return 0
+
+            def shared_tree_status_porcelain(self, cwd):
+                return " M src/new_change.py\n"
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _OwnDirtyFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("backend", note="แก้เสร็จแล้ว", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
+        assert facts.uncommitted == 1
+        assert facts.uncommitted_unrelated is False
+
     def test_done_status_failure_reports_unverifiable_not_baseline_paths(self, orch, monkeypatch):
         proj = "proj"
         _register_pane(orch, LEAD.name, proj, _make_alive_session())
