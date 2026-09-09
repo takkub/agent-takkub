@@ -2,6 +2,14 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.4] - 2026-09-09
+
+### Fixed (แก้)
+
+- **[auto] RuntimeError @ settings_usage.py:417** (#550, #553) — crash จริงบน user's เครื่อง ทั้ง Windows (2.0.2) และ macOS (2.0.3): กด Refresh หน้า Usage ตอน background import thread ถูก Qt ลบไปแล้ว (deleted-object race เดียวกับ #526) — self-heal แล้ว
+- **มือถือ PWA — เมนู Usage ใหม่แทนปุ่มบนหัว** — แก้ความเข้าใจผิดจากรอบก่อน (ที่ถอด usage-chip ออกทั้งก้อนไปด้วย ทั้งที่ user ต้องการแค่เอาตาราง token เป็นล้านออก): เพิ่มแท็บล่าง "Usage" (เหมือน Projects/Pulse) มี 2 แท็บย่อย — "เหลือ" (การ์ด quota/rate-limit ต่อ provider) และ "ภาพรวม" (สรุป turns/tokens ต่อ provider แบบง่าย ไม่ breakdown ลึก)
+- **#549 follow-up ที่ 2** — gemini usage cache-file fallback path ไม่มี dedup เลย (จุดเดียวกับ #551 แต่คนละ code path) แก้ด้วย shared helper เดียวกัน
+
 ## [2.0.3] - 2026-09-09
 
 ### Fixed (แก้)
