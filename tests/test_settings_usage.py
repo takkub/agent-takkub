@@ -167,6 +167,30 @@ class TestUsageViewSmoke:
         assert seen and seen[-1] == {"days": 1}
         dlg.deleteLater()
 
+    def test_refresh_click_survives_deleted_import_thread(self, monkeypatch):
+        """#550/#553 (auto-captured crash, Windows 2.0.2 + macOS 2.0.3):
+        `self._usage_import_thread` can point at a `_CallableThread` whose
+        C++ side is already deleted (Qt parent-child ownership tore it down,
+        or a prior run's thread object was GC'd) — same deleted-Qt-object
+        race as #526. `.isRunning()` on it then raises RuntimeError instead
+        of returning False. Reproduce by `sip.delete()`-ing the thread
+        object directly, then confirm the click handler self-heals instead
+        of propagating the crash."""
+        from PyQt6 import sip
+
+        monkeypatch.setattr(usage_ledger, "import_all", lambda: {})
+        dlg = _open_usage_view()
+        dlg._on_usage_refresh_clicked()
+        dlg._usage_import_thread.wait(2000)
+        stale_thread = dlg._usage_import_thread
+        sip.delete(stale_thread)  # C++ side gone; dlg._usage_import_thread still refs it
+
+        dlg._on_usage_refresh_clicked()  # must not raise RuntimeError
+
+        assert dlg._usage_import_thread is not stale_thread
+        dlg._usage_import_thread.wait(2000)
+        dlg.deleteLater()
+
     def test_refresh_click_starts_background_thread_not_main_thread_call(self, monkeypatch):
         """The expensive import must run off the calling (main) thread."""
         import threading

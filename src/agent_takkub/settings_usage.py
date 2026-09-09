@@ -414,7 +414,23 @@ class UsageSettingsMixin:
         # each unaware of the other's in-flight writes — racing appends
         # into the same raw jsonl/cursor/daily.json. Ignore the click
         # while a refresh is already running instead.
-        if self._usage_import_thread is not None and self._usage_import_thread.isRunning():
+        #
+        # #550/#553: `self._usage_import_thread` can outlive the QThread's
+        # C++ side (finished + garbage-collected, or the window torn down
+        # mid-run) while the Python attribute still holds a stale reference
+        # — same deleted-Qt-object race as #526. `.isRunning()` on it then
+        # raises RuntimeError instead of returning False, crashing the
+        # click handler. Guard the dereference and self-heal by dropping
+        # the stale reference so this and later calls fall through to
+        # starting a fresh thread.
+        try:
+            still_running = (
+                self._usage_import_thread is not None and self._usage_import_thread.isRunning()
+            )
+        except RuntimeError:
+            self._usage_import_thread = None
+            still_running = False
+        if still_running:
             return
         self._usage_refresh_btn.setEnabled(False)
         self._usage_status_label.setText("กำลัง import ข้อมูลล่าสุด (รันเบื้องหลัง)…")
