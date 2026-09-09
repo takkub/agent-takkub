@@ -757,16 +757,40 @@ def _fetch_gemini_live_buckets(
     return buckets if isinstance(buckets, list) else None
 
 
+def _gemini_bucket_group_name(model_ids: list[str]) -> str:
+    """A stable, readable label for one group of catalog model ids that all
+    share the same (fraction, resetTime) pair (#549). A group of one keeps
+    the old bare-model-id name (matches every pre-existing test/ledger row);
+    a pooled group is named after its alphabetically-first member plus a
+    count, so the same real tier gets the same label across polls even
+    though the RPC's per-poll bucket order is not guaranteed."""
+    if len(model_ids) == 1:
+        return model_ids[0]
+    uniq = sorted(set(model_ids))
+    return f"{uniq[0]} +{len(uniq) - 1} more"
+
+
 def _gemini_usage_from_live_buckets(
     buckets: list[dict[str, Any]], email: str | None
 ) -> ProviderUsage | None:
     """Same worst-case-model aggregation as the cache-file path below, just
     over the live RPC's `buckets` shape instead of the cache's `models`
     shape. Returns None when no bucket carries a usable fraction (treated
-    by the caller as "live fetch didn't pan out" — falls back to cache)."""
+    by the caller as "live fetch didn't pan out" — falls back to cache).
+
+    #549: the RPC returns one bucket per CATALOG model id (25+), but models
+    sharing one real pooled quota tier report an identical (fraction,
+    resetTime) pair — that was exploding into one identical-looking `windows`
+    row per catalog entry. Buckets are grouped on that pair first, so the
+    Settings > Usage table (and the ledger rows `_record_quota_ledger` writes
+    from `windows`) get one row per REAL tier instead of one per catalog
+    noise entry.
+    """
     best_fraction: float | None = None
     resets_at: datetime | None = None
-    windows: list[dict[str, Any]] = []
+    groups: dict[tuple[float, str | None], dict[str, Any]] = {}
+    group_order: list[tuple[float, str | None]] = []
+    model_count = 0
     for bucket in buckets:
         if not isinstance(bucket, dict):
             continue
@@ -777,34 +801,45 @@ def _gemini_usage_from_live_buckets(
             fraction = float(fraction)
         except (TypeError, ValueError):
             continue
+        model_count += 1
         model_id = bucket.get("modelId")
-        m_utilization = max(0.0, min(100.0, (1.0 - fraction) * 100.0))
         reset_raw = bucket.get("resetTime")
-        m_resets_at: datetime | None = None
-        if isinstance(reset_raw, str):
-            try:
-                m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
-            except ValueError:
-                m_resets_at = None
-        windows.append(
-            {
-                "name": str(model_id) if model_id else "?",
-                "utilization": m_utilization,
-                "resets_at": m_resets_at.isoformat() if m_resets_at else None,
+        reset_key = reset_raw if isinstance(reset_raw, str) else None
+        key = (fraction, reset_key)
+        if key not in groups:
+            m_resets_at: datetime | None = None
+            if isinstance(reset_raw, str):
+                try:
+                    m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    m_resets_at = None
+            groups[key] = {
+                "model_ids": [],
+                "utilization": max(0.0, min(100.0, (1.0 - fraction) * 100.0)),
+                "resets_at": m_resets_at,
             }
-        )
+            group_order.append(key)
+        groups[key]["model_ids"].append(str(model_id) if model_id else "?")
         if best_fraction is None or fraction < best_fraction:
             best_fraction = fraction
-            resets_at = m_resets_at
+            resets_at = groups[key]["resets_at"]
     if best_fraction is None:
         return None
+    windows = [
+        {
+            "name": _gemini_bucket_group_name(groups[key]["model_ids"]),
+            "utilization": groups[key]["utilization"],
+            "resets_at": groups[key]["resets_at"].isoformat() if groups[key]["resets_at"] else None,
+        }
+        for key in group_order
+    ]
     return ProviderUsage(
         provider="gemini",
         status=STATUS_ACTIVE,
         utilization=max(0.0, min(100.0, (1.0 - best_fraction) * 100.0)),
         resets_at=resets_at,
         fetched_at=datetime.now(tz=UTC),
-        raw_data={"email": email, "model_count": len(windows), "source": "live"},
+        raw_data={"email": email, "model_count": model_count, "source": "live"},
         windows=windows or None,
     )
 
