@@ -59,6 +59,17 @@ def test_solo_lead_and_pair_keep_extra_positions_off():
         assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
 
 
+def test_auto_enables_core_and_keeps_extra_positions_off():
+    """#555: `_position_roles()` grew to include EXTRA_POSITION_ROLES, which
+    made the `auto` branch's `dict.fromkeys(_position_roles(project), True)`
+    turn every extra role on too. Extras must stay off under `auto`, same as
+    every other preset."""
+    cfg = team_preset.current("proj")
+    assert cfg["preset"] == "auto"
+    assert all(cfg["roles"][r] is True for r in team_preset.CORE_POSITION_ROLES)
+    assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
+
+
 def test_set_current_rejects_unknown_preset():
     with pytest.raises(ValueError):
         team_preset.set_current("nope", "proj")
@@ -132,11 +143,26 @@ def test_manual_toggle_matching_preset_does_not_flip():
     assert team_preset.current_preset_id("proj") == "full"
 
 
-def test_manual_toggle_ignored_under_custom_and_auto():
-    team_preset.set_current("custom", "proj", custom={"roles": {}, "checker": None})
-    assert team_preset.note_manual_roles_change({"frontend": True}, "proj") is False
+def test_manual_toggle_noop_under_auto():
     team_preset.set_current("auto", "proj")
     assert team_preset.note_manual_roles_change({"frontend": True}, "proj") is False
+    assert team_preset.current_preset_id("proj") == "auto"
+
+
+def test_manual_toggle_under_custom_persists_without_flipping():
+    """#556: toggling a role back OFF while already on `custom` used to hit
+    an early return and never persist — Settings would read the stale True
+    back on reopen. It must save the new value and keep reporting no-flip."""
+    team_preset.set_current("custom", "proj", custom={"roles": {"tester": False}, "checker": None})
+    flipped_on = team_preset.note_manual_roles_change({"tester": True}, "proj")
+    assert flipped_on is False
+    assert team_preset.current("proj")["roles"]["tester"] is True
+
+    flipped_off = team_preset.note_manual_roles_change({"tester": False}, "proj")
+    assert flipped_off is False
+    cfg = team_preset.current("proj")
+    assert cfg["preset"] == "custom"
+    assert cfg["roles"]["tester"] is False
 
 
 # ── can_spawn guard ─────────────────────────────────────────────────────

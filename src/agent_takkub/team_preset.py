@@ -271,9 +271,14 @@ def _resolve(preset_id: str, project: str | None, raw: dict) -> dict:
         cfg["preset"] = "custom"
         return cfg
     # "auto": no fixed roster — advisory only (see routing_planner.suggest_team_size).
+    # Core positions default on, extras stay off (same split as "full" — #555).
     return {
         "preset": "auto",
-        "roles": dict.fromkeys(_position_roles(project), True),
+        "roles": {
+            **dict.fromkeys(CORE_POSITION_ROLES, True),
+            **dict.fromkeys(EXTRA_POSITION_ROLES, False),
+            **dict.fromkeys(sorted(_custom_role_names()), False),
+        },
         "checker": "qa",
         "lead_may_implement": False,
         "template": "feature",
@@ -357,10 +362,34 @@ def note_manual_roles_change(new_roles_enabled: dict, project: str | None = None
     on the next preset-driven action, and doesn't get silently exempt from
     the "toggle by hand -> custom" rule (#512 acceptance).
 
-    Returns True iff the project flipped to custom.
+    If the project is already on "custom", persist the changed roles into
+    the stored custom roster directly instead of skipping — otherwise a
+    toggle-off after an earlier toggle-on never sticks (#556). "auto" has no
+    fixed roster to persist against, so it stays a no-op there.
+
+    Returns True iff the project flipped to custom (never True when it was
+    already custom, since no flip happens).
     """
     preset_id = current_preset_id(project)
-    if preset_id in ("custom", "auto"):
+    if preset_id == "auto":
+        return False
+    if preset_id == "custom":
+        cfg = _resolve("custom", project, _load_raw(project))
+        positions = _position_roles(project)
+        updated_roles = {
+            p: bool(new_roles_enabled.get(p, cfg["roles"].get(p, False))) for p in positions
+        }
+        set_current(
+            "custom",
+            project,
+            custom={
+                "roles": updated_roles,
+                "checker": cfg["checker"],
+                "lead_may_implement": cfg["lead_may_implement"],
+                "template": cfg["template"],
+                "exec_mode": cfg["exec_mode"],
+            },
+        )
         return False
     cfg = _resolve(preset_id, project, _load_raw(project))
     positions = _position_roles(project)
