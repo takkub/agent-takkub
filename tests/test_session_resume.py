@@ -436,6 +436,92 @@ class TestRestoreTeammatesWorktreeBookkeeping:
         assert fake._pane_state == {}
 
 
+class TestMaybeWritePeriodicSnapshot:
+    """#532: `write_session_snapshot()` used to run ONLY from the two
+    graceful shutdown/restart call sites — a hard kill of an unresponsive
+    cockpit (e.g. a pane wedged with a runaway child-process tree) skipped
+    both, so `last_assigned_task` never reached disk and the next boot's
+    restore_teammates() respawned the pane with no task to re-paste."""
+
+    def test_writes_snapshot_on_first_call(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        calls: list[None] = []
+        fake = SimpleNamespace(write_session_snapshot=lambda: calls.append(None))
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
+        assert len(calls) == 1
+        assert fake._last_periodic_snapshot_ts == 1000.0
+
+    def test_throttles_within_interval(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        calls: list[None] = []
+        fake = SimpleNamespace(
+            write_session_snapshot=lambda: calls.append(None),
+            _last_periodic_snapshot_ts=1000.0,
+        )
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1010.0)  # type: ignore[arg-type]
+        assert calls == []
+        assert fake._last_periodic_snapshot_ts == 1000.0
+
+    def test_fires_again_once_interval_elapses(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import _PERIODIC_SNAPSHOT_INTERVAL_S, Orchestrator
+
+        calls: list[None] = []
+        fake = SimpleNamespace(
+            write_session_snapshot=lambda: calls.append(None),
+            _last_periodic_snapshot_ts=1000.0,
+        )
+        later = 1000.0 + _PERIODIC_SNAPSHOT_INTERVAL_S
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=later)  # type: ignore[arg-type]
+        assert len(calls) == 1
+        assert fake._last_periodic_snapshot_ts == later
+
+    def test_swallows_write_errors(self) -> None:
+        """A disk hiccup here must never break the watchdog tick that calls
+        this — same best-effort contract as write_session_snapshot itself."""
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        def _boom() -> None:
+            raise OSError("disk full")
+
+        fake = SimpleNamespace(write_session_snapshot=_boom)
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
+        assert fake._last_periodic_snapshot_ts == 1000.0
+
+    def test_end_to_end_persists_last_assigned_task_without_graceful_shutdown(
+        self, isolated_session_file: pathlib.Path
+    ) -> None:
+        """The scenario from #532: a `working` pane with an assigned task,
+        never closed gracefully — periodic snapshot must still land it on
+        disk so a later `restore_teammates()` can re-paste it."""
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator, PaneState
+
+        pane = SimpleNamespace(
+            _session_cwd="/wt/frontend-1", state="working", session=SimpleNamespace(is_alive=True)
+        )
+        fake = SimpleNamespace(
+            _panes_by_project={"p": {"frontend": pane}},
+            _pane_state={"p::frontend": PaneState(last_assigned_task="verify checkout UI")},
+        )
+        fake.snapshot_state = lambda: Orchestrator.snapshot_state(fake)
+        fake.write_session_snapshot = lambda: Orchestrator.write_session_snapshot(fake)
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
+        assert isolated_session_file.is_file()
+        saved = json.loads(isolated_session_file.read_text(encoding="utf-8"))
+        assert saved["projects"]["p"][0]["last_task"] == "verify checkout UI"
+
+
 class TestSnapshotStateWorktreeBookkeeping:
     """#410's other half: snapshot_state() must actually persist the
     bookkeeping restore_teammates() now knows how to restore."""
