@@ -91,9 +91,21 @@ def _wait_for_active_threads() -> None:
     """`aboutToQuit` hook (registered lazily the first time a
     `_CallableThread` runs) — gives any still-in-flight worker a bounded
     window to finish before the process exits, instead of leaving it to be
-    killed mid-write."""
+    killed mid-write.
+
+    A registry entry can outlive its C++ object (its `finished` → `_cleanup`
+    queued connection never got a chance to run before something else tore
+    the thread down — e.g. a test simulating the #550/#553 deleted-thread
+    race via `sip.delete()`), in which case `.wait()` raises RuntimeError
+    instead of returning. Same self-heal as `_CallableThread.isRunning()`
+    callers use elsewhere: treat "already deleted" as "nothing to wait for".
+    """
     for thread in list(_ACTIVE_THREADS):
-        thread.wait(3000)
+        try:
+            thread.wait(3000)
+        except RuntimeError:
+            pass
+        _ACTIVE_THREADS.discard(thread)
 
 
 class _CallableThread(QThread):
