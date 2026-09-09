@@ -770,6 +770,24 @@ def _gemini_bucket_group_name(model_ids: list[str]) -> str:
     return f"{uniq[0]} +{len(uniq) - 1} more"
 
 
+def _gemini_bucket_group_key(
+    fraction: float, resets_at: datetime | None
+) -> tuple[float, str | None]:
+    """#551 follow-up to #549: buckets sharing one real pooled quota tier
+    were still failing to group when the RPC reported them with a
+    floating-point epsilon of drift in `remainingFraction`, or a
+    sub-minute/formatting difference in `resetTime` — exact-equality keys
+    treated those as distinct tiers even though they render identically.
+    Round `fraction` to the same 1-decimal-percent precision the Settings >
+    Usage table displays (`f"{delta_pct:.1f}%"` in settings_usage.py), and
+    truncate the parsed reset time down to the minute, so buckets that look
+    identical to a user also collapse to one group."""
+    return (
+        round(fraction, 3),
+        resets_at.replace(second=0, microsecond=0).isoformat() if resets_at else None,
+    )
+
+
 def _gemini_usage_from_live_buckets(
     buckets: list[dict[str, Any]], email: str | None
 ) -> ProviderUsage | None:
@@ -785,6 +803,9 @@ def _gemini_usage_from_live_buckets(
     Settings > Usage table (and the ledger rows `_record_quota_ledger` writes
     from `windows`) get one row per REAL tier instead of one per catalog
     noise entry.
+
+    #551: exact (fraction, resetTime) equality was too strict — see
+    `_gemini_bucket_group_key` for the loosened grouping this now uses.
     """
     best_fraction: float | None = None
     resets_at: datetime | None = None
@@ -804,15 +825,14 @@ def _gemini_usage_from_live_buckets(
         model_count += 1
         model_id = bucket.get("modelId")
         reset_raw = bucket.get("resetTime")
-        reset_key = reset_raw if isinstance(reset_raw, str) else None
-        key = (fraction, reset_key)
+        m_resets_at: datetime | None = None
+        if isinstance(reset_raw, str):
+            try:
+                m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
+            except ValueError:
+                m_resets_at = None
+        key = _gemini_bucket_group_key(fraction, m_resets_at)
         if key not in groups:
-            m_resets_at: datetime | None = None
-            if isinstance(reset_raw, str):
-                try:
-                    m_resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
-                except ValueError:
-                    m_resets_at = None
             groups[key] = {
                 "model_ids": [],
                 "utilization": max(0.0, min(100.0, (1.0 - fraction) * 100.0)),

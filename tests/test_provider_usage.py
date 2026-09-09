@@ -937,6 +937,54 @@ class TestGeminiLiveBucketAggregation:
         # The worst-case (lowest remaining fraction) tier drives the headline.
         assert result.utilization == pytest.approx(90.0)
 
+    def test_epsilon_fraction_drift_still_collapses_to_one_row(self):
+        """#551: the RPC reports the same real pooled tier with a
+        floating-point epsilon of drift in `remainingFraction` across
+        catalog entries -- e.g. 0.9789999999999999 vs. 0.979 -- which
+        render as the identical "+202.1%"-style percentage once rounded to
+        1 decimal, but an exact-float key treated them as distinct tiers."""
+        reset = "2026-09-06T00:00:00Z"
+        buckets = [
+            {"modelId": "gemini-catalog-model-a", "remainingFraction": 0.979, "resetTime": reset},
+            {
+                "modelId": "gemini-catalog-model-b",
+                "remainingFraction": 0.9789999999999999,
+                "resetTime": reset,
+            },
+            {
+                "modelId": "gemini-catalog-model-c",
+                "remainingFraction": 0.9790001,
+                "resetTime": reset,
+            },
+        ]
+        result = pu._gemini_usage_from_live_buckets(buckets, email=None)
+        assert result is not None
+        assert len(result.windows) == 1
+        assert result.windows[0]["name"] == "gemini-catalog-model-a +2 more"
+
+    def test_resettime_subminute_drift_still_collapses_to_one_row(self):
+        """#551: the RPC reports the same real pooled tier with a
+        sub-minute/formatting difference in `resetTime` across catalog
+        entries (e.g. differing seconds on an otherwise identical reset
+        instant) -- an exact-string key treated those as distinct tiers
+        too."""
+        buckets = [
+            {
+                "modelId": "gemini-catalog-model-a",
+                "remainingFraction": 0.4,
+                "resetTime": "2026-09-06T00:00:00Z",
+            },
+            {
+                "modelId": "gemini-catalog-model-b",
+                "remainingFraction": 0.4,
+                "resetTime": "2026-09-06T00:00:47Z",
+            },
+        ]
+        result = pu._gemini_usage_from_live_buckets(buckets, email=None)
+        assert result is not None
+        assert len(result.windows) == 1
+        assert result.windows[0]["name"] == "gemini-catalog-model-a +1 more"
+
 
 # ── opencode adapter ──────────────────────────────────────────────────────
 
