@@ -732,6 +732,18 @@ STUCK_LIVE_CHILD_GRACE_S = int(os.environ.get("TAKKUB_STUCK_LIVE_CHILD_GRACE_S",
 # A silent long-running script is normal, so this reports the situation once per
 # episode rather than on every watchdog tick.
 STUCK_LIVE_CHILD_NOTICE_COOLDOWN_S = 15 * 60
+# #537: how long done()'s auto-close defers when the pane still has a real
+# (non-scaffolding) subprocess running underneath it, instead of killing it
+# immediately. Before this, `_warn_if_live_children` only *announced* the kill
+# a moment ahead of `terminate()` — no actual delay — so a still-running
+# evidence-collection script (or any other legitimate in-flight work) was
+# killed mid-write on the very report that warned about it. Bounded the same
+# way STUCK_LIVE_CHILD_GRACE_S is: a child that is itself hung must not be
+# able to pin the pane open forever, so past this the close proceeds anyway
+# (with the same kill+warn as before).
+DONE_CLOSE_LIVE_CHILD_GRACE_S = int(os.environ.get("TAKKUB_DONE_CLOSE_LIVE_CHILD_GRACE_S", 15 * 60))
+# How often to recheck whether the deferred children have finished.
+DONE_CLOSE_LIVE_CHILD_POLL_MS = 5_000
 
 # TTY prompt block detection (issue #54). When a pane's subprocess is waiting
 # for interactive input (y/N, passphrase, "press any key"), close→respawn won't
@@ -6102,10 +6114,53 @@ class Orchestrator(
         pane.set_state("done", note=note[:80] if note else "done")
         _done_sess = pane.session
 
-        def _close_if_same_session() -> None:
+        def _close_if_same_session(_deferred_since: float | None = None) -> None:
             _pp = self._project_panes(project_ns).get(from_role)
-            if _pp is not None and _pp.session is _done_sess and _pp.state == "done":
-                self.close(from_role, project=project_ns)
+            if _pp is None or _pp.session is not _done_sess or _pp.state != "done":
+                return
+            # #537: a pane that reports done() can still have a real
+            # subprocess mid-write underneath it (e.g. an evidence-collection
+            # script) — closing on the fixed 2.5s timer regardless killed it
+            # with only an after-the-fact warning. Defer the close (bounded by
+            # DONE_CLOSE_LIVE_CHILD_GRACE_S) while such work is still visible,
+            # polling instead of blocking so the Qt event loop stays free.
+            names = self._live_non_scaffolding_children(project_ns, from_role, _pp.session)
+            if names:
+                now = time.time()
+                since = _deferred_since if _deferred_since is not None else now
+                deferred_for = now - since
+                if deferred_for < DONE_CLOSE_LIVE_CHILD_GRACE_S:
+                    if _deferred_since is None:
+                        _log_event(
+                            "done_close_deferred_live_children",
+                            role=from_role,
+                            project=project_ns,
+                            count=len(names),
+                            children=names[:10],
+                        )
+                        self._notify_lead(
+                            project_ns,
+                            f"⏳ [{from_role} done] ยังมี {len(names)} subprocess ทำงานอยู่ใต้ "
+                            f"pane ({', '.join(names[:5])}) — เลื่อนการปิด pane ออกไปจนกว่าจะ"
+                            f"เสร็จ (สูงสุด {int(DONE_CLOSE_LIVE_CHILD_GRACE_S / 60)} นาที) แทนที่"
+                            "จะฆ่าทิ้งทันที",
+                            from_role=from_role,
+                            note="done_close_deferred",
+                            kind="done-close-deferred",
+                        )
+                    QTimer.singleShot(
+                        DONE_CLOSE_LIVE_CHILD_POLL_MS,
+                        lambda: _close_if_same_session(since),
+                    )
+                    return
+                _log_event(
+                    "done_close_live_children_grace_expired",
+                    role=from_role,
+                    project=project_ns,
+                    deferred_for_s=int(deferred_for),
+                    children=names[:10],
+                )
+            self.close(from_role, project=project_ns)
 
         QTimer.singleShot(2_500, _close_if_same_session)
         _log_event(
