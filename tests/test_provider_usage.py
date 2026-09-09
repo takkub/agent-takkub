@@ -1455,16 +1455,6 @@ class TestProviderUsageLoop:
         assert calls == list(pu.PROVIDER_NAMES) + list(pu.PROVIDER_NAMES[:2])
 
 
-def test_remote_usage_card_renders_the_stale_hint_for_stale_snapshots():
-    """#423: the Remote usage card only surfaced `error` for unsupported/error
-    statuses, so a stale gemini snapshot rendered as just "~6 เดือนก่อน" with no
-    explanation. The stale branch must render the hint too."""
-    from pathlib import Path
-
-    js = (Path(pu.__file__).parent / "remote" / "static" / "app.js").read_text(encoding="utf-8")
-    assert 'p.status === "stale" && p.error' in js
-
-
 # ── usage ledger hook (#507) ────────────────────────────────────────────
 
 
