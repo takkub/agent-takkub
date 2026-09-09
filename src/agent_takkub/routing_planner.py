@@ -600,6 +600,40 @@ def classify_precondition_mismatch(note: str) -> tuple[bool, str]:
     return False, ""
 
 
+# #538: a BLOCKED/PARTIAL-shaped report whose body names a concrete file or
+# function as the cause is a code bug, not something missing from outside the
+# codebase. Field case: qa reported a parser bug ("extractLauncherTargetUrl
+# ถอด URL ไม่ได้") that also happened to phrase the symptom near an
+# absence-cue word, so `classify_blocked` fired and the cockpit rendered
+# "ไม่มี role ไหนแก้ได้" over a report that named the exact function to fix.
+# Callers must check this BEFORE `classify_blocked` — and honor it even when
+# a pane explicitly reported `--blocked` — so a named code root cause never
+# gets buried under "wait for a human to hand over a secret".
+_CODE_REF_RE = re.compile(
+    r"\b[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rb|java|kt|cs|cpp|cc|h|hpp|"
+    r"php|swift|rs|vue)\b"
+    r"|\b[a-zA-Z_][a-zA-Z0-9_]*\(\)"
+    r"|\b[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\b"
+    r"|\b[A-Z][a-z0-9]+[A-Z][a-zA-Z0-9]*\b"
+)
+
+
+def classify_code_root_cause(note: str) -> tuple[bool, str]:
+    """True when *note* names a concrete file or function as the cause.
+
+    Returns ``(is_code_bug, what_it_named)`` — the first matched token, e.g.
+    ``"extractLauncherTargetUrl"`` or ``"parser.ts"``. See the module comment
+    above ``_CODE_REF_RE`` for the field case (#538); callers must check this
+    before treating a BLOCKED-shaped note as a missing-credential report."""
+    s = (note or "").strip()
+    if not s:
+        return False, ""
+    match = _CODE_REF_RE.search(s)
+    if match:
+        return True, match.group(0)
+    return False, ""
+
+
 def classify_failure(note: str) -> tuple[str | None, str]:
     """Map a verify-fail note to the role a fix loop should target (Tier 2c).
 

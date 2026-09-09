@@ -5231,14 +5231,24 @@ class Orchestrator(
             is_mismatch, mismatch_what = False, ""
         if is_mismatch:
             return Orchestrator._build_precondition_mismatch_handoff(from_role, body, mismatch_what)
+        # #538: a note naming a concrete file/function is a code bug even when
+        # it also matches an absence-cue phrase elsewhere — never let it fall
+        # into the "no role can fix this" credential template.
         try:
-            from .routing_planner import classify_blocked
+            from .routing_planner import classify_code_root_cause
 
-            is_blocked, what = classify_blocked(body)
+            is_code_bug, _code_what = classify_code_root_cause(body)
         except Exception:
-            is_blocked, what = False, ""
-        if is_blocked:
-            return Orchestrator._build_blocked_handoff(from_role, body, what)
+            is_code_bug, _code_what = False, ""
+        if not is_code_bug:
+            try:
+                from .routing_planner import classify_blocked
+
+                is_blocked, what = classify_blocked(body)
+            except Exception:
+                is_blocked, what = False, ""
+            if is_blocked:
+                return Orchestrator._build_blocked_handoff(from_role, body, what)
         # Tier 2c: signature-based suggestion for which role the fix loop
         # should target. A suggestion only — the Lead proposes, user confirms.
         suggest = ""
@@ -5819,16 +5829,32 @@ class Orchestrator(
                 # wrong tenant/env/target) before falling back to the
                 # generic "no role can fix this, wait for a human" wording —
                 # a mismatch IS fixable by the Lead, immediately.
-                from .routing_planner import classify_blocked, classify_precondition_mismatch
+                from .routing_planner import (
+                    classify_blocked,
+                    classify_code_root_cause,
+                    classify_precondition_mismatch,
+                )
 
                 full_note = f"{ref_tag}{note}".strip()
                 is_mismatch, mismatch_what = classify_precondition_mismatch(note)
+                is_code_bug, _code_what = classify_code_root_cause(note)
                 if is_mismatch:
                     notice = self._build_precondition_mismatch_handoff(
                         from_role, full_note, mismatch_what
                     )
                     _log_event(
                         "verify_precondition_mismatch",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                    )
+                elif is_code_bug:
+                    # #538: the pane called `--blocked`, but the note names a
+                    # concrete file/function — treat it as a real fail so it
+                    # gets routed to a fixable role, not "wait for a human".
+                    notice = self._build_verify_fail_handoff(from_role, full_note)
+                    _log_event(
+                        "verify_code_root_cause_despite_blocked_flag",
                         project=project_ns,
                         role=from_role,
                         note=(note or "")[:200],
