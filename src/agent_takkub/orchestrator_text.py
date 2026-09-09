@@ -982,6 +982,40 @@ def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
     return project_root is not None and (target == project_root or project_root in target.parents)
 
 
+def _decision_note_project_label(project: str, cwd: str | None, role_name: str) -> str:
+    """#546: the project label used for `_save_decision_note`'s on-disk
+    session file, vault mirror, and knowledge-base distillation — NOT the
+    pane's own runtime `project_ns` (pane registry / resource governor /
+    wait / digest all keep using that unchanged; this only affects where
+    the DONE report gets filed for later discovery).
+
+    A role assigned with an explicit ``--cwd`` that resolves OUTSIDE every
+    root `project` has registered (a genuine cross-repo ad-hoc task, e.g.
+    `assign --cwd <unrelated-repo> ...` with no matching `--project`) used
+    to file its session note under `project` anyway — searching later by
+    the repo actually touched found nothing (real incident: a backend/
+    devops task done against `weid_gateway_api` filed under the Lead's
+    then-active project `customer_centric_web`). Falls back to `project`
+    unchanged whenever `cwd` is missing/unresolvable or already inside one
+    of `project`'s configured paths — the common, correctly-attributed
+    case — so this only ever diverges for the genuinely cross-repo case.
+    """
+    if not cwd:
+        return project
+    try:
+        if _cwd_within_project(cwd, project, role_name):
+            return project
+    except Exception:
+        return project
+    try:
+        from .config import slugify_project_name
+
+        label = slugify_project_name(pathlib.Path(cwd).resolve().name)
+    except Exception:
+        return project
+    return label or project
+
+
 def _resolve_pane_pretrust_root(cwd: str, project: str) -> pathlib.Path | None:
     """The narrowest project-registered root that *cwd* resolves under, for
     pre-trusting a claude-backed pane's spawn cwd (#476 — the generalization

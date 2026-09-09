@@ -70,6 +70,13 @@ class DigestFacts:
     # ops/infra action (deploy, migrate, restart a service, ...) whose real
     # effect lives outside the repo's working tree — see `_files_bit`.
     ops_task: bool = False
+    # #546: true when `uncommitted` is provably NOT this pane's own doing —
+    # every currently-dirty path on the shared tree already predates this
+    # assignment (the assign-time dirty snapshot vs now diff is empty), so
+    # the count is leftover from another pane/Lead sharing the same tree.
+    # Only ever computed for a shared-tree pane (worktree isolation has its
+    # own dirty tree, nothing to attribute to a sibling); see `_uncommitted_bit`.
+    uncommitted_unrelated: bool = False
 
 
 # #470: a "0 files touched" digest line reads as "nothing happened" — true
@@ -157,6 +164,24 @@ def _files_bit(facts: DigestFacts) -> str:
     return f"ไฟล์ที่แตะ:{facts.files_touched}{dirs}{note}"
 
 
+def _uncommitted_bit(facts: DigestFacts) -> str | None:
+    if facts.uncommitted is None:
+        return None
+    if not facts.uncommitted:
+        if facts.crlf_phantom:
+            return "0 ไฟล์ค้าง commit (มี CRLF phantom เฉยๆ)"
+        return "0 ไฟล์ค้าง commit"
+    if facts.uncommitted_unrelated:
+        # #546: a real incident — devops ops task, digest showed "⚠3 ไฟล์
+        # ยังไม่ commit" and read as this task leaving work uncommitted, when
+        # the 3 files were dirty on the shared tree BEFORE this assignment
+        # even started (another pane/Lead's own in-progress edits). No ⚠
+        # here — that glyph means "this pane's own doing", which is exactly
+        # what `uncommitted_unrelated` disproves.
+        return f"{facts.uncommitted} ไฟล์ยังไม่ commit (dirty ที่มีอยู่ก่อน assign แล้ว — ไม่ใช่ของงานนี้)"
+    return f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit"
+
+
 def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     """Render one digest bullet as a fact table, never a prose sentence.
 
@@ -174,13 +199,9 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
         bits.append(f"branch:{facts.branch}")
     if facts.commits_ahead is not None:
         bits.append(f"{facts.commits_ahead} commit ahead")
-    if facts.uncommitted is not None:
-        if facts.uncommitted:
-            bits.append(f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit")
-        elif facts.crlf_phantom:
-            bits.append("0 ไฟล์ค้าง commit (มี CRLF phantom เฉยๆ)")
-        else:
-            bits.append("0 ไฟล์ค้าง commit")
+    uncommitted_bit = _uncommitted_bit(facts)
+    if uncommitted_bit is not None:
+        bits.append(uncommitted_bit)
     if facts.pushed and facts.branch:
         bits.append(f"pushed:origin/{facts.branch}")
     bits.append(_merge_bit(facts))

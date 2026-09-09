@@ -136,6 +136,35 @@ class TestOpsTaskZeroFiles:
         assert "ไฟล์ที่แตะ:2 (infra)" in line
 
 
+class TestUncommittedUnrelated:
+    """#546: a real incident — an ops/devops report on a shared tree showed
+    "⚠3 ไฟล์ยังไม่ commit" for files dirtied by a SIBLING pane/Lead before
+    this assignment even started, reading as if this task left work
+    uncommitted. `uncommitted_unrelated` is set by the caller
+    (`Orchestrator._build_digest_facts`) when the assign-time dirty
+    snapshot vs current diff is empty — every dirty path predates this
+    task."""
+
+    def test_unrelated_dirty_drops_the_warning_glyph(self):
+        facts = DigestFacts(role="devops", uncommitted=3, uncommitted_unrelated=True)
+        line = format_digest_fact_line(facts)
+        assert "⚠" not in line
+        assert "3 ไฟล์ยังไม่ commit" in line
+        assert "dirty ที่มีอยู่ก่อน assign แล้ว" in line
+
+    def test_own_dirty_keeps_the_warning_glyph(self):
+        facts = DigestFacts(role="devops", uncommitted=3, uncommitted_unrelated=False)
+        line = format_digest_fact_line(facts)
+        assert "⚠3 ไฟล์ยังไม่ commit" in line
+        assert "dirty ที่มีอยู่ก่อน assign แล้ว" not in line
+
+    def test_zero_uncommitted_ignores_the_unrelated_flag(self):
+        facts = DigestFacts(role="devops", uncommitted=0, uncommitted_unrelated=True)
+        line = format_digest_fact_line(facts)
+        assert "0 ไฟล์ค้าง commit" in line
+        assert "ก่อน assign" not in line
+
+
 class TestDetectOpsTask:
     def test_devops_role_is_always_ops(self):
         assert detect_ops_task("devops", "") is True

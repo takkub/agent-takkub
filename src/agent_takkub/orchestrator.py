@@ -94,6 +94,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _append_worktree_hint,
     _build_transcript_path,
     _cwd_within_project,
+    _decision_note_project_label,
     _describe_valid_project_cwds,
     _enter_delay_ms,
     _exit_key,
@@ -5463,6 +5464,10 @@ class Orchestrator(
             report_path=report_path,
             headline=headline,
             ops_task=ops_task,
+            # #546: every currently-dirty shared-tree path already predates
+            # this assignment (the assign-time snapshot diff is empty) —
+            # the count is leftover from a sibling pane/Lead, not this task.
+            uncommitted_unrelated=bool(uncommitted) and not changed_uncommitted,
         )
         return facts, None
 
@@ -5688,8 +5693,15 @@ class Orchestrator(
         except Exception:
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
         transcript_path = getattr(pane, "_transcript_path", None)
+        # #546: file the decision note under the cwd's own repo when this
+        # role was assigned a cross-repo --cwd outside project_ns's
+        # registered roots — pane registry / wait / digest keep using
+        # project_ns unchanged, only discoverability of the note itself.
+        note_project = _decision_note_project_label(
+            project_ns, getattr(pane, "_session_cwd", None), from_role
+        )
         session_md_path = self._save_decision_note(
-            project_ns, from_role, note, now=now, transcript_path=transcript_path, failed=failed
+            note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
         )
 
         # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
@@ -11614,6 +11626,22 @@ class Orchestrator(
     # re-stamps normally.
     _LEAD_INJECT_GRACE_S = 5.0
 
+    # #548: the tight 5s grace above assumes the Lead pane's own redraw
+    # follows the injection quickly — true for a cursor-position reply to a
+    # pasted digest, false when Lead's own CLI is busy composing a reply to
+    # that injected notice/spawn confirmation for a while (a Bash tool call
+    # with no intermediate PTY output routinely ran 60-140s in the reported
+    # incident) before its eventual redraw triggers a terminal query/reply.
+    # By then both `_LEAD_INJECT_GRACE_S` windows are long stale, so the
+    # reply-shaped chunk fell through to being stamped as genuine
+    # "user_input" — 3 spurious `takkub wait` interrupts in one session with
+    # nothing actually typed, matching the #393/#428/#449/#498 family this
+    # closes another gap in. Bounded (not indefinite) so a wait sitting
+    # through a long owner silence still resumes normal interrupt behaviour
+    # eventually; see the busy-prompt check below for the other half of the
+    # guard.
+    _LEAD_BUSY_REPLY_GRACE_S = 300.0
+
     def _is_post_inject_terminal_reply(self, project_ns: str, pane, data: bytes) -> bool:
         """(#498) *pane* — not just its `.session` — so a reply-shaped chunk
         can also be recognised via `pane._last_output_ts` (see below), not
@@ -11642,7 +11670,30 @@ class Orchestrator(
         # tolerance as above (a stray arrow-key press loses nothing but a
         # wait-interrupt; the very next keystroke re-stamps normally).
         last_output = float(getattr(pane, "_last_output_ts", 0.0) or 0.0)
-        return last_output > last_user and (time.time() - last_output) <= self._LEAD_INJECT_GRACE_S
+        if last_output > last_user and (time.time() - last_output) <= self._LEAD_INJECT_GRACE_S:
+            return True
+        # #548: neither grace window above fires once Lead's CLI has been
+        # silently busy responding to the injection for longer than 5s (no
+        # PTY output at all in that stretch — a Bash tool call with no
+        # streamed output, e.g. `takkub send`/`takkub wait` themselves).
+        # Widen to `_LEAD_BUSY_REPLY_GRACE_S` but ONLY while the pane is
+        # confirmed NOT at its own ready prompt — i.e. still working on
+        # whatever the injected write kicked off — so this never suppresses
+        # an arrow-key/escape chunk arriving once Lead has genuinely gone
+        # idle again (the case a real owner interrupt needs to still fire
+        # for). `is_at_ready_prompt` is best-effort per #440's existing
+        # pattern: any exception falls through to "not chrome".
+        newest_engine_signal = max(last_write, last_output)
+        if (
+            newest_engine_signal > last_user
+            and (time.time() - newest_engine_signal) <= self._LEAD_BUSY_REPLY_GRACE_S
+        ):
+            try:
+                if pane.session.is_at_ready_prompt() is False:
+                    return True
+            except Exception:
+                pass
+        return False
 
     @classmethod
     def _is_terminal_auto_reply_chunk(cls, data: bytes) -> bool:
