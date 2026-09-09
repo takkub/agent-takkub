@@ -93,10 +93,12 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _append_verify_fail_hint,
     _append_worktree_hint,
     _build_transcript_path,
+    _clean_progress_line,
     _cwd_within_project,
     _describe_valid_project_cwds,
     _enter_delay_ms,
     _exit_key,
+    _extract_transcript_lines,
     _lead_model_override,
     _log_event,
     _looks_like_source_reference,
@@ -7873,6 +7875,42 @@ class Orchestrator(
                 paths.add(str(pathlib.Path(path).resolve()))
         return paths
 
+    def _find_latest_transcript_path(self, project_ns: str, role: str) -> pathlib.Path | None:
+        """Find the active or most-recent transcript path for `role` in `project_ns` (#541)."""
+        pane = self._project_panes(project_ns).get(role)
+        if pane is not None:
+            t_path = getattr(pane, "_transcript_path", None)
+            if t_path and pathlib.Path(str(t_path)).is_file():
+                return pathlib.Path(str(t_path))
+
+        sessions_root = RUNTIME_DIR / "sessions"
+        if not sessions_root.is_dir():
+            return None
+
+        candidates: list[pathlib.Path] = []
+        try:
+            for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+                if not day_dir.is_dir():
+                    continue
+                proj_dir = day_dir / project_ns
+                if not proj_dir.is_dir():
+                    continue
+                for f in sorted(proj_dir.iterdir(), reverse=True):
+                    if not f.is_file() or not f.name.endswith(".transcript.log"):
+                        continue
+                    prefix = f"{role}-"
+                    if f.name.startswith(prefix):
+                        candidates.append(f)
+                if candidates:
+                    break
+        except OSError:
+            pass
+
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+            return candidates[0]
+        return None
+
     def pane_status_report(
         self,
         project: str | None = None,
@@ -7913,44 +7951,51 @@ class Orchestrator(
 
             pane = self._project_panes(project_ns).get(role)
             transcript_tail = ""
+            transcript_path = None
+            exit_hint = ""
             if pane is not None:
                 transcript_path = getattr(pane, "_transcript_path", None)
-                if transcript_path:
-                    try:
-                        raw = _read_tail_bytes(
-                            pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES
-                        )
-                        lines = raw.decode("utf-8", errors="replace").splitlines()
-                        tail_lines = [ln for ln in lines if ln.strip()][-5:]
-                        tail_lines = [_ANSI.sub("", ln) for ln in tail_lines]
-                        transcript_tail = "\n".join(tail_lines)
-                    except OSError:
-                        pass
+            if not transcript_path or not pathlib.Path(str(transcript_path)).is_file():
+                finder = getattr(self, "_find_latest_transcript_path", None)
+                if finder is not None:
+                    transcript_path = finder(project_ns, role)
 
-                # #308: the transcript-file tail above is the last N raw
-                # rendered lines, which is dominated by whatever chrome sits
-                # at the BOTTOM of the screen — usually the composer/idle
-                # footer, even while a tool call is genuinely wedged higher
-                # up (agy's "? for shortcuts" stayed visible below "Running
-                # command..." the whole 13-minute #308 incident). When the
-                # LIVE screen shows a tool-running marker right now, surface
-                # that real line instead of the misleading empty-looking
-                # footer tail — cheap best-effort, never raises.
-                if pane.session is not None:
-                    try:
-                        from .provider_config import effective_provider_for
+            if transcript_path and pathlib.Path(str(transcript_path)).is_file():
+                try:
+                    raw = _read_tail_bytes(
+                        pathlib.Path(str(transcript_path)), _TRANSCRIPT_TAIL_BYTES
+                    )
+                    clean_lines = _extract_transcript_lines(raw, max_lines=5)
+                    transcript_tail = "\n".join(clean_lines)
+                    if state == "exited" or display_state == "exited":
+                        exit_hint = "\n".join(clean_lines[-3:])
+                except OSError:
+                    pass
 
-                        _provider = effective_provider_for(role, project=project_ns)
-                        _marker = pane.session.tool_running_marker(_provider)
-                        # Guard against a loosely-mocked session in tests —
-                        # same isinstance idiom as _check_stuck_tool_panes.
-                        if isinstance(_marker, str) and _marker:
-                            for _ln in reversed(pane.session.display_lines()):
-                                if _marker in _ln.lower():
-                                    transcript_tail = _ln.strip()
-                                    break
-                    except Exception:
-                        pass
+            # #308: the transcript-file tail above is the last N raw
+            # rendered lines, which is dominated by whatever chrome sits
+            # at the BOTTOM of the screen — usually the composer/idle
+            # footer, even while a tool call is genuinely wedged higher
+            # up (agy's "? for shortcuts" stayed visible below "Running
+            # command..." the whole 13-minute #308 incident). When the
+            # LIVE screen shows a tool-running marker right now, surface
+            # that real line instead of the misleading empty-looking
+            # footer tail — cheap best-effort, never raises.
+            if pane is not None and pane.session is not None:
+                try:
+                    from .provider_config import effective_provider_for
+
+                    _provider = effective_provider_for(role, project=project_ns)
+                    _marker = pane.session.tool_running_marker(_provider)
+                    # Guard against a loosely-mocked session in tests —
+                    # same isinstance idiom as _check_stuck_tool_panes.
+                    if isinstance(_marker, str) and _marker:
+                        for _ln in reversed(pane.session.display_lines()):
+                            if _marker in _ln.lower():
+                                transcript_tail = _clean_progress_line(_ln)
+                                break
+                except Exception:
+                    pass
 
             last_screenshot = ""
             if _split_shard(role)[0] in ("qa", "critic", "designer"):
@@ -7988,6 +8033,7 @@ class Orchestrator(
             quota_resets_at = info.get("quota_resets_at") or 0.0
             quota_resets_human = _human_duration(quota_resets_at - now) if quota_resets_at else ""
 
+            is_exited = state == "exited" or display_state == "exited"
             panes_out[role] = {
                 "state": state,
                 "display_state": display_state,
@@ -8002,6 +8048,10 @@ class Orchestrator(
                 "quota_marker": info.get("quota_marker") or "",
                 "model": info.get("model"),
                 "transcript_tail": transcript_tail,
+                "transcript_path": str(transcript_path)
+                if (transcript_path and is_exited)
+                else None,
+                "exit_hint": exit_hint if is_exited else "",
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
                 "resource_wait_message": info.get("resource_wait_message"),
@@ -8009,6 +8059,30 @@ class Orchestrator(
 
         any_stalled = any(info["stall_minutes"] is not None for info in panes_out.values())
         return {"panes": panes_out, "any_stalled": any_stalled, "project": project_ns}
+
+    def tail_role_transcript(
+        self,
+        role: str,
+        project: str | None = None,
+        lines: int = 20,
+    ) -> tuple[bool, str, dict]:
+        """Return the recent transcript output for `role` (#541).
+
+        Works for live and exited panes alike by resolving the active
+        or most-recent `.transcript.log` under `runtime/sessions/`.
+        """
+        project_ns = self._resolve_project(project)
+        t_path = self._find_latest_transcript_path(project_ns, role)
+        if t_path is None or not t_path.is_file():
+            return False, f"no transcript found for role {role!r} in project {project_ns!r}", {}
+
+        try:
+            read_bytes = max(65536, lines * 4096)
+            raw = _read_tail_bytes(t_path, read_bytes)
+            clean_lines = _extract_transcript_lines(raw, max_lines=lines)
+            return True, "ok", {"path": str(t_path), "lines": clean_lines}
+        except OSError as exc:
+            return False, f"failed to read transcript for {role!r}: {exc}", {}
 
     def harvest_info(
         self,

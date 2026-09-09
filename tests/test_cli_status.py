@@ -223,3 +223,162 @@ class TestSinceFutureTimeWraps:
         assert since_ts_used <= time.time(), (
             "since_ts must be in the past when HH:MM resolves to a future time"
         )
+
+
+class TestStatusExitedPane:
+    """Issue #541 & #542: status shows transcript path and exit hint for exited panes, and cleans spinner progress."""
+
+    def test_status_shows_transcript_and_exit_hint_for_exited_pane(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        def _fake(payload: dict) -> dict:
+            return {
+                "ok": True,
+                "msg": "status report",
+                "report": {
+                    "project": "myproj",
+                    "any_stalled": False,
+                    "panes": {
+                        "codex": {
+                            "state": "exited",
+                            "display_state": "exited",
+                            "stall_minutes": None,
+                            "last_progress_ts": 0.0,
+                            "last_progress_human": "5m ago",
+                            "last_progress_abs": "10:05:12",
+                            "transcript_path": "C:/runtime/sessions/2026-09-09/myproj/codex-100512.transcript.log",
+                            "exit_hint": "unauthorized error\nprocess exited with code 1",
+                            "transcript_tail": "unauthorized error\nprocess exited with code 1",
+                        }
+                    },
+                },
+            }
+
+        monkeypatch.setattr(cli, "_request", _fake)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        rc = cli.main(["status"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "[codex] exited" in out
+        assert (
+            "transcript: C:/runtime/sessions/2026-09-09/myproj/codex-100512.transcript.log" in out
+        )
+        assert "exit hint:" in out
+        assert "process exited with code 1" in out
+
+    def test_status_cleans_spinner_progress_line(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        def _fake(payload: dict) -> dict:
+            return {
+                "ok": True,
+                "msg": "status report",
+                "report": {
+                    "project": "myproj",
+                    "any_stalled": False,
+                    "panes": {
+                        "codex": {
+                            "state": "working",
+                            "display_state": "working",
+                            "stall_minutes": None,
+                            "last_progress_ts": 0.0,
+                            "last_progress_human": "1s ago",
+                            "last_progress_abs": "10:11:05",
+                            "transcript_tail": "W  Wo •Wor  •Work  •Worki  Workin •Working  •Working 7 •Working  •Working orking •",
+                        }
+                    },
+                },
+            }
+
+        monkeypatch.setattr(cli, "_request", _fake)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        rc = cli.main(["status"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "•Working 7" in out
+        # progressive fragments should not be printed as raw pollution
+        assert "•Worki " not in out
+        assert "•Wor " not in out
+        assert " Workin " not in out
+
+
+class TestTailCommand:
+    """Issue #541: takkub tail --role <r> [--lines N]."""
+
+    def test_tail_sends_default_20_lines(self, fake_request: list[dict]) -> None:
+        cli.main(["tail", "--role", "codex"])
+        payload = fake_request[-1]
+        assert payload["cmd"] == "tail"
+        assert payload["role"] == "codex"
+        assert payload["lines"] == 20
+
+    def test_tail_sends_custom_lines(self, fake_request: list[dict]) -> None:
+        cli.main(["tail", "--role", "qa", "--lines", "50"])
+        payload = fake_request[-1]
+        assert payload["cmd"] == "tail"
+        assert payload["role"] == "qa"
+        assert payload["lines"] == 50
+
+    def test_tail_prints_path_and_lines(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        def _fake(payload: dict) -> dict:
+            return {
+                "ok": True,
+                "msg": "ok",
+                "path": "C:/sessions/codex-120000.transcript.log",
+                "lines": ["line 1", "line 2", "error: died"],
+            }
+
+        monkeypatch.setattr(cli, "_request", _fake)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        rc = cli.main(["tail", "--role", "codex"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "[codex] C:/sessions/codex-120000.transcript.log" in out
+        assert "line 1" in out
+        assert "error: died" in out
+
+    def test_tail_role_gate_blocks_teammate(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "frontend")
+        rc = cli.main(["tail", "--role", "backend"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "only lead can run" in err
+
+    def test_tail_role_gate_allows_lead(
+        self, monkeypatch: pytest.MonkeyPatch, fake_request: list[dict]
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        rc = cli.main(["tail", "--role", "backend"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "tail"
+
+
+class TestCliServerTail:
+    """Issue #541: CliServer tail dispatch."""
+
+    def test_tail_dispatch_success(self, srv_sock) -> None:
+        srv, sock, mock_orch = srv_sock
+        mock_orch.tail_role_transcript.return_value = (
+            True,
+            "ok",
+            {"path": "/p/t.log", "lines": ["out 1", "out 2"]},
+        )
+        req = {"cmd": "tail", "role": "codex", "lines": 10, "from": "lead", "auth": "tok"}
+        srv._dispatch(sock, req)
+        resp = sock.last_response()
+        assert resp["ok"] is True
+        assert resp["path"] == "/p/t.log"
+        assert resp["lines"] == ["out 1", "out 2"]
+        mock_orch.tail_role_transcript.assert_called_once_with("codex", project=None, lines=10)
+
+    def test_tail_dispatch_rejects_teammate(self, srv_sock) -> None:
+        srv, sock, _mock_orch = srv_sock
+        req = {"cmd": "tail", "role": "codex", "from": "backend"}
+        srv._dispatch(sock, req)
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "role gate" in resp["msg"]
