@@ -2315,7 +2315,7 @@ class Orchestrator(
         if state.get("requires_commit") and not state.get("worktree") and state.get("cwd"):
             self._check_uncommitted_async(project_ns, role_name, state["cwd"])
         if state.get("worktree"):
-            self._finalize_worktree(project_ns, role_name, state["worktree"])
+            self._finalize_worktree(project_ns, role_name, state["worktree"], note=note)
         if state.get("auto_chain") and not any(
             p == project_ns and other.get("auto_chain") for (p, _role), other in pending.items()
         ):
@@ -3463,6 +3463,7 @@ class Orchestrator(
         worktree: dict,
         precomputed: dict | None = None,
         skip_proposal_notice: bool = False,
+        note: str = "",
     ) -> None:
         """Wrap up an isolated pane's worktree when it reports done/close.
 
@@ -3500,6 +3501,12 @@ class Orchestrator(
         `_notify_lead(kind="worktree-proposal")`. False (default) for every
         other caller (`close()`, subagent-done) — those never had a digest
         notice to fold into, so this keeps sending its own.
+
+        *note* (#536): the pane's own `done()` free-text report, if any —
+        threaded through to `auto_commit_snapshot` so an auto-committed
+        snapshot's headline reflects what the pane actually did instead of
+        a generic "done snapshot" indistinguishable from every other one.
+        Empty for callers with no done-note to offer (`close()`).
         """
         try:
             from .worktree_manager import WorktreeInfo, WorktreeManager, build_merge_proposal
@@ -3518,7 +3525,7 @@ class Orchestrator(
                 dirty_before = (
                     precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
                 )
-                if dirty_before and mgr.auto_commit_snapshot(info, from_role):
+                if dirty_before and mgr.auto_commit_snapshot(info, from_role, summary=note):
                     _log_event(
                         "worktree_auto_commit_snapshot",
                         role=from_role,
@@ -3589,6 +3596,33 @@ class Orchestrator(
                     )
                 return
             dirty = precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
+            if not dirty:
+                # #536: `commit_count` can legitimately read 0 here even
+                # though real work happened and Lead already merged it — see
+                # `WorktreeManager.branch_merged_into_base`'s docstring for
+                # the `rediscover_worktree` mechanism that causes this. Only
+                # even ask the question when HEAD has moved past the
+                # recorded base — a truly virgin worktree (HEAD == base_sha,
+                # #161's "forgot to commit" case) must keep alarming exactly
+                # as before.
+                head_sha = mgr.head_sha(info.path)
+                if head_sha and head_sha != info.base_sha:
+                    if mgr.branch_merged_into_base(info.git_root, info.branch):
+                        _log_event(
+                            "worktree_already_merged_no_alarm",
+                            role=from_role,
+                            project=project_ns,
+                            branch=info.branch,
+                        )
+                        self._notify_lead(
+                            project_ns,
+                            f"✅ [{from_role}] worktree `{info.branch}` merge เข้า base ไปแล้ว — "
+                            f"ไม่มีงานค้าง เก็บ checkout ไว้เผื่อใช้ `takkub worktree clean` ลบทีหลัง",
+                            from_role=from_role,
+                            note="",
+                            kind="worktree-already-merged",
+                        )
+                        return
             _log_event(
                 "worktree_no_commit_kept",
                 role=from_role,
@@ -6057,6 +6091,7 @@ class Orchestrator(
                 had_worktree,
                 precomputed=_worktree_digest_precomputed,
                 skip_proposal_notice=merge_folded_into_notice,
+                note=note,
             )
         else:
             # graft code-graph refresh (debounced): the pane wrote directly

@@ -459,6 +459,89 @@ class TestRediscoverWorktree:
         assert WorktreeManager(r).rediscover_worktree("/repo") is None
 
 
+# ── branch_merged_into_base — #536 false "no commit" alarm ──────────────────
+
+
+class TestBranchMergedIntoBase:
+    def test_true_when_branch_is_ancestor(self):
+        r = FakeRunner([(["merge-base", "--is-ancestor"], _ok())])
+        assert WorktreeManager(r).branch_merged_into_base("/repo", "wt/x-1") is True
+
+    def test_false_when_branch_is_not_ancestor(self):
+        r = FakeRunner([(["merge-base", "--is-ancestor"], _fail("", 1))])
+        assert WorktreeManager(r).branch_merged_into_base("/repo", "wt/x-1") is False
+
+    def test_none_when_probe_cannot_be_verified(self):
+        # exit 128 (bad ref) must never be read as "not merged" — unknown,
+        # so the caller's alarm stays up rather than being silently waived.
+        r = FakeRunner([(["merge-base", "--is-ancestor"], _fail("bad revision", 128))])
+        assert WorktreeManager(r).branch_merged_into_base("/repo", "wt/x-1") is None
+
+
+# ── auto_commit_snapshot — #525 self-heal, #536 real-summary headline ───────
+
+
+class TestAutoCommitSnapshot:
+    def _info(self) -> WorktreeInfo:
+        return WorktreeInfo(path="/wt/x-1", branch="wt/x-1", base_sha="abc", git_root="/repo")
+
+    def test_uses_generic_message_when_summary_empty(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
+                (["add", "-A"], _ok()),
+                (["commit", "-m"], _ok()),
+            ]
+        )
+        assert WorktreeManager(r).auto_commit_snapshot(self._info(), "backend") is True
+        commit_call = next(c for c in r.calls if "commit" in c)
+        assert commit_call[commit_call.index("-m") + 1] == "wip: backend done snapshot"
+
+    def test_uses_first_line_of_summary_as_headline(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
+                (["add", "-A"], _ok()),
+                (["commit", "-m"], _ok()),
+            ]
+        )
+        WorktreeManager(r).auto_commit_snapshot(
+            self._info(), "backend", summary="implemented the retry queue\nmore detail below"
+        )
+        commit_call = next(c for c in r.calls if "commit" in c)
+        assert (
+            commit_call[commit_call.index("-m") + 1] == "wip: backend: implemented the retry queue"
+        )
+
+    def test_blank_summary_falls_back_to_generic_message(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
+                (["add", "-A"], _ok()),
+                (["commit", "-m"], _ok()),
+            ]
+        )
+        WorktreeManager(r).auto_commit_snapshot(self._info(), "backend", summary="   \n  ")
+        commit_call = next(c for c in r.calls if "commit" in c)
+        assert commit_call[commit_call.index("-m") + 1] == "wip: backend done snapshot"
+
+    def test_long_summary_is_truncated(self):
+        r = FakeRunner(
+            [
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
+                (["add", "-A"], _ok()),
+                (["commit", "-m"], _ok()),
+            ]
+        )
+        long_summary = "x" * 100
+        WorktreeManager(r).auto_commit_snapshot(self._info(), "backend", summary=long_summary)
+        commit_call = next(c for c in r.calls if "commit" in c)
+        message = commit_call[commit_call.index("-m") + 1]
+        assert message.startswith("wip: backend: " + "x" * 71)
+        assert message.endswith("…")
+        assert len(message) < len("wip: backend: ") + 100
+
+
 # ── Generic (cwd-based) probes — #245 shared-tree digest facts ──────────────
 #
 # `commit_count`/`diffstat`/`uncommitted_count` above are now thin wrappers
@@ -849,6 +932,7 @@ class TestRemoveWorktreeTree:
             raise OSError("simulated: file in use")
 
         monkeypatch.setattr(wm.os, "rename", boom)
+        monkeypatch.setattr(wm.time, "sleep", lambda _s: None)  # #539 retry — skip real delay
 
         removed, msg, leftover = wm.remove_worktree_tree(wt)
         assert removed is False
@@ -1713,6 +1797,59 @@ class TestRmtreeLongPathSafeRetry:
         assert target.exists()
 
 
+class TestStageForDeleteRetry:
+    """#539 — a real incident: `takkub worktree merge` reported "merged ...
+    แต่ลบ worktree ไม่ได้" (WinError 32) on a single failed rename, keeping an
+    otherwise fully-merged worktree around only because a handle from the
+    just-exited pane hadn't cleared yet. `_stage_for_delete` retries the
+    rename with a short backoff before giving up — same shape as
+    `_rmtree_long_path_safe`'s existing retry (#411), one step earlier."""
+
+    def test_retries_and_succeeds_on_transient_lock(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+
+        calls = {"n": 0}
+        real_rename = wm.os.rename
+
+        def flaky_rename(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("mock: WinError 32 cannot access the file")
+            real_rename(src, dst)
+
+        monkeypatch.setattr(wm.os, "rename", flaky_rename)
+
+        staged, err = wm._stage_for_delete(wt)
+
+        assert err == ""
+        assert staged is not None and staged != wt
+        assert calls["n"] == 2
+        assert not wt.exists()
+        assert staged.exists()
+
+    def test_gives_up_after_exhausting_retries(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            wm.os,
+            "rename",
+            lambda src, dst: (_ for _ in ()).throw(OSError("permanently locked")),
+        )
+
+        staged, err = wm._stage_for_delete(wt)
+
+        assert staged is None
+        assert "permanently locked" in err
+        assert wt.exists()  # full-or-nothing guarantee still holds
+
+
 class TestMergeIsolated:
     def _runner(self, extra=None):
         rules = (extra or []) + [
@@ -1826,6 +1963,28 @@ class TestMergeIsolated:
         assert "live" in msg.lower()
         assert r.ran("merge", "--no-ff", "--no-edit", "wt/frontend-9")  # merge still happened
         assert not r.ran("worktree", "remove")  # but not the deletion
+
+    def test_disk_removal_failure_still_reports_merged_and_retryable(self, monkeypatch):
+        """#539: a real incident — the merge itself succeeds and the worktree
+        is left fully intact (guaranteed by `remove_worktree_tree`'s
+        full-or-nothing rename), but the on-disk delete fails (WinError 32).
+        The result must still report the merge as done, never touch the
+        branch/worktree metadata, and tell Lead this is retryable rather than
+        something to investigate."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        monkeypatch.setattr(
+            wm, "remove_worktree_tree", lambda p: (False, "ลบไม่ได้ ([WinError 32] ...)", "")
+        )
+        r = self._runner()
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok  # merge itself succeeded
+        assert "แต่ลบ worktree ไม่ได้" in msg
+        assert "WinError 32" in msg
+        assert "worktree clean" in msg  # tells Lead this self-heals, no need to investigate
+        assert not r.ran("worktree", "remove")  # never reached — branch/metadata untouched
+        assert not r.ran("branch", "-d")
 
 
 class TestAllCommitsLandedViaCherryPick:

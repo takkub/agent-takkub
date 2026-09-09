@@ -61,12 +61,20 @@ class _FakeMgr:
         uncommitted: int = 0,
         merge_conflicts: bool | None = False,
         auto_commit_result: bool = False,
+        head_sha: str | None = None,
+        already_merged: bool | None = False,
     ):
         self._info = info
         self._reason = reason
         self._commits = commits
         self._dirty = dirty
         self._remove = (remove_ok, remove_reason)
+        # #536: defaults to the recorded base_sha (no divergence) so
+        # existing "virgin worktree" tests are unaffected unless a test
+        # explicitly scripts HEAD having moved past it.
+        self._head_sha = head_sha if head_sha is not None else (info.base_sha if info else None)
+        self._already_merged = already_merged
+        self.last_auto_commit_summary: str | None = None
         self._uncommitted = uncommitted
         self._merge_conflicts = merge_conflicts
         self._auto_commit_result = auto_commit_result
@@ -109,17 +117,24 @@ class _FakeMgr:
     def diffstat(self, info):
         return " src/x.ts | 3 +++"
 
-    def auto_commit_snapshot(self, info, role):
+    def auto_commit_snapshot(self, info, role, summary=""):
         # #525: mirrors the real method — a successful snapshot commit moves
         # HEAD, so a subsequent `commit_count`/`real_dirty`/`real_uncommitted_
         # count` read must see the post-commit state, not the pre-commit
         # script the test set up.
         self.auto_commit_calls += 1
+        self.last_auto_commit_summary = summary
         if self._auto_commit_result:
             self._commits += 1
             self._dirty = False
             self._uncommitted = 0
         return self._auto_commit_result
+
+    def head_sha(self, path):
+        return self._head_sha
+
+    def branch_merged_into_base(self, git_root, branch):
+        return self._already_merged
 
     def safe_remove(self, info):
         self.safe_remove_calls += 1
@@ -432,6 +447,51 @@ class TestFinalizeWorktree:
         warn = orch._notify_lead.call_args[0][1]
         assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn  # kept, not lost
         assert "uncommitted changes" in warn
+
+    def test_no_commit_but_branch_already_merged_suppresses_false_alarm(self, orch, monkeypatch):
+        """#536: `commit_count` can legitimately read 0 even though real work
+        happened and Lead already merged it (`rediscover_worktree`'s
+        fallback `base_sha` collapses to the branch tip once it's merged).
+        HEAD having moved past the recorded `base_sha`, plus an ancestry
+        check confirming the branch IS merged, must produce a benign notice
+        instead of the "งานหายไปจริงหรือแค่ลืม commit" false alarm."""
+        fake = _FakeMgr(
+            info=_info(),
+            commits=0,
+            dirty=False,
+            head_sha="mergedsha123",
+            already_merged=True,
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "backend", _info().as_dict())
+        assert fake.safe_remove_calls == 0
+        msg = orch._notify_lead.call_args[0][1]
+        assert "merge เข้า base ไปแล้ว" in msg
+        assert "งานหายไปจริง" not in msg
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" not in msg
+
+    def test_virgin_worktree_still_alarms_even_when_trivially_an_ancestor(self, orch, monkeypatch):
+        """#161 regression guard: a worktree that never diverged from its
+        base (HEAD == base_sha) is ALWAYS a trivial ancestor of the current
+        base — the #536 fix must never use ancestry alone to suppress the
+        alarm; it must require HEAD to have actually moved first."""
+        fake = _FakeMgr(info=_info(), commits=0, dirty=False, already_merged=True)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "backend", _info().as_dict())
+        warn = orch._notify_lead.call_args[0][1]
+        assert "ไม่มี commit" in warn
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn
+
+    def test_done_note_becomes_auto_commit_snapshot_summary(self, orch, monkeypatch):
+        """#536: the pane's own done() note should reach `auto_commit_
+        snapshot` as the commit headline instead of the generic message."""
+        fake = _FakeMgr(info=_info(), commits=0, dirty=True, auto_commit_result=True)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "qa", _info().as_dict(), note="implemented the retry queue")
+        assert fake.last_auto_commit_summary == "implemented the retry queue"
 
     def test_finalize_never_raises(self, orch, monkeypatch):
         # A malformed worktree dict must not break done()/close().

@@ -77,6 +77,16 @@ _TRASH_PREFIX = ".trash-"
 _RMTREE_ATTEMPTS = 3
 _RMTREE_RETRY_DELAY_S = 0.2
 
+# `_stage_for_delete`'s rename retry/backoff for the SAME transient-lock class
+# as above, one step earlier (#539): a pane's own process (shell, watcher) can
+# still hold a handle open in the worktree for a brief moment after the pane
+# is told to close, and `os.rename` fails with WinError 32 ("cannot access the
+# file") the instant anything under the tree is still open. Increasing delays
+# (vs. the flat one above) give a slow-to-exit process more room on the later
+# attempts without stalling the common case, which clears on the first retry.
+_RENAME_ATTEMPTS = 3
+_RENAME_RETRY_DELAYS_S = (0.2, 0.5)
+
 
 @dataclass(frozen=True)
 class WorktreeInfo:
@@ -864,17 +874,29 @@ def _stage_for_delete(path: Path) -> tuple[Path | None, str]:
     either fully succeeds (the tracked *path* is now completely gone) or
     fully fails (nothing touched, *path* still fully intact). Returns
     ``(path, "")`` unchanged when there was nothing there to move.
+
+    Retries up to :data:`_RENAME_ATTEMPTS` times with a short, increasing
+    backoff (#539: a real incident — `takkub worktree merge` reported "merged
+    ... แต่ลบ worktree ไม่ได้" on a single WinError 32, leaving an otherwise
+    fully-merged worktree kept around only because a handle from the just-
+    exited pane hadn't cleared yet). Same shape as `_rmtree_long_path_safe`'s
+    existing retry (#411), one step earlier in the pipeline.
     """
     if not _path_exists_long_safe(path):
         return path, ""  # nothing to stage — already gone
     staged = path.parent / f".trash-{path.name}-{os.getpid()}"
     src = _win_long_path(path) if sys.platform == "win32" else str(path)
     dst = _win_long_path(staged) if sys.platform == "win32" else str(staged)
-    try:
-        os.rename(src, dst)
-    except OSError as exc:
-        return None, str(exc)
-    return staged, ""
+    last_err = ""
+    for attempt in range(_RENAME_ATTEMPTS):
+        try:
+            os.rename(src, dst)
+            return staged, ""
+        except OSError as exc:
+            last_err = str(exc)
+            if attempt < _RENAME_ATTEMPTS - 1:
+                time.sleep(_RENAME_RETRY_DELAYS_S[min(attempt, len(_RENAME_RETRY_DELAYS_S) - 1)])
+    return None, last_err
 
 
 def remove_worktree_tree(path: Path) -> tuple[bool, str, str]:
@@ -1441,9 +1463,10 @@ class WorktreeManager:
 
     # -- finalize (done-time) ------------------------------------------------
 
-    def auto_commit_snapshot(self, info: WorktreeInfo, role: str) -> bool:
+    def auto_commit_snapshot(self, info: WorktreeInfo, role: str, summary: str = "") -> bool:
         """Commit whatever is sitting uncommitted in *info*'s worktree as a
-        ``wip: <role> done snapshot`` (#525).
+        ``wip: <role> done snapshot`` (#525), or ``wip: <role>: <summary>``
+        when *summary* is given (#536).
 
         Root problem: a worktree-isolated pane that reports `done()` with
         real uncommitted changes but zero commits on its branch used to fall
@@ -1453,6 +1476,13 @@ class WorktreeManager:
         (backend + frontend, same round). This makes `_finalize_worktree`'s
         zero-commits branch self-heal: commit the pane's own work on its own
         branch before deciding there is nothing to propose merging.
+
+        *summary* (#536): the pane's own `done()` note text — its first
+        non-blank line becomes the commit's headline instead of the generic
+        snapshot message. A git log full of identical "wip: <role> done
+        snapshot" entries gave Lead no way to tell one auto-commit from
+        another; empty/whitespace-only *summary* falls back to the original
+        generic message unchanged.
 
         Returns True only when a commit was actually created — HEAD moved.
         Never trust `git commit`'s exit code alone for that (#527 taught the
@@ -1467,9 +1497,42 @@ class WorktreeManager:
         add = self._run(["-C", info.path, "add", "-A"], None)
         if not add.ok:
             return False
-        commit = self._run(["-C", info.path, "commit", "-m", f"wip: {role} done snapshot"], None)
+        first_line = next((ln.strip() for ln in summary.splitlines() if ln.strip()), "")
+        if first_line:
+            if len(first_line) > 72:
+                first_line = first_line[:71].rstrip() + "…"
+            message = f"wip: {role}: {first_line}"
+        else:
+            message = f"wip: {role} done snapshot"
+        commit = self._run(["-C", info.path, "commit", "-m", message], None)
         after = self.head_sha(info.path)
         return bool(commit.ok and after and after != before)
+
+    def branch_merged_into_base(self, git_root: str, branch: str) -> bool | None:
+        """True when *branch*'s tip is already an ancestor of *git_root*'s
+        current HEAD — i.e. genuinely merged already (#536).
+
+        `_finalize_worktree`'s "no commit" alarm used to trust `commit_count`
+        (base_sha..HEAD inside the worktree) unconditionally, but that count
+        can legitimately read 0 even after real work happened: when a pane's
+        `PaneState.worktree` bookkeeping goes missing before `done()` runs
+        (#410), `rediscover_worktree` reconstructs `base_sha` as
+        `merge-base(git_root HEAD NOW, branch)` — which collapses to the
+        branch's own tip the instant that branch is fully merged, silently
+        erasing its apparent commit count and firing a false "งานหายไปจริง
+        หรือแค่ลืม commit" alarm for work Lead had already merged. This gives
+        callers an independent, ancestry-based cross-check.
+
+        Returns ``None`` (unknown) when the probe itself can't be verified
+        (bad ref, git failure) — callers must treat that the same as "not
+        merged", never as a green light to suppress a real alarm.
+        """
+        res = self._run(["-C", git_root, "merge-base", "--is-ancestor", branch, "HEAD"], None)
+        if res.returncode == 0:
+            return True
+        if res.returncode == 1:
+            return False
+        return None
 
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
 
@@ -1785,7 +1848,16 @@ class WorktreeManager:
         sweep_link_points(Path(row["path"]))
         removed, disk_msg, leftover = remove_worktree_tree(Path(row["path"]))
         if not removed:
-            return True, f"merged {branch} แต่ลบ worktree ไม่ได้ ({disk_msg}) — เก็บที่ {row['path']}"
+            # #539: the branch is already merged and the worktree untouched
+            # (nothing partial — `remove_worktree_tree` guarantees full-or-
+            # nothing), so it's already SAFE-sweep eligible: a later
+            # `takkub worktree clean` retries the same rename and, once the
+            # lock has cleared, removes it with no branch/commit loss risk —
+            # this is a stuck delete, not stuck work.
+            return True, (
+                f"merged {branch} แต่ลบ worktree ไม่ได้ ({disk_msg}) — เก็บที่ {row['path']} "
+                "(merge ไปแล้ว ลอง `takkub worktree clean` อีกครั้งได้ทันที ถ้า handle ที่ล็อกอยู่ปล่อยแล้วจะลบสำเร็จ)"
+            )
         remove = self._run(["-C", git_root, "worktree", "remove", "--force", row["path"]], None)
         self._run(["-C", git_root, "worktree", "prune"], None)
         if not remove.ok:
