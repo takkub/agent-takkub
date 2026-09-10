@@ -2880,6 +2880,7 @@
         "agent_takkub.limit_status",
         "agent_takkub.orchestrator_text",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_state",
         "agent_takkub.spawn_engine",
         "agent_takkub.user_profile"
       ],
@@ -2887,7 +2888,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.limit_panel",
@@ -3707,6 +3708,7 @@
       ],
       "imported_by": [
         "agent_takkub.lead_context",
+        "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator",
         "agent_takkub.provider_config",
         "agent_takkub.provider_update",
@@ -3714,7 +3716,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 4
     },
     {

@@ -51,9 +51,16 @@ from .agent_pane import AgentPane
 from .config import RUNTIME_DIR
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
-from .orchestrator_text import _log_event
-from .provider_config import CLAUDE, effective_provider_for
+from .orchestrator_text import _human_duration, _log_event
+from .provider_config import CLAUDE, CODEX, CURSOR, GEMINI, KIMI, OPENCODE, effective_provider_for
 from .spawn_engine import PaneState
+
+# #514: fixed priority order the reroute picker walks — claude first (the
+# cockpit's always-available baseline), then the rest in registry order.
+# Whichever candidates are disabled/uninstalled/still quota-hit/the
+# --distinct-from counterpart's provider get skipped; see
+# AutoResumeMixin._pick_reroute_provider.
+_REROUTE_PRIORITY: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
 
 
 def _usage_confirms_limit(
@@ -135,7 +142,7 @@ def _write_progress_marker(
     ever reporting `takkub done`. Returns the path on success, None on a
     write failure (disk full, permissions) — diagnostic only, never fatal."""
     marker = {
-        "status": status,  # "parked" | "gave_up" | "resumed"
+        "status": status,  # "parked" | "gave_up" | "resumed" | "rerouted"
         "reason": reason,
         "role": role,
         "project": project,
@@ -214,7 +221,7 @@ class AutoResumeMixin:
             # #103: Codex/Gemini do not yet expose usage telemetry here. Their
             # provider-specific limit banner (signal a) is the safe fallback;
             # never confirm it against an unrelated Anthropic usage window.
-            self._park_pane_for_limit(project, role, ps)
+            self._reroute_or_park(project, role, ps)
             return
 
         ps.limit_confirm_pending = True
@@ -222,11 +229,12 @@ class AutoResumeMixin:
 
     def _give_up_auto_resume(self, project: str, role: str, ps: PaneState, *, reason: str) -> None:
         ps.limit_park_stopped = True
-        why = (
-            "ชน limit ซ้ำเร็วเกินไปหลังปลุก"
-            if reason == "relimit_within_grace"
-            else f"park/wake ครบ {auto_resume.MAX_PARK_ROUNDS} รอบแล้ว"
-        )
+        if reason == "relimit_within_grace":
+            why = "ชน limit ซ้ำเร็วเกินไปหลังปลุก"
+        elif reason == "no_fallback_park_disabled":
+            why = "ชนโควตา, ไม่มี provider อื่นให้ reroute และ park-fallback ปิดอยู่ใน Settings"
+        else:
+            why = f"park/wake ครบ {auto_resume.MAX_PARK_ROUNDS} รอบแล้ว"
         pane = self._panes_by_project.get(project, {}).get(role)
         cwd = _pane_cwd(pane)
         tail = _pane_output_tail(pane)
@@ -268,6 +276,240 @@ class AutoResumeMixin:
             # requires-commit warning, so a dirty tree gets its own follow-up
             # Lead message instead of racing the notice above.
             self._check_uncommitted_async(project, role, cwd)
+
+    # ── quota-hit reroute (#514) ─────────────────────────────────────────
+    # A quota-hit pane's task moves to another available provider
+    # immediately instead of waiting out the window — the pre-#514 park
+    # behaviour above is now only the fallback when NOTHING else can take
+    # the task right now (forced-identity role, every other provider
+    # disabled/uninstalled/itself still quota-hit, or the only remaining
+    # candidate is the --distinct-from counterpart's own provider).
+    def _reroute_or_park(self, project: str, role: str, ps: PaneState) -> None:
+        hit_provider = ps.quota_provider or "claude"
+        reset_at = ps.rate_limited_until
+        if reset_at:
+            from . import provider_state
+
+            provider_state.set_quota_reset_at(hit_provider, reset_at)
+            self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
+
+        candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
+        if candidate is not None:
+            self._reroute_pane_to_provider(project, role, ps, candidate, hit_provider, reset_at)
+            return
+
+        if auto_resume.park_fallback_enabled():
+            self._park_pane_for_limit(project, role, ps)
+            return
+
+        _log_event(
+            "pane_quota_reroute_no_fallback",
+            role=role,
+            project=project,
+            hit_provider=hit_provider,
+        )
+        self._give_up_auto_resume(project, role, ps, reason="no_fallback_park_disabled")
+
+    def _pick_reroute_provider(
+        self, project: str, role: str, ps: PaneState, hit_provider: str
+    ) -> str | None:
+        """The next available CLI this role's task can move to right now, or
+        None when nothing qualifies.
+
+        Forced-identity roles (`codex`/`gemini`/`opencode`/`kimi`/`cursor` as
+        the role NAME — `provider_config.FORCED_ROLES`) never reroute: the
+        role's whole identity IS that one CLI (see `provider_config`'s
+        module docstring — "always X, the role's whole point"), so there is
+        no other provider it could legitimately run as. Every other role
+        (lead, backend, frontend, qa, reviewer, critic, custom roles, ...)
+        can move to any registered provider that's actually usable."""
+        from . import provider_state
+        from .provider_config import FORCED_ROLES, VALID_PROVIDERS, _provider_available
+
+        base_role = role.split("#", 1)[0].strip().lower()
+        if base_role in FORCED_ROLES:
+            return None
+
+        now = time.time()
+        exclude = {hit_provider}
+        if ps.distinct_from:
+            counterpart_key = f"{project}::{ps.distinct_from}"
+            counterpart_ps = self._pane_state.get(counterpart_key)
+            counterpart_provider = None
+            if counterpart_ps is not None:
+                counterpart_provider = counterpart_ps.provider_override or (
+                    counterpart_ps.quota_provider or None
+                )
+            if not counterpart_provider:
+                counterpart_provider = effective_provider_for(ps.distinct_from, project)
+            exclude.add(counterpart_provider)
+
+        for candidate in _REROUTE_PRIORITY:
+            if candidate not in VALID_PROVIDERS or candidate in exclude:
+                continue
+            if not _provider_available(candidate):
+                continue
+            if not provider_state.is_quota_ready(candidate, now):
+                continue
+            return candidate
+        return None
+
+    def _reroute_pane_to_provider(
+        self,
+        project: str,
+        role: str,
+        ps: PaneState,
+        new_provider: str,
+        hit_provider: str,
+        reset_at: float,
+    ) -> None:
+        """Close the quota-hit pane and respawn the SAME role on
+        `new_provider`, resending its outstanding task with a short
+        progress note. Mirrors `Orchestrator._auto_recover_stuck`'s
+        close→snapshot→respawn shape — the closest existing precedent for
+        "the pane itself is fine, only the provider under it needs to
+        change" (no `--resume`, unlike that path: a different CLI can't
+        resume another provider's session)."""
+        pane = self._panes_by_project.get(project, {}).get(role)
+        cwd = _pane_cwd(pane)
+        task = ps.last_assigned_task or ""
+        key = f"{project}::{role}"
+        reroute_count = ps.quota_reroute_count + 1
+
+        # Snapshot everything close() pops that must survive the respawn —
+        # same fields _auto_recover_stuck snapshots, minus the session uuid
+        # (not reusable across providers).
+        snap_auto_chain = ps.auto_chain
+        snap_requires_commit = ps.requires_commit_on_done
+        snap_shard_total = ps.shard_total
+        snap_pipeline_run_id = ps.pipeline_run_id
+        snap_assign_base_sha = ps.assign_base_sha
+        snap_assign_git_root = ps.assign_git_root
+        snap_assign_dirty_snapshot = ps.assign_dirty_snapshot
+        snap_assign_non_git = bool(ps.assign_non_git)
+        snap_distinct_from = ps.distinct_from
+
+        _write_progress_marker(
+            project, role, ps, pane, status="rerouted", reason=f"{hit_provider}->{new_provider}"
+        )
+        human = _human_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
+        _log_event(
+            "pane_quota_rerouted",
+            role=role,
+            project=project,
+            from_provider=hit_provider,
+            to_provider=new_provider,
+            round=reroute_count,
+        )
+        lead_msg = (
+            f"🔀 [auto-resume] {hit_provider} ชนโควตา → {role} ย้ายไป {new_provider} "
+            f"ต่อจาก progress ล่าสุด, {hit_provider} กลับ {human}"
+        )
+        self._notify_lead(
+            project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
+        )
+
+        self.close(role, project=project, suppress_pipeline=True, suppress_auto_chain=True)
+
+        def _do_reroute_respawn() -> None:
+            _ps_r = self._ps(key)
+            _ps_r.provider_override = new_provider
+            _ps_r.last_assigned_task = task
+            _ps_r.quota_reroute_count = reroute_count
+            _ps_r.quota_reroute_from = hit_provider
+            _ps_r.distinct_from = snap_distinct_from
+            if snap_auto_chain:
+                _ps_r.auto_chain = snap_auto_chain
+            if snap_requires_commit:
+                _ps_r.requires_commit_on_done = snap_requires_commit
+            if snap_shard_total:
+                _ps_r.shard_total = snap_shard_total
+            if snap_pipeline_run_id is not None:
+                _ps_r.pipeline_run_id = snap_pipeline_run_id
+            if snap_assign_base_sha is not None:
+                _ps_r.assign_base_sha = snap_assign_base_sha
+            if snap_assign_git_root is not None:
+                _ps_r.assign_git_root = snap_assign_git_root
+            if snap_assign_dirty_snapshot is not None:
+                _ps_r.assign_dirty_snapshot = snap_assign_dirty_snapshot
+            _ps_r.assign_non_git = snap_assign_non_git
+
+            ok, msg = self.spawn(
+                role,
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=True,
+                _shard_total=snap_shard_total,
+            )
+            _log_event(
+                "quota_reroute_respawn",
+                role=role,
+                project=project,
+                ok=ok,
+                msg=msg[:160],
+                to_provider=new_provider,
+            )
+            if not ok:
+                self._pane_state.pop(key, None)
+                self._notify_lead(
+                    project,
+                    f"⚠️ [auto-resume] ย้าย {role} ไป {new_provider} ไม่สำเร็จ: {msg} — "
+                    "ต้อง assign ใหม่เอง",
+                    from_role=role,
+                    note="quota_reroute_failed",
+                    kind="quota-reroute-failed",
+                )
+                # The reroute-close suppressed the pipeline fail/advance
+                # assuming the role would come back on the new provider. It
+                # didn't — mark it failed + advance the hop now, mirroring
+                # `Orchestrator._auto_recover_stuck`'s own respawn-failure
+                # branch, or a pipeline hop stalls forever waiting on a pane
+                # that's gone.
+                if snap_pipeline_run_id is not None:
+                    pl_key = f"{project}::{snap_pipeline_run_id}"
+                    pl_run = self._pipeline_runs.get(pl_key)
+                    if pl_run is not None and not pl_run.closed:
+                        pl_run.hop_pending.discard(role)
+                        pl_run.hop_failed.add(role)
+                        if not pl_run.hop_pending:
+                            self._advance_pipeline(project, pl_key, pl_run)
+                return
+            if task:
+                note = (
+                    f"\n\n[system] งานนี้ย้ายจาก provider {hit_provider} (ชนโควตา) มาที่ "
+                    f"{new_provider} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
+                    "ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
+                )
+                self._send_when_ready(role, task + note, project=project)
+
+        QTimer.singleShot(2_000, _do_reroute_respawn)
+
+    def _schedule_provider_quota_reset_notice(
+        self, project: str, provider: str, reset_at: float
+    ) -> None:
+        """Once `provider`'s quota window actually resets, clear the
+        recorded quota-hit and tell Lead once — the pane that fled the hit
+        stays on whichever provider it rerouted to; this just says new/future
+        work can route to `provider` again."""
+        delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - time.time()) * 1000))
+        QTimer.singleShot(
+            delay_ms,
+            lambda: self._on_provider_quota_window_reset(project, provider, reset_at),
+        )
+
+    def _on_provider_quota_window_reset(self, project: str, provider: str, reset_at: float) -> None:
+        from . import provider_state
+
+        # De-dupe: only the timer for the CURRENTLY recorded reset fires the
+        # notice — a later quota-hit on the same provider overwrites
+        # set_quota_reset_at with a newer reset_at, and that newer timer
+        # owns the notice instead.
+        if provider_state.quota_reset_at(provider) != reset_at:
+            return
+        provider_state.clear_quota_reset(provider)
+        msg = f"⏰ [auto-resume] {provider} quota reset แล้ว — กลับมาใช้ปกติได้"
+        self._notify_lead(project, msg, note="quota_provider_reset", kind="quota-reset")
+        _log_event("provider_quota_reset", project=project, provider=provider)
 
     # ── signal (b) confirmation (background thread → Qt signal) ─────────
     def _confirm_limit_via_usage_async(self, project: str, role: str) -> None:
@@ -319,7 +561,7 @@ class AutoResumeMixin:
             _log_event("pane_limit_confirm_failed", role=role, project=project)
             return  # signal (b) disagreed — stay on the notify-only path
 
-        self._park_pane_for_limit(project, role, ps)
+        self._reroute_or_park(project, role, ps)
 
     # ── park ──────────────────────────────────────────────────────────────
     def _park_pane_for_limit(self, project: str, role: str, ps: PaneState) -> None:

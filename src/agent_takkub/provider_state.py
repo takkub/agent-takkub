@@ -16,6 +16,7 @@ session-scoped (see spec 2026-05-20-provider-toggle-design.md).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .config import SETTINGS_HOME
@@ -120,3 +121,82 @@ def set_disabled(provider: str, flag: bool) -> None:
 def all_disabled() -> set[str]:
     """Return the set of provider names currently disabled."""
     return {k for k, v in load().items() if v}
+
+
+# ── quota-hit reroute state (#514) ──────────────────────────────────────────
+# `limit_autoresume.py`'s AutoResumeMixin records here which provider is
+# currently quota-hit and when its window resets, so the reroute picker can
+# skip a provider that would just re-hit the same wall immediately.
+#
+# Deliberately NOT `providers/<provider>/<account>/...` (the per-account
+# layout #504 will introduce) — #504 hasn't landed, so this is global-scope,
+# same shape/location as `disabled-providers.json` above: one small JSON file
+# under `~/.takkub/`, per-provider, no per-account split yet.
+_QUOTA_PATH = SETTINGS_HOME / "provider-quota.json"
+
+
+def quota_path() -> Path:
+    """Where per-provider quota-reset state lives. Function form so tests
+    can monkeypatch `_QUOTA_PATH`."""
+    return _QUOTA_PATH
+
+
+def load_quota_resets() -> dict[str, float]:
+    """Return ``{provider: reset_at epoch}`` for providers currently
+    recorded as quota-hit. Missing file or corrupt JSON -> empty dict
+    (never blocks the reroute picker)."""
+    path = quota_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in data.items():
+        try:
+            out[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _save_quota_resets(state: dict[str, float]) -> None:
+    path = quota_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def set_quota_reset_at(provider: str, reset_at: float) -> None:
+    """Record that `provider` is quota-hit until `reset_at` (epoch seconds).
+    Overwrites any earlier recorded reset for the same provider."""
+    state = load_quota_resets()
+    state[provider] = float(reset_at)
+    _save_quota_resets(state)
+
+
+def clear_quota_reset(provider: str) -> None:
+    """Drop `provider`'s recorded quota-hit — called once its window has
+    actually reset. No-op if nothing was recorded."""
+    state = load_quota_resets()
+    if provider not in state:
+        return
+    del state[provider]
+    _save_quota_resets(state)
+
+
+def quota_reset_at(provider: str) -> float:
+    """0.0 when `provider` has no recorded quota-hit."""
+    return load_quota_resets().get(provider, 0.0)
+
+
+def is_quota_ready(provider: str, now: float | None = None) -> bool:
+    """True iff `provider` has no outstanding recorded quota-hit as of `now`
+    (defaults to ``time.time()``) — i.e. safe to route new/rerouted work to."""
+    if now is None:
+        now = time.time()
+    return quota_reset_at(provider) <= now

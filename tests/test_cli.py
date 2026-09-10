@@ -145,6 +145,46 @@ class TestArgparse:
         assert rc == 1
         assert fake_request == []
 
+    def test_assign_with_distinct_from(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "backend", "--distinct-from", "reviewer", "scan"])
+        assert fake_request[-1]["distinct_from"] == "reviewer"
+
+    def test_distinct_from_omitted_defaults_to_none(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        cli.main(["assign", "--role", "backend", "scan"])
+        assert fake_request[-1]["distinct_from"] is None
+
+    def test_distinct_from_is_forwarded_to_every_shard(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        cli.main(["assign", "--role", "qa", "--shards", "2", "--distinct-from", "reviewer", "scan"])
+        assert [payload["distinct_from"] for payload in fake_request[-2:]] == [
+            "reviewer",
+            "reviewer",
+        ]
+
+    def test_subagent_mode_rejects_distinct_from(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(
+            [
+                "assign",
+                "--role",
+                "reviewer",
+                "--mode",
+                "subagent",
+                "--distinct-from",
+                "backend",
+                "scan",
+            ]
+        )
+        assert rc == 1
+        assert fake_request == []
+
+    def test_distinct_from_same_role_rejected(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(["assign", "--role", "backend", "--distinct-from", "backend", "scan"])
+        assert rc == 1
+        assert fake_request == []
+
     def test_model_override_validated_against_provider_override(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
     ) -> None:

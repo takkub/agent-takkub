@@ -76,6 +76,7 @@ class _FakeOrch:
         mode="pane",
         team=None,
         base_ref=None,
+        distinct_from=None,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
@@ -84,6 +85,7 @@ class _FakeOrch:
         self.last_assign_mode = mode
         self.last_assign_team = team
         self.last_assign_base_ref = base_ref
+        self.last_assign_distinct_from = distinct_from
         return True, "ok"
 
     def subagent_done(self, role, note="", project=None, failed=False):

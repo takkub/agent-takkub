@@ -601,6 +601,7 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         ("agent_takkub.plan_tier", "_PATH", "plan.json"),
         ("agent_takkub.provider_models", "_PATH", "provider-models.json"),
         ("agent_takkub.provider_state", "_PATH", "disabled-providers.json"),
+        ("agent_takkub.provider_state", "_QUOTA_PATH", "provider-quota.json"),
         ("agent_takkub.remote.config", "_PATH", "remote.json"),
         ("agent_takkub.pane_tools_policy", "PANE_TOOLS_POLICY_FILE", "pane-tools.json"),
         ("agent_takkub.skill_policy", "SKILL_POLICY_FILE", "skill-policy.json"),

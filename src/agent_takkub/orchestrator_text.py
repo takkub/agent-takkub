@@ -422,6 +422,20 @@ def _truncate_at_word_boundary(text: str, max_chars: int) -> str:
     return cut.rstrip() + "…"
 
 
+def _human_duration(total_seconds: float) -> str:
+    """Coarse "in Xh Ym" / "in Xm" / "in Xs" phrasing for a Lead-facing
+    notice (#301) — matches _RATE_LIMIT_FALLBACK-scale windows (minutes to
+    hours), so seconds only show up for a duration under a minute."""
+    secs = max(0, int(total_seconds))
+    hours, rem = divmod(secs, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def _notice_fingerprint(body: str) -> str:
     """Stable short hash of a Lead-facing notice body (#241).
 
