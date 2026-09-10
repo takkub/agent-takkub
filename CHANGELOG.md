@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed (แก้)
+
+- **[#559] tab ค้างเป็น "empty slot" หลัง done แทนที่จะ auto-close** — `_close_if_same_session` (#537's live-child deferral) ปฏิบัติกับ `pane.session` ที่กลายเป็น `None` (agent process ออกเองหลัง done ก่อน timer จะยิง — `AgentPane._on_exit()` ทำแบบนี้เป็นปกติ) เหมือนถูก respawn ด้วย session ใหม่ แล้วเลิกปิด tab เงียบๆ ทั้งที่ยังเป็น close เดิมที่ค้างอยู่ — แก้ให้แยก "session หายไปเอง" (ปิดต่อตามเดิม) ออกจาก "respawn ด้วย session ใหม่จริงๆ" (ยกเลิกตามเดิม) ด้วย identity check ที่รองรับ `None`
+
 ## [2.0.6] - 2026-09-09
 
 ### Fixed (แก้)

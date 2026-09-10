@@ -6226,7 +6226,22 @@ class Orchestrator(
 
         def _close_if_same_session(_deferred_since: float | None = None) -> None:
             _pp = self._project_panes(project_ns).get(from_role)
-            if _pp is None or _pp.session is not _done_sess or _pp.state != "done":
+            if _pp is None or _pp.state not in ("done", "empty"):
+                return
+            # #559: `_pp.session` can legitimately become None before this
+            # timer fires — the underlying process often exits on its own
+            # shortly after reporting done (independent of #537's live-child
+            # deferral below), and AgentPane._on_exit() reacts to that by
+            # nulling `.session` (detach_session()) and dropping the pane to
+            # "empty". That is still THIS SAME pending close, not a respawn —
+            # only a *new, different* session object attached to the role
+            # means someone/something respawned it and this stale timer must
+            # back off. Treating "session already gone" as "respawned" (the
+            # old `is not _done_sess` check did, since None is never
+            # `_done_sess`) silently abandoned the close, leaving the tab
+            # stuck showing the "empty slot" placeholder forever instead of
+            # being torn down.
+            if _pp.session is not None and _pp.session is not _done_sess:
                 return
             # #537: a pane that reports done() can still have a real
             # subprocess mid-write underneath it (e.g. an evidence-collection
