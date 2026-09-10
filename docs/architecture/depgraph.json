@@ -291,6 +291,7 @@
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy",
+        "agent_takkub.skill_scan",
         "agent_takkub.token_estimate",
         "agent_takkub.user_profile"
       ],
@@ -298,7 +299,7 @@
         "agent_takkub.doctor"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.boot_update_window",
@@ -4762,6 +4763,7 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.boot_context",
         "agent_takkub.cli",
         "agent_takkub.core.capabilities.registry",
         "agent_takkub.main_window",
@@ -4771,7 +4773,7 @@
         "agent_takkub.skill_policy",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 3
     },
     {

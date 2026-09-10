@@ -156,3 +156,69 @@ def test_doctor_check_boot_context_not_in_run_all_checks_default_set():
     from agent_takkub.doctor import run_all_checks
 
     assert "check_boot_context" not in inspect.getsource(run_all_checks)
+
+
+def _write_skill(skills_dir, name: str, description: str = "") -> None:
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n", encoding="utf-8"
+    )
+
+
+class TestNativeSkillCatalogMeasurement:
+    """#516 follow-up F2: the native `skill_listing` catalog (CLAUDE_CONFIG_DIR/
+    skills/, distinct from cockpit's own skill_matrix_appendix) was never
+    measured before — closes that gap so `takkub doctor --boot-context` can
+    show it for the first time."""
+
+    def test_no_skills_dir_returns_none(self, monkeypatch, tmp_path):
+        from agent_takkub import user_profile
+
+        # This machine's real per-project profile (registered outside any
+        # test isolation, in ~/.takkub/projects/<slug>/user-profile.json)
+        # can resolve to a real CLAUDE_CONFIG_DIR with real skills — patch
+        # config_dir_for itself so this test is deterministic regardless of
+        # the machine it runs on.
+        monkeypatch.setattr(user_profile, "config_dir_for", lambda project: tmp_path)
+        assert boot_context.measure_native_skill_catalog("agent-takkub") is None
+
+    def test_counts_files_and_flags_unrelated_skills(self, monkeypatch, tmp_path):
+        from agent_takkub import user_profile
+
+        monkeypatch.setattr(user_profile, "config_dir_for", lambda project: tmp_path)
+        skills_dir = tmp_path / "skills"
+        _write_skill(skills_dir, "some-unrelated-personal-skill", "not agent-takkub")
+        _write_skill(skills_dir, "another-one")
+
+        m = boot_context.measure_native_skill_catalog("agent-takkub")
+
+        assert m is not None
+        assert m.category == "native_skill_catalog"
+        assert m.chars > 0
+        assert m.est_tokens >= 1
+        assert "2 skill(s)" in m.detail
+        assert "some-unrelated-personal-skill" in m.detail
+
+    def test_dynamic_state_category_not_gated(self):
+        assert "native_skill_catalog" in boot_context.DYNAMIC_STATE_CATEGORIES
+
+    def test_doctor_reports_native_skill_catalog_finding(self, monkeypatch, tmp_path):
+        from agent_takkub import user_profile
+        from agent_takkub.doctor import check_boot_context
+
+        monkeypatch.setattr(user_profile, "config_dir_for", lambda project: tmp_path)
+        _write_skill(tmp_path / "skills", "some-other-skill")
+
+        findings, report_text = check_boot_context(role="backend", project="agent-takkub")
+
+        hits = [f for f in findings if f.name == "native_skill_catalog"]
+        assert len(hits) == 1
+        assert "no per-skill CLI gate" in hits[0].detail
+        assert "native_skill_catalog" in report_text
+
+    def test_format_report_shows_dynamic_state_tag(self):
+        m = boot_context.CategoryMeasurement("native_skill_catalog", 100, 25, "fake/skills")
+        text = boot_context.format_report([], None, m)
+        assert "native_skill_catalog" in text
+        assert "[dynamic-state, not gated]" in text

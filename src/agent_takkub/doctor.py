@@ -1216,7 +1216,24 @@ def check_boot_context(role: str | None, project: str) -> tuple[list[Finding], s
             )
         )
 
-    report_text = boot_context.format_report(reports, native_mem)
+    try:
+        native_skills = boot_context.measure_native_skill_catalog(project)
+    except Exception:
+        native_skills = None
+    if native_skills is not None:
+        findings.append(
+            Finding(
+                "boot-context",
+                "native_skill_catalog",
+                Status.INFO,
+                f"{native_skills.chars} chars (~{native_skills.est_tokens} tok lower bound), "
+                f"{native_skills.detail} — #516 follow-up F2: no per-skill CLI gate exists yet "
+                "(--disable-slash-commands is all-or-nothing and would also remove this "
+                "project's own skills; see docs/audit/2026-09-07-boot-context.md §F2/F3)",
+            )
+        )
+
+    report_text = boot_context.format_report(reports, native_mem, native_skills)
     return findings, report_text
 
 
