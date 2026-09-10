@@ -3388,8 +3388,9 @@ def check_storage_layout_state() -> list[Finding]:
     Deliberately NOT part of `run_all_checks()`'s default tuple — opt-in
     only via `takkub doctor --storage-layout`, same "--live"/"--core-
     version" pattern this module already uses, so a plain `takkub doctor`
-    stays byte-identical to before this landed. Never FAILs — a V1-only
-    machine (every install today) is OK, not broken.
+    stays byte-identical to before this landed. Never FAILs outright — a
+    V1-only machine pre-#504 boot is OK, not broken; an installed machine
+    resting on "mixed" past that boot gets a WARN (not a FAIL) instead.
     """
     try:
         from .core.storage.layout import LEGACY_MAPPING, layout_state, storage_layout_v2
@@ -3399,15 +3400,25 @@ def check_storage_layout_state() -> list[Finding]:
                 "storage-layout", "core-v2", Status.INFO, f"core.storage.layout unavailable: {e}"
             )
         ]
+    from . import config
 
+    # #504/#566 M1: `layout_state()` reports "mixed" for two very different
+    # situations that used to read as one — a dev checkout's permanent,
+    # intentional nested `v2/` root (never promoted/archived by design,
+    # `auto_migrate_boot.is_dev_checkout`), and an INSTALLED machine that
+    # still has V1 leftovers because the boot ladder hasn't finished, or
+    # (the #566 bug this doctor message used to paper over) a live writer
+    # resurrected a top-level file like `projects.json` after archival.
+    # Only the dev case is "expected, not a problem" — an installed
+    # "mixed" resting state is a real gap that deserves a WARN.
+    is_dev_checkout = config.DATA_HOME == config.REPO_ROOT
     state = layout_state()
+    root = storage_layout_v2().root
+    state_detail = f"{state} — {root}"
+    if is_dev_checkout:
+        state_detail += " (dev checkout — nested v2/ root, never auto-archived)"
     findings = [
-        Finding(
-            "storage-layout",
-            "state",
-            Status.OK,
-            f"{state} — {storage_layout_v2().root}",
-        ),
+        Finding("storage-layout", "state", Status.OK, state_detail),
         _v2_authority_retirement_finding(),
     ]
     if state == "v1":
@@ -3421,15 +3432,28 @@ def check_storage_layout_state() -> list[Finding]:
             )
         )
     elif state == "mixed":
-        findings.append(
-            Finding(
-                "storage-layout",
-                "legacy-leftover",
-                Status.INFO,
-                "V2 layout exists alongside V1 files — expected until the deprecation ladder "
-                "(plan §2, Phase 10) removes V1; not itself a problem",
+        if is_dev_checkout:
+            findings.append(
+                Finding(
+                    "storage-layout",
+                    "legacy-leftover",
+                    Status.OK,
+                    "dev checkout keeps a nested v2/ root by design (#504) — never "
+                    "promoted or archived on this box; not a migration gap",
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    "storage-layout",
+                    "legacy-leftover",
+                    Status.WARN,
+                    "installed layout still mixed — V1 top-level file(s) remain (the "
+                    "boot ladder hasn't finished archiving, or a live writer "
+                    "recreated one after archival, e.g. #566) — `takkub migrate "
+                    "inspect` for detail",
+                )
+            )
     findings.extend(_auto_migrate_boot_findings())
     return findings
 
@@ -3454,7 +3478,8 @@ def _v2_authority_retirement_finding() -> Finding:
         "storage-layout",
         "authority",
         Status.OK,
-        "v2-only (#504 cut half) — ทุก dual-written domain อ่าน/เขียน v2/ โดยตรงเสมอ",
+        "v2-only (#504 cut half) — ทุก dual-written domain อ่าน/เขียน V2 target โดยตรงเสมอ "
+        "(ตำแหน่งจริงคือ DATA_HOME เองบนเครื่องที่ promote แล้ว, เป็น DATA_HOME/v2/ เฉพาะ dev checkout)",
     )
 
 

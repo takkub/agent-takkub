@@ -571,14 +571,55 @@ def project_docs_dir(project_ns: str) -> Path:
     return d
 
 
+def _v2_project_registry_path() -> Path:
+    """Where ``core.migration.steps_v1.ProjectMigrationStep`` promotes
+    ``projects.json`` to (#504, #566) — same
+    ``storage_layout_v2(data_home).projects_root / "registry.json"`` target
+    that step itself resolves to (never hardcoded here, so a future fix to
+    `storage_layout_v2`'s own root-resolution logic — e.g. #566's H5 nested-
+    path note — is picked up automatically). Local import: `core.storage
+    .layout` imports this module at its OWN top level, so importing it back
+    at THIS module's top level is a real circular import (proven: breaks
+    whenever something imports `core.storage.layout` before `config` in a
+    fresh process) — a function-local import is safe because both modules
+    have always finished loading by the time this is actually called.
+    `DATA_HOME` is passed explicitly (matching every other real caller,
+    e.g. `ProjectMigrationStep._registry_target`) rather than relying on
+    `storage_layout_v2`'s own default — bare `storage_layout_v2()` resolves
+    through a *fresh* per-call attribute lookup on the `core.storage.layout`
+    module, which one test fixture (`tests/conftest.py`'s `_isolate_runtime`)
+    deliberately monkeypatches to a different isolated default for exactly
+    this "late import" calling shape; passing `DATA_HOME` explicitly keeps
+    this module's own `config.DATA_HOME` monkeypatch authoritative."""
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    return storage_layout_v2(DATA_HOME).projects_root / "registry.json"
+
+
 def load_projects() -> dict:
-    """projects.json — kept V1-only (#504 note: the project registry's V2
-    cutover is deferred, not part of this pass — `PROJECTS_JSON` backs
-    dozens of unrelated tests' fixture scaffolding, and the physical
-    promotion to V2 is `core.migration.steps_v1.ProjectMigrationStep`'s job
-    at boot anyway, via #504's separate "move" half). No dual-write mirror,
-    no V2 read fallback — just the plain V1 file."""
+    """projects.json — reads the promoted V2 project registry when it
+    exists (post `core.migration.steps_v1.ProjectMigrationStep` +
+    `core.migration.promote_v1.ArchiveV1LegacyStep`, which moves the V1
+    file itself into ``backups/v1-archive-<ts>/``, #566), falling back to
+    the plain V1 file otherwise — pre-migration, and always on a dev
+    checkout, where the boot migration ladder never runs
+    (`auto_migrate_boot.is_dev_checkout`)."""
     empty = {"active": None, "projects": {}}
+    registry_path = _v2_project_registry_path()
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _log.warning(
+                "could not read V2 project registry (%r) — falling back to projects.json", exc
+            )
+            registry = None
+        if isinstance(registry, dict) and isinstance(registry.get("data"), dict):
+            return registry["data"]
+        if registry is not None:
+            _log.warning(
+                "V2 project registry has no usable 'data' object — falling back to projects.json"
+            )
     if not PROJECTS_JSON.exists():
         return empty
     try:
@@ -593,10 +634,22 @@ def load_projects() -> dict:
 
 
 def save_projects_json(data: dict) -> bool:
-    """Persist the full projects.json document (V1 — see :func:`load_projects`).
-    Every writer of ``PROJECTS_JSON`` (this module's own project-tab helpers
+    """Persist the full projects document (see :func:`load_projects`).
+    Every writer of project data (this module's own project-tab helpers
     below, plus ``project_wizard.py``'s add/edit-project flows) goes through
-    this one function."""
+    this one function. Writes into the V2 registry once it exists (post-
+    migration) — never both, so the archived V1 file is never resurrected
+    (#566)."""
+    registry_path = _v2_project_registry_path()
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            registry = None
+        if not isinstance(registry, dict):
+            registry = {"schema": 1}
+        registry["data"] = data
+        return _write_json_atomic(registry_path, registry)
     PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
     return _write_json_atomic(PROJECTS_JSON, data)
 

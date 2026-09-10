@@ -107,6 +107,29 @@ class TestAutoMigratePendingFindings:
         assert not [f for f in findings if f.name == "auto-migrate-pending-rollback"]
 
 
+class TestMixedLayoutStateFinding:
+    """#566/M1: `layout_state() == "mixed"` means two different things —
+    a dev checkout's permanent, intentional nested `v2/` root, and an
+    installed machine that still has V1 leftovers (including the #566
+    "a live writer resurrected projects.json" case). Doctor must tell
+    them apart instead of calling both "expected, not a problem"."""
+
+    def _seed_mixed(self) -> None:
+        (config.DATA_HOME / "v2").mkdir(parents=True, exist_ok=True)
+
+    def test_installed_mixed_reports_warn(self) -> None:
+        self._seed_mixed()
+        f = _finding(name="legacy-leftover")
+        assert f.status == doctor.Status.WARN
+
+    def test_dev_checkout_mixed_reports_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", config.DATA_HOME)
+        self._seed_mixed()
+        f = _finding(name="legacy-leftover")
+        assert f.status == doctor.Status.OK
+        assert "dev checkout" in f.detail
+
+
 class TestV2AuthorityRetirementFinding:
     """#504 cut half: dual-write/v1-only-write drift telemetry is gone
     (nothing left to compare — every domain reads/writes its `v2/` target

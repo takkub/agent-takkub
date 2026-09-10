@@ -52,6 +52,32 @@ class SchedulerPolicyConfig:
 
 
 def path() -> Path:
+    """Where Core V2 settings (scheduler policy / context strategy) live —
+    the promoted V2 target (#566 H8), not the bare top of `SETTINGS_HOME`
+    (== `DATA_HOME` on an installed build): that location sat outside every
+    `core.migration.promote_v1.ArchiveV1LegacyStep`-skipped name, so every
+    boot after the first swept this file into a FRESH `v1-archive-<ts>/`
+    as a "V1 leftover", silently resetting the user's scheduler policy /
+    context strategy and defeating one-shot archival.
+
+    Local import — `core.storage.layout` imports this module at its own
+    top level, so a top-level import back here would be a circular import
+    (`config` sits underneath both). `effective_data_home(None,
+    prefer_primary=True)` — same call shape `role_models.py`/
+    `provider_models.py` (the other already-cut-over `SETTINGS_HOME`-scoped
+    domains) already use — resolves a worktree pane back to the PRIMARY
+    cockpit's data home instead of its own checkout-local one."""
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None, prefer_primary=True)
+    return storage_layout_v2(home).config_dir / "core-v2-settings.json"
+
+
+def _legacy_path() -> Path:
+    """Pre-#566 location, read-only fallback for a machine that saved
+    settings there before this moved — the next successful `save()` always
+    writes to the new `path()`, so this is only ever consulted once."""
     return config.SETTINGS_HOME / "core-v2-settings.json"
 
 
@@ -89,14 +115,21 @@ def load() -> dict:
     as `performance_settings.load()`. Cached by the file's `(mtime_ns, size)`
     so repeated calls (e.g. once per `flag_enabled()` check per Qt tick) only
     re-`read_text()`/`json.loads()` when the Settings UI actually rewrote the
-    file — see `_cache` above."""
+    file — see `_cache` above. Falls back to :func:`_legacy_path` (read-only,
+    #566) when the new `path()` target doesn't exist yet — a machine that
+    saved settings before this moved still sees them once, and the next
+    `save()` writes them to the new location for good."""
     global _cache
     target = path()
     try:
         st = target.stat()
-        cache_key: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
     except OSError:
-        cache_key = None
+        target = _legacy_path()
+        try:
+            st = target.stat()
+        except OSError:
+            st = None
+    cache_key: tuple[int, int] | None = (st.st_mtime_ns, st.st_size) if st else None
 
     with _cache_lock:
         if _cache is not None and _cache[0] == cache_key:

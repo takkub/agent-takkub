@@ -21,6 +21,14 @@ import pytest
 
 from agent_takkub import config, core_v2_settings
 
+# Captured at import time, before `tests/conftest.py`'s own autouse
+# isolation fixture ever runs — it unconditionally replaces
+# `core_v2_settings.path` with a fixed isolated-tmp lambda for every test in
+# the suite (so ordinary tests here never depend on this module's own path
+# arithmetic). `TestCoreV2SettingsV2Path` restores this real implementation
+# to actually exercise it.
+_REAL_PATH_FN = core_v2_settings.path
+
 
 @pytest.fixture(autouse=True)
 def _isolate_core_v2_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -70,6 +78,60 @@ class TestCoreV2SettingsStore:
         core_v2_settings.path().write_text("not json", encoding="utf-8")
         assert core_v2_settings.flag_enabled("router") is True  # always true anyway
         assert core_v2_settings.load_context_strategy() == "automatic"  # falls back
+
+
+class TestCoreV2SettingsV2Path:
+    """#566 H8: this store used to write at the bare top of `SETTINGS_HOME`
+    (== `DATA_HOME` on an installed build) — a name `ArchiveV1LegacyStep`
+    treats as a V1 leftover and sweeps into a fresh archive every boot,
+    silently resetting the user's settings. `path()` must resolve under
+    the promoted V2 `config/` domain instead, with a one-time read fallback
+    to the old location."""
+
+    @pytest.fixture(autouse=True)
+    def _installed_layout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # An "installed" (non-nested) layout, not the dev-nested default —
+        # DATA_HOME != REPO_ROOT — and no primary-cockpit override.
+        data_home = tmp_path / "data_home"
+        data_home.mkdir()
+        monkeypatch.setattr(config, "DATA_HOME", data_home)
+        monkeypatch.setattr(config, "SETTINGS_HOME", data_home)
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        # Undo conftest's blanket `path` replacement — this class tests the
+        # real implementation, not the isolated-tmp stand-in every other
+        # test here relies on.
+        monkeypatch.setattr(core_v2_settings, "path", _REAL_PATH_FN)
+        core_v2_settings._reset_cache()
+        yield data_home
+        core_v2_settings._reset_cache()
+
+    def test_path_is_under_v2_config_not_data_home_root(self, _installed_layout: Path) -> None:
+        # `path()` resolves `storage_layout_v2()`'s own default root (which
+        # `tests/conftest.py` isolates separately from a locally-patched
+        # `config.DATA_HOME` for this exact "late import" calling shape —
+        # by design, see `storage_layout_v2` comment there) — so this
+        # asserts the meaningful invariant (moved under `config/`, off the
+        # bare top level) rather than pinning an exact root.
+        p = core_v2_settings.path()
+        assert p.name == "core-v2-settings.json"
+        assert p.parent.name == "config"
+        assert p != _installed_layout / "core-v2-settings.json"
+
+    def test_legacy_top_level_file_is_read_once_then_migrated_on_save(
+        self, _installed_layout: Path
+    ) -> None:
+        legacy = _installed_layout / "core-v2-settings.json"
+        legacy.write_text(
+            json.dumps({"schema_version": 1, "scheduler_policy": {}, "context_strategy": "deep"}),
+            encoding="utf-8",
+        )
+        core_v2_settings._reset_cache()
+        assert core_v2_settings.load_context_strategy() == "deep"
+
+        assert core_v2_settings.save_context_strategy("fast") is True
+        assert core_v2_settings.path().exists()
+        core_v2_settings._reset_cache()
+        assert core_v2_settings.load_context_strategy() == "fast"
 
 
 class TestCoreV2SettingsCache:
