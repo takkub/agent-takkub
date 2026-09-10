@@ -10503,6 +10503,18 @@ class Orchestrator(
                         _perm_stuck = None
                         _tty_stuck = None
                     if _tty_stuck:
+                        # #534 diagnostic: log every classification into this
+                        # branch (not just the cooldown-gated surface below) so
+                        # a future incident can tell whether the watchdog kept
+                        # re-classifying the pane as tty-blocked the whole time
+                        # it was wedged, or missed it entirely.
+                        _log_event(
+                            "stuck_watchdog_tty_block_classified",
+                            role=role,
+                            project=project_name,
+                            kind="permission" if _perm_stuck else "tty",
+                            reason=_tty_stuck,
+                        )
                         _ps_tty = self._ps(key)
                         if _ps_tty.tty_blocked_since is None:
                             _ps_tty.tty_blocked_since = now
@@ -10612,6 +10624,17 @@ class Orchestrator(
         except Exception:
             names = []
         if not names:
+            # #534 diagnostic: no events.log evidence survived the field incident
+            # to tell us whether this branch (as opposed to the grace-expiry
+            # branch below) was the one resetting the timer. Log every reset so
+            # a future incident of this shape has the trail this one lacked.
+            if ps_ck.live_child_defer_since != 0.0:
+                _log_event(
+                    "stuck_recover_defer_grace_reset",
+                    role=role,
+                    project=project,
+                    reason="no_live_children",
+                )
             ps_ck.live_child_defer_since = 0.0
             return False
         if ps_ck.live_child_defer_since == 0.0:

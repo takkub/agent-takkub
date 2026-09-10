@@ -708,6 +708,43 @@ class TestTtyBlockStuckDefer:
         assert len(fake.close_calls) == 1, "non-blocked stuck pane must still be recovered"
         assert fake.spawn_calls[0][0] == "backend"
 
+    def test_tty_block_classification_is_logged_every_tick(self) -> None:
+        """#534: the cooldown-gated surface-to-lead notice used to be the only
+        signal in events.log for this branch, so a long-running incident (like
+        the 2026-xx-xx stuck Gemini frontend pane) left no trail of whether the
+        watchdog kept re-classifying the pane as tty-blocked the whole time.
+        Every classification must now log, independent of the surface cooldown."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake = _FakeOrch()
+            now = 1_000_000.0
+            pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+            pane.session.is_blocked_on_tty_prompt.return_value = "Ok to proceed? (y)"
+            fake._panes_by_project["p"] = {"frontend": pane}
+            fake._ps("p::frontend").last_content_change_ts = now - STUCK_THRESHOLD_S - 1
+
+            _check(fake, now)
+            # Still within the surface cooldown — but classification is logged again.
+            now2 = now + 1
+            pane._last_output_ts = now2 - STUCK_THRESHOLD_S - 1
+            fake._ps("p::frontend").last_content_change_ts = now2 - STUCK_THRESHOLD_S - 1
+            _check(fake, now2)
+        finally:
+            orch_mod._log_event = orig
+
+        classified = [e for e in logged if e["event"] == "stuck_watchdog_tty_block_classified"]
+        assert len(classified) == 2, "must log on every classification, not just every surface"
+        assert classified[0]["role"] == "frontend"
+        assert classified[0]["project"] == "p"
+        assert classified[0]["kind"] == "tty"
+        assert "Ok to proceed" in classified[0]["reason"]
+        # Only one surface-to-lead notice fired (cooldown intact, behaviour unchanged).
+        assert len(fake.tty_surface_calls) == 1
+
 
 # ─────────────────────────────────────────────────────────────
 # Issue #104: Windows Open-With dialog transcript tripwire
@@ -1050,3 +1087,43 @@ class TestLiveChildrenDefer:
         fake, now = self._stuck_pane_orch([])
         _check(fake, now)
         assert fake.close_calls == [("qa", "agent-takkub")]
+
+    def test_grace_reset_to_zero_is_logged(self) -> None:
+        """#534: no events.log survived a stuck-frontend-pane field incident to
+        say whether this branch (grace timer reset because live children went
+        away) ever ran. Pin down that the reset now leaves a trail."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake, now = self._stuck_pane_orch(["node.exe"])
+            _check(fake, now)  # deferred: grace timer starts running (non-zero)
+            fake.live_children = []
+            _check(fake, now + STUCK_THRESHOLD_S + 1)  # children gone: timer resets to 0
+        finally:
+            orch_mod._log_event = orig
+
+        resets = [e for e in logged if e["event"] == "stuck_recover_defer_grace_reset"]
+        assert len(resets) == 1
+        assert resets[0]["role"] == "qa"
+        assert resets[0]["project"] == "agent-takkub"
+        assert resets[0]["reason"] == "no_live_children"
+
+    def test_grace_never_running_is_not_logged_as_a_reset(self) -> None:
+        """Scaffolding-only children never set the timer running in the first
+        place, so there is no real "reset" transition to report."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake, now = self._stuck_pane_orch([])
+            _check(fake, now)
+        finally:
+            orch_mod._log_event = orig
+
+        resets = [e for e in logged if e["event"] == "stuck_recover_defer_grace_reset"]
+        assert resets == []
