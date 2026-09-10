@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.1.0] - Unreleased
+
+Release candidate notes. **Release held:** the [Round 2 acceptance review](docs/audit/2026-09-10-504-acceptance-review.md#round-2--60abb771) found migration data loss and incomplete restore handling at `60abb771`. These notes do not announce a released or approved build.
+
+### Changed (เปลี่ยน)
+
+- Installed storage promotes the contents of `DATA_HOME/v2/` into the domain directories directly under `DATA_HOME`. Retired V1 entries are copied, verified with SHA-256, and archived in `backups/v1-archive-<timestamp>/`. Archives have no automatic expiry or cleanup.
+- Migrated model and routing domains use their V2 targets directly. The project registry uses `projects/registry.json` after migration. `TAKKUB_V2_AUTHORITY` no longer selects a storage layout; `takkub doctor --storage-layout` warns when the retired variable is set.
+- Boot migration state lives in `system/auto-migrate-state.json`; Core V2 settings use `config/core-v2-settings.json` on installed builds. Source/dev checkouts retain a nested `v2/` layout and skip automatic physical migration.
+- `takkub migrate restore-v1 --list` lists archive timestamps. `--archive <timestamp>` selects one generation; without a selector, restore processes generations oldest first. Restore copies archives back and retains the archived files. Existing destination data is backed up under `runtime/core/migration_backups/`.
+
+### Upgrade and downgrade (อัปเกรด / ย้อนเวอร์ชัน)
+
+- **Upgrade 1.x through a supported 2.0.x release first.** Boot and validate 2.0.x before installing the approved 2.1.0 release. Direct 1.x → 2.1.0 is not the supported route in this guide.
+- **Downgrading below 2.1.0 requires `restore-v1` before installing the older version.** Close all instances and panes using the data home, back up the current data separately, and use the still-installed 2.1.0 CLI to restore and verify the intended archives before installing 2.0.x.
+- Read the [2.1.0 migration guide](docs/v2/2.1.0-migration-guide.md) for generation selection, relocation, collision backups and verification limits. At this candidate, a successful restore exit alone does not prove archive completeness; crash recovery and target integrity also remain release review findings.
+
 ## [2.0.8] - 2026-09-10
 
 ### Changed (เปลี่ยน)
