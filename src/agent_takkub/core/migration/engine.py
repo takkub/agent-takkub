@@ -13,6 +13,7 @@ one.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -36,11 +37,32 @@ from .steps_v1 import (
     build_state_step,
 )
 
-# #504: `ArchiveV1LegacyStep.step_id`, duplicated as a literal (not imported
-# from the class) so this module never needs to construct one just to read
-# an attribute — matches `apply_version_marker_only()`'s own "steps[0] is
-# version-marker" convention of hardcoding ladder-position knowledge here.
+# #504: `ArchiveV1LegacyStep.step_id`/`PromoteV2RootStep.step_id`, duplicated
+# as literals (not imported from the classes) so this module never needs to
+# construct one just to read an attribute — matches
+# `apply_version_marker_only()`'s own "steps[0] is version-marker" convention
+# of hardcoding ladder-position knowledge here.
 _ARCHIVE_V1_STEP_ID = "archive-v1-legacy"
+_PROMOTE_V2_ROOT_STEP_ID = "promote-v2-root"
+_VERSION_MARKER_STEP_ID = "version-marker"
+
+
+def _remove_if_empty_dir(path: Path) -> None:
+    """Remove *path* only if it (and everything under it) is already empty
+    of files — never a blanket removal of real content. #504 B5 (acceptance
+    review): `MigrationEngine.rollback()` used to unconditionally
+    `shutil.rmtree` a stray nested `v2/` root on the theory that it could
+    never be anything's only copy — false once `PromoteV2RootStep.rollback()`
+    started deliberately RECREATING a real `v2/` tree as part of a normal
+    restore-v1 (the reviewed `engine_rollback` repro: a unique file ended up
+    with zero copies anywhere in DATA_HOME after a fully-green rollback)."""
+    if not path.is_dir():
+        return
+    for _dirpath, _dirnames, filenames in os.walk(path):
+        if filenames:
+            return
+    shutil.rmtree(path, ignore_errors=True)
+
 
 # The domain steps whose V1 SOURCE lives among what `ArchiveV1LegacyStep`
 # archives — their `validate()` re-reads that source live and can never
@@ -113,14 +135,17 @@ class MigrationEngine:
         return [s.dry_run() for s in self._steps]
 
     def apply_version_marker_only(self) -> StepReport:
-        """Run just step 0 (`version-marker`) — the boot-time fast path once
-        the full ladder has already applied once (#361): every later boot
-        only needs `system/version.json` re-pinned to the running build, not
-        a re-walk of the whole ladder. Reuses the same step object the
-        default ladder already built (or `steps[0]` for a hand-built list),
-        never a second `VersionMarkerStep` wired to different journal/backup
-        stores."""
-        return self._steps[0].apply()
+        """Run just `version-marker` — the boot-time fast path once the full
+        ladder has already applied once (#361): every later boot only needs
+        `system/version.json` re-pinned to the running build, not a re-walk
+        of the whole ladder. Reuses the same step object the default ladder
+        already built, never a second `VersionMarkerStep` wired to different
+        journal/backup stores. Looked up by step_id (not `steps[0]`) so this
+        stays correct regardless of ladder ordering."""
+        for s in self._steps:
+            if getattr(s, "step_id", "") == _VERSION_MARKER_STEP_ID:
+                return s.apply()
+        raise KeyError(f"MigrationEngine has no step {_VERSION_MARKER_STEP_ID!r}")
 
     def applied_step_ids(self) -> list[str]:
         """Step ids the journal already has a successful, not-yet-rolled-
@@ -150,7 +175,36 @@ class MigrationEngine:
         even if an earlier one in this same call failed, so one broken step
         never blocks a later, independent one from ever making progress —
         the caller (`auto_migrate_boot`) decides what a failure means
-        per-step, not this method.
+        per-step, not this method. The ONE exception (#504 B2, acceptance
+        review): `archive-v1-legacy` structurally depends on
+        `promote-v2-root` having actually finished (or had nothing to do)
+        in THIS SAME pass — it treats the legacy `v2/` root as safe to
+        remove the instant it exists, and a `promote-v2-root` that failed
+        mid-copy leaves its SOURCE exactly as full as before it started
+        (its own two-phase copy-then-remove never got to the removal half).
+        Letting the pass continue into `archive-v1-legacy` anyway used to
+        have it destroy that still-full source outright — the reviewed
+        `pending_failure` repro: a unique file present nowhere else ended up
+        in the nested source, the promoted target, AND every archive. A
+        `promote-v2-root` failure now stops this whole pass right here —
+        the OTHER already-applied domain steps from a PRIOR pass are
+        untouched, and the caller's existing per-step rollback/retry-guard
+        (`auto_migrate_boot._run_apply_pending`) still handles
+        `promote-v2-root` itself exactly like any other new failure.
+
+        #504 H6 (acceptance review): `version-marker` (ladder position 0)
+        runs before `promote-v2-root` can have materialized
+        `core.storage.paths.core_home()`'s post-#504 top-level `system/` for
+        the first time — its write can land at the pre-flip fallback
+        location moments before `promote-v2-root` copies an OLD nested
+        `v2/system/version.json` over the spot `core_home()` NOW resolves
+        to, leaving the running build's own version stamp shadowed by a
+        stale one on the very first boot after an upgrade. When
+        `promote-v2-root` just ran (successfully) in this pass, re-apply
+        `version-marker` once more right after it, so this pass ends with
+        the current version at wherever `core_home()` ends up resolving —
+        not whatever `promote-v2-root` happened to copy up from the old
+        nested root.
 
         #504: once `archive-v1-legacy` has archived every V1 leftover it
         owns (or there was never any), the 5 domain steps in
@@ -168,6 +222,9 @@ class MigrationEngine:
             (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
         )
         v1_retired = archive_step is not None and archive_step.validate().ok
+        version_marker_step = next(
+            (s for s in self._steps if getattr(s, "step_id", "") == _VERSION_MARKER_STEP_ID), None
+        )
         reports: list[StepReport] = []
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
@@ -178,7 +235,13 @@ class MigrationEngine:
                     continue
                 if s.validate().ok:
                     continue
-            reports.append(s.apply())
+            r = s.apply()
+            reports.append(r)
+            if step_id == _PROMOTE_V2_ROOT_STEP_ID:
+                if not r.ok:
+                    break
+                if version_marker_step is not None:
+                    reports.append(version_marker_step.apply())
         return reports
 
     def rollback_step(self, step_id: str) -> StepReport:
@@ -186,9 +249,16 @@ class MigrationEngine:
         per-step failure handling (#362) must never reach for the
         whole-ladder `rollback()`, which would also undo every earlier step
         that already succeeded, possibly release(s) ago."""
+        return self.get_step(step_id).rollback()
+
+    def get_step(self, step_id: str) -> MigrationStep:
+        """The ladder step object with this id — #504 H1: `cli.py`'s
+        `restore-v1` needs to call `ArchiveV1LegacyStep.rollback(archive_ts=...)`
+        with an argument `rollback_step()` above has no way to pass through
+        (every `MigrationStep.rollback()` in the protocol takes none)."""
         for s in self._steps:
             if getattr(s, "step_id", "") == step_id:
-                return s.rollback()
+                return s
         raise KeyError(f"MigrationEngine has no step {step_id!r}")
 
     def apply(self) -> list[StepReport]:
@@ -309,17 +379,20 @@ class MigrationEngine:
                 "auto_migrate_boot.py both use the default MigrationEngine() "
                 "which resolves it from config.DATA_HOME)."
             )
-        # #504: `storage_layout_v2().root` is now DATA_HOME itself (the
-        # nested v2/ folder was retired as the V2 root by the promote step
-        # above) — a blanket rmtree of "root" here would wipe the whole
-        # user data directory, not a disposable copy. Each step's own
-        # rollback already reversed exactly what IT wrote; the only
-        # still-disposable-by-construction leftover is a legacy pre-#504
-        # nested v2/ folder, if `PromoteV2RootStep.rollback()` above didn't
-        # already need it (e.g. it was interrupted mid-promote) — always
-        # safe to remove since it is, by definition, never anything's only
-        # copy (#350's original "don't leave `doctor --storage-layout`
-        # stuck reporting stale state forever" concern, scoped to the one
-        # thing here that's actually still safe to nuke).
-        shutil.rmtree(self._data_home / "v2", ignore_errors=True)
+        # #504 B5 (acceptance review): `storage_layout_v2().root` is now
+        # DATA_HOME itself (the nested v2/ folder was retired as the V2
+        # root by the promote step above) — a blanket rmtree of "root" here
+        # would wipe the whole user data directory, not a disposable copy.
+        # This USED TO also assume a leftover `v2/` here is always
+        # disposable-by-construction ("never anything's only copy") — false
+        # the moment `PromoteV2RootStep.rollback()` (just run, above, in
+        # reverse order) deliberately RECREATES real content under `v2/` as
+        # part of a normal restore: the reviewed `engine_rollback` repro
+        # showed a fully-green rollback leaving a unique file with zero
+        # copies anywhere in DATA_HOME. Only remove `v2/` when it is
+        # genuinely empty — a leftover shell from an interrupted operation,
+        # never anything's only copy — matching #350's original "don't
+        # leave `doctor --storage-layout` stuck reporting stale state
+        # forever" concern without ever destroying real data to do it.
+        _remove_if_empty_dir(self._data_home / "v2")
         return reports

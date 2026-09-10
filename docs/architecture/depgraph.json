@@ -396,6 +396,7 @@
         "agent_takkub.core.capabilities.design_integrations",
         "agent_takkub.core.capabilities.permission_engine",
         "agent_takkub.core.migration.engine",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
@@ -430,7 +431,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 39
+      "fan_out": 40
     },
     {
       "module": "agent_takkub.cli_server",
@@ -1558,9 +1559,10 @@
         "agent_takkub.core.migration.verify_copy"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.core.migration.engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 6
     },
     {

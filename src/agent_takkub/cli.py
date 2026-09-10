@@ -3133,14 +3133,72 @@ def cmd_qa_gate(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": "qa-gate: failed — see table above", "exit_code": report.exit_code}
 
 
+def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
+    """`takkub migrate restore-v1` (#504 item 2): undo the boot-time "finish
+    the move" pair (archive-v1-legacy, then promote-v2-root) from the
+    archives they themselves wrote, never deleted. A dedicated verb rather
+    than overloading `rollback` (which reverses the WHOLE ladder, including
+    every V1->V2 domain step) since a user reaching for "put V1 back" almost
+    never also wants those undone.
+
+    #504 H1 (acceptance review): `--archive <ts>` restores one specific
+    ``v1-archive-<ts>`` generation instead of only ever being able to reach
+    the latest one; with no `--archive`, every generation is restored
+    oldest-first (a later boot only ever archives NEW top-level names a
+    previous archive didn't already own, so generations don't overlap in
+    practice — walking them oldest-first still lets a genuinely repeated
+    name land as its newest recorded copy).
+
+    #504 H3: `promote-v2-root`'s rollback used to run even when
+    `archive-v1-legacy`'s just failed — reconstructing only HALF of the
+    pre-2.1.0 shape while reporting the overall command as having tried
+    both. Stop here instead."""
+    from .core.migration.promote_v1 import list_v1_archives
+
+    archive_step = engine.get_step("archive-v1-legacy")
+    archive_ts = getattr(args, "archive_ts", None)
+    if archive_ts is not None:
+        generations = [archive_ts]
+    else:
+        generations = [a["ts"] for a in reversed(list_v1_archives(config.DATA_HOME))]
+
+    if not generations:
+        return [archive_step.rollback()]  # the "nothing to restore" report
+
+    reports = []
+    for ts in generations:
+        r = archive_step.rollback(archive_ts=ts)
+        reports.append(r)
+        if not r.ok:
+            return reports
+    reports.append(engine.rollback_step("promote-v2-root"))
+    return reports
+
+
 def cmd_migrate(args: argparse.Namespace) -> dict:
-    """`takkub migrate {inspect,plan,dry-run,apply,validate,rollback}` — Core
-    V2 storage migration (#309 Phase 4, docs/v2/V2_IMPLEMENTATION_PLAN.md
-    §5). Pure-local, same rationale as `takkub worktree`/`takkub doctor`: no
-    orchestrator socket needed, works with the cockpit closed."""
+    """`takkub migrate {inspect,plan,dry-run,apply,validate,rollback,
+    restore-v1}` — Core V2 storage migration (#309 Phase 4,
+    docs/v2/V2_IMPLEMENTATION_PLAN.md §5). Pure-local, same rationale as
+    `takkub worktree`/`takkub doctor`: no orchestrator socket needed, works
+    with the cockpit closed."""
     from .core.migration.engine import MigrationEngine
+    from .core.migration.promote_v1 import list_v1_archives
 
     engine = MigrationEngine()
+
+    if args.migrate_cmd == "restore-v1" and getattr(args, "list_archives", False):
+        archives = list_v1_archives(config.DATA_HOME)
+        if args.json:
+            import json as _json
+
+            _utf8_print(_json.dumps(archives, indent=2))
+        else:
+            if not archives:
+                _utf8_print("  (no v1-archive-<ts> generations found)")
+            for a in archives:
+                _utf8_print(f"  {a['ts']}  archived={a['archived']}  deleted={a['deleted']}")
+        return {"ok": True, "msg": f"{len(archives)} archive generation(s)"}
+
     dispatch = {
         "inspect": engine.inspect,
         "plan": engine.plan,
@@ -3148,17 +3206,7 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
         "apply": engine.apply,
         "validate": engine.validate,
         "rollback": engine.rollback,
-        # #504 item 2: undo the boot-time "finish the move" pair specifically
-        # (archive-v1-legacy, then promote-v2-root) — restoring from the
-        # archive `ArchiveV1LegacyStep`/`PromoteV2RootStep` themselves wrote,
-        # never deleted (#504: "archive ไม่มีวันหมดอายุ ไม่มี auto-cleanup").
-        # A dedicated verb rather than overloading `rollback` (which reverses
-        # the WHOLE ladder, including every V1->V2 domain step) since a user
-        # reaching for "put V1 back" almost never also wants those undone.
-        "restore-v1": lambda: [
-            engine.rollback_step("archive-v1-legacy"),
-            engine.rollback_step("promote-v2-root"),
-        ],
+        "restore-v1": lambda: _cmd_migrate_restore_v1(engine, args),
     }
     reports = dispatch[args.migrate_cmd]()
 
@@ -5332,6 +5380,24 @@ def main(argv: list[str] | None = None) -> int:
     for _name, _help in smig_help.items():
         _p = smig_sub.add_parser(_name, help=_help)
         _p.add_argument("--json", action="store_true", help="emit JSON instead of text report")
+        if _name == "restore-v1":
+            # #504 H1: pick one specific v1-archive-<ts> generation instead
+            # of only ever reaching the latest one, and list what exists.
+            _p.add_argument(
+                "--archive",
+                dest="archive_ts",
+                default=None,
+                metavar="TS",
+                help="restore only this v1-archive-<ts> generation (default: every "
+                "generation, oldest first — see --list)",
+            )
+            _p.add_argument(
+                "--list",
+                dest="list_archives",
+                action="store_true",
+                help="list available v1-archive-<ts> generations and exit, without "
+                "restoring anything",
+            )
         _p.set_defaults(func=cmd_migrate)
 
     sprv = sub.add_parser(

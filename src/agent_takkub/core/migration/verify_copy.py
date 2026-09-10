@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -32,6 +32,13 @@ class VerifyMismatchError(RuntimeError):
 class CopyVerification:
     file_count: int
     total_bytes: int
+    # #504 H9: relative-posix-path -> sha256, for every file this call just
+    # verified — callers persist this into their own manifests so a LATER
+    # `validate()` can recompute and compare against real on-disk archive
+    # content instead of only checking "the source is gone" (#504 acceptance
+    # review finding H9: a green migration validate previously proved
+    # nothing about target integrity).
+    digests: dict[str, str] = field(default_factory=dict)
 
 
 def _sha256(path: Path) -> str:
@@ -62,11 +69,16 @@ def copy_verified(src: Path, dest: Path) -> CopyVerification:
         shutil.copy2(src, dest)
 
     total_bytes = 0
-    for f in _source_files(src):
+    digests: dict[str, str] = {}
+    source_files = _source_files(src)
+    for f in source_files:
         target = (dest / f.relative_to(src)) if src.is_dir() else dest
         if not target.is_file():
             raise VerifyMismatchError(f"missing after copy: {target}")
-        if _sha256(target) != _sha256(f):
+        digest = _sha256(target)
+        if digest != _sha256(f):
             raise VerifyMismatchError(f"checksum mismatch: {target}")
         total_bytes += target.stat().st_size
-    return CopyVerification(file_count=len(_source_files(src)), total_bytes=total_bytes)
+        rel = f.relative_to(src).as_posix() if src.is_dir() else src.name
+        digests[rel] = digest
+    return CopyVerification(file_count=len(source_files), total_bytes=total_bytes, digests=digests)
