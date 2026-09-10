@@ -1684,6 +1684,26 @@ class SpawnEngineMixin:
             # while a Claude-capable spawn was deferred.
             self._finish_spawn_initial_task(role_name, project_ns, preloaded=False)
             self.statusChanged.emit()
+            # #558: this tail (shell/gemini/codex/...) used to skip the
+            # `takkub send` no-pane flush that the claude branch does below
+            # (see the matching block near the end of `spawn()`'s claude
+            # path) — a bare `takkub spawn` for a non-claude role left any
+            # message queued while it had no pane stuck "will be delivered
+            # as soon as it spawns" forever, since nothing ever scheduled
+            # the actual flush. `takkub assign` never hit this because it
+            # dispatches its own task text directly instead of relying on
+            # the queued-message path.
+            try:
+                from . import role_messages
+
+                _runtime_dir = _from_orch("RUNTIME_DIR")
+                if role_messages.queued_no_pane_for_role(_runtime_dir, project_ns, role_name):
+                    QTimer.singleShot(
+                        5_000,
+                        lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),
+                    )
+            except Exception:
+                pass
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=bool(resume_uuid))
             return True, f"{label} spawned in {spawn_cwd}"
         except SpawnTargetCorrupt as e:

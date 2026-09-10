@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
+from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
 
 TEST_PROJECT = "launchtest"
@@ -30,8 +31,9 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture
-def orch(qapp, monkeypatch):
+def orch(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p or TEST_PROJECT))
+    monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
     o = Orchestrator()
     o.shutdown_timers()
     # Neutralise collaborators the tail touches so we observe wiring, not effects.
@@ -281,3 +283,51 @@ class TestExitGuardSurvivesOwnHandlerRace:
         orch_handler(1)
 
         orch._on_session_exit.assert_not_called()
+
+
+class TestLaunchSessionFlushesQueuedNoPaneMessages:
+    """#558: a bare `takkub spawn` for a non-claude role (codex/gemini/shell —
+    everything routed through `_launch_session`, per its own docstring) used
+    to skip the queued `takkub send` flush entirely: only the separate
+    claude-branch success tail (inline in `spawn()`) scheduled
+    `_flush_queued_no_pane_messages`. A message queued while e.g. `codex`
+    had no pane open stayed stuck "will be delivered as soon as it spawns"
+    forever once spawned via bare `spawn` (only `assign` dispatches its own
+    task text directly, sidestepping the gap). `_launch_session`'s own
+    success path must schedule the same flush `spawn()`'s claude branch
+    does.
+    """
+
+    def test_schedules_and_flushes_a_message_queued_before_spawn(self, orch, monkeypatch):
+        fired: list = []
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine.QTimer.singleShot",
+            lambda _ms, fn: (fired.append(fn), fn())[1],
+        )
+        ok, _msg = orch.send("codex", "safety note", from_role="lead", project=TEST_PROJECT)
+        assert ok is True
+
+        pane = _pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
+        ok, _msg, sess, _handler = _launch(orch, pane, label="codex", codex_exit=True)
+        pane.session = sess  # _flush_queued_no_pane_messages reads pane.session
+
+        assert ok is True
+        assert fired, "queued-message flush timer was never scheduled"
+
+        from agent_takkub import role_messages
+
+        assert (
+            role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, TEST_PROJECT, "codex") == []
+        )
+        all_records = role_messages.read(orch_mod.RUNTIME_DIR, TEST_PROJECT, role="codex")
+        assert any(r["state"] == "sent" for r in all_records)
+
+    def test_does_not_schedule_a_flush_when_nothing_was_queued(self, orch, monkeypatch):
+        calls: list = []
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine.QTimer.singleShot",
+            lambda _ms, fn: calls.append(fn),
+        )
+        _launch(orch, _pane(), label="shell")
+        assert calls == []
