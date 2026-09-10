@@ -401,3 +401,94 @@ default, nothing more.
   dedicated follow-up task rather than shipped half-verified.
 - **Multi-provider boot-context measurement (point 6)** — unchanged gap from
   §4; still only claude's `--append-system-prompt-file` path is measured.
+
+## 7. Follow-up pass (2026-09-10, third session) — F2 measurement gap closed, idle-pane reuse investigated
+
+### F2 measurement gap closed: `native_skill_catalog` category
+
+§3/F2 flagged the native `skill_listing` catalog (16 skills, 8,025 chars in
+the original transcript) as a real cost `boot_context.py` never actually
+measured — only inferred from a one-off transcript read. New
+`boot_context.measure_native_skill_catalog(project_ns)` scans
+`CLAUDE_CONFIG_DIR/skills/` (`user_profile.config_dir_for`, the real
+directory every claude pane of a project reads its global catalog from —
+NOT a hardcoded `~/.claude/skills`, since this project's own dev panes run
+under an isolated `CLAUDE_CONFIG_DIR`), cross-referenced against this
+project's own `.claude/skills/` (`skill_scan.scan_skills`) so the report
+separates "this repo's own skill" from "an unrelated global skill riding
+along on every pane." Wired into `doctor.check_boot_context` (new
+`native_skill_catalog` Finding, INFO) and `boot_context.format_report`.
+Added to `DYNAMIC_STATE_CATEGORIES` — per-machine operator state (what the
+user personally has installed), not repo content, same class as
+`native_project_memory`. Confirmed live on the dev machine that produced
+this doc: **34 skills** currently load into every agent-takkub pane this
+way (a different, machine-specific number from the original 16-skill
+transcript — expected, since it depends on what's installed on whichever
+machine runs it, which is exactly why this is dynamic-state and not
+ceiling-gated). Tests: `tests/test_boot_context.py::
+TestNativeSkillCatalogMeasurement` (5 new tests).
+
+### Point 2 (skills gate knob) revisited: still not wired, for the same reason as before
+
+Re-investigated whether a default per-role gate could now be shipped (the
+literal ask this pass started from: gate user-level skills unrelated to
+agent-takkub out of every pane by default, keep this repo's own skills,
+except where a role has real, demonstrated use of a specific catalog
+skill). Conclusion unchanged from §3/F3: **no safe lever exists.**
+`--disable-slash-commands` is still the only discovered CLI switch, is
+still all-or-nothing per session, and disabling it would remove BOTH the
+unrelated global catalog AND this project's own `.claude/skills/` skills in
+the same stroke — directly violating the "keep this repo's own skills"
+half of the ask, not just the risky half. It would also re-remove
+`superpowers-dev`'s real, measured usage (`test-driven-development` x9,
+`systematic-debugging` x4, `verification-before-completion` x2 — §6's
+30-day scan) for ANY role, since that usage could not be attributed to a
+specific role (67 of 68 invocations landed in `lead_or_unknown` — same
+methodology caveat as §6) and those are universal engineering practices
+every teammate role plausibly exercises, not a design-specific skill a
+`_ROLE_PLUGIN_POLICY` split could safely gate by role today.
+
+The one thing that changed this pass: the gap is now **measured**
+(previous section), so a future decision — either building the real fix
+(a per-project curated `CLAUDE_CONFIG_DIR` with only the wanted skills
+symlinked in, mirroring `user_profile.py`'s existing multi-account-profile
+machinery and its "first-boot profile clone" allowlist precedent for
+`config`/`skills`/`agents`/`plugins`) or a fresh 30-day usage scan with
+better role attribution — has a real "before" number to check its "after"
+against via `takkub doctor --boot-context`, instead of a one-off transcript
+read. Not shipped this pass: the curated-`CLAUDE_CONFIG_DIR` fix needs to
+mirror real auth credentials into the new directory without breaking pane
+login, which is a correctness-sensitive change to how every pane
+authenticates and deserves its own dedicated design/test pass rather than
+riding in on this one.
+
+### Point 4 (idle-pane reuse) investigated: the "already-alive pane" case already works; the "already-exited" case is intentionally NOT resumed
+
+Traced the full `assign()` → `spawn()` path rather than guessing:
+
+- **Pane still alive (not yet auto-closed)** — `spawn_engine.spawn()`'s
+  very first check (`pane.session is not None and pane.session.is_alive`)
+  already short-circuits as a no-op, and `_assign_dispatch` already falls
+  through to `_send_when_ready` (paste into the SAME running session)
+  instead of any fresh boot. This needed no engine change — it already
+  delivers a new task into a role's `done`-state-but-still-alive pane for
+  free. Locked in with a new regression test:
+  `tests/test_idle_pane_reuse_assign.py`.
+- **Pane already fully exited** (`done()`/`close()` already tore it down)
+  — `spawn_engine.py`'s existing `RESUME_WINDOW_SEC` (5 min) `--resume
+  <uuid>` mechanism looks like it should cover this (the comment at
+  `_auto_respawn` even says so), but its `can_resume` check reads
+  `prior_uuid`/`prior_uuid_cwd` from the LIVE `self._pane_state` dict —
+  which `done()`/`close()` deliberately pop before this ever runs. This
+  looks like a dead code path on first read, but `tests/
+  test_orchestrator_session_uuid.py` (`TestManualCloseClears`/
+  `TestDoneClears`, module docstring: "option-B session UUID fix
+  (resume-bleed prevention)") proves it is INTENTIONAL: resuming a role's
+  transcript across a `done()`/`close()` boundary was a past bug (bleed
+  between an old finished task's conversation and a new one), fixed by
+  forcing every post-close/post-done spawn to start a brand-new session.
+  Wiring `--resume` back in for this case — even gated on `RESUME_WINDOW_
+  SEC` — would revert that fix and needs its own explicit design/test pass
+  (how to safely resume a task-level session without reintroducing bleed,
+  e.g. summarizing rather than replaying the old transcript), not a blind
+  change riding in on this task. Not shipped this pass.

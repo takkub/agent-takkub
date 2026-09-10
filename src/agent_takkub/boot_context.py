@@ -78,6 +78,9 @@ DYNAMIC_STATE_CATEGORIES = frozenset(
         "native_project_memory",
         "native_project_memory_LEAD",
         "graft_caveats",
+        # #516 follow-up: whatever the operator has personally installed
+        # under CLAUDE_CONFIG_DIR/skills — per-machine, not repo content.
+        "native_skill_catalog",
     }
 )
 
@@ -325,6 +328,77 @@ def measure_native_project_memory(
     return _cat(category, text, str(mem_path))
 
 
+def measure_native_skill_catalog(project_ns: str) -> CategoryMeasurement | None:
+    """Claude Code's OWN native skill-discovery catalog (the `skill_listing`
+    system-prompt attachment — see docs/audit/2026-09-07-boot-context.md
+    finding F2), a DIFFERENT mechanism from `skill_matrix_appendix` above
+    (cockpit's `skill_policy.py` proactive-reference block, which only
+    covers this PROJECT's own `.claude/skills/`). This one is scanned
+    directly from `CLAUDE_CONFIG_DIR/skills/` (`user_profile.config_dir_for`
+    — the exact directory every claude pane of this project reads its
+    global skill catalog from, real files, not a guess) and is SHARED by
+    every role of the project (profiles are per-project, not per-role — no
+    per-role split to measure here, unlike F1's `native_project_memory`).
+
+    Cross-referenced against this project's OWN skills (`skill_scan.
+    scan_skills` over `_allowed_project_roots`) so the detail string can
+    separate "this repo's own skill" from "an unrelated global skill riding
+    along on every pane for free" — the #516 follow-up gap F2 flagged as
+    unmeasured. Measuring this does NOT imply a safe way to gate it yet:
+    `--disable-slash-commands` is the only discovered CLI lever and it is
+    all-or-nothing (would also remove this project's own skills, and real
+    30-day usage data showed teammates using unrelated catalog skills like
+    `superpowers-dev`'s `test-driven-development` — see the audit doc's F3
+    section for why that was deliberately not wired blind).
+
+    Returns None when `CLAUDE_CONFIG_DIR/skills/` doesn't exist or has no
+    skill files — nothing to report. Never raises."""
+    from . import skill_scan
+    from .lead_context import _allowed_project_roots
+    from .user_profile import config_dir_for
+
+    try:
+        config_dir = config_dir_for(project_ns)
+    except Exception:
+        return None
+    skills_dir = config_dir / "skills"
+    files = skill_scan._skill_files(skills_dir)
+    if not files:
+        return None
+
+    try:
+        project_roots = _allowed_project_roots(project_ns)
+    except Exception:
+        project_roots = []
+    project_names = {s.name for s in skill_scan.scan_skills(project_roots)}
+
+    texts: list[str] = []
+    names: list[str] = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        texts.append(text)
+        fm = skill_scan._parse_frontmatter(text)
+        name = fm.get("name")
+        if not isinstance(name, str) or not name.strip():
+            name = f.parent.name if f.name == "SKILL.md" else f.stem
+        names.append(name.strip())
+
+    unrelated = [n for n in names if n not in project_names]
+    detail = (
+        f"{skills_dir} — {len(names)} skill(s), {len(unrelated)} not part of this "
+        f"project's own .claude/skills"
+        + (
+            f" ({', '.join(unrelated[:8])}{'...' if len(unrelated) > 8 else ''})"
+            if unrelated
+            else ""
+        )
+    )
+    return _cat("native_skill_catalog", "".join(texts), detail)
+
+
 def build_report(base_role: str, project_ns: str) -> RoleBootReport:
     report = RoleBootReport(role=base_role, project=project_ns)
     report.categories.extend(measure_role_appendix(base_role, project_ns))
@@ -336,12 +410,23 @@ def build_report(base_role: str, project_ns: str) -> RoleBootReport:
     return report
 
 
-def format_report(reports: list[RoleBootReport], native_memory: CategoryMeasurement | None) -> str:
+def format_report(
+    reports: list[RoleBootReport],
+    native_memory: CategoryMeasurement | None,
+    native_skills: CategoryMeasurement | None = None,
+) -> str:
     lines: list[str] = []
     if native_memory is not None:
         lines.append(
             f"[Lead only, post-#516-F1] native_project_memory: {native_memory.chars} chars, "
             f"~{native_memory.est_tokens} tok (lower bound) — {native_memory.detail}"
+        )
+        lines.append("")
+    if native_skills is not None:
+        lines.append(
+            f"[shared across every role] native_skill_catalog: {native_skills.chars} chars, "
+            f"~{native_skills.est_tokens} tok (lower bound) — {native_skills.detail} "
+            "[dynamic-state, not gated]"
         )
         lines.append("")
     for r in reports:
