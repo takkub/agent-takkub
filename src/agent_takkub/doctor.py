@@ -3479,17 +3479,24 @@ def _v1_only_write_finding() -> Finding:
             "0 พบใน snapshot นี้ (on-demand, ไม่ใช่ monitor ต่อเนื่อง)",
         )
     missing = [h for h in hits if h.reason == "missing_mirror"]
-    stale = [h for h in hits if h.reason != "missing_mirror"]
+    diverged = [h for h in hits if h.reason == "diverged"]
+    unmirrored_equal = [h for h in hits if h.reason == "unmirrored_equal"]
     parts = []
     if missing:
         parts.append(
             f"{len(missing)} domain(s) มี V1 file แต่ไม่มี v2/ mirror เลย "
             f"({', '.join(sorted(h.name for h in missing))}) — dual_write อาจไม่เคยรันสำหรับ domain นี้"
         )
-    if stale:
+    if diverged:
         parts.append(
-            f"{len(stale)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ "
-            f"({', '.join(sorted(h.name for h in stale))}) — `dual_write.py` มี writer ที่หลุด"
+            f"{len(diverged)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ และค่าจริงต่างกัน "
+            f"({', '.join(sorted(h.name for h in diverged))}) — `dual_write.py` มี writer ที่หลุด"
+        )
+    if unmirrored_equal:
+        parts.append(
+            f"{len(unmirrored_equal)} domain(s) เขียนลง V1 โดยไม่ mirror แต่ค่าที่ save ซ้ำเหมือนเดิม "
+            f"({', '.join(sorted(h.name for h in unmirrored_equal))}) — v2/ ยังไม่ผิด "
+            "แต่ writer เดิมก็ยังหลุด dual_write อยู่ดี"
         )
     return Finding("storage-layout", "v1-only-write", Status.WARN, "; ".join(parts))
 

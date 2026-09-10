@@ -10,9 +10,29 @@ swallowed, never raised. The reverse order (V2 succeeds, V1 fails) cannot
 happen by construction, since V1 always runs first and this module is only
 reached once it already has.
 
-**Skips silently on a not-yet-migrated machine** (no ``v2/`` root) — dual-
-write only refreshes an EXISTING v2/ copy; creating one from scratch is
-#361's job (`auto_migrate_boot` / `migrate apply`), not this module's.
+**Skips on a not-yet-migrated machine** (no ``v2/`` root) — dual-write only
+refreshes an EXISTING v2/ copy; creating one from scratch is #361's job
+(`auto_migrate_boot` / `migrate apply`), not this module's. NOT silent since
+#504 pre-req (2026-09-10): every skip calls `_warn_v2_write_skipped`, a
+best-effort ``events.log`` breadcrumb (`_log_event`, proxied to
+`orchestrator._log_event` only when this process is actually running inside
+the app — a bare CLI/test process logs nothing there being anything to log
+*to*) — a genuinely not-yet-migrated machine skipping every call forever is
+expected and not itself a bug, but a machine that HAS migrated skipping one
+domain because THIS process's own `effective_data_home` disagrees with where
+the real ``v2/`` root lives (see `_primary_data_home` below) is exactly the
+silent-drift shape #502's `v1_only_write` scan exists to catch — this
+breadcrumb is the earlier, cheaper signal for the same failure.
+
+**Global-scope (``SETTINGS_HOME``) V1 domains prefer the PRIMARY DATA_HOME.**
+``role-models``/``provider-models``/``role-providers`` (the ``global``
+bucket) all source from ``SETTINGS_HOME``, which is shared across every dev
+checkout on the machine — unlike this process's own `config.DATA_HOME`,
+which in dev mode IS the checkout root and therefore differs per worktree.
+A worktree pane process saving one of these must still check/write the
+PRIMARY cockpit's ``v2/`` tree, not spuriously conclude "not migrated" from
+its own checkout's (`_effective_data_home`'s ``prefer_primary=True``,
+`_primary_data_home`).
 
 **Callers pass already-loaded V1 data, not a path to re-read.** Every writer
 below already has the exact payload it just persisted sitting in a local
@@ -63,7 +83,7 @@ from .layout import storage_layout_v2
 _log = logging.getLogger(__name__)
 
 
-def _effective_data_home(data_home: Path | None) -> Path:
+def _effective_data_home(data_home: Path | None, *, prefer_primary: bool = False) -> Path:
     # Late, per-call import — NOT hoisted to module top — so this always
     # resolves through whatever `core.storage.layout.storage_layout_v2` is
     # bound to AT CALL TIME. `tests/conftest.py`'s autouse `_isolate_runtime`
@@ -73,13 +93,101 @@ def _effective_data_home(data_home: Path | None) -> Path:
     # function once and silently keep resolving to the real data_home in
     # every test, the exact class of bug `core.routing.router` already
     # works around the same way for the same reason.
+    #
+    # `prefer_primary` (#504 pre-req): the 3 callers whose V1 source is
+    # itself `SETTINGS_HOME`-scoped (global, shared across every dev
+    # checkout on the machine) — not `DATA_HOME`-scoped like the rest — set
+    # this so a worktree pane process resolves the V2 mirror against the
+    # PRIMARY cockpit's DATA_HOME (`_primary_data_home()`) instead of its
+    # own checkout-local one. Only applies to the bare no-arg default: an
+    # explicit `data_home` (every test in this suite) always wins outright,
+    # exactly like every other override in this module.
     from .layout import storage_layout_v2 as _storage_layout_v2
+
+    if data_home is None and prefer_primary:
+        primary = _primary_data_home()
+        if primary is not None:
+            data_home = primary
 
     return _storage_layout_v2(data_home).root.parent
 
 
 def _v2_present(effective_data_home: Path) -> bool:
     return storage_layout_v2(effective_data_home).root.is_dir()
+
+
+def _primary_data_home() -> Path | None:
+    """Best-effort recovery of the PRIMARY cockpit's own ``config.DATA_HOME``
+    from inside a worktree pane process (#504 pre-req; live-test 2026-09-10
+    12:16:37 found this domain class drifting silently for exactly this
+    reason). A worktree checkout's own ``config.DATA_HOME`` resolves to ITS
+    OWN checkout root in dev mode (``_resolve_data_home`` returns
+    ``REPO_ROOT``) — a different directory per worktree, never the primary
+    cockpit's ``DATA_HOME`` that a global-scope V1 domain (``SETTINGS_HOME``-
+    sourced: provider-models, role-models, role-providers) actually needs its
+    V2 mirror checked against, since ``SETTINGS_HOME`` itself is shared
+    across every dev checkout on the machine (``config._resolve_settings_home``).
+
+    ``pane_env._apply_port_file`` stamps every spawned pane's env with the
+    HOST cockpit's own ``config._effective_port_file_for_app()`` result —
+    normally ``<primary DATA_HOME>/runtime/port`` — so its grandparent
+    recovers the primary DATA_HOME. Returns ``None`` when not derivable: no
+    ``TAKKUB_PORT_FILE`` override present (bare CLI/test run, no orchestrator
+    context at all), or the value is the per-PID multi-instance temp file
+    (``config._AUTO_PORT_FILE_ENV``), which lives OUTSIDE any DATA_HOME by
+    construction — callers must fall back to the caller-supplied/default
+    resolution in that case, never guess further."""
+    import os
+
+    override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
+    if not override:
+        return None
+    if os.environ.get("_TAKKUB_AUTO_PORT_FILE", "").strip() == override:
+        return None
+    path = Path(override)
+    if path.name != "port" or path.parent.name != "runtime":
+        return None
+    return path.parent.parent
+
+
+def _log_event(event: str, **details) -> None:
+    """Best-effort proxy to ``orchestrator._log_event`` (events.log) when
+    this process is running inside the app — ``sys.modules`` lookup only,
+    never a static import, so this doesn't trip the ``core-is-bottom-layer``
+    import-linter contract (same trick ``design_actions.py``/
+    ``editor_service.py`` already use one layer up). No-op for a bare
+    ``takkub`` CLI/test process with no orchestrator loaded (nothing there
+    owns an events.log to write to anyway).
+
+    Deliberately does NOT attempt to also push a live Lead-pane notice:
+    every ``_notify_lead`` call in this codebase is a bound method on a
+    live ``Orchestrator`` instance, keyed by ``project_ns`` — neither of
+    which a plain module-level writer like this (or any of its callers:
+    ``role_models.py``/``provider_models.py``/``provider_config.py``, none
+    of which carry a ``self``/``project_ns``) has any way to reach. The
+    ``events.log`` line this writes is what ``doctor --storage-layout`` /
+    `takkub migrate validate`'s ``v1_only_write`` check already surfaces to
+    an operator; a from-anywhere Lead-pane push would need a new
+    process-wide "current orchestrator" registry this codebase doesn't have
+    today — out of scope here rather than guessed at."""
+    import sys
+
+    _orch = sys.modules.get("agent_takkub.orchestrator")
+    if _orch is None:
+        return
+    try:
+        _orch._log_event(event, **details)
+    except Exception:
+        pass
+
+
+def _warn_v2_write_skipped(name: str, effective_data_home: Path) -> None:
+    _log_event(
+        "v2_write_skipped",
+        name=name,
+        target=str(storage_layout_v2(effective_data_home).root),
+        data_home=str(effective_data_home),
+    )
 
 
 def _write_wrapped(name: str, target: Path, payload: dict) -> None:
@@ -106,9 +214,12 @@ def _mapping_target(mappings, name: str) -> Path | None:
 
 def dual_write_role_models(entries: dict, *, data_home: Path | None = None) -> None:
     """Mirror ``role_models._save()``'s cleaned entries into
-    ``models/aliases.json`` (ladder step 1's target)."""
-    effective = _effective_data_home(data_home)
+    ``models/aliases.json`` (ladder step 1's target). V1 source
+    (``SETTINGS_HOME/role-models.json``) is global-scope — see
+    ``_effective_data_home``'s ``prefer_primary`` docstring."""
+    effective = _effective_data_home(data_home, prefer_primary=True)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("role-models", effective)
         return
     from ..migration.steps_v1 import build_readonly_registries_step
 
@@ -121,9 +232,12 @@ def dual_write_role_models(entries: dict, *, data_home: Path | None = None) -> N
 
 def dual_write_provider_models(models: dict, *, data_home: Path | None = None) -> None:
     """Mirror ``provider_models._save()``'s cleaned mapping into
-    ``models/registry.json`` (ladder step 1's target)."""
-    effective = _effective_data_home(data_home)
+    ``models/registry.json`` (ladder step 1's target). V1 source
+    (``SETTINGS_HOME/provider-models.json``) is global-scope — see
+    ``_effective_data_home``'s ``prefer_primary`` docstring."""
+    effective = _effective_data_home(data_home, prefer_primary=True)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("provider-models", effective)
         return
     from ..migration.steps_v1 import build_readonly_registries_step
 
@@ -139,6 +253,7 @@ def dual_write_disabled_providers(state: dict, *, data_home: Path | None = None)
     ``providers/registry.json`` (ladder step 1's target)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("disabled-providers", effective)
         return
     from ..migration.steps_v1 import build_readonly_registries_step
 
@@ -160,6 +275,7 @@ def dual_write_exec_mode(payload: dict, *, data_home: Path | None = None) -> Non
     still has a reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("exec-mode", effective)
         return
     from ..migration.steps_v1 import build_readonly_registries_step
 
@@ -183,6 +299,7 @@ def dual_write_rtk_enabled(payload: dict, *, data_home: Path | None = None) -> N
     reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("rtk-enabled", effective)
         return
     from ..migration.steps_v1 import build_readonly_registries_step
 
@@ -199,6 +316,7 @@ def dual_write_pane_tools_policy(file_payload: dict, *, data_home: Path | None =
     ``capabilities/mcp/permissions.json`` (ladder step 3's target)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("pane-tools", effective)
         return
     from ..migration.steps_v1 import build_capability_step
 
@@ -212,6 +330,7 @@ def dual_write_skill_policy(file_payload: dict, *, data_home: Path | None = None
     ``capabilities/skills/registry.json`` (ladder step 3's target)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("skill-policy", effective)
         return
     from ..migration.steps_v1 import build_capability_step
 
@@ -235,9 +354,19 @@ def dual_write_routing(global_data: dict, projects: dict, *, data_home: Path | N
     `dual_write_projects`, and `provider_config` transitively pulls in
     `provider_spec` -> `codex_helper`/`gemini_helper`, which would poison
     `config.py`'s own leaf status the moment this module reached for it.
+
+    The GLOBAL bucket's V1 source (role-models.json, per #515) is
+    ``SETTINGS_HOME``-scoped like role-models/provider-models above, so this
+    resolves through the same ``prefer_primary`` path — the merged target is
+    one file, so there's no way to split "primary DATA_HOME for the global
+    half, this process's own for the per-project half" even if the
+    per-project sources are arguably DATA_HOME-scoped; erring towards the
+    primary cockpit's V2 tree (the one #504's exit gate actually reads) is
+    the safer of the two wrong answers for a worktree pane invocation.
     """
-    effective = _effective_data_home(data_home)
+    effective = _effective_data_home(data_home, prefer_primary=True)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("role-providers", effective)
         return
     from ..migration.steps_v1 import RoleAgentMigrationStep
 
@@ -257,6 +386,7 @@ def dual_write_custom_roles_registry(file_payload: dict, *, data_home: Path | No
     (ladder step 2's target)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("custom-roles", effective)
         return
     from ..migration.steps_v1 import RoleAgentMigrationStep
 
@@ -272,6 +402,7 @@ def dual_write_custom_role_file(
     ``None`` (the role's V1 file was just deleted)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped(f"custom-role-md:{name}", effective)
         return
     target = storage_layout_v2(effective).agents / "custom" / f"{name}.md"
     try:
@@ -304,6 +435,7 @@ def dual_write_local_issues(
     ``target is None`` guard the other flat-registry mirrors use."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("local-issues", effective)
         return
     from ..migration.steps_v1 import build_state_step
 
@@ -326,6 +458,7 @@ def dual_write_issue_dedup(state: dict, *, data_home: Path | None = None) -> Non
     into ``state/issues/dedup.json`` (ladder step 5's target)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("issue-dedup", effective)
         return
     from ..migration.steps_v1 import build_state_step
 
@@ -345,6 +478,7 @@ def dual_write_autoresume(payload: dict, *, data_home: Path | None = None) -> No
     state/sessions/autoresume.json domain still has a reason to exist."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("autoresume", effective)
         return
     from ..migration.steps_v1 import build_state_step
 
@@ -359,6 +493,7 @@ def dual_write_remote_sessions(payload: dict | None, *, data_home: Path | None =
     the V2 copy when ``payload`` is ``None`` (``session_store.clear()``)."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("remote-sessions", effective)
         return
     from ..migration.steps_v1 import build_state_step
 
@@ -381,6 +516,7 @@ def dual_write_projects(data: dict, *, data_home: Path | None = None) -> None:
     projects.json document the caller just wrote to V1."""
     effective = _effective_data_home(data_home)
     if not _v2_present(effective):
+        _warn_v2_write_skipped("projects-registry", effective)
         return
     from ..migration.steps_v1 import ProjectMigrationStep
 

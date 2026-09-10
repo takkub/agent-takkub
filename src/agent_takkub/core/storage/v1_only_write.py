@@ -3,15 +3,27 @@ removal): find a V1 config file that was written more recently than its
 ``core.storage.dual_write`` mirror, meaning some writer changed it without
 going through dual-write and the ``v2/`` copy went stale silently.
 
-**Why mtime, not content-hash.** ``dual_write.py``'s every writer mirrors its
-V1 file in the SAME call, right after the V1 write commits — so under a
-working dual-write path the V2 target's mtime is never older than its V1
-source's (barring the two writes landing in the same filesystem tick, which
-``_MTIME_SLOP_S`` absorbs). A V1 source strictly newer than its V2 mirror
-by more than that slop is the one shape a working dual-write path can never
-produce on its own: a writer changed V1 without mirroring. Hashing every
-mapped file on every scan would cost real I/O to answer a question mtimes
-already answer for free.
+**Why mtime FIRST, not content-hash alone.** ``dual_write.py``'s every
+writer mirrors its V1 file in the SAME call, right after the V1 write
+commits — so under a working dual-write path the V2 target's mtime is never
+older than its V1 source's (barring the two writes landing in the same
+filesystem tick, which ``_MTIME_SLOP_S`` absorbs). A V1 source strictly
+newer than its V2 mirror by more than that slop is the one shape a working
+dual-write path can never produce on its own: a writer changed V1 without
+mirroring. Hashing every mapped file on every scan would cost real I/O to
+answer a question mtimes already answer for free — so mtime stays the
+cheap first gate that decides whether a mapping is even worth reading.
+
+**Content-hash breaks a stale-mtime hit into ``diverged`` vs
+``unmirrored_equal``** (#504 pre-req round 2, 2026-09-10 live-test): a
+writer that skipped dual-write but happened to re-save the SAME values (the
+exact shape that let today's drift go unnoticed — Settings Save re-submitted
+values already on disk) still trips the mtime gate, but isn't the case that
+actually risks a wrong value surviving into V2. Once mtime says "stale", the
+source's parsed JSON (unwrapped V2 payload compared against it — see
+``_unwrap_registry_data``/``_content_diverged``) decides which of the two it
+is; a read/parse failure on either side defaults to ``diverged`` so a real
+hit is never silently downgraded just because content couldn't be verified.
 
 **Reuses the same mapping objects dual-write and the ladder itself are built
 from** (`core.migration.steps_v1`'s ``RegistryMapping`` tuples for the flat
@@ -54,6 +66,8 @@ do that logging themselves from the hits this returns.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,13 +86,85 @@ class V1OnlyWriteHit:
     target: Path
     source_mtime: float
     target_mtime: float | None
-    reason: str = "stale_mirror"  # "stale_mirror" | "missing_mirror"
+    # "missing_mirror" (no v2/ copy at all) | "diverged" (stale mtime AND
+    # content actually differs) | "unmirrored_equal" (stale mtime but the
+    # skipped write happened to re-save the same value already mirrored).
+    reason: str = "diverged"
 
     @property
     def lag_s(self) -> float | None:
         if self.target_mtime is None:
             return None
         return round(self.source_mtime - self.target_mtime, 1)
+
+
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _unwrap_registry_data(doc):
+    """Undo ``dual_write._wrap()``'s ``{"schema", "migrated_from",
+    "migrated_at", "data": ...}`` envelope every 1:1 mapping's V2 target
+    uses. Falls back to the raw doc for anything without a ``"data"`` key —
+    the fan-out ``role-providers`` -> routing.json target has its own
+    ``{"global", "projects"}`` shape instead (see ``_content_diverged``'s
+    ``scope`` branch, which never calls this)."""
+    return doc["data"] if isinstance(doc, dict) and "data" in doc else doc
+
+
+def _content_hash(obj) -> str:
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _global_routing_view(source_doc):
+    """Collapse role-models.json's on-disk shape (``{role: {"provider",
+    "model"?, "effort"?}}``) the same way ``role_models._save()``'s own
+    ``dual_write_routing(...)`` call collapses it for routing.json's
+    ``"global"`` bucket (#515: role-models.json is the only V1 source for
+    the global routing scope, extracting just ``provider``) — comparing the
+    raw source against ``target["global"]`` would report every healthy,
+    correctly-mirrored save as "diverged" since the two shapes never match
+    on their own."""
+    if not isinstance(source_doc, dict):
+        return source_doc
+    return {
+        role: entry.get("provider") for role, entry in source_doc.items() if isinstance(entry, dict)
+    }
+
+
+def _content_diverged(source: Path, target: Path, *, scope: str | None = None) -> bool:
+    """True when *source*'s parsed content actually differs from what
+    *target* mirrors for it — vs merely having a newer mtime, which a
+    re-save of an unchanged value also produces (see module docstring).
+    Any read/parse failure on either side defaults to ``True`` so a hit is
+    never silently downgraded just because content couldn't be verified.
+
+    *scope* is set only for the ``role-providers`` fan-out, whose single
+    merged target has no per-mapping ``.data`` envelope — instead
+    ``dual_write.dual_write_routing``'s own ``{"global", "projects": {name:
+    ...}}`` payload shape, so the relevant slice is picked out directly
+    instead of going through ``_unwrap_registry_data`` (and the "global"
+    scope's source needs `_global_routing_view`'s shape collapse first)."""
+    source_doc = _load_json(source)
+    target_doc = _load_json(target)
+    if source_doc is None or target_doc is None:
+        return True
+    if scope is not None:
+        if not isinstance(target_doc, dict):
+            return True
+        if scope == "global":
+            source_doc = _global_routing_view(source_doc)
+            mirrored = target_doc.get("global")
+        else:
+            mirrored = (target_doc.get("projects") or {}).get(scope)
+    else:
+        mirrored = _unwrap_registry_data(target_doc)
+    return _content_hash(source_doc) != _content_hash(mirrored)
 
 
 def _hit(name: str, source: Path, target: Path) -> V1OnlyWriteHit | None:
@@ -99,7 +185,8 @@ def _hit(name: str, source: Path, target: Path) -> V1OnlyWriteHit | None:
     except OSError:
         return None
     if source_mtime - target_mtime > _MTIME_SLOP_S:
-        return V1OnlyWriteHit(name, source, target, source_mtime, target_mtime)
+        reason = "diverged" if _content_diverged(source, target) else "unmirrored_equal"
+        return V1OnlyWriteHit(name, source, target, source_mtime, target_mtime, reason=reason)
     return None
 
 
@@ -141,7 +228,14 @@ def _fanout_hit(name: str, sources: dict[str, Path], target: Path) -> V1OnlyWrit
     except OSError:
         return None
     if newest_mtime - target_mtime > _MTIME_SLOP_S:
-        return V1OnlyWriteHit(hit_name, worst_source, target, newest_mtime, target_mtime)
+        reason = (
+            "diverged"
+            if _content_diverged(worst_source, target, scope=newest_scope)
+            else "unmirrored_equal"
+        )
+        return V1OnlyWriteHit(
+            hit_name, worst_source, target, newest_mtime, target_mtime, reason=reason
+        )
     return None
 
 
