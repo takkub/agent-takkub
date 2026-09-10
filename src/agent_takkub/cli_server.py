@@ -1549,8 +1549,22 @@ class CliServer(QObject):
 
     def _reply(self, sock: QTcpSocket, *, ok: bool, msg: str, **extra) -> None:
         payload = {"ok": ok, "msg": msg, **extra}
-        sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        sock.flush()
+        try:
+            sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            sock.flush()
+        except RuntimeError:
+            # #557: sock can outlive its C++ QTcpSocket when the reply is
+            # queued async (e.g. _run_off_thread's _mainThreadCall hop for
+            # `done`'s git-facts collection) — the client disconnecting in
+            # the meantime fires `disconnected -> sock.deleteLater()`
+            # (_on_new_connection), and deleteLater can run on the Qt event
+            # loop before our queued reply does. Touching the now-deleted
+            # sip wrapper raises RuntimeError, not any Python exception a
+            # caller could pre-check for (isValid()/state() on a deleted
+            # wrapper raises the same way). The client is already gone, so
+            # there is nothing left to reply to — log and drop instead of
+            # crashing the reactor.
+            _log_event("cli_reply_dropped_deleted_socket", msg=str(msg)[:200])
 
     def _instance_context(self) -> str:
         """Short 'which cockpit answered' tag appended to auth-rejection

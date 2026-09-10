@@ -412,6 +412,51 @@ def test_done_collects_git_facts_off_thread_then_replies(qapp, monkeypatch) -> N
     assert b"done ok" in sock.written
 
 
+class _DeletedSock:
+    """Mimics a PyQt6 QTcpSocket whose underlying C++ object was already
+    destroyed (client disconnected -> `disconnected.connect(sock.deleteLater)`
+    in `_on_new_connection`, and the deferred delete ran before the queued
+    `_mainThreadCall` reply did) — touching it raises RuntimeError, verbatim
+    the message PyQt6/sip raises for any access on a deleted wrapper (#557)."""
+
+    def write(self, b) -> None:
+        raise RuntimeError("wrapped C/C++ object of type QTcpSocket has been deleted")
+
+    def flush(self) -> None:
+        raise RuntimeError("wrapped C/C++ object of type QTcpSocket has been deleted")
+
+
+def test_done_reply_survives_socket_deleted_before_async_reply(qapp, monkeypatch) -> None:
+    """#557: the client can disconnect (killing its QTcpSocket) while
+    `collect_done_git_facts` is still running on the worker thread. The
+    queued `_finish` callback must not crash the Qt event loop when it tries
+    to reply on the now-deleted socket — `_orch.done()` (the actual state
+    mutation) must still run, and `_reply` must swallow the RuntimeError."""
+
+    class _FakeMgr:
+        def collect_done_git_facts(self, **kw):
+            return {"kind": "shared", "branch": "main"}
+
+    monkeypatch.setattr(wm_mod, "WorktreeManager", _FakeMgr)
+    orch = _Orch()
+    srv = CliServer(orch)
+    sock = _DeletedSock()
+
+    srv._dispatch(sock, {"cmd": "done", "from": "backend", "note": "x", "auth": _PANE_TOKEN})
+
+    # Does not raise despite sock.write()/flush() always raising RuntimeError.
+    _pump(qapp, lambda: bool(orch.done_calls))
+    assert orch.done_calls == [("backend", {"kind": "shared", "branch": "main"})]
+
+
+def test_reply_swallows_deleted_socket_runtime_error() -> None:
+    """Direct unit coverage of the `_reply` guard itself, independent of the
+    `done` async path — any future `_reply` call site (sync or async) gets
+    the same protection."""
+    srv = CliServer(_Orch())
+    srv._reply(_DeletedSock(), ok=True, msg="hello")  # must not raise
+
+
 def test_worktree_assign_creates_off_thread_then_assigns_with_prepared(qapp, monkeypatch) -> None:
     info = _info()
 
