@@ -32,6 +32,23 @@ from .legacy_reader import read_json
 _logger = logging.getLogger(__name__)
 
 
+def _has_v2_layout_markers(root: Path) -> bool:
+    """Whether *root* looks like an actual V2 storage root rather than an
+    arbitrary/stale directory a caller happened to point ``TAKKUB_STORAGE_
+    ROOT`` at (#504 acceptance review round 3, R3-H3 ``storage_root_wrong``/
+    ``storage_root_nonexistent``). Checks the same two markers ``layout.
+    layout_state()`` already treats as "the ladder has run" — a written
+    ``system/version.json`` (``VersionMarkerStep``) or a populated
+    ``projects/`` domain — at *root* itself, or one level down at ``root/
+    v2`` in case an older host stamped the bare pre-nesting DATA_HOME
+    instead of its own already-resolved root."""
+
+    def _markers_at(base: Path) -> bool:
+        return (base / "system" / "version.json").is_file() or (base / "projects").is_dir()
+
+    return _markers_at(root) or _markers_at(root / "v2")
+
+
 def _primary_data_home() -> Path | None:
     """Best-effort recovery of the PRIMARY cockpit's own storage root from
     inside a worktree pane process (carried over from
@@ -65,10 +82,38 @@ def _primary_data_home() -> Path | None:
     guessed. Returns ``None`` when neither is derivable (no override
     present, or the per-PID multi-instance temp file, which lives outside
     any DATA_HOME) — callers fall back to the caller-supplied/default
-    resolution."""
+    resolution.
+
+    #504 acceptance review round 3 (R3-H3): ``TAKKUB_STORAGE_ROOT`` is only
+    ever trusted verbatim once it's confirmed to actually look like a
+    storage root (:func:`_has_v2_layout_markers`) on a path that exists —
+    a value pointing at a directory that doesn't exist is never used *or*
+    created (Lead policy decision: this process must never conjure a new
+    root out of a bogus override), and a value pointing at an existing but
+    unrelated/stale directory is never trusted either. Either case logs
+    ``storage_root_ambiguous`` (with a ``reason=nonexistent`` or
+    ``reason=not_a_storage_root`` tag) and falls through to this function's
+    own per-process ``TAKKUB_PORT_FILE`` resolution below, exactly as if
+    the env var had never been set."""
     storage_root = os.environ.get("TAKKUB_STORAGE_ROOT", "").strip()
     if storage_root:
-        return Path(storage_root)
+        path = Path(storage_root)
+        if not path.exists():
+            _logger.warning(
+                "storage_root_ambiguous: TAKKUB_STORAGE_ROOT=%s does not exist "
+                "(reason=nonexistent) — refusing to use or create it; falling back to "
+                "per-process resolution",
+                path,
+            )
+        elif not path.is_dir() or not _has_v2_layout_markers(path):
+            _logger.warning(
+                "storage_root_ambiguous: TAKKUB_STORAGE_ROOT=%s has no recognizable V2 "
+                "storage-root markers (reason=not_a_storage_root) — falling back to "
+                "per-process resolution",
+                path,
+            )
+        else:
+            return path
 
     override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
     if not override:

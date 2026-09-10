@@ -11,6 +11,8 @@ heuristic used when an older host hasn't stamped it yet.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent_takkub import config, pane_env
@@ -32,17 +34,88 @@ def _real_storage_layout_v2_default(monkeypatch):
     monkeypatch.setattr(layout_mod, "storage_layout_v2", _real_storage_layout_v2)
 
 
+def _seed_v2_markers(root: Path) -> None:
+    """Give *root* the minimal on-disk shape `_has_v2_layout_markers` (#504
+    round 3 R3-H3) accepts as an actual storage root."""
+    system = root / "system"
+    system.mkdir(parents=True)
+    (system / "version.json").write_text("{}")
+
+
 class TestPrimaryDataHomeFromStorageRootEnv:
     def test_uses_takkub_storage_root_verbatim_when_present(self, monkeypatch, tmp_path):
         root = tmp_path / "primary" / "v2"
+        _seed_v2_markers(root)
         monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(root))
         assert _primary_data_home() == root
 
     def test_takkub_storage_root_wins_even_with_a_port_file_present(self, monkeypatch, tmp_path):
         root = tmp_path / "primary"  # installed shape — no /v2 suffix
+        _seed_v2_markers(root)
         monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(root))
         monkeypatch.setenv("TAKKUB_PORT_FILE", str(tmp_path / "other" / "runtime" / "port"))
         assert _primary_data_home() == root
+
+    def test_accepts_nested_v2_marker_shape(self, monkeypatch, tmp_path):
+        """A value pointing at the bare pre-nesting DATA_HOME (markers one
+        level down, at ``root/v2/...``) is still trusted verbatim — as
+        `root`, not `root / "v2"` — matching the "value correct -> use as
+        before" branch of the round 3 policy."""
+        root = tmp_path / "primary-data-home"
+        _seed_v2_markers(root / "v2")
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(root))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        assert _primary_data_home() == root
+
+
+class TestPrimaryDataHomeStorageRootValidation:
+    """#504 acceptance review round 3, R3-H3: `storage_root_wrong` /
+    `storage_root_nonexistent` — an override that fails validation must
+    never be used or created; it must fall back to this function's own
+    per-process `TAKKUB_PORT_FILE` resolution, exactly as if
+    `TAKKUB_STORAGE_ROOT` had never been set."""
+
+    def test_nonexistent_path_falls_back_without_creating_it(self, monkeypatch, tmp_path, caplog):
+        bogus = tmp_path / "does-not-exist" / "v2"
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(bogus))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        with caplog.at_level("WARNING"):
+            result = _primary_data_home()
+        assert result is None
+        assert not bogus.exists()
+        assert any(
+            "storage_root_ambiguous" in r.message and "reason=nonexistent" in r.message
+            for r in caplog.records
+        )
+
+    def test_existing_dir_without_markers_falls_back(self, monkeypatch, tmp_path, caplog):
+        wrong = tmp_path / "some-other-existing-dir"
+        wrong.mkdir()
+        (wrong / "unrelated.txt").write_text("noise")
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(wrong))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        with caplog.at_level("WARNING"):
+            result = _primary_data_home()
+        assert result is None
+        assert not (wrong / "system").exists()
+        assert any(
+            "storage_root_ambiguous" in r.message and "reason=not_a_storage_root" in r.message
+            for r in caplog.records
+        )
+
+    def test_invalid_override_falls_back_to_port_file_heuristic(self, monkeypatch, tmp_path):
+        """The fallback isn't just `None` — an invalid override still lets
+        the older `TAKKUB_PORT_FILE` per-process resolution recover the
+        real primary root."""
+        wrong = tmp_path / "wrong-root"
+        wrong.mkdir()
+        primary = tmp_path / "primary"
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(wrong))
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(primary / "runtime" / "port"))
+        monkeypatch.setenv("_TAKKUB_AUTO_PORT_FILE", "")
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "child-repo")
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "child-repo")
+        assert _primary_data_home() == primary / "v2"
 
 
 class TestPrimaryDataHomeFallbackHeuristic:
