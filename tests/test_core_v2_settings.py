@@ -134,6 +134,39 @@ class TestCoreV2SettingsV2Path:
         assert core_v2_settings.load_context_strategy() == "fast"
 
 
+class TestCoreV2SettingsWorktreePaneContainerOverride:
+    """#504 acceptance review round 4, R4-M2: a worktree pane process whose
+    `TAKKUB_STORAGE_ROOT` points at the CONTAINER of the primary cockpit's
+    real root (bare pre-nesting DATA_HOME, markers one level down at
+    `<value>/v2`) used to have `effective_data_home`/`_primary_data_home`
+    return the container verbatim — `path()` then resolved under
+    `<container>/config/`, the bare top level, instead of `<container>/v2/
+    config/`. Confirmed live: a stray `config/core-v2-settings.json` was
+    found at this repo's own checkout root while this bug was still
+    present. `v2_target._resolve_storage_root`'s fix must keep this from
+    ever landing at the container's bare top level again."""
+
+    def test_container_override_resolves_under_nested_v2_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        primary = tmp_path / "primary"  # the container — a bare pre-nesting DATA_HOME
+        (primary / "v2" / "system").mkdir(parents=True)
+        (primary / "v2" / "system" / "version.json").write_text("{}")
+        child = tmp_path / "child"  # this process's own (worktree pane) checkout
+
+        monkeypatch.setattr(config, "REPO_ROOT", child)
+        monkeypatch.setattr(config, "DATA_HOME", child)
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(primary))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        monkeypatch.setattr(core_v2_settings, "path", _REAL_PATH_FN)
+        core_v2_settings._reset_cache()
+
+        p = core_v2_settings.path()
+        assert p == primary / "v2" / "config" / "core-v2-settings.json"
+        assert p.parent.parent.name == "v2"
+        assert not (primary / "config").exists()
+
+
 class TestCoreV2SettingsCache:
     """`load()` reloads only when `core-v2-settings.json`'s (mtime, size)
     actually changes — PR #311 review must-fix #1. Exercised via

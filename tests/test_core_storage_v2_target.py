@@ -57,11 +57,40 @@ class TestPrimaryDataHomeFromStorageRootEnv:
         assert _primary_data_home() == root
 
     def test_accepts_nested_v2_marker_shape(self, monkeypatch, tmp_path):
-        """A value pointing at the bare pre-nesting DATA_HOME (markers one
-        level down, at ``root/v2/...``) is still trusted verbatim — as
-        `root`, not `root / "v2"` — matching the "value correct -> use as
-        before" branch of the round 3 policy."""
+        """#504 round 4, R4-M2: a value pointing at the bare pre-nesting
+        DATA_HOME (markers one level down, at ``root/v2/...``) resolves to
+        the NESTED directory the markers actually live in (``root / "v2"``),
+        not the container `root` itself — the container previously got
+        accepted as the root outright, splitting reads/writes across two
+        directories (`storage_root_bare_nested` in the round 4 fault
+        harness)."""
         root = tmp_path / "primary-data-home"
+        _seed_v2_markers(root / "v2")
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(root))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        assert _primary_data_home() == root / "v2"
+
+
+class TestPrimaryDataHomeStorageRootContainer:
+    """#504 acceptance review round 4, R4-M2: `TAKKUB_STORAGE_ROOT` pointing
+    at the CONTAINER of the real root (markers one level down at
+    `<value>/v2`, not at `<value>` itself) must resolve to the nested
+    directory, never the container — matching the round 4 fault harness's
+    `storage_root_bare_nested` case."""
+
+    def test_container_value_resolves_to_nested_v2_root(self, monkeypatch, tmp_path):
+        container = tmp_path / "primary"
+        _seed_v2_markers(container / "v2")
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(container))
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        assert _primary_data_home() == container / "v2"
+
+    def test_markers_at_the_value_itself_win_over_a_nested_v2(self, monkeypatch, tmp_path):
+        """When *both* the value and `<value>/v2` look like storage roots,
+        the exact/unambiguous match at the value itself wins — this is the
+        pre-existing installed-layout shape, not the container case."""
+        root = tmp_path / "primary"
+        _seed_v2_markers(root)
         _seed_v2_markers(root / "v2")
         monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(root))
         monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
