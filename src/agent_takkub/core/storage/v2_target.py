@@ -32,21 +32,30 @@ from .legacy_reader import read_json
 _logger = logging.getLogger(__name__)
 
 
-def _has_v2_layout_markers(root: Path) -> bool:
-    """Whether *root* looks like an actual V2 storage root rather than an
-    arbitrary/stale directory a caller happened to point ``TAKKUB_STORAGE_
-    ROOT`` at (#504 acceptance review round 3, R3-H3 ``storage_root_wrong``/
-    ``storage_root_nonexistent``). Checks the same two markers ``layout.
-    layout_state()`` already treats as "the ladder has run" — a written
-    ``system/version.json`` (``VersionMarkerStep``) or a populated
-    ``projects/`` domain — at *root* itself, or one level down at ``root/
-    v2`` in case an older host stamped the bare pre-nesting DATA_HOME
-    instead of its own already-resolved root."""
+def _resolve_storage_root(root: Path) -> Path | None:
+    """The actual V2 storage root implied by *root*, or ``None`` when
+    neither location looks like one (#504 acceptance review round 3, R3-H3
+    ``storage_root_wrong``/``storage_root_nonexistent``). Checks the same
+    two markers ``layout.layout_state()`` already treats as "the ladder has
+    run" — a written ``system/version.json`` (``VersionMarkerStep``) or a
+    populated ``projects/`` domain — at *root* itself first (the exact,
+    unambiguous match), else one level down at ``root/v2``.
+
+    Round 4, R4-M2: the nested case previously returned *root* itself (the
+    CONTAINER a bare pre-nesting DATA_HOME sits in) instead of ``root/v2``
+    where the markers actually live, splitting reads/writes across two
+    directories. This now returns the directory the markers were found in,
+    never the container one level above it."""
 
     def _markers_at(base: Path) -> bool:
         return (base / "system" / "version.json").is_file() or (base / "projects").is_dir()
 
-    return _markers_at(root) or _markers_at(root / "v2")
+    if _markers_at(root):
+        return root
+    nested = root / "v2"
+    if _markers_at(nested):
+        return nested
+    return None
 
 
 def _primary_data_home() -> Path | None:
@@ -85,19 +94,26 @@ def _primary_data_home() -> Path | None:
     resolution.
 
     #504 acceptance review round 3 (R3-H3): ``TAKKUB_STORAGE_ROOT`` is only
-    ever trusted verbatim once it's confirmed to actually look like a
-    storage root (:func:`_has_v2_layout_markers`) on a path that exists —
-    a value pointing at a directory that doesn't exist is never used *or*
-    created (Lead policy decision: this process must never conjure a new
-    root out of a bogus override), and a value pointing at an existing but
+    ever trusted once it's confirmed to actually look like a storage root
+    (:func:`_resolve_storage_root`) on a path that exists — a value pointing
+    at a directory that doesn't exist is never used *or* created (Lead
+    policy decision: this process must never conjure a new root out of a
+    bogus override), and a value pointing at an existing but
     unrelated/stale directory is never trusted either. Either case logs
     ``storage_root_ambiguous`` (with a ``reason=nonexistent`` or
     ``reason=not_a_storage_root`` tag) and falls through to this function's
     own per-process ``TAKKUB_PORT_FILE`` resolution below, exactly as if
-    the env var had never been set."""
+    the env var had never been set.
+
+    #504 acceptance review round 4 (R4-M2): a *found* override is no longer
+    returned verbatim — :func:`_resolve_storage_root` may report the actual
+    root one level down at ``<value>/v2`` (a bare pre-nesting DATA_HOME
+    passed as the value, i.e. the CONTAINER of the real root rather than
+    the root itself), and that resolved directory is what gets returned."""
     storage_root = os.environ.get("TAKKUB_STORAGE_ROOT", "").strip()
     if storage_root:
         path = Path(storage_root)
+        resolved = _resolve_storage_root(path) if path.is_dir() else None
         if not path.exists():
             _logger.warning(
                 "storage_root_ambiguous: TAKKUB_STORAGE_ROOT=%s does not exist "
@@ -105,7 +121,7 @@ def _primary_data_home() -> Path | None:
                 "per-process resolution",
                 path,
             )
-        elif not path.is_dir() or not _has_v2_layout_markers(path):
+        elif resolved is None:
             _logger.warning(
                 "storage_root_ambiguous: TAKKUB_STORAGE_ROOT=%s has no recognizable V2 "
                 "storage-root markers (reason=not_a_storage_root) — falling back to "
@@ -113,7 +129,7 @@ def _primary_data_home() -> Path | None:
                 path,
             )
         else:
-            return path
+            return resolved
 
     override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
     if not override:
