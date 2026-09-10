@@ -196,3 +196,50 @@ def test_migrate_restore_v1_list_archives_is_exempt_from_the_disk_gate(capsys, m
     monkeypatch.setattr(boot, "_disk_has_room", lambda *a, **k: False)
     rc = cli.main(["migrate", "restore-v1", "--list", "--json"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# #504 round4 R4-H7: `promote-v2-root`'s own rollback is part of the SAME
+# all-or-nothing `restore-v1` command as the archive-generation walk — a
+# failure there must revert every archive generation this same call already
+# restored too, not just report its own half-failure.
+# ---------------------------------------------------------------------------
+
+
+def test_restore_v1_reverts_archived_content_when_promote_rollback_fails(capsys, monkeypatch):
+    from agent_takkub import config
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.report import StepReport
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "projects.json").write_text('{"projects": {}}', encoding="utf-8")
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    # `apply()` archived "projects.json" away — data_home no longer has it.
+    assert not (config.DATA_HOME / "projects.json").exists()
+
+    real_rollback_step = MigrationEngine.rollback_step
+
+    def _fail_promote_rollback(self, step_id):
+        if step_id == "promote-v2-root":
+            return StepReport(step_id, "rollback", False, "injected promote rollback failure")
+        return real_rollback_step(self, step_id)
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(MigrationEngine, "rollback_step", _fail_promote_rollback)
+        rc = cli.main(["migrate", "restore-v1", "--json"])
+    finally:
+        mp.undo()
+
+    assert rc != 0
+    out = _json_body(capsys.readouterr().out)
+    step_ids = [r["step_id"] for r in out]
+    assert "archive-v1-legacy" in step_ids
+    assert "promote-v2-root" in step_ids
+    # The whole command reverted — "projects.json" (restored by the real
+    # archive-v1-legacy rollback above) is gone again, back to the state
+    # this restore-v1 command actually started from.
+    assert not (config.DATA_HOME / "projects.json").exists()

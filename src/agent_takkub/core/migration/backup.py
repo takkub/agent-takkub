@@ -63,7 +63,8 @@ class BackupManager:
         try:
             slots = sorted((p for p in step_dir.iterdir() if p.is_dir()), reverse=True)
         except OSError:
-            return None
+            return None  # swallow-ok: read-only listing; caller treats a
+            # missing backup the same as one it can't even enumerate.
         for slot in slots:
             candidate = slot / name
             if candidate.exists():

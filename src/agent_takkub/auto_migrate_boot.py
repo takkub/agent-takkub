@@ -232,6 +232,39 @@ def _estimate_restore_bytes(data_home: Path) -> int:
     return _dir_size(base) if base.is_dir() else 0
 
 
+def _live_preimage_bytes(data_home: Path) -> int:
+    """#504 round4 R4-M1 `restore_preimage_space_estimate`: current
+    on-disk size of every top-level name any archive generation could
+    restore INTO — a restore backs this up BEFORE overwriting it
+    (`BackupManager`, inside `_copy_phase`'s own merge), and a multi-
+    generation `restore-v1` ALSO takes one command-level preimage
+    snapshot of it (`_begin_command_snapshot`) before touching anything.
+    Neither write is captured by `_estimate_restore_bytes` above (which
+    only sizes the archive tree itself), so `_disk_has_room` adds this on
+    top, unconditionally — even when a caller supplied its own
+    `estimate`, since this cost is real and independent of that number."""
+    try:
+        from .core.migration.promote_v1 import list_v1_archives
+    except OSError:
+        return 0  # swallow-ok: read-only import failure — best-effort
+        # extra margin; the base estimate below is unaffected.
+    names: set[str] = set()
+    for gen in list_v1_archives(data_home):
+        names.update(n for n in gen.get("archived", []) if n)
+    total = 0
+    for name in names:
+        target = data_home / name
+        try:
+            if target.is_dir():
+                total += _dir_size(target)
+            elif target.is_file():
+                total += target.stat().st_size
+        except OSError:
+            continue  # swallow-ok: read-only size probe for one name;
+            # an unmeasurable target just doesn't add to the margin.
+    return total
+
+
 def _existing_ancestor(path: Path) -> Path:
     """*path* itself, or its nearest EXISTING ancestor — `shutil.disk_usage`
     needs a real path to stat, but a brand-new machine's `DATA_HOME` (or a
@@ -255,13 +288,43 @@ def _disk_has_room(data_home: Path, *, estimate: int | None = None) -> bool:
     CLI's `restore-v1` gate (#504 R3 `disk_cli_restore-v1`) passes
     `_estimate_restore_bytes` instead, since a restore's dominant cost is
     the archive tree it copies back, not what a fresh promote/archive pass
-    would move."""
+    would move.
+
+    #504 round4 R4-M1 `per_volume_preflight`: `data_home` isn't the only
+    volume this pass writes to — every snapshot/backup/WAL file this
+    module's own migration steps stage lives under `migration_home()`,
+    which an operator can point at a DIFFERENT volume than `data_home`
+    entirely (`TAKKUB_STORAGE_ROOT`-style overrides). Both are measured;
+    either one failing its own check fails the whole gate, so a full
+    snapshot volume fails closed even when `data_home`'s own drive has
+    plenty of room.
+
+    #504 round4 R4-M1 `restore_preimage_space_estimate`: on top of
+    *estimate* (whatever it counts), this ALWAYS separately adds
+    `_live_preimage_bytes` — the current on-disk size of every name an
+    archive generation could restore into, which a real restore backs up
+    (at least once, more for a multi-generation command) BEFORE
+    overwriting it. A caller-supplied `estimate` (e.g. the CLI's
+    `_estimate_restore_bytes`) was never meant to already include this,
+    so it's never assumed to."""
+    from .core.migration.promote_v1 import migration_home
+
+    volumes = {_existing_ancestor(data_home)}
     try:
-        free = shutil.disk_usage(_existing_ancestor(data_home)).free
+        volumes.add(_existing_ancestor(migration_home()))
     except OSError:
-        return False
+        pass  # swallow-ok: read-only path resolution; if this can't even
+        # be computed, the data_home-only check below still applies.
     needed = estimate if estimate is not None else _estimate_copy_bytes(data_home)
-    return free >= _MIN_FREE_MULTIPLE * needed
+    needed += _live_preimage_bytes(data_home)
+    for volume in volumes:
+        try:
+            free = shutil.disk_usage(volume).free
+        except OSError:
+            return False
+        if free < _MIN_FREE_MULTIPLE * needed:
+            return False
+    return True
 
 
 def _log_boot_event(event: str, **details: object) -> None:

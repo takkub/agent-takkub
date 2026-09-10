@@ -694,16 +694,18 @@ def test_promote_delete_phase_failure_restores_every_source_no_data_lost(
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
-    real_remove = promote_mod._remove
+    real_rmtree = promote_mod.shutil.rmtree
+    target = data_home / "v2" / "state"
     count = {"n": 0}
 
-    def _fail_second_remove(path):
-        count["n"] += 1
-        if count["n"] == 2:
-            raise OSError("injected failure removing second source")
-        return real_remove(path)
+    def _fail_second_remove(path, *a, **k):
+        if Path(path) == target:
+            count["n"] += 1
+            if count["n"] == 1:
+                raise OSError("injected failure removing second source")
+        return real_rmtree(path, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    monkeypatch.setattr(promote_mod.shutil, "rmtree", _fail_second_remove)
     step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
     report = step.apply()
 
@@ -731,18 +733,15 @@ def test_archive_delete_phase_failure_restores_every_source_no_data_lost(
     (data_home / "a.json").write_text("unique-a", encoding="utf-8")
     (data_home / "b.json").write_text("unique-b", encoding="utf-8")
 
-    import agent_takkub.core.migration.promote_v1 as promote_mod
+    real_unlink = Path.unlink
+    target = data_home / "b.json"
 
-    real_remove = promote_mod._remove
-    count = {"n": 0}
-
-    def _fail_second_remove(path):
-        count["n"] += 1
-        if count["n"] == 2:
+    def _fail_second_remove(self, *a, **k):
+        if self == target:
             raise OSError("injected failure removing second source")
-        return real_remove(path)
+        return real_unlink(self, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    monkeypatch.setattr(Path, "unlink", _fail_second_remove)
     step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
     report = step.apply()
 
@@ -770,18 +769,15 @@ def test_promote_rollback_delete_phase_failure_restores_every_source(
     assert (data_home / "models" / "only-a.json").exists()
     assert (data_home / "state" / "only-b.json").exists()
 
-    import agent_takkub.core.migration.promote_v1 as promote_mod
+    real_unlink = Path.unlink
+    target = data_home / "state" / "only-b.json"
 
-    real_remove = promote_mod._remove
-    count = {"n": 0}
-
-    def _fail_second_remove(path):
-        count["n"] += 1
-        if count["n"] == 2:
+    def _fail_second_remove(self, *a, **k):
+        if self == target:
             raise OSError("injected failure removing second source")
-        return real_remove(path)
+        return real_unlink(self, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    monkeypatch.setattr(Path, "unlink", _fail_second_remove)
     report = step.rollback()
 
     assert not report.ok
@@ -829,10 +825,13 @@ def test_promote_survives_a_crash_right_after_a_real_source_removal(
     assert not (data_home / "v2" / "models").exists()
     assert (data_home / "v2" / "state" / "only-b.json").is_file()
 
-    # A fresh retry (a new boot) only sees "state" as a candidate — but the
-    # manifest must still remember "models" from the interrupted run.
+    # A resumed retry (a new boot) reads this step's own WAL — which still
+    # names "models" as already `SOURCE_PRUNED` — rather than rescanning
+    # `v2/` fresh, so the manifest still remembers it from the interrupted
+    # run instead of silently dropping it.
     retry = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
     assert retry.apply().ok
+    assert not (data_home / "v2" / "models").exists()
 
     rollback_report = retry.rollback()
     assert rollback_report.ok, rollback_report.summary
@@ -1030,14 +1029,15 @@ def test_promote_recovery_never_contaminates_ownership_with_a_live_sibling(
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
-    real_remove = promote_mod._remove
+    real_rmtree = promote_mod.shutil.rmtree
+    target = data_home / "v2" / "state"
 
-    def _fail_removing_state(path):
-        if path == data_home / "v2" / "state":
+    def _fail_removing_state(path, *a, **k):
+        if Path(path) == target:
             raise OSError("last remove blocked")
-        return real_remove(path)
+        return real_rmtree(path, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", _fail_removing_state)
+    monkeypatch.setattr(promote_mod.shutil, "rmtree", _fail_removing_state)
     step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
     initial = step.apply()
     assert not initial.ok
@@ -1047,7 +1047,7 @@ def test_promote_recovery_never_contaminates_ownership_with_a_live_sibling(
     assert not (data_home / "v2" / "providers" / "kimi").exists()
     assert auth.read_text(encoding="utf-8") == "live-secret"
 
-    monkeypatch.setattr(promote_mod, "_remove", real_remove)
+    monkeypatch.setattr(promote_mod.shutil, "rmtree", real_rmtree)
     assert step.apply().ok  # retry, now unblocked
     rollback_report = step.rollback()
     assert rollback_report.ok, rollback_report.summary
@@ -1075,15 +1075,18 @@ def test_promote_recovery_restores_every_file_after_a_partial_directory_removal(
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
-    real_remove = promote_mod._remove
+    real_rmtree = promote_mod.shutil.rmtree
+    target = data_home / "v2" / "state"
 
-    def _partially_fail_state(path):
-        if path == data_home / "v2" / "state":
-            (path / "b.json").unlink()  # simulate a partially-completed rmtree
+    def _partially_fail_state(path, *a, **k):
+        if Path(path) == target:
+            # Simulate a directory removal that got partway through
+            # (b.json really deleted) before failing.
+            (path / "b.json").unlink()
             raise OSError("directory deletion partially completed")
-        return real_remove(path)
+        return real_rmtree(path, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", _partially_fail_state)
+    monkeypatch.setattr(promote_mod.shutil, "rmtree", _partially_fail_state)
     step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
     report = step.apply()
 
@@ -1346,14 +1349,15 @@ def test_prune_phase_reports_a_restore_failure_via_apply(tmp_path, journal_backu
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
-    real_remove = promote_mod._remove
+    real_rmtree = promote_mod.shutil.rmtree
+    target = data_home / "v2" / "state"
 
-    def fail_removing_state(path):
-        if path == data_home / "v2" / "state":
+    def fail_removing_state(path, *a, **k):
+        if Path(path) == target:
             raise OSError("last remove blocked")
-        return real_remove(path)
+        return real_rmtree(path, *a, **k)
 
-    monkeypatch.setattr(promote_mod, "_remove", fail_removing_state)
+    monkeypatch.setattr(promote_mod.shutil, "rmtree", fail_removing_state)
 
     real_copy2 = promote_mod.shutil.copy2
 
