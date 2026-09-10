@@ -234,3 +234,50 @@ class TestDoneCloseDefersForLiveChildren:
         with patch.object(orch, "close") as close_mock:
             poll_cb()
         close_mock.assert_not_called()
+
+
+class TestDoneCloseSurvivesNaturalExit:
+    """#559: the pane's own underlying process routinely exits on its own
+    shortly after `done()` (independent of #537's live-child deferral above)
+    — AgentPane._on_exit() reacts by nulling `.session` (detach_session())
+    and dropping the pane to "empty". The old guard (`pane.session is not
+    _done_sess`) treated that None as "respawned with a different session"
+    and silently gave up on ever closing the tab — user-visible as a
+    permanently stuck "empty slot" tab. `_close_if_same_session` must still
+    finish tearing the pane down in that case, while a *genuine* respawn
+    (a new, non-None session object attached to the role) must still abort
+    the stale close exactly as before.
+    """
+
+    def test_session_gone_and_state_empty_still_closes(self, orch: Orchestrator) -> None:
+        timers: list = []
+        _lead, close_cb = _assign_and_done(orch, "devops", timers)
+
+        pane = orch._panes_by_project[TEST_PROJECT]["devops"]
+        # Simulate AgentPane._on_exit()'s effect when the process exits on
+        # its own while this close is still pending.
+        pane.session = None
+        pane.state = "empty"
+
+        with (
+            patch.object(orch, "_live_non_scaffolding_children", return_value=[]),
+            patch.object(orch, "close") as close_mock,
+        ):
+            close_cb()
+
+        close_mock.assert_called_once_with("devops", project=TEST_PROJECT)
+
+    def test_genuine_respawn_with_new_session_still_aborts_close(self, orch: Orchestrator) -> None:
+        timers: list = []
+        _lead, close_cb = _assign_and_done(orch, "qa", timers)
+
+        pane = orch._panes_by_project[TEST_PROJECT]["qa"]
+        # A real respawn: a brand-new, non-None session object attached
+        # before the deferred close fires.
+        pane.session = MagicMock()
+        pane.state = "active"
+
+        with patch.object(orch, "close") as close_mock:
+            close_cb()
+
+        close_mock.assert_not_called()
