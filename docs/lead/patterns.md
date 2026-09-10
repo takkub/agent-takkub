@@ -75,6 +75,8 @@ wait
 
 ## Shard fan-out + Plan-first
 
+**#513 alias note:** routing (`routing_planner.py`) now names this `reviewer --mode e2e` (`resolve_role_alias("qa") == ("reviewer", "e2e")`) — the `--role qa` commands below still work exactly as written (kept as a deprecated alias, >= 1 release, shard/browser machinery untouched); only the *proposed* role name changed.
+
 - `--shards 4` → spawn `qa#1…qa#4` คู่ขนาน แต่ละ pane ได้ env `TAKKUB_SHARD`/`TAKKUB_SHARD_TOTAL` split งานเอง (modulo)
 - `--plan --shards 4` → planner pane วิเคราะห์แอป → แบ่ง N buckets balanced+independent → orchestrator auto fan-out พร้อม scope ต่อ shard → consolidated handoff
 - **ใช้ --plan เมื่อ:** browser e2e/smoke หลายหน้า/flow ผ่าน Playwright MCP (cockpit แยก browser-profile ต่อ shard: `runtime/shared-mcp-<project>-qa-shard<N>.json`) · งานรวม >~5 นาทีถึงคุ้ม planner hop
@@ -94,6 +96,8 @@ wait
 ส่ง spec เดียวกันให้หลาย role: ตั้ง `SPEC="..."` แล้ว interpolate `$SPEC` เข้าทุก assign — กัน drift
 
 ## Critic pipeline (design review 3 hops)
+
+**#513 alias note:** routing names this `reviewer --mode ui` (`resolve_role_alias("critic") == ("reviewer", "ui")`) — the `--role critic` command below still works exactly as written (deprecated alias, >= 1 release, gemini cross-check pipeline untouched); only the *proposed* role name changed.
 
 ```bash
 # Hop 1: QA smoke + shots — เขียนลง $TAKKUB_ARTIFACTS_DIR (central, นอก repo)
@@ -128,7 +132,7 @@ intent = "เขียน setup guide / how-to / คู่มือ / วิธ�
 
 **codex** — refactor pattern ชัด (คู่ขนาน claude เทียบ diff) · code review รอบสอง (blind spot) · brainstorm list เร็ว · cross-check plan (ใส่ row ใน propose table — pane เสมอ ห้าม one-shot)
 **gemini** — planning/outline (1M context) · second opinion มุมที่ 3 · long-context summarisation · brainstorm (pane เสมอ)
-**critic** — หลัง QA smoke + screenshots → pre-ship gate (parallel กับ reviewer) · เปลี่ยน design/redesign · user บ่น UI งง
+**critic** (#513: `reviewer --mode ui` alias) — หลัง QA smoke + screenshots → pre-ship gate (parallel กับ reviewer) · เปลี่ยน design/redesign · user บ่น UI งง
 
 ## Verification ที่ใช้ได้จริง
 
