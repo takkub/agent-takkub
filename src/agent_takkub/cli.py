@@ -3154,11 +3154,13 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     pre-2.1.0 shape while reporting the overall command as having tried
     both. Stop here instead."""
     from .core.migration.promote_v1 import (
+        CommandSnapshotError,
         _begin_command_snapshot,
         _find_manifest_by_ts,
         _revert_to_command_snapshot,
         list_v1_archives,
     )
+    from .core.migration.report import StepReport
 
     archive_step = engine.get_step("archive-v1-legacy")
     archive_ts = getattr(args, "archive_ts", None)
@@ -3189,7 +3191,28 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
             name = entry.get("name")
             if name and name not in all_names:
                 all_names.append(name)
-    snapshot = _begin_command_snapshot(config.DATA_HOME, all_names)
+
+    # #504 round4 R4-B1 BLOCKER: `_begin_command_snapshot` fails CLOSED —
+    # if it can't snapshot every name's preimage (ENOSPC, ...), abort the
+    # WHOLE command before any generation's rollback ever runs. There is
+    # no preimage to safely fall back to otherwise.
+    try:
+        snapshot = _begin_command_snapshot(config.DATA_HOME, all_names)
+    except CommandSnapshotError as e:
+        return [StepReport("archive-v1-legacy", "rollback", False, str(e))]
+
+    def _revert(reports: list) -> list:
+        errors = _revert_to_command_snapshot(config.DATA_HOME, snapshot)
+        if errors:
+            reports.append(
+                StepReport(
+                    "restore-v1",
+                    "rollback",
+                    False,
+                    "revert to pre-command state was INCOMPLETE: " + "; ".join(errors),
+                )
+            )
+        return reports
 
     # #504 R2-H1: a multi-generation restore-v1 (no --archive: walk every
     # generation oldest-first) is all-or-nothing — if a LATER generation's
@@ -3201,9 +3224,15 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
         r = archive_step.rollback(archive_ts=ts)
         reports.append(r)
         if not r.ok:
-            _revert_to_command_snapshot(config.DATA_HOME, snapshot)
-            return reports
-    reports.append(engine.rollback_step("promote-v2-root"))
+            return _revert(reports)
+
+    # #504 round4 R4-H7: `promote-v2-root`'s own rollback is part of the
+    # SAME all-or-nothing command — a failure here must also revert every
+    # archive generation this call just restored, not just its own half.
+    promote_report = engine.rollback_step("promote-v2-root")
+    reports.append(promote_report)
+    if not promote_report.ok:
+        return _revert(reports)
     return reports
 
 

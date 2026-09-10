@@ -55,19 +55,42 @@ def _source_files(src: Path) -> list[Path]:
     return sorted(p for p in src.rglob("*") if p.is_file())
 
 
-def copy_verified(src: Path, dest: Path) -> CopyVerification:
-    """Copy *src* (file or directory) into *dest*, then verify every file
-    *src* contains landed at *dest* with a matching sha256 — raises
-    `VerifyMismatchError` (never returns) on any mismatch or missing file.
-    Never touches *src* — the caller removes the original only after this
-    returns without raising, per the module's own copy-verify-then-remove
-    contract."""
+def copy_only(src: Path, dest: Path) -> None:
+    """Just the physical copy half of `copy_verified` — no checksum pass.
+    Split out so a WAL-aware caller (`promote_v1._copy_phase`) can record a
+    durable `COPIED` checkpoint between the copy landing on disk and its
+    checksum being verified, rather than treating "copied" and "verified"
+    as one indivisible moment (#504 round4 T2/T3).
+
+    #504 round4 R4-H5: a directory merge (`dirs_exist_ok=True`) never
+    silently overwrites a file that ALREADY exists at *dest* with
+    DIFFERENT content — that file was never part of *src*'s own tree
+    before this copy started, so it belongs to whoever put it there (a
+    live provider home sharing a parent directory with what's being
+    promoted/archived, #504 design note). Raises `VerifyMismatchError`
+    BEFORE touching anything if such a collision is found, so the
+    caller's own backup-restore undo (already taken before this call,
+    #504 B3) puts the untouched live file straight back with nothing
+    lost — never a race where the collision is detected only after
+    `shutil.copytree` has already clobbered it."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
+        for f in _source_files(src):
+            target = dest / f.relative_to(src)
+            if target.is_file() and _sha256(target) != _sha256(f):
+                raise VerifyMismatchError(
+                    f"collision: {target} already exists with different content — "
+                    "never part of this transaction's own source, refusing to overwrite it"
+                )
         shutil.copytree(src, dest, dirs_exist_ok=True)
     else:
         shutil.copy2(src, dest)
 
+
+def verify_only(src: Path, dest: Path) -> CopyVerification:
+    """Just the checksum half of `copy_verified` — assumes `copy_only(src,
+    dest)` already ran. Raises `VerifyMismatchError` (never returns) on any
+    mismatch or missing file."""
     total_bytes = 0
     digests: dict[str, str] = {}
     source_files = _source_files(src)
@@ -82,3 +105,14 @@ def copy_verified(src: Path, dest: Path) -> CopyVerification:
         rel = f.relative_to(src).as_posix() if src.is_dir() else src.name
         digests[rel] = digest
     return CopyVerification(file_count=len(source_files), total_bytes=total_bytes, digests=digests)
+
+
+def copy_verified(src: Path, dest: Path) -> CopyVerification:
+    """Copy *src* (file or directory) into *dest*, then verify every file
+    *src* contains landed at *dest* with a matching sha256 — raises
+    `VerifyMismatchError` (never returns) on any mismatch or missing file.
+    Never touches *src* — the caller removes the original only after this
+    returns without raising, per the module's own copy-verify-then-remove
+    contract."""
+    copy_only(src, dest)
+    return verify_only(src, dest)

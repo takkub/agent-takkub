@@ -37,10 +37,29 @@ class RegistryMapping:
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
+    """Write *payload* to *path* via a tmp-file + `os.replace` (never a
+    partial file observable at *path*). #504 round4 T2: also fsyncs the
+    tmp file's content before the rename, and best-effort fsyncs the
+    parent directory afterward — every caller of this function (migration
+    ledgers/manifests included) needs the write to survive a hard crash,
+    not just an unhandled exception, before this returns."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    with open(tmp, "r+b") as f:
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+    try:
+        fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass  # swallow-ok: directory-entry fsync is an extra durability
+        # margin on top of the file fsync above (which already made the
+        # content itself durable) — unsupported on some platforms (e.g.
+        # opening a directory this way on Windows).
 
 
 @dataclass
