@@ -48,7 +48,11 @@ def test_pytest_process_exception_never_files_an_issue(tmp_path, monkeypatch):
 
     # Defense in depth only — the guard under test must return before either
     # of these is ever touched; patched so a repro can't write real state.
-    monkeypatch.setattr(aic, "_DEDUP_PATH", tmp_path / "auto_issue_dedup.json")
+    # `raising=False`: `_DEDUP_PATH` stopped being a module constant once
+    # its path moved behind `path()` (#504 direct-V2-read/write cut) —
+    # harmless here since this patch is defense-in-depth only, not what the
+    # guard's early-return is actually being tested against.
+    monkeypatch.setattr(aic, "_DEDUP_PATH", tmp_path / "auto_issue_dedup.json", raising=False)
     new_issue_calls: list = []
     monkeypatch.setattr(
         aic.issues,

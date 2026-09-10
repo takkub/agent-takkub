@@ -8,6 +8,7 @@ DATA_HOME/SETTINGS_HOME."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,7 @@ from agent_takkub.core.migration.promote_v1 import (
     ArchiveV1LegacyStep,
     PromoteV2RootStep,
     _find_latest_manifest,
+    list_v1_archives,
 )
 from agent_takkub.core.migration.verify_copy import VerifyMismatchError, copy_verified
 from agent_takkub.core.storage.jsonl_store import JsonlStore
@@ -655,3 +657,341 @@ def test_archive_validate_detects_a_corrupted_archived_file(tmp_path, journal_ba
     report = step.validate()
     assert not report.ok
     assert "checksum mismatch" in report.summary
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 acceptance review, ROUND 2 (docs/audit/2026-09-10-504-acceptance-
+# review.md "## Round 2 — 60abb771") — R2-B1 (source-removal undo could drop
+# a file to zero copies), R2-H1 (restore-v1 generation handling), R2-H2
+# (nested registered provider homes), R2-H3 covered separately in
+# test_auto_migrate_boot.py, and the crash/restart + older-generation H9
+# gaps #568 left open.
+# ---------------------------------------------------------------------------
+
+
+def _every_copy(data_home: Path, name: str) -> list[Path]:
+    """Every file anywhere under *data_home*'s parent (source, target,
+    archive, backups — everywhere this suite's fixtures could put a copy)
+    whose basename is *name* — the concrete form of the "copies >= 1"
+    invariant every #504 promote/archive/rollback/restore path must hold."""
+    return [p for p in data_home.parent.rglob(name) if p.is_file()]
+
+
+def test_promote_delete_phase_failure_restores_every_source_no_data_lost(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R2-B1: a source-removal failure on the SECOND candidate used to
+    trigger `_undo_moved_entries`, which deletes the (only remaining) target
+    for the FIRST candidate whose source had already been removed —
+    reproducibly dropping it to zero copies. The fix restores every source
+    Phase B already removed instead of ever touching a target."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "only-a.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "only-a.json").write_text("unique-a", encoding="utf-8")
+    (data_home / "v2" / "state" / "only-b.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "only-b.json").write_text("unique-b", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+    count = {"n": 0}
+
+    def _fail_second_remove(path):
+        count["n"] += 1
+        if count["n"] == 2:
+            raise OSError("injected failure removing second source")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    # Both original nested sources are back (the one whose removal
+    # succeeded was re-materialized from its already-verified target).
+    assert (data_home / "v2" / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    assert (data_home / "v2" / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+    assert len(_every_copy(data_home, "only-a.json")) >= 1
+    assert len(_every_copy(data_home, "only-b.json")) >= 1
+    # Retry succeeds cleanly once the injected failure is gone.
+    assert step.apply().ok
+    assert (data_home / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+
+
+def test_archive_delete_phase_failure_restores_every_source_no_data_lost(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R2-B1, archive side: same failure class, reproduced through
+    `ArchiveV1LegacyStep.apply()` instead of promote."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "a.json").write_text("unique-a", encoding="utf-8")
+    (data_home / "b.json").write_text("unique-b", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+    count = {"n": 0}
+
+    def _fail_second_remove(path):
+        count["n"] += 1
+        if count["n"] == 2:
+            raise OSError("injected failure removing second source")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert (data_home / "a.json").read_text(encoding="utf-8") == "unique-a"
+    assert (data_home / "b.json").read_text(encoding="utf-8") == "unique-b"
+    assert len(_every_copy(data_home, "a.json")) >= 1
+    assert len(_every_copy(data_home, "b.json")) >= 1
+
+
+def test_promote_rollback_delete_phase_failure_restores_every_source(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R2-B1, promote-rollback side: the third reproduction the
+    reviewer named — `PromoteV2RootStep.rollback()` shares the same
+    `_two_phase_move` helper as `apply()`."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "only-a.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "only-a.json").write_text("unique-a", encoding="utf-8")
+    (data_home / "v2" / "state" / "only-b.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "only-b.json").write_text("unique-b", encoding="utf-8")
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    assert (data_home / "models" / "only-a.json").exists()
+    assert (data_home / "state" / "only-b.json").exists()
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+    count = {"n": 0}
+
+    def _fail_second_remove(path):
+        count["n"] += 1
+        if count["n"] == 2:
+            raise OSError("injected failure removing second source")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", _fail_second_remove)
+    report = step.rollback()
+
+    assert not report.ok
+    assert len(_every_copy(data_home, "only-a.json")) >= 1
+    assert len(_every_copy(data_home, "only-b.json")) >= 1
+    assert (data_home / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+
+
+def test_promote_survives_a_crash_right_after_a_real_source_removal(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R2 `crash_restart_restore`: a process death (not a caught
+    OSError) between a REAL source removal and this step's own bookkeeping
+    used to leave that candidate permanently missing from the promote
+    manifest — a later retry's batch manifest write only ever described
+    ITS OWN candidates, silently dropping whatever an earlier interrupted
+    run had already promoted. `on_before_remove` now merges each candidate
+    into the manifest BEFORE its source is removed, so the record survives
+    even when the removal itself is the last thing that ever completes."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "only-a.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "only-a.json").write_text("unique-a", encoding="utf-8")
+    (data_home / "v2" / "state" / "only-b.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "only-b.json").write_text("unique-b", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+
+    def _crash_after_first_remove(path):
+        real_remove(path)  # the real deletion DID happen
+        raise RuntimeError("simulated process loss right after source removal")
+
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    monkeypatch.setattr(promote_mod, "_remove", _crash_after_first_remove)
+    with pytest.raises(RuntimeError):
+        step.apply()
+    monkeypatch.undo()  # restore the real `_remove` for the retry below
+
+    # "models" (processed first, alphabetically) is really gone from v2/ —
+    # the crash happened right after its real removal — but "state" never
+    # got touched at all.
+    assert not (data_home / "v2" / "models").exists()
+    assert (data_home / "v2" / "state" / "only-b.json").is_file()
+
+    # A fresh retry (a new boot) only sees "state" as a candidate — but the
+    # manifest must still remember "models" from the interrupted run.
+    retry = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert retry.apply().ok
+
+    rollback_report = retry.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    assert (data_home / "v2" / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    assert (data_home / "v2" / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+
+
+def test_restore_v1_refuses_when_an_archived_member_is_missing(tmp_path, journal_backups):
+    """#504 R2-H1/H2 residual: `ArchiveV1LegacyStep.rollback()` used to skip
+    a missing archived member per-entry (`if not src.exists(): continue`)
+    and still report `ok=True`, silently dropping that file from the
+    restore. It must now refuse the WHOLE restore, touching nothing."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    archived_copy = next((data_home / "backups").rglob("projects.json"))
+    archived_copy.unlink()
+
+    report = step.rollback()
+    assert not report.ok
+    assert not (data_home / "projects.json").exists()
+
+
+def test_restore_v1_refuses_when_an_archived_member_is_corrupt(tmp_path, journal_backups):
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    archived_copy = next((data_home / "backups").rglob("projects.json"))
+    archived_copy.write_text("corrupted", encoding="utf-8")
+
+    report = step.rollback()
+    assert not report.ok
+    assert not (data_home / "projects.json").exists()
+
+
+def test_archive_protects_a_nested_registered_provider_home(tmp_path, journal_backups):
+    """#504 R2-H2: `_named_account_home_names()` used to protect only an
+    EXACT top-level `config_dir` (`Path(config_dir).parent == data_home`).
+    A registered home nested two levels deep must still protect its whole
+    top-level ancestor directory, not just its own leaf name."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    home = data_home / "team-homes" / "nested" / "claude-config-team"
+    (home / "auth.json").parent.mkdir(parents=True)
+    (home / "auth.json").write_text("named-account-secret", encoding="utf-8")
+    (data_home / "user-profiles.json").write_text(
+        json.dumps([{"name": "team", "config_dir": str(home)}]), encoding="utf-8"
+    )
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")  # a real leftover too
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert report.ok, report.summary
+    assert (home / "auth.json").read_text(encoding="utf-8") == "named-account-secret"
+    assert not (data_home / "projects.json").exists()
+
+
+def test_archive_validate_detects_corruption_in_an_older_non_latest_generation(
+    tmp_path, journal_backups
+):
+    """#504 R2-H9 `older_archive_integrity`: `validate()` used to check
+    only `_find_latest_manifest()` — corrupting an OLDER generation stayed
+    invisible even though `restore-v1`'s default walks every generation,
+    not just the latest."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("old", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    older_archive = Path(list_v1_archives(data_home)[0]["path"])
+
+    (data_home / "custom-roles.json").write_text("new-generation", encoding="utf-8")
+    assert step.apply().ok  # a second, newer generation
+
+    (older_archive / "projects.json").write_text("corrupted", encoding="utf-8")
+
+    report = step.validate()
+    assert not report.ok
+    assert older_archive.name in report.summary
+
+
+def test_restore_v1_rejects_an_explicit_unknown_archive_generation(tmp_path, journal_backups):
+    """#504 R2-H1: `rollback(archive_ts=<unknown>)` used to return the SAME
+    ok=True "no archive to restore from" report as the generic no-archives-
+    at-all case — a typo'd/stale `--archive <ts>` silently did nothing
+    while reporting success."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+
+    report = step.rollback(archive_ts="not-a-real-generation")
+    assert not report.ok
+
+
+def test_list_v1_archives_surfaces_an_unreadable_generation_instead_of_hiding_it(
+    tmp_path, journal_backups
+):
+    """#504 R2-H1: a generation whose manifest.json is missing/corrupt used
+    to be silently dropped from `--list` entirely."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    archive_dir = Path(list_v1_archives(data_home)[0]["path"])
+    (archive_dir / "manifest.json").write_text("not-json", encoding="utf-8")
+
+    archives = list_v1_archives(data_home)
+    assert len(archives) == 1
+    assert archives[0]["unreadable"] is True
+
+
+def test_restore_v1_cli_undoes_an_earlier_generation_when_a_later_one_fails(
+    tmp_path, journal_backups
+):
+    """#504 R2-H1: `cli._cmd_migrate_restore_v1` walks every generation
+    oldest-first when no `--archive` is given — if a LATER generation's
+    restore fails, the EARLIER one this same call already restored must be
+    undone too (all-or-nothing), not left half-applied."""
+    from argparse import Namespace
+
+    from agent_takkub.cli import _cmd_migrate_restore_v1
+    from agent_takkub.core.migration.engine import MigrationEngine
+
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+
+    (data_home / "projects.json").write_text("gen1", encoding="utf-8")
+    assert archive.apply().ok  # oldest generation
+
+    (data_home / "custom-roles.json").write_text("gen2", encoding="utf-8")
+    assert archive.apply().ok  # newest generation
+
+    # Corrupt the NEWER generation's archived member so it fails AFTER the
+    # older one has already been restored (oldest-first walk order).
+    # `list_v1_archives` is newest-first, so index 0 is the newer one.
+    newest_archive = Path(list_v1_archives(data_home)[0]["path"])
+    (newest_archive / "custom-roles.json").write_text("corrupted", encoding="utf-8")
+
+    engine = MigrationEngine([promote, archive], data_home=data_home, journal=journal)
+    reports = _cmd_migrate_restore_v1(engine, Namespace(archive_ts=None))
+
+    assert not all(r.ok for r in reports)
+    # The older generation's restore ("projects.json") must have been
+    # undone again — it never existed before this restore-v1 call started.
+    assert not (data_home / "projects.json").exists()

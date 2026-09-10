@@ -178,15 +178,44 @@ def _estimate_copy_bytes(data_home: Path) -> int:
     carries no per-step byte accounting yet (`inspect()` reports
     presence/counts, not sizes), so this walks the two dominant sources
     directly rather than inventing a per-step size API just for this gate.
-    ponytail: V1 top-level leftovers `ArchiveV1LegacyStep` is about to copy
-    into `backups/` aren't counted here (they overlap heavily with content
-    the domain steps above ALSO count toward `runtime/`/`v2/`, and archiving
-    happens after everything else already fit) — widen this if a future
-    ladder step's source outgrows both of these."""
+    #504 R2-H3 (round 2 acceptance review): the ponytail note above no
+    longer holds — `ArchiveV1LegacyStep`'s own candidates (V1 top-level
+    leftovers + H7's shared-dir legacy files) are counted explicitly below,
+    since a fixture with ONLY an archive-only payload (no `runtime/`, no
+    nested `v2/`) used to estimate exactly zero bytes and pass any disk
+    gate unconditionally (`disk_archive_inventory`). Also counts the
+    PRE-EXISTING size of any promote destination `_two_phase_move` would
+    merge into — that preimage gets backed up before the merge, so room
+    must cover it too, not just the new copy (a populated `providers/`
+    destination can be larger than the nested `v2/providers/` subtree being
+    merged in)."""
     total = _dir_size(data_home / "runtime") if (data_home / "runtime").is_dir() else 0
     legacy_v2 = data_home / "v2"
     if legacy_v2.is_dir():
         total += _dir_size(legacy_v2)
+
+    def _path_size(path: Path) -> int:
+        try:
+            if path.is_dir():
+                return _dir_size(path)
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    try:
+        from .core.migration.promote_v1 import ArchiveV1LegacyStep, PromoteV2RootStep
+
+        promote = PromoteV2RootStep(data_home=data_home)
+        for src in promote._promote_candidates():
+            dest = data_home / src.name
+            if dest.exists():
+                total += _path_size(dest)  # preimage BackupManager backs up before merging
+
+        archive = ArchiveV1LegacyStep(data_home=data_home)
+        for src in archive._archive_candidates() + archive._shared_dir_legacy_candidates():
+            total += _path_size(src)
+    except OSError:
+        pass
     return total
 
 

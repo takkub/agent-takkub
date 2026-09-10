@@ -805,6 +805,38 @@ class TestPromoteBootFailureHandling:
         (data_home / "v2" / "models" / "large.bin").write_bytes(b"x" * 4096)
         assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096
 
+    def test_disk_estimate_counts_archive_only_candidates(self) -> None:
+        """#504 R2-H3 `disk_archive_inventory`: a fixture with ONLY a V1
+        top-level leftover (no `runtime/`, no nested `v2/`) used to estimate
+        exactly zero bytes too — `ArchiveV1LegacyStep`'s own candidates
+        weren't counted at all."""
+        data_home = config.DATA_HOME
+        (data_home / "unmapped-legacy").mkdir(parents=True)
+        (data_home / "unmapped-legacy" / "large.bin").write_bytes(b"x" * 8192)
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                auto_migrate_boot.shutil,
+                "disk_usage",
+                lambda _path: type("Usage", (), {"free": 0})(),
+            )
+            assert auto_migrate_boot._disk_has_room(data_home) is False
+
+    def test_disk_estimate_counts_a_promote_merge_preimage(self) -> None:
+        """#504 R2-H3: a promote candidate that will MERGE into an
+        already-populated top-level destination must count that existing
+        destination too — `_two_phase_move` backs it up before merging, so
+        room must cover the preimage, not just the new copy."""
+        data_home = config.DATA_HOME
+        (data_home / "v2" / "providers" / "claude").mkdir(parents=True)
+        (data_home / "v2" / "providers" / "claude" / "new.json").write_bytes(b"n" * 10)
+        (data_home / "providers" / "kimi" / "default").mkdir(parents=True)
+        (data_home / "providers" / "kimi" / "default" / "auth.json").write_bytes(b"k" * 2000)
+        # The nested v2/ dir itself already counts the new bytes; the
+        # pre-existing top-level "providers" destination's own bytes must
+        # be counted ON TOP of that.
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) >= 10 + 2000
+
     def test_version_bump_on_first_upgraded_boot_still_validates_green(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

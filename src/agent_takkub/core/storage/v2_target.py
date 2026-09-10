@@ -18,18 +18,23 @@ the migration ladder can never disagree about where a file lives.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+from agent_takkub import config
+
 from ..migration.registry_copy_step import write_json_atomic
 from .legacy_reader import read_json
 
+_logger = logging.getLogger(__name__)
+
 
 def _primary_data_home() -> Path | None:
-    """Best-effort recovery of the PRIMARY cockpit's own ``config.DATA_HOME``
-    from inside a worktree pane process (carried over from
+    """Best-effort recovery of the PRIMARY cockpit's own storage root from
+    inside a worktree pane process (carried over from
     ``core.storage.dual_write``'s #504-pre-req fix). A worktree checkout's
     own ``config.DATA_HOME`` resolves to ITS OWN checkout root in dev mode —
     a different directory per worktree, never the primary cockpit's
@@ -38,12 +43,33 @@ def _primary_data_home() -> Path | None:
     against, since ``SETTINGS_HOME`` itself is shared across every dev
     checkout on the machine.
 
-    ``pane_env._apply_port_file`` stamps every spawned pane's env with the
-    HOST cockpit's own port-file path (normally ``<primary DATA_HOME>/
-    runtime/port``), so its grandparent recovers the primary DATA_HOME.
-    Returns ``None`` when not derivable (no override present, or the
-    per-PID multi-instance temp file, which lives outside any DATA_HOME) —
-    callers fall back to the caller-supplied/default resolution."""
+    #504 acceptance-review round 2 (H5): ``pane_env._apply_storage_root``
+    stamps every spawned pane's env with the HOST cockpit's own ALREADY
+    RESOLVED ``storage_layout_v2().root`` (computed inside the host's own
+    process, where ``core.storage.layout``'s dev/installed
+    ``home == config.REPO_ROOT`` check is evaluated correctly) — read that
+    back verbatim here rather than re-deriving a bare ``DATA_HOME`` and
+    letting the CALLER's ``storage_layout_v2()`` redo that same check from
+    inside a pane process, where ``config.REPO_ROOT`` resolves to the
+    pane's own worktree checkout instead of the primary's: comparing a
+    primary path against the WRONG REPO_ROOT silently picked the untested
+    shape (a dev-mode primary's ``<primary>/v2`` read as bare
+    ``<primary>``) with no error on either side.
+
+    Falls back to the older ``TAKKUB_PORT_FILE``-derived bare ``DATA_HOME``
+    (``pane_env._apply_port_file`` stamps ``<primary DATA_HOME>/runtime/
+    port``, so its grandparent recovers the primary DATA_HOME) only when a
+    host cockpit hasn't stamped the newer var — genuinely undecidable
+    whether that primary needs the nested ``v2/`` root from this process,
+    so it's logged as ``storage_root_ambiguous`` rather than silently
+    guessed. Returns ``None`` when neither is derivable (no override
+    present, or the per-PID multi-instance temp file, which lives outside
+    any DATA_HOME) — callers fall back to the caller-supplied/default
+    resolution."""
+    storage_root = os.environ.get("TAKKUB_STORAGE_ROOT", "").strip()
+    if storage_root:
+        return Path(storage_root)
+
     override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
     if not override:
         return None
@@ -52,7 +78,29 @@ def _primary_data_home() -> Path | None:
     path = Path(override)
     if path.name != "port" or path.parent.name != "runtime":
         return None
-    return path.parent.parent
+    primary_data_home = path.parent.parent
+
+    # Fallback heuristic for a host cockpit that hasn't stamped
+    # TAKKUB_STORAGE_ROOT yet (older cockpit build): in practice this whole
+    # divergence only ever arises while THIS process is itself running
+    # agent-takkub's own source from a worktree checkout
+    # (``config.DATA_HOME == config.REPO_ROOT``) — a "worktree pane" can
+    # only exist while self-hosting agent-takkub's own development, and
+    # every worktree of that same repo (the primary checkout included) is
+    # necessarily ALSO a dev checkout. So when this process is itself a dev
+    # checkout, the recovered primary is safely assumed to be one too.
+    # When this process is NOT a dev checkout, there is no known
+    # self-hosting relationship to lean on — genuinely undecidable, so it's
+    # logged rather than silently guessed either way.
+    if config.DATA_HOME == config.REPO_ROOT:
+        return primary_data_home / "v2"
+    _logger.warning(
+        "storage_root_ambiguous: TAKKUB_STORAGE_ROOT not set — falling back to bare "
+        "primary DATA_HOME %s; whether it needs the nested v2/ dev-checkout root cannot "
+        "be determined from this process",
+        primary_data_home,
+    )
+    return primary_data_home
 
 
 def effective_data_home(

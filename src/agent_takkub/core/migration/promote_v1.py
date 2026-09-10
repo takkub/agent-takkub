@@ -34,12 +34,16 @@ at DIFFERENT points relative to the 8 existing V1->V2 steps:
 Both moves use `verify_copy.copy_verified` (copy + sha256-verify every file,
 THEN remove the original) — never a raw `shutil.move`, since DATA_HOME's
 archive target may not share a volume with the source (#504 "ความปลอดภัยตอน
-ย้าย"). Any failure mid-move triggers this step's OWN `_undo` before it
-returns `ok=False`, so a partial move never lingers (#504: "ล้มกลางทาง →
-journal rollback กลับสภาพเดิมทั้งก้อน ห้ามค้างครึ่ง") — on top of that,
-`rollback()`/the CLI's `takkub migrate restore-v1` can always reconstruct the
-pre-2.1.0 shape later from the archive's own manifest, since that archive is
-never deleted or expired by this codebase.
+ย้าย"). A failure while copy-verifying (Phase A, `_two_phase_move` — no
+*src* has been touched yet) undoes every `dest` this call just created; a
+failure while removing an already-verified source (Phase B) instead
+restores every *src* Phase B already removed — it NEVER deletes a `dest`,
+because an earlier pair's `dest` may by then be the only remaining copy of
+its data (#504 R2-B1, below). So a partial move never lingers (#504: "ล้ม
+กลางทาง → journal rollback กลับสภาพเดิมทั้งก้อน ห้ามค้างครึ่ง") — on top of
+that, `rollback()`/the CLI's `takkub migrate restore-v1` can always
+reconstruct the pre-2.1.0 shape later from the archive's own manifest,
+since that archive is never deleted or expired by this codebase.
 
 2026-09-10 acceptance review (#504) findings B2/B3/B4/B5, H1/H2/H3/H6/H7/H9
 (docs/audit/2026-09-10-504-acceptance-review.md) rewrote most of the actual
@@ -49,6 +53,24 @@ preimages, manifests record per-file relative paths (never a bare top-level
 name) with sha256 digests, and archives store archive-relative paths so a
 relocated `backups/` tree still restores. See each helper's own docstring
 for the specific failure mode it closes.
+
+Round 2 of that same review (`## Round 2 — 60abb771` in the same doc) found
+the Phase A/Phase B conflation above (R2-B1: a caught Phase B failure still
+triggered the Phase A-style `dest`-deleting undo, dropping an EARLIER
+pair's already-source-removed data to zero copies), restore-v1 accepting a
+missing/corrupt archived member or an unknown `--archive` selector (R2-H1),
+a registered provider home nested more than one level deep still being
+archived (R2-H2), an incomplete disk preflight (R2-H3, `auto_migrate_boot
+.py`), `MigrationEngine.validate()`/`ArchiveV1LegacyStep.validate()` still
+not checking real target/older-generation integrity (#568's H9 gap), and no
+durable per-item progress before a source removal (the crash/restart gap).
+Every one of those is closed in this module (`_two_phase_move`'s
+`on_before_remove`/`on_restore` callbacks, `_archive_entry_problems` reused
+fail-closed by `rollback()`, `_named_account_home_names`'s first-path-
+segment protection, `_find_all_manifests`) or its caller
+(`engine.py`'s `_domain_target_problems`, `auto_migrate_boot
+._estimate_copy_bytes`, `cli._cmd_migrate_restore_v1`'s multi-generation
+undo).
 """
 
 from __future__ import annotations
@@ -58,6 +80,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -171,26 +194,102 @@ def _rel_files(root: Path) -> list[Path]:
 
 
 DoneEntry = tuple[Path, Path, "Path | None", dict[str, str]]
+# (src, dest, error message) — a pair whose *src* could not be removed in
+# Phase B (before restoration below put it back).
+CleanupPendingEntry = tuple[Path, Path, str]
+
+
+@dataclass(frozen=True, slots=True)
+class MoveResult:
+    """Outcome of `_two_phase_move`, split by WHICH phase it failed in —
+    #504 acceptance-review round 2 R2-B1 (was B-new): Phase A (copy+verify)
+    and Phase B (remove sources) fail in fundamentally different ways, and
+    treating them the same used to be able to drop a file to ZERO copies.
+
+    A `phase_a_error` means no *src* was ever touched — every `done` entry
+    is a *dest* this call just created and nothing else, so the caller's
+    `_undo_moved_entries` can safely delete every one of them; the original
+    data is still sitting at its *src*, untouched.
+
+    A non-empty `cleanup_pending` means Phase B is where things went wrong:
+    at least one pair's *src* removal raised, possibly AFTER an earlier
+    pair's *src* was already removed in this same phase. Deleting `dest`
+    here (an "undo") is never safe — that earlier pair's `dest` may be the
+    ONLY remaining copy of its data. Restoring the just-deleted `src` back
+    from its already-verified `dest` is: `_two_phase_move` does exactly
+    that for every pair whose *src* it removed before returning, so by the
+    time this result comes back EVERY pair's *src* is present again — the
+    whole transaction reverts to "every dest verified, no source removed",
+    safely re-driveable by a plain retry. `cleanup_pending` records which
+    pair(s) actually failed, for the caller to log/report; `done`'s *dest*
+    entries are untouched either way."""
+
+    done: list[DoneEntry]
+    phase_a_error: Exception | None = None
+    cleanup_pending: list[CleanupPendingEntry] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.phase_a_error is None and not self.cleanup_pending
+
+
+def _restore_removed_source(src: Path, dest: Path) -> None:
+    """Re-materialize *src* by copying the already copy-verified *dest*
+    back onto it — never touches *dest*. Best-effort: even if this itself
+    fails, the invariant "at least one copy survives" still holds (*dest*
+    is untouched throughout), so a failure here is not escalated further."""
+    try:
+        if dest.is_dir():
+            shutil.copytree(dest, src, dirs_exist_ok=True)
+        else:
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, src)
+    except OSError:
+        pass
 
 
 def _two_phase_move(
-    pairs: list[tuple[Path, Path]], backups: BackupManager, step_id: str
-) -> tuple[list[DoneEntry], Exception | None]:
-    """Copy-verify every ``(src, dest)`` pair, back up any PRE-EXISTING
-    *dest* first (so a merge into an already-populated directory — the
-    kimi-credentials scenario, #504 B3 — can be undone byte-for-byte instead
-    of guessed at), then remove every *src* only after every copy verified.
-    *src* is never touched on a partial failure.
+    pairs: list[tuple[Path, Path]],
+    backups: BackupManager,
+    step_id: str,
+    *,
+    on_before_remove: Callable[[Path, Path, dict[str, str]], None] | None = None,
+    on_restore: Callable[[Path, Path], None] | None = None,
+) -> MoveResult:
+    """Phase A: copy-verify every ``(src, dest)`` pair, back up any
+    PRE-EXISTING *dest* first (so a merge into an already-populated
+    directory — the kimi-credentials scenario, #504 B3 — can be undone
+    byte-for-byte instead of guessed at). No *src* is touched during this
+    phase, so a Phase A failure can always be undone in full — see
+    `MoveResult`.
 
-    Returns ``(attempted, error)``. *attempted* lists every pair this call
-    actually reached, in order, as ``(src, dest, backup_path, digests)`` —
-    including the ONE that raised, thanks to the ``try/finally`` below
-    (#504 B3 `partial_copy` finding: a copy that writes a partial *dest* and
-    then raises used to never make it into the undo list at all, leaving
-    that partial junk behind forever); *digests* is `copy_verified`'s own
-    relative-path -> sha256 map (empty when the copy for that pair never
-    completed). *error* is ``None`` on full success, in which case every
-    *src* has already been removed and *attempted* is exactly *pairs*."""
+    Phase B (only reached once every pair in Phase A copy-verified clean):
+    remove every *src*, one at a time. If ANY removal raises, EVERY *src*
+    already removed in this same phase is restored back from its
+    already-verified *dest* before returning (`_restore_removed_source`) —
+    never an undo of `dest` (#504 R2-B1, was B-new: this exact
+    replace-then-undo-the-wrong-side sequence used to be reproducible via
+    `promote`, `archive`, and `promote`'s own `rollback`, all of which
+    share this helper). The caller sees every pair's *src* present again
+    and `cleanup_pending` naming which one(s) actually failed.
+
+    ``on_before_remove`` (#504 R2 `crash_restart_restore`), when given, is
+    called with ``(src, dest, digests)`` for each pair IMMEDIATELY BEFORE
+    its *src* is removed — a caller durably records "this pair is now the
+    caller's responsibility to track" (e.g. merges it into its own
+    manifest) at the one moment that matters: a process death during or
+    right after the actual OS-level removal (which this cannot catch — a
+    `KeyboardInterrupt`/`SystemExit`/hard kill is not an `OSError`) still
+    leaves that record in place, because it was written BEFORE the
+    destructive call, not after. A callback failure is swallowed — it must
+    never block the underlying removal it is only asked to precede.
+
+    ``on_restore`` is called with ``(src, dest)`` for each pair
+    `_restore_removed_source` puts back after a Phase B failure — the
+    compensating retraction for whatever `on_before_remove` durably
+    recorded for that same pair, so an ORDINARY caught failure (as opposed
+    to the process death `on_before_remove` exists for) leaves no stale
+    record behind for a pair whose source turned out to still be present."""
     done: list[DoneEntry] = []
     try:
         for src, dest in pairs:
@@ -199,12 +298,40 @@ def _two_phase_move(
             try:
                 digests = copy_verified(src, dest).digests
             finally:
+                # #504 B3 `partial_copy`: append even on a raise, so a copy
+                # that wrote a partial *dest* and then raised still lands in
+                # `done` for `_undo_moved_entries` to clean up.
                 done.append((src, dest, backup_path, digests))
-        for src, _dest, _backup, _digests in done:
-            _remove(src)
-        return done, None
     except (OSError, VerifyMismatchError) as e:
-        return done, e
+        return MoveResult(done=done, phase_a_error=e)
+
+    cleanup_pending: list[CleanupPendingEntry] = []
+    removed: list[tuple[Path, Path]] = []
+    for src, dest, _backup, digests in done:
+        if on_before_remove is not None:
+            try:
+                on_before_remove(src, dest, digests)
+            except Exception:
+                pass
+        try:
+            _remove(src)
+            removed.append((src, dest))
+        except OSError as e:
+            cleanup_pending.append((src, dest, str(e)))
+
+    if cleanup_pending:
+        for src, dest in removed:
+            _restore_removed_source(src, dest)
+            if on_restore is not None:
+                try:
+                    on_restore(src, dest)
+                except Exception:
+                    pass
+    return MoveResult(done=done, cleanup_pending=cleanup_pending)
+
+
+def _format_cleanup_pending(cleanup_pending: list[CleanupPendingEntry]) -> str:
+    return "; ".join(f"{src}: {msg}" for src, _dest, msg in cleanup_pending)
 
 
 def _copy_only_transaction(
@@ -302,12 +429,18 @@ def _rmdir_tree(root: Path) -> None:
 
 
 def list_v1_archives(data_home: Path) -> list[dict]:
-    """Every ``v1-archive-<ts>`` generation under *data_home* with a
-    readable manifest, NEWEST first — #504 H1: `restore-v1` used to only
-    ever be able to reach the single latest generation, silently stranding
-    files that were only ever recorded in an earlier one. `takkub migrate
-    restore-v1 --list` surfaces this; `--archive <ts>` then targets one
-    generation explicitly."""
+    """Every ``v1-archive-<ts>`` generation directory under *data_home*,
+    NEWEST first — #504 H1: `restore-v1` used to only ever be able to reach
+    the single latest generation, silently stranding files that were only
+    ever recorded in an earlier one. `takkub migrate restore-v1 --list`
+    surfaces this; `--archive <ts>` then targets one generation explicitly.
+
+    #504 R2-H1: a generation whose manifest.json is missing or unreadable
+    is now INCLUDED with ``"unreadable": True`` (and every other field
+    ``None``/empty) instead of being silently dropped from the list — an
+    operator deciding which `--archive <ts>` to restore from needs to know
+    a generation exists but can't be read, not have it vanish as if it
+    never happened."""
     base = data_home / _ARCHIVE_DIR_NAME
     if not base.is_dir():
         return []
@@ -320,20 +453,44 @@ def list_v1_archives(data_home: Path) -> list[dict]:
         return []
     out: list[dict] = []
     for c in candidates:
+        ts = c.name.removeprefix("v1-archive-")
         m = c / _MANIFEST_NAME
         if not m.is_file():
+            out.append(
+                {
+                    "ts": ts,
+                    "path": str(c),
+                    "created_at": None,
+                    "archived": [],
+                    "deleted": [],
+                    "unreadable": True,
+                    "error": "manifest.json missing",
+                }
+            )
             continue
         try:
             manifest = json.loads(m.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            out.append(
+                {
+                    "ts": ts,
+                    "path": str(c),
+                    "created_at": None,
+                    "archived": [],
+                    "deleted": [],
+                    "unreadable": True,
+                    "error": str(e),
+                }
+            )
             continue
         out.append(
             {
-                "ts": c.name.removeprefix("v1-archive-"),
+                "ts": ts,
                 "path": str(c),
                 "created_at": manifest.get("created_at"),
                 "archived": [e.get("name") for e in manifest.get("archived", [])],
                 "deleted": manifest.get("deleted", []),
+                "unreadable": False,
             }
         )
     return out
@@ -422,6 +579,42 @@ class PromoteV2RootStep:
             detail={"items": names},
         )
 
+    def _merge_manifest_entry(self, entry: dict) -> None:
+        """Durably record that *entry* (one candidate's name/kind/paths) is
+        promoted — merged into any existing manifest rather than
+        overwritten, and called (via `_two_phase_move`'s
+        ``on_before_remove``) BEFORE this candidate's `v2/<name>` source is
+        removed (#504 R2 `crash_restart_restore`). A process death right
+        after that removal — this call already wrote *entry* first — still
+        leaves it correctly recorded; a LATER retry's own candidates (which
+        no longer include an already-removed entry) merge in beside it
+        instead of a batch overwrite silently dropping it, which is what
+        used to make `restore-v1` lose the original nested path for
+        whatever this run's retry didn't happen to touch."""
+        path = self._manifest_path()
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            promoted = list(existing.get("promoted", []))
+        except (OSError, ValueError):
+            promoted = []
+        promoted = [e for e in promoted if e.get("name") != entry["name"]]
+        promoted.append(entry)
+        write_json_atomic(path, {"schema": 2, "created_at": time.time(), "promoted": promoted})
+
+    def _retract_manifest_entry(self, name: str) -> None:
+        """Undo `_merge_manifest_entry` for *name* — called (via
+        `_two_phase_move`'s ``on_restore``) when an ORDINARY caught Phase B
+        failure puts that candidate's source back, so a ONE-item pending
+        state doesn't leave it wrongly recorded as promoted."""
+        path = self._manifest_path()
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            promoted = list(existing.get("promoted", []))
+        except (OSError, ValueError):
+            return
+        promoted = [e for e in promoted if e.get("name") != name]
+        write_json_atomic(path, {"schema": 2, "created_at": time.time(), "promoted": promoted})
+
     def apply(self) -> StepReport:
         if not self._pending():
             self.journal.record(self.step_id, "apply", True, "nothing pending")
@@ -445,30 +638,59 @@ class PromoteV2RootStep:
                 manifest_entries.append({"name": src.name, "kind": "dir", "paths": paths})
             else:
                 manifest_entries.append({"name": src.name, "kind": "file"})
+        entries_by_name = {e["name"]: e for e in manifest_entries}
 
         pairs = [(src, self.data_home / src.name) for src in candidates]
-        done, err = _two_phase_move(pairs, self.backups, self.step_id)
-        if err is not None:
-            _undo_moved_entries(done)
-            self.journal.record(self.step_id, "apply", False, str(err))
-            return StepReport(self.step_id, "apply", False, f"promote failed, rolled back: {err}")
-
-        write_json_atomic(
-            self._manifest_path(),
-            {
-                "schema": 2,
-                "created_at": time.time(),
-                "promoted": manifest_entries,
-            },
+        result = _two_phase_move(
+            pairs,
+            self.backups,
+            self.step_id,
+            on_before_remove=lambda src, _dest, _digests: self._merge_manifest_entry(
+                entries_by_name[src.name]
+            ),
+            on_restore=lambda src, _dest: self._retract_manifest_entry(src.name),
         )
+        if result.phase_a_error is not None:
+            _undo_moved_entries(result.done)
+            self.journal.record(self.step_id, "apply", False, str(result.phase_a_error))
+            return StepReport(
+                self.step_id, "apply", False, f"promote failed, rolled back: {result.phase_a_error}"
+            )
 
-        self.journal.record(self.step_id, "apply", True, f"promoted {len(done)} item(s)")
+        if result.cleanup_pending:
+            # #504 R2-B1: at least one candidate's `v2/<name>` source could
+            # not be removed after its copy already verified clean.
+            # `_two_phase_move` has already restored every source it DID
+            # remove in this same phase, so nothing here actually promoted
+            # — no manifest write, no legacy-root cleanup. The next
+            # `apply()` retry sees the exact same candidates again.
+            msg = _format_cleanup_pending(result.cleanup_pending)
+            self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {msg}")
+            return StepReport(
+                self.step_id,
+                "apply",
+                False,
+                f"promote copy-verified {len(result.done)} item(s) but {len(result.cleanup_pending)} "
+                f"source(s) could not be removed — every source has been restored, nothing lost, "
+                f"retry apply: {msg}",
+                detail={"cleanup_pending": [src.name for src, _d, _m in result.cleanup_pending]},
+            )
+
+        # No batch manifest write here — every entry in `manifest_entries`
+        # was already durably merged in one at a time via
+        # `on_before_remove`, BEFORE its own source removal (#504 R2
+        # `crash_restart_restore`). A bulk overwrite using only THIS run's
+        # `manifest_entries` would silently drop any entry a PRIOR
+        # interrupted run already merged in but that isn't a candidate this
+        # time (its `v2/<name>` source is already gone) — exactly the bug
+        # this incremental-merge design exists to close.
+        self.journal.record(self.step_id, "apply", True, f"promoted {len(result.done)} item(s)")
         return StepReport(
             self.step_id,
             "apply",
             True,
-            f"promoted {len(done)} item(s) from {self._legacy_root()} to {self.data_home}",
-            detail={"items": [src.name for src, _d, _b, _dg in done]},
+            f"promoted {len(result.done)} item(s) from {self._legacy_root()} to {self.data_home}",
+            detail={"items": [src.name for src, _d, _b, _dg in result.done]},
         )
 
     def validate(self) -> StepReport:
@@ -531,16 +753,36 @@ class PromoteV2RootStep:
                 if s.is_file():
                     pairs.append((s, legacy_root / name / rel))
 
-        done, err = _two_phase_move(pairs, self.backups, self.step_id)
-        if err is not None:
-            _undo_moved_entries(done)
-            self.journal.record(self.step_id, "rollback", False, str(err))
-            return StepReport(self.step_id, "rollback", False, f"restore failed: {err}")
+        result = _two_phase_move(pairs, self.backups, self.step_id)
+        if result.phase_a_error is not None:
+            _undo_moved_entries(result.done)
+            self.journal.record(self.step_id, "rollback", False, str(result.phase_a_error))
+            return StepReport(
+                self.step_id, "rollback", False, f"restore failed: {result.phase_a_error}"
+            )
+
+        if result.cleanup_pending:
+            # #504 R2-B1: same rule as `apply()` — `_two_phase_move` has
+            # already restored every top-level source it removed in this
+            # same phase, so nothing here actually moved back under
+            # `legacy_root` — no pruning, next `rollback()` retry sees the
+            # same manifest entries again.
+            msg = _format_cleanup_pending(result.cleanup_pending)
+            self.journal.record(self.step_id, "rollback", False, f"cleanup-pending: {msg}")
+            return StepReport(
+                self.step_id,
+                "rollback",
+                False,
+                f"restore copy-verified {len(result.done)} item(s) but {len(result.cleanup_pending)} "
+                f"could not be removed from their original location — every source has been "
+                f"restored, nothing lost, retry rollback: {msg}",
+                detail={"cleanup_pending": [str(dest) for _s, dest, _m in result.cleanup_pending]},
+            )
 
         for base, paths in prune_map.items():
             _prune_empty_dirs(base, paths)
 
-        restored = [str(dest.relative_to(legacy_root)) for _s, dest, _b, _dg in done]
+        restored = [str(dest.relative_to(legacy_root)) for _s, dest, _b, _dg in result.done]
         self.journal.record(self.step_id, "rollback", True, f"restored {len(restored)} item(s)")
         return StepReport(
             self.step_id,
@@ -587,13 +829,26 @@ class ArchiveV1LegacyStep:
 
     def _named_account_home_names(self) -> set[str]:
         """Every top-level basename under `data_home` that a LIVE
-        `user-profiles.json` entry's `config_dir` actually points at (#504
-        B4). A named account's home shares no fixed basename a static
-        skip-list could enumerate (`accounts_adapter.default_account_home`:
-        `claude-config-<name>`), so this reads the real registry instead of
-        guessing a naming convention. Best-effort: a missing/corrupt
-        registry just means nothing extra gets protected here, same as
-        every other best-effort read in this module."""
+        `user-profiles.json` entry's `config_dir` actually lives under (#504
+        B4, + B4-residual). A named account's home shares no fixed basename
+        a static skip-list could enumerate
+        (`accounts_adapter.default_account_home`: `claude-config-<name>`),
+        so this reads the real registry instead of guessing a naming
+        convention. Best-effort: a missing/corrupt registry just means
+        nothing extra gets protected here, same as every other best-effort
+        read in this module.
+
+        B4-residual: `config_dir` need not sit directly at `data_home`'s top
+        level — a registered home can be nested arbitrarily deep (e.g.
+        `data_home/homes/team/claude-config-team`). Protecting only an exact
+        `p.parent == data_home` match left every OTHER top-level ancestor of
+        a nested home unprotected — `_archive_candidates()` only ever
+        filters by top-level basename, so it would sweep the WHOLE ancestor
+        (`homes/`) into the archive, nested live home included. This adds
+        the FIRST path segment under `data_home` for every `config_dir`
+        actually rooted there, protecting the whole top-level candidate the
+        same coarse-grained way every other entry in this module already
+        is — never just the leaf name a shallower match would compute."""
         path = self.data_home / "user-profiles.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -609,12 +864,52 @@ class ArchiveV1LegacyStep:
             if not config_dir:
                 continue
             try:
-                p = Path(config_dir)
-                if p.parent == self.data_home:
-                    out.add(p.name)
+                rel = Path(config_dir).relative_to(self.data_home)
             except (OSError, ValueError, TypeError):
                 continue
+            if rel.parts:
+                out.add(rel.parts[0])
         return out
+
+    def _merge_archive_manifest_entry(self, archive_root: Path, entry: dict) -> None:
+        """Progressively accumulate *entry* into *archive_root*'s own
+        manifest.json — called (via `_two_phase_move`'s
+        ``on_before_remove``) BEFORE this entry's data_home source is
+        removed (#504 R2 crash-durability, same rationale as
+        `PromoteV2RootStep._merge_manifest_entry`). Unlike promote's single
+        persistent manifest path, `archive_root` is fresh per `apply()`
+        call, so this only needs to accumulate WITHIN this one call — but
+        without it, a process death mid-loop leaves `archive_root` holding
+        real archived files with no manifest.json at all, invisible to
+        `list_v1_archives()`/`restore-v1` even though the bytes are safely
+        on disk."""
+        path = archive_root / _MANIFEST_NAME
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {
+                "schema": 2,
+                "created_at": time.time(),
+                "archived": [],
+                "legacy_v2_marker_archived": False,
+                "deleted": [],
+            }
+        archived = [e for e in existing.get("archived", []) if e.get("name") != entry["name"]]
+        archived.append(entry)
+        existing["archived"] = archived
+        write_json_atomic(path, existing)
+
+    def _retract_archive_manifest_entry(self, archive_root: Path, name: str) -> None:
+        """Undo `_merge_archive_manifest_entry` for *name* — called (via
+        `_two_phase_move`'s ``on_restore``) when an ordinary caught Phase B
+        failure puts that entry's source back."""
+        path = archive_root / _MANIFEST_NAME
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        existing["archived"] = [e for e in existing.get("archived", []) if e.get("name") != name]
+        write_json_atomic(path, existing)
 
     def _delete_candidates(self) -> list[Path]:
         if not self.data_home.is_dir():
@@ -720,18 +1015,56 @@ class ArchiveV1LegacyStep:
         archive_root = self._archive_base() / f"v1-archive-{ts}"
         candidates = self._archive_candidates() + self._shared_dir_legacy_candidates()
         pairs = [(src, archive_root / src.relative_to(self.data_home)) for src in candidates]
-        done, err = _two_phase_move(pairs, self.backups, self.step_id)
-        if err is not None:
-            _undo_moved_entries(done)
+        result = _two_phase_move(
+            pairs,
+            self.backups,
+            self.step_id,
+            on_before_remove=lambda src, dest, digests: self._merge_archive_manifest_entry(
+                archive_root,
+                {
+                    "name": str(src.relative_to(self.data_home)),
+                    "path": dest.relative_to(archive_root).as_posix(),
+                    "sha256": digests,
+                },
+            ),
+            on_restore=lambda src, _dest: self._retract_archive_manifest_entry(
+                archive_root, str(src.relative_to(self.data_home))
+            ),
+        )
+        if result.phase_a_error is not None:
+            _undo_moved_entries(result.done)
             for d in (archive_root, self._archive_base()):
                 try:
                     if d.is_dir() and not any(d.iterdir()):
                         d.rmdir()
                 except OSError:
                     pass
-            self.journal.record(self.step_id, "apply", False, str(err))
-            return StepReport(self.step_id, "apply", False, f"archive failed, rolled back: {err}")
+            self.journal.record(self.step_id, "apply", False, str(result.phase_a_error))
+            return StepReport(
+                self.step_id, "apply", False, f"archive failed, rolled back: {result.phase_a_error}"
+            )
 
+        if result.cleanup_pending:
+            # #504 R2-B1: `_two_phase_move` has already restored every
+            # data_home source it removed in this same phase, so nothing
+            # here actually archived — no manifest write (an unnamed
+            # archive_root with verified-but-unrecorded copies is harmless
+            # clutter, cleared out on this generation's next successful
+            # retry), no legacy-v2/-folder cleanup, no item-5 deletes. The
+            # next `apply()` retry sees the same candidates again.
+            msg = _format_cleanup_pending(result.cleanup_pending)
+            self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {msg}")
+            return StepReport(
+                self.step_id,
+                "apply",
+                False,
+                f"archive copy-verified {len(result.done)} item(s) but {len(result.cleanup_pending)} "
+                f"source(s) could not be removed — every source has been restored, nothing lost, "
+                f"retry apply: {msg}",
+                detail={"cleanup_pending": [str(src) for src, _d, _m in result.cleanup_pending]},
+            )
+
+        done = result.done
         archived_legacy_marker = False
         if legacy_root.is_dir():
             (archive_root / _LEGACY_V2_NAME).mkdir(parents=True, exist_ok=True)
@@ -739,9 +1072,38 @@ class ArchiveV1LegacyStep:
                 _rmdir_tree(legacy_root)
                 archived_legacy_marker = True
             except OSError as e:
-                _undo_moved_entries(done)
+                # #504 B-new: the archive move above already fully
+                # succeeded — every src pair's source is gone and every
+                # dest verified — so undoing `done` here would delete the
+                # ONLY remaining copy of that data over a failure that is
+                # scoped to the legacy v2/ marker alone. Record what
+                # actually archived and report the marker problem
+                # separately instead.
+                write_json_atomic(
+                    archive_root / _MANIFEST_NAME,
+                    {
+                        "schema": 2,
+                        "created_at": time.time(),
+                        "archived": [
+                            {
+                                "name": str(src.relative_to(self.data_home)),
+                                "path": dest.relative_to(archive_root).as_posix(),
+                                "sha256": digests,
+                            }
+                            for src, dest, _backup, digests in done
+                        ],
+                        "legacy_v2_marker_archived": False,
+                        "deleted": [],
+                    },
+                )
                 self.journal.record(self.step_id, "apply", False, str(e))
-                return StepReport(self.step_id, "apply", False, f"archive failed, rolled back: {e}")
+                return StepReport(
+                    self.step_id,
+                    "apply",
+                    False,
+                    f"archived {len(done)} item(s) into {archive_root}, but the legacy v2/ "
+                    f"marker could not be removed (no data lost, retry apply to finish): {e}",
+                )
 
         manifest = {
             "schema": 2,
@@ -809,43 +1171,35 @@ class ArchiveV1LegacyStep:
                 False,
                 "V1 leftover(s) still present — archive not yet applied",
             )
-        # #504 H9: "nothing left to archive" alone used to be treated as
-        # proof the LATEST archive is intact — recompute the sha256 of every
-        # file it recorded and compare, so silent corruption/deletion of the
-        # archive itself turns validate() red instead of staying green
-        # forever.
-        manifest_path = _find_latest_manifest(self.data_home)
-        if manifest_path is None:
+        # #504 H9 / R2-H9: "nothing left to archive" alone used to be treated
+        # as proof the LATEST archive is intact — recompute the sha256 of
+        # every file every generation recorded and compare, so silent
+        # corruption/deletion of ANY archive generation turns validate() red
+        # instead of staying green forever. Checking only the latest left an
+        # OLDER generation's corruption invisible even though `restore-v1`
+        # (`cli.py`) walks every generation by default, not just the latest.
+        manifest_paths = _find_all_manifests(self.data_home)
+        if not manifest_paths:
             return StepReport(self.step_id, "validate", True, "no V1 leftovers remain")
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            return StepReport(
-                self.step_id, "validate", False, f"latest archive manifest unreadable: {e}"
-            )
-        archive_root = manifest_path.parent
-        for entry in manifest.get("archived", []):
-            rel = entry.get("path")
-            digests: dict[str, str] = entry.get("sha256") or {}
-            if not rel or not digests:
-                continue
-            base = archive_root / rel
-            for file_rel, expected in digests.items():
-                target = base / file_rel if base.is_dir() else base
-                if not target.is_file():
-                    return StepReport(
-                        self.step_id,
-                        "validate",
-                        False,
-                        f"archived file missing: {target}",
-                    )
-                if _sha256(target) != expected:
-                    return StepReport(
-                        self.step_id,
-                        "validate",
-                        False,
-                        f"archived file checksum mismatch: {target}",
-                    )
+        for manifest_path in manifest_paths:
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                return StepReport(
+                    self.step_id,
+                    "validate",
+                    False,
+                    f"archive manifest unreadable ({manifest_path.parent.name}): {e}",
+                )
+            archive_root = manifest_path.parent
+            problems = _archive_entry_problems(archive_root, manifest)
+            if problems:
+                return StepReport(
+                    self.step_id,
+                    "validate",
+                    False,
+                    f"archived file {problems[0]} (generation {archive_root.name})",
+                )
         return StepReport(self.step_id, "validate", True, "no V1 leftovers remain")
 
     def rollback(self, archive_ts: str | None = None) -> StepReport:
@@ -868,6 +1222,15 @@ class ArchiveV1LegacyStep:
             else _find_latest_manifest(self.data_home)
         )
         if manifest_path is None:
+            if archive_ts is not None:
+                # #504 R2-H1: an EXPLICITLY named generation that doesn't
+                # exist is a caller error, not "nothing to restore" — the
+                # old code returned ok=True here regardless, so
+                # `restore-v1 --archive <typo'd-or-stale-ts>` silently did
+                # nothing while reporting success.
+                msg = f"no v1-archive-{archive_ts} generation found"
+                self.journal.record(self.step_id, "rollback", False, msg)
+                return StepReport(self.step_id, "rollback", False, msg)
             self.journal.record(self.step_id, "rollback", True, "no archive to restore from")
             return StepReport(
                 self.step_id, "rollback", True, "no v1-archive found — nothing to restore"
@@ -880,13 +1243,25 @@ class ArchiveV1LegacyStep:
             return StepReport(self.step_id, "rollback", False, f"could not read manifest: {e}")
 
         archive_root = manifest_path.parent
+        # #504 H2 residual: fail CLOSED — refuse the whole restore, touching
+        # nothing at `data_home`, the moment any archived member is missing
+        # or corrupt. The old code just skipped a missing `src` per-entry
+        # (`if not src.exists(): continue`) and still returned ok=True,
+        # silently dropping that file from the restore instead of refusing.
+        problems = _archive_entry_problems(archive_root, manifest)
+        if problems:
+            msg = (
+                f"archive at {archive_root} is incomplete/corrupt "
+                f"({len(problems)} problem(s)) — refusing to restore: {'; '.join(problems[:5])}"
+            )
+            self.journal.record(self.step_id, "rollback", False, msg)
+            return StepReport(self.step_id, "rollback", False, msg, detail={"problems": problems})
+
         pairs: list[tuple[Path, Path]] = []
         for entry in manifest.get("archived", []):
             name = entry["name"]
             rel = entry.get("path")
             src = archive_root / rel if rel is not None else Path(entry.get("path", ""))
-            if not src.exists():
-                continue
             pairs.append((src, self.data_home / name))
 
         done, err = _copy_only_transaction(pairs, self.backups, self.step_id)
@@ -911,6 +1286,63 @@ class ArchiveV1LegacyStep:
             detail={"archive_root": str(archive_root), "restored": restored},
         )
 
+    def _undo_restored_names(self, names: list[str]) -> None:
+        """Reverse a PRIOR successful `rollback()` call's restored
+        top-level entries — #504 R2-H1: `cli._cmd_migrate_restore_v1` walks
+        every generation oldest-first when no `--archive` is given; if a
+        LATER generation's restore fails, the EARLIER one(s) this same
+        command call already restored must not be left half-applied (a
+        multi-generation restore-v1 is all-or-nothing). Each name's
+        PRE-restore content — backed up by `_copy_only_transaction` before
+        THAT generation's restore overwrote/merged it — is restored back; a
+        name with no backup means it didn't exist before the restore, so it
+        is simply removed again. Best-effort, same as every other undo path
+        in this module: a failure here is swallowed rather than compounding
+        the original failure with a second one."""
+        for name in names:
+            dest = self.data_home / name
+            backup_path = self.backups.latest_backup(self.step_id, name)
+            try:
+                if dest.is_dir():
+                    shutil.rmtree(dest, ignore_errors=True)
+                elif dest.exists():
+                    dest.unlink()
+                if backup_path is not None:
+                    if backup_path.is_dir():
+                        shutil.copytree(backup_path, dest)
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup_path, dest)
+            except OSError:
+                pass
+
+
+def _archive_entry_problems(archive_root: Path, manifest: dict) -> list[str]:
+    """Every problem (missing file / checksum mismatch) found while checking
+    *manifest*'s ``archived`` entries against what's actually under
+    *archive_root* — shared by `ArchiveV1LegacyStep.validate()` (H9, which
+    only needs to know the archive is intact) and `.rollback()` (#504 H2
+    residual: which must refuse the ENTIRE restore, touching nothing at
+    `data_home`, the moment ANY archived member turns out missing or
+    corrupt, rather than silently skipping just that one file — via its old
+    ``if not src.exists(): continue`` — and reporting success anyway).
+    Empty return means the archive is fully intact."""
+    problems: list[str] = []
+    for entry in manifest.get("archived", []):
+        rel = entry.get("path")
+        digests: dict[str, str] = entry.get("sha256") or {}
+        if not rel or not digests:
+            continue
+        base = archive_root / rel
+        for file_rel, expected in digests.items():
+            target = base / file_rel if base.is_dir() else base
+            if not target.is_file():
+                problems.append(f"missing: {target}")
+                continue
+            if _sha256(target) != expected:
+                problems.append(f"checksum mismatch: {target}")
+    return problems
+
 
 def _find_latest_manifest(data_home: Path) -> Path | None:
     base = data_home / _ARCHIVE_DIR_NAME
@@ -928,3 +1360,22 @@ def _find_latest_manifest(data_home: Path) -> Path | None:
         if m.is_file():
             return m
     return None
+
+
+def _find_all_manifests(data_home: Path) -> list[Path]:
+    """Every ``v1-archive-<ts>`` generation's manifest.json under
+    *data_home*, oldest first — #504 R2-H9 `older_archive_integrity`:
+    `restore-v1`'s default (`cli.py`) walks EVERY generation, so
+    `ArchiveV1LegacyStep.validate()` checking only the latest one left an
+    older generation's corruption invisible while still being consumed by
+    restore."""
+    base = data_home / _ARCHIVE_DIR_NAME
+    if not base.is_dir():
+        return []
+    try:
+        candidates = sorted(
+            p for p in base.iterdir() if p.is_dir() and p.name.startswith("v1-archive-")
+        )
+    except OSError:
+        return []
+    return [c / _MANIFEST_NAME for c in candidates if (c / _MANIFEST_NAME).is_file()]
