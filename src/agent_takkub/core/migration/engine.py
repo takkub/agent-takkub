@@ -13,6 +13,7 @@ one.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from collections.abc import Iterable, Sequence
@@ -74,6 +75,68 @@ def _remove_if_empty_dir(path: Path) -> None:
 _ARCHIVED_SOURCE_STEP_IDS = frozenset(
     {"readonly-registries", "role-agent", "capability", "project", "state"}
 )
+
+
+# Every domain target's required top-level key(s), by which accessor
+# computed its path — `RegistryCopyStep` targets (readonly-registries/
+# capability/state) and `ProjectMigrationStep._registry_target()` all use
+# the ``{"schema", ..., "data": ...}`` envelope
+# (`registry_copy_step.write_json_atomic`'s shape); `RoleAgentMigrationStep
+# ._routing_target()` is the one exception — `_routing_payload()` writes
+# ``{"schema", "migrated_at", "global", "projects"}`` with no "data" key at
+# all, so a single universal required-key assumption is wrong for it.
+_DOMAIN_TARGET_ACCESSOR_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "_custom_roles_target": ("data",),
+    "_routing_target": ("global", "projects"),
+    "_registry_target": ("data",),
+}
+
+
+def _domain_target_specs(step: object) -> list[tuple[Path, tuple[str, ...]]]:
+    """Every V2 target file *step* (one of `_ARCHIVED_SOURCE_STEP_IDS`)
+    writes, paired with its required top-level key(s) — used only once its
+    V1 source has been archived and its own `validate()` can no longer
+    re-read that source to cross-check against (#504 R2-H9
+    `domain_integrity`). `RegistryCopyStep` exposes its targets via
+    `.mappings` directly (always the "data"-keyed envelope);
+    `RoleAgentMigrationStep`/`ProjectMigrationStep` have their own
+    dataclass-specific target accessors — read by name rather than
+    duplicating each step's own path-computation logic here."""
+    mappings = getattr(step, "mappings", None)
+    if mappings is not None:
+        return [(m.target, ("data",)) for m in mappings]
+    specs: list[tuple[Path, tuple[str, ...]]] = []
+    for attr, required_keys in _DOMAIN_TARGET_ACCESSOR_REQUIRED_KEYS.items():
+        fn = getattr(step, attr, None)
+        if fn is not None:
+            specs.append((fn(), required_keys))
+    return specs
+
+
+def _domain_target_problems(specs: list[tuple[Path, tuple[str, ...]]]) -> list[str]:
+    """Presence + JSON-readability + required-key check for every
+    ``(path, required_keys)`` in *specs* — NOT a byte/sha256 match against
+    the (now-archived, gone) V1 source: a domain target is a live, mutable
+    file after migration (a project gets renamed, a role gets added), so
+    only its own basic health can be required forever, never that it still
+    equals some historical V1 snapshot."""
+    problems: list[str] = []
+    for path, required_keys in specs:
+        if not path.is_file():
+            problems.append(f"missing: {path}")
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            problems.append(f"unreadable ({e}): {path}")
+            continue
+        if not isinstance(data, dict):
+            problems.append(f"not a JSON object: {path}")
+            continue
+        missing = [k for k in required_keys if k not in data]
+        if missing:
+            problems.append(f"missing required key(s) {missing}: {path}")
+    return problems
 
 
 class MigrationEngine:
@@ -339,12 +402,30 @@ class MigrationEngine:
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
             if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+                # #504 R2-H9 `domain_integrity`: "nothing left to cross-check
+                # against" used to be an unconditional True — corrupting or
+                # deleting the V2 target itself (`projects/registry.json`
+                # turning into invalid JSON, say) still validated green
+                # forever. Check the target's own basic health instead of
+                # skipping straight to success.
+                problems = _domain_target_problems(_domain_target_specs(s))
+                if problems:
+                    reports.append(
+                        StepReport(
+                            step_id,
+                            "validate",
+                            False,
+                            f"V1 source archived (#504) but V2 target unhealthy: {problems[0]}",
+                            detail={"problems": problems},
+                        )
+                    )
+                    break
                 reports.append(
                     StepReport(
                         step_id,
                         "validate",
                         True,
-                        "V1 source archived (#504) — nothing left to cross-check against",
+                        "V1 source archived (#504) — target present, readable, correctly shaped",
                     )
                 )
                 continue

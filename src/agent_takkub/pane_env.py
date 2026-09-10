@@ -128,6 +128,11 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # single- and multi-instance mode, so this allowlist entry is never
         # actually relied on to carry the value through.
         "TAKKUB_PORT_FILE",
+        # Host cockpit's own resolved V2 storage root (#504 H5) — listed
+        # here for clarity only: `_apply_storage_root()` (below) recomputes
+        # and stamps the effective value into every pane's env
+        # unconditionally, same contract as TAKKUB_PORT_FILE.
+        "TAKKUB_STORAGE_ROOT",
         # Browser MCP (chrome-devtools needs to find Chrome)
         "CHROME_BIN",
         # User override for MCP per-call timeout (default injected below).
@@ -204,6 +209,7 @@ def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_win32_path_sanitization(env)
     _apply_port_file(env)
+    _apply_storage_root(env)
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
     _apply_utf8_io_env(env)
@@ -256,6 +262,7 @@ def _build_lead_env(project_ns: str | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_win32_path_sanitization(env)
     _apply_port_file(env)
+    _apply_storage_root(env)
 
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
@@ -296,6 +303,37 @@ def _apply_port_file(env: dict[str, str]) -> None:
     from . import config
 
     env["TAKKUB_PORT_FILE"] = str(config._effective_port_file_for_app())
+
+
+def _apply_storage_root(env: dict[str, str]) -> None:
+    """Stamp this cockpit's own resolved V2 storage root into every pane's
+    env (#504 acceptance-review round 2, H5).
+
+    `core.storage.layout.storage_layout_v2()` decides whether a `data_home`
+    needs the pre-#504 nested `v2/` root by comparing it against
+    `config.REPO_ROOT` — correct only when evaluated INSIDE the process
+    that owns that `data_home`. A worktree pane's own `config.REPO_ROOT`
+    resolves to ITS OWN checkout, never the primary/host cockpit's, so
+    `core.storage.v2_target.effective_data_home(prefer_primary=True)`
+    handing the primary's bare DATA_HOME to that comparison from inside a
+    pane process silently picks the wrong shape (a dev-mode primary's
+    `<primary>/v2` read/written as bare `<primary>` instead) — every
+    global-scope domain that opts into `prefer_primary`
+    (`model/routing/core_v2_settings`, ...) then reads/writes a location
+    the host cockpit never touches, with no error on either side.
+
+    Computed here, in the HOST's own process — where the `REPO_ROOT`
+    comparison above is correct — and stamped verbatim so
+    `v2_target._primary_data_home()` can hand it straight back to
+    `storage_layout_v2()` as `data_home` on the pane side: it will never
+    equal the pane's own `config.REPO_ROOT`, so that function's nested-
+    `v2/` check is always a no-op for it and this value passes through
+    byte-for-byte, already correctly shaped. Stamped unconditionally (not
+    ``setdefault``), same contract as `TAKKUB_PORT_FILE` above.
+    """
+    from .core.storage.layout import storage_layout_v2
+
+    env["TAKKUB_STORAGE_ROOT"] = str(storage_layout_v2().root)
 
 
 def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:

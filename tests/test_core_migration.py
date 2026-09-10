@@ -995,3 +995,38 @@ def test_core_internal_store_step_apply_pending_stays_quiet_once_only_cursors_dr
     assert json.loads((target / "conversation_ingest_cursors.json").read_text()) == {
         "claude::conv-1": "cursor-b"
     }
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 acceptance review, ROUND 2, #568 — R2-H9 `domain_integrity`:
+# once `archive-v1-legacy` retires a domain step's V1 source,
+# `MigrationEngine.validate()` used to substitute an unconditional
+# ok:True ("nothing left to cross-check against") for that step forever —
+# corrupting or deleting the V2 target itself still validated green.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_catches_a_corrupted_domain_target_after_v1_retirement(tmp_path, monkeypatch):
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", data_home)
+
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": "demo", "projects": {"demo": {}}}), encoding="utf-8"
+    )
+    engine = MigrationEngine()
+    apply_reports = engine.apply()
+    assert all(r.ok for r in apply_reports), [(r.step_id, r.summary) for r in apply_reports]
+    assert all(r.ok for r in engine.validate())
+
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    registry = storage_layout_v2(data_home).projects_root / "registry.json"
+    registry.write_text("not-json", encoding="utf-8")
+
+    reports = MigrationEngine(data_home=data_home).validate()
+    assert not all(r.ok for r in reports)
+    failed = next(r for r in reports if not r.ok)
+    assert failed.step_id == "project"
+    assert "unhealthy" in failed.summary

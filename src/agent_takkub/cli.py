@@ -3165,12 +3165,21 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     if not generations:
         return [archive_step.rollback()]  # the "nothing to restore" report
 
+    # #504 R2-H1: a multi-generation restore-v1 (no --archive: walk every
+    # generation oldest-first) is all-or-nothing — if a LATER generation's
+    # restore fails, undo every EARLIER generation this same call already
+    # restored successfully, rather than leaving DATA_HOME with only some
+    # of the requested generations applied.
     reports = []
+    restored_so_far: list[list[str]] = []
     for ts in generations:
         r = archive_step.rollback(archive_ts=ts)
         reports.append(r)
         if not r.ok:
+            for names in reversed(restored_so_far):
+                archive_step._undo_restored_names(names)
             return reports
+        restored_so_far.append(list(r.detail.get("restored", [])))
     reports.append(engine.rollback_step("promote-v2-root"))
     return reports
 
@@ -3196,7 +3205,10 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
             if not archives:
                 _utf8_print("  (no v1-archive-<ts> generations found)")
             for a in archives:
-                _utf8_print(f"  {a['ts']}  archived={a['archived']}  deleted={a['deleted']}")
+                if a.get("unreadable"):
+                    _utf8_print(f"  {a['ts']}  UNREADABLE — {a.get('error', '?')}")
+                else:
+                    _utf8_print(f"  {a['ts']}  archived={a['archived']}  deleted={a['deleted']}")
         return {"ok": True, "msg": f"{len(archives)} archive generation(s)"}
 
     dispatch = {
@@ -5372,7 +5384,12 @@ def main(argv: list[str] | None = None) -> int:
         "inspect": "V1 อะไรอยู่ตรงไหน, schema version เท่าไหร่ (read-only)",
         "plan": "จะย้ายอะไรไปไหน (ไม่แตะดิสก์)",
         "dry-run": "จำลอง apply แบบเต็ม ไม่เขียนดิสก์จริง",
-        "apply": "ทำจริง + journal (copy-never-move)",
+        # L1 (#504 round 2 acceptance review): "copy-never-move" only
+        # describes the 8 V1->V2 domain steps (steps_v1.py) — promote-v2-root
+        # / archive-v1-legacy verify-then-remove their source (never a raw
+        # shutil.move, still recoverable via restore-v1/rollback, but the
+        # source IS removed on success, unlike the domain steps).
+        "apply": "ทำจริง + journal (domain step = copy-never-move; promote/archive = copy-verify แล้วลบต้นทาง, กู้คืนได้ผ่าน restore-v1/rollback)",
         "validate": "cross-check V2 กับ V1 ที่ยังอยู่",
         "rollback": "ย้อนจาก journal + backup (ทั้ง ladder)",
         "restore-v1": "#504: ย้าย V1 จาก backups/v1-archive-<ts>/ กลับที่เดิม — ลง 2.0.x ใช้ต่อได้",
