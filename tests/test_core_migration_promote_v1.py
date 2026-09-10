@@ -1205,3 +1205,193 @@ def test_restore_v1_cli_multi_generation_undo_reverts_to_command_entry_state(
 
     assert not all(r.ok for r in reports)
     assert (data_home / "same.json").read_text(encoding="utf-8") == "CURRENT"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up to 26e0820a: spec item 5 ("ห้ามกลืน error ใน migration/restore/
+# ledger path") still had 4 bare `except OSError: pass` spots whose failure
+# was invisible to every caller. Each must now surface into the outcome the
+# caller sees (never a silent no-op) without changing what gets attempted.
+# ---------------------------------------------------------------------------
+
+
+def test_undo_copied_dest_reports_a_preimage_restore_failure(tmp_path, monkeypatch):
+    from agent_takkub.core.migration.promote_v1 import _undo_copied_dest
+
+    dest = tmp_path / "dest.json"
+    dest.write_text("just-copied", encoding="utf-8")
+    backup = tmp_path / "backup.json"
+    backup.write_text("pre-existing", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    def fail_copy2(*a, **k):
+        raise OSError("injected backup restore failure")
+
+    monkeypatch.setattr(promote_mod.shutil, "copy2", fail_copy2)
+
+    error = _undo_copied_dest(dest, backup)
+    assert error is not None
+    assert "could not restore preimage" in error
+    assert "injected backup restore failure" in error
+
+
+def test_copy_phase_reports_an_undo_failure_instead_of_swallowing_it(
+    tmp_path, journal_backups, monkeypatch
+):
+    """The `_undo_copied_dest` failure above must actually reach the
+    `StepReport` a real caller sees, not just the direct unit — a caller
+    that can't put a pre-existing destination's own prior content back
+    needs to know its retry starts from a destination that may still be
+    wrong."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "models").mkdir(parents=True)
+    (data_home / "models" / "existing.json").write_text("PRE-EXISTING", encoding="utf-8")
+    (data_home / "v2" / "models" / "new.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "new.json").write_text("new", encoding="utf-8")
+    (data_home / "v2" / "state" / "x.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "x.json").write_text("x", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_copy_verified = promote_mod.copy_verified
+
+    def fail_state(src, dest):
+        if src.name == "state":
+            raise OSError("injected state copy failure")
+        return real_copy_verified(src, dest)
+
+    monkeypatch.setattr(promote_mod, "copy_verified", fail_state)
+
+    # `shutil` is a single process-wide module object — patching it here
+    # would ALSO hit `BackupManager.backup()`'s own `copytree` call (taking
+    # the initial preimage backup, a different callsite). Only fail the
+    # RESTORE-back-onto-data_home call `_undo_copied_dest` makes.
+    real_copytree = promote_mod.shutil.copytree
+
+    def fail_restoring_models(src, dst, *a, **k):
+        if Path(dst) == data_home / "models":
+            raise OSError("injected preimage restore failure")
+        return real_copytree(src, dst, *a, **k)
+
+    monkeypatch.setattr(promote_mod.shutil, "copytree", fail_restoring_models)
+
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert "could not restore preimage" in report.summary
+
+
+def test_restore_source_from_dest_reports_a_file_kind_failure(tmp_path, monkeypatch):
+    from agent_takkub.core.migration.promote_v1 import TransferEntry
+
+    src = tmp_path / "src.json"
+    dest = tmp_path / "dest.json"
+    dest.write_text("verified", encoding="utf-8")
+    entry = TransferEntry(name="x", kind="file", src=src, dest=dest)
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    def fail_copy2(*a, **k):
+        raise OSError("injected copy2 failure")
+
+    monkeypatch.setattr(promote_mod.shutil, "copy2", fail_copy2)
+
+    errors = entry.restore_source_from_dest()
+    assert errors
+    assert str(src) in errors[0]
+    assert not src.exists()
+
+
+def test_restore_source_from_dest_reports_a_dir_kind_failure_per_file(tmp_path, monkeypatch):
+    from agent_takkub.core.migration.promote_v1 import TransferEntry
+
+    src = tmp_path / "src_dir"
+    dest = tmp_path / "dest_dir"
+    dest.mkdir()
+    (dest / "a.json").write_text("a", encoding="utf-8")
+    (dest / "b.json").write_text("b", encoding="utf-8")
+    entry = TransferEntry(name="x", kind="dir", src=src, dest=dest, paths=("a.json", "b.json"))
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_copy2 = promote_mod.shutil.copy2
+
+    def fail_b(s, d, *a, **k):
+        if Path(d).name == "b.json":
+            raise OSError("injected copy2 failure for b.json")
+        return real_copy2(s, d, *a, **k)
+
+    monkeypatch.setattr(promote_mod.shutil, "copy2", fail_b)
+
+    errors = entry.restore_source_from_dest()
+    assert len(errors) == 1
+    assert "b.json" in errors[0]
+    assert (src / "a.json").read_text(encoding="utf-8") == "a"
+    assert not (src / "b.json").exists()
+
+
+def test_prune_phase_reports_a_restore_failure_via_apply(tmp_path, journal_backups, monkeypatch):
+    """The `restore_source_from_dest` failure above must also reach the
+    `StepReport` from a real `apply()`/`_prune_phase` call, not just the
+    direct `TransferEntry` unit."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "a.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "a.json").write_text("a", encoding="utf-8")
+    (data_home / "v2" / "state" / "b.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "b.json").write_text("b", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+
+    def fail_removing_state(path):
+        if path == data_home / "v2" / "state":
+            raise OSError("last remove blocked")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", fail_removing_state)
+
+    real_copy2 = promote_mod.shutil.copy2
+
+    def fail_restoring_models(s, d, *a, **k):
+        if Path(d).name == "a.json":
+            raise OSError("injected restore-back failure")
+        return real_copy2(s, d, *a, **k)
+
+    monkeypatch.setattr(promote_mod.shutil, "copy2", fail_restoring_models)
+
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert "restore incomplete" in report.summary
+    assert "injected restore-back failure" in report.summary
+
+
+def test_list_v1_archives_reports_a_listing_failure_instead_of_vanishing(tmp_path, monkeypatch):
+    from agent_takkub.core.migration.promote_v1 import list_v1_archives
+
+    data_home = tmp_path / "data_home"
+    (data_home / "backups").mkdir(parents=True)
+
+    real_iterdir = Path.iterdir
+
+    def fail_iterdir(self):
+        if self == data_home / "backups":
+            raise OSError("injected iterdir failure")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+
+    archives = list_v1_archives(data_home)
+    assert len(archives) == 1
+    assert archives[0]["unreadable"] is True
+    assert "injected iterdir failure" in archives[0]["error"]
+    # `ts=""` (never a real generation timestamp), never `None` — a bare
+    # `None` would be read by `ArchiveV1LegacyStep.rollback(archive_ts=
+    # None)` as "restore the latest generation" instead of failing closed.
+    assert archives[0]["ts"] == ""
