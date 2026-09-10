@@ -359,3 +359,299 @@ def test_restore_does_not_recover_item_5_deleted_junk(tmp_path, journal_backups)
     assert "not recoverable" in report.summary
     assert (data_home / "projects.json").exists()
     assert not (data_home / "openviking").exists()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 acceptance review (docs/audit/2026-09-10-504-acceptance-review.md)
+# B2/B3/B4, H1/H2/H3/H7/H9 — regressions reproduced from the reviewer's own
+# fixtures (nested v2/ + a live providers/kimi/default home + V1 leftovers),
+# adapted to this file's tmp_path/journal_backups style.
+# ---------------------------------------------------------------------------
+
+
+def test_archive_refuses_to_delete_a_nonempty_legacy_v2_root(tmp_path, journal_backups):
+    """#504 B2: a `promote-v2-root` that never finished (or was interrupted)
+    can leave real un-promoted data under `v2/` — `ArchiveV1LegacyStep` must
+    never `shutil.rmtree` it just because it exists."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "state").mkdir(parents=True)
+    (data_home / "v2" / "state" / "only-copy.json").write_text("unique", encoding="utf-8")
+
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    report = archive.apply()
+
+    assert not report.ok
+    assert "refusing to delete" in report.summary
+    assert (data_home / "v2" / "state" / "only-copy.json").read_text(encoding="utf-8") == "unique"
+    assert not (data_home / "backups").exists()
+
+
+def test_promote_merge_undo_preserves_a_live_sibling_never_touched_by_the_copy(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 B3 `merge_undo`: a live `providers/kimi/default/auth.json` sits
+    beside a legacy `v2/providers/claude/...` waiting to be promoted. When a
+    LATER candidate's copy fails, undoing the `providers/` merge must
+    restore it to exactly its pre-merge state (the newly-merged `claude/`
+    entry gone) without ever losing the kimi home that was never part of
+    this transaction at all."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "providers" / "kimi" / "default").mkdir(parents=True)
+    (data_home / "providers" / "kimi" / "default" / "auth.json").write_text(
+        "live-secret", encoding="utf-8"
+    )
+    (data_home / "v2" / "providers" / "claude").mkdir(parents=True)
+    (data_home / "v2" / "providers" / "claude" / "provider.json").write_text(
+        "reference", encoding="utf-8"
+    )
+    (data_home / "v2" / "state").mkdir(parents=True)
+    (data_home / "v2" / "state" / "test.json").write_text("state", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_copy_verified = promote_mod.copy_verified
+
+    def _fail_on_state(src, dest):
+        if src.name == "state":
+            raise OSError("injected middle copy failure")
+        return real_copy_verified(src, dest)
+
+    monkeypatch.setattr(promote_mod, "copy_verified", _fail_on_state)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert (data_home / "providers" / "kimi" / "default" / "auth.json").read_text(
+        encoding="utf-8"
+    ) == "live-secret"
+    assert not (data_home / "providers" / "claude").exists()
+
+
+def test_promote_partial_copy_junk_is_cleaned_up_on_failure(tmp_path, journal_backups, monkeypatch):
+    """#504 B3 `partial_copy`: a copy that writes a partial destination and
+    THEN raises must still have that partial junk cleaned up — it used to
+    never make it into the undo list at all."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "original.json").write_text("{}", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    def _partial(src, dest):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "partial.json").write_text("half", encoding="utf-8")
+        raise OSError("injected partial copy")
+
+    monkeypatch.setattr(promote_mod, "copy_verified", _partial)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert not (data_home / "models" / "partial.json").exists()
+    assert not (data_home / "models").exists()
+
+
+def test_restore_v1_does_not_relocate_a_live_provider_home_never_promoted(
+    tmp_path, journal_backups
+):
+    """#504 B3 `restore_provider`: after a clean promote+archive, running
+    `restore-v1` (archive rollback then promote rollback, the CLI's order)
+    must never move the live Kimi home into the reconstructed `v2/` — it was
+    never part of what got promoted."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "providers" / "kimi" / "default").mkdir(parents=True)
+    (data_home / "providers" / "kimi" / "default" / "auth.json").write_text(
+        "live-secret", encoding="utf-8"
+    )
+    (data_home / "v2" / "providers" / "claude").mkdir(parents=True)
+    (data_home / "v2" / "providers" / "claude" / "provider.json").write_text(
+        "reference", encoding="utf-8"
+    )
+
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert promote.apply().ok
+    assert archive.apply().ok
+
+    archive_rb = archive.rollback()
+    promote_rb = promote.rollback()
+    assert archive_rb.ok and promote_rb.ok
+
+    assert (data_home / "providers" / "kimi" / "default" / "auth.json").read_text(
+        encoding="utf-8"
+    ) == "live-secret"
+    assert not (data_home / "v2" / "providers" / "kimi").exists()
+
+
+def test_archive_protects_named_provider_home_and_the_live_registry(tmp_path, journal_backups):
+    """#504 B4 `named_profiles`: a named claude account
+    (`claude-config-team`, #505 stage 2) shares no fixed basename the static
+    skip-list enumerates, and `user-profiles.json` is still a live
+    read/write target, not a retired V1 source — both must survive archive."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "claude-config-team").mkdir(parents=True)
+    (data_home / "claude-config-team" / "auth.json").write_text(
+        "named-account-secret", encoding="utf-8"
+    )
+    (data_home / "user-profiles.json").write_text(
+        json.dumps([{"name": "team", "config_dir": str(data_home / "claude-config-team")}]),
+        encoding="utf-8",
+    )
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")  # a real V1 leftover too
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert report.ok, report.summary
+    assert (data_home / "claude-config-team" / "auth.json").exists()
+    assert (data_home / "user-profiles.json").exists()
+    assert not (data_home / "projects.json").exists()  # the real leftover still gets archived
+
+
+def test_restore_v1_recovers_an_older_archive_generation_by_ts(tmp_path, journal_backups):
+    """#504 H1 `latest_archive`: two archive generations exist (an older one
+    holding `projects.json`/`custom-roles.json`, a newer one holding
+    something else) — `rollback(archive_ts=...)` must be able to reach the
+    OLDER one explicitly, not just whatever is latest."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("projects-before", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("roles-before", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    from agent_takkub.core.migration.promote_v1 import list_v1_archives
+
+    first_ts = list_v1_archives(data_home)[0]["ts"]
+
+    (data_home / "auto-migrate-state.json").write_text("new-state", encoding="utf-8")
+    assert step.apply().ok  # a second, newer generation
+
+    report = step.rollback(archive_ts=first_ts)
+    assert report.ok, report.summary
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "projects-before"
+    assert (data_home / "custom-roles.json").read_text(encoding="utf-8") == "roles-before"
+
+
+def test_restore_v1_list_shows_every_generation_newest_first(tmp_path, journal_backups):
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("a", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    (data_home / "custom-roles.json").write_text("b", encoding="utf-8")
+    assert step.apply().ok
+
+    from agent_takkub.core.migration.promote_v1 import list_v1_archives
+
+    archives = list_v1_archives(data_home)
+    assert len(archives) == 2
+    assert archives[0]["ts"] > archives[1]["ts"]  # newest first
+
+
+def test_restore_v1_survives_a_relocated_archive_tree(tmp_path, journal_backups):
+    """#504 H2 `relocated_archive`: the archive manifest must record paths
+    RELATIVE to the archive itself — copying `backups/` to a new DATA_HOME
+    (simulating the original location becoming unavailable, e.g. a drive
+    swap) must still let restore find its files."""
+    import shutil as _shutil
+
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("projects-before", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    relocated = tmp_path / "relocated-data"
+    _shutil.copytree(data_home / "backups", relocated / "backups")
+
+    relocated_step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=relocated)
+    report = relocated_step.rollback()
+
+    assert report.ok, report.summary
+    assert report.detail["restored"]
+    assert (relocated / "projects.json").read_text(encoding="utf-8") == "projects-before"
+
+
+def test_restore_v1_preserves_current_file_instead_of_silently_discarding_it(
+    tmp_path, journal_backups
+):
+    """#504 H3 `restore_collision`: the destination was recreated with
+    different content since the archive ran — restoring must not just
+    silently clobber it with no way to get "new-current" back."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("old", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    (data_home / "projects.json").write_text("new-current", encoding="utf-8")
+
+    report = step.rollback()
+
+    assert report.ok, report.summary
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "old"
+    # "new-current" survives somewhere recoverable (this step's own
+    # BackupManager preimage slot), not simply gone.
+    preserved = any(
+        p.is_file() and p.read_text(encoding="utf-8") == "new-current"
+        for p in backups.root.rglob("*")
+    )
+    assert preserved
+
+
+def test_archive_picks_up_v1_files_shared_with_a_v2_top_level_directory(tmp_path, journal_backups):
+    """#504 H7 `shared_legacy`: `agents/<role>.md` and
+    `projects/<slug>/role-providers.json` are real V1 leftovers living one
+    level inside a directory name V2 also owns — the whole-directory skip
+    must not make them invisible to archive/`_pending()`/`validate()`
+    forever."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "agents").mkdir(parents=True)
+    (data_home / "agents" / "custom-role.md").write_text("role md", encoding="utf-8")
+    (data_home / "projects" / "demo").mkdir(parents=True)
+    (data_home / "projects" / "demo" / "role-providers.json").write_text("{}", encoding="utf-8")
+    # V2's own sibling content in the same directories must survive.
+    (data_home / "agents" / "custom").mkdir(parents=True)
+    (data_home / "agents" / "custom" / "registry.json").write_text("{}", encoding="utf-8")
+    (data_home / "projects" / "demo" / "project.json").write_text("{}", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step._pending() is True
+
+    report = step.apply()
+    assert report.ok, report.summary
+    assert not (data_home / "agents" / "custom-role.md").exists()
+    assert not (data_home / "projects" / "demo" / "role-providers.json").exists()
+    assert (data_home / "agents" / "custom" / "registry.json").exists()
+    assert (data_home / "projects" / "demo" / "project.json").exists()
+    assert step.validate().ok
+    assert (data_home / "backups").exists()
+
+
+def test_archive_validate_detects_a_corrupted_archived_file(tmp_path, journal_backups):
+    """#504 H9: a green `validate()` used to mean only "nothing left to
+    archive" — it must also catch the archive itself having been corrupted
+    or partially deleted after the fact."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    assert step.validate().ok
+
+    archived_copy = next((data_home / "backups").rglob("projects.json"))
+    archived_copy.write_text("corrupted", encoding="utf-8")
+
+    report = step.validate()
+    assert not report.ok
+    assert "checksum mismatch" in report.summary

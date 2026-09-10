@@ -18,13 +18,16 @@ def core_home() -> Path:
     """Core V2's own internal store (journal, version.json, jsonl stores).
 
     Storage V2 (#309 Phase 8b) reserves `StorageLayoutV2.system` as this
-    dir's V2 destination — but no ladder step relocates it yet (the ladder
-    in `docs/v2/V2_IMPLEMENTATION_PLAN.md` §5.3 only migrates V1 *config*
-    files, not Core's already-established V2 internal storage). So this
-    resolves to the V2 `system/` dir once something creates it, and falls
-    back to the original `RUNTIME_DIR/core` location until then — today
-    that's every existing installation, so Phase 1–8a callers see byte
-    identical behaviour (plan §3.4's legacy-fallback rule).
+    dir's V2 destination — `core.migration.steps_v1.CoreInternalStoreStep`
+    (#360) is the ladder step that actually relocates it (L1, 2026-09-10
+    acceptance review: this used to claim no such step existed yet).
+    `#504`'s `PromoteV2RootStep` can ALSO materialize `system/` earlier in
+    the same pass, by relocating a pre-existing nested `v2/system/`. Either
+    way, this resolves to the V2 `system/` dir once one of them creates it,
+    and falls back to the original `RUNTIME_DIR/core` location until then —
+    a fresh machine, or one mid-ladder before either step has run, so every
+    earlier caller sees byte-identical behaviour (plan §3.4's legacy-fallback
+    rule).
     """
     v2 = storage_layout_v2().system
     if v2.is_dir():

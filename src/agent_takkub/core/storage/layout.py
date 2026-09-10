@@ -5,14 +5,17 @@ Physical root: ``config.DATA_HOME`` itself. Through 2.0.x this was nested
 under ``config.DATA_HOME / "v2"`` — V1 already owned bare top-level names
 like ``projects/``, ``runtime/``, ``cache/`` for a different shape, and
 nesting under ``v2/`` kept every migration step copy-never-move-safe while
-V1 stayed authoritative. #504 (2.1.0) retires that nesting: the boot-time
-ladder's own `core.migration.promote_v1.ArchiveV1LegacyStep` moves every V1
-top-level artifact into ``DATA_HOME/backups/v1-archive-<ts>/`` (archived,
-never deleted) BEFORE anything reuses those names here, and
-`PromoteV2RootStep` relocates a pre-existing nested ``v2/`` root's contents
-up to the paths this module now computes directly — so by the time any V2
-path below is read for real, the name collision the old nesting existed to
-avoid has already been resolved on disk, not by nesting in code.
+V1 stayed authoritative. #504 (2.1.0) retires that nesting, in this ladder
+order (L1, 2026-09-10 acceptance review: this used to claim the opposite
+order): `core.migration.promote_v1.PromoteV2RootStep` runs FIRST, relocating
+a pre-existing nested ``v2/`` root's contents up to the paths this module
+now computes directly; every V1->V2 domain step then runs against those
+already-top-level paths; `ArchiveV1LegacyStep` runs LAST, moving every
+remaining V1 top-level artifact into ``DATA_HOME/backups/v1-archive-<ts>/``
+(archived, never deleted) only once nothing above still needs it as a
+source — so by the time any V2 path below is read for real, the name
+collision the old nesting existed to avoid has already been resolved on
+disk, not by nesting in code.
 
 Every path in this module is a pure computation — nothing here creates a
 directory, touches disk, or depends on what currently exists on disk
@@ -119,8 +122,11 @@ def storage_layout_v2(data_home: Path | None = None) -> StorageLayoutV2:
     ladder is ALSO gated off entirely for dev checkouts
     (`auto_migrate_boot.is_dev_checkout()`), so there is never a real
     machine to promote for this branch — every OTHER caller of this
-    function (`core.routing.router`, `provider_config`'s dual-write gate,
-    ...) must keep resolving to this same safe, nested spot too."""
+    function (`core.routing.router`, `provider_config`, ...) must keep
+    resolving to this same safe, nested spot too. (L1, 2026-09-10 acceptance
+    review: `provider_config`'s dual-write gate this used to name was
+    removed along with `v1_only_write`/`v2_authority` — direct V2 read/write
+    now, same as everything else this function serves.)"""
     home = data_home if data_home is not None else config.DATA_HOME
     root = (home / "v2") if home == config.REPO_ROOT else home
     system = root / "system"

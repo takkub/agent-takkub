@@ -1,8 +1,12 @@
 """Auto `migrate apply` at boot (#361) — every device that boots 1.1.0+
-lands on the same storage layout (`mixed`) without anyone typing `takkub
-migrate apply` themselves, gated behind the same pre-flight checks a human
-running the CLI manually would be told to do (`docs/v2/2.0.0-migration-plan.md`
-§2.3).
+lands on the same storage layout without anyone typing `takkub migrate
+apply` themselves, gated behind the same pre-flight checks a human running
+the CLI manually would be told to do (`docs/v2/2.0.0-migration-plan.md`
+§2.3). (L1, 2026-09-10 acceptance review: this used to say every device
+lands on `"mixed"` — #504 (2.1.0) retired that as the steady state; a fully
+migrated installed machine now reaches `"v2"`, with `"mixed"` only ever
+transient mid-ladder. `run_boot_stage()` below runs `apply_pending()` on
+BOTH states forever, exactly alike, for exactly that reason.)
 
 Reuses `MigrationEngine` exactly as `takkub migrate` does — no second ladder.
 The whole point of running this at boot rather than leaving it to a human is
@@ -13,7 +17,11 @@ the cockpit first" instruction, done automatically. Callers (`app.py` /
 MainWindow — a pane spawned mid-copy writing into RUNTIME_DIR/SETTINGS_HOME
 would look like corruption to `validate()` and trigger a false rollback.
 
-State kept at ``SETTINGS_HOME/auto-migrate-state.json``:
+State kept at `_state_path()` — `storage_layout_v2().system/auto-migrate-
+state.json` (#504 H8: moved off the bare ``SETTINGS_HOME`` root, which
+`ArchiveV1LegacyStep` swept up as an unrecognized V1 leftover the instant
+this module wrote it there; `load_state()` still falls back to the old spot
+for a machine mid-upgrade):
   ``{"applied_version": "1.1.0"}``           — the first-ever full ladder
                                                 apply (state was "v1") went
                                                 ok.
@@ -62,6 +70,10 @@ from . import config
 
 _STATE_FILE = "auto-migrate-state.json"
 
+# #504 H8 (acceptance review): a mixed-state boot stops being a one-shot
+# event once its own bookkeeping file re-triggers the archive step — see
+# `_state_path()`.
+
 # Pre-flight disk gate: refuse to start a first-run apply unless free space
 # is at least this many times the estimated copy size — the ladder is
 # copy-never-move, so the real machine cost is disk, not data loss (#361
@@ -90,18 +102,48 @@ def is_dev_checkout() -> bool:
 
 
 def _state_path() -> Path:
+    """#504 H8 (acceptance review): the pre-#504 spot
+    (`SETTINGS_HOME/auto-migrate-state.json`) sits at DATA_HOME's TOP LEVEL
+    on every installed (non-dev) machine (`SETTINGS_HOME == DATA_HOME`) —
+    the very next `ArchiveV1LegacyStep` boot swept it up as an unrecognized
+    V1 leftover the instant THIS module wrote it, so a machine that never
+    had any V1 data still got a brand-new `v1-archive-<ts>` on its SECOND
+    boot (reviewed `fresh_two_boots` repro). `storage_layout_v2().system` is
+    a V2-owned directory `ArchiveV1LegacyStep` permanently excludes from
+    archival — writing here instead retires this file as an archive
+    candidate for good. Resolved lazily (not at import time): dev checkouts
+    never reach this module's writers at all (`is_dev_checkout()` gates
+    `run_boot_stage()` before either), but keeping the import local avoids
+    a module-load-order dependency on `core.storage.layout` regardless."""
+    from .core.storage.layout import storage_layout_v2
+
+    return storage_layout_v2().system / _STATE_FILE
+
+
+def _legacy_state_path() -> Path:
+    """Where every machine that reached this state before the #504 H8 fix
+    already has it — `load_state()` falls back to reading this so an
+    in-flight `rolled_back_for_version`/`rolled_back_steps` guard isn't
+    silently forgotten across the upgrade; `_save_state()` always writes the
+    NEW location, so the very next successful save retires this path."""
     return config.SETTINGS_HOME / _STATE_FILE
 
 
 def load_state() -> dict:
     """Missing/corrupt file reads as `{}` — fail-open, same contract as
     every other small state file in this codebase (`core_v2_settings.load`,
-    `auto_issue_signals`'s flag file)."""
-    try:
-        data = json.loads(_state_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    `auto_issue_signals`'s flag file). Tries the current location first,
+    then the pre-#504-H8-fix one (#504 H8) — never both at once, so a
+    machine with a stale copy at the old spot doesn't have it silently
+    override a freshly-written new one."""
+    for path in (_state_path(), _legacy_state_path()):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
 def _save_state(data: dict) -> None:
@@ -113,29 +155,38 @@ def _save_state(data: dict) -> None:
         pass
 
 
-def _estimate_copy_bytes(data_home: Path) -> int:
-    """Best-effort size of the V1 data the ladder is about to copy under
-    `v2/`, dominated by `RUNTIME_DIR` (`runtime-triage`'s sessions/tasks/
-    role-memory/knowledge — the design note's own "sessions อาจหลายร้อย MB"
-    warning); every other step's source is a handful of small flat JSON
-    files that don't move this number. `StepReport.detail` carries no
-    per-step byte accounting yet (`inspect()` reports presence/counts, not
-    sizes), so this walks the one dominant source directly rather than
-    inventing a per-step size API just for this gate. ponytail: if a future
-    ladder step's source ever outgrows RUNTIME_DIR, widen this — nothing
-    here assumes RUNTIME_DIR is the *only* source, just the biggest one
-    worth gating disk space on.
-    """
+def _dir_size(root: Path) -> int:
     total = 0
-    runtime_dir = data_home / "runtime"
-    if not runtime_dir.is_dir():
-        return 0
-    for root, _dirs, files in os.walk(runtime_dir):
+    for dirpath, _dirs, files in os.walk(root):
         for name in files:
             try:
-                total += (Path(root) / name).stat().st_size
+                total += (Path(dirpath) / name).stat().st_size
             except OSError:
                 pass
+    return total
+
+
+def _estimate_copy_bytes(data_home: Path) -> int:
+    """Best-effort size of the V1/2.0.x data the ladder is about to copy,
+    dominated by `RUNTIME_DIR` (`runtime-triage`'s sessions/tasks/
+    role-memory/knowledge — the design note's own "sessions อาจหลายร้อย MB"
+    warning) and a pre-existing nested `v2/` root (#504 `PromoteV2RootStep`'s
+    own source — the reviewed `disk_gate` finding: a populated `v2/` with NO
+    `runtime/` at all used to estimate exactly zero bytes and pass any disk
+    gate unconditionally). Every other ladder step's source is a handful of
+    small flat JSON files that don't move this number. `StepReport.detail`
+    carries no per-step byte accounting yet (`inspect()` reports
+    presence/counts, not sizes), so this walks the two dominant sources
+    directly rather than inventing a per-step size API just for this gate.
+    ponytail: V1 top-level leftovers `ArchiveV1LegacyStep` is about to copy
+    into `backups/` aren't counted here (they overlap heavily with content
+    the domain steps above ALSO count toward `runtime/`/`v2/`, and archiving
+    happens after everything else already fit) — widen this if a future
+    ladder step's source outgrows both of these."""
+    total = _dir_size(data_home / "runtime") if (data_home / "runtime").is_dir() else 0
+    legacy_v2 = data_home / "v2"
+    if legacy_v2.is_dir():
+        total += _dir_size(legacy_v2)
     return total
 
 
@@ -210,6 +261,18 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
 
     from . import __version__ as app_version
     from .core.migration.engine import MigrationEngine
+
+    # #504 H4 (acceptance review): the "v2"/"mixed" branch used to jump
+    # straight here without ever reaching the disk-space gate the "v1"
+    # first-boot path already has (`run_boot_stage`'s own `_disk_has_room`
+    # call sits further down, unreachable from this branch) — the reviewed
+    # `disk_gate` finding showed `_disk_has_room` called ZERO times on this
+    # path even with the check patched to always fail. `PromoteV2RootStep`
+    # copies real data on exactly this path (a pre-existing nested `v2/`),
+    # so it needs the same preflight the "v1" ladder gets.
+    if not _disk_has_room(config.DATA_HOME):
+        _report("พื้นที่ดิสก์ไม่พอสำหรับ pending migration step(s) — ข้ามรอบนี้")
+        return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
     engine = MigrationEngine()

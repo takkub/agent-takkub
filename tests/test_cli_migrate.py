@@ -81,3 +81,83 @@ def test_migrate_requires_a_subcommand():
     with pytest.raises(SystemExit) as exc:
         cli.main(["migrate"])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# #504 H1/H3 (2026-09-10 acceptance review): `restore-v1 --list`/`--archive`
+# and stop-on-failure, driven through the real CLI.
+# ---------------------------------------------------------------------------
+
+
+def test_restore_v1_list_reports_no_archives_on_a_clean_install(capsys):
+    rc = cli.main(["migrate", "restore-v1", "--list", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    assert out == []
+
+
+def test_restore_v1_list_and_archive_select_after_a_real_archive(capsys):
+    from agent_takkub import config
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "projects.json").write_text(
+        '{"active": null, "projects": {}}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    rc = cli.main(["migrate", "restore-v1", "--list", "--json"])
+    assert rc == 0
+    archives = _json_body(capsys.readouterr().out)
+    assert len(archives) == 1
+    ts = archives[0]["ts"]
+
+    rc = cli.main(["migrate", "restore-v1", "--archive", ts, "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    assert any(r["step_id"] == "archive-v1-legacy" and r["ok"] for r in out)
+    assert (config.DATA_HOME / "projects.json").exists()
+
+
+def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(capsys):
+    """#504 H3: `cli.py` used to run `promote-v2-root`'s rollback even when
+    `archive-v1-legacy`'s just failed, reconstructing only half of the
+    pre-2.1.0 shape while reporting the command as having tried both."""
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.report import StepReport
+
+    calls: list[str] = []
+    real_get_step = MigrationEngine.get_step
+
+    class _FailingArchiveStep:
+        step_id = "archive-v1-legacy"
+
+        def rollback(self, archive_ts=None):
+            calls.append("archive")
+            return StepReport(self.step_id, "rollback", False, "boom")
+
+    def _patched_get_step(self, step_id):
+        if step_id == "archive-v1-legacy":
+            return _FailingArchiveStep()
+        return real_get_step(self, step_id)
+
+    def _patched_rollback_step(self, step_id):
+        calls.append(step_id)
+        return StepReport(step_id, "rollback", True, "should never run")
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        mp.setattr(MigrationEngine, "get_step", _patched_get_step)
+        mp.setattr(MigrationEngine, "rollback_step", _patched_rollback_step)
+        rc = cli.main(["migrate", "restore-v1", "--json"])
+    finally:
+        mp.undo()
+
+    assert rc != 0
+    out = _json_body(capsys.readouterr().out)
+    assert [r["step_id"] for r in out] == ["archive-v1-legacy"]
+    assert "promote-v2-root" not in calls

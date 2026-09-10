@@ -195,8 +195,10 @@ class RoleAgentMigrationStep:
     def _global_routing_mapping(self) -> dict[str, str]:
         """Flat ``{role: provider}`` extracted from `role-models.json`'s
         per-role entries — the same shape `role-providers.json` used to
-        store directly, and what `dual_write_routing`'s `global_data` param
-        and `v2/config/routing.json`'s `"global"` key both expect."""
+        store directly, and what `v2/config/routing.json`'s `"global"` key
+        expects. (L1, 2026-09-10 acceptance review: `dual_write_routing`,
+        the API this docstring used to name, was removed with
+        `v1_only_write`/`v2_authority` — direct V2 write now.)"""
         data = read_json(self._global_routing_source())
         mapping: dict[str, str] = {}
         for role, entry in data.items():

@@ -732,6 +732,136 @@ class TestPromoteBootIntegration:
         assert not (data_home / "backups").exists()
 
 
+class TestPromoteBootFailureHandling:
+    """2026-09-10 acceptance review (docs/audit/2026-09-10-504-acceptance-
+    review.md) B2/H4/H6/H8 — reproduced against the real `_build_old_machine`
+    fixture and `run_boot_stage()`, not by hand-invoking individual steps."""
+
+    def test_promote_failure_during_mixed_boot_never_loses_the_unique_content(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504 B2 `pending_failure` repro: inject a failure on the FIRST
+        `promote-v2-root` copy during a mixed-state boot. The unique nested
+        content must survive SOMEWHERE, and `archive-v1-legacy` must never
+        have run in this same pass at all (it used to find the still-full
+        `v2/` and `shutil.rmtree` it outright)."""
+        data_home = config.DATA_HOME
+        _build_old_machine(data_home, monkeypatch)
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+        (data_home / "v2" / "state").mkdir(parents=True)
+        (data_home / "v2" / "state" / "only-copy.json").write_text(
+            "unique-v2-data", encoding="utf-8"
+        )
+
+        import agent_takkub.core.migration.promote_v1 as promote_mod
+
+        real_copy_verified = promote_mod.copy_verified
+
+        def _fail_promote(src, dest):
+            if src.parent == data_home / "v2":
+                raise OSError("injected promote failure")
+            return real_copy_verified(src, dest)
+
+        monkeypatch.setattr(promote_mod, "copy_verified", _fail_promote)
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_rolled_back"
+        assert list(data_home.rglob("only-copy.json"))
+        assert not (data_home / "state" / "only-copy.json").exists()
+        assert not (data_home / "backups").exists()
+
+    def test_disk_gate_runs_on_the_mixed_pending_path_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504 H4 `disk_gate` repro: the "v2"/"mixed" branch used to jump
+        straight to `apply_pending()` without ever consulting
+        `_disk_has_room` — patched to always fail, it used to be called
+        zero times and the migration ran anyway."""
+        data_home = config.DATA_HOME
+        _build_old_machine(data_home, monkeypatch)
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+        calls = {"n": 0}
+        real_disk_has_room = auto_migrate_boot._disk_has_room
+
+        def _tracked(home):
+            calls["n"] += 1
+            return False
+
+        monkeypatch.setattr(auto_migrate_boot, "_disk_has_room", _tracked)
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert calls["n"] > 0
+        assert result.action == "skipped"
+        assert result.reason == "disk-space"
+        assert real_disk_has_room  # sanity: original still importable/callable
+
+    def test_disk_estimate_counts_a_populated_nested_v2_root(self) -> None:
+        """#504 H4: a populated `v2/` with no `runtime/` at all used to
+        estimate exactly zero bytes, passing any disk gate unconditionally."""
+        data_home = config.DATA_HOME
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "large.bin").write_bytes(b"x" * 4096)
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096
+
+    def test_version_bump_on_first_upgraded_boot_still_validates_green(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504 H6 `version_upgrade` repro: `version-marker` runs before
+        `promote-v2-root` can have materialized the post-#504 `system/`
+        location for the first time — its fresh stamp used to get shadowed
+        by promote copying an OLD nested `v2/system/version.json` over it,
+        so the very first upgraded boot validated red."""
+        import agent_takkub
+        from agent_takkub.core.migration import steps as steps_mod
+        from agent_takkub.core.migration.engine import MigrationEngine
+        from agent_takkub.core.versioning.store import record_component
+
+        data_home = config.DATA_HOME
+        _build_old_machine(data_home, monkeypatch)
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+        # An established old-version marker under the pre-promotion nested
+        # location — as if this machine ran 2.0.8's ladder before upgrading.
+        record_component("app", "2.0.8", path=data_home / "v2" / "system" / "version.json")
+        # The actual real upgrade this boot represents: running build moved
+        # past 2.0.8. `steps.APP_VERSION` is bound at import time
+        # (`from agent_takkub import __version__ as APP_VERSION`), so it
+        # needs patching directly — patching `agent_takkub.__version__`
+        # alone wouldn't reach that already-bound name.
+        monkeypatch.setattr(steps_mod, "APP_VERSION", "2.1.0")
+        monkeypatch.setattr(agent_takkub, "__version__", "2.1.0")
+
+        result = auto_migrate_boot.run_boot_stage()
+        validation = MigrationEngine().validate()
+
+        assert result.action == "pending_applied"
+        version_marker_reports = [r for r in validation if r.step_id == "version-marker"]
+        assert version_marker_reports and version_marker_reports[0].ok, [
+            (r.step_id, r.summary) for r in validation
+        ]
+
+    def test_fresh_boot_state_file_does_not_get_archived_on_the_second_boot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504 H8 `fresh_two_boots` repro: a genuinely fresh DATA_HOME's
+        first boot used to write its own bookkeeping file
+        (`auto-migrate-state.json`) at the top level, which the very NEXT
+        boot then archived as an unrecognized V1 leftover — a machine that
+        never had any V1 data still got a brand-new v1-archive."""
+        data_home = config.DATA_HOME
+        monkeypatch.setattr(config, "SETTINGS_HOME", data_home)
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+
+        first = auto_migrate_boot.run_boot_stage()
+        assert first.action == "applied"
+        assert not (data_home / "backups").exists()
+
+        second = auto_migrate_boot.run_boot_stage()
+        assert second.action == "pending_applied"
+        assert not (data_home / "backups").exists()
+
+
 class TestMigrateCliRestoreV1:
     """`takkub migrate apply` / `validate` / `restore-v1` driven directly
     through the CLI (`agent_takkub.cli.main`), not by hand-invoking the

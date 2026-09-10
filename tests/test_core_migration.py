@@ -329,6 +329,35 @@ def test_engine_apply_downgrades_step_ok_when_a_later_step_corrupts_its_target()
     assert reports[1].ok is True
 
 
+def test_engine_rollback_does_not_wipe_a_v2_root_promote_rollback_just_restored(tmp_path):
+    """#504 B5 (2026-09-10 acceptance review, `engine_rollback` repro): a
+    real promote+archive pair, then a whole-ladder `rollback()` — the final
+    cleanup used to unconditionally `shutil.rmtree` `DATA_HOME/v2`, wiping
+    out the real data `PromoteV2RootStep.rollback()` (run moments earlier,
+    in the same call) had just recreated there as the ONLY remaining copy."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.promote_v1 import ArchiveV1LegacyStep, PromoteV2RootStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "only.json").write_text("unique", encoding="utf-8")
+
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(tmp_path / "backups")
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert promote.apply().ok
+    assert archive.apply().ok
+
+    engine = MigrationEngine([promote, archive], data_home=data_home, journal=journal)
+    reports = engine.rollback()
+
+    assert all(r.ok for r in reports), [(r.step_id, r.summary) for r in reports]
+    assert list(data_home.rglob("only.json"))
+
+
 def test_apply_version_marker_only_runs_just_step_zero(tmp_path):
     """#361 boot fast-path: `apply_version_marker_only()` must touch only
     the version marker, never re-walk the rest of the ladder."""
@@ -413,6 +442,23 @@ class TestApplyPending:
         assert [r.step_id for r in reports] == ["a", "b"]
         assert reports[0].ok is False
         assert reports[1].ok is True
+
+    def test_promote_v2_root_failure_stops_the_pass_before_archive_runs(self, tmp_path):
+        """#504 B2 (acceptance review): `archive-v1-legacy` treats a
+        non-empty legacy `v2/` as safe to remove the instant it exists — a
+        `promote-v2-root` failure in THIS SAME pass must stop the whole
+        pass right there, never reaching `archive-v1-legacy` with a `v2/`
+        that never finished draining."""
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("promote-v2-root", ok=False)
+        b = _FakeStep("archive-v1-legacy", ok=True)
+        engine = MigrationEngine([a, b], data_home=tmp_path, journal=journal)
+        reports = engine.apply_pending()
+        assert [r.step_id for r in reports] == ["promote-v2-root"]
+        # `apply_pending()`'s own `v1_retired` pre-check always calls
+        # `archive_step.validate()` up front regardless — the important
+        # part is `apply()` itself is never reached.
+        assert "apply" not in b.calls
 
     def test_prod_today_machine_applies_only_the_ladder_step_added_after_it_migrated(
         self, tmp_path
