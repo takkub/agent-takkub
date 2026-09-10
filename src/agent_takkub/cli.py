@@ -3202,7 +3202,12 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
         return [StepReport("archive-v1-legacy", "rollback", False, str(e))]
 
     def _revert(reports: list) -> list:
-        errors = _revert_to_command_snapshot(config.DATA_HOME, snapshot)
+        errors = _revert_to_command_snapshot(
+            config.DATA_HOME,
+            snapshot,
+            backups=archive_step.backups,
+            backup_step_id=archive_step.step_id,
+        )
         if errors:
             reports.append(
                 StepReport(

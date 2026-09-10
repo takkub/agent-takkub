@@ -292,7 +292,10 @@ class MigrationEngine:
         version_marker_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _VERSION_MARKER_STEP_ID), None
         )
+        steps_run: list[MigrationStep] = []
         reports: list[StepReport] = []
+        version_marker_reapply: StepReport | None = None
+        promote_idx: int | None = None
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
             if step_id in skip:
@@ -302,14 +305,117 @@ class MigrationEngine:
                     continue
                 if s.validate().ok:
                     continue
-            r = s.apply()
+            r = self._copy_only_apply(s)
+            steps_run.append(s)
             reports.append(r)
             if step_id == _PROMOTE_V2_ROOT_STEP_ID:
+                promote_idx = len(steps_run) - 1
                 if not r.ok:
                     break
                 if version_marker_step is not None:
-                    reports.append(version_marker_step.apply())
-        return reports
+                    version_marker_reapply = version_marker_step.apply()
+        # #504 round4 B1/B3: a hand-built ladder with no promote/archive
+        # step (or FakeStep stand-ins with matching ids but no copy/prune
+        # split) has nothing to defer — behave exactly as before, no extra
+        # `validate()` probing beyond what this method already did.
+        if not any(self._prune_deferred(s) for s in steps_run):
+            return reports
+        finished = self._finish_deferred_prune(
+            steps_run, self._downgrade_on_health(steps_run, reports)
+        )
+        if version_marker_reapply is not None and promote_idx is not None:
+            finished = [
+                *finished[: promote_idx + 1],
+                version_marker_reapply,
+                *finished[promote_idx + 1 :],
+            ]
+        return finished
+
+    def _prune_deferred(self, s: object) -> bool:
+        """*s* supports the copy-then-defer-prune split (real
+        `PromoteV2RootStep`/`ArchiveV1LegacyStep` only — a hand-built test
+        step, even one sharing the same `step_id`, never does) — #504
+        round4 B1: `MigrationEngine`'s ladder barrier only ever defers
+        pruning for a step that actually has a `prune()` to defer."""
+        return callable(getattr(s, "prune", None)) and callable(
+            getattr(s, "_health_problems", None)
+        )
+
+    def _copy_only_apply(self, s: MigrationStep) -> StepReport:
+        """*s*'s own apply, but copy-only when *s* supports the deferred-
+        prune split — every OTHER step's `apply()` already never deletes
+        any V1 source (#504's own domain steps only ever write V2
+        targets), so it runs exactly as before."""
+        fn = getattr(s, "apply_copy_only", None)
+        return fn() if callable(fn) else s.apply()
+
+    def _post_copy_health(self, s: MigrationStep) -> StepReport:
+        """Re-validate *s* right after its own apply this pass, WITHOUT
+        assuming its (possibly still-deferred) prune has run — a
+        deferred-prune step's `validate()` is inherently prune-completion-
+        gated (`_pending()`-based), so its OWN copy-target health check is
+        used instead (#504 round4 B1); every other step's `.validate()` is
+        unchanged."""
+        if self._prune_deferred(s):
+            problems = s._health_problems()
+            step_id = getattr(s, "step_id", "")
+            return StepReport(
+                step_id,
+                "validate",
+                not problems,
+                problems[0] if problems else "copy target healthy",
+            )
+        return s.validate()
+
+    def _downgrade_on_health(
+        self, steps: Sequence[MigrationStep], reports: list[StepReport]
+    ) -> list[StepReport]:
+        """A later step's apply() can silently overwrite an earlier step's
+        already-written target while both still report ok:true — each
+        step's apply() only ever checks its own write, never the final
+        on-disk state once the whole ladder has run (#350). Re-validate
+        every ALREADY-ok step now (via `_post_copy_health`) and downgrade
+        any apply report whose target no longer matches, so `apply` never
+        claims ok while an immediate check would already disagree. A step
+        whose OWN apply already failed keeps that report untouched."""
+        out: list[StepReport] = []
+        for s, r in zip(steps, reports, strict=True):
+            if not r.ok:
+                out.append(r)
+                continue
+            v = self._post_copy_health(s)
+            if v.ok:
+                out.append(r)
+            else:
+                out.append(
+                    StepReport(
+                        r.step_id,
+                        "apply",
+                        False,
+                        f"{r.summary}; post-ladder validate failed: {v.summary}",
+                        detail={"apply": r.detail, "validate": v.detail},
+                    )
+                )
+        return out
+
+    def _finish_deferred_prune(
+        self, steps: Sequence[MigrationStep], reports: list[StepReport]
+    ) -> list[StepReport]:
+        """#504 round4 B1 (Gemini cross-check (B)(1)): finish every
+        deferred-prune step's `prune()` — but ONLY once every step in
+        *steps* (domain steps and every OTHER archive generation included,
+        via `_downgrade_on_health`/`_post_copy_health` above) has an
+        ok:true report. One late failure anywhere in the SAME pass means
+        NO step in it prunes — every V1 source copy-verified this pass
+        stays fully intact, safely retryable next pass, matching #504's
+        own Pass-1/Pass-2 contract (never delete until the whole ladder
+        validates)."""
+        if any(not r.ok for r in reports):
+            return list(reports)
+        out: list[StepReport] = []
+        for s, r in zip(steps, reports, strict=True):
+            out.append(s.prune() if self._prune_deferred(s) else r)
+        return out
 
     def rollback_step(self, step_id: str) -> StepReport:
         """Roll back exactly one ladder step by id — `apply_pending()`'s
@@ -329,59 +435,34 @@ class MigrationEngine:
         raise KeyError(f"MigrationEngine has no step {step_id!r}")
 
     def apply(self) -> list[StepReport]:
-        # #504: `archive-v1-legacy` runs its OWN apply() last, same as every
-        # other step — but it must be excluded from the `_verify_post_apply`
-        # re-validation pass below, and run only after that pass completes.
-        # It's the one step whose job is to remove the V1 sources every
-        # domain step's own `validate()` re-reads live — running it inside
-        # the same re-validated batch would make `_verify_post_apply` see
-        # those V1 sources gone and downgrade every earlier domain step's
-        # apply report to a false failure, even though each one wrote its
-        # V2 target correctly.
+        """#504 round4 B1/B3 (Gemini cross-check): a full-ladder apply is
+        now genuinely 2-pass. Pass A copies every step (`archive-v1-legacy`
+        still last, still copy-only — its job is to remove V1 sources
+        every domain step's own `validate()`/health-check re-reads live,
+        so it must never run inside the same re-checked batch as them).
+        Once every step's copy has ok'd AND `_downgrade_on_health` finds
+        the whole pass still clean (including `archive-v1-legacy`'s own
+        copy, re-checked the same way), Pass B (`_finish_deferred_prune`)
+        removes every V1 source in one final sweep. Any failure anywhere
+        in Pass A means NO step's Pass B ever runs — every source stays
+        fully intact, retryable."""
         steps = [s for s in self._steps if getattr(s, "step_id", "") != _ARCHIVE_V1_STEP_ID]
         archive_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
         )
         reports: list[StepReport] = []
         for s in steps:
-            r = s.apply()
+            r = self._copy_only_apply(s)
             reports.append(r)
             if not r.ok:
                 return reports
-        verified = self._verify_post_apply(steps, reports)
-        if archive_step is None:
-            return verified
-        if any(not r.ok for r in verified):
-            return verified
-        verified.append(archive_step.apply())
-        return verified
-
-    def _verify_post_apply(
-        self, steps: Sequence[MigrationStep], reports: list[StepReport]
-    ) -> list[StepReport]:
-        """A later step's apply() can silently overwrite an earlier step's
-        already-written target while both still report ok:true — each
-        step's apply() only ever checks its own write, never the final
-        on-disk state once the whole ladder has run (#350). Re-validate
-        every step now and downgrade any apply report whose target no
-        longer matches, so `apply` never claims ok while an immediate
-        `validate` would already disagree."""
-        verified: list[StepReport] = []
-        for s, r in zip(steps, reports, strict=True):
-            v = s.validate()
-            if v.ok:
-                verified.append(r)
-            else:
-                verified.append(
-                    StepReport(
-                        r.step_id,
-                        "apply",
-                        False,
-                        f"{r.summary}; post-ladder validate failed: {v.summary}",
-                        detail={"apply": r.detail, "validate": v.detail},
-                    )
-                )
-        return verified
+        verified = self._downgrade_on_health(steps, reports)
+        all_steps, all_reports = steps, verified
+        if archive_step is not None and not any(not r.ok for r in verified):
+            archive_report = self._copy_only_apply(archive_step)
+            all_steps = [*steps, archive_step]
+            all_reports = [*verified, *self._downgrade_on_health([archive_step], [archive_report])]
+        return self._finish_deferred_prune(all_steps, all_reports)
 
     def validate(self) -> list[StepReport]:
         # #504: once `archive-v1-legacy` reports nothing pending (every V1
