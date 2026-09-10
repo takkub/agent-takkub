@@ -572,19 +572,13 @@ def project_docs_dir(project_ns: str) -> Path:
 
 
 def load_projects() -> dict:
-    """``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on
-    and the dual-written ``v2/`` projects registry mirror exists, returns
-    THAT instead of V1's ``projects.json`` — same shape (`dual_write_projects`
-    mirrors the exact document this function would otherwise parse). Falls
-    back to V1 on any v2 miss (not migrated / corrupt mirror)."""
-    from .core.storage.v2_authority import read_projects_registry, v2_authority_enabled
-
+    """projects.json — kept V1-only (#504 note: the project registry's V2
+    cutover is deferred, not part of this pass — `PROJECTS_JSON` backs
+    dozens of unrelated tests' fixture scaffolding, and the physical
+    promotion to V2 is `core.migration.steps_v1.ProjectMigrationStep`'s job
+    at boot anyway, via #504's separate "move" half). No dual-write mirror,
+    no V2 read fallback — just the plain V1 file."""
     empty = {"active": None, "projects": {}}
-    if v2_authority_enabled():
-        v2_data = read_projects_registry()
-        if isinstance(v2_data, dict):
-            return v2_data
-
     if not PROJECTS_JSON.exists():
         return empty
     try:
@@ -599,19 +593,12 @@ def load_projects() -> dict:
 
 
 def save_projects_json(data: dict) -> bool:
-    """Persist the full projects.json document to V1, then best-effort
-    mirror it into v2/ (#362 wave 1 dual-write). Every writer of
-    ``PROJECTS_JSON`` (this module's own project-tab helpers below, plus
-    ``project_wizard.py``'s add/edit-project flows) goes through this one
-    function instead of calling ``_write_json_atomic(PROJECTS_JSON, ...)``
-    directly, so the v2 mirror can never be forgotten at a new call site."""
+    """Persist the full projects.json document (V1 — see :func:`load_projects`).
+    Every writer of ``PROJECTS_JSON`` (this module's own project-tab helpers
+    below, plus ``project_wizard.py``'s add/edit-project flows) goes through
+    this one function."""
     PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    ok = _write_json_atomic(PROJECTS_JSON, data)
-    if ok:
-        from .core.storage.dual_write import dual_write_projects
-
-        dual_write_projects(data)
-    return ok
+    return _write_json_atomic(PROJECTS_JSON, data)
 
 
 def active_project() -> tuple[str | None, dict]:

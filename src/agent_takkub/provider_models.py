@@ -1,23 +1,29 @@
 """Persist the optional CLI model selected for each provider.
 
-State file: ``~/.takkub/provider-models.json``.  Missing, corrupt, or stale
-entries are treated as absent so each provider falls back to its own CLI
-default unless the user explicitly selects a model.
+State file: ``v2/models/registry.json`` under the cockpit's data home (#504
+cut half — direct V2 read/write, no V1 file, no dual-write mirror).
+Missing, corrupt, or stale entries are treated as absent so each provider
+falls back to its own CLI default unless the user explicitly selects a
+model.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from .config import SETTINGS_HOME
 
-_PATH = SETTINGS_HOME / "provider-models.json"
+def _target() -> Path:
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None, prefer_primary=True)
+    return storage_layout_v2(home).models / "registry.json"
 
 
 def path() -> Path:
-    """Where model selections live. Function form lets tests patch ``_PATH``."""
-    return _PATH
+    """Where model selections live (the V2 target). Function form lets
+    tests patch it."""
+    return _target()
 
 
 def _providers() -> frozenset[str]:
@@ -28,25 +34,10 @@ def _providers() -> frozenset[str]:
 
 
 def _load() -> dict[str, str]:
-    """Load and sanitize configured models; invalid state behaves as empty.
+    """Load and sanitize configured models; invalid state behaves as empty."""
+    from .core.storage.v2_target import read_data
 
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
-    file — same sanitizer either way. Falls back to V1 on any v2 miss.
-    """
-    from .core.storage.v2_authority import read_provider_models, v2_authority_enabled
-
-    if v2_authority_enabled():
-        v2_data = read_provider_models()
-        if isinstance(v2_data, dict):
-            return _sanitize(v2_data)
-
-    if not _PATH.exists():
-        return {}
-    try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = read_data(path())
     if not isinstance(data, dict):
         return {}
     return _sanitize(data)
@@ -73,14 +64,9 @@ def _save(models: dict[str, str]) -> None:
         for provider, model in models.items()
         if str(provider) in providers and isinstance(model, str) and model.strip()
     }
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(_PATH)
+    from .core.storage.v2_target import write_data
 
-    from .core.storage.dual_write import dual_write_provider_models
-
-    dual_write_provider_models(cleaned)
+    write_data(path(), cleaned)
 
 
 def model_for(provider: str) -> str | None:

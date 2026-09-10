@@ -458,27 +458,19 @@ def check_local_issue_backlog() -> Check:
     everything had been reported. Surfacing it here makes it something the
     operator actually sees.
     """
+    from . import issues as _issues
     from .config import DATA_HOME
 
-    store = DATA_HOME / ".takkub_issues.json"
-    if not store.is_file():
-        return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "ok", "ไม่มี")
-    try:
-        rows = json.loads(store.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return Check(
-            "local_issues",
-            "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)",
-            "error",
-            f"อ่าน {store} ไม่ได้: {exc}",
-        )
-    if not isinstance(rows, list):
-        rows = []
+    # #504 cut half: the cockpit-bug instance (this exact DATA_HOME path)
+    # now lives in `v2/state/issues/local.json`, no V1 file — read through
+    # issues.py's own loader so this check can never disagree with what
+    # `takkub issue list` itself sees.
+    rows = _issues._load_local_issues(DATA_HOME)
     open_rows = [r for r in rows if isinstance(r, dict) and r.get("status") == "open"]
     if not open_rows:
         return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "ok", "ไม่มี")
     details = [f"#{r.get('number')} {str(r.get('title') or '')[:70]}" for r in open_rows[:10]]
-    details.append(f"ไฟล์: {store}")
+    details.append(f"ไฟล์: {_issues._cockpit_bug_v2_target()}")
     return Check(
         "local_issues",
         "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)",

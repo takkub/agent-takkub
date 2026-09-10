@@ -8,11 +8,13 @@ from agent_takkub import provider_state
 
 
 @pytest.fixture
-def tmp_state_path(tmp_path, monkeypatch):
-    """Redirect provider_state to a tmp file so tests don't touch the real config."""
-    path = tmp_path / "disabled-providers.json"
-    monkeypatch.setattr(provider_state, "_PATH", path)
-    return path
+def tmp_state_path():
+    """The resolved V2 target (`provider_state.path()`) — isolation is
+    automatic (conftest.py's autouse `_isolate_runtime` redirects
+    `storage_layout_v2()`'s no-arg default to a per-test tmp dir)."""
+    target = provider_state.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def test_load_missing_file_returns_empty(tmp_state_path):
@@ -62,13 +64,13 @@ def test_set_disabled_unknown_provider_raises(tmp_state_path):
         provider_state.set_disabled("bogus", True)
 
 
-def test_default_path_follows_settings_home():
-    # Contract: the store lives under config.SETTINGS_HOME (dev → ~/.takkub,
-    # installed build → DATA_HOME) so an installed cockpit never shares
-    # settings with a dev checkout on the same machine.
-    from agent_takkub.config import SETTINGS_HOME
+def test_default_path_follows_data_home():
+    # Contract (#504 cut half): the store lives under the V2 layout's
+    # `providers/registry.json`, resolved against `storage_layout_v2()`'s
+    # data home — never a fixed SETTINGS_HOME-bound constant.
+    from agent_takkub.core.storage.layout import storage_layout_v2
 
-    assert provider_state._PATH == SETTINGS_HOME / "disabled-providers.json"
+    assert provider_state.path() == storage_layout_v2().providers / "registry.json"
 
 
 # ── quota-hit reroute state (#514) ──────────────────────────────────────────

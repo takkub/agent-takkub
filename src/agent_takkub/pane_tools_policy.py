@@ -1,8 +1,10 @@
 """Role-aware pane tools (MCPs + plugins) policy system.
 
-Configurable via ~/.takkub/pane-tools.json: per-role allowlists for MCPs
-and plugins. Roles not in the policy fall back to defaults. Enables cockpit
-operator to control which tools each teammate sees without code edits.
+Configurable via `v2/capabilities/mcp/permissions.json` under the cockpit's
+data home (#504 cut half — direct V2 read/write, no V1 file, no dual-write
+mirror): per-role allowlists for MCPs and plugins. Roles not in the policy
+fall back to defaults. Enables cockpit operator to control which tools each
+teammate sees without code edits.
 
 Schema:
   {
@@ -22,13 +24,10 @@ against concurrent access.
 
 from __future__ import annotations
 
-import json
 import logging
 import pathlib
 import re
-import tempfile
 
-from .config import SETTINGS_HOME
 from .roles import all_role_names
 
 _log = logging.getLogger(__name__)
@@ -44,7 +43,25 @@ def known_roles_base() -> frozenset[str]:
     return frozenset(all_role_names())
 
 
-PANE_TOOLS_POLICY_FILE = SETTINGS_HOME / "pane-tools.json"
+def path() -> pathlib.Path:
+    """Where the policy lives (the V2 target). Function form lets tests
+    patch it."""
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None)
+    return storage_layout_v2(home).capabilities / "mcp" / "permissions.json"
+
+
+def __getattr__(name: str):
+    # Back-compat for external readers (`settings_management.repositories.
+    # mcps`/`relationships`, `settings_window`) that snapshot/watch this as
+    # a plain path attribute — PEP 562 module `__getattr__` so it always
+    # resolves the CURRENT V2 target instead of a value bound at import
+    # time. Internal call sites in this module use `path()` directly.
+    if name == "PANE_TOOLS_POLICY_FILE":
+        return path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def known_roles() -> frozenset[str]:
@@ -72,16 +89,6 @@ def known_roles() -> frozenset[str]:
         return known_roles_base()
 
 
-def _policy_dir() -> pathlib.Path:
-    """Ensure ~/.takkub/ directory exists; idempotent."""
-    d = PANE_TOOLS_POLICY_FILE.parent
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return d
-
-
 def _validate_name(name: str) -> bool:
     """Check if name matches [a-z0-9][a-z0-9._-]* without traversal or trailing dot."""
     if ".." in name or name.endswith("."):
@@ -90,34 +97,16 @@ def _validate_name(name: str) -> bool:
 
 
 def load_policy() -> dict[str, dict[str, list[str]]]:
-    """Load role-specific MCP and plugin overrides from pane-tools.json.
+    """Load role-specific MCP and plugin overrides from the V2 target.
 
     Returns { role: { "mcps": [...], "plugins": [...] }, ... }
 
-    If file is missing, corrupt, or empty → return {}. Never raises.
+    If the target is missing, corrupt, or empty → return {}. Never raises.
     Safe to call at any time; locks not needed (single JSON reader).
-
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
-    the V1 file (same shape, same validation below). Falls back to V1 on any
-    v2 miss.
     """
-    from .core.storage.v2_authority import read_pane_tools_policy, v2_authority_enabled
+    from .core.storage.legacy_reader import read_json
 
-    data: dict | None = None
-    if v2_authority_enabled():
-        v2_payload = read_pane_tools_policy()
-        if isinstance(v2_payload, dict):
-            data = v2_payload
-
-    if data is None:
-        if not PANE_TOOLS_POLICY_FILE.is_file():
-            return {}
-        try:
-            data = json.loads(PANE_TOOLS_POLICY_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            _log.debug("load_policy: could not read %s: %s", PANE_TOOLS_POLICY_FILE, e)
-            return {}
+    data = read_json(path())
 
     if not isinstance(data, dict):
         _log.warning("load_policy: file root is not dict, treating as empty")
@@ -195,7 +184,7 @@ def _regen_role_variants_best_effort() -> None:
 
 
 def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
-    """Atomically write policy to ~/.takkub/pane-tools.json.
+    """Atomically write policy to the V2 target (`path()`).
 
     policy: { role: { "mcps": [...], "plugins": [...] }, ... }
 
@@ -203,16 +192,13 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
     on success, False on validation error or I/O failure. Never raises.
     If policy is empty, deletes the file and returns True (idempotent).
     """
-    # Empty policy is ok; delete file and return success.
+    # Empty policy is ok; delete the target and return success.
     if not policy:
         try:
-            PANE_TOOLS_POLICY_FILE.unlink(missing_ok=True)
+            path().unlink(missing_ok=True)
         except OSError as e:
-            _log.warning("save_policy: could not delete %s: %s", PANE_TOOLS_POLICY_FILE, e)
+            _log.warning("save_policy: could not delete %s: %s", path(), e)
             return False
-        from .core.storage.dual_write import dual_write_pane_tools_policy
-
-        dual_write_pane_tools_policy({})
         _regen_role_variants_best_effort()
         return True
 
@@ -238,37 +224,18 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
                     _log.warning("save_policy: role %r %r has invalid name %r", role, kind, item)
                     return False
 
-    # Atomic write via tmp + replace.
     payload = {
         "version": 1,
         "roles": policy,
     }
-    tmp_path: pathlib.Path | None = None
     try:
-        _policy_dir()
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=PANE_TOOLS_POLICY_FILE.parent,
-            suffix=".json",
-            delete=False,
-            encoding="utf-8",
-        ) as tmp:
-            json.dump(payload, tmp, indent=2, ensure_ascii=False)
-            tmp.write("\n")
-            tmp_path = pathlib.Path(tmp.name)
-        tmp_path.replace(PANE_TOOLS_POLICY_FILE)
-        from .core.storage.dual_write import dual_write_pane_tools_policy
+        from .core.migration.registry_copy_step import write_json_atomic
 
-        dual_write_pane_tools_policy(payload)
+        write_json_atomic(path(), payload)
         _regen_role_variants_best_effort()
         return True
     except OSError as e:
-        _log.warning("save_policy: could not write %s: %s", PANE_TOOLS_POLICY_FILE, e)
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _log.warning("save_policy: could not write %s: %s", path(), e)
         return False
 
 

@@ -70,29 +70,47 @@ _FORCED_PROVIDER = {
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
 FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
-# Global mapping — the cross-project default. Kept as a module global so tests
-# can monkeypatch ``_CONFIG_PATH``; per-project mappings live under
-# ``_BASE_DIR/projects/<slug>/`` (monkeypatch ``_BASE_DIR`` to redirect those).
-_CONFIG_PATH = _BASE_DIR / "role-providers.json"
-
-
-def _project_slug(project: str) -> str:
-    """Filesystem-safe folder name for a project (mirrors pipeline_config)."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
-
 
 def config_path(project: str | None = None) -> Path:
-    """Where the per-role provider mapping lives.
+    """Where the role→provider mapping lives — the single V2 `routing.json`
+    target (#504 cut half), global and every project merged into one file
+    now, so ``project`` no longer selects a different physical file. Kept
+    (ignoring ``project``) for callers that snapshot/watch this path
+    (`settings_window`'s Save & Apply rollback, `FileTransaction`)."""
+    return _routing_target()
 
-    ``project`` → that project's own file under ``~/.takkub/projects/<slug>/``
-    so each tab can back the same role with a different CLI without colliding;
-    ``None`` → the global file (also the fallback a project inherits until it
-    overrides). Function form so tests can monkeypatch ``_CONFIG_PATH``
-    (global) or ``_BASE_DIR`` (per-project root).
-    """
-    if project:
-        return _BASE_DIR / "projects" / _project_slug(project) / "role-providers.json"
-    return _CONFIG_PATH
+
+def _routing_target() -> Path:
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None, prefer_primary=True)
+    return storage_layout_v2(home).config_dir / "routing.json"
+
+
+def _read_routing() -> dict:
+    """``{"global": {...}, "projects": {name: {...}}}`` — missing/corrupt
+    target reads as both-empty, never raises."""
+    from .core.storage.legacy_reader import read_json
+
+    raw = read_json(_routing_target())
+    global_data = raw.get("global") if isinstance(raw, dict) else None
+    projects = raw.get("projects") if isinstance(raw, dict) else None
+    return {
+        "global": global_data if isinstance(global_data, dict) else {},
+        "projects": projects if isinstance(projects, dict) else {},
+    }
+
+
+def _write_routing(global_data: dict, projects: dict) -> None:
+    import time
+
+    from .core.migration.registry_copy_step import write_json_atomic
+
+    write_json_atomic(
+        _routing_target(),
+        {"schema": 1, "updated_at": time.time(), "global": global_data, "projects": projects},
+    )
 
 
 def _sanitize_providers(data: dict) -> dict[str, str]:
@@ -125,12 +143,10 @@ def _migrate_legacy_global_overrides_once() -> None:
     recreated empty by the existence-check below it), so this is a no-op
     thereafter.
 
-    Guarded against re-entry (B-H2 follow-up, 2026-09-07): each
-    `role_models.set_provider` call below now refreshes the v2 routing
-    mirror via `dual_write_routing_mirror` -> `load_providers(None)`,
-    which lands right back here — `global_path` hasn't been archived yet
-    mid-loop, so without the guard every role in `legacy` would re-trigger
-    the whole migration loop from inside itself, recursing without bound.
+    Guarded against re-entry (B-H2 follow-up, 2026-09-07): defensive only
+    since #504's cut — `role_models.set_provider` no longer calls back into
+    `load_providers`, so nothing currently re-enters this function mid-loop,
+    but the guard costs nothing to keep.
     """
     global _migrating_legacy_overrides
     if _migrating_legacy_overrides:
@@ -164,48 +180,21 @@ def _migrate_legacy_global_overrides_once() -> None:
 def load_providers(project: str | None = None) -> dict[str, str]:
     """Return the role→provider mapping for ``project`` (or global when None).
 
-    A ``project`` with no per-project file falls back to the global mapping, so
-    a fresh tab inherits global overrides until it saves its own. Only the
-    global file is auto-created on first read (so the user has one to discover);
-    per-project files are written lazily on first save. Invalid JSON or non-dict
-    content is treated as empty (silent recovery — never blocks spawn).
-
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` routing mirror exists, sanitizes THAT scope
-    (global or this project's entry) instead of the V1 file — same
-    sanitizer either way. A project with no v2 entry AT ALL falls back to
-    the V2 global (mirrors V1's "no per-project file -> inherit global").
-    A project WITH an entry (even ``{}``) resolves from it directly, no
-    inheritance — matching V1, because `dual_write_routing`'s caller
-    (`save_providers`, and the migration ladder's `RoleAgentMigrationStep`)
-    only ever write a project entry for a project whose per-project V1
-    file actually exists (#480); a project with no per-project file simply
-    gets no key in the mirror, same as V1's own existence check.
+    A ``project`` with no entry in `routing.json`'s ``projects`` bucket falls
+    back to the global mapping, so a fresh tab inherits global overrides
+    until it saves its own. A project WITH an entry (even ``{}``) resolves
+    from it directly, no inheritance — `save_providers` always writes a key
+    for a project it's ever been called with, so "no key" and "empty
+    mapping" stay distinguishable (#480).
     """
     if project is None:
         _migrate_legacy_global_overrides_once()
 
-    from .core.storage.v2_authority import read_routing, v2_authority_enabled
-
-    if v2_authority_enabled():
-        v2_routing = read_routing()
-        if v2_routing is not None:
-            if project and project in v2_routing["projects"]:
-                return _sanitize_providers(v2_routing["projects"][project])
-            return _sanitize_providers(v2_routing["global"])
-
     if project:
-        p = config_path(project)
-        if not p.exists():
-            return load_providers(None)  # inherit global defaults
-        try:
-            raw = p.read_text(encoding="utf-8")
-            data = json.loads(raw)
-        except (OSError, json.JSONDecodeError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        return _sanitize_providers(data)
+        routing = _read_routing()
+        if project in routing["projects"]:
+            return _sanitize_providers(routing["projects"][project])
+        return load_providers(None)  # inherit global defaults
 
     # Global scope: role-models.json is the one store now (#515) — every
     # role with a `provider` field there, whether it came from a model pick
@@ -217,66 +206,21 @@ def load_providers(project: str | None = None) -> dict[str, str]:
     )
 
 
-def dual_write_routing_mirror() -> None:
-    """Refresh the v2 `config/routing.json` mirror's `global` bucket (plus
-    every known project) from the current V1 state.
-
-    B-H2 (2026-09-07 round-2 review): `save_providers` already called this
-    at the end of its own write, but `role_models.set_provider`/`_save()` —
-    the path the model picker (`settings_window.py`, `provider_model_refresh
-    .py`) writes through directly, bypassing `save_providers` entirely — only
-    ever mirrored into `models/aliases.json` (`dual_write_role_models`), never
-    into `config/routing.json`. Any write that can change the global
-    role→provider mapping must call this, not just `save_providers`'s own
-    caller — `role_models._save()` calls it too now, so every path that can
-    move a role's provider keeps the routing mirror current.
-
-    Checks the v2 root's existence FIRST, before doing anything else —
-    `role_models._save()` reaching this on every single save means it now
-    runs on machines/tests that have never migrated to v2 at all, and
-    `load_providers(None)` below is not a cheap no-op there: it also drives
-    `_migrate_legacy_global_overrides_once()`, which is safe to call
-    repeatedly but should still not run on a v2-unaware machine just
-    because a role's model got saved. Reuses `dual_write`'s own
-    presence check (module reference, not a re-import of the bare names)
-    so a test's `monkeypatch.setattr("...dual_write._effective_data_home",
-    ...)` is honoured here exactly like it is inside `dual_write_routing`
-    itself, instead of this function silently resolving a different
-    ``data_home``."""
-    from .core.storage import dual_write as _dual_write
-
-    if not _dual_write._v2_present(_dual_write._effective_data_home(None)):
-        return
-
-    from . import config as _config
-    from .core.storage.legacy_reader import read_json
-
-    _dual_write.dual_write_routing(
-        load_providers(None),
-        {
-            name: read_json(config_path(name))
-            for name in _config.list_project_names()
-            if config_path(name).exists()
-        },
-    )
-
-
 def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
-    """Persist the mapping (per-project file when ``project`` given, else
-    into ``role-models.json`` — see :func:`load_providers`). Best-effort:
-    raises only if the target dir is unwritable (very rare). Caller passes
-    the full desired mapping — partial updates aren't supported."""
+    """Persist the mapping (this project's `routing.json` entry when
+    ``project`` given, else every global role in ``role-models.json`` — see
+    :func:`load_providers`). Best-effort: raises only if the target dir is
+    unwritable (very rare). Caller passes the full desired mapping — partial
+    updates aren't supported."""
     cleaned = {
         str(role).lower(): str(provider).lower()
         for role, provider in mapping.items()
         if str(provider).lower() in VALID_PROVIDERS
     }
     if project:
-        path = config_path(project)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        routing = _read_routing()
+        routing["projects"][project] = cleaned
+        _write_routing(routing["global"], routing["projects"])
     else:
         from . import role_models
 
@@ -290,8 +234,8 @@ def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
                 role_models.set_provider(role, "")
         for role, provider in cleaned.items():
             role_models.set_provider(role, provider)
-
-    dual_write_routing_mirror()
+        # role_models._save() already refreshes routing.json's global
+        # bucket on every one of the set_provider calls above.
 
 
 def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[str, str]:

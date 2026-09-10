@@ -17,11 +17,12 @@ TEST_PROJECT = "providermodeltest"
 
 
 @pytest.fixture(autouse=True)
-def isolated_models(monkeypatch, tmp_path) -> Path:
-    path = tmp_path / "provider-models.json"
-    monkeypatch.setattr(provider_models, "_PATH", path)
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
-    return path
+def isolated_models() -> Path:
+    # Isolation is automatic (conftest.py's autouse `_isolate_runtime`
+    # redirects `storage_layout_v2()`'s no-arg default to a per-test tmp
+    # dir; `provider_models.path()`/`role_models.path()` resolve through
+    # that) — this fixture just hands back the resolved V2 target.
+    return provider_models.path()
 
 
 @pytest.fixture(scope="module")
@@ -58,13 +59,17 @@ class TestProviderModelConfig:
         assert provider_models.all_models() == {}
 
     def test_load_drops_unknown_empty_and_non_string_entries(self, isolated_models) -> None:
+        isolated_models.parent.mkdir(parents=True, exist_ok=True)
         isolated_models.write_text(
             json.dumps(
                 {
-                    "kimi": "  k2.5  ",
-                    "retired-provider": "old",
-                    "cursor": "  ",
-                    "codex": 123,
+                    "schema": 1,
+                    "data": {
+                        "kimi": "  k2.5  ",
+                        "retired-provider": "old",
+                        "cursor": "  ",
+                        "codex": 123,
+                    },
                 }
             ),
             encoding="utf-8",
@@ -73,14 +78,19 @@ class TestProviderModelConfig:
         assert provider_models.all_models() == {"kimi": "k2.5"}
 
     def test_write_uses_atomic_tmp_replace(self, isolated_models, monkeypatch) -> None:
-        original_replace = Path.replace
+        # write_data -> write_json_atomic (core.migration.registry_copy_step)
+        # replaces via the plain `os.replace` function, not the `Path.replace`
+        # method the old direct-write code used.
+        import os
+
+        original_replace = os.replace
         replacements: list[tuple[Path, Path]] = []
 
-        def tracked_replace(source: Path, target: Path) -> Path:
-            replacements.append((source, target))
+        def tracked_replace(source, target) -> None:
+            replacements.append((Path(source), Path(target)))
             return original_replace(source, target)
 
-        monkeypatch.setattr(Path, "replace", tracked_replace)
+        monkeypatch.setattr(os, "replace", tracked_replace)
 
         provider_models.set_model("gemini", "gemini-3-pro")
 

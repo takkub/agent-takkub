@@ -1,7 +1,9 @@
 """Persist the optional provider/model/reasoning-effort selected for each
 *role*.
 
-State file: ``~/.takkub/role-models.json`` —
+State file: ``v2/models/aliases.json`` under the cockpit's data home (#504
+cut half — this module reads/writes that V2 target directly, no V1 file,
+no dual-write mirror) —
 ``{role: {"provider": p, "model": m, "effort": e}}`` (``model``/``effort``
 both optional — a role's entry only needs to carry whichever axis the user
 actually overrode; a bare ``{"provider": p}`` entry — no model, no effort —
@@ -35,18 +37,23 @@ sanitizer here.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from .config import SETTINGS_HOME
 from .provider_spec import PROVIDER_REGISTRY
 
-_PATH = SETTINGS_HOME / "role-models.json"
+
+def _target() -> Path:
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None, prefer_primary=True)
+    return storage_layout_v2(home).models / "aliases.json"
 
 
 def path() -> Path:
-    """Where role-model selections live. Function form lets tests patch ``_PATH``."""
-    return _PATH
+    """Where role-model selections live (the V2 target — #504 cut half).
+    Function form lets tests patch it."""
+    return _target()
 
 
 def _load() -> dict[str, dict[str, str]]:
@@ -55,25 +62,10 @@ def _load() -> dict[str, dict[str, str]]:
     Tolerates a legacy bare-string value (``{role: "model"}``) by dropping it —
     such an entry carries no provider, so honouring it is exactly the
     wrong-model-to-wrong-CLI hazard this module exists to prevent.
-
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
-    file — same sanitizer either way, so callers see identical output. Falls
-    back to V1 on any v2 miss (not migrated / corrupt mirror).
     """
-    from .core.storage.v2_authority import read_role_models, v2_authority_enabled
+    from .core.storage.v2_target import read_data
 
-    if v2_authority_enabled():
-        v2_data = read_role_models()
-        if isinstance(v2_data, dict):
-            return _sanitize(v2_data)
-
-    if not _PATH.exists():
-        return {}
-    try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = read_data(path())
     if not isinstance(data, dict):
         return {}
     return _sanitize(data)
@@ -106,14 +98,18 @@ def _sanitize(data: dict) -> dict[str, dict[str, str]]:
 
 
 def _save(entries: dict[str, dict[str, str]]) -> None:
-    """Persist role-model selections atomically, dropping entries that carry
-    neither a model nor an effort override.
+    """Persist role-model selections atomically (V2 target only, #504 cut
+    half), dropping entries that carry neither a model nor an effort
+    override.
 
-    Also refreshes the v2 `config/routing.json` mirror's `global` bucket
-    (B-H2, 2026-09-07 round-2 review) — every setter in this module funnels
+    Also refreshes `config/routing.json`'s `global` bucket (B-H2,
+    2026-09-07 round-2 review) — every setter in this module funnels
     through here, including the model picker's direct calls that never go
     through `provider_config.save_providers`, which used to be the only
-    caller that kept that mirror current."""
+    caller that kept that bucket current. The `projects` bucket is read
+    back and passed through unchanged — this call never recomputes it, so
+    it can never disagree with whatever `provider_config.save_providers`
+    last wrote there for a given project."""
     cleaned: dict[str, dict[str, str]] = {}
     for role, entry in entries.items():
         provider = entry.get("provider")
@@ -127,37 +123,17 @@ def _save(entries: dict[str, dict[str, str]]) -> None:
         if effort:
             clean_entry["effort"] = effort
         cleaned[role] = clean_entry
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(cleaned, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(_PATH)
 
-    from . import config as _config
+    from .core.storage.v2_target import write_data
+
+    write_data(path(), cleaned)
+
     from . import provider_config
-    from .core.storage.dual_write import dual_write_role_models, dual_write_routing
-    from .core.storage.legacy_reader import read_json
 
-    dual_write_role_models(cleaned)
-    # #515 folded the standalone global-routing file into this one — this
-    # is now the only global-routing writer, so it must mirror `routing.json`
-    # itself instead of relying on `provider_config.save_providers` (which
-    # this call never goes through — see B-H2 in
-    # docs/audit/2026-09-07-batch-2.0.x-review-round2.md). The global half
-    # comes straight from `cleaned` (this save's own in-memory result), not
-    # a re-read, for the same reason `provider_config.save_providers`
-    # passes `load_providers(None)` rather than trusting some other source.
-    dual_write_routing(
-        {role: entry["provider"] for role, entry in cleaned.items()},
-        {
-            name: read_json(provider_config.config_path(name))
-            for name in _config.list_project_names()
-            if provider_config.config_path(name).exists()
-        },
+    routing = provider_config._read_routing()
+    provider_config._write_routing(
+        {role: entry["provider"] for role, entry in cleaned.items()}, routing["projects"]
     )
-
-    from . import provider_config
-
-    provider_config.dual_write_routing_mirror()
 
 
 def model_for(role: str, provider: str) -> str | None:

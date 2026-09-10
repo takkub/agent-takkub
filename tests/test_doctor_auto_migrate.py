@@ -107,44 +107,20 @@ class TestAutoMigratePendingFindings:
         assert not [f for f in findings if f.name == "auto-migrate-pending-rollback"]
 
 
-class TestV1OnlyWriteFinding:
-    """#502 — a V1 file written more recently than its dual-write mirror
-    means some writer skipped `core.storage.dual_write`; exit criteria for
-    #504's V1 removal is this at 0 alongside `model_pin_v2_drift`."""
+class TestV2AuthorityRetirementFinding:
+    """#504 cut half: dual-write/v1-only-write drift telemetry is gone
+    (nothing left to compare — every domain reads/writes its `v2/` target
+    directly). `TAKKUB_V2_AUTHORITY` is retired; this finding only flags a
+    leftover env override so an operator can clean it up."""
 
-    def test_not_migrated_reports_ok_zero(self) -> None:
-        f = _finding(name="v1-only-write")
+    def test_no_env_override_reports_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+        f = _finding(name="authority")
         assert f.status == doctor.Status.OK
-        assert "0" in f.detail
 
-    def test_stale_v1_source_reports_warn(self) -> None:
-        import os
-        import time
-
-        from agent_takkub.core.migration.steps_v1 import build_readonly_registries_step
-
-        (config.DATA_HOME / "v2").mkdir(parents=True, exist_ok=True)
-        mapping = build_readonly_registries_step(data_home=config.DATA_HOME).mappings
-        source = next(m.source for m in mapping if m.name == "provider-models")
-        target = next(m.target for m in mapping if m.name == "provider-models")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text('{"schema": 1, "data": {}}', encoding="utf-8")
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text('{"claude": "sonnet"}', encoding="utf-8")
-        future = time.time() + 100
-        os.utime(source, (future, future))
-
-        f = _finding(name="v1-only-write")
+    def test_leftover_env_override_reports_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_V2_AUTHORITY", "0")
+        f = _finding(name="authority")
         assert f.status == doctor.Status.WARN
-        assert "provider-models" in f.detail
-
-        # `_log_event` resolves its target through the orchestrator façade
-        # (`orchestrator_text._orch_attr`), which `conftest.py`'s own
-        # autouse isolation already redirects to a per-test tmp path — read
-        # back through the same module rather than `config.RUNTIME_DIR`
-        # (a different tmp dir this file's own `_isolate_paths` fixture
-        # points at, only for the DATA_HOME/SETTINGS_HOME scan itself).
-        from agent_takkub import orchestrator_text
-
-        assert orchestrator_text.EVENTS_LOG.exists()
-        assert "v1_only_write" in orchestrator_text.EVENTS_LOG.read_text(encoding="utf-8")
+        assert "TAKKUB_V2_AUTHORITY" in f.detail
+        assert "#504" in f.detail

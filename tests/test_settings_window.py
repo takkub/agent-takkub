@@ -40,16 +40,14 @@ from agent_takkub import roles as roles_mod
 def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect every on-disk store SettingsWindow touches to tmp, and clear
     the runtime custom-role registry so tests never leak into each other or
-    the real ~/.takkub. provider_config's own paths are already isolated by
-    the autouse fixture in tests/conftest.py."""
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    the real ~/.takkub. provider_config's own paths, and custom_roles'/
+    pane_tools_policy's/skill_policy's/provider_state's/role_models' V2
+    targets (#504 cut half), are already isolated by the autouse fixture in
+    tests/conftest.py."""
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
     monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
-    monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     # Users view (VIEW_USERS) touches user_profile's registry on every
     # SettingsWindow() construction (list_profiles() is called eagerly to
@@ -61,11 +59,6 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # user_profile._BASE_DIR/projects — captured at import time from
     # SETTINGS_HOME, so the config.SETTINGS_HOME patch below doesn't cover it.
     monkeypatch.setattr(user_profile, "_BASE_DIR", tmp_path)
-    # Providers & Roles' per-role model/effort combos write through
-    # role_models.set_model/set_effort on every Save & Apply — isolate like
-    # every other store above so a test never touches the real
-    # ~/.takkub/role-models.json.
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
     monkeypatch.setattr(performance_settings, "path", lambda: tmp_path / "performance.json")
     # Core V2 views (VIEW_CORE_V2_*, epic #309 Phase 9) build unconditionally
     # in _build_content — every SettingsWindow() construction now touches

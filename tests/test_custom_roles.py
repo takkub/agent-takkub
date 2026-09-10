@@ -12,12 +12,14 @@ from agent_takkub import custom_roles, roles
 
 @pytest.fixture
 def registry_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the registry JSON + role-file dir to tmp, and clear the
-    runtime `roles._CUSTOM` registry so tests never leak into each other."""
-    registry = tmp_path / "custom-roles.json"
+    """Redirect the role-file dir to tmp (the registry JSON's V2 target is
+    already isolated by conftest.py's autouse `_isolate_runtime`), and clear
+    the runtime `roles._CUSTOM` registry so tests never leak into each
+    other."""
     agents_dir = tmp_path / "agents"
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", registry)
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", agents_dir)
+    registry = custom_roles.path()
+    registry.parent.mkdir(parents=True, exist_ok=True)
     saved = dict(roles._CUSTOM)
     roles._CUSTOM.clear()
     yield registry

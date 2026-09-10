@@ -4,8 +4,10 @@ Fires only for exceptions inside the cockpit's own process — see
 ``app.py::_log_unhandled`` (sys.excepthook / threading.excepthook /
 unraisablehook). This is not a diagnostic tool for the *user's* project code.
 
-Dedup + rate-cap state lives in ``DATA_HOME/auto_issue_dedup.json`` so a
-crash loop can't spam GitHub: the same signature is filed at most once per
+Dedup + rate-cap state lives in ``v2/state/issues/dedup.json`` under the
+cockpit's data home (#504 cut half — direct V2 read/write, no V1 file, no
+dual-write mirror) so a crash loop can't spam GitHub: the same signature is
+filed at most once per
 24h, and no more than 5 auto-issues (any signature) go out per rolling 24h.
 An in-memory mirror backs both caps so a crash storm or a broken disk never
 degrades into "file every crash" (see ``_recent`` / ``_fired_mem`` /
@@ -23,7 +25,6 @@ against the public repo (#188).
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import re
@@ -34,9 +35,7 @@ import traceback
 from pathlib import Path
 
 from . import __version__, issues
-from .config import DATA_HOME
 
-_DEDUP_PATH = DATA_HOME / "auto_issue_dedup.json"
 _COOLDOWN_SECONDS = 24 * 60 * 60
 _RATE_CAP = 5
 _RATE_WINDOW_SECONDS = 24 * 60 * 60
@@ -131,43 +130,29 @@ def _signature(exc_type: type[BaseException], exc_tb) -> str:
     return key
 
 
+def _dedup_target() -> Path:
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    return storage_layout_v2(effective_data_home(None)).state_issues / "dedup.json"
+
+
 def _load_state() -> dict:
-    from .core.storage.v2_authority import read_issue_dedup, v2_authority_enabled
+    from .core.storage.v2_target import read_data
 
-    if v2_authority_enabled():
-        v2_state = read_issue_dedup()
-        if isinstance(v2_state, dict):
-            return v2_state
-
-    if not _DEDUP_PATH.exists():
-        return {}
-    try:
-        with open(_DEDUP_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
+    data = read_data(_dedup_target())
     return data if isinstance(data, dict) else {}
 
 
 def _save_state(state: dict) -> bool:
     global _persist_broken
-    tmp = _DEDUP_PATH.with_suffix(_DEDUP_PATH.suffix + ".tmp")
     try:
-        _DEDUP_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, _DEDUP_PATH)
+        from .core.storage.v2_target import write_data
+
+        write_data(_dedup_target(), state)
         _persist_broken = False
-
-        from .core.storage.dual_write import dual_write_issue_dedup
-
-        dual_write_issue_dedup(state)
         return True
     except OSError as exc:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         if not _persist_broken:
             _persist_broken = True
             try:

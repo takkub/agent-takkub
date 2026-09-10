@@ -25,27 +25,22 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from agent_takkub import (
         config,
         custom_roles,
-        pane_tools_policy,
         performance_settings,
         pipeline_config,
-        provider_state,
-        role_models,
         shared_dev_tools,
-        skill_policy,
         user_profile,
     )
 
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles/pane_tools_policy/skill_policy/provider_state/role_models'
+    # V2 targets (#504 cut half) are isolated automatically by conftest.py's
+    # autouse `_isolate_runtime` — only `CUSTOM_AGENTS_DIR` (the .md role
+    # file dir, still V1) needs redirecting here.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
-    monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
     monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
     monkeypatch.setattr(performance_settings, "path", lambda: tmp_path / "performance.json")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")

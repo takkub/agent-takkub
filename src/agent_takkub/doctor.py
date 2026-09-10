@@ -3393,7 +3393,6 @@ def check_storage_layout_state() -> list[Finding]:
     """
     try:
         from .core.storage.layout import LEGACY_MAPPING, layout_state, storage_layout_v2
-        from .core.storage.v2_authority import authority_state, v2_authority_enabled
     except Exception as e:
         return [
             Finding(
@@ -3409,13 +3408,7 @@ def check_storage_layout_state() -> list[Finding]:
             Status.OK,
             f"{state} — {storage_layout_v2().root}",
         ),
-        Finding(
-            "storage-layout",
-            "authority",
-            Status.OK,
-            f"{authority_state()} — TAKKUB_V2_AUTHORITY={'on' if v2_authority_enabled() else 'off'} "
-            "(#362 Phase 10 wave 2: which side every dual-written domain's reader answers from)",
-        ),
+        _v2_authority_retirement_finding(),
     ]
     if state == "v1":
         findings.append(
@@ -3437,87 +3430,32 @@ def check_storage_layout_state() -> list[Finding]:
                 "(plan §2, Phase 10) removes V1; not itself a problem",
             )
         )
-    findings.append(_v1_only_write_finding())
     findings.extend(_auto_migrate_boot_findings())
     return findings
 
 
-def _v1_only_write_finding() -> Finding:
-    """[storage-layout/v1-only-write] — #502: a V1 file written more
-    recently than its dual-write mirror means some writer skipped
-    ``core.storage.dual_write`` and the ``v2/`` copy went stale silently.
-    Exit criteria for #504 (V1 removal) is this at 0 continuously alongside
-    `model_pin_v2_drift`, so a hit here is WARN, never FAIL — a still-mixed
-    V1/V2 machine finding one is exactly what this check exists to surface,
-    not itself a broken install."""
-    try:
-        from . import config
-        from .core.storage.v1_only_write import scan_v1_only_writes
-    except Exception as e:
-        return Finding("storage-layout", "v1-only-write", Status.INFO, f"unavailable: {e}")
+def _v2_authority_retirement_finding() -> Finding:
+    """[storage-layout/authority] — #504 cut half: every dual-written
+    domain now reads/writes its ``v2/`` target directly, no V1-vs-V2 gate
+    left to flip. ``TAKKUB_V2_AUTHORITY`` is retired; a leftover env
+    override is harmless (nothing reads it anymore) but worth flagging so
+    an operator can clean it up."""
+    import os
 
-    # Explicit `config.DATA_HOME`, not the bare no-arg default: `scan_v1_
-    # only_writes` resolves its "effective data home" through `core.storage.
-    # dual_write`'s deliberately late-bound `storage_layout_v2` lookup (same
-    # reason `core.routing.router` needs the same care — see that module's
-    # own docstring), which only agrees with `config.DATA_HOME` when told so
-    # explicitly. `layout_state()` right above already resolves the same way.
-    hits = scan_v1_only_writes(data_home=config.DATA_HOME)
-    for hit in hits:
-        _log_v1_only_write(hit)
-    if not hits:
-        # #502/#504 review (2026-09-07): this is a single on-demand snapshot,
-        # never a continuous monitor — a writer that skipped dual-write and
-        # then got mirrored correctly on its very next save erases its own
-        # drift before the next `doctor`/`migrate validate` run. "0 พบ" here
-        # is NOT proof of #504's one-week drift=0 exit gate on its own; that
-        # needs periodic sampling across the week, not one clean run.
+    env_raw = os.environ.get("TAKKUB_V2_AUTHORITY")
+    if env_raw is not None:
         return Finding(
             "storage-layout",
-            "v1-only-write",
-            Status.OK,
-            "0 พบใน snapshot นี้ (on-demand, ไม่ใช่ monitor ต่อเนื่อง)",
+            "authority",
+            Status.WARN,
+            f"TAKKUB_V2_AUTHORITY={env_raw!r} ถูกถอดแล้ว (#504) — ไม่มีผลอีกต่อไป, ลบ env var นี้ได้เลย",
         )
-    missing = [h for h in hits if h.reason == "missing_mirror"]
-    diverged = [h for h in hits if h.reason == "diverged"]
-    unmirrored_equal = [h for h in hits if h.reason == "unmirrored_equal"]
-    parts = []
-    if missing:
-        parts.append(
-            f"{len(missing)} domain(s) มี V1 file แต่ไม่มี v2/ mirror เลย "
-            f"({', '.join(sorted(h.name for h in missing))}) — dual_write อาจไม่เคยรันสำหรับ domain นี้"
-        )
-    if diverged:
-        parts.append(
-            f"{len(diverged)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ และค่าจริงต่างกัน "
-            f"({', '.join(sorted(h.name for h in diverged))}) — `dual_write.py` มี writer ที่หลุด"
-        )
-    if unmirrored_equal:
-        parts.append(
-            f"{len(unmirrored_equal)} domain(s) เขียนลง V1 โดยไม่ mirror แต่ค่าที่ save ซ้ำเหมือนเดิม "
-            f"({', '.join(sorted(h.name for h in unmirrored_equal))}) — v2/ ยังไม่ผิด "
-            "แต่ writer เดิมก็ยังหลุด dual_write อยู่ดี"
-        )
-    return Finding("storage-layout", "v1-only-write", Status.WARN, "; ".join(parts))
-
-
-def _log_v1_only_write(hit) -> None:
-    """Best-effort `events.log` breadcrumb — `orchestrator_text` has zero Qt
-    imports (same rule `auto_migrate_boot._log_boot_event` follows), so this
-    stays safe to call from a plain headless `takkub doctor` with no
-    QApplication running."""
-    try:
-        from .orchestrator_text import _log_event
-
-        _log_event(
-            "v1_only_write",
-            name=hit.name,
-            source=str(hit.source),
-            target=str(hit.target),
-            lag_s=hit.lag_s,
-        )
-    except Exception:
-        pass
+    return Finding(
+        "storage-layout",
+        "authority",
+        Status.OK,
+        "v2-only (#504 cut half) — ทุก dual-written domain อ่าน/เขียน v2/ โดยตรงเสมอ",
+    )
 
 
 def _auto_migrate_boot_findings() -> list[Finding]:
@@ -3722,7 +3660,6 @@ def check_core_v2() -> list[Finding]:
     from .core.conversation.flag import v2_conversation_enabled
     from .core.routing.flag import v2_router_enabled
     from .core.scheduling.flag import v2_scheduler_enabled
-    from .core.storage.v2_authority import v2_authority_enabled
 
     flag_checks = (
         ("router", "TAKKUB_V2_ROUTER", v2_router_enabled),
@@ -3730,7 +3667,6 @@ def check_core_v2() -> list[Finding]:
         ("context", "TAKKUB_V2_CONTEXT", v2_context_enabled),
         ("scheduler", "TAKKUB_V2_SCHEDULER", v2_scheduler_enabled),
         ("conversation", "TAKKUB_V2_CONVERSATION", v2_conversation_enabled),
-        ("v2_authority", "TAKKUB_V2_AUTHORITY", v2_authority_enabled),
         ("auto_migrate", "TAKKUB_AUTO_MIGRATE", auto_migrate_enabled),
     )
     for name, env_name, getter in flag_checks:
@@ -3740,6 +3676,9 @@ def check_core_v2() -> list[Finding]:
         detail += " (default)" if env_raw is None else f" — env {env_name}={env_raw!r} override"
         findings.append(Finding("core-v2", name, Status.OK if enabled else Status.WARN, detail))
 
+    # #504 cut half: TAKKUB_V2_AUTHORITY is retired — see
+    # `_v2_authority_retirement_finding` (storage-layout/authority) for the
+    # actual status; this section only covered flags still worth showing.
     findings.append(Finding("core-v2", "context-strategy", Status.INFO, context_strategy()))
 
     try:

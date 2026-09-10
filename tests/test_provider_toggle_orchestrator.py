@@ -16,10 +16,10 @@ from agent_takkub import provider_state
 
 
 @pytest.fixture
-def tmp_state_path(tmp_path, monkeypatch):
-    path = tmp_path / "disabled-providers.json"
-    monkeypatch.setattr(provider_state, "_PATH", path)
-    return path
+def tmp_state_path():
+    """The resolved V2 target (`provider_state.path()`) — isolation is
+    automatic (conftest.py's autouse `_isolate_runtime`)."""
+    return provider_state.path()
 
 
 def _stop_all_orchestrator_timers(orch) -> None:

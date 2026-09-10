@@ -572,40 +572,23 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if hasattr(cvs, "_reset_cache"):
             cvs._reset_cache()  # (mtime,size) cache must not leak across tests
 
-    # #338: `provider_config.provider_for` now falls back to the provider
-    # recorded in role-models.json when role-providers.json says nothing about
-    # a role — which makes the user's REAL ~/.takkub/role-models.json able to
-    # decide what a test's "default provider" resolves to. Same isolation
-    # reasoning (and same 2026-08-19 lesson) as core-v2-settings above.
-    rm = _maybe_module("agent_takkub.role_models", force=True)
-    if rm is not None:
-        monkeypatch.setattr(
-            rm, "_PATH", tmp_path / "_isolated_takkub" / "role-models.json", raising=False
-        )
-
-    # #362: provider_models._PATH = SETTINGS_HOME / "provider-models.json" is
-    # bound by value at import time (same shape as role_models._PATH above),
-    # so it was NOT covered by anything in this fixture — settings_window's
-    # provider-roles view touches it, and two xdist workers racing
-    # `tmp.replace(_PATH)` (provider_models._save) against the SAME real
-    # ~/.takkub/provider-models.json produced `PermissionError: [WinError 5]
-    # Access is denied` on windows-latest CI (Windows refuses to replace a
-    # file another process still has a handle open on). Audited every
-    # `<NAME> = SETTINGS_HOME / "..."` module-level binding in src/agent_takkub
-    # (grep, 2026-08-23) and isolate ALL of them here, not just the one that
-    # happened to fail first — each of these is the same unpatched-real-home
-    # bug, just not yet caught by a concurrent write.
+    # #504 cut half: role_models/provider_models/provider_state/
+    # pane_tools_policy/skill_policy/custom_roles/remote.session_store no
+    # longer bind a module-level `_PATH`/`*_FILE` V1 constant at all — each
+    # now resolves its V2 target lazily through `storage_layout_v2()`
+    # (`path()`/`config_path()`/`PANE_TOOLS_POLICY_FILE` etc., the last via
+    # module `__getattr__`), which the `storage_layout_v2` patch below
+    # already isolates. Nothing left to patch for any of them here — a
+    # `monkeypatch.setattr(module, "_PATH", ...)` on one of these modules
+    # now has no effect at all on where they actually read/write; the
+    # `hasattr`-gated loop right below already reflects that (only real,
+    # still-V1 constants remain in the tuple).
     _settings_home_path_modules = (
         ("agent_takkub.auto_resume", "_PATH", "autoresume.json"),
         ("agent_takkub.exec_mode", "_PATH", "exec-mode.json"),
         ("agent_takkub.plan_tier", "_PATH", "plan.json"),
-        ("agent_takkub.provider_models", "_PATH", "provider-models.json"),
-        ("agent_takkub.provider_state", "_PATH", "disabled-providers.json"),
         ("agent_takkub.provider_state", "_QUOTA_PATH", "provider-quota.json"),
         ("agent_takkub.remote.config", "_PATH", "remote.json"),
-        ("agent_takkub.pane_tools_policy", "PANE_TOOLS_POLICY_FILE", "pane-tools.json"),
-        ("agent_takkub.skill_policy", "SKILL_POLICY_FILE", "skill-policy.json"),
-        ("agent_takkub.custom_roles", "CUSTOM_ROLES_FILE", "custom-roles.json"),
     )
     for _mod_name, _attr, _fname in _settings_home_path_modules:
         _m = _maybe_module(_mod_name, force=True)
@@ -700,15 +683,14 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if cfg is not None and hasattr(cfg, "SETTINGS_HOME"):
         monkeypatch.setattr(cfg, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False)
 
-    # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
-    # password-session store unconditionally (not opt-in like the P0 remote
-    # scaffold — any test that builds a real RemoteHttpServer/AuthGate, not
-    # just test_remote_auth.py, goes through it). Unpatched, that's a read
-    # and (on `issue_password_session`) a write to the real
-    # `~/.takkub/takkub-remote-sessions.json` on the machine running pytest.
-    ss = _maybe_module("agent_takkub.remote.session_store", force=True)
-    if ss is not None:
-        monkeypatch.setattr(ss, "_PATH", runtime / "takkub-remote-sessions.json", raising=False)
+    # #196/#504: `session_store.py`'s password-session store used to be a
+    # module-level `_PATH` (SETTINGS_HOME-bound) needing isolation here so
+    # AuthGate.__init__ (built by any RemoteHttpServer/AuthGate test, not
+    # just test_remote_auth.py) never touched the real
+    # `~/.takkub/takkub-remote-sessions.json`. #504 cut half moved it to a
+    # lazily-resolved V2 target (`session_store.path()`), which the
+    # `storage_layout_v2` patch below already isolates — nothing left to
+    # patch here.
 
     # `orchestrator._main_thread_heartbeat_age` is a module-global probe
     # (set via `set_main_thread_heartbeat_probe`) that lead_inbox's

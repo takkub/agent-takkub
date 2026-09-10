@@ -5,7 +5,8 @@ This module answers "is provider Y currently usable" (per-provider gate) —
 a different boundary, persisted in a different file, surfaced through a
 different UI flow (status bar toggle, not config edit). Keep them apart.
 
-State file: `~/.takkub/disabled-providers.json`
+State file: `v2/providers/registry.json` under the cockpit's data home
+(#504 cut half — direct V2 read/write, no V1 file, no dual-write mirror).
 Format: `{"codex": true, "gemini": false}` — provider name → disabled flag
 Missing file or corrupt JSON → treated as empty mapping (all enabled).
 
@@ -45,37 +46,28 @@ def _togglable() -> frozenset[str]:
 # provider-specific routing rules.
 TOGGLABLE: frozenset[str] = _togglable()
 
-_PATH = SETTINGS_HOME / "disabled-providers.json"
+
+def _target() -> Path:
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None)
+    return storage_layout_v2(home).providers / "registry.json"
 
 
 def path() -> Path:
-    """Where state lives. Function form so tests can monkeypatch `_PATH`."""
-    return _PATH
+    """Where state lives (the V2 target). Function form so tests can patch it."""
+    return _target()
 
 
 def load() -> dict[str, bool]:
     """Return current state mapping. Missing file or corrupt JSON → empty dict.
 
     Always returns a fresh dict — callers can mutate without side effects.
-
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
-    file. Falls back to V1 on any v2 miss.
     """
-    from .core.storage.v2_authority import read_disabled_providers, v2_authority_enabled
+    from .core.storage.v2_target import read_data
 
-    if v2_authority_enabled():
-        v2_data = read_disabled_providers()
-        if isinstance(v2_data, dict):
-            return _sanitize(v2_data)
-
-    if not _PATH.exists():
-        return {}
-    try:
-        raw = _PATH.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = read_data(path())
     if not isinstance(data, dict):
         return {}
     return _sanitize(data)
@@ -90,14 +82,9 @@ def _sanitize(data: dict) -> dict[str, bool]:
 def save(state: dict[str, bool]) -> None:
     """Persist `state` atomically. Drops keys not in TOGGLABLE."""
     cleaned = {str(k): bool(v) for k, v in state.items() if str(k) in TOGGLABLE}
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(_PATH)
+    from .core.storage.v2_target import write_data
 
-    from .core.storage.dual_write import dual_write_disabled_providers
-
-    dual_write_disabled_providers(cleaned)
+    write_data(path(), cleaned)
 
 
 def is_disabled(provider: str) -> bool:

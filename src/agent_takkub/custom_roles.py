@@ -2,10 +2,15 @@
 
 A6 (Role & Skill Manager). Two files persist a custom role:
 
-  ~/.takkub/custom-roles.json   registry: {name: {label, color, column, row}}
+  v2/agents/custom/registry.json   registry: {name: {label, color, column, row}}
+                                    (#504 cut half: direct V2 read/write, no
+                                    V1 file, no dual-write mirror)
   <config.CUSTOM_AGENTS_DIR>/<name>.md   role file (stand-in instructions),
                                           same format as built-in files under
-                                          config.AGENTS_DIR
+                                          config.AGENTS_DIR — stays V1 (this
+                                          is what spawn actually reads; #504's
+                                          registry cutover covers the JSON
+                                          metadata only, not role content)
 
 `roles.py` resolves a role by name through its own runtime `_CUSTOM` dict —
 this module is what fills that dict, both at cockpit boot
@@ -20,18 +25,34 @@ note for the tradeoff of exposing that as a UI knob.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import tempfile
 from pathlib import Path
 
-from .config import CUSTOM_AGENTS_DIR, SETTINGS_HOME, validate_name
+from .config import CUSTOM_AGENTS_DIR, validate_name
 from .roles import ALL_DEFAULT, Role
 
 _log = logging.getLogger(__name__)
 
-CUSTOM_ROLES_FILE = SETTINGS_HOME / "custom-roles.json"
+
+def path() -> Path:
+    """Where the custom-role registry lives (the V2 target). Function form
+    lets tests patch it."""
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None)
+    return storage_layout_v2(home).agents / "custom" / "registry.json"
+
+
+def __getattr__(name: str):
+    # Back-compat for external readers (`settings_management.repositories.
+    # roles`) that snapshot/watch this as a plain path attribute.
+    if name == "CUSTOM_ROLES_FILE":
+        return path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 _RESERVED_NAMES = frozenset(r.name for r in ALL_DEFAULT)
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -88,28 +109,10 @@ def _default_role_template(name: str, label: str) -> str:
 
 
 def load_custom_roles() -> dict[str, Role]:
-    """Load the custom-role registry. Never raises; missing/corrupt -> {}.
+    """Load the custom-role registry. Never raises; missing/corrupt -> {}."""
+    from .core.storage.legacy_reader import read_json
 
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
-    the V1 file. Falls back to V1 on any v2 miss.
-    """
-    from .core.storage.v2_authority import read_custom_roles_registry, v2_authority_enabled
-
-    data: dict | None = None
-    if v2_authority_enabled():
-        v2_payload = read_custom_roles_registry()
-        if isinstance(v2_payload, dict):
-            data = v2_payload
-
-    if data is None:
-        if not CUSTOM_ROLES_FILE.is_file():
-            return {}
-        try:
-            data = json.loads(CUSTOM_ROLES_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            _log.debug("load_custom_roles: could not read %s: %s", CUSTOM_ROLES_FILE, e)
-            return {}
+    data = read_json(path())
     if not isinstance(data, dict):
         return {}
     raw_roles = data.get("roles")
@@ -141,7 +144,7 @@ def load_custom_roles() -> dict[str, Role]:
 
 
 def save_custom_roles(roles: dict[str, Role]) -> bool:
-    """Atomically persist the registry (tmp + replace). Never raises."""
+    """Atomically persist the registry to the V2 target. Never raises."""
     payload = {
         "version": 1,
         "roles": {
@@ -149,31 +152,13 @@ def save_custom_roles(roles: dict[str, Role]) -> bool:
             for name, r in roles.items()
         },
     }
-    tmp_path: Path | None = None
     try:
-        CUSTOM_ROLES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=CUSTOM_ROLES_FILE.parent,
-            suffix=".json",
-            delete=False,
-            encoding="utf-8",
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            json.dump(payload, tmp, indent=2, ensure_ascii=False)
-            tmp.write("\n")
-        tmp_path.replace(CUSTOM_ROLES_FILE)
-        from .core.storage.dual_write import dual_write_custom_roles_registry
+        from .core.migration.registry_copy_step import write_json_atomic
 
-        dual_write_custom_roles_registry(payload)
+        write_json_atomic(path(), payload)
         return True
     except OSError as e:
-        _log.warning("save_custom_roles: could not write %s: %s", CUSTOM_ROLES_FILE, e)
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _log.warning("save_custom_roles: could not write %s: %s", path(), e)
         return False
 
 
@@ -260,9 +245,6 @@ def create_role(
         tmp_path.unlink(missing_ok=True)
         return False, f"เขียน role file ไม่สำเร็จ: {e}"
 
-    from .core.storage.dual_write import dual_write_custom_role_file
-
-    dual_write_custom_role_file(name, content)
     return True, ""
 
 
@@ -290,9 +272,6 @@ def delete_role(name: str) -> bool:
     except OSError as e:
         _log.warning("delete_role: could not remove role file for %r: %s", name, e)
 
-    from .core.storage.dual_write import dual_write_custom_role_file
-
-    dual_write_custom_role_file(name, None)
     return True
 
 
@@ -361,7 +340,7 @@ def load_and_register_all() -> int:
                 "load_and_register_all: could not persist %d orphan custom-role doc(s) "
                 "to %s; registering in-memory only this session",
                 len(orphans),
-                CUSTOM_ROLES_FILE,
+                path(),
             )
             loaded = merged
 

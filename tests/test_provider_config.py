@@ -20,11 +20,17 @@ from agent_takkub import provider_config
 
 @pytest.fixture(autouse=True)
 def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the global `config_path()` at a per-test temp file, and the
-    per-project root at the temp dir, so the real path-resolution logic runs
-    (rather than stubbing config_path away — which would hide the project arg)."""
+    """`config_path()`/`load_providers`/`save_providers` now read/write the
+    V2 `routing.json` target directly (#504 cut half) — isolation is
+    automatic (conftest.py's autouse `_isolate_runtime` redirects
+    `storage_layout_v2()`'s no-arg default to a per-test tmp dir).
+
+    `_BASE_DIR` still needs redirecting: `_migrate_legacy_global_overrides_
+    once()` looks for a standalone `role-providers.json` there (the #515
+    ONE-TIME V1-to-V1 fold, unrelated to #504/V2 — untouched by this cut)
+    — this fixture's returned path is exactly where that legacy file lives,
+    for the tests below that still exercise that migration."""
     fake = tmp_path / "role-providers.json"
-    monkeypatch.setattr(provider_config, "_CONFIG_PATH", fake)
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
     # _provider_available()'s CLI-installed probe caches its result per
     # provider for a TTL — reset per test so one test's mocked discovery

@@ -104,9 +104,9 @@ class SignalRule:
     ignore_field: str | None = None
     ignore_values: frozenset[str] = frozenset()
     # Overrides the scan's default `WINDOW_HOURS` for just this rule — e.g.
-    # a fleet-telemetry signal (#361's `auto_migrate_rolled_back` /
-    # `model_pin_v2_drift`) that fires at most once per boot needs a wider
-    # window than the 6h default to ever cross `min_count=1` meaningfully.
+    # a fleet-telemetry signal (#361's `auto_migrate_rolled_back`) that
+    # fires at most once per boot needs a wider window than the 6h default
+    # to ever cross `min_count=1` meaningfully.
     # `None` means "use the scan's own `window_hours`".
     window_hours: float | None = None
     # #427: collapse repeats of the same (`chain_field`) value that land
@@ -182,19 +182,6 @@ RULES: tuple[SignalRule, ...] = (
             "#361: fires at most once per boot, and the ladder is copy-never-move — a single "
             "rollback already means a machine (likely the first-ever macOS `apply`, per the "
             "task's own risk note) needs a human to look, not a repeat count to build up first"
-        ),
-    ),
-    SignalRule(
-        key="model_pin_v2_drift",
-        event="model_pin_v2_drift",
-        min_count=1,
-        window_hours=24.0,
-        title="model pin V1/V2 disagree (router shadow-read)",
-        why=(
-            "#361: 1.1.0's V2 router shadow-read is still new on every machine but this one — "
-            "one disagreement is already worth a look, same one-shot bar as the rollback rule "
-            "above, so a friend's machine reports its own drift back without anyone pressing "
-            "anything"
         ),
     ),
 )
