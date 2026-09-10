@@ -3173,13 +3173,24 @@ def _v1_only_write_report():
         )
     names = ", ".join(sorted(h.name for h in hits))
     missing_count = sum(1 for h in hits if h.reason == "missing_mirror")
+    diverged_count = sum(1 for h in hits if h.reason == "diverged")
+    equal_count = sum(1 for h in hits if h.reason == "unmirrored_equal")
+    suffix = ""
+    if missing_count:
+        suffix += f" — {missing_count} ไม่มี mirror เลย"
+    if diverged_count:
+        suffix += f" — {diverged_count} ค่าจริงต่างกัน (diverged)"
+    if equal_count:
+        suffix += f" — {equal_count} ค่าเหมือนเดิม (unmirrored_equal)"
     return StepReport(
         "v1-only-write",
         "validate",
         True,
-        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names})"
-        + (f" — {missing_count} ไม่มี mirror เลย" if missing_count else ""),
-        detail={"hits": [h.name for h in hits]},
+        f"{len(hits)} domain(s) เขียนลง V1 โดยไม่ mirror เข้า v2/ ({names})" + suffix,
+        detail={
+            "hits": [h.name for h in hits],
+            "reasons": {h.name: h.reason for h in hits},
+        },
     )
 
 

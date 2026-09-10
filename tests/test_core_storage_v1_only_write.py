@@ -78,6 +78,7 @@ def test_hit_when_v1_source_written_without_dual_write(tmp_path):
     hits = scan_v1_only_writes(data_home=home)
     assert [h.name for h in hits] == ["provider-models"]
     assert hits[0].lag_s > 0
+    assert hits[0].reason == "diverged"
 
 
 def test_small_mtime_gap_is_not_a_hit(tmp_path):
@@ -172,8 +173,29 @@ def test_missing_mirror_and_stale_mirror_are_distinguishable(tmp_path):
     cr_source.write_text("{}", encoding="utf-8")
 
     hits = {h.name: h for h in scan_v1_only_writes(data_home=home)}
-    assert hits["provider-models"].reason == "stale_mirror"
+    assert hits["provider-models"].reason == "diverged"
     assert hits["custom-roles"].reason == "missing_mirror"
+
+
+def test_stale_but_same_content_is_unmirrored_equal_not_diverged(tmp_path):
+    """The exact shape that let the real drift go unnoticed on 2026-09-10: a
+    writer skipped dual-write, but re-saved the SAME value already sitting
+    in the v2/ mirror — mtime alone would call this "diverged" (a wrong
+    value at risk), when nothing about the mirrored value is actually
+    wrong."""
+    home = _migrated_home(tmp_path)
+    mapping = build_readonly_registries_step(data_home=home).mappings
+    source = next(m.source for m in mapping if m.name == "provider-models")
+    target = next(m.target for m in mapping if m.name == "provider-models")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"schema": 1, "data": {"claude": "sonnet"}}', encoding="utf-8")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text('{"claude": "sonnet"}', encoding="utf-8")
+    _touch_future(source)
+
+    hits = scan_v1_only_writes(data_home=home)
+    hit = next(h for h in hits if h.name == "provider-models")
+    assert hit.reason == "unmirrored_equal"
 
 
 # ── #502/#504 review 2026-09-07: role-providers fan-out (global + per-project
@@ -211,7 +233,7 @@ def test_role_providers_fanout_stale_global_source_is_a_hit(tmp_path):
 
     hits = scan_v1_only_writes(data_home=home)
     hit = next(h for h in hits if h.name == "role-providers:global")
-    assert hit.reason == "stale_mirror"
+    assert hit.reason == "diverged"
     assert hit.lag_s > 0
 
 
@@ -234,7 +256,33 @@ def test_role_providers_fanout_stale_project_scope_is_a_hit(tmp_path):
 
     hits = scan_v1_only_writes(data_home=home)
     hit = next(h for h in hits if h.name == "role-providers:proj_a")
-    assert hit.reason == "stale_mirror"
+    assert hit.reason == "diverged"
+
+
+def test_role_providers_fanout_stale_but_same_content_is_unmirrored_equal(tmp_path):
+    """routing.json's `"global"` bucket holds `{role: provider}` — the same
+    collapse `role_models._save()`'s own `dual_write_routing(...)` call
+    applies to role-models.json's on-disk `{role: {"provider", ...}}` shape
+    (#515) — so an equal-content check has to apply that same collapse
+    before comparing, not the raw source JSON."""
+    home = _migrated_home(tmp_path)
+    from agent_takkub import config
+    from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+
+    target = RoleAgentMigrationStep(data_home=home)._routing_target()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '{"schema": 1, "global": {"backend": "claude"}, "projects": {}}',
+        encoding="utf-8",
+    )
+
+    global_source = config.SETTINGS_HOME / "role-models.json"
+    global_source.write_text('{"backend": {"provider": "claude"}}', encoding="utf-8")
+    _touch_future(global_source)
+
+    hits = scan_v1_only_writes(data_home=home)
+    hit = next(h for h in hits if h.name == "role-providers:global")
+    assert hit.reason == "unmirrored_equal"
 
 
 def test_role_providers_fanout_no_hit_right_after_dual_write(tmp_path):
