@@ -180,6 +180,7 @@ class TestAssignBaseShaCapture:
         assert ps.assign_base_sha == "deadbeef"
         assert ps.assign_git_root == "/repo"
         assert ps.assign_dirty_snapshot == {"stale.png": ("??", 123, 456)}
+        assert ps.assign_non_git is False
 
     def test_no_resolved_cwd_leaves_baseline_none(self, orch, monkeypatch):
         monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
@@ -193,6 +194,62 @@ class TestAssignBaseShaCapture:
         assert ps.assign_base_sha is None
         assert ps.assign_git_root is None
         assert ps.assign_dirty_snapshot is None
+        assert ps.assign_non_git is False
+
+    def test_non_git_cwd_sets_assign_non_git_once(self, orch, monkeypatch):
+        """#560: a cwd that isn't inside any git work tree at all must be
+        classified as `assign_non_git=True` right here at assign() — done()
+        then never re-probes git or reformats the caveat on every report."""
+        from agent_takkub import worktree_manager as wm_mod
+
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        pane = _register_pane(orch, "backend", "proj")
+        pane._session_cwd = "/not/a/repo"
+
+        class _NonGitMgr:
+            def shared_tree_baseline(self, cwd):
+                return None, None, None
+
+            def git_root(self, cwd):
+                assert cwd == "/not/a/repo"
+                return None
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _NonGitMgr())
+
+        orch._assign_dispatch("backend", "/not/a/repo", "do the thing", project="proj")
+
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha is None
+        assert ps.assign_non_git is True
+
+    def test_git_repo_with_unborn_head_is_not_flagged_non_git(self, orch, monkeypatch):
+        """A real git repo whose baseline capture failed for another reason
+        (e.g. HEAD unborn) must NOT be misclassified as a non-git project —
+        `git rev-parse --show-toplevel` alone still succeeds there."""
+        from agent_takkub import worktree_manager as wm_mod
+
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        pane = _register_pane(orch, "backend", "proj")
+        pane._session_cwd = "/repo/empty"
+
+        class _UnbornHeadMgr:
+            def shared_tree_baseline(self, cwd):
+                return None, None, None
+
+            def git_root(self, cwd):
+                return "/repo/empty"
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _UnbornHeadMgr())
+
+        orch._assign_dispatch("backend", "/repo/empty", "do the thing", project="proj")
+
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha is None
+        assert ps.assign_non_git is False
 
     def test_worktree_dispatch_leaves_baseline_none(self, orch, monkeypatch):
         """An isolated worktree pane already has the equivalent baseline in
@@ -219,6 +276,7 @@ class TestAssignBaseShaCapture:
         assert ps.assign_base_sha is None
         assert ps.assign_git_root is None
         assert ps.assign_dirty_snapshot is None
+        assert ps.assign_non_git is False
 
 
 # ─────────────────────────────────────────────────────────────

@@ -64,6 +64,12 @@ class DigestFacts:
     files_touched: int | None = None
     files_dirs: tuple[str, ...] = field(default_factory=tuple)
     files_note: str = ""
+    # #560: True when the pane's cwd was found (once, at assign) to not be a
+    # git repo at all. Bypasses the generic files_touched=None/files_note
+    # rendering below — that path wraps files_note in its own "ตรวจไม่ได้
+    # (...)" caveat, which produced a nested "ตรวจไม่ได้ (ตรวจไม่ได้ ...)"
+    # when files_note ALSO started with "ตรวจไม่ได้" for this exact case.
+    non_git: bool = False
     report_path: str | None = None
     headline: str = ""  # first line of the agent's own note — CONTEXT ONLY
     # #470: true when `detect_ops_task` recognised this report as an
@@ -138,6 +144,8 @@ def _merge_bit(facts: DigestFacts) -> str:
 
 
 def _files_bit(facts: DigestFacts) -> str:
+    if facts.non_git:
+        return "ไฟล์ที่แตะ: n/a (non-git project)"
     if facts.files_touched is None:
         suffix = f" ({facts.files_note})" if facts.files_note else ""
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"

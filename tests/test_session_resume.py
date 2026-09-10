@@ -420,6 +420,27 @@ class TestRestoreTeammatesWorktreeBookkeeping:
         assert ps.assign_dirty_snapshot == {"a.py": ("M ", 111, 22)}
         assert isinstance(ps.assign_dirty_snapshot["a.py"], tuple)
 
+    def test_restores_non_git_classification_from_snapshot(
+        self, isolated_session_file: pathlib.Path
+    ) -> None:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {
+                "p": [
+                    {
+                        "role": "backend",
+                        "cwd": "/not/a/repo",
+                        "assign_non_git": True,
+                    }
+                ]
+            },
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        assert fake._pane_state["p::backend"].assign_non_git is True
+
     def test_older_snapshot_without_bookkeeping_creates_no_pane_state(
         self, isolated_session_file: pathlib.Path
     ) -> None:
@@ -579,6 +600,24 @@ class TestSnapshotStateWorktreeBookkeeping:
         assert entry["assign_git_root"] == "/repo"
         assert entry["assign_dirty_snapshot"] == {"a.py": ["M ", 111, 22]}
         json.dumps(snap)  # must round-trip through JSON (tuples → lists)
+
+    def test_includes_non_git_classification(self) -> None:
+        # #560: a non-git project's classification must survive a cockpit
+        # restart too — otherwise the one done() report landing right after
+        # a restart falls back to the old nested "ตรวจไม่ได้ (ตรวจไม่ได้ ...)"
+        # caveat again.
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator, PaneState
+
+        fake = SimpleNamespace(
+            _panes_by_project={"p": {"backend": self._pane("/not/a/repo", state="active")}},
+            _pane_state={"p::backend": PaneState(assign_non_git=True)},
+        )
+        snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
+        entry = snap["projects"]["p"][0]
+        assert entry["assign_non_git"] is True
+        json.dumps(snap)
 
     def test_no_pane_state_entry_omits_bookkeeping_without_crashing(self) -> None:
         from types import SimpleNamespace

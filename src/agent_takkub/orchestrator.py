@@ -3111,6 +3111,7 @@ class Orchestrator(
             ps_assign.assign_base_sha = None
             ps_assign.assign_git_root = None
             ps_assign.assign_dirty_snapshot = None
+            ps_assign.assign_non_git = False
         else:
             # #245/#251: a SHARED-tree pane has no WorktreeInfo baseline.
             # Capture HEAD plus the current porcelain paths' status/mtime/size
@@ -3122,15 +3123,24 @@ class Orchestrator(
             _snap_pane = self._project_panes(project_ns).get(role_name)
             _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
             if _snap_cwd:
+                _snap_mgr = _WorktreeManagerSnap()
                 (
                     ps_assign.assign_base_sha,
                     ps_assign.assign_git_root,
                     ps_assign.assign_dirty_snapshot,
-                ) = _WorktreeManagerSnap().shared_tree_baseline(_snap_cwd)
+                ) = _snap_mgr.shared_tree_baseline(_snap_cwd)
+                # #560: classify a missing baseline ONCE, here, not on every
+                # done() — a plain `rev-parse --show-toplevel` failure means
+                # cwd isn't a git repo at all (a static project fact), unlike
+                # an unborn-HEAD or status-read failure inside a real repo.
+                ps_assign.assign_non_git = (
+                    ps_assign.assign_base_sha is None and _snap_mgr.git_root(_snap_cwd) is None
+                )
             else:
                 ps_assign.assign_base_sha = None
                 ps_assign.assign_git_root = None
                 ps_assign.assign_dirty_snapshot = None
+                ps_assign.assign_non_git = False
         initial_task_consumed = ps_assign.spawn_initial_task_state in {
             "pending",
             "delivered",
@@ -5407,6 +5417,7 @@ class Orchestrator(
         assign_base_sha: str | None,
         assign_git_root: str | None,
         assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None,
+        assign_non_git: bool = False,
         git_facts: dict | None = None,
         ops_task: bool = False,
     ) -> tuple[object, dict | None]:
@@ -5506,6 +5517,28 @@ class Orchestrator(
                 "pushed": pushed,
             }
             return facts, precomputed
+
+        if assign_non_git:
+            # #560: a static project fact, classified ONCE at assign() — skip
+            # every git lookup below entirely (there's no repo to ask a
+            # branch/status from) and never re-probe or reformat this on
+            # every single done(). Replaces the old generic "snapshot ตอน
+            # assign ไม่ครบ" caveat, which doubled up into "ตรวจไม่ได้
+            # (ตรวจไม่ได้ ...)" for this exact case.
+            return (
+                DigestFacts(
+                    role=from_role,
+                    ref=ref,
+                    branch=None,
+                    merge_conflicts=None,
+                    merge_note="N/A (non-git project)",
+                    report_path=report_path,
+                    headline=headline,
+                    non_git=True,
+                    ops_task=ops_task,
+                ),
+                None,
+            )
 
         # Shared-tree pane: HEAD covers committed changes in the assignment
         # interval; the dirty-path metadata snapshot covers uncommitted state
@@ -5759,6 +5792,7 @@ class Orchestrator(
         had_assign_base_sha = _ps_done.assign_base_sha
         had_assign_git_root = _ps_done.assign_git_root
         had_assign_dirty_snapshot = _ps_done.assign_dirty_snapshot
+        had_assign_non_git = _ps_done.assign_non_git
         if not hasattr(self, "_last_done_task_ids"):
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
@@ -5990,6 +6024,7 @@ class Orchestrator(
                     had_assign_base_sha,
                     had_assign_git_root,
                     had_assign_dirty_snapshot,
+                    assign_non_git=had_assign_non_git,
                     git_facts=git_facts,
                     ops_task=ops_task,
                 )
@@ -8618,6 +8653,7 @@ class Orchestrator(
                             if assign_dirty_snapshot is not None
                             else None
                         ),
+                        "assign_non_git": bool(ps_snap.assign_non_git) if ps_snap else False,
                     }
                 )
             if entries:
@@ -8696,7 +8732,8 @@ class Orchestrator(
                     _base_sha_restore = (entry or {}).get("assign_base_sha")
                     _git_root_restore = (entry or {}).get("assign_git_root")
                     _dirty_snap_restore = (entry or {}).get("assign_dirty_snapshot")
-                    if _wt_restore or _base_sha_restore or _git_root_restore:
+                    _non_git_restore = bool((entry or {}).get("assign_non_git"))
+                    if _wt_restore or _base_sha_restore or _git_root_restore or _non_git_restore:
                         _ps_restore = self._ps(_exit_key(project, role))
                         if _wt_restore:
                             _ps_restore.worktree = _wt_restore
@@ -8708,6 +8745,12 @@ class Orchestrator(
                             _ps_restore.assign_dirty_snapshot = {
                                 k: tuple(v) for k, v in _dirty_snap_restore.items()
                             }
+                        # #560: a non-git project stays non-git across a
+                        # restart — restore the classification so done()
+                        # doesn't fall back to the generic "snapshot ตอน
+                        # assign ไม่ครบ" caveat for the one report that lands
+                        # right after a cockpit restart.
+                        _ps_restore.assign_non_git = _non_git_restore
                     # #9: re-paste the last task so the pane continues working;
                     # queue a Lead notice (delivered when Lead spawns) either
                     # way so the operator knows the pane was re-spawned.
@@ -10870,6 +10913,7 @@ class Orchestrator(
         snap_assign_dirty_snapshot = (
             _ps_snap.assign_dirty_snapshot if _ps_snap is not None else None
         )
+        snap_assign_non_git = bool(_ps_snap.assign_non_git) if _ps_snap is not None else False
         # #41: carry the stuck-recover attempt count across the close→respawn so
         # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
@@ -10968,6 +11012,7 @@ class Orchestrator(
                 self._ps(key).assign_git_root = snap_assign_git_root
             if snap_assign_dirty_snapshot is not None:
                 self._ps(key).assign_dirty_snapshot = snap_assign_dirty_snapshot
+            self._ps(key).assign_non_git = snap_assign_non_git
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.
