@@ -35,11 +35,11 @@ def test_pair_checker_is_reviewer():
     assert team_preset.verify_mode(cfg) == "reviewer"
 
 
-def test_full_enables_core_positions_and_qa_checker():
+def test_full_enables_core_positions_and_reviewer_checker():
     team_preset.set_current("full", "proj")
     cfg = team_preset.current("proj")
     assert all(cfg["roles"][r] is True for r in team_preset.CORE_POSITION_ROLES)
-    assert cfg["checker"] == "qa"
+    assert cfg["checker"] == "reviewer"
     assert cfg["lead_may_implement"] is False
 
 
@@ -193,11 +193,11 @@ def test_pair_allows_only_reviewer_as_checker():
     assert team_preset.can_spawn("backend", "proj")[0] is False
 
 
-def test_full_allows_positions_and_qa_not_reviewer():
+def test_full_allows_positions_and_reviewer_not_qa():
     team_preset.set_current("full", "proj")
     assert team_preset.can_spawn("backend", "proj")[0] is True
-    assert team_preset.can_spawn("qa", "proj")[0] is True
-    assert team_preset.can_spawn("reviewer", "proj")[0] is False
+    assert team_preset.can_spawn("reviewer", "proj")[0] is True
+    assert team_preset.can_spawn("qa", "proj")[0] is False
 
 
 def test_full_blocks_extra_positions_until_toggled_on():

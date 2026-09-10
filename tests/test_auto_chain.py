@@ -192,44 +192,46 @@ class TestInjectAutoChainHandoff:
         queue = orch._pending_done_notices.get("proj_a", [])
         assert any("auto-chain handoff" in entry.get("body", "") for entry in queue)
 
-    def test_qa_enabled_handoff_tells_lead_to_fire_qa(
+    def test_reviewer_enabled_handoff_tells_lead_to_fire_reviewer(
         self,
         qapp: QCoreApplication,
         two_project_json: pathlib.Path,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """#510: default project (qa enabled) keeps the original 'fire QA
-        LAST as the final gate' instruction."""
+        """#513: default project (auto preset, reviewer enabled) fires
+        reviewer as the terminal checker — qa is no longer the default
+        built-in checker (see test_custom_preset_excludes_qa_from_roster_
+        blocks_qa_gate below for the still-supported opt-in qa path)."""
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
         body = str(panes["lead"].session.write.call_args_list[0].args[0])
-        assert "takkub assign --role qa" in body
+        assert "takkub assign --role reviewer" in body
         assert "DISABLED" not in body
 
-    def test_qa_disabled_handoff_tells_lead_to_skip_qa(
+    def test_reviewer_disabled_handoff_tells_lead_to_skip_reviewer(
         self,
         qapp: QCoreApplication,
         two_project_json: pathlib.Path,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """#510: QA off in this project's Settings → the handoff must tell
-        Lead to SKIP the gate and say so to the user, not silently call qa
-        anyway (which assign() would reject) or pretend the gate ran."""
+        """#513: reviewer off in this project's Settings → the handoff must
+        tell Lead to SKIP the gate and say so to the user, not silently call
+        reviewer anyway (which assign() would reject) or pretend it ran."""
         import agent_takkub.pipeline_config as pipeline_config
 
         payload = pipeline_config.load("proj_a")
-        payload["rolesEnabled"]["qa"] = False
+        payload["rolesEnabled"]["reviewer"] = False
         pipeline_config.save(payload, "proj_a")
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
         body = str(panes["lead"].session.write.call_args_list[0].args[0])
-        assert "QA is DISABLED" in body
-        assert "SKIP the QA gate" in body
-        assert "no automatic QA gate" in body
-        assert "takkub assign --role qa ..." not in body
+        assert "reviewer (this project's checker) is disabled" in body
+        assert "SKIP the verify gate" in body
+        assert "no automatic verify gate" in body
+        assert "takkub assign --role reviewer ..." not in body
 
     def test_pair_preset_handoff_fires_reviewer_not_qa(
         self,
