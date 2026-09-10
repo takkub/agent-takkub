@@ -474,3 +474,140 @@ CLI apply and restore-v1 both succeed under the zero-free-space injection withou
 ### Release disposition
 
 **FAIL — not releasable. Owner: backend#2.** Do not release 2.1.0 or close #504 at `28a4e527`. Baseline improvements are acknowledged, but live-provider removal, missing durable recovery records, and incorrect multi-generation undo remain release blockers. Fix and regress the recorded failures, resolve storage-root override semantics with backend#3, and supply the remaining acceptance evidence before rescoring. This task only appends the existing Round 3 findings; it does not rerun verification or change implementation.
+
+## Round 4 — eda919ea
+
+Date: 2026-09-10. Reviewer: reviewer, mode code (rerouted from codex to claude mid-round, #514). Reviewed **eda919eac4c4f8cdc8b641b060a4c0fa3f87a0f0** — the merge of backend#2's transaction-core rewrite (`26e0820a`, `TransferEntry` + `_copy_phase`/`_prune_phase`, follow-up `a2ad05a9`) and backend#3's storage-root validation (`10136473`, plus the merged `v2_target.py` change). Source was not edited.
+
+**Verdict: FAIL — not releasable. Do not bump 2.1.0 and do not close #504 or #568 at this commit. Owner: backend#2** (R4-M2 storage-root semantics: coordinate backend#3).
+
+The rewrite is a real structural improvement and it closes the three Round 3 BLOCKERs on their own repros: `merged_live_home_after_retry`, `manifest_write_*` and `middle_generation_*` all pass now, and every Round 1–3 harness is green. But the new core still loses the only copy of user data on two independent paths, and an ordinary process death during archival permanently disables `restore-v1` — the one recovery verb #504 promises. Gemini's B1 and B2 are not implemented as specified: there is no write-ahead ledger before the first copy, no `fsync` anywhere in the ledger writer, no per-entry `PENDING`/`VERIFIED` state, and the prune pass runs per step rather than after whole-ladder validation.
+
+### Round 4 evidence
+
+- Baselines rerun by this reviewer against this worktree's `src` (not reported second-hand): `504-round2-repro.py` **16/16 PASS**, `504-round2-extra.py` **13/13 PASS**, `504-round3-faults.py` **28/28 PASS**, all with `failures=[]`. Output: `504-round2-repro-r4rev.jsonl`, `504-round2-extra-r4rev.jsonl`, `504-round3-faults-r4rev.jsonl`. This confirms Lead's harness run on the same commit.
+- Round 4 fault harness: `504-round4-faults.py` (56 cases, written by the codex reviewer pane before the reroute) with its recorded run `504-round4-faults.jsonl`. Rerun independently here into `504-round4-faults-claude-rerun.jsonl`: **24 PASS / 32 FAIL**, a byte-identical failure list to the original run. The harness was not modified.
+- Repository test suite for the touched modules: **156 passed** (`test_core_migration_promote_v1.py`, `test_cli_migrate.py`, `test_auto_migrate_boot.py`, `test_core_migration.py`, `test_core_storage_v2_target.py`) with `PYTHONPATH=<worktree>/src`.
+- All artifacts live under `C:/Users/monch/WebstormProjects/agent-takkub/runtime/exports/2026-09-10/agent-takkub/`. Fixture roots for the reruns: `r4/504-review-b7abea6g`, `r4/504-round4-8mkqv_z6`. Harness crash cases use real `os._exit(91)` worker subprocesses; this is process-death testing, **not** a physical power-cut or cross-volume test. No real user data or provider credentials were touched.
+- `promote_v1.py:line` references are `src/agent_takkub/core/migration/promote_v1.py` at this commit. No CI, six-provider, old-wheel or soak evidence is claimed by this round.
+
+### Trace against the Gemini B1–B4 design spec
+
+| Spec item | Status | What the code actually does |
+| --- | --- | --- |
+| B1 — copy-only pass never touches source | **PARTIAL** | `_copy_phase` (`:358`) truly never mutates `src`, and `disk_full_middle_copy` confirms a mid-copy ENOSPC leaves both originals byte-intact. But a file created in the source **after** its inventory was computed is destroyed by the whole-directory prune (R4-B2). |
+| B1 — prune only after all domains and generations validate | **NO** | `_prune_phase` runs inside each step's own `apply()` (`:822`, `:1174`). `barrier_domain_failure`, `barrier_domain_validation` and `barrier_old_generation` all show the nested `v2/` source already pruned while a later domain step reports `validate` false, and archival proceeding with a manifest-less generation on disk. |
+| B1 — an un-prunable entry keeps its duplicate and marks cleanup pending | **NO** | On any prune failure the batch reconstructs `src` from `dest` (`:437`–`:441`) instead of retaining the duplicate. Behaviourally safe here (copies stay at least 1) but it is the reconstruct-shaped recovery the spec asked to remove. `prune_duplicate_only_contract` records the writes back into `v2/`. |
+| B1 — no undo that deletes the target | **YES** | Undo only ever touches `dest` when a preimage exists (`_undo_copied_dest`, `:236`), and `ArchiveV1LegacyStep.rollback` is copy-only (`:1374`). |
+| B2 — ledger written before the first file copy | **NO** | Observed event order for a two-entry promote is `copy:models, copy:state, ledger, remove:models, ledger, remove:state` (`wal_observed`). Every copy precedes the first ledger write; nothing on disk says a transaction is in flight. |
+| B2 — flush/fsync before each state transition | **NO** | `write_json_atomic` (`registry_copy_step.py:41`) writes a temp file and `os.replace`s it with no `flush`/`fsync` on the file or its directory. The harness arms crash points inside `os.fsync` and the workers exit **0** instead of 91 — the hook is never reached because the writer never calls it (`crash_promote_fsync_before/after`, `crash_archive_fsync_before/after`). |
+| B2 — per-entry PENDING/VERIFIED state plus checksums | **NO** | Promote ledger entries carry only `name`, `kind`, `paths` and `path` (`to_ledger`, `:284`); no state field, and `sha256` is passed only by the archive step. |
+| B3 — command-level immutable snapshot for `restore-v1` | **PRESENT BUT UNSAFE** | `_begin_command_snapshot` and `_revert_to_command_snapshot` exist and fix the Round 3 shadowing (`middle_generation_entry_state` and the nested variant now pass), but both swallow every `OSError` — see R4-B1. |
+| B4 — no swallowed errors in migration/restore/ledger paths | **NO** | Seven bare `except: pass` handlers remain at `promote_v1.py` lines **88, 232, 644, 663, 673, 1154, 1248**. Lines 644, 663 and 673 are the snapshot and revert paths and are the direct cause of R4-B1. Line 88 (`_log_event`'s own guard) is benign. |
+| Never-touch enforced on every pass | **NO** | Three separate paths still write to or remove a live provider home — R4-H4 and R4-H5. |
+
+### R4-B1 — BLOCKER: `restore-v1` destroys the live file when its own snapshot could not be taken
+
+**Owner: backend#2.** `_begin_command_snapshot` copies each name into a snapshot directory and discards any `OSError` with a bare `pass` (`promote_v1.py:644`). Nothing checks afterwards whether a snapshot actually exists. When the command later aborts, `_revert_to_command_snapshot` deletes the current on-disk entry first (`:659`–`:664`) and only then tries to copy the saved preimage back, discarding that failure too (`:673`). A name whose snapshot silently failed is therefore deleted and never restored.
+
+`snapshot_capture_then_integrity` reproduces the worst shape: three archive generations exist, the user then writes a unique value into `same.json`, the latest generation is corrupt, and the snapshot copy raises `ENOSPC`. The archive integrity check correctly refuses the restore — and the revert then erases the live file. Recorded result: `target: null`, `entry_copies: []`. **Zero copies of the user's value survive anywhere on disk**, on a command that reported only "refusing to restore". `snapshot_capture_middle` and `snapshot_revert_middle` end the same way, with the value surviving only inside internal `migration_backups` and `restore-v1-snapshots` scratch directories the user is never told about.
+
+This is reachable without an actually full disk, because the preflight meant to prevent it under-measures by three orders of magnitude: `restore_size_observed` records `estimate=374` bytes against a live preimage of `262144` bytes, and the gate passes (`allowed: true`). Required: a failed snapshot capture must abort the command before anything is touched; the revert must verify the preimage exists before deleting the current entry; and both must report failure instead of `pass`.
+
+### R4-B2 — BLOCKER: a source file written after copy-verification is deleted with no copy anywhere
+
+**Owner: backend#2.** `TransferEntry.paths` is computed once before any copy (`:802`, `:1138`) and is the only inventory recovery ever reads — exactly the right fix for R3-B1. But the prune still removes the whole source **directory** (`_remove(entry.src)` at `:428`, `shutil.rmtree` at `:194`). Any file that appears in that directory between verification and prune is deleted although it was never copied and is in no inventory.
+
+`late_source_conservation` writes `late.json` into the source right after `copy_verified` returns and records `copies: []` — zero surviving copies, while `apply()` reports `ok: true`. The trigger is not exotic: takkub runs many panes against one `DATA_HOME`, and boot-time migration is not exclusive of other writers. Required: prune per recorded relative path, never the directory as a unit, and refuse to remove a source directory that still holds an unrecorded file — the way `_rmdir_tree` (`:199`) already refuses for the legacy `v2/` root.
+
+### R4-B3 — BLOCKER: one manifest-less archive generation disables `restore-v1` permanently
+
+**Owner: backend#2.** A crash during the archive copy phase leaves `backups/v1-archive-<ts>/` on disk with content and no `manifest.json`, and nothing ever cleans it up or resumes it — a retry allocates a fresh timestamp (`:1128`). `list_v1_archives` then returns that generation with `unreadable: True` but a real `ts` (`:510`–`:521`), and `_cmd_migrate_restore_v1` walks every returned `ts` unconditionally (`cli.py:3168`). `_find_manifest_by_ts` returns `None` for it, `ArchiveV1LegacyStep.rollback` fails with "no v1-archive-<ts> generation found" (`:1340`), the command reverts to its snapshot and returns. Every future `restore-v1` takes the same path.
+
+`crash_archive_tmp_before`, `crash_archive_tmp_after` and `crash_archive_replace_before` all record `restored: [null, null, null]` and `restore_ok: false` after three boot replays plus a supported restore, with the first replay reporting `rolled_back`. `barrier_old_generation` shows the same poisoning from a pre-existing empty generation directory. The bytes do survive under `backups/`, so this is loss of the recovery path rather than erasure — but "เอากลับได้เสมอ" is a core #504 acceptance requirement and an ordinary crash kills it. Required: skip or quarantine unreadable generations in the walk so they cannot fail the whole command, and detect-and-resume or discard an incomplete generation at boot. The `ts=""` entry returned on a listing `OSError` (`:497`) hits this identically.
+
+### R4-H1 — HIGH: B2 durability is claimed but not implemented
+
+**Owner: backend#2.** Covered in the trace table: no pre-copy ledger, no `fsync`, no per-entry state. `_prune_phase`'s docstring promises that "a durable ledger write naming it has itself already succeeded" (`:398`) and the commit subject says "WAL-safe", but `write_json_atomic` returns as soon as the page cache accepts the write. On a real power cut between the ledger write and `os.replace` reaching disk, the removal that follows is unrecorded — the exact R3-B2 shape the barrier was added to prevent. `wal_before_copy`, `wal_durable`, `wal_states` and the four `crash_*_fsync_*` cases all fail. Fix in `write_json_atomic` itself (flush plus `os.fsync` on the temp file, and fsync the parent directory on POSIX) so every ledger user inherits it, then re-run the fsync crash points and require exit 91.
+
+### R4-H2 — HIGH: a lost ledger becomes a green validate and a "successful" rollback
+
+**Owner: backend#2.** With the promote source already removed, deleting or emptying `backups/promote-v2-root-manifest.json` yields `validate_ok: true` and `rollback_ok: true` while `source` is `null` (`ledger_promote_deleted`, `ledger_promote_empty_object`). `_promoted_member_problems` returns `[]` when the manifest is absent (`:758`–`:759`), and `rollback` reports "no promote manifest — nothing to undo" (`:869`–`:873`). `ledger_archive_empty_object` is green the same way, and `ledger_archive_deleted` returns `rollback_ok: true` ("nothing to restore") for a `DATA_HOME` whose V1 files are gone. Only the `corrupt` variants fail closed. A missing ownership record after a migration has run must be a hard validation failure, not silence.
+
+### R4-H3 — HIGH: failed source reconstruction still retracts the ledger
+
+**Owner: backend#2.** This is R3-H1 carried into the new core. When a prune fails and `restore_source_from_dest` also fails, `_prune_phase` still calls `write_committed([])` (`:443`), dropping the entry from the ledger. `permission_prune_recovery_fails` records `source_a: null`, `target_a: "A"` and `ledger: {"promoted": []}` — the source is gone, the only copy sits at the target, and nothing on disk records that the target owns it. A later `rollback` cannot put it back, and `validate` is green. Retain ownership for every entry whose source was not verifiably reconstructed.
+
+### R4-H4 — HIGH: a registered provider home nested in a shared V2 directory is archived
+
+**Owner: backend#2.** `_named_account_home_names()` protects registered account homes among top-level candidates, but `_shared_dir_legacy_candidates()`'s `projects/*/role-providers.json` glob (`:180`–`:183`) never consults it. `never_touch_shared_registered` registers `projects/team` as a `config_dir` in `user-profiles.json`, and after `apply()` the live `role-providers.json` reads `null` — moved into the archive. Apply the registered-home exclusion to the H7 globs as well as to the top-level candidate list.
+
+### R4-H5 — HIGH: promotion and restore overwrite live credentials with stale copies
+
+**Owner: backend#2.** `copy_verified` merges with `shutil.copytree(..., dirs_exist_ok=True)` (`verify_copy.py:72`), which overwrites same-named files. `never_touch_promote_collision` puts `LIVE` in `providers/kimi/default/auth.json` and a stale `OLD` in `v2/providers/kimi/default/auth.json`; after promotion the live credential reads `OLD`. `never_touch_restore_registered` is the mirror case: `restore-v1` writes an older archived copy over a live registered home. A preimage does land in `migration_backups`, so this is recoverable by hand, but the user is never told and a broken provider login is the first symptom. Require an explicit collision policy — refuse, or keep the newer file and report — rather than silent last-writer-wins.
+
+### R4-H6 — HIGH: a crash mid-directory-removal drops the first file from ownership
+
+**Owner: backend#2.** `crash_promote_partial_directory` kills the worker after `rmtree` has deleted one file inside a promoted directory. Three boot replays plus `restore-v1` return `restored: [null, "CRASH-1", "CRASH-2"]` with `restore_ok: true` — the command reports success while the first file is missing from its original location. One copy survives at the target throughout (the harness's per-replay copy assertion holds), so this is inventory loss, not erasure. Same root cause as R4-B3: nothing durable says the transaction was interrupted, so replay reconstructs intent from live disk state.
+
+### R4-H7 — HIGH: `restore-v1` is not all-or-nothing when the final promote rollback fails
+
+**Owner: backend#2.** `_cmd_migrate_restore_v1` reverts to the command snapshot only inside the generation loop (`cli.py:3202`–`3205`). The final `engine.rollback_step("promote-v2-root")` result is appended with no revert, so a failure there leaves every archive generation applied on top of the user's entry state. `final_promote_abort_entry_state` records the reports ending in `false` with the target no longer at its entry value.
+
+### R4-M1 — MED: R2-H3 remains open — preflight is single-volume and under-measures restore
+
+**Owner: backend#2.** `boot._disk_has_room` queries only `DATA_HOME`'s volume: `volume_gate_observed` shows a single queried path and `allowed: true` while the simulated volume holding `migration_home()` (snapshots and step backups) reports zero free. `_estimate_restore_bytes` omits the command snapshot and the overwritten live preimages entirely (`estimate: 374` against a `262144`-byte live file). The Round 3 CLI-preflight gap itself is closed — `disk_cli_apply` and `disk_cli_restore-v1` now pass — but the gate it added measures the wrong thing on the wrong volume, and it is the first line of defence against R4-B1.
+
+### R4-M2 — MED: `TAKKUB_STORAGE_ROOT` pointing at the container is accepted as the root
+
+**Owner: backend#3 for the policy call, backend#2 to land it.** `_has_v2_layout_markers` accepts a directory when the markers are found either at that path or one level down at `<path>/v2` (`v2_target.py:49`), but `effective_data_home` then returns the path as given. `storage_root_bare_nested` records `selected: .../primary` where the real root is `.../primary/v2` — reads and writes split across two roots. The three Round 3 cases (`nonexistent`, `wrong`, `file`) are properly rejected with a logged `storage_root_ambiguous` reason and now pass; only the "one level up" case resolves wrongly. Either resolve to the nested root when the markers are found there, or reject the container.
+
+### R4-L1 — LOW: failure summaries claim more than the code verified
+
+`PromoteV2RootStep.apply` and `ArchiveV1LegacyStep.apply` return "every source has been restored, nothing lost" (`:830`, `:1182`) even when `_prune_phase` appended "restore incomplete" to the same error string. `prune_denied_observed` shows the wording in place. The detail arrives later in the message, but the operator reads the claim first.
+
+### The three claimed invariants
+
+Backend#2's invariant claim is only partly borne out. There are real, well-aimed regression tests for each Round 3 finding — `test_promote_recovery_never_contaminates_ownership_with_a_live_sibling`, `test_promote_recovery_restores_every_file_after_a_partial_directory_removal`, `test_restore_v1_cli_multi_generation_undo_reverts_to_command_entry_state`, `test_promote_apply_refuses_when_existing_manifest_is_corrupt` and four new error-reporting tests — and all 156 tests pass. But they are per-defect regressions, not the property or contract tests the spec asked for.
+
+- **Invariant 1 (copies never below 1)** — no repository test asserts it. The harness's `phase_line_boundary_copies` does (68 Python line boundaries inside `_copy_phase` and `_prune_phase`, minimum 1) and passes, but its scope is precisely the two functions that were rewritten. Outside that scope the invariant is violated twice with zero surviving copies: R4-B1 on the restore path and R4-B2 on the late source file.
+- **Invariant 2 (idempotent replay from an arbitrary crash)** — no repository test performs a real process death: `os._exit`, `subprocess` and `fsync` appear **zero** times across `test_core_migration_promote_v1.py`, `test_auto_migrate_boot.py` and `test_cli_migrate.py`. The single crash test (`test_promote_survives_a_crash_right_after_a_real_source_removal`) raises an in-process `RuntimeError` at one chosen point. The harness's real `os._exit` replays confirm the no-foreign-file half of the invariant holds at every crash point tested, but the original-location half fails at four of them (R4-B3, R4-H6).
+- **Invariant 3 (multi-step abort returns to command entry state)** — covered for a clean I/O world only. `middle_generation_entry_state` and its nested variant pass, and so does the repository test. Inject an I/O failure into the snapshot or the revert itself and the invariant breaks with zero copies (R4-B1), as does a failure in the final promote rollback (R4-H7).
+
+Required before Round 5: express invariants 1 to 3 as property tests in `tests/`, driven by real `os._exit` workers across every crash point, with fault injection (ENOSPC, EACCES) applied to the snapshot and revert paths too, not only to the happy path.
+
+### Acceptance matrix — Round 4 re-score
+
+| Requirement | Round 4 verdict | Evidence / remaining condition |
+| --- | --- | --- |
+| Automatic installed promotion; fresh two-boot layout | **PASS** | `504-round2-repro` 16/16 rerun here, including `fresh_two_boots`, `mixed_boot_projects` and `version_upgrade`. |
+| Archive complete and validation trustworthy | **FAIL / HIGH** | R4-H2: a deleted or emptied ledger validates green. Round 3's `promoted_member_inventory`, `archive_missing_manifest_validation` and `domain_null_data` are closed. |
+| Restore always possible; downgrade safe | **FAIL / BLOCKER** | R4-B1 (zero copies), R4-B3 (`restore-v1` permanently disabled after a crash), R4-H7 (not all-or-nothing). Old-wheel downgrade still not exercised. |
+| Provider homes untouched; six providers work | **FAIL / HIGH** | R4-H4 and R4-H5. Round 3's `merged_live_home_after_retry` BLOCKER is closed. Authenticated six-provider coverage still absent. |
+| Whole prior state restored on midway failure | **FAIL / BLOCKER** | R4-B2 (late source file), R4-H3 (ownership retracted after failed reconstruction), R4-H6. The Round 2 and 3 delete-phase and manifest-write repros all pass. |
+| Disk checked before mutation | **FAIL / MED** | R4-M1: CLI preflight now exists but measures one volume and under-estimates restore by roughly 700 times. |
+| Dev/worktree readers agree | **PARTIAL** | `storage_root_empty`, `wrong`, `nonexistent`, `file`, `correct` and pane stamping pass; R4-M2 container case resolves wrongly. |
+| Cross-volume-safe implementation | **PASS (simulated)** | `cross_volume_copy_simulated` (EXDEV on every `os.replace` and `shutil.move`) and `windows_long_spaced_home` (332-character path with spaces) both pass. No physical second drive was used. |
+| No swallowed errors in migration/restore/ledger | **FAIL / HIGH** | Seven bare `except: pass` remain; three of them cause R4-B1. |
+| Release and migration documentation | PASS as unreleased documentation | Release hold retained; this candidate must not be described as safe. |
+| Candidate CI on both OSes, six providers, old-wheel, one-week soak | **NOT ESTABLISHED** | No CI run exists for `eda919ea`; none of the four were exercised in this round. |
+
+### #568 — cannot be closed
+
+Both documented gaps are still open at this commit.
+
+1. **H9 domain inventory.** Archive generations carry per-file SHA-256, `validate()` recomputes them, and `_promoted_member_problems` now checks recorded promoted members — genuine progress. But `engine.py` still returns unconditional success for a domain step whose `_pending()` is false, and R4-H2 shows the promote inventory itself can vanish while validation stays green. There is no persisted per-generation inventory of every promoted target that survives losing the ledger.
+2. **Detect-and-resume for an interrupted transaction.** Not implemented. Nothing on disk marks a transaction as in flight (R4-H1), nothing at boot notices an incomplete archive generation, and R4-B3 shows that residue actively breaks the manual recovery verb the issue points operators at.
+
+### Release disposition and the gates for Round 5
+
+Not releasable. Fix R4-B1, R4-B2 and R4-B3 first, then R4-H1 through R4-H7, then re-run `504-round4-faults.py` unmodified and require 56/56. R4-M2 needs a written storage-root policy decision with backend#3 before it is coded.
+
+The pre-bump evidence checklist below is **not yet applicable** and is recorded so Lead knows what to collect once Round 5 comes back clean. Every item must name the candidate commit itself.
+
+- [ ] `504-round4-faults.py` 56/56 with `failures=[]`, plus Rounds 1 to 3 still green, all rerun against the candidate commit.
+- [ ] Invariants 1 to 3 present as property tests in `tests/`, using real `os._exit` workers, with fault injection on the snapshot and revert paths; full suite green.
+- [ ] `gh run list --commit <candidate>` shows a green run on **both** `windows-latest` and `macos-latest`, not a run for an ancestor commit.
+- [ ] A real old-wheel downgrade: install the previous released wheel over a `DATA_HOME` migrated by the candidate, boot it, and show the project list and provider logins intact. The headless `git archive` smoke from Round 1 does not satisfy this.
+- [ ] All six providers (claude, codex, gemini-agy, opencode, kimi, cursor) authenticated and working after a real migration, with the credential-collision cases from R4-H5 checked by hand.
+- [ ] Prod soak on the candidate, one week minimum, with no use of any escape hatch. The 2026-09-07 soak start cannot complete before 2026-09-14 and it was started on a different commit.
