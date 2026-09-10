@@ -20,14 +20,17 @@ default under the ``full`` preset) plus five "extra" ones (``tester`` /
 ``analyst`` / ``designer`` / ``docs`` / ``security``, OFF by default under
 every built-in preset — they only spawn once a project (or a task's
 ``custom`` preset) explicitly turns one on) — plus any project custom role —
-plus one **checker** slot. ``qa`` and ``critic``
-stay separate roles today (#513 will fold them into ``reviewer`` with a
-code|e2e|ui mode and drop providers from the role list); until then the
-checker slot maps to a real role through the single :data:`CHECKER_ROLES`
-table below, so that future collapse only touches this one table, not the
-preset model. Provider-panes (codex/gemini/opencode/kimi/cursor) and ``shell``
-are NEVER part of a preset's roster — still directly `assign`-able as always,
-untouched by preset switches.
+plus one **checker** slot. Every built-in preset's checker is ``reviewer``
+now (#513 UI half — the Settings roster shows the 5-position list frontend/
+backend/mobile/devops/reviewer + custom roles; ``qa``/``critic`` stay
+spawnable via a ``custom`` preset's explicit ``checker`` choice, or directly
+through `assign`, but no longer appear in that default list). The checker
+slot still maps to a real role through the single :data:`CHECKER_ROLES`
+table below, so a future full fold (mode-aware reviewer, dropped ``qa``
+role) only touches this one table, not the preset model. Provider-panes
+(codex/gemini/opencode/kimi/cursor) and ``shell`` are NEVER part of a
+preset's roster — still directly `assign`-able as always, untouched by
+preset switches.
 
 File shape (mirrors ``pipeline_config``'s per-project JSON)::
 
@@ -112,7 +115,10 @@ BUILTIN_PRESETS: dict[str, dict] = {
             **dict.fromkeys(CORE_POSITION_ROLES, True),
             **dict.fromkeys(EXTRA_POSITION_ROLES, False),
         },
-        "checker": "qa",
+        # #513: reviewer is the checker for every built-in preset now — qa
+        # stays spawnable (CHECKER_ROLES, pipeline_executor's "qa" branch)
+        # only for a project that explicitly picks it via a `custom` preset.
+        "checker": "reviewer",
         "lead_may_implement": False,
         "template": "feature",
         "exec_mode": "parallel",
@@ -130,7 +136,7 @@ QUICK_PRESET_IDS: tuple[str, ...] = ("solo-lead", "pair", "full", "auto")
 _DESCRIPTIONS: dict[str, str] = {
     "solo-lead": "Lead อ่าน → แก้ → ทดสอบเอง ไม่ spawn ใคร",
     "pair": "Lead ทำเอง + reviewer 1 คน อ่านอย่างเดียว",
-    "full": "แยก role ตาม template, QA ปิดท้ายเสมอ",
+    "full": "แยก role ตาม template, reviewer ปิดท้ายเสมอ",
     "custom": "เลือกเอง: role ไหนบ้าง · Lead แก้โค้ดได้ไหม · ตรวจด้วยอะไร",
     "auto": "Lead เสนอขนาดจาก scope ของงานแต่ละครั้ง",
 }
@@ -279,7 +285,7 @@ def _resolve(preset_id: str, project: str | None, raw: dict) -> dict:
             **dict.fromkeys(EXTRA_POSITION_ROLES, False),
             **dict.fromkeys(sorted(_custom_role_names()), False),
         },
-        "checker": "qa",
+        "checker": "reviewer",
         "lead_may_implement": False,
         "template": "feature",
         "exec_mode": "parallel",

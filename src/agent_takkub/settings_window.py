@@ -1467,7 +1467,25 @@ class SettingsWindow(
             # sits on a FIXED team preset flips it to "custom" (carrying the
             # other resolved fields along) so the preset doesn't silently
             # overwrite the user's manual choice on its next apply.
-            _team_preset.note_manual_roles_change(roles_enabled, self._project)
+            # #513: tester/analyst/designer/docs/security no longer get a row
+            # on this page (see `_rebuild_roster_panel`), but `roles_enabled`
+            # above still carries pipeline_config's own independently-
+            # defaulted value for them (True unless something else already
+            # saved a False) — comparing THAT against team_preset's roster
+            # (always False for extras under every built-in preset) would
+            # read as spurious drift on a project's very first save and wrongly
+            # flip it to "custom". Drop them here so note_manual_roles_change
+            # only diffs the roles this page actually lets the user touch;
+            # its own defaults (False for a fixed preset, the existing custom
+            # value otherwise) already do the right thing for the rest.
+            _team_preset.note_manual_roles_change(
+                {
+                    k: v
+                    for k, v in roles_enabled.items()
+                    if k not in _team_preset.EXTRA_POSITION_ROLES
+                },
+                self._project,
+            )
 
             updated_mcps = pane_tools_dialog.matrix_to_role_items(
                 {
@@ -2081,7 +2099,16 @@ class SettingsWindow(
                 w.deleteLater()
 
         cfg = _team_preset.resolve(self._selected_team_preset_id, self._project)
-        position_roles = list(cfg["roles"].keys())
+        # #513: this page's role list is 5 positions (frontend/backend/
+        # mobile/devops + reviewer as the checker below) plus any project
+        # custom role — tester/analyst/designer/docs/security stay real,
+        # preset-governed positions (still toggleable via a `custom` preset
+        # payload / the Pipeline Builder palette), they just no longer get a
+        # row on THIS page, so the roster reads as the short list Lead scopes
+        # a task against instead of a 9-row wall most projects never touch.
+        position_roles = [
+            r for r in cfg["roles"].keys() if r not in _team_preset.EXTRA_POSITION_ROLES
+        ]
         checker_role = _team_preset.CHECKER_ROLES.get(cfg["checker"]) if cfg["checker"] else None
         display_roles = ["lead", *position_roles, *([checker_role] if checker_role else [])]
 

@@ -486,13 +486,13 @@ class TestProvidersRolesView:
 
     def test_save_apply_persists_role_enabled_and_provider(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
-        dlg._role_toggles["qa"].setChecked(False)
+        dlg._role_toggles["reviewer"].setChecked(False)
         combo = dlg._role_provider_combos["backend"]
         combo.setCurrentIndex(combo.findData("codex"))
         dlg._on_save_apply_clicked()
 
         payload = pipeline_config.load(None)
-        assert payload["rolesEnabled"]["qa"] is False
+        assert payload["rolesEnabled"]["reviewer"] is False
         assert provider_config.provider_for("backend") == "codex"
         assert dlg.result() == QDialog.DialogCode.Accepted
         dlg.deleteLater()
@@ -534,10 +534,10 @@ class TestProvidersRolesView:
 
     def test_reset_reverts_unsaved_toggle(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
-        dlg._role_toggles["qa"].setChecked(False)
+        dlg._role_toggles["reviewer"].setChecked(False)
         assert dlg._dirty is True
         dlg._on_reset_clicked()
-        assert dlg._role_toggles["qa"].isChecked() is True
+        assert dlg._role_toggles["reviewer"].isChecked() is True
         assert dlg._dirty is False
         dlg.deleteLater()
 
@@ -591,7 +591,7 @@ class TestProvidersRolesView:
         """Gemini #16 — nothing staged at open time means nothing to apply."""
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         assert dlg._save_btn.isEnabled() is False
-        dlg._role_toggles["qa"].setChecked(False)
+        dlg._role_toggles["reviewer"].setChecked(False)
         assert dlg._save_btn.isEnabled() is True
         dlg.deleteLater()
 
@@ -602,16 +602,16 @@ class TestProvidersRolesView:
         own "+ Create Role" button writes through immediately), so it can't
         stand in as "the other still-dirty view" here anymore."""
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
-        dlg._role_toggles["qa"].setChecked(False)
+        dlg._role_toggles["reviewer"].setChecked(False)
         dlg._goto_view(settings_window.VIEW_PIPELINE_BUILDER)
         dlg._on_add_hop_clicked()
         assert dlg._dirty is True
 
         dlg._on_reset_clicked()  # reverts the Pipeline view only
 
-        # Providers & Roles' staged qa-disable must still be dirty/unsaved.
+        # Providers & Roles' staged reviewer-disable must still be dirty/unsaved.
         assert dlg._dirty is True
-        assert dlg._role_toggles["qa"].isChecked() is False
+        assert dlg._role_toggles["reviewer"].isChecked() is False
         dlg.deleteLater()
 
     def test_substitute_badge_shown_when_selected_provider_unavailable(self) -> None:
@@ -639,7 +639,7 @@ class TestProvidersRolesView:
         from PyQt6.QtWidgets import QPushButton
 
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
-        row = dlg._role_toggles["qa"].parent()
+        row = dlg._role_toggles["reviewer"].parent()
         assert not any(
             isinstance(w, QPushButton) and w.text() == "x" for w in row.findChildren(QPushButton)
         )
@@ -1401,7 +1401,7 @@ class TestSaveApplyAtomicity:
         monkeypatch.setattr(shared_dev_tools, "list_master_mcps", lambda: ["playwright"])
         monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: None)
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
-        dlg._role_toggles["qa"].setChecked(False)
+        dlg._role_toggles["reviewer"].setChecked(False)
         combo = dlg._role_provider_combos["backend"]
         combo.setCurrentIndex(combo.findData("codex"))
         dlg._goto_view(settings_window.VIEW_MCP_MATRIX)
@@ -1412,7 +1412,7 @@ class TestSaveApplyAtomicity:
         dlg._on_save_apply_clicked()
 
         assert provider_config.load_providers().get("backend") != "codex"
-        assert pipeline_config.load(None)["rolesEnabled"].get("qa", True) is True
+        assert pipeline_config.load(None)["rolesEnabled"].get("reviewer", True) is True
         assert dlg.result() != QDialog.DialogCode.Accepted
         assert dlg._dirty is True
         dlg.deleteLater()
@@ -2137,20 +2137,20 @@ class TestTeamPresetView:
         dlg._on_team_preset_card_clicked("full")
         for role in team_preset.CORE_POSITION_ROLES:
             assert dlg._role_toggles[role].isChecked() is True
-        assert dlg._role_toggles["qa"].isChecked() is True
+        assert dlg._role_toggles["reviewer"].isChecked() is True
         dlg.deleteLater()
 
-    def test_clicking_full_leaves_extra_positions_off_but_visible(self) -> None:
-        """2026-09-09: tester/analyst/designer/docs/security show up as
-        toggle rows under every preset, but `full` doesn't switch them on —
-        a project must opt in by hand."""
+    def test_clicking_full_hides_extra_positions_from_the_roster(self) -> None:
+        """#513: this page's role list is 5 positions (frontend/backend/
+        mobile/devops/reviewer) + custom roles — tester/analyst/designer/
+        docs/security no longer get a row here (still toggleable via a
+        `custom` preset payload or the Pipeline Builder palette)."""
         dlg = settings_window.SettingsWindow(
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("full")
         for role in team_preset.EXTRA_POSITION_ROLES:
-            assert role in dlg._role_toggles
-            assert dlg._role_toggles[role].isChecked() is False
+            assert role not in dlg._role_toggles
         dlg.deleteLater()
 
     def test_clicking_solo_lead_disables_every_position_and_drops_checker_row(self) -> None:
@@ -2158,8 +2158,10 @@ class TestTeamPresetView:
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("solo-lead")
-        for role in team_preset.POSITION_ROLES:
+        for role in team_preset.CORE_POSITION_ROLES:
             assert dlg._role_toggles[role].isChecked() is False
+        for role in team_preset.EXTRA_POSITION_ROLES:
+            assert role not in dlg._role_toggles
         assert "qa" not in dlg._role_toggles
         assert "reviewer" not in dlg._role_toggles
         assert "lead" in dlg._role_toggles or "lead" in dlg._role_provider_combos
@@ -2206,7 +2208,7 @@ class TestTeamPresetView:
         cfg = team_preset.current("proj-a")
         assert all(cfg["roles"][r] is True for r in team_preset.CORE_POSITION_ROLES)
         assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
-        assert cfg["checker"] == "qa"
+        assert cfg["checker"] == "reviewer"
 
     def test_hand_toggle_after_save_still_flips_a_fixed_preset_to_custom(self) -> None:
         """#512 acceptance, unchanged by the #512-UI refactor of this view:
