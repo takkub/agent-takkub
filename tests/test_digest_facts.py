@@ -58,6 +58,22 @@ class TestFormatDigestFactLine:
         line = format_digest_fact_line(facts)
         assert "\n" not in line
 
+    def test_non_git_project_renders_single_clean_line(self):
+        # #560: non_git=True must short-circuit BEFORE the files_touched=None
+        # branch — that branch wraps files_note in its own "ตรวจไม่ได้ (...)"
+        # and files_note for this exact case also started with "ตรวจไม่ได้",
+        # producing a nested "ตรวจไม่ได้ (ตรวจไม่ได้ ...)" every single done().
+        facts = DigestFacts(
+            role="backend",
+            non_git=True,
+            merge_conflicts=None,
+            merge_note="N/A (non-git project)",
+        )
+        line = format_digest_fact_line(facts)
+        assert "ไฟล์ที่แตะ: n/a (non-git project)" in line
+        assert line.count("ตรวจไม่ได้") == 0
+        assert "((" not in line
+
     def test_no_ref_omits_ref_badge(self):
         facts = DigestFacts(role="mobile")
         line = format_digest_fact_line(facts)

@@ -861,6 +861,17 @@ class PaneState:
     # and continue using WorktreeInfo.base_sha exactly as before.
     assign_git_root: str | None = None
     assign_dirty_snapshot: dict[str, tuple[str, int | None, int | None]] | None = None
+    # #560: True when assign() found the pane's cwd is not inside any git
+    # work tree at all (a bare `rev-parse --show-toplevel` failure), checked
+    # ONCE right here rather than re-probed by done() every single report.
+    # Distinct from the assign_base_sha=None cases above (git repo present
+    # but HEAD unborn, or a status read failed) — those are transient/
+    # per-repo-state, while "not a git repo" is a static fact about the
+    # project (real non-git projects.json dirs exist, see graft_autobuild.py
+    # 2026-08-06). Lets done()'s digest fact table print one clean "non-git
+    # project" line instead of the old nested "ตรวจไม่ได้ (ตรวจไม่ได้ ...)"
+    # caveat repeating on every done() (#560).
+    assign_non_git: bool = False
     # ── auto-resume (🌙, limit_autoresume.py) — park/wake bookkeeping ────────
     # limit_parked: True while this pane is currently parked awaiting its
     # usage-limit window to reset (auto-resume ON path only).

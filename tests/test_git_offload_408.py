@@ -238,6 +238,39 @@ def test_compute_digest_facts_uses_shared_git_facts_without_git(monkeypatch) -> 
     assert facts.uncommitted == 1
 
 
+def test_compute_digest_facts_non_git_project_never_nests_unverifiable(monkeypatch) -> None:
+    """#560: a pane whose cwd was classified as non-git ONCE at assign()
+    (`assign_non_git=True`) must render a single clean line — never the old
+    "ตรวจไม่ได้ (ตรวจไม่ได้ (snapshot ตอน assign ไม่ครบ ...))" double-wrap,
+    and `_compute_digest_facts` must not touch git at all to render it."""
+    monkeypatch.setattr(wm_mod, "WorktreeManager", _NoGitMgr)
+    facts, precomputed = Orchestrator._compute_digest_facts(
+        "backend",
+        "#560",
+        "แก้ non-git project",
+        None,
+        None,
+        "/not/a/repo",
+        None,
+        None,
+        None,
+        assign_non_git=True,
+    )
+    assert precomputed is None
+    assert facts.non_git is True
+    assert facts.files_touched is None
+    assert facts.merge_conflicts is None
+    assert facts.merge_note == "N/A (non-git project)"
+
+    from agent_takkub.digest_facts import format_digest_fact_line
+
+    line = format_digest_fact_line(facts)
+    assert "ไฟล์ที่แตะ: n/a (non-git project)" in line
+    assert "ตรวจไม่ได้" not in line
+    assert line.count("(") == line.count(")")
+    assert "((" not in line
+
+
 # ── orchestrator input helpers + prepared worktree ───────────────────────
 
 
