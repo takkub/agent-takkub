@@ -374,3 +374,103 @@ R2-B1 is a separate, stronger **BLOCKER**: ordinary caught deletion errors actua
 After fixes, require the now-positive 15-case harness and supplementary failure cases to pass, cross-platform candidate CI, complete restored-inventory/old-wheel verification and authenticated provider coverage. The explicit one-week dev/prod soak beginning 2026-09-07 has not elapsed on this review date (earliest 2026-09-14); Lead must provide the required evidence. Lead/operator must also resolve the dev nested-layout and remaining live compatibility-file exceptions against the literal #504 acceptance. A green unit suite does not waive these gates.
 
 The Round 1 embedded release drafts are historical. The finalized **unreleased** candidate text is now in [CHANGELOG.md](../../CHANGELOG.md) and the [2.1.0 migration guide](../v2/2.1.0-migration-guide.md). Both make the release hold explicit, require restore-v1 **before** installing an older version, route 1.x through 2.0.x, document real `--list`/`--archive` behavior and relocation/preimage limitations, and avoid promising that green validation or a successful restore exit proves completeness. No version bump or release publication was performed.
+
+## Round 3 — 28a4e527
+
+Date: 2026-09-10. **Verdict: FAIL — not releasable. Owner: backend#2.** This section supersedes the Round 2 assessment for this candidate while retaining its historical evidence. Current worktree HEAD is `28a4e527`. This is a documentation-only consolidation of existing evidence; no harness, tests, or additional investigation were run and no implementation was edited.
+
+### Round 3 evidence
+
+- Source of truth: `runtime/exports/2026-09-10/agent-takkub/504-round3-faults.jsonl` and case definitions in `504-round3-faults.py`, under the central project root `C:/Users/monch/WebstormProjects/agent-takkub/`. The JSONL records fixture root `504-review-00lezi5a` and source worktree `reviewer-1789035895`.
+- Existing Round 3 fault results: **28 cases, 11 PASS / 17 FAIL**. The table below uses the JSONL verdict records, with observations from their associated records and the case code. Passing fault cases mean the expected rejection/recovery assertions passed, not that the injected operation succeeded.
+- Previous reviewer's summary supplied by Lead: baseline `504-round2-repro.py` **16/16 PASS**, `504-round2-extra.py` **13/13 PASS** on this round. These are reported baseline results, not reruns in this documentation task. They close the corresponding narrow Round 2 repros, not the additional failures below.
+- All `promote_v1.py:line` references below refer to `src/agent_takkub/core/migration/promote_v1.py` at current HEAD; other source references use the same `src/agent_takkub/` prefix. No new CI, authenticated-provider, physical cross-volume, old-wheel, or soak evidence is claimed.
+
+### Fault harness — every recorded case
+
+| Case | Round 3 verdict | Observed result |
+| --- | --- | --- |
+| `last_remove_promote` | PASS | Final removal fails; operation reports false and all three original source values survive. |
+| `last_remove_archive` | PASS | Final removal fails; all three original archive sources survive. |
+| `last_remove_rollback` | PASS | Final removal fails; all three rollback sources survive. |
+| `manifest_write_promote` | FAIL | Manifest write fails but source is removed; apply and rollback report success, original nested file remains absent. |
+| `manifest_write_promote_crash` | FAIL | Failed manifest write followed by interruption after removal; rollback reports success without reconstructing source. |
+| `manifest_write_archive_crash` | FAIL | Failed archive manifest write followed by interruption after removal; restore reports false and original source is absent. |
+| `source_restore_fails_again` | FAIL | Reconstruction error is hidden; manifest drops models ownership although only the flat copy survives. Retry and rollback succeed but original source remains absent. |
+| `merged_live_home_after_retry` | FAIL / BLOCKER | Recovery copies live Kimi auth into nested source; retry claims ownership; successful rollback removes auth from the actual live home. |
+| `partial_final_directory_remove` | FAIL | Failed removal already deleted `state/b.json`; source is absent, target still contains `b`, despite report claiming every source was restored. |
+| `middle_generation_disjoint` | PASS | Second-generation copy fails; undo restores command-entry target value `CURRENT`. |
+| `middle_generation_same_name` | FAIL | Second-generation failure leaves `generation-0` instead of `CURRENT`. |
+| `third_generation_same_name` | FAIL | Third-generation failure leaves `generation-1` instead of `CURRENT`. |
+| `middle_generation_nested_name` | FAIL | Undo leaves `projects/demo/role-providers.json` absent instead of restoring `CURRENT`. |
+| `two_crashes_promote` | PASS | Two simulated interruptions, boot/reboot and restore recover all three original nested files. |
+| `two_crashes_archive` | PASS | Two simulated interruptions, boot/reboot and restore recover all three original root files. |
+| `windows_long_spaced_data_home` | PASS | 332-character home with spaces boots and restores nested value `LONG`. |
+| `storage_root_empty` | PASS | Child reads `PRIMARY`, writes `CHILD` into primary nested root, creates no wrong root. |
+| `storage_root_wrong` | FAIL | Nonempty override selects wrong existing root; read is null, primary stays `PRIMARY`, child writes elsewhere. |
+| `storage_root_nonexistent` | FAIL | Nonempty override creates another root; read is null and primary stays `PRIMARY`. |
+| `pane_overwrites_inherited_root` | PASS | Pane environment stamping replaces incorrect inherited value with the intended `data/v2` root. |
+| `archive_missing_manifest_validation` | FAIL | Validate is green although generation listing marks it unreadable; restore correctly rejects it. |
+| `promoted_member_inventory` | FAIL | Deleting arbitrary promoted `models/unique-extra.json` leaves every validation report green. |
+| `domain_missing` | PASS | Missing required project registry makes validation fail. |
+| `domain_required_key` | PASS | Registry `{}` makes validation fail. |
+| `domain_null_data` | FAIL | Registry `{"data":null}` still validates green. |
+| `disk_cli_apply` | FAIL | CLI apply succeeds and removes legacy source with zero recorded free-space checks under injected zero free space. |
+| `disk_cli_restore-v1` | FAIL | CLI restore succeeds and restores legacy source with zero recorded free-space checks under injected zero free space. |
+| `merge_unreadable_prior_manifest` | FAIL | Apply replaces corrupt prior ownership inventory; rollback succeeds but first nested source stays absent, bytes remain at flat target. |
+
+### R3-B1 — BLOCKER: recovery contaminates promoted ownership and removes live Kimi auth
+
+**Owner: backend#2.** `_restore_removed_source()` copies the entire merged destination directory back to the source (`promote_v1.py:236`, `:243`). That destination includes pre-existing `providers/kimi/default/auth.json`, which was never promoted. After a later source removal fails, this helper reconstructs `v2/providers` with Kimi included. Retry enumerates every nested source file into promoted ownership (`:634`, `:637`, `:648`). Rollback then builds source-removal pairs for those recorded relative files (`:735`, `:751`, `:754`; `_two_phase_move` removes at `:317`).
+
+The recorded outcome is `copied_live_home_to_source=true`, `rollback_ok=true`, `live_home=null`, and `nested_home="live-secret"`. This is removal from the actual provider home, not total erasure of every copy. It still violates the never-touch-provider-home acceptance and can break provider access. Recover only the original source-owned members; destination-only siblings must never become retry ownership. Require this exact failure → retry → rollback regression before closure.
+
+### R3-B2 — BLOCKER: failed durable record does not stop destructive removal
+
+**Owner: backend#2.** `_two_phase_move()` invokes `on_before_remove` at `promote_v1.py:313`, swallows every callback exception at `:314`, then removes source at `:317`. Promotion supplies the manifest callback at `:648`; archive supplies it at `:1022`. A failed write therefore defeats the intended durable-before-delete barrier.
+
+All three manifest-write fault cases fail. The ordinary promote case even reports successful apply and rollback while the original nested file is absent. The interruption cases remove source without a usable record and supported restore cannot reconstruct its original location. These observations establish lost recovery inventory; they do not establish that the copied target bytes were also erased. Required: successful durable recording must be a prerequisite to source deletion, with failure returned before destructive work and inventory retained for retry/recovery.
+
+### R3-B3 — BLOCKER: multi-generation undo does not restore command-entry state
+
+**Owner: backend#2.** CLI tracks only restored names and undoes prior generations in reverse order (`cli.py:3174`, `:3179`, `:3182`). `_undo_restored_names()` resolves each name through the latest backup (`promote_v1.py:1304`) and removes the current destination before copying that backup (`:1306`, `:1309`, `:1310`). It does not retain the exact preimage for each operation.
+
+For overlapping names, the latest backup belongs to a later generation, so failed restore leaves `generation-0` or `generation-1`, not command-entry `CURRENT`. For a nested name, `BackupManager.backup()` stores only `source.name` (`core/migration/backup.py:40`), but `latest_backup()` looks up `slot / name` (`:68`); the nested relative path does not find that basename backup. Undo then deletes the target and restores nothing. The disjoint-name case passes, so that baseline cannot certify multi-generation atomicity. Required: carry exact per-operation backup references and restore the command-entry state, including nested paths, on any later-generation failure.
+
+### R3-H1 — HIGH: source recovery failures and partial removals are misreported
+
+**Owner: backend#2.** `_restore_removed_source()` suppresses `OSError` (`promote_v1.py:247`). Its caller still invokes the ownership-retraction callback (`:324`, `:327`; promotion binding at `:651`), discarding the record even if reconstruction failed. The recorded retry/rollback then cannot put the first file back. Separately, `removed.append()` occurs only after successful removal (`:318`); recovery loops only over that list (`:323`), omitting the source whose removal partly completed before raising. The failure report nevertheless claims every source has been restored (`:674`).
+
+Do not retract ownership without verified reconstruction. Recover partially removed sources too, retain unresolved inventory, and report failed recovery accurately. Also reject an unreadable existing promote manifest: `_merge_manifest_entry()` currently converts read/parse failure into an empty inventory (`:595`, `:598`, `:599`) and writes the replacement (`:602`). The recorded corrupt-prior-manifest case loses the earlier restoration path while reporting apply/rollback success.
+
+### R3-H2 — HIGH: #568 integrity remains open
+
+**Owner: backend#2.** Missing archive manifests remain invisible to validate because `_find_all_manifests()` filters out generations without a manifest file (`promote_v1.py:1381`); archive validation consumes that filtered list (`:1181`). Listing/restore now detect the unreadable generation in the recorded case, but validation stays green. Promotion validation checks only whether nested work remains (`:696`, `:697`, `:698`), not completeness of the promoted member inventory. Deleting an arbitrary promoted member therefore still validates green. Required-domain checks reject a missing registry and `{}`, but accept `{"data":null}` in this run.
+
+The prior baseline and the two repeated-interruption cases demonstrate improvements; they do not close #568 or waive R3-B2/R3-H1. Require complete generation presence, promoted-member existence, and required-domain shape validation without treating ordinary legitimate live edits as immutable archive hashes.
+
+### R3-H3 — HIGH: remaining root-override and CLI disk gaps
+
+**Owner: backend#2 for release coordination/disk; coordinate backend#3 for storage-root policy.** Baseline dev-root behavior, empty override, and pane stamping pass. The two nonempty override cases still redirect real provider-model reads/writes away from the cockpit. The harness asserts that even these overrides must resolve to the primary; whether an explicit override is intended to be authoritative requires a documented policy decision. These FAIL records must not be silently converted into a claim that the normal pane-stamping path failed.
+
+CLI apply and restore-v1 both succeed under the zero-free-space injection without invoking the patched disk-usage check. The recorded failure is absence of CLI preflight, not a physical disk-full experiment. Boot-gate baseline success does not certify these manual entry points.
+
+### Acceptance matrix — Round 3 re-score
+
+| Requirement | Round 3 verdict | Evidence / remaining condition |
+| --- | --- | --- |
+| Automatic installed promotion; fresh two-boot layout | PASS in reported baseline | Baseline 16/16 and 13/13; no fresh execution here. |
+| Complete archive/inventory and trustworthy validation | FAIL / HIGH | Missing manifest, arbitrary promoted member, and null domain data validate green; #568 remains open. |
+| Complete restore and downgrade safety | FAIL / BLOCKER | Multi-generation undo loses command-entry state; missing recovery records prevent supported reconstruction. Old-wheel evidence not added. |
+| Provider homes untouched; all six providers work | FAIL / BLOCKER | Live Kimi auth removed after recovery/retry/rollback; authenticated coverage not added. |
+| Whole prior state restored on midway failure | FAIL / BLOCKER | Final-removal and repeated-interruption cases pass, but merged ownership, failed manifest writes, partial removal and second recovery failures remain. |
+| Disk checked before mutation | FAIL | Both manual CLI entry points perform no observed check. Reported boot baseline does not close this. |
+| Dev/worktree readers agree | PARTIAL | Reported baseline, empty override and pane stamping pass; wrong/nonexistent override cases fail and require explicit policy. |
+| Cross-volume-safe implementation | Prior implementation PASS retained | No new physical multi-volume evidence; long/spaced Windows path case passes. |
+| Retired imports, authority warning, doctor messaging | Prior scoped results retained | No new evidence here; Round 2 literal mixed-layout exception remains a scope decision. |
+| Release/migration documentation | PASS as unreleased documentation | Existing release hold retained; this candidate must not be described as safe. |
+| Candidate CI, provider/old-wheel acceptance and one-week soak | NOT ESTABLISHED by these artifacts | No additional evidence supplied; the stated 2026-09-07 soak cannot complete before 2026-09-14. |
+
+### Release disposition
+
+**FAIL — not releasable. Owner: backend#2.** Do not release 2.1.0 or close #504 at `28a4e527`. Baseline improvements are acknowledged, but live-provider removal, missing durable recovery records, and incorrect multi-generation undo remain release blockers. Fix and regress the recorded failures, resolve storage-root override semantics with backend#3, and supply the remaining acceptance evidence before rescoring. This task only appends the existing Round 3 findings; it does not rerun verification or change implementation.
