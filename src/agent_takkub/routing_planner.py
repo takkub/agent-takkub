@@ -42,6 +42,9 @@ class RoutingAction:
     cross_check: list[str] | None = None  # extra roles to auto-fire (codex/gemini)
     reason: str = ""  # human-readable explanation
     mixed: bool = False  # has both informational + actionable intent
+    # #513: sub-mode when role == "reviewer" — "code" | "e2e" | "ui" (None for
+    # every other role). See REVIEWER_MODE_ALIASES / resolve_role_alias below.
+    mode: str | None = None
     # Tier 2c: ordered execution when the message signals a data dependency
     # between the multi-role split (e.g. "form ตาม schema ที่ backend ส่ง").
     # None = independent, parallel dispatch is fine. Non-None = dispatch in
@@ -248,9 +251,53 @@ _ONESHOT = re.compile(
     re.IGNORECASE,
 )
 
-# Routing table: (pattern, primary_role_or_None, cross_check_list_or_None)
+# ─────────────────────────────────────────────────────────────────────
+# #513 (backend half): qa + reviewer + critic merged into one `reviewer`
+# role taking `--mode code|e2e|ui`. The route table below already emits
+# `role="reviewer"` directly for all three; REVIEWER_MODE_ALIASES exists so
+# an EXPLICIT mention of the old role names ("qa"/"critic" — still real,
+# still-spawnable role files, per the "keep the slot, alias it" pattern
+# `_sub_note` already uses for a disabled codex/gemini provider) resolves to
+# the same canonical (role, mode) pair instead of two parallel routing
+# tables silently drifting. Deletion of the old `.claude/agents/qa.md` /
+# `critic.md` files is explicitly OUT of scope for at least one release —
+# see their deprecation banners.
+# ─────────────────────────────────────────────────────────────────────
+REVIEWER_MODE_ALIASES: dict[str, str] = {"qa": "e2e", "critic": "ui"}
+# Reverse of the above, plus reviewer's own default — used to translate a
+# `mode` back to the legacy role name a Settings `disabled_roles` toggle (or
+# a human) still refers to it by.
+_MODE_TO_LEGACY_ROLE: dict[str, str] = {"e2e": "qa", "ui": "critic", "code": "reviewer"}
+
+
+def resolve_role_alias(role: str) -> tuple[str, str | None]:
+    """Map *role* to its canonical ``(role, mode)`` per the #513 merge.
+
+    ``"qa"`` -> ``("reviewer", "e2e")``, ``"critic"`` -> ``("reviewer", "ui")``,
+    ``"reviewer"`` -> ``("reviewer", "code")``. Any other role name passes
+    through unchanged with ``mode=None`` — this function only knows about the
+    three roles #513 folded together.
+    """
+    r = (role or "").strip().lower()
+    if r in REVIEWER_MODE_ALIASES:
+        return "reviewer", REVIEWER_MODE_ALIASES[r]
+    if r == "reviewer":
+        return "reviewer", "code"
+    return role, None
+
+
+def _deprecation_note(old_role: str, mode: str) -> str:
+    """Reason fragment for a routing decision that resolved a deprecated
+    ``qa``/``critic`` role name through the #513 alias. The role FILE
+    (``.claude/agents/qa.md`` / ``critic.md``) still works standalone —
+    this only flags that the canonical target is now ``reviewer --mode``."""
+    return f"'{old_role}' รวมเข้า 'reviewer' แล้ว (#513) — ใช้ --role reviewer --mode {mode} แทน"
+
+
+# Routing table: (pattern, primary_role_or_None, cross_check_list_or_None, mode)
 # Order matters — earlier entries win.  None role means "derive from content".
-_ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
+# mode is non-None only for the three reviewer sub-modes (#513).
+_ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None, str | None]] = [
     # Rollout / strategy → gemini (checked before generic "deploy")
     (
         re.compile(
@@ -259,21 +306,25 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         ),
         "gemini",
         None,
+        None,
     ),
     # Refactor / extract / rename / migrate (verb form) → primary + codex
     (
         re.compile(r"\b(refactor|extract|rename|restructure|migrate)\b", re.IGNORECASE),
         None,  # derived from content keywords below
         ["codex"],
+        None,
     ),
-    # Design / UI critique — routed to `critic` (post-QA visual reviewer).
+    # Design / UI critique — routed to `reviewer --mode ui` (#513; formerly
+    # the standalone `critic` role, still the post-QA visual reviewer).
     # MUST come before the generic `review` rule below or "design review"
-    # / "UI review" would land on `reviewer` (which is code-review only).
+    # / "UI review" would land on mode=code instead of mode=ui.
     # Triggers: "design review", "UI review", "UX review", "visual review",
     # "heuristic" (Nielsen), "look and feel", and Thai equivalents:
     # "รีวิว UI / หน้าตา / ดีไซน์", "ดู UI", "ดู หน้าตา".
-    # Cross-check: gemini pane spawned in parallel so critic can immediately
-    # `takkub send --to gemini` shot paths without waiting for a fresh pane.
+    # Cross-check: gemini pane spawned in parallel so the ui-mode pipeline can
+    # immediately `takkub send --to gemini` shot paths without waiting for a
+    # fresh pane — same as critic's pipeline before the merge.
     (
         re.compile(
             r"(?:"
@@ -285,23 +336,27 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
             r")",
             re.IGNORECASE,
         ),
-        "critic",
+        "reviewer",
         ["gemini"],
+        "ui",
     ),
-    # Code review / security audit
+    # Code review / security audit → reviewer --mode code (unchanged default)
     (
         re.compile(r"\b(review|code.review|security.review|audit)\b", re.IGNORECASE),
         "reviewer",
         None,
+        "code",
     ),
-    # Test / e2e / regression
+    # Test / e2e / regression → reviewer --mode e2e (#513; formerly `qa`) —
+    # browser shard workflow (--plan --shards N, Playwright MCP) unchanged.
     (
         re.compile(
             r"\b(test|smoke.test|e2e|end.to.end|regression|unit.test|integration.test)\b",
             re.IGNORECASE,
         ),
-        "qa",
+        "reviewer",
         None,
+        "e2e",
     ),
     # DevOps (checked before backend so "deploy pipeline" stays devops)
     (
@@ -311,22 +366,24 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         ),
         "devops",
         None,
+        None,
     ),
     # Mobile
     (
         re.compile(r"\b(mobile|iOS|Android|Capacitor|React.Native|expo)\b", re.IGNORECASE),
         "mobile",
         None,
+        None,
     ),
     # Backend (API / db / schema) — Thai: ฐานข้อมูล (database), หลังบ้าน (server-side)
     # Pattern built from _API_EN_BASE so the routing rule and multi-role
     # detection (_HAS_API below) stay in sync automatically.
-    (_build_api_regex(), "backend", None),
+    (_build_api_regex(), "backend", None, None),
     # Frontend (UI / page / form / component …) — Thai: หน้าจอ/หน้า (screen/page), ปุ่ม (button)
     # หน้า uses lookbehind (ก่อน/ข้าง/ด้าน/เบื้อง) + lookahead (\s*[/a-zA-Z]) inside
     # _UI_TH_FRAGMENT to avoid false positives from compound words: ก่อนหน้า,
     # ข้างหน้า, หน้าหนาว, หน้าฝน, etc.
-    (_build_ui_regex(), "frontend", None),
+    (_build_ui_regex(), "frontend", None, None),
 ]
 
 # Confirm / abort / ambiguous signals
@@ -726,6 +783,13 @@ def _filter_disabled_roles(routing: dict, disabled_roles: set[str]) -> dict:
     kept_cc = [r for r in cross_check if r not in disabled_roles]
     if primary in disabled_roles:
         return {"role": None, "reason": _role_disabled_note(primary)}
+    # #513: `primary` is "reviewer" for all three merged modes now — a
+    # Settings toggle that disabled the OLD role name ("qa"/"critic") must
+    # still block that mode, since those role slots (and their disabled_roles
+    # entries) were never renamed. `reviewer` itself disabled is caught above.
+    legacy_alias = _MODE_TO_LEGACY_ROLE.get(routing.get("mode") or "")
+    if primary == "reviewer" and legacy_alias and legacy_alias in disabled_roles:
+        return {"role": None, "reason": _role_disabled_note(legacy_alias)}
     if kept_cc != cross_check:
         routing["cross_check"] = kept_cc or None
     return routing
@@ -753,13 +817,17 @@ def _route(msg: str) -> dict:
             "roles": ["frontend", "backend"],
             "reason": "UI + API keywords detected — parallel roles",
         }
-    for pattern, role, cross_check in _ROUTE_TABLE:
+    for pattern, role, cross_check, mode in _ROUTE_TABLE:
         if pattern.search(msg):
             resolved_role = role if role is not None else _derive_primary_role(msg)
+            reason = f"matched: {pattern.pattern[:50]}"
+            if mode:
+                reason += f" → reviewer --mode {mode}"
             return {
                 "role": resolved_role,
                 "cross_check": cross_check,
-                "reason": f"matched: {pattern.pattern[:50]}",
+                "reason": reason,
+                "mode": mode,
             }
     # No specific match — default to backend
     return {"role": "backend", "reason": "no domain keyword — defaulting to backend"}
@@ -836,14 +904,23 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
                 task_hint=msg,
                 reason=f"explicit role requested; {_role_disabled_note(explicit)}",
             )
+        # #513: an explicit "qa"/"critic"/"reviewer" mention resolves through
+        # the alias to (reviewer, mode) — the role FILE stays fully usable
+        # (checked against disabled_roles above using the name the user
+        # actually typed, same as any other role), this only changes what
+        # `.role`/`.mode` report so callers dispatch the merged role.
+        resolved_role, resolved_mode = resolve_role_alias(explicit)
         # A disabled codex/gemini explicit role is fired anyway — the spawn
         # layer backs it with claude. Just note the substitution.
         reason = "explicit role specified by user"
         if explicit in disabled:
             reason = f"explicit role; {_sub_note(explicit)}"
+        if resolved_mode and explicit in REVIEWER_MODE_ALIASES:
+            reason = f"{reason}; {_deprecation_note(explicit, resolved_mode)}"
         return RoutingAction(
             kind=ActionKind.FIRE_ASSIGN,
-            role=explicit,
+            role=resolved_role,
+            mode=resolved_mode,
             task_hint=msg,
             reason=reason,
         )
@@ -950,6 +1027,7 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
         reason=reason,
         mixed=is_mixed,
         sequence=routing.get("sequence"),
+        mode=routing.get("mode"),
     )
 
 

@@ -101,14 +101,16 @@ native subagent tool ของ provider ปัจจุบันด้วย cap
 | docker / CI / deploy / infra / k8s | devops | — |
 | refactor / extract / migrate / rename | primary (ตามไฟล์) | **+codex** เทียบ diff |
 | rollout / strategy / migration plan | gemini | — |
-| browser e2e/smoke หลายหน้า (Playwright MCP) | **qa `--plan --shards N`** · ⚠️ `mb` ห้าม shard (#92) | — |
-| test แคบ / non-browser | qa | — |
-| review / security | reviewer | — |
-| design review / รีวิว UI | critic | **+gemini** parallel |
+| browser e2e/smoke หลายหน้า (Playwright MCP) | **reviewer `--mode e2e` `--plan --shards N`** (#513, เดิม `qa`) · ⚠️ `mb` ห้าม shard (#92) | — |
+| test แคบ / non-browser | reviewer `--mode e2e` (#513, เดิม `qa`) | — |
+| review / security | reviewer `--mode code` (default) | — |
+| design review / รีวิว UI | reviewer `--mode ui` (#513, เดิม `critic`) | **+gemini** parallel |
 | รีวิวระบบ / อธิบายระบบ / system overview | **Lead → HTML explainer** (`docs/lead/patterns.md`) | — |
 | setup guide / คู่มือ / เขียน docs ให้ user | **Lead → HTML guide** (`docs/lead/patterns.md`) | — |
 | feature ใหญ่ (UI + API) | frontend + backend (parallel) | — |
 | complex / สงสัย approach | primary | **+gemini** (1M) |
+
+**#513 — qa/critic → reviewer alias (logic half done, dispatch half not yet):** `routing_planner.classify()` now proposes `role="reviewer"` + `mode="code"|"e2e"|"ui"` for all three rows above (never bare `"qa"`/`"critic"`) — `resolve_role_alias()` is the single source of truth. `qa.md`/`critic.md` **are not deleted** (kept >= 1 release, both print a `DEPRECATED ALIAS` banner when actually spawned) and their browser-shard/gemini-cross-check machinery is untouched — the actual `takkub assign` dispatch for `--mode e2e`/`--mode ui` still targets `--role qa`/`--role critic` under the hood until the browser-grant/shard plumbing itself migrates onto `reviewer` (separate follow-up). An explicit `ให้ qa …` / `ให้ critic …` request still fires (same alias resolution), with a deprecation note in the reason.
 
 ### Proposal template
 ```markdown

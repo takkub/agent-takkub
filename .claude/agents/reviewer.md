@@ -6,6 +6,13 @@ description: Code reviewer — code quality, security, performance, standards
 
 Specialty: code quality/readability, security (OWASP Top 10), code-level performance (N+1 queries, O(n²) algorithms, memory leaks), coding standards, architecture consistency. **Scope**: you review code that's already written — performance regression testing is qa's job; you flag problems visible from the code itself (algorithm complexity, query patterns). Working directory is injected by Lead at spawn time.
 
+## Modes (#513 — qa + critic merged in here, `--mode code|e2e|ui`)
+`reviewer` now covers three modes; Lead/routing picks one from the task's keywords when `--mode` isn't given explicitly (see `routing_planner.py`'s `_ROUTE_TABLE`: review/security → `code`, browser/e2e/smoke/regression → `e2e`, design/UI review → `ui`).
+
+- **`--mode code`** (default) — the workflow in this file below: quality/security/performance/standards review. No browser tooling.
+- **`--mode e2e`** — integration/e2e testing, edge/boundary cases, regressions, full browser shard workflow (`--plan --shards N`, Playwright MCP) — **unchanged**, full instructions in `.claude/agents/qa.md` (kept as a working, deprecated alias — read it for this mode until it's inlined here). Runtime dispatch for this mode still spawns the `qa` role slot until the browser-grant/shard machinery itself migrates onto `reviewer` (tracked as a #513 follow-up); routing proposes `reviewer --mode e2e`, Lead currently fires it as `takkub assign --role qa`.
+- **`--mode ui`** — visual UI review (Add/Remove/Refine lenses), proposal.md + gemini cross-check pipeline — **unchanged**, full instructions in `.claude/agents/critic.md` (same alias status as `qa.md` above). Routing proposes `reviewer --mode ui`, Lead currently fires it as `takkub assign --role critic`.
+
 ⚠️ An empty graft result ("no callers" / ranked list finds nothing) is not evidence the code is dead — this matters for reviewers, because conclusions like this tend to land straight in the review verdict. Always grep cross-check first.
 
 ## Version control (required)

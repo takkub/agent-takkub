@@ -12,11 +12,13 @@ Coverage:
 from __future__ import annotations
 
 from agent_takkub.routing_planner import (
+    REVIEWER_MODE_ALIASES,
     ActionKind,
     RoutingAction,
     classify,
     classify_blocked,
     classify_failure,
+    resolve_role_alias,
 )
 
 
@@ -99,10 +101,12 @@ class TestActionableDetector:
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "devops"
 
-    def test_actionable_test_routes_to_qa(self):
+    def test_actionable_test_routes_to_reviewer_e2e(self):
+        """#513: qa folded into reviewer --mode e2e."""
         result = classify("test the login flow")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "qa"
+        assert result.role == "reviewer"
+        assert result.mode == "e2e"
 
     def test_floating_imperative_lorg_du(self):
         """'ลอง X ดู' → propose (default actionable per spec)."""
@@ -194,9 +198,13 @@ class TestExplicitRole:
         assert result.role == "frontend"
 
     def test_explicit_qa(self):
+        """#513: explicit 'qa' still fires, but resolves to reviewer --mode e2e
+        (deprecation alias — the qa.md role file itself still works standalone)."""
         result = classify("ให้ qa test หน้า login")
         assert result.kind == ActionKind.FIRE_ASSIGN
-        assert result.role == "qa"
+        assert result.role == "reviewer"
+        assert result.mode == "e2e"
+        assert "#513" in result.reason
 
     def test_explicit_devops(self):
         result = classify("ให้ devops deploy docker")
@@ -288,52 +296,64 @@ class TestRoutingTable:
         assert result.role == "devops"
 
     def test_qa(self):
+        """#513: qa folded into reviewer --mode e2e (browser shard workflow unchanged)."""
         result = classify("write e2e tests for the login flow")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "qa"
+        assert result.role == "reviewer"
+        assert result.mode == "e2e"
 
     def test_reviewer(self):
         result = classify("do a code review for auth PR")
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "reviewer"
+        assert result.mode == "code"
 
-    def test_design_review_routes_to_critic(self):
-        """'design review' / 'UI review' → critic with gemini cross-check.
+    def test_design_review_routes_to_reviewer_ui_mode(self):
+        """'design review' / 'UI review' → reviewer --mode ui (#513, formerly
+        `critic`) with gemini cross-check.
 
-        MUST resolve to `critic` (not `reviewer`) since the design-review
-        rule sits above the generic review rule in the route table.
+        MUST resolve to mode="ui" (not "code") since the design-review rule
+        sits above the generic review rule in the route table.
         """
         result = classify("design review the login page")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
         assert result.cross_check is not None
         assert "gemini" in result.cross_check
 
-    def test_ui_review_routes_to_critic(self):
+    def test_ui_review_routes_to_reviewer_ui_mode(self):
         result = classify("UI review on the dashboard screenshots")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
 
-    def test_thai_review_ui_routes_to_critic(self):
+    def test_thai_review_ui_routes_to_reviewer_ui_mode(self):
         result = classify("รีวิว UI หน้า /login")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
 
-    def test_thai_review_design_routes_to_critic(self):
+    def test_thai_review_design_routes_to_reviewer_ui_mode(self):
         result = classify("รีวิวดีไซน์ของ dashboard")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
 
-    def test_heuristic_routes_to_critic(self):
+    def test_heuristic_routes_to_reviewer_ui_mode(self):
         result = classify("run heuristic evaluation on the cockpit")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
 
     def test_explicit_critic_role_recognised(self):
-        """'ให้ critic review' → FIRE_ASSIGN (explicit-role skips propose per spec)."""
+        """'ให้ critic review' → FIRE_ASSIGN (explicit-role skips propose per
+        spec), resolved through the #513 alias to reviewer --mode ui."""
         result = classify("ให้ critic review หน้า login")
         assert result.kind == ActionKind.FIRE_ASSIGN
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
+        assert "#513" in result.reason
 
     def test_refactor_adds_codex_cross_check(self):
         """Refactor → primary role + codex cross-check (per spec rule of thumb)."""
@@ -380,10 +400,11 @@ class TestRoutingTable:
         assert result.role == "reviewer"
         assert result.roles is None
 
-    def test_test_ui_and_api_routes_to_qa_not_parallel_impl(self):
+    def test_test_ui_and_api_routes_to_reviewer_e2e_not_parallel_impl(self):
         result = classify("test the login page and auth endpoint")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "qa"
+        assert result.role == "reviewer"
+        assert result.mode == "e2e"
         assert result.roles is None
 
     def test_refactor_ui_and_api_keeps_codex_cross_check(self):
@@ -393,13 +414,117 @@ class TestRoutingTable:
         assert result.roles is None
         assert result.cross_check == ["codex"]
 
-    def test_design_review_ui_and_api_routes_to_critic_not_parallel_impl(self):
+    def test_design_review_ui_and_api_routes_to_reviewer_ui_not_parallel_impl(self):
         result = classify("design review the login page and auth endpoint")
         assert result.kind == ActionKind.PROPOSE
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
         assert result.roles is None
         assert result.cross_check is not None
         assert "gemini" in result.cross_check
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #513: qa + reviewer + critic merged into `reviewer --mode code|e2e|ui`.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestReviewerModeAliasMapping:
+    """`resolve_role_alias` — the single source of truth both the explicit-role
+    branch and `_ROUTE_TABLE` funnel through."""
+
+    def test_qa_maps_to_reviewer_e2e(self):
+        assert resolve_role_alias("qa") == ("reviewer", "e2e")
+
+    def test_critic_maps_to_reviewer_ui(self):
+        assert resolve_role_alias("critic") == ("reviewer", "ui")
+
+    def test_reviewer_maps_to_itself_code_mode(self):
+        assert resolve_role_alias("reviewer") == ("reviewer", "code")
+
+    def test_unrelated_role_passes_through_unchanged(self):
+        assert resolve_role_alias("backend") == ("backend", None)
+        assert resolve_role_alias("frontend") == ("frontend", None)
+
+    def test_alias_table_only_knows_qa_and_critic(self):
+        """Nothing else is silently folded into reviewer by this merge."""
+        assert set(REVIEWER_MODE_ALIASES) == {"qa", "critic"}
+
+
+class TestReviewerDeprecationWarning:
+    """Explicitly invoking the deprecated 'qa'/'critic' role name still fires
+    (the role file itself is untouched — #513 keeps it for >= 1 release) but
+    the reason string must carry a real, checkable deprecation warning."""
+
+    def test_explicit_qa_reason_names_513_and_reviewer_mode(self):
+        action = classify("ให้ qa test หน้า login")
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert "#513" in action.reason
+        assert "reviewer" in action.reason
+        assert "--mode e2e" in action.reason
+
+    def test_explicit_critic_reason_names_513_and_reviewer_mode(self):
+        action = classify("ให้ critic review หน้า login")
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert "#513" in action.reason
+        assert "reviewer" in action.reason
+        assert "--mode ui" in action.reason
+
+    def test_explicit_reviewer_itself_carries_no_deprecation_note(self):
+        """'reviewer' isn't deprecated — only the qa/critic aliases warn."""
+        action = classify("ให้ reviewer review โค้ด auth")
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert "#513" not in action.reason
+
+    def test_table_routed_e2e_reason_mentions_mode_no_deprecation_tag(self):
+        """Keyword-routed (non-explicit) traffic doesn't need the '#513'
+        per-alias warning — it was never asking for the old role by name."""
+        action = classify("write e2e tests for the login flow")
+        assert action.mode == "e2e"
+        assert "reviewer --mode e2e" in action.reason
+
+
+class TestReviewerE2EModeShardWorkflowPreserved:
+    """mode=e2e must keep carrying everything the browser e2e shard workflow
+    (--plan --shards N, Playwright MCP) needs to recognise the task — the
+    #513 merge only changed which `role` string routing reports, not what
+    the underlying qa.md-derived shard machinery receives."""
+
+    def test_smoke_test_routes_e2e(self):
+        assert classify("smoke test the checkout flow").mode == "e2e"
+
+    def test_regression_routes_e2e(self):
+        assert classify("run a regression pass on the auth flow").mode == "e2e"
+
+    def test_end_to_end_phrase_routes_e2e(self):
+        assert classify("write end to end coverage for signup").mode == "e2e"
+
+    def test_e2e_mode_has_no_gemini_cross_check(self):
+        """Only ui mode auto-fires gemini — e2e stays a solo reviewer pane."""
+        action = classify("write e2e tests for the login flow")
+        assert action.mode == "e2e"
+        assert action.cross_check is None
+
+
+class TestReviewerUIModeGeminiCrossCheckPreserved:
+    """mode=ui must keep the critic pipeline's gemini cross-check (#512
+    preset sizing untouched) so the design-review pipeline still spawns a
+    gemini pane in parallel."""
+
+    def test_design_review_keeps_gemini_cross_check(self):
+        action = classify("design review the checkout page")
+        assert action.mode == "ui"
+        assert action.cross_check == ["gemini"]
+
+    def test_ux_review_keeps_gemini_cross_check(self):
+        action = classify("UX review on the settings screen")
+        assert action.mode == "ui"
+        assert action.cross_check == ["gemini"]
+
+    def test_thai_ui_review_keeps_gemini_cross_check(self):
+        action = classify("รีวิว UI หน้า /checkout")
+        assert action.mode == "ui"
+        assert action.cross_check == ["gemini"]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -867,7 +992,34 @@ class TestDisabledRoles:
         action_none = classify("test the login flow")
         action_empty = classify("test the login flow", context={"disabled_roles": set()})
         assert action_none.kind == action_empty.kind == ActionKind.PROPOSE
-        assert action_none.role == action_empty.role == "qa"
+        assert action_none.role == action_empty.role == "reviewer"
+        assert action_none.mode == action_empty.mode == "e2e"
+
+    def test_disabled_legacy_qa_still_blocks_reviewer_e2e_mode(self):
+        """#513: 'qa' was never renamed as a Settings toggle — disabling it
+        must still block the e2e mode it now maps to, even though the
+        routing table's `role` field reads "reviewer" post-merge."""
+        action = classify("test the login flow", context={"disabled_roles": {"qa"}})
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+        assert "qa" in action.reason and "ปิด" in action.reason
+
+    def test_disabled_legacy_critic_still_blocks_reviewer_ui_mode(self):
+        action = classify("design review the login page", context={"disabled_roles": {"critic"}})
+        assert action.kind == ActionKind.INFORMATIONAL
+        assert action.role is None
+        assert "critic" in action.reason and "ปิด" in action.reason
+
+    def test_disabled_reviewer_blocks_every_mode(self):
+        """Disabling the canonical 'reviewer' role blocks code/e2e/ui alike."""
+        for msg in (
+            "do a code review for auth PR",
+            "test the login flow",
+            "design review หน้า login",
+        ):
+            action = classify(msg, context={"disabled_roles": {"reviewer"}})
+            assert action.kind == ActionKind.INFORMATIONAL, msg
+            assert action.role is None, msg
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -982,7 +1134,8 @@ class TestGenerateGuideHTML:
     def test_design_review_unaffected(self):
         result = classify("design review หน้า login")
         assert result.kind != ActionKind.GENERATE_GUIDE_HTML
-        assert result.role == "critic"
+        assert result.role == "reviewer"
+        assert result.mode == "ui"
 
     def test_code_review_unaffected(self):
         result = classify("do a code review for auth PR")
@@ -1035,10 +1188,11 @@ class TestExplainSystem:
         assert action.kind == ActionKind.PROPOSE
         assert action.role == "reviewer"
 
-    def test_design_review_still_critic(self):
+    def test_design_review_still_reviewer_ui_mode(self):
         action = classify("design review หน้า login")
         assert action.kind == ActionKind.PROPOSE
-        assert action.role == "critic"
+        assert action.role == "reviewer"
+        assert action.mode == "ui"
 
     def test_normal_impl_task_unaffected(self):
         action = classify("เพิ่ม login form")
