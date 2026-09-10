@@ -2,11 +2,16 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [2.0.7] - 2026-09-10
 
 ### Fixed (แก้)
 
+- **[#557, severity:high] `RuntimeError: wrapped C/C++ object of type QTcpSocket has been deleted`** ที่ `cli_server.py` `_reply()` — race ระหว่างไคลเอนต์ disconnect (Qt ลบ `QTcpSocket`) กับ reply ที่ค้างอยู่บน `_run_off_thread`/`_mainThreadCall` ยังพยายามเขียนกลับ socket ที่ถูกลบไปแล้ว — guard ด้วย try/except แล้ว log+drop แทน crash
+- **[#558] `takkub spawn` (bare) ไม่ flush queued `send` messages** — `_launch_session` (spawn tail ของ shell/gemini/codex/…) ไม่เคย schedule `_flush_queued_no_pane_messages` ต่างจาก claude branch ทำให้ข้อความที่ queue ไว้ก่อน pane เปิดค้าง "รอ pane เปิด" ตลอดไปแม้ pane ready แล้ว — เพิ่ม flush ให้ตรงกันทุก provider
 - **[#559] tab ค้างเป็น "empty slot" หลัง done แทนที่จะ auto-close** — `_close_if_same_session` (#537's live-child deferral) ปฏิบัติกับ `pane.session` ที่กลายเป็น `None` (agent process ออกเองหลัง done ก่อน timer จะยิง — `AgentPane._on_exit()` ทำแบบนี้เป็นปกติ) เหมือนถูก respawn ด้วย session ใหม่ แล้วเลิกปิด tab เงียบๆ ทั้งที่ยังเป็น close เดิมที่ค้างอยู่ — แก้ให้แยก "session หายไปเอง" (ปิดต่อตามเดิม) ออกจาก "respawn ด้วย session ใหม่จริงๆ" (ยกเลิกตามเดิม) ด้วย identity check ที่รองรับ `None`
+- **[#560] done-report digest ซ้อนข้อความ "ตรวจไม่ได้ (ตรวจไม่ได้ ...)" ในโปรเจคที่ไม่ใช่ git repo** — classify "cwd ไม่ใช่ git repo เลย" ครั้งเดียวตอน `assign()` (แยกจาก git repo จริงที่แค่ HEAD ยังไม่เกิด) แล้วพิมพ์บรรทัดเดียวสะอาด "ไฟล์ที่แตะ: n/a (non-git project)" แทน — persist ข้าม cockpit restart ด้วย
+- **[#554] done-close รอ subprocess ค้างเต็ม 15 นาทีแม้เป็นแค่ orphan shell ที่ไม่มีวันจบเอง** — เพิ่ม idle-detection: children มี CPU time เท่าเดิม 2 poll tick ติดกัน + PTY เงียบครบ `DONE_CLOSE_IDLE_CHILD_THRESHOLD_S` (20s) → ปิดทันทีแทนรอครบ grace เดิม งานจริงที่ยัง active (CPU เปลี่ยน/มี output ใหม่) ยัง defer เหมือนเดิมไม่เปลี่ยน threshold
+- **[#534] เพิ่ม diagnostic log ที่จุดตัดสินของ stuck-pane watchdog** (ยังไม่ใช่ fix ตัว logic เพราะไม่มี events.log ของ incident เก่าให้ฟันธง) — log ทุกครั้งที่ pane ถูก classify เข้า `is_blocked_on_tty_prompt` branch และทุกครั้งที่ grace timer ของ `_defer_stuck_recover_for_live_children` reset เป็น 0 ครั้งหน้าเกิดซ้ำจะมีหลักฐานจริงตัดสินได้ทันที
 
 ## [2.0.6] - 2026-09-09
 
