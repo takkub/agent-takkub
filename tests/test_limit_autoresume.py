@@ -288,14 +288,22 @@ class TestOnLimitUsageConfirmed:
             o._on_limit_usage_confirmed("proj", "backend", True)
         park.assert_not_called()
 
-    def test_confirmed_parks(self) -> None:
+    def test_confirmed_parks_when_no_reroute_candidate(self) -> None:
+        # #514: confirmed no longer parks unconditionally — it tries reroute
+        # first. Pin the picker to "nothing available" so this test keeps
+        # exercising the park fallback path in isolation; the reroute
+        # decision itself has its own dedicated tests below.
         o = _bare_orch()
         ps = o._ps("proj::backend")
         ps.last_assigned_task = "do the thing"
         ps.rate_limited_until = time.time() + 3600
         ps.limit_confirm_pending = True
-        with patch.object(o, "_park_pane_for_limit") as park:
+        with (
+            patch.object(o, "_pick_reroute_provider", return_value=None) as pick,
+            patch.object(o, "_park_pane_for_limit") as park,
+        ):
             o._on_limit_usage_confirmed("proj", "backend", True)
+        pick.assert_called_once_with("proj", "backend", ps, "claude")
         park.assert_called_once_with("proj", "backend", ps)
         assert ps.limit_confirm_pending is False
 
@@ -698,3 +706,277 @@ class TestGiveUpAutoResume:
         with patch.object(o, "_check_uncommitted_async") as check:
             o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
         check.assert_not_called()
+
+
+# ── layer 5: quota-hit reroute (#514) ───────────────────────────────────────
+
+
+class TestPickRerouteProvider:
+    def test_picks_first_available_excluding_hit_provider(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "codex"
+
+    def test_forced_identity_role_never_reroutes(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        ps = o._ps("proj::codex")
+        assert o._pick_reroute_provider("proj", "codex", ps, "codex") is None
+
+    def test_forced_identity_role_shard_suffix_still_never_reroutes(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        ps = o._ps("proj::gemini#2")
+        assert o._pick_reroute_provider("proj", "gemini#2", ps, "gemini") is None
+
+    def test_skips_provider_not_yet_reset(self, monkeypatch) -> None:
+        from agent_takkub import provider_config, provider_state
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        # codex is next in priority order after claude but still quota-hit
+        # (reset_at in the future) — must be skipped in favour of gemini.
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "gemini"
+
+    def test_provider_with_reset_in_the_past_is_eligible_again(self, monkeypatch) -> None:
+        from agent_takkub import provider_config, provider_state
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() - 10)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "codex"
+
+    def test_skips_disabled_or_uninstalled_provider(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p != "codex")
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "gemini"
+
+    def test_distinct_from_excludes_counterparts_current_provider(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.distinct_from = "reviewer"
+        o._ps("proj::reviewer").provider_override = "codex"
+        # claude excluded (hit provider), codex excluded (reviewer's own
+        # provider) — next candidate in priority order is gemini.
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "gemini"
+
+    def test_distinct_from_falls_back_to_effective_provider_when_counterpart_has_no_pane(
+        self, monkeypatch
+    ) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        monkeypatch.setattr(
+            "agent_takkub.limit_autoresume.effective_provider_for",
+            lambda role, project=None: "codex" if role == "reviewer" else "claude",
+        )
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.distinct_from = "reviewer"
+        # No PaneState registered for "reviewer" yet — falls back to
+        # effective_provider_for("reviewer", ...) to learn its provider.
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") == "gemini"
+
+    def test_no_candidate_when_every_provider_excluded(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        assert o._pick_reroute_provider("proj", "backend", ps, "claude") is None
+
+    def test_multi_provider_hit_provider_never_offered_back_to_itself(self, monkeypatch) -> None:
+        """#495 reuse: whichever provider's own quota banner tripped signal
+        (a) is recorded on `ps.quota_provider` regardless of which CLI it
+        was — the picker must exclude THAT provider from its own fallback
+        candidates no matter which one hit."""
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        for hit in ("claude", "codex", "gemini", "kimi"):
+            ps = o._ps(f"proj::backend-{hit}")
+            result = o._pick_reroute_provider("proj", f"backend-{hit}", ps, hit)
+            assert result is not None
+            assert result != hit
+
+
+class TestRerouteOrPark:
+    def test_reroute_when_candidate_available(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.quota_provider = "claude"
+        ps.rate_limited_until = time.time() + 3600
+        with (
+            patch.object(o, "_reroute_pane_to_provider") as reroute,
+            patch.object(o, "_park_pane_for_limit") as park,
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot"),
+        ):
+            o._reroute_or_park("proj", "backend", ps)
+        park.assert_not_called()
+        reroute.assert_called_once()
+        assert reroute.call_args.args[0] == "proj"
+        assert reroute.call_args.args[1] == "backend"
+        assert reroute.call_args.args[3] == "codex"  # chosen candidate
+        assert reroute.call_args.args[4] == "claude"  # hit provider
+
+    def test_no_candidate_falls_back_to_park_by_default(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::codex")  # forced-identity role -> never reroutes
+        ps.quota_provider = "codex"
+        ps.rate_limited_until = time.time() + 3600
+        with (
+            patch.object(o, "_park_pane_for_limit") as park,
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot"),
+        ):
+            o._reroute_or_park("proj", "codex", ps)
+        park.assert_called_once_with("proj", "codex", ps)
+
+    def test_no_candidate_and_park_disabled_gives_up_instead(self, monkeypatch) -> None:
+        from agent_takkub import auto_resume as ar
+
+        monkeypatch.setattr(ar, "park_fallback_enabled", lambda: False)
+        o = _bare_orch()
+        ps = o._ps("proj::codex")
+        ps.quota_provider = "codex"
+        ps.rate_limited_until = time.time() + 3600
+        with (
+            patch.object(o, "_give_up_auto_resume") as give_up,
+            patch.object(o, "_park_pane_for_limit") as park,
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot"),
+        ):
+            o._reroute_or_park("proj", "codex", ps)
+        park.assert_not_called()
+        give_up.assert_called_once_with("proj", "codex", ps, reason="no_fallback_park_disabled")
+
+    def test_records_quota_reset_and_schedules_reset_notice(self) -> None:
+        from agent_takkub import provider_state
+
+        o = _bare_orch()
+        ps = o._ps("proj::codex")
+        ps.quota_provider = "codex"
+        reset_at = time.time() + 3600
+        ps.rate_limited_until = reset_at
+        with (
+            patch.object(o, "_park_pane_for_limit"),
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot") as timer,
+        ):
+            o._reroute_or_park("proj", "codex", ps)
+        assert provider_state.quota_reset_at("codex") == reset_at
+        timer.assert_called_once()
+
+
+class TestReroutePaneToProvider:
+    def _orch_with_respawn_hooks(self):
+        o = _bare_orch()
+        o.close = MagicMock(return_value=(True, "ok"))
+        o.spawn = MagicMock(return_value=(True, "ok"))
+        o._send_when_ready = MagicMock()
+        o._pipeline_runs = {}
+        return o
+
+    def test_closes_and_respawns_with_provider_override_and_progress_note(self) -> None:
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "implement the thing"
+        pane = MagicMock()
+        pane._session_cwd = "C:/work/api"
+        o._panes_by_project["proj"] = {"backend": pane}
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider(
+                "proj", "backend", ps, "codex", "claude", time.time() + 3600
+            )
+        o.close.assert_called_once_with(
+            "backend", project="proj", suppress_pipeline=True, suppress_auto_chain=True
+        )
+        o.spawn.assert_called_once()
+        assert o.spawn.call_args.kwargs["cwd"] == "C:/work/api"
+        assert o.spawn.call_args.kwargs["_from_auto_respawn"] is True
+        new_ps = o._ps("proj::backend")
+        assert new_ps.provider_override == "codex"
+        assert new_ps.quota_reroute_from == "claude"
+        assert new_ps.quota_reroute_count == 1
+        o._send_when_ready.assert_called_once()
+        sent_role, sent_task = o._send_when_ready.call_args.args[:2]
+        assert sent_role == "backend"
+        assert "implement the thing" in sent_task
+        assert "claude" in sent_task and "codex" in sent_task
+        o._notify_lead.assert_called_once()
+        assert "ย้ายไป codex" in o._notify_lead.call_args.args[1]
+
+    def test_preserves_distinct_from_across_the_respawn(self) -> None:
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "implement the thing"
+        ps.distinct_from = "reviewer"
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider(
+                "proj", "backend", ps, "codex", "claude", time.time() + 3600
+            )
+        assert o._ps("proj::backend").distinct_from == "reviewer"
+
+    def test_respawn_failure_notifies_lead_and_drops_pane_state(self) -> None:
+        o = self._orch_with_respawn_hooks()
+        o.spawn = MagicMock(return_value=(False, "boom"))
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "implement the thing"
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider(
+                "proj", "backend", ps, "codex", "claude", time.time() + 3600
+            )
+        assert "proj::backend" not in o._pane_state
+        assert o._notify_lead.call_count == 2  # reroute notice + failure notice
+        assert "ไม่สำเร็จ" in o._notify_lead.call_args.args[1]
+        o._send_when_ready.assert_not_called()
+
+
+class TestProviderQuotaResetNotice:
+    def test_reset_clears_recorded_state_and_notifies_lead_once(self) -> None:
+        from agent_takkub import provider_state
+
+        provider_state.set_quota_reset_at("codex", 1000.0)
+        o = _bare_orch()
+        o._on_provider_quota_window_reset("proj", "codex", 1000.0)
+        assert provider_state.quota_reset_at("codex") == 0.0
+        o._notify_lead.assert_called_once()
+        assert "codex" in o._notify_lead.call_args.args[1]
+
+    def test_stale_timer_from_an_earlier_hit_is_ignored(self) -> None:
+        from agent_takkub import provider_state
+
+        # A newer quota-hit already overwrote the recorded reset with a
+        # later epoch — the OLD timer firing must not clear that newer
+        # state or send a premature "back to normal" notice.
+        provider_state.set_quota_reset_at("codex", 2000.0)
+        o = _bare_orch()
+        o._on_provider_quota_window_reset("proj", "codex", 1000.0)
+        assert provider_state.quota_reset_at("codex") == 2000.0
+        o._notify_lead.assert_not_called()

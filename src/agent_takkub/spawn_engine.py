@@ -895,6 +895,26 @@ class PaneState:
     # back to the pre-existing notify-only behaviour) until a new task is
     # assigned.
     limit_park_stopped: bool = False
+    # ── quota-hit reroute (#514) ──────────────────────────────────────────
+    # distinct_from: role name this pane's task was assigned with
+    # `--distinct-from ROLE` — a cross-check pairing that must never end up
+    # running the same model as ROLE. Consulted by the reroute picker
+    # (`AutoResumeMixin._pick_reroute_provider`) to exclude ROLE's current
+    # provider from this pane's fallback candidates. None = no constraint.
+    # Reset on every fresh assign() to whatever that assign specifies (a new
+    # task is a new pairing decision, not inherited from the previous one).
+    distinct_from: str | None = None
+    # quota_reroute_count: how many times THIS pane's current task has been
+    # moved to a different provider after a quota hit (0 = never). Reset to
+    # 0 on every fresh assign(), same budget shape as limit_park_rounds.
+    quota_reroute_count: int = 0
+    # quota_reroute_from: the provider this pane was rerouted AWAY from most
+    # recently ("" = never rerouted this task) — diagnostic only, surfaced
+    # in `takkub status`/progress markers so a human can tell a pane running
+    # on claude is there because its configured provider got substituted at
+    # spawn time (provider_override/effective_provider_for) vs. because it
+    # fled a quota hit mid-task.
+    quota_reroute_from: str = ""
     # shell_open_dialog_notified: True once the transcript watchdog has
     # warned Lead that this pane's transcript shows the Windows "How do you
     # want to open this file?" ShellExecute marker (issue #104) — a shell

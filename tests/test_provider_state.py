@@ -69,3 +69,66 @@ def test_default_path_follows_settings_home():
     from agent_takkub.config import SETTINGS_HOME
 
     assert provider_state._PATH == SETTINGS_HOME / "disabled-providers.json"
+
+
+# ── quota-hit reroute state (#514) ──────────────────────────────────────────
+
+
+@pytest.fixture
+def tmp_quota_path(tmp_path, monkeypatch):
+    """Redirect the quota-reset store to a tmp file, same shape as
+    tmp_state_path above for disabled-providers.json."""
+    path = tmp_path / "provider-quota.json"
+    monkeypatch.setattr(provider_state, "_QUOTA_PATH", path)
+    return path
+
+
+def test_load_quota_resets_missing_file_returns_empty(tmp_quota_path):
+    assert provider_state.load_quota_resets() == {}
+
+
+def test_set_quota_reset_at_then_load_roundtrip(tmp_quota_path):
+    provider_state.set_quota_reset_at("codex", 12345.0)
+    assert provider_state.load_quota_resets() == {"codex": 12345.0}
+
+
+def test_set_quota_reset_at_overwrites_earlier_value(tmp_quota_path):
+    provider_state.set_quota_reset_at("codex", 111.0)
+    provider_state.set_quota_reset_at("codex", 222.0)
+    assert provider_state.quota_reset_at("codex") == 222.0
+
+
+def test_quota_reset_at_unknown_provider_is_zero(tmp_quota_path):
+    assert provider_state.quota_reset_at("codex") == 0.0
+
+
+def test_clear_quota_reset_drops_entry(tmp_quota_path):
+    provider_state.set_quota_reset_at("codex", 999.0)
+    provider_state.clear_quota_reset("codex")
+    assert provider_state.quota_reset_at("codex") == 0.0
+
+
+def test_clear_quota_reset_missing_entry_is_noop(tmp_quota_path):
+    provider_state.clear_quota_reset("codex")  # must not raise
+    assert provider_state.load_quota_resets() == {}
+
+
+def test_corrupt_quota_json_returns_empty_without_crash(tmp_quota_path):
+    tmp_quota_path.write_text("{not valid json", encoding="utf-8")
+    assert provider_state.load_quota_resets() == {}
+
+
+def test_is_quota_ready_true_when_no_hit_recorded(tmp_quota_path):
+    assert provider_state.is_quota_ready("codex") is True
+
+
+def test_is_quota_ready_false_before_reset_true_after(tmp_quota_path):
+    provider_state.set_quota_reset_at("codex", 1000.0)
+    assert provider_state.is_quota_ready("codex", now=500.0) is False
+    assert provider_state.is_quota_ready("codex", now=1500.0) is True
+
+
+def test_quota_default_path_follows_settings_home():
+    from agent_takkub.config import SETTINGS_HOME
+
+    assert provider_state._QUOTA_PATH == SETTINGS_HOME / "provider-quota.json"

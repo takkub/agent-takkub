@@ -100,6 +100,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _enter_delay_ms,
     _exit_key,
     _extract_transcript_lines,
+    _human_duration,
     _lead_model_override,
     _log_event,
     _looks_like_source_reference,
@@ -942,20 +943,6 @@ _SPINNER_VOLATILE_RE = re.compile(
     r"\d+s\b|[↑↓]\s*[\d.,]+k?\s*tokens?",
     re.IGNORECASE,
 )
-
-
-def _human_duration(total_seconds: float) -> str:
-    """Coarse "in Xh Ym" / "in Xm" / "in Xs" phrasing for a Lead-facing
-    notice (#301) — matches _RATE_LIMIT_FALLBACK-scale windows (minutes to
-    hours), so seconds only show up for a duration under a minute."""
-    secs = max(0, int(total_seconds))
-    hours, rem = divmod(secs, 3600)
-    minutes, seconds = divmod(rem, 60)
-    if hours:
-        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
-    if minutes:
-        return f"{minutes}m"
-    return f"{seconds}s"
 
 
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
@@ -2390,11 +2377,20 @@ class Orchestrator(
         effort: str | None = None,
         mode: str = "pane",
         team: str | None = None,
+        distinct_from: str | None = None,
         _resource_token: ResourceToken | None = None,
         worktree_prepared: tuple | None = None,
         base_ref: str | None = None,
     ) -> tuple[bool, str]:
-        """*worktree_prepared* (#408): ``(WorktreeInfo | None, reason)`` from a
+        """*distinct_from* (#514): this task must never end up running the
+        same provider as *distinct_from*'s pane — a cross-check pairing
+        (e.g. reviewer vs. the impl role it's checking) where correlated
+        model errors would defeat the point. Recorded on `PaneState` and
+        consulted only by the quota-hit reroute picker
+        (`AutoResumeMixin._pick_reroute_provider`); it does not affect this
+        assign's own initial spawn/provider choice.
+
+        *worktree_prepared* (#408): ``(WorktreeInfo | None, reason)`` from a
         `WorktreeManager.create` the caller already ran OFF the Qt thread
         (`cli_server` does this for `--isolation worktree`, fed by
         `worktree_assign_inputs`). When given, `_assign_with_worktree` uses
@@ -2514,6 +2510,8 @@ class Orchestrator(
                 return False, "effort override is not supported in subagent mode"
             if plan:
                 return False, "plan mode is not supported in subagent mode"
+            if distinct_from:
+                return False, "--distinct-from is not supported in subagent mode"
             return self._register_subagent(
                 role_name,
                 cwd,
@@ -2732,6 +2730,7 @@ class Orchestrator(
                 model,
                 provider,
                 effort,
+                distinct_from,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -2753,6 +2752,7 @@ class Orchestrator(
                 effort,
                 prepared=worktree_prepared,
                 base_ref=base_ref,
+                distinct_from=distinct_from,
             )
         else:
             result = self._assign_dispatch(
@@ -2769,6 +2769,7 @@ class Orchestrator(
                 model=model,
                 provider=provider,
                 effort=effort,
+                distinct_from=distinct_from,
             )
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
@@ -2879,6 +2880,7 @@ class Orchestrator(
         model: str | None = None,
         provider: str | None = None,
         effort: str | None = None,
+        distinct_from: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -3118,6 +3120,11 @@ class Orchestrator(
         ps_assign.limit_park_rounds = 0
         ps_assign.limit_park_wake_ts = 0.0
         ps_assign.limit_park_stopped = False
+        # #514: a fresh task is a fresh reroute budget + cross-check pairing —
+        # neither carries over from whatever this pane was doing before.
+        ps_assign.quota_reroute_count = 0
+        ps_assign.quota_reroute_from = ""
+        ps_assign.distinct_from = (distinct_from or "").strip().lower() or None
         if requires_commit:
             ps_assign.requires_commit_on_done = True
         if auto_chain:
@@ -3323,6 +3330,7 @@ class Orchestrator(
         effort: str | None = None,
         prepared: tuple | None = None,
         base_ref: str | None = None,
+        distinct_from: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -3384,6 +3392,7 @@ class Orchestrator(
                 model=model,
                 provider=provider,
                 effort=effort,
+                distinct_from=distinct_from,
             )
 
         if not base_cwd:
@@ -3483,6 +3492,7 @@ class Orchestrator(
             model=model,
             provider=provider,
             effort=effort,
+            distinct_from=distinct_from,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -11371,11 +11381,12 @@ class Orchestrator(
         model: str | None = None,
         provider: str | None = None,
         effort: str | None = None,
+        distinct_from: str | None = None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
         flag (commit gate, auto-chain, shards, plan, isolation, feature,
-        per-assign model/provider/effort) survives unchanged."""
+        per-assign model/provider/effort/distinct_from) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -11395,6 +11406,7 @@ class Orchestrator(
                 "model": model,
                 "provider": provider,
                 "effort": effort,
+                "distinct_from": distinct_from,
             }
         )
         depth = len(q[project_ns])
@@ -11458,6 +11470,7 @@ class Orchestrator(
                 model=item.get("model"),
                 provider=item.get("provider"),
                 effort=item.get("effort"),
+                distinct_from=item.get("distinct_from"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a

@@ -563,6 +563,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     model = (getattr(args, "model", None) or "").strip() or None
     provider = (getattr(args, "provider", None) or "").strip().lower() or None
     effort = (getattr(args, "effort", None) or "").strip().lower() or None
+    distinct_from = (getattr(args, "distinct_from", None) or "").strip().lower() or None
     team = (getattr(args, "team", None) or "").strip().lower() or None
     if team and args.role != "lead":
         return {
@@ -613,6 +614,16 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         return {
             "ok": False,
             "msg": "--plan cannot be used with --mode subagent; fan out native subagents directly with --shards",
+        }
+    if mode == "subagent" and distinct_from:
+        return {
+            "ok": False,
+            "msg": "--distinct-from cannot be used with --mode subagent: native subagents always use the parent provider/model context, so there is no provider to reroute onto",
+        }
+    if distinct_from == args.role.strip().lower():
+        return {
+            "ok": False,
+            "msg": "--distinct-from cannot name the same role being assigned",
         }
     if provider:
         from .provider_config import assign_provider_override_error
@@ -697,6 +708,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "feature": getattr(args, "feature", "") or "",
                     "mode": mode_requested,
                     "team": team,
+                    "distinct_from": distinct_from,
                 }
             )
         )
@@ -731,6 +743,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "feature": getattr(args, "feature", "") or "",
                         "mode": mode_requested,
                         "team": team,
+                        "distinct_from": distinct_from,
                     }
                 )
             )
@@ -783,6 +796,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "feature": getattr(args, "feature", "") or "",
                 "mode": mode,
                 "team": team,
+                "distinct_from": distinct_from,
             }
         )
     )
@@ -4095,6 +4109,18 @@ def main(argv: list[str] | None = None) -> int:
         "no CLI knob yet (GAP tracked in #103) and silently ignore this flag "
         "rather than erroring. Only takes effect when spawning a new pane; an "
         "already-running pane keeps its current effort",
+    )
+    sa.add_argument(
+        "--distinct-from",
+        default=None,
+        metavar="ROLE",
+        dest="distinct_from",
+        help="cross-check pairing (#514): this task must never end up running "
+        "the SAME provider as ROLE's pane. Consulted only if this pane later "
+        "hits a quota limit and auto-resume looks for a fallback provider to "
+        "reroute to — ROLE's current provider is excluded from the candidates "
+        "so a correlated model error can't slip past both sides of the check. "
+        "Does not affect this assign's own initial spawn/provider choice.",
     )
     sa.add_argument(
         "--team",

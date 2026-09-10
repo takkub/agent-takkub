@@ -830,6 +830,9 @@ class CliServer(QObject):
                         mode=mode,
                         team=(str(req.get("team", "") or "").strip().lower() or None),
                         base_ref=(str(req.get("base_ref", "") or "").strip() or None),
+                        distinct_from=(
+                            str(req.get("distinct_from", "") or "").strip().lower() or None
+                        ),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -866,6 +869,9 @@ class CliServer(QObject):
                         effort=(str(req.get("effort", "") or "").strip().lower() or None),
                         team=(str(req.get("team", "") or "").strip().lower() or None),
                         base_ref=(str(req.get("base_ref", "") or "").strip() or None),
+                        distinct_from=(
+                            str(req.get("distinct_from", "") or "").strip().lower() or None
+                        ),
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
