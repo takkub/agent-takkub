@@ -41,7 +41,8 @@ def _isolate_custom_roles(tmp_path, monkeypatch: pytest.MonkeyPatch):
     the same pytest process (reproduced: a stray real `data-eng.md` on the
     dev machine made `roles.by_name("data-eng")` resolve non-None for the
     rest of the suite)."""
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles' V2 target (#504 cut half) is isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     saved = dict(roles._CUSTOM)
     roles._CUSTOM.clear()

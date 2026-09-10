@@ -26,7 +26,8 @@ OPENCODE = PROVIDER_REGISTRY["opencode"]
 
 @pytest.fixture(autouse=True)
 def redirect_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+    # role_models' V2 target (#504 cut half) is isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`.
     monkeypatch.delenv("TAKKUB_TEAMMATE_EFFORT", raising=False)
     yield tmp_path
 

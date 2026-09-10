@@ -2,11 +2,11 @@
 (#196: a phone had to re-enter the password every time the cockpit process
 restarted, because `AuthGate._sessions` used to live only in RAM).
 
-State file: ``<SETTINGS_HOME>/takkub-remote-sessions.json`` (atomic
-tmp+rename, 0o600 — same pattern as `config.py`'s ``remote.json``). Only a
-SHA-256 hash of each session token is ever written, never the raw token
-(same reasoning as `RemoteConfig.password_hash`: disk contents alone must
-never be enough to authenticate).
+State file: ``v2/state/sessions/remote.json`` under the cockpit's data home
+(#504 cut half — direct V2 read/write, no V1 file, no dual-write mirror).
+Only a SHA-256 hash of each session token is ever written, never the raw
+token (same reasoning as `RemoteConfig.password_hash`: disk contents alone
+must never be enough to authenticate).
 
 Invalidation is fingerprint-based, not event-based: every record on disk is
 stamped with a hash of the auth identity (`password_hash` + `secret_path` +
@@ -26,17 +26,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
-from ..config import SETTINGS_HOME
 from .config import RemoteConfig
-
-_PATH = SETTINGS_HOME / "takkub-remote-sessions.json"
 
 
 def path() -> Path:
-    """Where state lives. Function form so tests can monkeypatch `_PATH`."""
-    return _PATH
+    """Where state lives (the V2 target). Function form so tests can patch it."""
+    from ..core.storage.layout import storage_layout_v2
+    from ..core.storage.v2_target import effective_data_home
+
+    return storage_layout_v2(effective_data_home(None)).state_sessions / "remote.json"
 
 
 def hash_token(token: str) -> str:
@@ -73,27 +74,10 @@ def fingerprint(config: RemoteConfig) -> str:
 
 def load(current_fingerprint: str) -> dict[str, float]:
     """Read ``{token_hash: expiry_epoch}``. Missing/corrupt/fingerprint-
-    mismatched -> ``{}`` — never raises, never creates the file.
+    mismatched -> ``{}`` — never raises, never creates the file."""
+    from ..core.storage.v2_target import read_data
 
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, sanitizes THAT instead of the V1
-    file — same sanitizer either way. Falls back to V1 on any v2 miss.
-    """
-    from ..core.storage.v2_authority import read_remote_sessions, v2_authority_enabled
-
-    data: dict | None = None
-    if v2_authority_enabled():
-        v2_doc = read_remote_sessions()
-        if isinstance(v2_doc, dict):
-            data = v2_doc
-
-    if data is None:
-        if not _PATH.exists():
-            return {}
-        try:
-            data = json.loads(_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+    data = read_data(path())
 
     if not isinstance(data, dict):
         return {}
@@ -110,11 +94,13 @@ def load(current_fingerprint: str) -> dict[str, float]:
 
 
 def save(current_fingerprint: str, sessions: dict[str, float]) -> None:
-    """Persist atomically (tmp+rename), same pattern as `RemoteConfig.save()`."""
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
+    """Persist atomically (tmp+rename, 0o600 — same pattern as
+    `RemoteConfig.save()`) to the V2 target."""
     doc = {"fingerprint": current_fingerprint, "sessions": sessions}
-    payload = json.dumps(doc, indent=2) + "\n"
+    target = path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    payload = json.dumps({"schema": 1, "updated_at": time.time(), "data": doc}, indent=2) + "\n"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     if os.name != "nt":
         os.fchmod(fd, 0o600)
@@ -122,21 +108,13 @@ def save(current_fingerprint: str, sessions: dict[str, float]) -> None:
         stream.write(payload)
     if os.name != "nt":
         tmp.chmod(0o600)
-    tmp.replace(_PATH)
-
-    from ..core.storage.dual_write import dual_write_remote_sessions
-
-    dual_write_remote_sessions(doc)
+    tmp.replace(target)
 
 
 def clear() -> None:
     """ "Log out everywhere": drop the whole store. Safe to call when the
-    file doesn't exist (remote never enabled, or already cleared)."""
+    target doesn't exist (remote never enabled, or already cleared)."""
     try:
-        _PATH.unlink()
+        path().unlink()
     except FileNotFoundError:
         pass
-
-    from ..core.storage.dual_write import dual_write_remote_sessions
-
-    dual_write_remote_sessions(None)

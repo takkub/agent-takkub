@@ -111,7 +111,7 @@ def load() -> dict:
                 raise ValueError("core-v2-settings.json root is not an object")
             merged = _default_payload()
             # "flags" (router/conversation/context/brain/scheduler/
-            # auto_migrate/v2_authority) is intentionally NOT read back here
+            # auto_migrate — v2_authority itself retired by #504) is intentionally NOT read back here
             # any more (#515 Settings diet) — every one of them is default-ON
             # since 1.0.84/2.0.0 and `flag_enabled()` below now always
             # returns True, so a legacy file's persisted values are dead
@@ -144,9 +144,11 @@ def save(payload: dict) -> bool:
 
 def flag_enabled(name: str) -> bool:
     """Always True (#515 Settings diet) — every Core V2 flag (router/
-    conversation/context/brain/scheduler/auto_migrate/v2_authority) has been
+    conversation/context/brain/scheduler/auto_migrate) has been
     default-ON since 1.0.84/2.0.0 with no real-world reason left to flip one
-    off from the UI. `name` is accepted (unused) so every `core/*/flag.py`
+    off from the UI (v2_authority itself was retired outright by #504 —
+    see `core.storage.v2_target`). `name` is accepted (unused) so every
+    `core/*/flag.py`
     module's `env-wins-else-this` call shape needs no change — an operator's
     `TAKKUB_V2_*=0`/`TAKKUB_AUTO_MIGRATE=0` env override is checked BEFORE
     this function is ever reached and still fully works."""

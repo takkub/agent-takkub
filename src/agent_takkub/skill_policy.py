@@ -10,7 +10,9 @@ instructions text at creation time and never touches it again). This
 policy instead applies to EVERY role (built-in + custom) and is resolved
 fresh on every spawn, exactly like ``pane_tools_policy.effective_mcps``.
 
-Schema (``~/.takkub/skill-policy.json``):
+Schema (``v2/capabilities/skills/registry.json`` under the cockpit's data
+home — #504 cut half: direct V2 read/write, no V1 file, no dual-write
+mirror):
   {"version": 1, "roles": {"<role>": ["skill-name", ...]}}
 
 A role with no entry gets NO injected skill references. Unlike
@@ -43,20 +45,35 @@ the spawning provider's ``provider_spec.ProviderSpec.context_strategy``:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import tempfile
 from pathlib import Path
 
-from .config import SETTINGS_HOME
 from .pane_tools_policy import known_roles
 
 _log = logging.getLogger(__name__)
 
-SKILL_POLICY_FILE = SETTINGS_HOME / "skill-policy.json"
-
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$", re.IGNORECASE)
+
+
+def path() -> Path:
+    """Where the policy lives (the V2 target). Function form lets tests
+    patch it."""
+    from .core.storage.layout import storage_layout_v2
+    from .core.storage.v2_target import effective_data_home
+
+    home = effective_data_home(None)
+    return storage_layout_v2(home).capabilities / "skills" / "registry.json"
+
+
+def __getattr__(name: str):
+    # Back-compat for external readers (`settings_management.repositories.
+    # skills`/`relationships`, `settings_window`) that snapshot/watch this
+    # as a plain path attribute.
+    if name == "SKILL_POLICY_FILE":
+        return path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Providers whose CLI has a native Skill tool that auto-discovers
 # `.claude/skills/` on its own — the appendix for these is a proactive
@@ -85,31 +102,14 @@ def _validate_name(name: str) -> bool:
 
 
 def load_policy() -> dict[str, list[str]]:
-    """Load ``{role: [skill_name, ...]}``. Missing/corrupt/empty file -> {}.
+    """Load ``{role: [skill_name, ...]}``. Missing/corrupt/empty target -> {}.
 
     Never raises. Unknown roles and invalid names are silently filtered,
     mirroring `pane_tools_policy.load_policy`'s tolerance.
-
-    ``TAKKUB_V2_AUTHORITY`` (#362 Phase 10 wave 2, default off): when on and
-    the dual-written ``v2/`` mirror exists, validates THAT payload instead of
-    the V1 file. Falls back to V1 on any v2 miss.
     """
-    from .core.storage.v2_authority import read_skill_policy, v2_authority_enabled
+    from .core.storage.legacy_reader import read_json
 
-    data: dict | None = None
-    if v2_authority_enabled():
-        v2_payload = read_skill_policy()
-        if isinstance(v2_payload, dict):
-            data = v2_payload
-
-    if data is None:
-        if not SKILL_POLICY_FILE.is_file():
-            return {}
-        try:
-            data = json.loads(SKILL_POLICY_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            _log.debug("load_policy: could not read %s: %s", SKILL_POLICY_FILE, e)
-            return {}
+    data = read_json(path())
     if not isinstance(data, dict):
         return {}
     roles = data.get("roles")
@@ -127,20 +127,17 @@ def load_policy() -> dict[str, list[str]]:
 
 
 def save_policy(policy: dict[str, list[str]]) -> bool:
-    """Atomically persist *policy* (tmp + replace). Never raises.
+    """Atomically persist *policy* to the V2 target. Never raises.
 
-    Empty policy deletes the file (idempotent). Rejects the whole write
+    Empty policy deletes the target (idempotent). Rejects the whole write
     (returns False, no partial write) if any role/name is invalid.
     """
     if not policy:
         try:
-            SKILL_POLICY_FILE.unlink(missing_ok=True)
+            path().unlink(missing_ok=True)
         except OSError as e:
-            _log.warning("save_policy: could not delete %s: %s", SKILL_POLICY_FILE, e)
+            _log.warning("save_policy: could not delete %s: %s", path(), e)
             return False
-        from .core.storage.dual_write import dual_write_skill_policy
-
-        dual_write_skill_policy({})
         return True
 
     for role, names in policy.items():
@@ -154,34 +151,13 @@ def save_policy(policy: dict[str, list[str]]) -> bool:
             return False
 
     payload = {"version": 1, "roles": policy}
-    tmp_path: Path | None = None
     try:
-        SKILL_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=SKILL_POLICY_FILE.parent,
-            suffix=".json",
-            delete=False,
-            encoding="utf-8",
-        ) as tmp:
-            # Bind the temp path BEFORE writing so the except-clause cleanup
-            # still fires if json.dump raises mid-write (delete=False would
-            # otherwise leak the partial temp file).
-            tmp_path = Path(tmp.name)
-            json.dump(payload, tmp, indent=2, ensure_ascii=False)
-            tmp.write("\n")
-        tmp_path.replace(SKILL_POLICY_FILE)
-        from .core.storage.dual_write import dual_write_skill_policy
+        from .core.migration.registry_copy_step import write_json_atomic
 
-        dual_write_skill_policy(payload)
+        write_json_atomic(path(), payload)
         return True
     except OSError as e:
-        _log.warning("save_policy: could not write %s: %s", SKILL_POLICY_FILE, e)
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _log.warning("save_policy: could not write %s: %s", path(), e)
         return False
 
 

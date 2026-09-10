@@ -10,11 +10,9 @@ from PyQt6.QtWidgets import QApplication
 
 from agent_takkub import (
     custom_roles,
-    pane_tools_policy,
     provider_config,
     roles,
     shared_dev_tools,
-    skill_policy,
 )
 from agent_takkub.settings_management.commands import (
     CreateRoleCommand,
@@ -27,11 +25,10 @@ from agent_takkub.settings_management.window import SettingsManagementWindow
 
 @pytest.fixture(autouse=True)
 def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles'/pane_tools_policy's/skill_policy's V2 targets, and
+    # provider_config's `routing.json` target (#504 cut half), are isolated
+    # automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
-    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
     # Access-tab MCP writes now regen role variants (HIGH-4) — redirect the
     # master file so that never touches the real ~/.takkub runtime dir.

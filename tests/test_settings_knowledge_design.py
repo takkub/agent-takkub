@@ -38,9 +38,9 @@ from agent_takkub.core.secrets.manager import SecretManager
 
 @pytest.fixture(autouse=True)
 def _isolate_kd_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles'/pane_tools_policy's V2 targets (#504 cut half) are
+    # isolated automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
     # Context Strategy panel reads this env directly (`TAKKUB_CONTEXT_

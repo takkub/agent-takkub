@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from agent_takkub import config, pane_tools_policy, shared_dev_tools, skill_policy
+from agent_takkub import config, shared_dev_tools
 from agent_takkub.settings_management.commands import CreateMcpCommand, McpConfigDraft
 from agent_takkub.settings_management.pages.mcp_page import McpPage
 from agent_takkub.settings_management.pages.skills_page import SkillsPage
@@ -27,9 +27,9 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(config, "ASSETS_ROOT", shipped_dir)
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "no-agents-here")
     monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / "no-custom-agents-here")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
+    # skill_policy's/pane_tools_policy's V2 targets (#504 cut half) are
+    # isolated automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     yield tmp_path
 
 

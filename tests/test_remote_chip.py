@@ -178,7 +178,6 @@ class TestApplyRemoteConfig:
         by the time this runs, so there's no live AuthGate left to clear)."""
         import agent_takkub.remote.session_store as session_store
 
-        monkeypatch.setattr(session_store, "_PATH", tmp_path / "sessions.json")
         session_store.save("some-fingerprint", {"tok-hash": 1e15})
         assert session_store.path().exists()
 
@@ -275,7 +274,6 @@ class TestLogoutAllRemoteSessions:
         — nothing to reach through, so clear the on-disk store on its own."""
         import agent_takkub.remote.session_store as session_store
 
-        monkeypatch.setattr(session_store, "_PATH", tmp_path / "sessions.json")
         session_store.save("some-fingerprint", {"tok-hash": 1e15})
         assert session_store.path().exists()
 

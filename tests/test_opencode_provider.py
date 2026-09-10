@@ -114,7 +114,6 @@ def _make_pane(role: str = "opencode"):
 
 class TestOpencodeSpawnThroughGenericBranch:
     def _spawn_and_capture(self, qapp, monkeypatch, tmp_path):
-        from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt
         from agent_takkub.provider_config import OPENCODE
 
@@ -123,7 +122,6 @@ class TestOpencodeSpawnThroughGenericBranch:
         orch._panes_by_project[TEST_PROJECT] = {"opencode": pane}
 
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-        monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
         pty_spawn_calls: list[dict] = []
 

@@ -1569,7 +1569,6 @@ class TestCheckCoreV2:
             "context",
             "scheduler",
             "conversation",
-            "v2_authority",
             "auto_migrate",
         ):
             assert by_name[name].status == Status.OK, name

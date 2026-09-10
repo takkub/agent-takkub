@@ -32,7 +32,8 @@ from agent_takkub import (
 def new_custom_role(tmp_path, monkeypatch):
     """Create a real custom role exactly the way the New Role dialog does,
     then unregister it again so state never leaks into other tests."""
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles' V2 target (#504 cut half) is isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
 
@@ -89,7 +90,8 @@ def test_shell_still_excluded_from_pipeline_palette_and_matrix(new_custom_role):
 
 
 def test_unregistering_role_drops_it_from_every_surface(tmp_path, monkeypatch):
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    # custom_roles' V2 target (#504 cut half) is isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
     name = "temp-role-sync-test"
     ok, err = custom_roles.create_role(name, "Temp", "#112233", 2, 9, "x")

@@ -345,15 +345,38 @@ def _get_local_issues_path(cwd: str | Path | None) -> Path:
     return Path(cwd or ".").resolve() / ".takkub_issues.json"
 
 
+def _cockpit_bug_v2_target() -> Path:
+    """`v2/state/issues/local.json` — the ONLY local-issues path with a V2
+    target (ladder step 5's ``local-issues`` mapping is always
+    ``DATA_HOME/.takkub_issues.json``, the cockpit-bug instance). A
+    per-*project* ``.takkub_issues.json`` (any other ``cwd``) has no V2
+    mapping and stays V1-only, same as before #504.
+
+    Resolved against this module's own ``DATA_HOME`` binding (not a fresh
+    ``effective_data_home()`` lookup) so it always agrees with
+    :func:`_is_cockpit_bug_path`, which compares against that same name —
+    including when a test monkeypatches ``agent_takkub.issues.DATA_HOME``
+    directly."""
+    from .core.storage.layout import storage_layout_v2
+
+    return storage_layout_v2(DATA_HOME).state_issues / "local.json"
+
+
+def _is_cockpit_bug_path(path: Path) -> bool:
+    try:
+        return path.resolve() == (DATA_HOME / ".takkub_issues.json").resolve()
+    except OSError:
+        return False
+
+
 def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
     path = _get_local_issues_path(cwd)
 
-    from .core.storage.v2_authority import read_local_issues, v2_authority_enabled
+    if _is_cockpit_bug_path(path):
+        from .core.storage.v2_target import read_data
 
-    if v2_authority_enabled():
-        v2_issues = read_local_issues(path)
-        if v2_issues is not None:
-            return v2_issues
+        data = read_data(_cockpit_bug_v2_target())
+        return data if isinstance(data, list) else []
 
     if not path.exists():
         return []
@@ -395,15 +418,21 @@ def _filter_local_issues(
 
 def _save_local_issues(issues: list[dict[str, Any]], cwd: str | Path | None) -> None:
     path = _get_local_issues_path(cwd)
+
+    if _is_cockpit_bug_path(path):
+        from .core.storage.v2_target import write_data
+
+        try:
+            write_data(_cockpit_bug_v2_target(), issues)
+        except OSError as exc:
+            raise RuntimeError(f"could not save local issue store {path}: {exc}") from exc
+        return
+
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(issues, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
-
-        from .core.storage.dual_write import dual_write_local_issues
-
-        dual_write_local_issues(issues, path)
     except Exception as exc:
         try:
             tmp.unlink(missing_ok=True)

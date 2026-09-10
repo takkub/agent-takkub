@@ -48,11 +48,11 @@ def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -
     real cockpit config under `runtime/`. Also redirects the pane-tools
     policy file so a real ~/.takkub/pane-tools.json on the dev machine
     can't leak overrides into variant generation."""
-    from agent_takkub import pane_tools_policy as ptp
 
     target = tmp_path / "shared-mcp.json"
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    # pane_tools_policy's V2 target (#504 cut half) is isolated automatically
+    # by conftest.py's autouse `_isolate_runtime`.
     return target
 
 

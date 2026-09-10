@@ -48,8 +48,8 @@ def tmp_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "find_claude_executable", lambda: "claude")
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
-    monkeypatch.setattr(provider_models, "_PATH", tmp_path / "provider-models.json")
+    # role_models/provider_models' V2 targets (#504 cut half) are isolated
+    # automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.delenv("TAKKUB_TEAMMATE_MODEL", raising=False)
     return tmp_path
 

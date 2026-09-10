@@ -33,7 +33,8 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # when cwd has no `.claude/agents`) — point it at an empty dir instead.
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "no-agents-here")
     monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / "no-custom-agents-here")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
+    # skill_policy's V2 target (#504 cut half) is isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`.
     yield tmp_path
 
 

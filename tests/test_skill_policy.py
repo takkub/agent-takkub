@@ -11,11 +11,13 @@ from agent_takkub import skill_policy
 
 
 @pytest.fixture
-def policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect skill_policy.SKILL_POLICY_FILE to tmp."""
-    policy_file = tmp_path / "skill-policy.json"
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", policy_file)
-    return policy_file
+def policy_file() -> Path:
+    """The resolved V2 target (`skill_policy.path()`) — isolation is
+    automatic (conftest.py's autouse `_isolate_runtime` redirects
+    `storage_layout_v2()`'s no-arg default to a per-test tmp dir)."""
+    target = skill_policy.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 class TestLoadPolicy:

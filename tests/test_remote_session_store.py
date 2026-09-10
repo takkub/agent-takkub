@@ -80,11 +80,11 @@ class TestLoadSave:
         session_store.save("fp", {"h2": 2.0})
         assert session_store.load("fp") == {"h2": 2.0}
 
-    def test_save_creates_parent_dir(self, tmp_path, monkeypatch):
-        nested = tmp_path / "nested" / "dir" / "sessions.json"
-        monkeypatch.setattr(session_store, "_PATH", nested)
+    def test_save_creates_parent_dir(self):
+        target = session_store.path()
+        assert not target.parent.exists()
         session_store.save("fp", {"h1": 1.0})
-        assert nested.exists()
+        assert target.exists()
 
     if sys.platform != "win32":
 

@@ -313,10 +313,11 @@ class TestRolePinsAreRefreshedToo:
     level reported NO_PIN forever and never bumped anything."""
 
     @pytest.fixture(autouse=True)
-    def _isolate_stores(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-        from agent_takkub import provider_models, role_models
+    def _isolate_stores(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub import provider_models
 
-        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+        # role_models' V2 target (#504 cut half) is isolated automatically
+        # by conftest.py's autouse `_isolate_runtime`.
         monkeypatch.setattr(provider_models, "model_for", lambda name: None)
 
     def test_role_pin_is_bumped_even_with_no_provider_level_pin(
@@ -463,10 +464,9 @@ class TestCodexDiscovery:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         import agent_takkub.codex_helper as codex_helper
-        from agent_takkub import provider_models, role_models
+        from agent_takkub import provider_models
 
         monkeypatch.setattr(codex_helper, "codex_home", lambda: tmp_path / "nope")
-        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
         monkeypatch.setattr(provider_models, "model_for", lambda name: "gpt-5.6-terra")
         assert pmr._discover_codex_models("/bin/codex") is None
         assert (
@@ -486,7 +486,6 @@ class TestCodexDiscovery:
             ],
         )
         self._patch_home(monkeypatch, home)
-        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
         monkeypatch.setattr(provider_models, "model_for", lambda name: None)
         role_models.set_model("backend", "codex", "gpt-5.6-terra")
         outcome = pmr.refresh_provider_model("codex", "/bin/codex")

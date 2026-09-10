@@ -146,12 +146,10 @@ class TestOtherProvidersUnaffected:
     never see --project/--new-project injected into their argv."""
 
     def test_codex_argv_has_no_project_scope_flags(self, qapp, monkeypatch, tmp_path):
-        from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt
         from agent_takkub.provider_config import CODEX
 
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-        monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
         argv = _spawn_and_capture_argv(
             qapp,
@@ -165,12 +163,10 @@ class TestOtherProvidersUnaffected:
         assert "--new-project" not in argv
 
     def test_opencode_argv_has_no_project_scope_flags(self, qapp, monkeypatch, tmp_path):
-        from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt
         from agent_takkub.provider_config import OPENCODE
 
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-        monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
         argv = _spawn_and_capture_argv(
             qapp,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import config, pane_tools_policy, plugin_installer
+from agent_takkub import config, plugin_installer
 from agent_takkub.settings_management.commands import CreatePluginCommand
 from agent_takkub.settings_management.repositories import plugins as plugins_repo
 
@@ -87,7 +87,8 @@ class _FakeRegistry:
 
 @pytest.fixture(autouse=True)
 def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    # pane_tools_policy's V2 target (#504 cut half) is isolated automatically
+    # by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(
         config,
         "_SAFE_PLUGINS",

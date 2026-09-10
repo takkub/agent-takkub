@@ -4,8 +4,8 @@ master plan §4 fix 3: "`project_id` identity ต้องมาจาก V2 reg
 re-defined elsewhere).
 
 `config.load_projects()` is already that single registry reader — the V2
-dual-write mirror under `TAKKUB_V2_AUTHORITY` when on and migrated, V1
-`projects.json` otherwise (#362 piece 1, merged). This module adds nothing
+projects registry directly (#504 cut half: no V1 file, no dual-write
+mirror). This module adds nothing
 on top of it beyond "what is *this* project's canonical id": every known
 project's dict key IS its id already (`ProjectMigrationStep`/`steps_v1.py`
 uses the same key verbatim as the V2 `projects/<id>/project.json` folder

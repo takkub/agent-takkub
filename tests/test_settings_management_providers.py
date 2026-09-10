@@ -19,10 +19,12 @@ from agent_takkub.settings_management.repositories import providers as providers
 
 @pytest.fixture(autouse=True)
 def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
-    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
+    # provider_state/provider_models' V2 targets and provider_config's
+    # `routing.json` target (#504 cut half) are isolated automatically by
+    # conftest.py's autouse `_isolate_runtime`. `_BASE_DIR` still needs
+    # redirecting — `_migrate_legacy_global_overrides_once()` looks for a
+    # standalone legacy `role-providers.json` there (#515, unrelated to V2).
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
-    monkeypatch.setattr(provider_models, "_PATH", tmp_path / "provider-models.json")
     yield tmp_path
 
 

@@ -141,7 +141,6 @@ class TestCursorSpawnThroughGenericBranch:
     ) -> None:
         """The generic branch must pass cursor's `--force`, or every shell
         command in the pane stops on a y/n prompt."""
-        from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt
         from agent_takkub.provider_config import CURSOR
 
@@ -149,7 +148,6 @@ class TestCursorSpawnThroughGenericBranch:
         pane = _make_pane()
         orchestrator._panes_by_project[TEST_PROJECT] = {"cursor": pane}
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-        monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
         spawn_calls: list[dict] = []
 
         with (

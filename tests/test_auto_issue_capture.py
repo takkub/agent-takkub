@@ -32,7 +32,8 @@ def _make_exc(cls: type[BaseException], msg: str = "boom"):
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    monkeypatch.setattr(aic, "_DEDUP_PATH", tmp_path / "auto_issue_dedup.json")
+    # auto_issue_capture's V2 target (#504 cut half) is isolated
+    # automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(aic, "_spawn", _SyncThread)
     monkeypatch.setattr(aic, "_recent", {})
     monkeypatch.setattr(aic, "_fired_mem", [])
@@ -174,7 +175,7 @@ def test_new_issue_failure_still_consumes_the_slot(monkeypatch):
     et, ev, tb = _make_exc(ValueError, "boom")
     aic.capture_cockpit_crash(et, ev, tb, source="test")
 
-    state = json.loads(aic._DEDUP_PATH.read_text(encoding="utf-8"))
+    state = json.loads(aic.path().read_text(encoding="utf-8"))
     assert len(state["fired"]) == 1
 
 
@@ -211,8 +212,8 @@ def test_rolling_window_lets_signature_refire_after_24h(monkeypatch):
 
 
 def test_corrupt_state_file_does_not_permanently_disable_capture(monkeypatch):
-    aic._DEDUP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    aic._DEDUP_PATH.write_text(
+    aic.path().parent.mkdir(parents=True, exist_ok=True)
+    aic.path().write_text(
         json.dumps(
             {"fired": ["not-a-number", None], "signatures": {"ValueError:x.py:1": "also-bad"}}
         ),

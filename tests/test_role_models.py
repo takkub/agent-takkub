@@ -8,17 +8,30 @@ the old model.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from agent_takkub import role_models
 
+# Isolation is automatic (conftest.py's autouse `_isolate_runtime` redirects
+# `storage_layout_v2()`'s no-arg default to a per-test tmp dir; `path()`
+# resolves through that). `_raw_write` below is only for tests that need to
+# plant raw/corrupt content ahead of a load.
 
-@pytest.fixture(autouse=True)
-def redirect_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
-    yield tmp_path
+
+def _raw_write(text: str) -> None:
+    """Plant literal on-disk content ahead of a load — for tests exercising
+    a malformed/unexpected top-level document shape."""
+    target = role_models.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def _write_v2(data: dict) -> None:
+    """Plant a valid V2-target document (the `{"data": ...}` envelope
+    `role_models._load()` unwraps) ahead of a load."""
+    import json
+
+    _raw_write(json.dumps({"schema": 1, "data": data}))
 
 
 def test_unset_role_returns_none() -> None:
@@ -114,18 +127,18 @@ def test_raw_model_for_reports_binding() -> None:
 def test_legacy_flat_string_entry_is_dropped() -> None:
     # A pre-binding entry carries no provider — honouring it is exactly the
     # wrong-model-to-wrong-CLI hazard, so it must be ignored, not guessed at.
-    role_models._PATH.write_text('{"backend": "gpt-5.6"}', encoding="utf-8")
+    _write_v2({"backend": "gpt-5.6"})
     assert role_models.all_models() == {}
     assert role_models.model_for("backend", "codex") is None
 
 
 def test_corrupt_file_behaves_empty() -> None:
-    role_models._PATH.write_text("{not json", encoding="utf-8")
+    _raw_write("{not json")
     assert role_models.all_models() == {}
 
 
 def test_non_dict_json_behaves_empty() -> None:
-    role_models._PATH.write_text('["a", "b"]', encoding="utf-8")
+    _raw_write('["a", "b"]')
     assert role_models.all_models() == {}
 
 
@@ -135,9 +148,7 @@ def test_non_dict_json_behaves_empty() -> None:
 def test_legacy_entry_without_effort_key_still_loads() -> None:
     # Backward compat: a role-models.json written before this field existed
     # must load unchanged, with effort simply absent.
-    role_models._PATH.write_text(
-        '{"backend": {"provider": "codex", "model": "gpt-5.6"}}', encoding="utf-8"
-    )
+    _write_v2({"backend": {"provider": "codex", "model": "gpt-5.6"}})
     assert role_models.all_models() == {"backend": {"provider": "codex", "model": "gpt-5.6"}}
     assert role_models.effort_for("backend", "codex") is None
 
@@ -160,9 +171,8 @@ def test_effort_not_returned_for_a_different_provider() -> None:
 def test_invalid_effort_value_drops_only_that_field() -> None:
     # "ludicrous" is not one of claude's declared effort_levels — the
     # (provider, model) pair underneath must survive, only effort is dropped.
-    role_models._PATH.write_text(
-        '{"backend": {"provider": "claude", "model": "claude-sonnet-5", "effort": "ludicrous"}}',
-        encoding="utf-8",
+    _write_v2(
+        {"backend": {"provider": "claude", "model": "claude-sonnet-5", "effort": "ludicrous"}}
     )
     assert role_models.model_for("backend", "claude") == "claude-sonnet-5"
     assert role_models.effort_for("backend", "claude") is None
@@ -171,10 +181,7 @@ def test_invalid_effort_value_drops_only_that_field() -> None:
 def test_effort_valid_for_unregistered_provider_is_kept() -> None:
     # A provider not in PROVIDER_REGISTRY (future/custom) can't be validated
     # against a known level set — trust it rather than guess.
-    role_models._PATH.write_text(
-        '{"backend": {"provider": "made-up", "model": "x", "effort": "whatever"}}',
-        encoding="utf-8",
-    )
+    _write_v2({"backend": {"provider": "made-up", "model": "x", "effort": "whatever"}})
     assert role_models.effort_for("backend", "made-up") == "whatever"
 
 
@@ -219,23 +226,14 @@ def test_clear_model_also_clears_effort() -> None:
     assert role_models.effort_for("backend", "claude") is None
 
 
-# ── B-H2 (round2 review, docs/audit/2026-09-07-batch-2.0.x-review-round2.md):
-# #515 folded the standalone global-routing file (role-providers.json) into
-# this module, making `set_provider`/`_save` the ONLY writer of global
-# routing — but it only ever mirrored `role-models.json` itself
-# (`dual_write_role_models`), never `v2/config/routing.json`
-# (`dual_write_routing`). A provider switch through the model picker (this
-# module, not `provider_config.save_providers`) left the v2 mirror stale
-# and invisible to `scan_v1_only_writes`'s exit-gate check. ────────────────
+# ── #504 cut half: `set_provider`/`_save` is the only writer of global
+# routing, and now writes `config/routing.json`'s "global" bucket directly
+# (no mirror, no flag) on every call — B-H2's original regression (a
+# provider switch through the model picker leaving that bucket stale) can
+# no longer happen because there is only one write path left. ─────────────
 
 
-def test_set_provider_mirrors_v2_routing_global(monkeypatch, isolated_v2_data_home) -> None:
-    (isolated_v2_data_home / "v2").mkdir(parents=True)
-    settings_home = isolated_v2_data_home.parent / "settings"
-    settings_home.mkdir()
-    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", settings_home)
-    monkeypatch.setattr(role_models, "_PATH", settings_home / "role-models.json")
-
+def test_set_provider_writes_v2_routing_global(isolated_v2_data_home) -> None:
     role_models.set_provider("frontend", "codex")
 
     from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
@@ -243,21 +241,3 @@ def test_set_provider_mirrors_v2_routing_global(monkeypatch, isolated_v2_data_ho
 
     routing_target = RoleAgentMigrationStep(data_home=isolated_v2_data_home)._routing_target()
     assert read_json(routing_target).get("global") == {"frontend": "codex"}
-
-
-def test_set_provider_leaves_no_v1_only_write_hit(monkeypatch, isolated_v2_data_home) -> None:
-    """The regression this bug produces at the exit gate: `scan_v1_only_writes`
-    reading clean (0 hits) despite the v2 mirror never having been updated —
-    the exact `probe_routing_source.py` scenario from the round2 review."""
-    (isolated_v2_data_home / "v2").mkdir(parents=True)
-    settings_home = isolated_v2_data_home.parent / "settings"
-    settings_home.mkdir()
-    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", settings_home)
-    monkeypatch.setattr(role_models, "_PATH", settings_home / "role-models.json")
-
-    role_models.set_provider("frontend", "codex")
-
-    from agent_takkub.core.storage.v1_only_write import scan_v1_only_writes
-
-    hits = scan_v1_only_writes(data_home=isolated_v2_data_home)
-    assert not any(h.name.startswith("role-providers") for h in hits)

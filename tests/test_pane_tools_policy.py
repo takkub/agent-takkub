@@ -11,8 +11,10 @@ from agent_takkub import pane_tools_policy, shared_dev_tools
 
 
 @pytest.fixture
-def policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect pane_tools_policy.PANE_TOOLS_POLICY_FILE to tmp.
+def policy_file(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The resolved V2 target (`pane_tools_policy.path()`) — isolation is
+    automatic (conftest.py's autouse `_isolate_runtime` redirects
+    `storage_layout_v2()`'s no-arg default to a per-test tmp dir).
 
     Also stubs `shared_dev_tools.regen_role_variants` — `save_policy()`
     fires it on every successful write (#364 lever 4, keeps the on-disk
@@ -20,13 +22,12 @@ def policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     function would otherwise read the project's real `runtime/shared-
     mcp.json` and write real `runtime/shared-mcp-<role>.json` variant
     files as a side effect of this test — a shared file this suite must
-    never touch, same reasoning as redirecting `PANE_TOOLS_POLICY_FILE`
-    itself.
+    never touch.
     """
-    policy_file = tmp_path / "pane-tools.json"
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file)
     monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
-    return policy_file
+    target = pane_tools_policy.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 class TestLoadPolicy:
@@ -202,9 +203,7 @@ class TestSavePolicyRegeneratesVariants:
 
         from agent_takkub import shared_dev_tools
 
-        policy_file = tmp_path / "pane-tools.json"
         shared_mcp_file = tmp_path / "shared-mcp.json"
-        monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file)
         monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", shared_mcp_file)
 
         shared_mcp_file.write_text(
@@ -464,7 +463,8 @@ class TestKnownRoles:
     def custom_role_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         from agent_takkub import custom_roles
 
-        monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+        # custom_roles' V2 target (#504 cut half) is isolated automatically
+        # by conftest.py's autouse `_isolate_runtime`.
         monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
         return tmp_path
 

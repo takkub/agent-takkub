@@ -65,7 +65,6 @@ def _make_codex_pane() -> MagicMock:
 
 
 def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> list[str]:
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
 
@@ -78,7 +77,6 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> list[str]:
     # test_spawn_codex_argv.py uses, so MCP injection here is deterministic
     # rather than machine-dependent.
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
     pty_spawn_calls: list[dict] = []
 
