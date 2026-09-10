@@ -186,18 +186,50 @@ def test_solo_lead_never_blocks_lead_or_providers():
         assert team_preset.can_spawn(role, "proj")[0] is True
 
 
-def test_pair_allows_only_reviewer_as_checker():
+def test_pair_allows_reviewer_and_qa_alias_as_checker():
+    """qa is #513's legacy alias for reviewer --mode e2e (resolve_role_alias) —
+    with checker=reviewer (pair's default), spawning "qa" must still resolve
+    through the alias and pass, same as spawning "reviewer" directly."""
     team_preset.set_current("pair", "proj")
     assert team_preset.can_spawn("reviewer", "proj")[0] is True
-    assert team_preset.can_spawn("qa", "proj")[0] is False
+    assert team_preset.can_spawn("qa", "proj")[0] is True
     assert team_preset.can_spawn("backend", "proj")[0] is False
 
 
-def test_full_allows_positions_and_reviewer_not_qa():
+def test_full_allows_positions_reviewer_and_qa_alias():
+    """Regression for the live-test repro: `takkub assign --role qa` on the
+    default 'full' preset (checker=reviewer) must NOT be rejected — qa is
+    reviewer's alias, not a separate ungoverned role."""
     team_preset.set_current("full", "proj")
     assert team_preset.can_spawn("backend", "proj")[0] is True
     assert team_preset.can_spawn("reviewer", "proj")[0] is True
-    assert team_preset.can_spawn("qa", "proj")[0] is False
+    assert team_preset.can_spawn("qa", "proj")[0] is True
+
+
+def test_full_never_blocks_critic():
+    """critic was never added to CHECKER_ROLES, so it's ungoverned and always
+    passes through _governed_roles — same alias-role status as qa, kept
+    symmetric here so a future regression in either direction is caught."""
+    team_preset.set_current("full", "proj")
+    assert team_preset.can_spawn("critic", "proj")[0] is True
+
+
+def test_custom_checker_qa_explicit_keeps_qa_allowed_and_reviewer_blocked():
+    """A custom preset that picks checker="qa" directly (not via the #513
+    alias) must keep working exactly as before this fix: qa passes because
+    it *is* the checker, reviewer is blocked because it isn't (and isn't a
+    plain position either)."""
+    team_preset.set_current(
+        "custom",
+        "proj",
+        custom={
+            "roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True),
+            "checker": "qa",
+            "lead_may_implement": False,
+        },
+    )
+    assert team_preset.can_spawn("qa", "proj")[0] is True
+    assert team_preset.can_spawn("reviewer", "proj")[0] is False
 
 
 def test_full_blocks_extra_positions_until_toggled_on():

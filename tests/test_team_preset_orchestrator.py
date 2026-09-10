@@ -71,12 +71,17 @@ class TestAssignRejectsPresetGovernedRole:
             ok, _ = orch.assign("backend", cwd="/api", task="fix bug", project=TEST_PROJECT)
         assert ok is True
 
-    def test_pair_blocks_qa_allows_reviewer(self, orch: Orchestrator) -> None:
+    def test_pair_allows_reviewer_and_qa_alias(self, orch: Orchestrator) -> None:
+        """qa is #513's legacy alias for reviewer --mode e2e — with pair's
+        checker=reviewer, assign("qa") must resolve through the alias and
+        spawn, same as assign("reviewer") itself (live-test repro fix)."""
         team_preset.set_current("pair", TEST_PROJECT)
-        with patch.object(orch, "spawn") as spawn_mock:
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
             ok, _ = orch.assign("qa", cwd="/web", task="test", project=TEST_PROJECT)
-        assert ok is False
-        spawn_mock.assert_not_called()
+        assert ok is True
 
         with (
             patch.object(orch, "spawn", return_value=(True, "spawned")),
