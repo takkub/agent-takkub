@@ -745,6 +745,24 @@ STUCK_LIVE_CHILD_NOTICE_COOLDOWN_S = 15 * 60
 DONE_CLOSE_LIVE_CHILD_GRACE_S = int(os.environ.get("TAKKUB_DONE_CLOSE_LIVE_CHILD_GRACE_S", 15 * 60))
 # How often to recheck whether the deferred children have finished.
 DONE_CLOSE_LIVE_CHILD_POLL_MS = 5_000
+# #554 (follow-up to #537): DONE_CLOSE_LIVE_CHILD_GRACE_S bounds how long the
+# deferred close waits for a still-running subprocess, but that grace period
+# can't tell real in-flight work apart from an orphaned wrapper shell that
+# will never exit on its own (real report: a leftover bash.exe left running
+# under a devops pane after its actual task had already finished and its done
+# report had already gone out) — that shape sat out the full 15 minutes every
+# time, reading to the user as "stuck again" even though `done()` had already
+# succeeded and they had to `takkub close` it themselves. Once every live
+# child has shown identical CPU time (no CPU activity, no new/exited
+# children — see `_live_non_scaffolding_children_cpu_snapshot`) AND the
+# pane's PTY has produced no new output across this many consecutive
+# seconds, treat the tree as idle leftovers and close right away instead of
+# waiting out the rest of the grace period. Two consecutive poll ticks
+# (DONE_CLOSE_LIVE_CHILD_POLL_MS apart) is the minimum possible measurement
+# window, so this must be set well above one poll interval.
+DONE_CLOSE_IDLE_CHILD_THRESHOLD_S = int(
+    os.environ.get("TAKKUB_DONE_CLOSE_IDLE_CHILD_THRESHOLD_S", 20)
+)
 
 # TTY prompt block detection (issue #54). When a pane's subprocess is waiting
 # for interactive input (y/N, passphrase, "press any key"), close→respawn won't
@@ -4427,28 +4445,14 @@ class Orchestrator(
             msg += f" · could not kill: {', '.join(failed[:5])}"
         return not failed, msg
 
-    def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
-        """Names of the processes running under *session* that represent real
-        work, with the provider's own launcher scaffolding filtered out AND
-        any child that has already exited excluded (#412).
-
-        #288 split this out of :meth:`_warn_if_live_children`: the same list
-        that explains what a close is about to kill is also the proof that a
-        screen-silent pane is not actually wedged, and the stuck watchdog has
-        to consult it *before* deciding to kill (see `_check_stuck_panes`).
-        Returns ``[]`` on any probe failure — every caller must treat "no
-        evidence of live work" as inconclusive, never as proof of idleness.
-
-        #412 (real report: macOS, opencode): `psutil.Process(pid).children()`
-        can still enumerate a child that has ALREADY finished — e.g. a `vite
-        build` whose process exited but whose own parent (an intermediate
-        shell/launcher under the pane) hasn't `wait()`-ed on it yet, so POSIX
-        keeps it around as a zombie/defunct entry. That produced a "10
-        subprocess(es) still running... about to be killed" warning on
-        `takkub done` for work that had, in fact, already completed. Exit
-        detection differs by OS (Windows has no zombie state at all), hence
-        the explicit branch below rather than one exception-swallowing check
-        assumed to cover both.
+    def _live_non_scaffolding_child_procs(self, project_ns: str, role_name: str, session) -> list:
+        """`psutil.Process` objects for the children running under *session*
+        that represent real work — provider launcher scaffolding and
+        already-exited children filtered out (#412). Shared by
+        :meth:`_live_non_scaffolding_children` (names, for warnings/notices)
+        and :meth:`_live_non_scaffolding_children_cpu_snapshot` (per-pid CPU
+        time, for #554 idle detection) so the filtering rules can't drift
+        between the two. Returns ``[]`` on any probe failure.
         """
         pid = getattr(session, "_pid", None)
         if not pid:
@@ -4466,7 +4470,7 @@ class Orchestrator(
 
         provider = effective_provider_for(role_name, project=project_ns)
         scaffolding = scaffolding_process_names_for(provider)
-        names: list[str] = []
+        procs = []
         for child in children:
             try:
                 status = child.status()
@@ -4497,8 +4501,69 @@ class Orchestrator(
                 continue
             if normalize_process_name(child_name) in scaffolding:
                 continue
-            names.append(child_name)
+            procs.append(child)
+        return procs
+
+    def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
+        """Names of the processes running under *session* that represent real
+        work, with the provider's own launcher scaffolding filtered out AND
+        any child that has already exited excluded (#412).
+
+        #288 split this out of :meth:`_warn_if_live_children`: the same list
+        that explains what a close is about to kill is also the proof that a
+        screen-silent pane is not actually wedged, and the stuck watchdog has
+        to consult it *before* deciding to kill (see `_check_stuck_panes`).
+        Returns ``[]`` on any probe failure — every caller must treat "no
+        evidence of live work" as inconclusive, never as proof of idleness.
+
+        #412 (real report: macOS, opencode): `psutil.Process(pid).children()`
+        can still enumerate a child that has ALREADY finished — e.g. a `vite
+        build` whose process exited but whose own parent (an intermediate
+        shell/launcher under the pane) hasn't `wait()`-ed on it yet, so POSIX
+        keeps it around as a zombie/defunct entry. That produced a "10
+        subprocess(es) still running... about to be killed" warning on
+        `takkub done` for work that had, in fact, already completed. Exit
+        detection differs by OS (Windows has no zombie state at all), hence
+        the explicit branch below rather than one exception-swallowing check
+        assumed to cover both.
+        """
+        names: list[str] = []
+        for child in self._live_non_scaffolding_child_procs(project_ns, role_name, session):
+            try:
+                names.append(child.name())
+            except Exception:
+                continue
         return names
+
+    def _live_non_scaffolding_children_cpu_snapshot(
+        self, project_ns: str, role_name: str, session
+    ) -> dict[int, float] | None:
+        """Per-pid total CPU time (user+system) for the same live children
+        `_live_non_scaffolding_children` reports, for idle-vs-busy comparison
+        across `_close_if_same_session` poll ticks (#554).
+
+        Returns ``None`` on any probe failure — callers must treat that as
+        "cannot tell", never as proof of idleness (same convention as
+        `_live_non_scaffolding_children` returning ``[]`` on failure).
+        An empty ``{}`` (probe succeeded, no children survived filtering) is
+        a meaningful, comparable snapshot and distinct from ``None``.
+        """
+        pid = getattr(session, "_pid", None)
+        if not pid:
+            return None
+        procs = self._live_non_scaffolding_child_procs(project_ns, role_name, session)
+        snapshot: dict[int, float] = {}
+        for child in procs:
+            try:
+                cpu = child.cpu_times()
+                snapshot[child.pid] = cpu.user + cpu.system
+            except Exception:
+                # A child whose CPU time can't be read is one we can't prove
+                # idle — drop it from the snapshot rather than the whole
+                # probe, so a comparison against the previous tick can never
+                # mistake "couldn't read" for "used zero CPU".
+                return None
+        return snapshot
 
     def _warn_if_live_children(self, project_ns: str, role_name: str, session) -> None:
         """#234: best-effort check for a live subprocess tree under this
@@ -6258,8 +6323,15 @@ class Orchestrator(
         # has already been respawned with a new session by the time the timer fires.
         pane.set_state("done", note=note[:80] if note else "done")
         _done_sess = pane.session
+        # #554: cross-poll-tick idle tracking for the still-live-children
+        # path below — one closure per done() call, reset whenever the
+        # children set/CPU usage changes so a genuine burst of activity
+        # (however brief) always restarts the idle clock.
+        _idle_activity: dict[int, float] | None = None
+        _idle_since: float | None = None
 
         def _close_if_same_session(_deferred_since: float | None = None) -> None:
+            nonlocal _idle_activity, _idle_since
             _pp = self._project_panes(project_ns).get(from_role)
             if _pp is None or _pp.state not in ("done", "empty"):
                 return
@@ -6289,6 +6361,56 @@ class Orchestrator(
                 now = time.time()
                 since = _deferred_since if _deferred_since is not None else now
                 deferred_for = now - since
+
+                # #554: the grace period above can't tell a genuinely
+                # still-running subprocess apart from an orphaned wrapper
+                # shell that will simply never exit on its own — that shape
+                # sat out the full grace period every time even though
+                # `done()` had already succeeded. If the live children have
+                # shown identical CPU time across consecutive poll ticks
+                # (same pids, no CPU consumed) AND the pane's PTY has
+                # produced no new output for that whole span, they're idle
+                # leftovers rather than real work: close now instead of
+                # waiting out the rest of the grace period.
+                prev_activity, _idle_activity = (
+                    _idle_activity,
+                    (
+                        self._live_non_scaffolding_children_cpu_snapshot(
+                            project_ns, from_role, _pp.session
+                        )
+                    ),
+                )
+                children_idle = (
+                    prev_activity is not None
+                    and _idle_activity is not None
+                    and _idle_activity == prev_activity
+                )
+                try:
+                    _quiet_s = _pp.session.seconds_since_output()
+                    pty_idle = isinstance(_quiet_s, (int, float)) and _quiet_s >= (
+                        DONE_CLOSE_LIVE_CHILD_POLL_MS / 1000
+                    )
+                except Exception:
+                    pty_idle = False
+                if children_idle and pty_idle:
+                    if _idle_since is None:
+                        _idle_since = now
+                else:
+                    _idle_since = None
+                if (
+                    _idle_since is not None
+                    and now - _idle_since >= DONE_CLOSE_IDLE_CHILD_THRESHOLD_S
+                ):
+                    _log_event(
+                        "done_close_idle_children_short_circuit",
+                        role=from_role,
+                        project=project_ns,
+                        idle_for_s=int(now - _idle_since),
+                        children=names[:10],
+                    )
+                    self.close(from_role, project=project_ns)
+                    return
+
                 if deferred_for < DONE_CLOSE_LIVE_CHILD_GRACE_S:
                     if _deferred_since is None:
                         _log_event(
