@@ -72,6 +72,23 @@ from .registry_copy_step import write_json_atomic
 from .report import StepReport
 from .verify_copy import VerifyMismatchError, _sha256, copy_verified
 
+
+def _log_event(event: str, **details: object) -> None:
+    """Best-effort structured log for an error this module has ALREADY
+    decided not to escalate further (every `except OSError: pass` below
+    calls this instead of swallowing silently) — never raises, and never
+    changes what the caller does next. Local import, same reasoning as
+    `auto_migrate_boot._log_boot_event`: `orchestrator_text` has zero Qt
+    imports, but this module must stay importable (and callable) from a
+    plain headless test/process with no orchestrator wiring at all."""
+    try:
+        from ...orchestrator_text import _log_event as _emit
+
+        _emit(event, **details)
+    except Exception:
+        pass
+
+
 _LEGACY_V2_NAME = "v2"
 _ARCHIVE_DIR_NAME = "backups"
 _MANIFEST_NAME = "manifest.json"
@@ -216,14 +233,21 @@ def _prune_empty_dirs(base: Path, relpaths: list[str]) -> None:
             pass
 
 
-def _undo_copied_dest(dest: Path, backup_path: Path | None) -> None:
+def _undo_copied_dest(dest: Path, backup_path: Path | None) -> str | None:
     """Reverse one `copy_verified(src, dest)` call that a batch's later
     entry then failed on: *dest* is removed, then restored from
     *backup_path* if one was taken (a pre-existing merge target) — never a
     bare `shutil.rmtree` of a directory that held content before this
     transaction ever started (#504 B3: the old undo deleted the WHOLE
     destination, including whatever pre-dated the merge). *src* is never
-    touched — a copy phase never removes anything at *src*."""
+    touched — a copy phase never removes anything at *src*.
+
+    Returns `None` on success, or an error message when restoring
+    *backup_path* back onto *dest* fails — a caller unable to put a
+    pre-existing destination's OWN prior content back must know about it
+    (`_copy_phase` folds this into `CopyOutcome.error`, #504 spec item 5:
+    no `except OSError: pass` in a migration/restore/ledger path may swallow
+    a failure the caller can't otherwise see)."""
     try:
         if dest.is_dir():
             shutil.rmtree(dest, ignore_errors=True)
@@ -235,8 +259,11 @@ def _undo_copied_dest(dest: Path, backup_path: Path | None) -> None:
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(backup_path, dest)
-    except OSError:
-        pass
+    except OSError as e:
+        msg = f"could not restore preimage for {dest} from backup {backup_path}: {e}"
+        _log_event("migration_undo_preimage_restore_failed", dest=str(dest), error=str(e))
+        return msg
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,34 +299,53 @@ class TransferEntry:
             out["sha256"] = digests
         return out
 
-    def restore_source_from_dest(self) -> None:
-        """Best-effort, per-file reconstruction of `src` from the
-        already-verified `dest` — copies EXACTLY the files `paths` recorded
-        before this entry's own copy ever ran, one at a time, never a
-        directory-level sweep of whatever else happens to live under
-        `dest` (#504 R3-B1: the old recovery path did
-        ``shutil.copytree(dest, src, dirs_exist_ok=True)``, which pulled in
-        unrelated sibling content — e.g. a live provider home merged into
-        the same destination directory by an earlier, unrelated
-        promotion — as if it had always belonged to THIS entry). Safe to
-        call unconditionally regardless of how much of `src` a failed
-        removal actually managed to delete before raising — every
-        recorded file is simply (re)written from `dest`."""
+    def restore_source_from_dest(self) -> list[str]:
+        """Per-file reconstruction of `src` from the already-verified
+        `dest` — copies EXACTLY the files `paths` recorded before this
+        entry's own copy ever ran, one at a time, never a directory-level
+        sweep of whatever else happens to live under `dest` (#504 R3-B1:
+        the old recovery path did ``shutil.copytree(dest, src,
+        dirs_exist_ok=True)``, which pulled in unrelated sibling content —
+        e.g. a live provider home merged into the same destination
+        directory by an earlier, unrelated promotion — as if it had always
+        belonged to THIS entry). Safe to call unconditionally regardless of
+        how much of `src` a failed removal actually managed to delete
+        before raising — every recorded file is simply (re)written from
+        `dest`.
+
+        Returns every per-file error message encountered (empty on full
+        success) — best-effort per file (one failing file must not stop the
+        rest from being reconstructed), but never silent: a caller with a
+        non-empty result has a `src` that is NOT fully restored and must
+        say so (#504 spec item 5), not report the batch as cleanly reverted."""
+        errors: list[str] = []
         if self.kind == "file":
             try:
                 self.src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.dest, self.src)
-            except OSError:
-                pass
-            return
+            except OSError as e:
+                msg = f"{self.src}: {e}"
+                errors.append(msg)
+                _log_event(
+                    "migration_restore_source_failed",
+                    name=self.name,
+                    path=str(self.src),
+                    error=str(e),
+                )
+            return errors
         for rel in self.paths:
             s = self.src / rel
             d = self.dest / rel
             try:
                 s.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(d, s)
-            except OSError:
-                pass
+            except OSError as e:
+                msg = f"{s}: {e}"
+                errors.append(msg)
+                _log_event(
+                    "migration_restore_source_failed", name=self.name, path=str(s), error=str(e)
+                )
+        return errors
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,9 +374,13 @@ def _copy_phase(entries: list[TransferEntry], backups: BackupManager, step_id: s
             verify = copy_verified(entry.src, entry.dest)
             digests[entry.name] = verify.digests
         except (OSError, VerifyMismatchError) as e:
-            for e2, bp in attempted:
-                _undo_copied_dest(e2.dest, bp)
-            return CopyOutcome(ok=False, error=str(e))
+            undo_errors = [
+                msg for e2, bp in attempted if (msg := _undo_copied_dest(e2.dest, bp)) is not None
+            ]
+            error = str(e)
+            if undo_errors:
+                error += "; undo incomplete: " + "; ".join(undo_errors)
+            return CopyOutcome(ok=False, error=error)
     return CopyOutcome(ok=True, digests=digests)
 
 
@@ -384,12 +434,16 @@ def _prune_phase(
     if failed is None:
         return PruneOutcome(pruned=pruned, ok=True)
 
+    restore_errors: list[str] = []
     for e in [*pruned, failed]:
-        e.restore_source_from_dest()
+        restore_errors.extend(e.restore_source_from_dest())
+    if restore_errors:
+        error += "; restore incomplete: " + "; ".join(restore_errors)
     try:
         write_committed([])
-    except OSError:
-        pass
+    except OSError as e:
+        error += f"; could not revert ledger to prior state: {e}"
+        _log_event("migration_ledger_revert_failed", error=str(e))
     return PruneOutcome(pruned=[], ok=False, failed_name=failed.name, error=error)
 
 
@@ -428,8 +482,27 @@ def list_v1_archives(data_home: Path) -> list[dict]:
             (p for p in base.iterdir() if p.is_dir() and p.name.startswith("v1-archive-")),
             reverse=True,
         )
-    except OSError:
-        return []
+    except OSError as e:
+        # #504 R2-H1 / spec item 5: a listing failure must not silently
+        # make every generation vanish from `--list` — an operator (or
+        # `restore-v1`'s own generation walk) needs to know SOMETHING is
+        # wrong here, not see an empty, all-clear list. `ts=""` (never a
+        # real timestamp) rather than `None` — `ArchiveV1LegacyStep
+        # .rollback(archive_ts=None)` means "use the latest generation",
+        # so a caller that blindly walked this entry's `ts` must fail
+        # closed on the lookup instead of silently falling back to latest.
+        _log_event("migration_archive_list_failed", path=str(base), error=str(e))
+        return [
+            {
+                "ts": "",
+                "path": str(base),
+                "created_at": None,
+                "archived": [],
+                "deleted": [],
+                "unreadable": True,
+                "error": str(e),
+            }
+        ]
     out: list[dict] = []
     for c in candidates:
         ts = c.name.removeprefix("v1-archive-")

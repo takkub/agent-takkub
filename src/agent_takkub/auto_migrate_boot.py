@@ -184,7 +184,7 @@ def _estimate_copy_bytes(data_home: Path) -> int:
     since a fixture with ONLY an archive-only payload (no `runtime/`, no
     nested `v2/`) used to estimate exactly zero bytes and pass any disk
     gate unconditionally (`disk_archive_inventory`). Also counts the
-    PRE-EXISTING size of any promote destination `_two_phase_move` would
+    PRE-EXISTING size of any promote destination `_copy_phase` would
     merge into — that preimage gets backed up before the merge, so room
     must cover it too, not just the new copy (a populated `providers/`
     destination can be larger than the nested `v2/providers/` subtree being

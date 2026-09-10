@@ -1561,7 +1561,8 @@
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.report",
         "agent_takkub.core.migration.verify_copy",
-        "agent_takkub.core.storage.paths"
+        "agent_takkub.core.storage.paths",
+        "agent_takkub.orchestrator_text"
       ],
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
@@ -1569,7 +1570,7 @@
         "agent_takkub.core.migration.engine"
       ],
       "fan_in": 3,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.core.migration.registry_copy_step",
@@ -3180,6 +3181,7 @@
         "agent_takkub.boot_update_window",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.disk_usage",
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_wait",
@@ -3188,7 +3190,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 8
     },
     {
