@@ -2,6 +2,18 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [2.0.8] - 2026-09-10
+
+### Changed (เปลี่ยน)
+
+- **[#513] ยุบ role ตัวตรวจ: `reviewer` เดียวรับโหมด code|e2e|ui แทน qa+reviewer+critic** — routing (`routing_planner.resolve_role_alias`) แมป `qa`→`reviewer/e2e`, `critic`→`reviewer/ui` พร้อม deprecation note · role file `qa.md`/`critic.md` ยังใช้ได้ครบ (alias ≥1 release) แค่แปะ banner ชี้ไป `reviewer.md` · Settings → Roles & ตำแหน่ง เหลือ 5 ตำแหน่ง (frontend/backend/mobile/devops/reviewer + custom) แยก provider ออกเป็น section "สมองเสริม" · preset ทีมเต็ม/คู่/อัตโนมัติ ใช้ `reviewer` เป็น checker · **ยังไม่มี `--mode` เป็น flag จริงของ `assign`** — runtime dispatch ยังผูก string `qa`/`critic` (ติดตาม #561)
+- **[#514] ชนโควตา → reroute ไป provider อื่นทันที แทน park รอ reset** — `limit_autoresume._reroute_or_park` ปิด pane ที่ชนแล้ว respawn role เดิมบน provider ถัดไปที่ว่าง (ลำดับ claude→codex→gemini→kimi→opencode→cursor ข้ามตัวที่ปิด/ไม่ได้ติดตั้ง/ยังไม่ reset) ส่ง task+progress note ต่อให้ · จำ `quota_reset_at` ต่อ provider ใน `provider-quota.json` (global scope ยังไม่ใช่ layout #504) + notice Lead 1 บรรทัดตอน reroute และตอน provider กลับมา · `takkub assign --distinct-from <role>` กัน cross-check pair reroute ไปโมเดลเดียวกับคู่ · role ที่ตัวตนคือ provider (codex/gemini/…) ไม่ reroute · park ยังเป็น fallback สุดท้าย (`park_fallback_enabled()` default เปิด — Settings toggle ติดตาม #562)
+
+### Fixed (แก้)
+
+- **[#513] `takkub assign --role qa` ถูก team preset บล็อกทุก built-in preset** — เจอจาก live-test หลัง merge: `can_spawn()` เช็ค `cfg["checker"] == "qa"` แต่ default checker ย้ายเป็น `reviewer` แล้ว → ผ่าน `resolve_role_alias` ให้ qa นับว่าตรง checker `reviewer` ด้วย (critic/custom checker=qa ไม่กระทบ) + เทสยิงผ่าน `can_spawn()`/`assign()` จริง
+- **[#516] idle-pane reuse** — ตรวจแล้วว่า `assign` ซ้ำเข้า pane ที่ยัง alive ในสถานะ done paste เข้า session เดิมอยู่แล้ว (ไม่ boot ใหม่) ล็อกด้วย regression test · วัด skill ระดับ user ที่โหลดเข้าทุก pane ได้แล้ว (`doctor --boot-context`: 34 ตัวบนเครื่องนี้) แต่ **ยังไม่ gate** — lever เดียวที่มี (`--disable-slash-commands`) เป็น all-or-nothing จะพา skill ของ repo ตายด้วย (ออกแบบต่อใน #563)
+
 ## [2.0.7] - 2026-09-10
 
 ### Fixed (แก้)
