@@ -219,15 +219,49 @@ def _estimate_copy_bytes(data_home: Path) -> int:
     return total
 
 
-def _disk_has_room(data_home: Path) -> bool:
+def _estimate_restore_bytes(data_home: Path) -> int:
+    """Best-effort size of what `takkub migrate restore-v1` is about to
+    copy back onto disk — #504 R3 `disk_cli_restore-v1`: after a machine has
+    already fully promoted/archived, `_estimate_copy_bytes` above sees
+    almost nothing left to promote or archive and would estimate ~0 bytes
+    even though a real restore is about to copy the WHOLE `backups/` tree
+    back onto `data_home`. Conservative on purpose (the whole archive tree,
+    not just the generation(s) actually selected) — cheap to compute and
+    never under-counts."""
+    base = data_home / "backups"
+    return _dir_size(base) if base.is_dir() else 0
+
+
+def _existing_ancestor(path: Path) -> Path:
+    """*path* itself, or its nearest EXISTING ancestor — `shutil.disk_usage`
+    needs a real path to stat, but a brand-new machine's `DATA_HOME` (or a
+    test's isolated one) legitimately doesn't exist yet on the very first
+    boot; its eventual parent volume is the same either way."""
+    p = path
+    while not p.exists():
+        parent = p.parent
+        if parent == p:
+            return p
+        p = parent
+    return p
+
+
+def _disk_has_room(data_home: Path, *, estimate: int | None = None) -> bool:
     """False (gate fails, boot stage skips) both when there is genuinely
     not enough free space AND when free space can't be measured at all —
-    an unmeasurable disk is not a safe one to bet a first-run copy on."""
+    an unmeasurable disk is not a safe one to bet a first-run copy on.
+
+    *estimate*, when given, replaces the default copy-size estimate — the
+    CLI's `restore-v1` gate (#504 R3 `disk_cli_restore-v1`) passes
+    `_estimate_restore_bytes` instead, since a restore's dominant cost is
+    the archive tree it copies back, not what a fresh promote/archive pass
+    would move."""
     try:
-        free = shutil.disk_usage(data_home).free
+        free = shutil.disk_usage(_existing_ancestor(data_home)).free
     except OSError:
         return False
-    return free >= _MIN_FREE_MULTIPLE * _estimate_copy_bytes(data_home)
+    needed = estimate if estimate is not None else _estimate_copy_bytes(data_home)
+    return free >= _MIN_FREE_MULTIPLE * needed
 
 
 def _log_boot_event(event: str, **details: object) -> None:

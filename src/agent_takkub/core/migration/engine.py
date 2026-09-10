@@ -133,7 +133,11 @@ def _domain_target_problems(specs: list[tuple[Path, tuple[str, ...]]]) -> list[s
         if not isinstance(data, dict):
             problems.append(f"not a JSON object: {path}")
             continue
-        missing = [k for k in required_keys if k not in data]
+        # #504 R3 `domain_null_data`: a present-but-null required key (e.g.
+        # `{"data": null}`) used to pass this check — `k not in data` is
+        # true only when the key is absent, not when it holds a
+        # legitimately-impossible value.
+        missing = [k for k in required_keys if k not in data or data[k] is None]
         if missing:
             problems.append(f"missing required key(s) {missing}: {path}")
     return problems

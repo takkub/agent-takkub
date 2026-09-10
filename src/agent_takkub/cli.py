@@ -3153,7 +3153,12 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     `archive-v1-legacy`'s just failed — reconstructing only HALF of the
     pre-2.1.0 shape while reporting the overall command as having tried
     both. Stop here instead."""
-    from .core.migration.promote_v1 import list_v1_archives
+    from .core.migration.promote_v1 import (
+        _begin_command_snapshot,
+        _find_manifest_by_ts,
+        _revert_to_command_snapshot,
+        list_v1_archives,
+    )
 
     archive_step = engine.get_step("archive-v1-legacy")
     archive_ts = getattr(args, "archive_ts", None)
@@ -3165,21 +3170,39 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     if not generations:
         return [archive_step.rollback()]  # the "nothing to restore" report
 
+    # #504 R3-B3: snapshot every name ANY selected generation could touch
+    # ONCE, before the walk starts — never a per-generation "latest backup
+    # wins" model, which let a LATER generation's own restore shadow an
+    # earlier one's backup for the same name (so undo after a later
+    # failure put back that later generation's OWN overwrite, not the
+    # state this whole command actually started from).
+    all_names: list[str] = []
+    for ts in generations:
+        mpath = _find_manifest_by_ts(config.DATA_HOME, ts)
+        if mpath is None:
+            continue
+        try:
+            manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for entry in manifest.get("archived", []):
+            name = entry.get("name")
+            if name and name not in all_names:
+                all_names.append(name)
+    snapshot = _begin_command_snapshot(config.DATA_HOME, all_names)
+
     # #504 R2-H1: a multi-generation restore-v1 (no --archive: walk every
     # generation oldest-first) is all-or-nothing — if a LATER generation's
-    # restore fails, undo every EARLIER generation this same call already
-    # restored successfully, rather than leaving DATA_HOME with only some
-    # of the requested generations applied.
+    # restore fails, revert every name this whole command could have
+    # touched back to the snapshot above, rather than leaving DATA_HOME
+    # with only some of the requested generations applied.
     reports = []
-    restored_so_far: list[list[str]] = []
     for ts in generations:
         r = archive_step.rollback(archive_ts=ts)
         reports.append(r)
         if not r.ok:
-            for names in reversed(restored_so_far):
-                archive_step._undo_restored_names(names)
+            _revert_to_command_snapshot(config.DATA_HOME, snapshot)
             return reports
-        restored_so_far.append(list(r.detail.get("restored", [])))
     reports.append(engine.rollback_step("promote-v2-root"))
     return reports
 
@@ -3210,6 +3233,24 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
                 else:
                     _utf8_print(f"  {a['ts']}  archived={a['archived']}  deleted={a['deleted']}")
         return {"ok": True, "msg": f"{len(archives)} archive generation(s)"}
+
+    # #504 R3 `disk_cli_apply`/`disk_cli_restore-v1`: `run_boot_stage()` has
+    # its own disk-space preflight, but these two CLI entry points call the
+    # engine directly and used to skip it entirely — a manual `takkub
+    # migrate apply`/`restore-v1` on a genuinely full disk mutated storage
+    # with zero free-space checks.
+    if args.migrate_cmd in ("apply", "restore-v1"):
+        from . import auto_migrate_boot as _boot
+
+        estimate = (
+            _boot._estimate_restore_bytes(config.DATA_HOME)
+            if args.migrate_cmd == "restore-v1"
+            else None
+        )
+        if not _boot._disk_has_room(config.DATA_HOME, estimate=estimate):
+            msg = f"insufficient free disk space for migrate {args.migrate_cmd} — aborting"
+            _utf8_print(f"✗ {msg}")
+            return {"ok": False, "msg": msg}
 
     dispatch = {
         "inspect": engine.inspect,
