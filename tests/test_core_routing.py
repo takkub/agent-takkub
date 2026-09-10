@@ -276,7 +276,7 @@ def test_effective_model_for_v2_malformed_v2_json_fails_open_per_pin(
         providers={"claude": "claude-sonnet-5"},
     )
     _migrate(isolated_v2_data_home, v1_model_state)
-    (isolated_v2_data_home / "v2" / "models" / "aliases.json").write_text(
+    (isolated_v2_data_home / "models" / "aliases.json").write_text(
         "{not valid json", encoding="utf-8"
     )
 
