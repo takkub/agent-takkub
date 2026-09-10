@@ -136,8 +136,8 @@ def test_graft_caveats_never_enters_repo_controlled_ceiling(monkeypatch, tmp_pat
 
     without_override = boot_context.build_report("frontend", "agent-takkub")
 
-    policy_file = tmp_path / "pane-tools.json"
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file, raising=False)
+    policy_file = pane_tools_policy.path()
+    policy_file.parent.mkdir(parents=True, exist_ok=True)
     policy_file.write_text(
         '{"version": 1, "roles": {"frontend": {"mcps": ["graft"], "plugins": []}}}',
         encoding="utf-8",

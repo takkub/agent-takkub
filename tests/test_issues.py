@@ -584,8 +584,11 @@ def test_local_store_cwd_redirects_cockpit_bug_to_data_home(tmp_path, monkeypatc
 
 def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monkeypatch) -> None:
     """End-to-end: cockpit_bug=True + gh unavailable + installed build → the
-    local .takkub_issues.json lands under DATA_HOME, not the venv ancestor
+    local fallback store lands under DATA_HOME's own V2 target (#504 cut
+    half — no V1 file for this domain anymore), not the venv ancestor
     REPO_ROOT resolves to."""
+    import agent_takkub.issues as issues_mod
+
     fake_repo_root = tmp_path / "venv" / "Lib"
     fake_repo_root.mkdir(parents=True)
     fake_data_home = tmp_path / "agent-takkub-home"
@@ -598,7 +601,7 @@ def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monk
             number, _url = new_issue("installed cockpit bug", "body", cockpit_bug=True)
 
     assert number == 1
-    assert (fake_data_home / ".takkub_issues.json").exists()
+    assert issues_mod._cockpit_bug_v2_target().exists()
     assert not (fake_repo_root / ".takkub_issues.json").exists()
 
 
@@ -997,30 +1000,31 @@ def test_list_issues_merges_unreconciled_local_backlog(tmp_path, monkeypatch, ca
     """gh was down when `new_issue` wrote to the local fallback store; gh has
     since recovered. `list_issues()` must still surface those records instead
     of reporting '(no issues)' just because the GitHub query came back empty."""
+    import agent_takkub.issues as issues_mod
+
     fake_repo_root = tmp_path / "cockpit-checkout"
     fake_repo_root.mkdir()
     monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
 
-    local_path = fake_repo_root / ".takkub_issues.json"
-    local_path.write_text(
-        json.dumps(
-            [
-                {
-                    "number": 1,
-                    "title": "stranded local issue",
-                    "status": "open",
-                    "severity": "med",
-                    "role": "",
-                    "noticed_in": "",
-                    "tags": [],
-                    "url": "local://issue/1",
-                    "created_at": "2026-08-04T08:37:31Z",
-                    "closed_at": "",
-                }
-            ]
-        ),
-        encoding="utf-8",
+    from agent_takkub.core.storage.v2_target import write_data
+
+    write_data(
+        issues_mod._cockpit_bug_v2_target(),
+        [
+            {
+                "number": 1,
+                "title": "stranded local issue",
+                "status": "open",
+                "severity": "med",
+                "role": "",
+                "noticed_in": "",
+                "tags": [],
+                "url": "local://issue/1",
+                "created_at": "2026-08-04T08:37:31Z",
+                "closed_at": "",
+            }
+        ],
     )
 
     with patch("agent_takkub.issues._gh") as mock_gh:
@@ -1049,20 +1053,21 @@ def test_list_issues_no_backlog_no_warning(tmp_path, monkeypatch, capsys) -> Non
 def test_list_issues_backlog_respects_filters(tmp_path, monkeypatch) -> None:
     """Local backlog merge must honour the same filters as the gh-path query —
     a closed local issue must not leak into an --open listing."""
+    import agent_takkub.issues as issues_mod
+
     fake_repo_root = tmp_path / "cockpit-checkout"
     fake_repo_root.mkdir()
     monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
 
-    local_path = fake_repo_root / ".takkub_issues.json"
-    local_path.write_text(
-        json.dumps(
-            [
-                {"number": 1, "title": "closed one", "status": "closed", "severity": "med"},
-                {"number": 2, "title": "open one", "status": "open", "severity": "med"},
-            ]
-        ),
-        encoding="utf-8",
+    from agent_takkub.core.storage.v2_target import write_data
+
+    write_data(
+        issues_mod._cockpit_bug_v2_target(),
+        [
+            {"number": 1, "title": "closed one", "status": "closed", "severity": "med"},
+            {"number": 2, "title": "open one", "status": "open", "severity": "med"},
+        ],
     )
 
     with patch("agent_takkub.issues._gh") as mock_gh:

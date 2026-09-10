@@ -3148,6 +3148,17 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
         "apply": engine.apply,
         "validate": engine.validate,
         "rollback": engine.rollback,
+        # #504 item 2: undo the boot-time "finish the move" pair specifically
+        # (archive-v1-legacy, then promote-v2-root) — restoring from the
+        # archive `ArchiveV1LegacyStep`/`PromoteV2RootStep` themselves wrote,
+        # never deleted (#504: "archive ไม่มีวันหมดอายุ ไม่มี auto-cleanup").
+        # A dedicated verb rather than overloading `rollback` (which reverses
+        # the WHOLE ladder, including every V1->V2 domain step) since a user
+        # reaching for "put V1 back" almost never also wants those undone.
+        "restore-v1": lambda: [
+            engine.rollback_step("archive-v1-legacy"),
+            engine.rollback_step("promote-v2-root"),
+        ],
     }
     reports = dispatch[args.migrate_cmd]()
 
@@ -5315,7 +5326,8 @@ def main(argv: list[str] | None = None) -> int:
         "dry-run": "จำลอง apply แบบเต็ม ไม่เขียนดิสก์จริง",
         "apply": "ทำจริง + journal (copy-never-move)",
         "validate": "cross-check V2 กับ V1 ที่ยังอยู่",
-        "rollback": "ย้อนจาก journal + backup",
+        "rollback": "ย้อนจาก journal + backup (ทั้ง ladder)",
+        "restore-v1": "#504: ย้าย V1 จาก backups/v1-archive-<ts>/ กลับที่เดิม — ลง 2.0.x ใช้ต่อได้",
     }
     for _name, _help in smig_help.items():
         _p = smig_sub.add_parser(_name, help=_help)

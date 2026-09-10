@@ -350,11 +350,16 @@ def _cockpit_bug_v2_target() -> Path:
     target (ladder step 5's ``local-issues`` mapping is always
     ``DATA_HOME/.takkub_issues.json``, the cockpit-bug instance). A
     per-*project* ``.takkub_issues.json`` (any other ``cwd``) has no V2
-    mapping and stays V1-only, same as before #504."""
-    from .core.storage.layout import storage_layout_v2
-    from .core.storage.v2_target import effective_data_home
+    mapping and stays V1-only, same as before #504.
 
-    return storage_layout_v2(effective_data_home(None)).state_issues / "local.json"
+    Resolved against this module's own ``DATA_HOME`` binding (not a fresh
+    ``effective_data_home()`` lookup) so it always agrees with
+    :func:`_is_cockpit_bug_path`, which compares against that same name —
+    including when a test monkeypatches ``agent_takkub.issues.DATA_HOME``
+    directly."""
+    from .core.storage.layout import storage_layout_v2
+
+    return storage_layout_v2(DATA_HOME).state_issues / "local.json"
 
 
 def _is_cockpit_bug_path(path: Path) -> bool:

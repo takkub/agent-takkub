@@ -465,7 +465,10 @@ def check_local_issue_backlog() -> Check:
     # now lives in `v2/state/issues/local.json`, no V1 file — read through
     # issues.py's own loader so this check can never disagree with what
     # `takkub issue list` itself sees.
-    rows = _issues._load_local_issues(DATA_HOME)
+    try:
+        rows = _issues._load_local_issues(DATA_HOME)
+    except RuntimeError as exc:
+        return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "error", str(exc))
     open_rows = [r for r in rows if isinstance(r, dict) and r.get("status") == "open"]
     if not open_rows:
         return Check("local_issues", "Issue ที่ค้างในเครื่อง (ยังไม่ถึง GitHub)", "ok", "ไม่มี")

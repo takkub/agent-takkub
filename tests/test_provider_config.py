@@ -18,6 +18,17 @@ import pytest
 from agent_takkub import provider_config
 
 
+def _write_role_models(data: dict) -> None:
+    """Plant a valid role-models.json V2-target document ahead of a read —
+    `role_models.py`'s target is isolated automatically by conftest.py's
+    autouse `_isolate_runtime`, so this writes straight to `path()`."""
+    from agent_takkub import role_models
+
+    target = role_models.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"schema": 1, "data": data}), encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """`config_path()`/`load_providers`/`save_providers` now read/write the
@@ -53,23 +64,18 @@ class TestProviderFor:
         redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
         assert provider_config.provider_for("lead") == "codex"
 
-    def test_role_models_provider_fills_in_when_role_providers_is_silent(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_role_models_provider_fills_in_when_role_providers_is_silent(self) -> None:
         """#338: a team that set up model diversity through the model picker
         alone leaves role-providers.json empty — its shipped state — and every
         role used to resolve to claude in silence. Measured on a real cockpit:
         six roles configured across codex/gemini/claude, all six spawning
         claude, with no event saying so."""
-        from agent_takkub import role_models
-
-        models = tmp_path / "role-models.json"
-        models.write_text(
-            '{"frontend": {"provider": "codex", "model": "gpt-5.6-terra"},'
-            ' "critic": {"provider": "gemini", "model": "gemini-3.7-flash-high"}}',
-            encoding="utf-8",
+        _write_role_models(
+            {
+                "frontend": {"provider": "codex", "model": "gpt-5.6-terra"},
+                "critic": {"provider": "gemini", "model": "gemini-3.7-flash-high"},
+            }
         )
-        monkeypatch.setattr(role_models, "_PATH", models)
 
         assert provider_config.provider_for("frontend") == "codex"
         assert provider_config.provider_for("critic") == "gemini"
@@ -77,27 +83,17 @@ class TestProviderFor:
         assert provider_config.provider_for("reviewer") == "claude"
 
     def test_role_providers_entry_still_wins_over_role_models(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, redirect_config_path: Path
+        self, redirect_config_path: Path
     ) -> None:
         """The fallback only fills a gap — it must never override the provider
         the user picked in Providers & Roles."""
-        from agent_takkub import role_models
-
-        models = tmp_path / "role-models.json"
-        models.write_text('{"frontend": {"provider": "codex"}}', encoding="utf-8")
-        monkeypatch.setattr(role_models, "_PATH", models)
+        _write_role_models({"frontend": {"provider": "codex"}})
         redirect_config_path.write_text('{"frontend": "opencode"}', encoding="utf-8")
 
         assert provider_config.provider_for("frontend") == "opencode"
 
-    def test_unknown_provider_in_role_models_falls_back_to_claude(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from agent_takkub import role_models
-
-        models = tmp_path / "role-models.json"
-        models.write_text('{"frontend": {"provider": "not-a-cli"}}', encoding="utf-8")
-        monkeypatch.setattr(role_models, "_PATH", models)
+    def test_unknown_provider_in_role_models_falls_back_to_claude(self) -> None:
+        _write_role_models({"frontend": {"provider": "not-a-cli"}})
 
         assert provider_config.provider_for("frontend") == "claude"
 
@@ -301,135 +297,55 @@ class TestSaveProviders:
         provider_config.save_providers({"backend": "codex", "ml": "openrouter"})
         assert provider_config.load_providers() == {"backend": "codex"}
 
-    def test_save_dual_writes_global_and_every_project_into_v2(
-        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+    def test_save_writes_global_and_preserves_existing_projects(
+        self, redirect_config_path: Path
     ) -> None:
-        """#362 wave 1: `save_providers()` must gather every scope itself
-        (global + each `config.list_project_names()` entry) and hand the
-        merged result to `dual_write_routing` — it can only touch ONE scope
-        per call, so nothing else assembles the full picture."""
-        from agent_takkub import config
-        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
-        from agent_takkub.core.storage.legacy_reader import read_json
-
-        data_home = tmp_path / "data_home"
-        (data_home / "v2").mkdir(parents=True)
-        monkeypatch.setattr(
-            "agent_takkub.core.storage.dual_write._effective_data_home",
-            lambda dh=None: data_home,
-        )
-
-        proj_dir = tmp_path / "projects" / "proj-a"
-        proj_dir.mkdir(parents=True)
-        (proj_dir / "role-providers.json").write_text(
-            json.dumps({"qa": "gemini"}), encoding="utf-8"
-        )
-        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
-
+        """#504 cut half: `save_providers()` (global) writes only the
+        `global` bucket of the single V2 `routing.json` target — it no
+        longer re-derives `projects` from anywhere, so a project's
+        previously-saved override survives untouched."""
+        provider_config.save_providers({"qa": "gemini"}, project="proj-a")
         provider_config.save_providers({"backend": "codex"})
 
-        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
-        written = read_json(target)
-        assert written["global"] == {"backend": "codex"}
-        assert written["projects"] == {"proj-a": {"qa": "gemini"}}
+        routing = provider_config._read_routing()
+        assert routing["global"] == {"backend": "codex"}
+        assert routing["projects"] == {"proj-a": {"qa": "gemini"}}
 
     def test_role_models_direct_write_also_refreshes_the_v2_routing_mirror(
-        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
+        self, redirect_config_path: Path
     ) -> None:
         """B-H2 (2026-09-07 round-2 review): the model picker
         (`settings_window.py`, `provider_model_refresh.py`) writes a role's
         provider through `role_models.set_provider`/`set_model` DIRECTLY,
-        never through `save_providers` — before this fix that path only
-        ever mirrored into `models/aliases.json`
-        (`dual_write_role_models`), leaving `config/routing.json`'s
-        `global` bucket stale."""
-        from agent_takkub import config, role_models
-        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
-        from agent_takkub.core.storage.legacy_reader import read_json
-
-        data_home = tmp_path / "data_home"
-        (data_home / "v2").mkdir(parents=True)
-        monkeypatch.setattr(
-            "agent_takkub.core.storage.dual_write._effective_data_home",
-            lambda dh=None: data_home,
-        )
-        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
-        monkeypatch.setattr(config, "list_project_names", lambda: [])
+        never through `save_providers` — this must still keep
+        `routing.json`'s `global` bucket current."""
+        from agent_takkub import role_models
 
         role_models.set_provider("backend", "codex")
-
-        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
-        written = read_json(target)
-        assert written["global"] == {"backend": "codex"}
+        assert provider_config._read_routing()["global"] == {"backend": "codex"}
 
         # A second direct write (model, not provider) must refresh it too.
         role_models.set_model("backend", "codex", "gpt-5.6-terra")
-        written_after_model = read_json(target)
-        assert written_after_model["global"] == {"backend": "codex"}
+        assert provider_config._read_routing()["global"] == {"backend": "codex"}
 
-    def test_save_dual_write_omits_projects_with_no_v1_file(
-        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
-    ) -> None:
-        """#480: a project known to `config.list_project_names()` but that
-        has never saved its own `role-providers.json` must get NO key in the
-        v2 mirror — not a `{}` entry. A `{}` entry would make
-        `load_providers()` (flag ON) treat the project as "has its own
-        empty override" and skip global inheritance, instead of falling
-        back to global the way the flag-OFF/V1 path does (`config_path
-        (project).exists()` is False -> `load_providers(None)`)."""
-        from agent_takkub import config
-        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
-        from agent_takkub.core.storage.legacy_reader import read_json
-
-        data_home = tmp_path / "data_home"
-        (data_home / "v2").mkdir(parents=True)
-        monkeypatch.setattr(
-            "agent_takkub.core.storage.dual_write._effective_data_home",
-            lambda dh=None: data_home,
-        )
-        # "proj-a" has a real per-project file; "proj-b" is a known project
-        # (e.g. from projects.json) that never saved role-providers.json.
-        proj_dir = tmp_path / "projects" / "proj-a"
-        proj_dir.mkdir(parents=True)
-        (proj_dir / "role-providers.json").write_text(
-            json.dumps({"qa": "gemini"}), encoding="utf-8"
-        )
-        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a", "proj-b"])
-
+    def test_save_omits_projects_with_no_saved_override(self, redirect_config_path: Path) -> None:
+        """#480: a project that never called `save_providers(..., project=X)`
+        must get NO key in `routing.json`'s `projects` bucket — not a `{}`
+        entry — so `load_providers(project=X)` still inherits global."""
         provider_config.save_providers({"backend": "codex"})
+        assert "proj-b" not in provider_config._read_routing()["projects"]
+        assert provider_config.load_providers(project="proj-b") == {"backend": "codex"}
 
-        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
-        written = read_json(target)
-        assert written["projects"] == {"proj-a": {"qa": "gemini"}}
-        assert "proj-b" not in written["projects"]
-
-    def test_save_dual_write_keeps_genuinely_empty_project_file(
-        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
-    ) -> None:
-        """A project WITH a per-project file that is genuinely empty (`{}`,
-        e.g. the user cleared all overrides) must still get a `{}` entry in
-        the mirror — that's real "no inheritance" state, distinct from
-        "file never existed"."""
-        from agent_takkub import config
-        from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
-        from agent_takkub.core.storage.legacy_reader import read_json
-
-        data_home = tmp_path / "data_home"
-        (data_home / "v2").mkdir(parents=True)
-        monkeypatch.setattr(
-            "agent_takkub.core.storage.dual_write._effective_data_home",
-            lambda dh=None: data_home,
-        )
-        proj_dir = tmp_path / "projects" / "proj-a"
-        proj_dir.mkdir(parents=True)
-        (proj_dir / "role-providers.json").write_text("{}", encoding="utf-8")
-        monkeypatch.setattr(config, "list_project_names", lambda: ["proj-a"])
-
+    def test_save_keeps_genuinely_empty_project_override(self, redirect_config_path: Path) -> None:
+        """A project explicitly saved with an EMPTY mapping (the user
+        cleared all overrides) must still get a `{}` entry — real
+        "no inheritance" state, distinct from "never saved" — so it does
+        NOT fall back to global."""
         provider_config.save_providers({"backend": "codex"})
+        provider_config.save_providers({}, project="proj-a")
 
-        target = RoleAgentMigrationStep(data_home=data_home)._routing_target()
-        written = read_json(target)
-        assert written["projects"] == {"proj-a": {}}
+        assert provider_config._read_routing()["projects"] == {"proj-a": {}}
+        assert provider_config.load_providers(project="proj-a") == {}
 
 
 class TestGlobalRoleProvidersMigration:
@@ -458,26 +374,13 @@ class TestGlobalRoleProvidersMigration:
         assert backup.is_file()
         assert not redirect_config_path.exists()
 
-    def test_migration_with_v2_present_does_not_recurse(
-        self, redirect_config_path: Path, monkeypatch, tmp_path: Path
-    ) -> None:
-        """B-H2 follow-up (2026-09-07): `role_models.set_provider` (called
-        once per legacy role, inside this very migration's own loop) now
-        also refreshes the v2 routing mirror, which calls
-        `load_providers(None)` — landing right back in this function while
-        `role-providers.json` still exists (it isn't archived until the
-        loop finishes). Without the re-entry guard this recurses without
-        bound for ANY non-empty legacy mapping; with two roles it would
-        blow the stack almost immediately."""
+    def test_migration_handles_multiple_legacy_roles(self, redirect_config_path: Path) -> None:
+        """B-H2 follow-up (2026-09-07): the re-entry guard around this
+        migration loop is defensive only since #504's cut (`role_models.
+        set_provider` no longer calls back into `load_providers`), but two
+        legacy roles must still both land correctly in one pass."""
         from agent_takkub import role_models
 
-        data_home = tmp_path / "data_home"
-        (data_home / "v2").mkdir(parents=True)
-        monkeypatch.setattr(
-            "agent_takkub.core.storage.dual_write._effective_data_home",
-            lambda dh=None: data_home,
-        )
-        monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
         redirect_config_path.write_text(
             json.dumps({"backend": "codex", "qa": "gemini"}), encoding="utf-8"
         )

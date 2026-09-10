@@ -77,7 +77,6 @@ def _spawn_codex_and_capture_argv(
     # files == "no MCP policy anywhere" == the pre-#100 behaviour for tests
     # that don't care about MCP injection.
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     if allowed_mcps is not None:
         ptp.set_role_items("codex", "mcps", allowed_mcps)
         sdt.regen_role_variants()

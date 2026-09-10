@@ -34,12 +34,11 @@ from agent_takkub.settings_management.services import cleanup, relationships
 @pytest.fixture(autouse=True)
 def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Redirect every store the Roles slice touches into tmp, and clear the
-    runtime custom-role registry so tests never leak into each other."""
-    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    runtime custom-role registry so tests never leak into each other.
+    custom_roles'/pane_tools_policy's/skill_policy's V2 targets, and
+    provider_config's `routing.json` target (#504 cut half), are isolated
+    automatically by conftest.py's autouse `_isolate_runtime`."""
     monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
-    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
-    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
     # Access-tab MCP writes now regen role variants (HIGH-4) — redirect the
     # master file so that never touches the real ~/.takkub runtime dir.

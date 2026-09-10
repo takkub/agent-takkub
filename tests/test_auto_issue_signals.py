@@ -306,10 +306,12 @@ class TestDeliveryFailureReasons:
 
 
 class TestAutoMigrateAndDriftSignals:
-    """#361 — `auto_migrate_rolled_back` / `model_pin_v2_drift` fire at most
-    once per boot, so both use `min_count=1` over a 24h window (wider than
-    the 6h scan default) rather than the repeated-N-times shape every other
-    rule above uses."""
+    """#361 — `auto_migrate_rolled_back` fires at most once per boot, so it
+    uses `min_count=1` over a 24h window (wider than the 6h scan default)
+    rather than the repeated-N-times shape every other rule above uses.
+    (`model_pin_v2_drift` used to be covered here too — retired by #504's
+    cut half, which removed the V1-vs-V2 shadow-read it was drift telemetry
+    for.)"""
 
     def test_single_rollback_within_24h_fires(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 23, 12, 0, 0)
@@ -337,21 +339,6 @@ class TestAutoMigrateAndDriftSignals:
             [{"ts": (now - timedelta(hours=25)).isoformat(), "event": "auto_migrate_rolled_back"}],
         )
         assert sig.scan_for_signals(log, now=now) == []
-
-    def test_single_model_pin_drift_within_24h_fires(self, tmp_path: Path) -> None:
-        now = datetime(2026, 8, 23, 12, 0, 0)
-        log = _log(
-            tmp_path / "events.log",
-            [
-                {
-                    "ts": (now - timedelta(hours=10)).isoformat(),
-                    "event": "model_pin_v2_drift",
-                    "role": "backend",
-                }
-            ],
-        )
-        hits = sig.scan_for_signals(log, now=now)
-        assert [h.rule.key for h in hits] == ["model_pin_v2_drift"]
 
     def test_a_20h_old_rollback_survives_alongside_events_past_the_6h_default(
         self, tmp_path: Path

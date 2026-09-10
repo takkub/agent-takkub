@@ -24,7 +24,8 @@ from agent_takkub.settings_management.repositories import mcps as mcps_repo
 @pytest.fixture(autouse=True)
 def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    # pane_tools_policy's V2 target (#504 cut half) is isolated automatically
+    # by conftest.py's autouse `_isolate_runtime`.
     yield tmp_path
 
 

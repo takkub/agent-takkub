@@ -56,11 +56,9 @@ def _spawn_with_scripted_pty(orch, role, monkeypatch, tmp_path, spawn_side_effec
     per `spawn_side_effects` (consumed one per real spawn attempt), and a
     QTimer.singleShot that runs its callback immediately instead of on a real
     timer — so a retry chain resolves synchronously within the test."""
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
     def _immediate_single_shot(_delay_ms, callback):
         callback()

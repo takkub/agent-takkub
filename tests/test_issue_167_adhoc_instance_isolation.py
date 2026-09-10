@@ -30,11 +30,9 @@ from agent_takkub.shared_dev_tools import (
 
 @pytest.fixture
 def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
-    from agent_takkub import pane_tools_policy as ptp
 
     target = tmp_path / "shared-mcp.json"
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     return target
 
 

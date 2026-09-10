@@ -203,9 +203,7 @@ class TestSavePolicyRegeneratesVariants:
 
         from agent_takkub import shared_dev_tools
 
-        policy_file = tmp_path / "pane-tools.json"
         shared_mcp_file = tmp_path / "shared-mcp.json"
-        monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", policy_file)
         monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", shared_mcp_file)
 
         shared_mcp_file.write_text(
@@ -465,7 +463,8 @@ class TestKnownRoles:
     def custom_role_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         from agent_takkub import custom_roles
 
-        monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+        # custom_roles' V2 target (#504 cut half) is isolated automatically
+        # by conftest.py's autouse `_isolate_runtime`.
         monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
         return tmp_path
 

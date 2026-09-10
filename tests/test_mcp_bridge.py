@@ -30,12 +30,10 @@ def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
     running these tests happens to have a real `codex` binary on PATH —
     see TestCodexResolveVersionGate for the opposite (skip-resolve) path.
     """
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
     target = tmp_path / "shared-mcp.json"
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *args: [])
     monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *args: None)
     return target

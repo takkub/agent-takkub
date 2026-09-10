@@ -550,7 +550,9 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if pc is not None:
         takkub_dir = tmp_path / "_isolated_takkub"
         monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
-        monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
+        # provider_config's `routing.json` target (#504 cut half) is isolated
+        # automatically via the `storage_layout_v2` patch below — no
+        # `_CONFIG_PATH` constant left to redirect.
         # #343: _provider_available()'s CLI-installed TTL cache is module-global
         # and outlives any single test's monkeypatched discovery result — reset
         # it here (not just in provider_config's own test fixture) so every

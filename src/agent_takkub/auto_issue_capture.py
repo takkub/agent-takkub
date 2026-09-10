@@ -130,7 +130,9 @@ def _signature(exc_type: type[BaseException], exc_tb) -> str:
     return key
 
 
-def _dedup_target() -> Path:
+def path() -> Path:
+    """Where dedup/rate-cap state lives (the V2 target). Function form lets
+    tests patch it."""
     from .core.storage.layout import storage_layout_v2
     from .core.storage.v2_target import effective_data_home
 
@@ -138,18 +140,18 @@ def _dedup_target() -> Path:
 
 
 def _load_state() -> dict:
-    from .core.storage.v2_target import read_data
+    from .core.storage.legacy_reader import read_json
 
-    data = read_data(_dedup_target())
+    data = read_json(path())
     return data if isinstance(data, dict) else {}
 
 
 def _save_state(state: dict) -> bool:
     global _persist_broken
     try:
-        from .core.storage.v2_target import write_data
+        from .core.migration.registry_copy_step import write_json_atomic
 
-        write_data(_dedup_target(), state)
+        write_json_atomic(path(), state)
         _persist_broken = False
         return True
     except OSError as exc:

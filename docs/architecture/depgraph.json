@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 333,
+  "module_count": 335,
   "modules": [
     {
       "module": "agent_takkub",
@@ -193,7 +193,9 @@
       "module": "agent_takkub.auto_issue_capture",
       "imports": [
         "agent_takkub",
+        "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
         "agent_takkub.issues"
       ],
@@ -202,7 +204,7 @@
         "agent_takkub.auto_issue_signals"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.auto_issue_signals",
@@ -554,6 +556,7 @@
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.migration.engine",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.resilience.circuit_breaker",
         "agent_takkub.core.secrets.manager",
@@ -638,7 +641,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 101,
+      "fan_in": 102,
       "fan_out": 0
     },
     {
@@ -1499,11 +1502,12 @@
       ],
       "imported_by": [
         "agent_takkub.core.migration.engine",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.migration.steps_v1"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
@@ -1513,10 +1517,10 @@
         "agent_takkub.core.contracts.migration",
         "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.journal",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.report",
         "agent_takkub.core.migration.steps",
-        "agent_takkub.core.migration.steps_v1",
-        "agent_takkub.core.storage.layout"
+        "agent_takkub.core.migration.steps_v1"
       ],
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
@@ -1533,12 +1537,29 @@
       ],
       "imported_by": [
         "agent_takkub.core.migration.engine",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.migration.steps_v1"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.core.migration.promote_v1",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.migration.backup",
+        "agent_takkub.core.migration.journal",
+        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.migration.report",
+        "agent_takkub.core.migration.verify_copy"
+      ],
+      "imported_by": [
+        "agent_takkub.core.migration.engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.core.migration.registry_copy_step",
@@ -1549,6 +1570,8 @@
         "agent_takkub.core.storage.legacy_reader"
       ],
       "imported_by": [
+        "agent_takkub.auto_issue_capture",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.storage.v2_target",
         "agent_takkub.custom_roles",
@@ -1556,7 +1579,7 @@
         "agent_takkub.provider_config",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 6,
+      "fan_in": 8,
       "fan_out": 4
     },
     {
@@ -1564,11 +1587,12 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.core.migration.engine",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.migration.steps_v1"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -1603,6 +1627,15 @@
       ],
       "fan_in": 2,
       "fan_out": 7
+    },
+    {
+      "module": "agent_takkub.core.migration.verify_copy",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.core.migration.promote_v1"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.core.model_catalog",
@@ -2184,11 +2217,9 @@
       "imported_by": [
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_migrate_boot",
-        "agent_takkub.core.migration.engine",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.storage.paths",
-        "agent_takkub.core.storage.v2_target",
         "agent_takkub.custom_roles",
         "agent_takkub.design_actions",
         "agent_takkub.doctor",
@@ -2201,7 +2232,7 @@
         "agent_takkub.role_models",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 18,
+      "fan_in": 16,
       "fan_out": 1
     },
     {
@@ -2210,6 +2241,7 @@
         "agent_takkub.cached_read"
       ],
       "imported_by": [
+        "agent_takkub.auto_issue_capture",
         "agent_takkub.core.conversation.checkpoint",
         "agent_takkub.core.conversation.ingest.cursor_store",
         "agent_takkub.core.conversation.store",
@@ -2223,7 +2255,7 @@
         "agent_takkub.provider_config",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 1
     },
     {
@@ -2251,7 +2283,6 @@
       "module": "agent_takkub.core.storage.v2_target",
       "imports": [
         "agent_takkub.core.migration.registry_copy_step",
-        "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader"
       ],
       "imported_by": [
@@ -2267,7 +2298,7 @@
         "agent_takkub.skill_policy"
       ],
       "fan_in": 10,
-      "fan_out": 3
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core.versioning",

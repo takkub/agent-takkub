@@ -116,15 +116,23 @@ class TestRunBootStageGates:
         assert result.action == "skipped"
         assert result.reason == "dev-checkout"
 
-    def test_v2_layout_state_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_v2_layout_state_still_runs_apply_pending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504: `"v2"` is the normal steady state of every fully-migrated
+        machine now, not a dead/unreachable branch — it must keep running
+        `apply_pending()` on every boot forever, exactly like `"mixed"`
+        does, so a ladder step added in a LATER release still gets picked
+        up (#362's whole point) instead of every promoted machine being
+        permanently stranded on whatever ladder existed the boot it first
+        reached `"v2"`."""
         # `layout_state` is imported inside `run_boot_stage` — patch the
         # source module's binding, not a module-level name in this one.
         import agent_takkub.core.storage.layout as layout_mod
 
         monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v2")
         result = auto_migrate_boot.run_boot_stage()
-        assert result.action == "skipped"
-        assert result.reason == "layout-state-v2"
+        assert result.action == "pending_applied"
 
     def test_previously_rolled_back_same_version_skips(
         self, monkeypatch: pytest.MonkeyPatch
@@ -316,9 +324,12 @@ class TestRunBootStageMixedPendingApply:
     ) -> None:
         """End-to-end with the real ladder (#362): a machine that migrated
         under the pre-#360 ladder (8 steps: version-marker + the 7 V1
-        steps) must, on its next mixed-state boot after upgrading to a
-        build carrying #360's core-internal-store, apply just that one new
-        step — the other 8 stay untouched, no stale/rollback noise at all."""
+        steps), with real V1 data still on disk (`projects.json` — the
+        fixture below), must, on its next mixed-state boot after upgrading
+        to a build carrying #360's core-internal-store (and #504's
+        promote/archive pair), apply just the steps genuinely new to this
+        machine's journal — the other 8 stay untouched, no stale/rollback
+        noise at all."""
         from agent_takkub.core.migration.backup import BackupManager
         from agent_takkub.core.migration.journal import MigrationJournal
         from agent_takkub.core.migration.steps import VersionMarkerStep
@@ -332,6 +343,13 @@ class TestRunBootStageMixedPendingApply:
             build_state_step,
         )
         from agent_takkub.core.storage.paths import core_home
+
+        # Real V1 data still on disk — what actually makes this "mixed"
+        # under #504's layout_state() (`projects.json` is one of the exact
+        # markers it checks for).
+        (config.DATA_HOME / "projects.json").write_text(
+            json.dumps({"active": None, "projects": {}}), encoding="utf-8"
+        )
 
         journal = MigrationJournal()
         backups = BackupManager()
@@ -362,30 +380,34 @@ class TestRunBootStageMixedPendingApply:
 
         assert result.action == "pending_applied"
         assert events == []  # no stale step, no rollback — the 8 old steps were untouched
-        assert core_home() == config.DATA_HOME / "v2" / "system"  # the new step actually ran
+        assert core_home() == config.DATA_HOME / "system"  # the new step actually ran
 
-    def test_stale_routing_global_self_heals_on_next_boot_no_rollback(
+    def test_stale_routing_global_self_heals_within_the_same_promote_boot(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Release-blocker repro (2026-09-07, prod on 2.0.0): a machine whose
-        `role-agent` step already applied once under the PRE-#515 ladder (V2
-        `routing.json`'s "global" mirrored the then-empty
-        `role-providers.json`) later gets real per-role assignments saved
-        into `role-models.json` by hand (Settings UI, or restored from an
-        even older V1 profile) WITHOUT going through `role_models._save()`'s
-        post-#515 `dual_write_routing` call — e.g. the file was written
-        before this build's `_save()` fix ever ran once. `v2/routing.json`
-        is then stale: "global" still `{}}` while `role-models.json` (the
-        one V1 source of truth, #515) has real entries. The next boot's
-        `apply_pending()` must re-run `role-agent`'s `apply()` (validate()
-        fails for an already-applied step -> not skipped) and that apply()
-        recomputes `_routing_payload()` fresh from `role-models.json` every
-        time — self-healing the mirror with NO rollback, NO stale-step
-        bookkeeping (that bucket is only for a REAPPLY that itself fails),
-        and NO V1 file touched."""
+        """Release-blocker repro (2026-09-07, prod on 2.0.0), reproduced on a
+        simulated already-mixed 2.0.x machine: `role-agent` applied once
+        under the PRE-#515 ladder (its nested `v2/routing.json`'s "global"
+        mirrored the then-empty `role-providers.json`), and real per-role
+        assignments were later saved into `role-models.json` by hand
+        WITHOUT going through `role_models._save()`'s post-#515 `dual_write_
+        routing` call — the mirror is stale: "global" still `{}` while
+        `role-models.json` (the one V1 source of truth, #515) has real
+        entries.
+
+        #504: this machine's FIRST 2.1.0 boot must self-heal `role-agent`'s
+        stale mirror BEFORE `archive-v1-legacy` (last in the ladder) sweeps
+        `role-models.json` into the archive — ladder order, not a second
+        boot, is what guarantees this now, since V1 stops being readable
+        for this step the instant `archive-v1-legacy` succeeds (#504's own
+        `_ARCHIVED_SOURCE_STEP_IDS` — see `engine.py`)."""
+        from agent_takkub.core.migration.journal import MigrationJournal
         from agent_takkub.core.migration.registry_copy_step import write_json_atomic
         from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
         from agent_takkub.core.storage.legacy_reader import read_json
+
+        data_home = config.DATA_HOME
+        monkeypatch.setattr(config, "SETTINGS_HOME", data_home)
 
         role_models = {
             "backend": {"provider": "claude"},
@@ -397,33 +419,34 @@ class TestRunBootStageMixedPendingApply:
             "qa": {"provider": "gemini"},
             "reviewer": {"provider": "codex"},
         }
-        (config.SETTINGS_HOME / "role-models.json").write_text(
-            json.dumps(role_models), encoding="utf-8"
-        )
+        (data_home / "role-models.json").write_text(json.dumps(role_models), encoding="utf-8")
 
-        # Full ladder applies once (role-agent mirrors the real role-models
-        # data faithfully the first time) and lands on "mixed".
-        first = auto_migrate_boot.run_boot_stage()
-        assert first.action == "applied"
+        # Pre-existing 2.0.x nested v2/ root — `role-agent` already applied
+        # once, its "global" mirror now stale (empty) relative to the real
+        # role-models.json above (the #515 drift shape).
+        routing_target = data_home / "v2" / "config" / "routing.json"
+        write_json_atomic(routing_target, {"schema": 1, "global": {}, "projects": {}})
+        journal = MigrationJournal()
+        for step_id in (
+            "version-marker",
+            "readonly-registries",
+            "role-agent",
+            "capability",
+            "project",
+            "state",
+            "credential-reference",
+            "runtime-triage",
+            "core-internal-store",
+        ):
+            journal.record(step_id, "apply", True, "seeded: pre-#504 machine already migrated once")
+
         assert layout_state() == "mixed"
-        routing_target = RoleAgentMigrationStep(data_home=config.DATA_HOME)._routing_target()
-        assert read_json(routing_target)["global"] == {
-            role: e["provider"] for role, e in role_models.items()
-        }
-
-        # Simulate the drift: a stale V2 mirror written before role-models.json
-        # became the source of truth (the pre-#515 shape) sits on disk —
-        # "global" empty even though V1's role-models.json is unchanged.
-        stale = read_json(routing_target)
-        stale["global"] = {}
-        write_json_atomic(routing_target, stale)
-        assert MigrationEngine(data_home=config.DATA_HOME).validate()[-1].step_id == "role-agent"
-        role_agent_validate = next(
-            r
-            for r in MigrationEngine(data_home=config.DATA_HOME).validate()
-            if r.step_id == "role-agent"
-        )
-        assert role_agent_validate.ok is False  # confirms the repro before asserting the fix
+        # Direct, not through the full engine's `validate()` — that stops
+        # the line at `promote-v2-root` (legitimately not-yet-done on a
+        # still-"mixed" machine) before ever reaching `role-agent`.
+        assert (
+            RoleAgentMigrationStep(data_home=data_home).validate().ok is False
+        )  # confirms the repro
 
         events: list[dict] = []
         monkeypatch.setattr(
@@ -432,23 +455,31 @@ class TestRunBootStageMixedPendingApply:
             lambda ev, **kw: events.append({"event": ev, **kw}),
         )
 
-        second = auto_migrate_boot.run_boot_stage()
+        result = auto_migrate_boot.run_boot_stage()
 
-        assert second.action == "pending_applied"
+        assert result.action == "pending_applied"
         assert events == []  # no stale-step bookkeeping, no rollback event at all
         assert auto_migrate_boot.load_state().get("stale_applied_steps", {}) == {}
         assert auto_migrate_boot.load_state().get("rolled_back_steps", {}) == {}
 
-        healed = read_json(routing_target)
+        # Promoted to the top level, self-healed, THEN archived — all in
+        # this one boot.
+        assert layout_state() == "v2"
+        promoted_routing = RoleAgentMigrationStep(data_home=data_home)._routing_target()
+        healed = read_json(promoted_routing)
         assert healed["global"] == {role: e["provider"] for role, e in role_models.items()}
-        assert read_json(config.SETTINGS_HOME / "role-models.json") == role_models  # V1 untouched
+        assert not (data_home / "role-models.json").exists()  # archived by archive-v1-legacy
 
-        final_reports = MigrationEngine(data_home=config.DATA_HOME).validate()
+        final_reports = MigrationEngine(data_home=data_home).validate()
         assert all(r.ok for r in final_reports), [(r.step_id, r.summary) for r in final_reports]
 
 
 class TestRunBootStageHappyPath:
-    def test_v1_fixture_applies_and_lands_on_mixed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_v1_fixture_applies_and_lands_on_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#504: a genuinely fresh/empty fixture has no V1 leftovers for
+        `ArchiveV1LegacyStep` to archive, so a first-ever full-ladder apply
+        lands straight on `"v2"` — no more permanent `"mixed"` limbo for a
+        box with nothing to migrate."""
         assert layout_state() == "v1"
 
         events: list[dict] = []
@@ -462,7 +493,7 @@ class TestRunBootStageHappyPath:
         result = auto_migrate_boot.run_boot_stage(progress_cb=progress.append)
 
         assert result.action == "applied"
-        assert layout_state() == "mixed"
+        assert layout_state() == "v2"
         assert progress  # something was reported
         assert events and events[0]["event"] == "auto_migrate_applied"
 
@@ -547,3 +578,197 @@ class TestState:
     def test_corrupt_state_file_is_empty_dict(self) -> None:
         (config.SETTINGS_HOME / "auto-migrate-state.json").write_text("{not json", encoding="utf-8")
         assert auto_migrate_boot.load_state() == {}
+
+
+# ---------------------------------------------------------------------------
+# #504 — boot-time "finish the move": a simulated OLD machine (real
+# installed-build shape: SETTINGS_HOME == DATA_HOME, a pre-existing populated
+# nested v2/ root from 2.0.x, plus genuine V1 top-level leftovers) boots
+# 2.1.0 and the archive+promote pair runs automatically via run_boot_stage()
+# — verified end to end, not by hand-invoking the steps.
+# ---------------------------------------------------------------------------
+
+
+def _build_old_machine(data_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real installed-build shape: SETTINGS_HOME == DATA_HOME (#504's own
+    scope only ever runs on that shape — `is_dev_checkout()` excludes every
+    other one), a pre-existing 2.0.x nested v2/ root, real V1 leftovers, and
+    the exact never-touch infrastructure #504 item 8 names — all under one
+    `data_home` so the test can assert every one of them survives.
+
+    Also seeds the REAL migration journal with "already applied" records for
+    the 9 pre-#504 ladder steps — a real 2.0.x machine's journal has these
+    (that's what running the ladder once already wrote), and `apply_pending()`
+    needs them to know those 9 are done and only `promote-v2-root`/
+    `archive-v1-legacy` are genuinely new — without this, it would re-run
+    every domain step fresh from (in this fixture, empty) V1 sources and
+    clobber the nested v2/ content this function just placed."""
+    monkeypatch.setattr(config, "SETTINGS_HOME", data_home)
+
+    from agent_takkub.core.migration.journal import MigrationJournal
+
+    journal = MigrationJournal()
+    for step_id in (
+        "version-marker",
+        "readonly-registries",
+        "role-agent",
+        "capability",
+        "project",
+        "state",
+        "credential-reference",
+        "runtime-triage",
+        "core-internal-store",
+    ):
+        journal.record(step_id, "apply", True, "seeded: pre-#504 machine already migrated once")
+
+    # V1 source for `readonly-registries`'s "provider-models" mapping — a
+    # real already-migrated machine still has this (pre-#504 never deleted
+    # V1), consistent with the nested v2/ mirror below (otherwise
+    # `apply_pending()` would correctly see the mirror as stale and
+    # legitimately re-derive it from V1 — which would just rewrite the SAME
+    # content here, but the test below wants to prove the PROMOTE path
+    # specifically, not a coincidental re-derive).
+    (data_home / "provider-models.json").write_text(
+        json.dumps({"claude": "claude-sonnet-5"}), encoding="utf-8"
+    )
+
+    # Pre-existing 2.0.x nested v2/ root (already fully migrated once) —
+    # `readonly-registries`'s own wrapped shape, matching the V1 source above.
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "registry.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "migrated_from": "seed",
+                "migrated_at": 0,
+                "data": {"claude": "claude-sonnet-5"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data_home / "v2" / "config" / "features").mkdir(parents=True)
+    (data_home / "v2" / "config" / "features" / "rtk.json").write_text(
+        json.dumps({"schema": 1, "migrated_from": "seed", "migrated_at": 0, "data": {}}),
+        encoding="utf-8",
+    )
+
+    # Real V1 top-level leftovers still on disk.
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": None, "projects": {"demo": {}}}), encoding="utf-8"
+    )
+    (data_home / "custom-roles.json").write_text("{}", encoding="utf-8")
+
+    # #504 item 8 "ไม่แตะ" — never archived, never promoted over.
+    (data_home / "runtime" / "core").mkdir(parents=True, exist_ok=True)
+    (data_home / "runtime" / "core" / "version.json").write_text("{}", encoding="utf-8")
+    (data_home / "worktrees" / "demo" / "wt-1").mkdir(parents=True)
+    (data_home / "worktrees" / "demo" / "wt-1" / "code.py").write_text("x = 1", encoding="utf-8")
+    (data_home / "claude-config").mkdir(parents=True)
+    (data_home / "claude-config" / "auth.json").write_text("secret", encoding="utf-8")
+
+    # #504 item 5 — deleted outright, not archived.
+    (data_home / "openviking").mkdir(parents=True)
+    (data_home / "openviking" / "stale.json").write_text("{}", encoding="utf-8")
+
+
+class TestPromoteBootIntegration:
+    def test_old_machine_boot_promotes_and_archives_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data_home = config.DATA_HOME
+        _build_old_machine(data_home, monkeypatch)
+        # Explicit per the task's own instruction, even though a tmp
+        # data_home already makes this False — belt and suspenders against
+        # this test ever silently running against a real dev checkout.
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+
+        assert layout_state(data_home) == "mixed"
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"
+        assert layout_state(data_home) == "v2"
+
+        # Promoted: the pre-existing nested v2/ content is now top-level.
+        assert not (data_home / "v2").exists()
+        assert json.loads((data_home / "models" / "registry.json").read_text())["data"] == {
+            "claude": "claude-sonnet-5"
+        }
+        assert (data_home / "config" / "features" / "rtk.json").exists()
+
+        # Archived: V1 leftovers moved into backups/v1-archive-<ts>/, never deleted.
+        assert not (data_home / "projects.json").exists()
+        assert not (data_home / "custom-roles.json").exists()
+        archive_dirs = [
+            p for p in (data_home / "backups").iterdir() if p.name.startswith("v1-archive-")
+        ]
+        assert len(archive_dirs) == 1
+        archived_projects = json.loads((archive_dirs[0] / "projects.json").read_text())
+        assert archived_projects == {"active": None, "projects": {"demo": {}}}
+
+        # Deleted outright — #504 item 5, gone for good.
+        assert not (data_home / "openviking").exists()
+
+        # Never touched.
+        assert (data_home / "runtime" / "core" / "version.json").exists()
+        assert (data_home / "worktrees" / "demo" / "wt-1" / "code.py").read_text() == "x = 1"
+        assert (data_home / "claude-config" / "auth.json").read_text() == "secret"
+
+    def test_fresh_data_home_boot_gets_the_new_layout_with_no_archive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#504 item 4 — a genuinely empty DATA_HOME gets the promoted
+        layout straight away, no `v2` name anywhere, no floating json, no
+        archive folder at all."""
+        data_home = config.DATA_HOME
+        monkeypatch.setattr(config, "SETTINGS_HOME", data_home)
+        monkeypatch.setattr(auto_migrate_boot, "is_dev_checkout", lambda: False)
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "applied"
+        assert layout_state(data_home) == "v2"
+        assert not (data_home / "v2").exists()
+        assert not (data_home / "backups").exists()
+
+
+class TestMigrateCliRestoreV1:
+    """`takkub migrate apply` / `validate` / `restore-v1` driven directly
+    through the CLI (`agent_takkub.cli.main`), not by hand-invoking the
+    step classes — per #504's own "ทดสอบผ่าน takkub migrate apply/validate/
+    restore-v1 ตรงๆ" requirement."""
+
+    def test_apply_validate_restore_v1_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub import cli
+
+        data_home = config.DATA_HOME
+        _build_old_machine(data_home, monkeypatch)
+
+        rc = cli.main(["migrate", "apply", "--json"])
+        assert rc == 0
+        assert layout_state(data_home) == "v2"
+        assert (data_home / "models" / "registry.json").exists()
+
+        rc = cli.main(["migrate", "validate", "--json"])
+        assert rc == 0
+
+        rc = cli.main(["migrate", "restore-v1", "--json"])
+        assert rc == 0
+
+        # Back to the exact pre-2.1.0 shape.
+        assert (data_home / "projects.json").exists()
+        assert json.loads((data_home / "projects.json").read_text()) == {
+            "active": None,
+            "projects": {"demo": {}},
+        }
+        assert json.loads((data_home / "v2" / "models" / "registry.json").read_text())["data"] == {
+            "claude": "claude-sonnet-5"
+        }
+        assert layout_state(data_home) == "mixed"
+
+        # The archive itself is untouched by restore — never expires.
+        archive_dirs = [
+            p for p in (data_home / "backups").iterdir() if p.name.startswith("v1-archive-")
+        ]
+        assert len(archive_dirs) == 1
+        assert (archive_dirs[0] / "projects.json").exists()

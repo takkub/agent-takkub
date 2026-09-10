@@ -19,7 +19,8 @@ def isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
     monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "dot-claude")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
-    monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
+    # provider_config's `routing.json` target (#504 cut half) is isolated
+    # automatically by conftest.py's autouse `_isolate_runtime`.
     monkeypatch.setattr(actions_mod, "active_project", lambda: ("proj", {}))
 
 

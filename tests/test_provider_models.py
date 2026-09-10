@@ -127,7 +127,6 @@ def _capture_generic_argv(
     role: str | None = None,
     gemini_project_id: str | None = None,
 ) -> list[str]:
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
     orchestrator = _make_orchestrator(qapp, monkeypatch)
@@ -147,7 +146,6 @@ def _capture_generic_argv(
         "opencode": "opencode",
     }[provider]
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     spawn_calls: list[dict] = []
 
     with (

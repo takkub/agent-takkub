@@ -39,13 +39,9 @@ def fake_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathl
         _make_plugin(cache, mp)
     monkeypatch.setattr(pathlib.Path, "home", lambda: home)
 
-    # Isolate pane_tools_policy's role-override file: a real machine may have
-    # its own ~/.takkub/pane-tools.json with role overrides, which would leak
-    # into effective_plugins() and make these tests flaky depending on whose
-    # machine runs them (mirrors isolate_profiles below for user_profile).
-    from agent_takkub import pane_tools_policy as ptp
-
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    # pane_tools_policy's V2 target (#504 cut half) is isolated automatically
+    # by conftest.py's autouse `_isolate_runtime`, so a real machine's role
+    # overrides can't leak into effective_plugins() here.
     return cache
 
 
@@ -64,14 +60,12 @@ def isolate_profiles(
     which would leak into `effective_plugins()` and make these tests flaky
     depending on whose machine runs them.
     """
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import user_profile as up
 
     settings_home = tmp_path / "settings"
     monkeypatch.setattr(up, "_BASE_DIR", settings_home)
     monkeypatch.setattr(up, "_REGISTRY_PATH", settings_home / "user-profiles.json")
     monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", tmp_path / "home" / ".claude")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", settings_home / "pane-tools.json")
     return up
 
 

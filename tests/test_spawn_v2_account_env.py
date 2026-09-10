@@ -60,7 +60,6 @@ def _make_codex_pane(role: str = "codex"):
 
 
 def _spawn_codex_and_capture_env(qapp, monkeypatch, tmp_path):
-    from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
 
@@ -69,7 +68,6 @@ def _spawn_codex_and_capture_env(qapp, monkeypatch, tmp_path):
     orch._panes_by_project[TEST_PROJECT] = {"codex": pane}
 
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
-    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
 
     pty_spawn_calls = []
 
