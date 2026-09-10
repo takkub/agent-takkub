@@ -4095,9 +4095,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.team_preset"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -4937,7 +4938,8 @@
       "module": "agent_takkub.team_preset",
       "imports": [
         "agent_takkub.config",
-        "agent_takkub.roles"
+        "agent_takkub.roles",
+        "agent_takkub.routing_planner"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -4954,7 +4956,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 12,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.terminal_widget",
