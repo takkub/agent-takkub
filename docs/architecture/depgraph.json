@@ -536,7 +536,9 @@
     },
     {
       "module": "agent_takkub.config",
-      "imports": [],
+      "imports": [
+        "agent_takkub.core.storage.layout"
+      ],
       "imported_by": [
         "agent_takkub.accounts_adapter",
         "agent_takkub.agent_pane",
@@ -642,7 +644,7 @@
         "agent_takkub.worktree_manager"
       ],
       "fan_in": 102,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.core",
@@ -2217,9 +2219,11 @@
       "imported_by": [
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.config",
         "agent_takkub.core.migration.steps_v1",
         "agent_takkub.core.model_catalog.legacy",
         "agent_takkub.core.storage.paths",
+        "agent_takkub.core_v2_settings",
         "agent_takkub.custom_roles",
         "agent_takkub.design_actions",
         "agent_takkub.doctor",
@@ -2232,7 +2236,7 @@
         "agent_takkub.role_models",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 16,
+      "fan_in": 18,
       "fan_out": 1
     },
     {
@@ -2287,6 +2291,7 @@
       ],
       "imported_by": [
         "agent_takkub.auto_issue_capture",
+        "agent_takkub.core_v2_settings",
         "agent_takkub.custom_roles",
         "agent_takkub.issues",
         "agent_takkub.pane_tools_policy",
@@ -2297,7 +2302,7 @@
         "agent_takkub.role_models",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     },
     {
@@ -2361,7 +2366,9 @@
     {
       "module": "agent_takkub.core_v2_settings",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.core.storage.layout",
+        "agent_takkub.core.storage.v2_target"
       ],
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
@@ -2373,7 +2380,7 @@
         "agent_takkub.settings_knowledge_design"
       ],
       "fan_in": 7,
-      "fan_out": 1
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.cursor_helper",
