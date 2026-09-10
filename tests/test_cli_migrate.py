@@ -37,7 +37,7 @@ def test_migrate_inspect_returns_ok(capsys):
     rc = cli.main(["migrate", "inspect", "--json"])
     assert rc == 0
     out = _json_body(capsys.readouterr().out)
-    assert len(out) == 9
+    assert len(out) == 11
     assert out[0]["step_id"] == "version-marker"
     assert out[0]["stage"] == "inspect"
     assert all(r["ok"] for r in out)
@@ -56,7 +56,7 @@ def test_migrate_apply_validate_rollback_full_cycle(capsys):
     rc = cli.main(["migrate", "apply", "--json"])
     assert rc == 0
     apply_out = _json_body(capsys.readouterr().out)
-    assert len(apply_out) == 9
+    assert len(apply_out) == 11
     assert all(r["ok"] for r in apply_out)
 
     rc = cli.main(["migrate", "validate", "--json"])

@@ -1,20 +1,25 @@
 """Storage V2 layout (#309 Phase 8b, blueprint `02_STORAGE_AND_FOLDER_STRUCTURE.md`
 + `13_MIGRATION_MAPPING_FROM_V1.md`, trimmed to the task's own explicit tree).
 
-Physical root: ``config.DATA_HOME / "v2"`` — deliberately NOT bare top-level
-names under ``DATA_HOME`` (blueprint uses ``projects/``, ``runtime/``,
-``cache/`` at the root, but V1 already owns those exact names for a
-DIFFERENT shape; reusing them unnamespaced would let a migration step
-silently interleave V1 and V2 files in one directory). Nesting under ``v2/``
-keeps every migration step copy-never-move-safe: V1 stays untouched at
-``DATA_HOME``'s existing top level, V2 lives entirely alongside it until a
-future deprecation phase (plan §2, Phase 10 ladder) removes V1.
+Physical root: ``config.DATA_HOME`` itself. Through 2.0.x this was nested
+under ``config.DATA_HOME / "v2"`` — V1 already owned bare top-level names
+like ``projects/``, ``runtime/``, ``cache/`` for a different shape, and
+nesting under ``v2/`` kept every migration step copy-never-move-safe while
+V1 stayed authoritative. #504 (2.1.0) retires that nesting: the boot-time
+ladder's own `core.migration.promote_v1.ArchiveV1LegacyStep` moves every V1
+top-level artifact into ``DATA_HOME/backups/v1-archive-<ts>/`` (archived,
+never deleted) BEFORE anything reuses those names here, and
+`PromoteV2RootStep` relocates a pre-existing nested ``v2/`` root's contents
+up to the paths this module now computes directly — so by the time any V2
+path below is read for real, the name collision the old nesting existed to
+avoid has already been resolved on disk, not by nesting in code.
 
 Every path in this module is a pure computation — nothing here creates a
-directory or touches disk (`core-is-bottom-layer` / `core-models-pure`-style
-purity, verified by the same subprocess Qt-import check `core.storage.paths`
-already passes). Only `agent_takkub.config` is imported, same leaf as
-`core.storage.paths`.
+directory, touches disk, or depends on what currently exists on disk
+(`core-is-bottom-layer` / `core-models-pure`-style purity, verified by the
+same subprocess Qt-import check `core.storage.paths` already passes, and by
+`test_core_storage_layout.py`'s explicit "never stats the filesystem" case).
+Only `agent_takkub.config` is imported, same leaf as `core.storage.paths`.
 """
 
 from __future__ import annotations
@@ -98,11 +103,26 @@ class StorageLayoutV2:
 def storage_layout_v2(data_home: Path | None = None) -> StorageLayoutV2:
     """Build the V2 layout rooted at *data_home* (default `config.DATA_HOME`).
 
-    Pure path arithmetic — never creates directories. A migration step's
-    `apply()` is the only place that should `mkdir()` any of these.
-    """
+    Pure path arithmetic — never creates directories, never stats the
+    filesystem. A migration step's `apply()` is the only place that should
+    `mkdir()` any of these.
+
+    Dev checkouts (`data_home == config.REPO_ROOT`) keep the pre-#504
+    nested ``v2/`` root — same `if DATA_HOME == REPO_ROOT:` gate every other
+    dev/installed split in `config.py` already uses (`_resolve_settings_
+    home`, `default_claude_config_dir`, `provider_home_env`, ...), not a new
+    pattern. A dev checkout's `DATA_HOME` IS the git repo (`config
+    ._resolve_data_home`), which already has REAL committed content at some
+    of these exact top-level names (this repo's own `capabilities/` skill
+    hub, for one) — reusing them unnamespaced there would silently
+    interleave that content with V2's. #504's boot-time promote/archive
+    ladder is ALSO gated off entirely for dev checkouts
+    (`auto_migrate_boot.is_dev_checkout()`), so there is never a real
+    machine to promote for this branch — every OTHER caller of this
+    function (`core.routing.router`, `provider_config`'s dual-write gate,
+    ...) must keep resolving to this same safe, nested spot too."""
     home = data_home if data_home is not None else config.DATA_HOME
-    root = home / "v2"
+    root = (home / "v2") if home == config.REPO_ROOT else home
     system = root / "system"
     return StorageLayoutV2(
         root=root,
@@ -133,17 +153,56 @@ def storage_layout_v2(data_home: Path | None = None) -> StorageLayoutV2:
 
 
 def layout_state(data_home: Path | None = None) -> str:
-    """``"v1"`` (no V2 root yet) / ``"v2"`` (V2 root exists, V1 top-level
-    dirs it maps from are all gone) / ``"mixed"`` (both present) — what
-    `doctor`'s layout check reports. Existence-only, cheap enough for a
-    doctor check (matches `check_core_version_compat`'s no-blocking-I/O
-    posture)."""
+    """``"v1"`` (nothing migrated yet) / ``"v2"`` (fully on the promoted
+    top-level layout, no V1 leftovers) / ``"mixed"`` (a pre-#504 nested
+    ``v2/`` root is still on disk — `core.migration.promote_v1`'s ladder
+    steps haven't finished moving it up yet) — what `doctor`'s layout check
+    reports. Existence-only, cheap enough for a doctor check (matches
+    `check_core_version_compat`'s no-blocking-I/O posture).
+
+    ``"mixed"`` should only ever be observed transiently, mid-boot, on a
+    machine upgrading straight from 2.0.x — `auto_migrate_boot.run_boot_stage`
+    finishes the promote before anything else touches storage (#504 item 1),
+    so a *running* app never sees it as a resting state; it exists here
+    mainly so that boot-time dispatch (and a `doctor` run mid-migration, or
+    one that hits a stuck promote) can still tell "not yet promoted" apart
+    from "no V1 data ever existed"."""
     home = data_home if data_home is not None else config.DATA_HOME
+    if (home / "v2").is_dir():
+        return "mixed"
     layout = storage_layout_v2(home)
-    v2_exists = layout.root.is_dir()
-    if not v2_exists:
+    # Any well-known top-level V2 domain having actual content counts as
+    # "the ladder has run" — NOT just `system_version_json` alone: that
+    # file's home flips through `core.storage.paths.core_home()`'s OWN
+    # legacy-fallback, tied specifically to whether `CoreInternalStoreStep`
+    # has run on this machine, which is exactly the kind of "one step
+    # landed, another hasn't yet" gap #362 exists to tolerate — using it
+    # alone as the sole V2-presence signal would make a machine that has
+    # every OTHER step applied read as `"v1"` again. A bare *empty* tree
+    # doesn't count either — a step's own `rollback()` can leave empty
+    # parent dirs behind after removing the file(s) it actually wrote
+    # (`mkdir(parents=True)` from the original `apply()` was never its job
+    # to clean up), which must read as "nothing here", not "V2 present" —
+    # so this checks for an actual FILE anywhere under each domain, not
+    # merely a non-empty top level.
+    any_v2_domain = any(
+        p.is_dir() and any(f.is_file() for f in p.rglob("*"))
+        for p in (layout.config_dir, layout.models, layout.system, layout.projects_root)
+    )
+    if not any_v2_domain:
         return "v1"
-    v1_markers = (home / "projects.json", home / "runtime", config.SETTINGS_HOME)
+    # #504: files the ladder's `ArchiveV1LegacyStep` actually moves away —
+    # NOT `runtime/` or `config.SETTINGS_HOME` (the pre-#504 markers this
+    # replaced): both are permanent, always-present infrastructure on a
+    # real install (`runtime/` is #504 item 8's explicit "never touch", and
+    # `SETTINGS_HOME == DATA_HOME` on every non-dev install — see
+    # `config._resolve_settings_home`), so checking either made `"v2"`
+    # unreachable forever, not just until migration finished.
+    v1_markers = (
+        home / "projects.json",
+        home / "custom-roles.json",
+        home / ".takkub_issues.json",
+    )
     v1_still_present = any(m.exists() for m in v1_markers)
     return "mixed" if v1_still_present else "v2"
 

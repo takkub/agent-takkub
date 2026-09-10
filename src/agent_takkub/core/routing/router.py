@@ -82,7 +82,10 @@ class Router:
         from agent_takkub.core.storage.layout import storage_layout_v2
 
         layout = storage_layout_v2()
-        data_home = layout.root.parent
+        # #504: `layout.root` IS data_home now (the pre-#504 nested `v2/`
+        # root this used to `.parent` back out of is gone) — see
+        # `core.storage.layout`'s module docstring.
+        data_home = layout.root
         if (
             not (layout.models / "registry.json").exists()
             and not (layout.models / "aliases.json").exists()

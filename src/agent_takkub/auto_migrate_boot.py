@@ -309,9 +309,19 @@ def run_boot_stage(
     from .core.storage.layout import layout_state
 
     state = layout_state()
-    if state == "v2":
-        return _done("skipped", "layout-state-v2")
-    if state == "mixed":
+    if state in ("v2", "mixed"):
+        # #504: "v2" is now the normal steady state of every fully-migrated
+        # machine (not the "unreachable in practice" case it was pre-#504 —
+        # see `authority_state`'s own now-stale docstring claim), so it must
+        # keep running `apply_pending()` exactly like "mixed" does, forever
+        # — that's the only thing that ever picks up a ladder step added in
+        # a LATER release after this machine already promoted (#362's whole
+        # point), or self-heals a step whose validate() has since gone
+        # stale (e.g. `role-agent`'s drift-repair). A bare `skip` here would
+        # permanently strand every promoted machine on whatever ladder
+        # existed the boot it first reached "v2" — each step's own
+        # apply()/validate() being cheap existence-ish checks is what makes
+        # calling this every boot fine even when truly nothing is pending.
         return _run_apply_pending(progress_cb)
 
     # state == "v1" from here — the only state a first-run apply is allowed on.

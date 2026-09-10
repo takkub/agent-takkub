@@ -20,9 +20,9 @@ from pathlib import Path
 from agent_takkub import config
 
 from ..contracts.migration import MigrationStep
-from ..storage.layout import storage_layout_v2
 from .backup import BackupManager
 from .journal import MigrationJournal
+from .promote_v1 import ArchiveV1LegacyStep, PromoteV2RootStep
 from .report import StepReport
 from .steps import VersionMarkerStep
 from .steps_v1 import (
@@ -34,6 +34,23 @@ from .steps_v1 import (
     build_capability_step,
     build_readonly_registries_step,
     build_state_step,
+)
+
+# #504: `ArchiveV1LegacyStep.step_id`, duplicated as a literal (not imported
+# from the class) so this module never needs to construct one just to read
+# an attribute — matches `apply_version_marker_only()`'s own "steps[0] is
+# version-marker" convention of hardcoding ladder-position knowledge here.
+_ARCHIVE_V1_STEP_ID = "archive-v1-legacy"
+
+# The domain steps whose V1 SOURCE lives among what `ArchiveV1LegacyStep`
+# archives — their `validate()` re-reads that source live and can never
+# agree with an already-populated V2 target again once it's gone (see
+# `MigrationEngine.validate()` below). `credential-reference` (provider
+# homes), `runtime-triage` and `core-internal-store` (both under
+# `RUNTIME_DIR`) read from #504 item 8's explicit never-touch list instead —
+# deliberately excluded here, their validate() stays meaningful forever.
+_ARCHIVED_SOURCE_STEP_IDS = frozenset(
+    {"readonly-registries", "role-agent", "capability", "project", "state"}
 )
 
 
@@ -68,6 +85,11 @@ class MigrationEngine:
             # the whole ladder in reverse from a single source of truth.
             self._steps = [
                 VersionMarkerStep(journal=journal, backups=backups),
+                # #504: right after version-marker, before any of the 8 V1->V2
+                # steps below run their validate() in the SAME apply_pending()
+                # pass — see promote_v1.py's module docstring for why this
+                # exact position matters.
+                PromoteV2RootStep(journal=journal, backups=backups, data_home=home),
                 build_readonly_registries_step(journal, backups, data_home=home),
                 RoleAgentMigrationStep(journal=journal, backups=backups, data_home=home),
                 build_capability_step(journal, backups, data_home=home),
@@ -76,6 +98,9 @@ class MigrationEngine:
                 CredentialReferenceStep(journal=journal, backups=backups, data_home=home),
                 RuntimeTriageStep(journal=journal, backups=backups, data_home=home),
                 CoreInternalStoreStep(journal=journal, backups=backups, data_home=home),
+                # #504: last — every step above needs its V1 source still on
+                # disk to read from; archiving first would starve all of them.
+                ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=home),
             ]
 
     def inspect(self) -> list[StepReport]:
@@ -125,16 +150,34 @@ class MigrationEngine:
         even if an earlier one in this same call failed, so one broken step
         never blocks a later, independent one from ever making progress —
         the caller (`auto_migrate_boot`) decides what a failure means
-        per-step, not this method."""
+        per-step, not this method.
+
+        #504: once `archive-v1-legacy` has archived every V1 leftover it
+        owns (or there was never any), the 5 domain steps in
+        `_ARCHIVED_SOURCE_STEP_IDS` can never validate `ok=True` again on
+        their own — their V1 source is gone by design. Without this guard,
+        every boot from then on would see them as "went stale" and re-run
+        `apply()`, which would re-derive their V2 target from a now-missing
+        V1 source and overwrite the real, already-correct migrated content
+        with empty defaults. An already-applied step in that set is treated
+        as still valid once V1 is retired, without even calling its own
+        (permanently broken, post-archival) `validate()`."""
         applied_before = set(self.applied_step_ids())
         skip = set(skip_step_ids)
+        archive_step = next(
+            (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
+        )
+        v1_retired = archive_step is not None and archive_step.validate().ok
         reports: list[StepReport] = []
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
             if step_id in skip:
                 continue
-            if step_id in applied_before and s.validate().ok:
-                continue
+            if step_id in applied_before:
+                if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+                    continue
+                if s.validate().ok:
+                    continue
             reports.append(s.apply())
         return reports
 
@@ -149,15 +192,36 @@ class MigrationEngine:
         raise KeyError(f"MigrationEngine has no step {step_id!r}")
 
     def apply(self) -> list[StepReport]:
+        # #504: `archive-v1-legacy` runs its OWN apply() last, same as every
+        # other step — but it must be excluded from the `_verify_post_apply`
+        # re-validation pass below, and run only after that pass completes.
+        # It's the one step whose job is to remove the V1 sources every
+        # domain step's own `validate()` re-reads live — running it inside
+        # the same re-validated batch would make `_verify_post_apply` see
+        # those V1 sources gone and downgrade every earlier domain step's
+        # apply report to a false failure, even though each one wrote its
+        # V2 target correctly.
+        steps = [s for s in self._steps if getattr(s, "step_id", "") != _ARCHIVE_V1_STEP_ID]
+        archive_step = next(
+            (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
+        )
         reports: list[StepReport] = []
-        for s in self._steps:
+        for s in steps:
             r = s.apply()
             reports.append(r)
             if not r.ok:
                 return reports
-        return self._verify_post_apply(reports)
+        verified = self._verify_post_apply(steps, reports)
+        if archive_step is None:
+            return verified
+        if any(not r.ok for r in verified):
+            return verified
+        verified.append(archive_step.apply())
+        return verified
 
-    def _verify_post_apply(self, reports: list[StepReport]) -> list[StepReport]:
+    def _verify_post_apply(
+        self, steps: Sequence[MigrationStep], reports: list[StepReport]
+    ) -> list[StepReport]:
         """A later step's apply() can silently overwrite an earlier step's
         already-written target while both still report ok:true — each
         step's apply() only ever checks its own write, never the final
@@ -166,7 +230,7 @@ class MigrationEngine:
         longer matches, so `apply` never claims ok while an immediate
         `validate` would already disagree."""
         verified: list[StepReport] = []
-        for s, r in zip(self._steps, reports, strict=True):
+        for s, r in zip(steps, reports, strict=True):
             v = s.validate()
             if v.ok:
                 verified.append(r)
@@ -183,8 +247,37 @@ class MigrationEngine:
         return verified
 
     def validate(self) -> list[StepReport]:
+        # #504: once `archive-v1-legacy` reports nothing pending (every V1
+        # leftover it owns has been archived, or there was never any to
+        # begin with), the 5 domain steps whose SOURCE lives among what it
+        # archives (`_ARCHIVED_SOURCE_STEP_IDS`) can no longer answer "does
+        # my V2 target still match V1?" — their V1 source is gone by
+        # design, not by accident. Re-reading a missing file as `{}` and
+        # comparing it to a populated V2 target would report a false
+        # mismatch forever after every future `validate()` call (`takkub
+        # migrate validate`, `doctor --storage-layout`, ...), not just the
+        # one apply() pass `_verify_post_apply` above already guards.
+        # `credential-reference`/`runtime-triage`/`core-internal-store`
+        # read from provider homes / `runtime/` — #504 item 8's explicit
+        # never-touch list — so their sources persist forever and their
+        # validate() stays meaningful; they are NOT in the skip set.
+        archive_step = next(
+            (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
+        )
+        v1_retired = archive_step is not None and archive_step.validate().ok
         reports: list[StepReport] = []
         for s in self._steps:
+            step_id = getattr(s, "step_id", "")
+            if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+                reports.append(
+                    StepReport(
+                        step_id,
+                        "validate",
+                        True,
+                        "V1 source archived (#504) — nothing left to cross-check against",
+                    )
+                )
+                continue
             r = s.validate()
             reports.append(r)
             if not r.ok:
@@ -200,27 +293,33 @@ class MigrationEngine:
                 return reports
         if self._data_home is None:
             # Every per-step rollback above already reported ok — but a
-            # rollback that leaves the whole v2/ root in place is incomplete,
-            # not merely partial (#350 qa follow-up: this used to be a quiet
-            # `if self._data_home is not None:` skip, which meant a future
-            # edit could delete that guard with nothing to catch it — see
+            # rollback that leaves a stray legacy v2/ root in place is
+            # incomplete, not merely partial (#350 qa follow-up: this used
+            # to be a quiet `if self._data_home is not None:` skip, which
+            # meant a future edit could delete that guard with nothing to
+            # catch it — see
             # test_engine_rollback_without_data_home_raises_instead_of_silently_skipping).
             # Refuse outright instead of guessing at a fallback target.
             raise RuntimeError(
-                "MigrationEngine.rollback() needs data_home to remove the V2 "
-                "root; every per-step rollback above succeeded but leaving "
-                "v2/ in place would make this an incomplete rollback. Pass "
-                "data_home=... to the constructor (real callers always do — "
-                "cli.py and auto_migrate_boot.py both use the default "
-                "MigrationEngine() which resolves it from config.DATA_HOME)."
+                "MigrationEngine.rollback() needs data_home to finish "
+                "cleanup; every per-step rollback above succeeded but "
+                "leaving a stray legacy v2/ root in place would make this "
+                "an incomplete rollback. Pass data_home=... to the "
+                "constructor (real callers always do — cli.py and "
+                "auto_migrate_boot.py both use the default MigrationEngine() "
+                "which resolves it from config.DATA_HOME)."
             )
-        # copy-never-move (module docstring): everything under v2/ is a
-        # copy of V1 data, never its only home — once every step's own
-        # rollback reports ok, the whole V2 root is safe to remove
-        # outright rather than trust each step's own bookkeeping to have
-        # deleted every file/empty dir it ever created (#350: leftover
-        # v2/ content otherwise kept `doctor --storage-layout` stuck on
-        # "mixed" forever, permanently failing the plan's own pre-flight
-        # check on any machine that ever ran `apply`).
-        shutil.rmtree(storage_layout_v2(self._data_home).root, ignore_errors=True)
+        # #504: `storage_layout_v2().root` is now DATA_HOME itself (the
+        # nested v2/ folder was retired as the V2 root by the promote step
+        # above) — a blanket rmtree of "root" here would wipe the whole
+        # user data directory, not a disposable copy. Each step's own
+        # rollback already reversed exactly what IT wrote; the only
+        # still-disposable-by-construction leftover is a legacy pre-#504
+        # nested v2/ folder, if `PromoteV2RootStep.rollback()` above didn't
+        # already need it (e.g. it was interrupted mid-promote) — always
+        # safe to remove since it is, by definition, never anything's only
+        # copy (#350's original "don't leave `doctor --storage-layout`
+        # stuck reporting stale state forever" concern, scoped to the one
+        # thing here that's actually still safe to nuke).
+        shutil.rmtree(self._data_home / "v2", ignore_errors=True)
         return reports
