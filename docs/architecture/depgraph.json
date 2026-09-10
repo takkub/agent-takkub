@@ -235,9 +235,10 @@
       "imported_by": [
         "agent_takkub.app",
         "agent_takkub.boot_update_window",
+        "agent_takkub.cli",
         "agent_takkub.doctor"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 7
     },
     {
@@ -389,6 +390,7 @@
     {
       "module": "agent_takkub.cli",
       "imports": [
+        "agent_takkub.auto_migrate_boot",
         "agent_takkub.bm25_search",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.codex_agents_md",
@@ -432,7 +434,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 40
+      "fan_out": 41
     },
     {
       "module": "agent_takkub.cli_server",
@@ -1558,7 +1560,8 @@
         "agent_takkub.core.migration.journal",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.migration.report",
-        "agent_takkub.core.migration.verify_copy"
+        "agent_takkub.core.migration.verify_copy",
+        "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
@@ -1566,7 +1569,7 @@
         "agent_takkub.core.migration.engine"
       ],
       "fan_in": 3,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.core.migration.registry_copy_step",
@@ -2282,11 +2285,12 @@
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.journal",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.model_catalog.registry",
         "agent_takkub.core.versioning.store",
         "agent_takkub.obsidian_dedup"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     },
     {

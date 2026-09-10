@@ -1030,3 +1030,31 @@ def test_validate_catches_a_corrupted_domain_target_after_v1_retirement(tmp_path
     failed = next(r for r in reports if not r.ok)
     assert failed.step_id == "project"
     assert "unhealthy" in failed.summary
+
+
+def test_validate_catches_a_present_but_null_required_domain_value(tmp_path, monkeypatch):
+    """#504 R3 `domain_null_data`: a required key present but holding
+    ``null`` (``{"data": null}``) used to pass `_domain_target_problems` —
+    ``k not in data`` is only true when the key is ABSENT, not when it holds
+    a legitimately-impossible value."""
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", data_home)
+
+    (data_home / "projects.json").write_text(
+        json.dumps({"active": "demo", "projects": {"demo": {}}}), encoding="utf-8"
+    )
+    engine = MigrationEngine()
+    assert all(r.ok for r in engine.apply())
+    assert all(r.ok for r in engine.validate())
+
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    registry = storage_layout_v2(data_home).projects_root / "registry.json"
+    registry.write_text(json.dumps({"data": None}), encoding="utf-8")
+
+    reports = MigrationEngine(data_home=data_home).validate()
+    assert not all(r.ok for r in reports)
+    failed = next(r for r in reports if not r.ok)
+    assert failed.step_id == "project"

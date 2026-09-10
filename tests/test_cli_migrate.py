@@ -161,3 +161,38 @@ def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(
     out = _json_body(capsys.readouterr().out)
     assert [r["step_id"] for r in out] == ["archive-v1-legacy"]
     assert "promote-v2-root" not in calls
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 acceptance review Round 3 — `disk_cli_apply`/`disk_cli_restore-v1`:
+# `apply`/`restore-v1` used to mutate storage with ZERO free-space checks,
+# unlike the automatic boot-time path (`auto_migrate_boot.run_boot_stage`).
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_apply_refuses_on_insufficient_disk_space(capsys, monkeypatch):
+    from agent_takkub import auto_migrate_boot as boot
+
+    monkeypatch.setattr(boot, "_disk_has_room", lambda *a, **k: False)
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc != 0
+    assert "insufficient free disk space" in capsys.readouterr().out
+
+
+def test_migrate_restore_v1_refuses_on_insufficient_disk_space(capsys, monkeypatch):
+    from agent_takkub import auto_migrate_boot as boot
+
+    monkeypatch.setattr(boot, "_disk_has_room", lambda *a, **k: False)
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc != 0
+    assert "insufficient free disk space" in capsys.readouterr().out
+
+
+def test_migrate_restore_v1_list_archives_is_exempt_from_the_disk_gate(capsys, monkeypatch):
+    """`--list` is read-only — it must never be refused for lack of disk
+    space, since it doesn't write anything."""
+    from agent_takkub import auto_migrate_boot as boot
+
+    monkeypatch.setattr(boot, "_disk_has_room", lambda *a, **k: False)
+    rc = cli.main(["migrate", "restore-v1", "--list", "--json"])
+    assert rc == 0

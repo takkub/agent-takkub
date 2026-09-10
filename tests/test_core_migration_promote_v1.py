@@ -995,3 +995,213 @@ def test_restore_v1_cli_undoes_an_earlier_generation_when_a_later_one_fails(
     # The older generation's restore ("projects.json") must have been
     # undone again — it never existed before this restore-v1 call started.
     assert not (data_home / "projects.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 acceptance review, ROUND 3 (docs/audit/2026-09-10-504-acceptance-
+# review.md "## Round 3 — 28a4e527") — the transaction-core rewrite that
+# replaced the shared `_two_phase_move` helper with per-file `TransferEntry`
+# + `_copy_phase`/`_prune_phase`, and `cli._cmd_migrate_restore_v1`'s
+# command-level snapshot for multi-generation restore.
+# ---------------------------------------------------------------------------
+
+
+def test_promote_recovery_never_contaminates_ownership_with_a_live_sibling(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R3-B1 `merged_live_home_after_retry`: the old recovery path
+    reconstructed a removed source by `shutil.copytree`ing the WHOLE merged
+    destination back — which pulled in a live sibling (Kimi's real
+    credential home) that was never part of this transaction at all. A
+    retry then recorded that sibling as promoted ownership, and a
+    subsequent `rollback()` removed it from its ACTUAL home. Recovery must
+    only ever reconstruct the exact files THIS entry's own copy verified."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    auth = data_home / "providers" / "kimi" / "default" / "auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("live-secret", encoding="utf-8")
+    (data_home / "v2" / "providers" / "claude").mkdir(parents=True)
+    (data_home / "v2" / "providers" / "claude" / "provider.json").write_text(
+        "ref", encoding="utf-8"
+    )
+    (data_home / "v2" / "state").mkdir(parents=True)
+    (data_home / "v2" / "state" / "value.json").write_text("state", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+
+    def _fail_removing_state(path):
+        if path == data_home / "v2" / "state":
+            raise OSError("last remove blocked")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", _fail_removing_state)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    initial = step.apply()
+    assert not initial.ok
+    # The "providers" candidate's removal succeeded before "state" failed —
+    # recovery must have reconstructed it WITHOUT sweeping the live kimi
+    # home in alongside it.
+    assert not (data_home / "v2" / "providers" / "kimi").exists()
+    assert auth.read_text(encoding="utf-8") == "live-secret"
+
+    monkeypatch.setattr(promote_mod, "_remove", real_remove)
+    assert step.apply().ok  # retry, now unblocked
+    rollback_report = step.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    # The live kimi home must never appear anywhere under the reconstructed
+    # v2/ tree, and must still exist at its real, untouched home.
+    assert not (data_home / "v2" / "providers" / "kimi").exists()
+    assert auth.read_text(encoding="utf-8") == "live-secret"
+
+
+def test_promote_recovery_restores_every_file_after_a_partial_directory_removal(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R3 `partial_final_directory_remove`: a directory removal that
+    deletes SOME of its files before raising (a real `shutil.rmtree`
+    failure mode) must not leave the un-restored ones missing — recovery
+    unconditionally re-copies every file THIS entry's own manifest recorded,
+    regardless of how much of a failed removal actually completed."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "a.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "a.json").write_text("a", encoding="utf-8")
+    (data_home / "v2" / "state" / "b.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "b.json").write_text("b", encoding="utf-8")
+    (data_home / "v2" / "state" / "c.json").write_text("c", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+
+    def _partially_fail_state(path):
+        if path == data_home / "v2" / "state":
+            (path / "b.json").unlink()  # simulate a partially-completed rmtree
+            raise OSError("directory deletion partially completed")
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", _partially_fail_state)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+
+    assert not report.ok
+    assert (data_home / "v2" / "state" / "b.json").read_text(encoding="utf-8") == "b"
+    assert (data_home / "v2" / "state" / "c.json").read_text(encoding="utf-8") == "c"
+
+
+def test_promote_apply_refuses_when_existing_manifest_is_corrupt(tmp_path, journal_backups):
+    """#504 R3-H1 `merge_unreadable_prior_manifest`: a corrupt existing
+    promote manifest must never be silently replaced with a fresh, empty
+    one — that permanently drops a previously-recorded promotion's own
+    ownership record even though its source is already gone."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "first.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "first.json").write_text("FIRST", encoding="utf-8")
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    step._manifest_path().write_text("{broken", encoding="utf-8")
+    (data_home / "v2" / "state" / "second.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "state" / "second.json").write_text("SECOND", encoding="utf-8")
+
+    report = step.apply()
+    assert not report.ok
+    assert (data_home / "models" / "first.json").read_text(encoding="utf-8") == "FIRST"
+
+
+def test_promote_validate_detects_a_missing_promoted_file(tmp_path, journal_backups):
+    """#504 R3 `promoted_member_inventory`: every file EVER recorded as
+    promoted must still be present at its target — `_pending()` alone only
+    proves the (by-then-empty) `v2/` root is gone, never that nothing
+    promoted from it has since disappeared."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models" / "unique-extra.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "models" / "unique-extra.json").write_text("UNIQUE", encoding="utf-8")
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    assert step.validate().ok
+
+    (data_home / "models" / "unique-extra.json").unlink()
+
+    report = step.validate()
+    assert not report.ok
+    assert "unique-extra.json" in report.summary
+
+
+def test_archive_validate_detects_a_generation_with_a_missing_manifest(tmp_path, journal_backups):
+    """#504 R3 `archive_missing_manifest_validation`: the old
+    `_find_all_manifests`-based validate loop silently FILTERED OUT any
+    generation directory whose `manifest.json` was missing — a generation
+    that exists but can't be read must fail validate(), not vanish from
+    consideration."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    from agent_takkub.core.migration.promote_v1 import list_v1_archives
+
+    archive_dir = Path(list_v1_archives(data_home)[0]["path"])
+    (archive_dir / "manifest.json").unlink()
+
+    report = step.validate()
+    assert not report.ok
+    assert archive_dir.name in report.summary
+
+
+def test_restore_v1_cli_multi_generation_undo_reverts_to_command_entry_state(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 R3-B3: the old per-name "latest backup wins" undo model let a
+    LATER generation's own restore shadow an EARLIER generation's backup for
+    the same top-level name — so undoing after a later generation's failure
+    put back that later generation's own overwrite, not the state the whole
+    `restore-v1` command actually started from. A command-level snapshot,
+    taken once before any generation is touched, must revert to the exact
+    pre-command state regardless of how many generations already ran."""
+    from argparse import Namespace
+
+    from agent_takkub import config
+    from agent_takkub.cli import _cmd_migrate_restore_v1
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.promote_v1 import list_v1_archives
+
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    monkeypatch.setattr(config, "DATA_HOME", data_home)
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+
+    # Three separate generations that all happen to archive a file at the
+    # SAME top-level name ("same.json") at different points in time.
+    for value in ("generation-0", "generation-1", "generation-2"):
+        (data_home / "same.json").write_text(value, encoding="utf-8")
+        assert archive.apply().ok
+
+    (data_home / "same.json").write_text("CURRENT", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_copy_verified = promote_mod.copy_verified
+    # Fail the SECOND generation's restore (oldest-first walk order).
+    fail_root = Path(list_v1_archives(data_home)[-2]["path"])
+
+    def _fail_second_generation(src, dest):
+        if src.is_relative_to(fail_root):
+            raise OSError("injected generation copy failure")
+        return real_copy_verified(src, dest)
+
+    monkeypatch.setattr(promote_mod, "copy_verified", _fail_second_generation)
+    engine = MigrationEngine([promote, archive], data_home=data_home, journal=journal)
+    reports = _cmd_migrate_restore_v1(engine, Namespace(archive_ts=None))
+
+    assert not all(r.ok for r in reports)
+    assert (data_home / "same.json").read_text(encoding="utf-8") == "CURRENT"
