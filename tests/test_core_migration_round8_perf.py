@@ -108,14 +108,16 @@ def test_restore_shaped_copy_result_matches_unbatched_result(tmp_path):
 
 
 def test_restore_of_many_small_files_stays_within_budget_relative_to_a_single_bulk_entry(
-    tmp_path,
+    tmp_path, monkeypatch, capsys
 ):
-    """Sanity timing check (generous, non-flaky bound) at a CI-tractable
-    scale (a few thousand files, not the full 15.7k production rehearsal —
-    Lead is re-running that separately): a per-file "restore" through
-    `_copy_phase` must land within a small multiple of an equivalent
-    single-entry "apply" over the SAME files, not the ~150x-and-climbing
-    slowdown the unbatched code showed in production."""
+    """#504 R8-P1 shape check: deterministic assertion (ledger write count,
+    not wall-clock) at a CI-tractable scale — a per-file "restore" through
+    `_copy_phase` must make a constant-bounded number of durable writes
+    regardless of file count, proving O(n) total bytes written (not the
+    ~O(n²) the unbatched code showed in production). Wall-clock, when
+    TAKKUB_PERF_WALLCLOCK=1, is logged as informational only."""
+    import os
+
     n = 2000
     src = tmp_path / "src"
     _make_files(src, n)
@@ -124,12 +126,25 @@ def test_restore_of_many_small_files_stays_within_budget_relative_to_a_single_bu
     apply_entry = TransferEntry(
         "models", "dir", src, tmp_path / "dest_apply", paths=tuple(f"f{i}.txt" for i in range(n))
     )
+
+    apply_write_calls = {"n": 0}
+    real_write = TransferLedger.write
+
+    def _counting_write_apply(self, *a, **k):
+        apply_write_calls["n"] += 1
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(TransferLedger, "write", _counting_write_apply)
     t0 = time.monotonic()
     apply_outcome = _copy_phase(
         [apply_entry], backups, "apply-step", TransferLedger(tmp_path / "apply_wal.json")
     )
     apply_elapsed = time.monotonic() - t0
     assert apply_outcome.ok
+    apply_writes = apply_write_calls["n"]
+
+    # Reset monkeypatch for restore
+    monkeypatch.undo()
 
     restore_entries = [
         TransferEntry(
@@ -137,6 +152,14 @@ def test_restore_of_many_small_files_stays_within_budget_relative_to_a_single_bu
         )
         for i in range(n)
     ]
+
+    restore_write_calls = {"n": 0}
+
+    def _counting_write_restore(self, *a, **k):
+        restore_write_calls["n"] += 1
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(TransferLedger, "write", _counting_write_restore)
     t0 = time.monotonic()
     restore_outcome = _copy_phase(
         restore_entries,
@@ -147,11 +170,24 @@ def test_restore_of_many_small_files_stays_within_budget_relative_to_a_single_bu
     )
     restore_elapsed = time.monotonic() - t0
     assert restore_outcome.ok
+    restore_writes = restore_write_calls["n"]
 
-    # Floor avoids false failures when both finish in well under a second;
-    # multiplier is generous on purpose — this is a shape check (no
-    # per-file quadratic blowup), not a strict perf gate.
-    assert restore_elapsed < max(apply_elapsed * 5, 3.0)
+    # Deterministic shape check: restore's durable writes must stay constant
+    # (1 initial PENDING + ~60 batched checkpoints ≈ ~61 writes), never scale
+    # with n like the unbatched O(n²) shape. Apply is 1-2 writes for a single
+    # entry. The real assertion is that restore_writes << n, not a ratio.
+    assert restore_writes < 150, (
+        f"restore made {restore_writes} ledger.write calls — expected O(1) "
+        f"batched writes, not O(n). n={n}"
+    )
+    # Wall-clock ratio logged for context when TAKKUB_PERF_WALLCLOCK=1 only.
+    if os.environ.get("TAKKUB_PERF_WALLCLOCK"):
+        ratio = restore_elapsed / max(apply_elapsed, 0.001)
+        print(
+            f"[perf-log] copy phase: restore {restore_elapsed:.2f}s / apply "
+            f"{apply_elapsed:.2f}s = {ratio:.1f}x; apply_writes={apply_writes}, "
+            f"restore_writes={restore_writes}, n={n}"
+        )
 
 
 def test_resume_from_a_partially_verified_restore_wal_finishes_the_rest(tmp_path):
@@ -504,14 +540,15 @@ def test_prune_phase_batched_result_matches_unbatched_result(tmp_path):
     assert unbatched.digests == batched.digests
 
 
-def test_restore_copy_plus_prune_stays_within_budget_relative_to_apply(tmp_path):
-    """#504 round10 (R8-P2) sanity timing check (generous, non-flaky bound):
-    a per-file restore's TOTAL copy+prune time through `_copy_phase` +
-    `_prune_phase` must land within a small multiple of an equivalent
-    single-entry apply's own copy+prune over the SAME files — the copy side
-    alone was already covered by round8's own budget test above; this one
-    covers the prune side the production rehearsal still found slow after
-    that fix landed."""
+def test_restore_copy_plus_prune_stays_within_budget_relative_to_apply(tmp_path, monkeypatch):
+    """#504 round10 (R8-P2) shape check: deterministic assertion (write counts
+    for copy+prune phases, not wall-clock) — a per-file restore's TOTAL
+    copy+prune durable writes must stay bounded regardless of file count,
+    proving O(n) bytes (not the O(n²) the unbatched prune side showed in
+    production even after the copy fix). Covers both copy-phase and prune-phase
+    batching together."""
+    import os
+
     n = 10_000
     backups = BackupManager(tmp_path / "backups")
 
@@ -522,14 +559,28 @@ def test_restore_copy_plus_prune_stays_within_budget_relative_to_apply(tmp_path)
         "models", "dir", apply_src, apply_dest, paths=tuple(f"f{i}.txt" for i in range(n))
     )
     apply_ledger = TransferLedger(tmp_path / "apply_wal.json")
-    apply_write_committed, _ = _write_committed_counter(tmp_path / "apply_manifest.json")
+    apply_write_committed, apply_write_committed_calls = _write_committed_counter(
+        tmp_path / "apply_manifest.json"
+    )
 
+    # Count ledger writes during apply copy+prune
+    apply_ledger_writes = {"n": 0}
+    real_write = TransferLedger.write
+
+    def _counting_apply_ledger(self, *a, **k):
+        apply_ledger_writes["n"] += 1
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(TransferLedger, "write", _counting_apply_ledger)
     t0 = time.monotonic()
     apply_copy = _copy_phase([apply_entry], backups, "apply-step", apply_ledger)
     assert apply_copy.ok, apply_copy.error
     apply_prune = _prune_phase([apply_entry], apply_write_committed, apply_ledger)
     apply_elapsed = time.monotonic() - t0
     assert apply_prune.ok, apply_prune.error
+    apply_total_writes = apply_ledger_writes["n"] + apply_write_committed_calls["n"]
+
+    monkeypatch.undo()
 
     restore_src = tmp_path / "restore_src"
     _make_files(restore_src, n)
@@ -541,8 +592,18 @@ def test_restore_copy_plus_prune_stays_within_budget_relative_to_apply(tmp_path)
         for i in range(n)
     ]
     restore_ledger = TransferLedger(tmp_path / "restore_wal.json")
-    restore_write_committed, _ = _write_committed_counter(tmp_path / "restore_manifest.json")
+    restore_write_committed, restore_write_committed_calls = _write_committed_counter(
+        tmp_path / "restore_manifest.json"
+    )
 
+    # Count ledger writes during restore copy+prune
+    restore_ledger_writes = {"n": 0}
+
+    def _counting_restore_ledger(self, *a, **k):
+        restore_ledger_writes["n"] += 1
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(TransferLedger, "write", _counting_restore_ledger)
     t0 = time.monotonic()
     restore_copy = _copy_phase(
         restore_entries,
@@ -560,9 +621,21 @@ def test_restore_copy_plus_prune_stays_within_budget_relative_to_apply(tmp_path)
     )
     restore_elapsed = time.monotonic() - t0
     assert restore_prune.ok, restore_prune.error
+    restore_total_writes = restore_ledger_writes["n"] + restore_write_committed_calls["n"]
 
-    # Floor avoids false failures when both finish in well under a second;
-    # multiplier is generous on purpose — this is a shape check (no
-    # per-file quadratic blowup across copy+prune together), not a strict
-    # perf gate.
-    assert restore_elapsed < max(apply_elapsed * 3, 5.0)
+    # Deterministic shape check: restore's total durable writes must stay
+    # constant-bounded (2 phases × ~60 checkpoints each ≈ ~120 writes total),
+    # never scale with n. Apply is small (few writes for 1 entry). The real
+    # assertion is that restore_total_writes << n, proving O(n) total bytes.
+    assert restore_total_writes < 300, (
+        f"restore made {restore_total_writes} total writes (copy+prune) — "
+        f"expected O(1) batched writes, not O(n). n={n}"
+    )
+    # Wall-clock ratio logged for context when TAKKUB_PERF_WALLCLOCK=1 only.
+    if os.environ.get("TAKKUB_PERF_WALLCLOCK"):
+        ratio = restore_elapsed / max(apply_elapsed, 0.001)
+        print(
+            f"[perf-log] copy+prune total: restore {restore_elapsed:.2f}s / apply "
+            f"{apply_elapsed:.2f}s = {ratio:.1f}x; apply_total_writes={apply_total_writes}, "
+            f"restore_total_writes={restore_total_writes}, n={n}"
+        )
