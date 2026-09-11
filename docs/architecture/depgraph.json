@@ -343,13 +343,14 @@
         "agent_takkub",
         "agent_takkub.boot_flow",
         "agent_takkub.cockpit_theme",
+        "agent_takkub.config",
         "agent_takkub.core.versioning.store"
       ],
       "imported_by": [
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.browser_chrome",
@@ -587,6 +588,7 @@
         "agent_takkub.auto_resume",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
@@ -685,7 +687,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 105,
+      "fan_in": 106,
       "fan_out": 1
     },
     {
