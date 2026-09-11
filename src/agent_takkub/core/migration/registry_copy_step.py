@@ -56,7 +56,7 @@ def write_json_atomic(path: Path, payload: dict) -> None:
         finally:
             os.close(fd)
     except OSError:
-        pass  # swallow-ok: directory-entry fsync is an extra durability
+        return  # swallow-ok: directory-entry fsync is an extra durability
         # margin on top of the file fsync above (which already made the
         # content itself durable) — unsupported on some platforms (e.g.
         # opening a directory this way on Windows).

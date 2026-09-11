@@ -192,6 +192,17 @@ _ARCHIVE_SKIP_NAMES: frozenset[str] = (
     | _V2_TOP_LEVEL_NAMES
 )
 
+# #574 round9 (`never_touch_promote_collision`): the one `_V2_TOP_LEVEL_NAMES`
+# entry that is itself a home for genuinely LIVE, externally-owned content
+# (a provider account's own credential files, #504 R3-B1's "Kimi credential
+# directory") rather than something only migration ever writes. A same-path
+# copy collision under any OTHER top-level name (`models/`, `state/`, ...) is
+# always this transaction's own prior attempt and safe for `copy_only`'s
+# duplicate-aside rescue; a collision under `providers/` must instead refuse
+# outright (`_refuse_live_collision`, called before `copy_verified` ever
+# runs) — never even momentarily move the live file aside.
+_STRICT_COLLISION_NAMES: frozenset[str] = frozenset({"providers"})
+
 # #504 item 5 — explicitly named as "not data", deleted outright rather than
 # archived. Exact names only; nothing here is a guess.
 _DELETE_OUTRIGHT_NAMES: frozenset[str] = frozenset({"openviking", "claude-config.partial"})
@@ -530,6 +541,29 @@ def _demote_verified_before_undo(
         _log_event("migration_undo_demote_failed", error=str(e))
 
 
+def _refuse_live_collision(entry: TransferEntry) -> None:
+    """#574 round9 (`never_touch_promote_collision`): called ONLY for an
+    entry whose top level is `_STRICT_COLLISION_NAMES` (a home for
+    genuinely LIVE, externally-owned content, #504 R3-B1's "a Kimi
+    credential directory") — raises `VerifyMismatchError` on the FIRST
+    pre-existing *dest* file whose content differs from *entry*'s own
+    source, exactly like the pre-round6 R4-H5 contract, BEFORE
+    `copy_verified` (and its round6 duplicate-aside rescue, right for
+    every OTHER top-level name but wrong here) ever touches it. A
+    same-content match is never a collision — it's the ordinary
+    already-copied-once case every resumed entry can hit."""
+    if entry.kind == "file":
+        rel_pairs = [(entry.src, entry.dest)]
+    else:
+        rel_pairs = [(entry.src / rel, entry.dest / rel) for rel in entry.paths]
+    for src_file, dest_file in rel_pairs:
+        if dest_file.is_file() and src_file.is_file() and _sha256(dest_file) != _sha256(src_file):
+            raise VerifyMismatchError(
+                f"pre-existing content at {dest_file} would be overwritten by this "
+                "transaction's own copy — refusing to touch a live, externally-owned home"
+            )
+
+
 def _notify_entry(on_entry: Callable[[str], None] | None, name: str) -> None:
     """Best-effort per-entry progress observer (#574) — never lets a
     caller's callback failure affect the copy/prune phase it's observing."""
@@ -538,7 +572,7 @@ def _notify_entry(on_entry: Callable[[str], None] | None, name: str) -> None:
     try:
         on_entry(name)
     except Exception:
-        pass  # swallow-ok: pure progress notification, not a phase input.
+        return  # swallow-ok: pure progress notification, not a phase input.
 
 
 def _copy_phase(
@@ -655,6 +689,8 @@ def _copy_phase(
         backup_path = backups.backup(step_id, entry.dest) if entry.dest.exists() else None
         attempted.append((entry, backup_path))
         try:
+            if entry.name in _STRICT_COLLISION_NAMES:
+                _refuse_live_collision(entry)
             verify = copy_verified(entry.src, entry.dest)
         except (OSError, VerifyMismatchError) as e:
             _demote_verified_before_undo(states, attempted, ledger)

@@ -85,7 +85,15 @@ def copy_only(src: Path, dest: Path) -> list[str]:
     sibling (never deleted — same "copy/keep, never lose" contract as
     everything else in this package) and let this transaction's own copy
     proceed into the now-clear spot; the caller reports every path this
-    returns rather than the collision going unnoticed."""
+    returns rather than the collision going unnoticed.
+
+    #574 round9 (`never_touch_promote_collision`): a top-level name that is
+    itself a home for genuinely LIVE, externally-owned content (`providers/`,
+    #504 R3-B1's "a Kimi credential directory") must never even get this far
+    — `promote_v1._copy_phase` refuses a collision under one of those names
+    OUTRIGHT before ever calling this function, so this rename-aside rescue
+    only ever runs for a name only migration itself writes (`models/`,
+    `state/`, ...)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     duplicated: list[str] = []
     if src.is_dir():

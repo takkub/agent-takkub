@@ -256,6 +256,48 @@ class TestRunBootStageMixedPendingApply:
             "core-internal-store": app_version
         }
 
+    def test_cleanup_pending_step_failure_is_neither_rolled_back_nor_guarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#574 round9 G11 `boot_completes_after_a_transient_prune_denial`:
+        a step whose failure detail names `cleanup_pending` (a transient
+        prune denial — every file this attempt already copy-verified STAYS
+        at its new home, only the source removal is outstanding) must be
+        left alone — no `rollback_step()` call, and never added to
+        `rolled_back_steps` — so the very next boot retries it
+        unconditionally instead of being version-gated away forever."""
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: ["state"])
+        monkeypatch.setattr(
+            MigrationEngine,
+            "apply_pending",
+            lambda self, **kw: [
+                StepReport(
+                    "promote-v2-root",
+                    "apply",
+                    False,
+                    "cleanup-pending: prune denied",
+                    detail={"cleanup_pending": ["state"]},
+                )
+            ],
+        )
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            MigrationEngine,
+            "rollback_step",
+            lambda self, step_id: (
+                rollback_calls.append(step_id) or StepReport(step_id, "rollback", True, "restored")
+            ),
+        )
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "cleanup_pending"
+        assert rollback_calls == []
+        assert auto_migrate_boot.load_state().get("rolled_back_steps", {}) == {}
+
     def test_new_pending_step_retry_guard_skips_it_on_the_next_boot_same_version(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

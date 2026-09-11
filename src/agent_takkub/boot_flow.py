@@ -210,7 +210,7 @@ def remember_provider_choice(choice: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         config._write_json_atomic(path, choice)
     except OSError:
-        pass  # swallow-ok: a failed remember just means asking again next boot.
+        return  # swallow-ok: a failed remember just means asking again next boot.
 
 
 _OUTCOME_STATUS_MAP = {
@@ -247,7 +247,7 @@ def run_provider_updates(
             try:
                 progress_cb(updated)
             except Exception:
-                pass
+                continue  # swallow-ok: an observer failure must never abort the update loop.
     return out
 
 
@@ -439,7 +439,7 @@ def _log_paths() -> list[Path]:
     try:
         paths.append(MigrationJournal().store_path)
     except Exception:
-        pass
+        return paths  # swallow-ok: best-effort extra log path, boot.log alone is enough.
     return paths
 
 
@@ -492,7 +492,7 @@ def run_migration(
                 )
             )
         except Exception:
-            pass
+            return  # swallow-ok: a progress-observer failure must never affect migration.
 
     if plan is None:
         result = auto_migrate_boot.run_boot_stage()

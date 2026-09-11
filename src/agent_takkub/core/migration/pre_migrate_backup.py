@@ -73,7 +73,7 @@ def _log_event(event: str, **details: object) -> None:
 
         _emit(event, **details)
     except Exception:
-        pass  # swallow-ok: this IS the fallback logging path itself — no
+        return  # swallow-ok: this IS the fallback logging path itself — no
         # further sink to report its own failure to, and it never mutates
         # anything.
 
@@ -228,7 +228,7 @@ class PreMigrateBackupStep:
         try:
             self.on_entry(name)
         except Exception:
-            pass  # swallow-ok: an observer failure must never fail the backup.
+            return  # swallow-ok: an observer failure must never fail the backup.
 
     def apply(self) -> StepReport:
         entries = self._input_entries()

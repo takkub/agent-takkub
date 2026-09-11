@@ -234,3 +234,31 @@ def test_r6_m2_copy_phase_surfaces_duplicates_kept_in_its_outcome(tmp_path):
 
     assert outcome.ok, outcome.error
     assert outcome.duplicates_kept == {"sub": ("a.json",)}
+
+
+# ---------------------------------------------------------------------------
+# #574 round9 — `providers/` is the one collision the R6-M2 rescue must NOT
+# apply to: a live provider account home is never touched, not even moved
+# aside and restored.
+# ---------------------------------------------------------------------------
+
+
+def test_round9_providers_collision_refuses_outright_never_duplicate_asides(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "kimi" / "default").mkdir(parents=True)
+    (src / "kimi" / "default" / "auth.json").write_text("OLD", encoding="utf-8")
+    dest = tmp_path / "dest" / "providers"
+    (dest / "kimi" / "default").mkdir(parents=True)
+    (dest / "kimi" / "default" / "auth.json").write_text("LIVE", encoding="utf-8")
+    entry = TransferEntry("providers", "dir", src, dest, paths=("kimi/default/auth.json",))
+
+    ledger = TransferLedger(tmp_path / "wal.json")
+    backups = BackupManager(tmp_path / "backups")
+
+    outcome = _copy_phase([entry], backups, "test-step", ledger)
+
+    assert not outcome.ok
+    # never moved aside, never overwritten — content is exactly untouched.
+    assert (dest / "kimi" / "default" / "auth.json").read_text(encoding="utf-8") == "LIVE"
+    assert not list(dest.rglob("*.duplicate-*"))
