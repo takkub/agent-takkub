@@ -289,10 +289,10 @@ def copy_verified(
         # run. `len(files)` still proves the process hasn't stalled
         # (the whole point of this check-in) without lying about progress
         # having been lost.
-        try:
-            on_file(len(files), len(files), "")
-        except Exception:
-            pass  # swallow-ok: pure progress notification, never a phase input.
+        # Propagates like every other `on_file` call in this module (the
+        # throttle at `_FileProgressThrottle.__call__` never swallows either):
+        # a broken progress observer is a caller bug, not something to hide.
+        on_file(len(files), len(files), "")
     result = verify_only(src, dest, source_digests, on_file=on_file, files=files)
     if duplicated:
         return CopyVerification(
