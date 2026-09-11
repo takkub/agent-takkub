@@ -58,6 +58,10 @@ GROUND_PANEL = "#181B22"
 GROUND_PANEL_ALT = "#1C2029"
 GROUND_INPUT = "#0F172A"
 GROUND_SELECT = "#222630"
+# Nested-card ground one shade darker than GROUND_PANEL — the boot-flow
+# wizard's provider-list / backup-item cards (#574) sit on GROUND_PANEL and
+# need their own fill distinct from both that and GROUND_INPUT.
+GROUND_INSET = "#14171E"
 # ToggleSwitch's unchecked track — deliberately lighter than GROUND_SELECT.
 # GROUND_SELECT against card background GROUND_PANEL had almost no delta, so
 # an off toggle's rounded-rect shape barely read against the card behind it
@@ -75,6 +79,16 @@ BORDER_HAIRLINE = "rgba(255,255,255,0.07)"
 BORDER_MED = "rgba(255,255,255,0.10)"
 BORDER_STRONG = "rgba(255,255,255,0.12)"
 BORDER_STRONG2 = "rgba(255,255,255,0.14)"
+# Solid-hex card border (boot-flow wizard, #574) — distinct from the
+# rgba-over-ground overlays above because it must render the same fixed
+# hue over both GROUND_PANEL and GROUND_INSET cards in one dialog.
+BORDER_CARD = "#262B36"
+# Divider between rows inside a GROUND_INSET card — one step lighter than
+# BORDER_CARD so nested rows read as grouped, not as separate cards.
+BORDER_CARD_ROW = "#1F232C"
+# Outline for an inert/disabled control (an already-up-to-date row's
+# checkbox, a not-yet-reached phase dot) on a GROUND_INPUT ground.
+BORDER_CONTROL = "#3A4150"
 # Hover washes — a translucent overlay of the *text* pole (white on dark,
 # near-black on light), so the same QSS reads correctly in both variants.
 HOVER_FAINT = "rgba(255,255,255,0.04)"
@@ -166,6 +180,10 @@ STATE_OK_BRIGHT = "#22c55e"
 STATE_WARN_BRIGHT = "#facc15"
 STATE_ERROR_BRIGHT = "#f87171"
 STATE_INFO_BRIGHT = "#0ea5e9"
+# Muted error-icon roundel fill (boot-flow wizard's failed-page icon, #574) —
+# duller than STATE_ERROR/BANNER_ERROR_BG so a 36px icon circle reads as
+# "handled, not alarming" (rollback already ran) rather than a live alert.
+STATE_ERROR_ICON_BG = "#3a2226"
 STATE_EXITED = "#f97316"  # orange — a pane exited unexpectedly (respawnable)
 # Amber used for "pro/enabled/attention" chips (status_header, main_window) —
 # a brighter amber than STATE_WARN's provider-warn tone; kept distinct so both
@@ -296,6 +314,7 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "GROUND_PANEL_ALT",
     "GROUND_INPUT",
     "GROUND_SELECT",
+    "GROUND_INSET",
     "TOGGLE_TRACK_OFF",
     "TOGGLE_TRACK_EDGE_RGBA",
     # borders / hovers
@@ -303,6 +322,9 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "BORDER_MED",
     "BORDER_STRONG",
     "BORDER_STRONG2",
+    "BORDER_CARD",
+    "BORDER_CARD_ROW",
+    "BORDER_CONTROL",
     "HOVER_FAINT",
     "HOVER_WEAK",
     # gold accent
@@ -346,6 +368,7 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "STATE_WARN_BRIGHT",
     "STATE_ERROR_BRIGHT",
     "STATE_INFO_BRIGHT",
+    "STATE_ERROR_ICON_BG",
     "STATE_EXITED",
     "STATE_WARN_ALT",
     # status-bar chip identities
@@ -401,6 +424,7 @@ LIGHT_TOKENS: dict[str, object] = {
     "GROUND_PANEL_ALT": "#F8FAFC",
     "GROUND_INPUT": "#F8FAFC",
     "GROUND_SELECT": "#E2E8F0",
+    "GROUND_INSET": "#F1F5F9",
     "TOGGLE_TRACK_OFF": "#CBD5E1",
     "TOGGLE_TRACK_EDGE_RGBA": (16, 24, 40, 36),
     # borders / hovers
@@ -408,6 +432,9 @@ LIGHT_TOKENS: dict[str, object] = {
     "BORDER_MED": "rgba(16,24,40,0.14)",
     "BORDER_STRONG": "rgba(16,24,40,0.20)",
     "BORDER_STRONG2": "rgba(16,24,40,0.24)",
+    "BORDER_CARD": "#E2E8F0",
+    "BORDER_CARD_ROW": "#EDF1F6",
+    "BORDER_CONTROL": "#CBD5E1",
     "HOVER_FAINT": "rgba(16,24,40,0.04)",
     "HOVER_WEAK": "rgba(16,24,40,0.06)",
     # accent — Deep Indigo
@@ -451,6 +478,7 @@ LIGHT_TOKENS: dict[str, object] = {
     "STATE_WARN_BRIGHT": "#b45309",
     "STATE_ERROR_BRIGHT": "#dc2626",
     "STATE_INFO_BRIGHT": "#0369a1",
+    "STATE_ERROR_ICON_BG": "#fee2e2",
     "STATE_EXITED": "#c2410c",
     "STATE_WARN_ALT": "#b45309",
     # status-bar chip identities

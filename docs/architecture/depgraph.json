@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 336,
+  "module_count": 337,
   "modules": [
     {
       "module": "agent_takkub",
@@ -9,12 +9,13 @@
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
         "agent_takkub.ram_report",
         "agent_takkub.remote.api"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 0
     },
     {
@@ -172,7 +173,7 @@
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
-        "agent_takkub.boot_update_window",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
@@ -305,6 +306,19 @@
       "fan_out": 13
     },
     {
+      "module": "agent_takkub.boot_flow_window",
+      "imports": [
+        "agent_takkub",
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.core.versioning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.app"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.boot_update_window",
       "imports": [
         "agent_takkub.auto_migrate_boot",
@@ -314,10 +328,8 @@
         "agent_takkub.provider_spec",
         "agent_takkub.provider_update"
       ],
-      "imported_by": [
-        "agent_takkub.app"
-      ],
-      "fan_in": 1,
+      "imported_by": [],
+      "fan_in": 0,
       "fan_out": 6
     },
     {
@@ -466,6 +478,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.app",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.boot_update_window",
         "agent_takkub.headless_window",
         "agent_takkub.logs_panel",
@@ -500,7 +513,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 35,
+      "fan_in": 36,
       "fan_out": 0
     },
     {
@@ -2387,9 +2400,10 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
+        "agent_takkub.boot_flow_window",
         "agent_takkub.core.migration.steps"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 3
     },
     {
