@@ -1130,3 +1130,196 @@ pointing `PYTHONPATH` at it — no branch switch, no worktree mutation. Two harn
 once the first run showed my original premise was wrong: a boot-path prune denial does not
 leave a DUPLICATE at all, because the health downgrade rolls the step back before one can
 be recorded. Both now assert what the code actually guarantees.
+
+## Round 7 — 6203e57b
+
+Reviewed: `4ee48c24` (#504 round10/R8-P2 — batched rollback prune-phase +
+`boot_flow` `verify_steps`/`current_path`), plus the `pre_migrate_backup.py`
+ladder step and `takkub migrate run --providers/--remember/--no-backup/--json`
+that merged ahead of it. Working tree `wt/reviewer-1789101154` at `6203e57b`.
+
+**Verdict: 2.1.0 migration releasable: no.** One blocker, three HIGH. The R8-P2
+change itself causes no regression in any existing harness, but it introduces
+one new durability-claim defect, and the prod rehearsal exposes a release-
+blocking performance problem in the new mandatory backup step.
+
+### 1. Findings
+
+| ID | Sev | Where | What |
+|----|-----|-------|------|
+| R7-B1 | BLOCKER | `pre_migrate_backup.py:251` | `migrate run` apply did not finish on a real 244,659-file prod copy — killed at 1806 s still inside phase 1/5, item 8/30 (12.1 %). The new first-in-ladder backup copies and sha256s the whole home, via `_copy_phase` with the default `fsync_every=1` — the exact un-batched shape R8-P1/R8-P2 fixed everywhere else. |
+| R7-H1 | HIGH (regression, new in `4ee48c24`) | `promote_v1.py:1038-1060`, `:1091` | A *handled* removal failure inside a batch leaves every later sibling of that batch durably `PRUNED` in the WAL with its source fully intact and no manifest record. At `fsync_every=1` the same fault strands zero. |
+| R7-H2 | HIGH (pre-existing, **not** an R8-P2 regression) | `promote_v1.py:1086` | After a prune removal failure plus rollback, the promoted copies of the un-pruned tail stay at top level with no ownership record, and nothing cleans them up. |
+| R7-H3 | HIGH | `pre_migrate_backup.py:257`, `:262`, `:305` | A backup whose `manifest.json` write fails still reports `apply ok=true`, `validate ok=true` ("no pre-migrate backup manifest yet") — while `restore_from_backup_dir` cannot read it at all. Green ladder, dead escape hatch. |
+| R7-M1 | MED | `boot_flow_terminal.py:206` | `--json --no-backup` prints a non-JSON Thai warning into the JSON stream, breaking the one-object-per-line contract `run_cli`'s own docstring states. |
+| R7-M2 | MED | `cli.py:5603`, `boot_flow_terminal.py:156` | `--no-backup` does not skip the backup and records nothing durable, while both argparse helps advertise it as "DANGEROUS: skip the pre-migrate backup". |
+| R7-M3 | MED | `boot_flow_terminal.py:167-177` | `--providers ask` — the **default** — never prompts. It runs provider updates for everything `check_provider_updates()` pre-selected. |
+| R7-M4 | MED | `boot_flow_terminal.py:185-195` | `--remember` sits inside `if any(it.selected)`, so `--providers none --remember` persists nothing. It also always writes mode `"selected"`, never `"skip"`/`"update_all"`, and `run_cli` never reads `remembered_provider_choice()` back. |
+| R7-M5 | MED | `promote_v1.py:1015`, `:1034` | When a batch's own `write_committed`/`ledger.write` fails, `batch[0]` is named `failed` and recorded DUPLICATE although nothing was ever attempted on it. |
+| R7-L1 | LOW | `boot_flow_terminal.py:226` | `--json` silently implies `--yes`; the confirm prompt is skipped with no record. |
+| R7-L2 | LOW | prod rehearsal | `version-marker` validates red ("app component missing/mismatched") on **both** rehearsal legs. Expected for a 2.0.8 marker under a different running build, but Lead should confirm it is rehearsal setup and not product. |
+
+### 2. Harness results — all six existing suites green
+
+Re-run by me on `6203e57b`, `PYTHONPATH=<worktree>/src`, per-suite
+`TAKKUB_ARTIFACTS_DIR`, `timeout 600`. Logs:
+`runtime/exports/2026-09-11/agent-takkub/r7b-evidence/`.
+
+| Suite | Result |
+|-------|--------|
+| `504-round2-repro.py` | `failures: []` |
+| `504-round2-extra.py` | `failures: []` |
+| `504-round3-faults.py` | `failures: []` |
+| `504-round4-faults.py` | 56/56, `failures: []` |
+| `504-round5-faults.py` | 12/12, `failures: []` |
+| `504-round6-faults.py` | 12/12, `failures: []` |
+
+**R8-P2 introduces no regression in the existing corpus.** Targeted tests also
+pass: 183 tests across `test_core_migration*.py`, `test_boot_flow.py`,
+`test_boot_flow_terminal.py`, `test_cli_migrate.py` and
+`test_core_migration_pre_migrate_backup.py` — 0 failures, 0 errors.
+
+### 3. New harness — `504-round7-faults.py`
+
+Rewritten from scratch this round. The version left on disk by the previous
+session reported 88/95 failures; 70 of those were a single harness defect (it
+read the WAL under a key whose payload is a list of records, then indexed that
+list by string) and most of the rest asserted that `rollback()` must succeed
+when called a second time after a *successful* rollback, which correctly
+refuses. Those 88 were not product findings and are not carried forward.
+
+29 cases, 18 pass. Every fault case runs **twice** — once at the batched
+`fsync_every` and once at `fsync_every=1`, which is exactly the pre-`4ee48c24`
+shape — so a finding is only ever reported as a regression when the batched run
+is strictly worse than its own control.
+
+Invariants asserted after every observed mutation:
+
+- **I1** every seeded byte sequence still readable at source or destination
+- **I2** no WAL record `PRUNED` whose target files are missing
+- **I3** no WAL record `PRUNED` whose source is still fully intact and which the
+  committed manifest no longer lists
+
+I1 and I2 never fired, at any batch size, on either the apply or the rollback
+path, under process kill or handled exception. **No data-loss path was found.**
+
+### 4. R7-H1 — the batching regression, with its control
+
+`_prune_phase` records a whole batch as `PRUNED` in both the manifest and the
+WAL before removing any of that batch's sources (`promote_v1.py:1013-1038`).
+That is the T1 "record before delete" contract and is correct. What is new is
+the handling of a removal that fails *without* crashing: the loop breaks at
+`:1056`, then `:1086` rewrites the manifest as baseline plus newly plus failed —
+dropping the batch's untouched tail — while `:1091` writes back a
+`ledger_states` that still carries that same tail as `PRUNED`.
+
+Measured, 7 entries, injected `OSError` on a source removal:
+
+| Case | `fsync_every=3` | `fsync_every=1` (control) |
+|------|-----------------|---------------------------|
+| apply, fault at removal 2 | 2 entries stranded | 0 |
+| apply, fault at removal 4 | 2 entries stranded | 0 |
+| rollback, fault at removal 2 | 1 entry stranded | 0 |
+| rollback, fault at removal 4 | 2 entries stranded | 0 |
+| rollback, 121 entries, native sizing | 1 entry stranded | n/a |
+
+The commit message states the opposite invariant for the write-failure case it
+did fix: "a failed `ledger.write` must never leave sibling entries in that batch
+looking pruned". The removal-failure path has the identical shape and was not
+covered — and there the false claim is already durable on disk.
+
+Scope: `promote_v1.py:2028` sizes this with `_restore_fsync_batch(len(entries))`,
+which is `ceil(n/60)`. On the 244,659-file prod copy that is a batch of 4,078,
+so one handled removal failure can strand up to 4,077 entries.
+
+Severity is HIGH, not BLOCKER, because it self-heals: the `baseline` resume loop
+at `promote_v1.py:985-998` re-attempts removal on the next call, and the
+post-resume stranded count was 0 in every case. The risk is a window in which
+the WAL durably asserts something false about thousands of entries — the same
+condition R6-B1 (still open) turns into an entry skipped by `_copy_phase`.
+
+A process **kill** mid-batch strands the whole recorded batch too, but that is
+the documented T1 window and it resolves on resume, so the harness reports it as
+a blast-radius metric rather than a failure.
+
+### 5. R7-H2 — confirmed pre-existing, not this commit's fault
+
+After an apply whose prune fails at `d003`, the committed manifest holds
+`d000..d003`; rollback moves those four back and leaves `d004`, `d005`, `d006`
+sitting at top level, owned by nobody. Cross-checked against the parent commit
+`899e572a` with `git archive` into a scratch tree (no branch switch), using a
+standalone probe that imports cleanly on both:
+
+```
+PARENT 899e572a  orphaned_top_level: ["d004/f004.json","d005/f005.json","d006/f006.json"]
+HEAD   6203e57b  orphaned_top_level: ["d004/f004.json","d005/f005.json","d006/f006.json"]
+```
+
+Identical, and identical again between `fsync_every` 3 and 1 on HEAD. Carried as
+a standing HIGH against #504, not against `4ee48c24`.
+
+### 6. Prod rehearsal cross-check (item 5)
+
+**`resume/resume.txt` — DONE.** The prune-phase resume on `home2` completed;
+`load_projects` reads 29 projects; `v2/` holds 9 entries; a `v1-archive-*`
+generation exists. Post-resume validate is **red** on `version-marker`
+(R7-L2). `pre-migrate-backup` validates green with the message "no pre-migrate
+backup manifest yet" — direct prod corroboration of R7-H3.
+
+**`final/final.txt` — NOT complete at the time I read it.** No `DONE` marker; it
+was still inside `restore-v1`. So the restore/apply ratio and the byte-identical
+exit I was asked to cross-check are **not yet available and I have not seen
+them**.
+
+What the apply leg does show is R7-B1:
+
+```
+apply exit=124 elapsed=1806s
+last progress: phase 1/5 (pre-migrate-backup), done 8 / total 30, 12.1% overall
+progress events emitted in 1806s: 10
+```
+
+244,659 files in the copy before apply. Exit 124 is `timeout`'s exit code, but
+the script's own limit is `timeout 3600` (`final-rehearsal.sh:34`) and the run
+stopped at 1806 s — I cannot attribute that gap from the artifacts, and Lead
+should confirm whether something else killed it. Either way the measurement
+stands on its own: 30 minutes of wall clock did not get the mandatory backup
+step past 12 % of phase 1 of 5.
+
+`pre_migrate_backup.py:251` and `:383` are the two `_copy_phase` calls left in
+the package at the default `fsync_every=1`, against the largest entry set in the
+whole ladder. That is a candidate contributor, not a proven root cause — the
+step also sha256s and copies the entire home, which is inherently expensive.
+Backend should measure the split before choosing a fix.
+
+### 7. What still has to happen before 2.1.0 ships
+
+- [ ] R7-B1: make a full prod-scale apply complete in a defensible time, and
+      show the number. This is the release gate.
+- [ ] R7-H1: demote the batch's untouched tail out of `PRUNED` before the final
+      `ledger.write` at `promote_v1.py:1091`.
+- [ ] R7-H3: fail `apply()` when the manifest write fails, and stop `validate()`
+      reporting ok for a backup directory with no manifest.
+- [ ] R7-M1/M2: guard the `--no-backup` warning behind `not args.json`, and
+      either implement the skip or correct both help strings.
+- [ ] The `final/final.txt` leg finishing, with the restore/apply ratio and the
+      byte-identical exit actually read.
+- [ ] Everything still open from round 6: R6-B1, R6-H1, the #568 item-1 hash
+      deviation, the per-provider authenticated login check, the old-wheel
+      downgrade rehearsal, and CI green on both `windows-latest` and
+      `macos-latest`.
+
+### 8. Working notes
+
+`504-round7-faults.py` never edits repository source and never touches a real
+home; every fixture is its own directory under `TAKKUB_ARTIFACTS_DIR`. Batch
+size is forced through the real production callers by patching
+`promote_v1._prune_phase`/`_copy_phase` to inject `fsync_every`, so the code
+under test is the shipped code path, not a reimplementation. The parent-commit
+comparison used `git archive <sha> src` into a scratch tree with `PYTHONPATH`
+pointed at it — no branch switch, no worktree mutation. I did not touch
+`home2`/`home3`; both were read-only.
+
+Evidence: `runtime/exports/2026-09-11/agent-takkub/504-round7-faults.py` and
+`runtime/exports/2026-09-11/agent-takkub/r7b-evidence/` (seven suite logs plus
+`fixtures-path.txt`). `runtime/` is gitignored, so those live outside git.
