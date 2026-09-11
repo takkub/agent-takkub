@@ -64,8 +64,10 @@ class _FakeOrch:
     def _send_when_ready(self, role, task, project=None) -> None:
         pass
 
-    def _auto_recover_stuck(self, role, project, pane, now) -> None:
-        Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+    def _auto_recover_stuck(self, role, project, pane, now, *, idle_no_progress=False) -> None:
+        Orchestrator._auto_recover_stuck(  # type: ignore[arg-type]
+            self, role, project, pane, now, idle_no_progress=idle_no_progress
+        )
 
     def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
         Orchestrator._check_shell_open_dialog(self, project_name, role, pane, key, now)  # type: ignore[arg-type]
@@ -201,3 +203,33 @@ class TestWatchdogSleepGapAbsorption:
         _absorb(fake, 1000.0)
         _absorb(fake, 1000.0 + WATCHDOG_SLEEP_GAP_THRESHOLD_S + 60)
         assert fake._pane_state["p::backend"].last_content_change_ts is None
+
+    def test_progress_clocks_are_also_shifted(self) -> None:
+        """#570: `last_send_ts` / `last_tool_marker_seen_ts` feed the
+        idle-no-progress watchdog's own kill/escalation decision the same
+        way `last_content_change_ts` feeds this one — an unshifted clock
+        would read an 8h sleep as 8h of real silence the instant the
+        machine woke and fire the notice (or worse, escalate straight to
+        recovery) on the very next tick."""
+        fake = _FakeOrch()
+        ps = fake._ps("p::backend")
+        ps.last_send_ts = 1000.0
+        ps.last_tool_marker_seen_ts = 1000.0
+
+        _absorb(fake, 1000.0)
+        gap = WATCHDOG_SLEEP_GAP_THRESHOLD_S + 60
+        _absorb(fake, 1000.0 + gap)
+
+        assert ps.last_send_ts == 1000.0 + gap
+        assert ps.last_tool_marker_seen_ts == 1000.0 + gap
+
+    def test_unset_progress_clocks_stay_zero(self) -> None:
+        # Default (never-set) 0.0 must not be turned into a positive number —
+        # 0.0 means "no baseline yet", same semantics as last_content_change_ts's
+        # None, just PaneState's float-default shape for these two fields.
+        fake = _FakeOrch()
+        ps = fake._ps("p::backend")
+        _absorb(fake, 1000.0)
+        _absorb(fake, 1000.0 + WATCHDOG_SLEEP_GAP_THRESHOLD_S + 60)
+        assert ps.last_send_ts == 0.0
+        assert ps.last_tool_marker_seen_ts == 0.0

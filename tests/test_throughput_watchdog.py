@@ -68,7 +68,7 @@ class _FakeOrch:
     def _send_when_ready(self, *a, **kw):
         pass
 
-    def _auto_recover_stuck(self, role, project, pane, now):
+    def _auto_recover_stuck(self, role, project, pane, now, *, idle_no_progress=False):
         self.recover_calls.append((role, project, now))
 
     def _warn_lead_runaway_pane(self, role: str, project: str, rate: float) -> None:

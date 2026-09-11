@@ -11,12 +11,13 @@ spawn (`system_prompt_flag is None`) and so always rides the paste path.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import Orchestrator, PaneState
 
 
 @pytest.fixture(scope="module")
@@ -119,12 +120,19 @@ class TestUncertainDeliveryNotice:
     def test_suppressed_when_pane_is_working_with_recent_output(self, orch: Orchestrator) -> None:
         """#359: a long task paste that genuinely landed can still trip the
         "still ready" verdict — if the pane is visibly working with recent
-        output, don't tell Lead to reassign it."""
+        output, don't tell Lead to reassign it.
+
+        (#570) The primary tier used to be raw `seconds_since_output()` —
+        ANY PTY byte counted, spinner/marquee included. Now it's
+        `_compute_last_progress_ts`'s content-hash clock
+        (`PaneState.last_content_change_ts`, wall-clock/`time.time()`-based),
+        so "recent output" is simulated the same way `_check_stuck_panes`
+        populates that field."""
         lead = _pane(_live_session())
         gemini = _pane(_live_session())
         gemini.state = "working"
-        gemini.session.seconds_since_output.return_value = 2.0
         orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}
+        orch._pane_state = {"P::gemini": PaneState(last_content_change_ts=time.time() - 2.0)}
 
         with patch("agent_takkub.lead_inbox._log_event") as log_event:
             orch._warn_lead_delivery_uncertain("gemini", "P")

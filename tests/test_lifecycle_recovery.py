@@ -292,9 +292,11 @@ class _FakeOrchForContentDelta:
     def _send_when_ready(self, *_a, **_kw) -> None:
         pass
 
-    def _auto_recover_stuck(self, role, project, pane, now) -> None:
+    def _auto_recover_stuck(self, role, project, pane, now, *, idle_no_progress=False) -> None:
         self.recover_calls.append((role, project))
-        Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+        Orchestrator._auto_recover_stuck(  # type: ignore[arg-type]
+            self, role, project, pane, now, idle_no_progress=idle_no_progress
+        )
 
     def _project_panes(self, project: str | None = None) -> dict:
         return self._panes_by_project.get(project or "", {})
