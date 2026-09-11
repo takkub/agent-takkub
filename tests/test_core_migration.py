@@ -358,6 +358,57 @@ def test_engine_rollback_does_not_wipe_a_v2_root_promote_rollback_just_restored(
     assert list(data_home.rglob("only.json"))
 
 
+def test_engine_apply_stops_pass2_prune_after_an_earlier_step_leaves_a_duplicate(tmp_path):
+    """#504 round5 R5-H1 (`prune_failure_stops_later_prunes`): the pass-1
+    barrier only gates whether pass 2 (deferred prune) STARTS — once
+    started, `promote-v2-root`'s own `prune()` failing partway through
+    (a denied removal, recorded DUPLICATE) must stop `archive-v1-legacy`
+    from pruning its OWN V1 sources in the SAME pass. Before this fix the
+    loop had no early exit and kept pruning every later step regardless."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.promote_v1 import ArchiveV1LegacyStep, PromoteV2RootStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "a.json").write_text("A", encoding="utf-8")
+    (data_home / "v2" / "state").mkdir(parents=True)
+    (data_home / "v2" / "state" / "b.json").write_text("B", encoding="utf-8")
+    (data_home / "legacy-top.json").write_text("LEGACY", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove = promote_mod._remove
+    denied = data_home / "v2" / "state"
+
+    def _deny_state_removal(path):
+        if path == denied:
+            raise PermissionError("prune denied")
+        return real_remove(path)
+
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(tmp_path / "backups")
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    engine = MigrationEngine([promote, archive], data_home=data_home, journal=journal)
+
+    import unittest.mock as mock
+
+    with mock.patch.object(promote_mod, "_remove", side_effect=_deny_state_removal):
+        reports = engine.apply()
+
+    promote_report = next(r for r in reports if r.step_id == "promote-v2-root")
+    archive_report = next(r for r in reports if r.step_id == "archive-v1-legacy")
+    assert not promote_report.ok
+    assert "DUPLICATE" in promote_report.summary
+    # `archive-v1-legacy` copy-verified `legacy-top.json` this same pass —
+    # its own prune() must never have run, so the V1 source is untouched.
+    assert archive_report.ok
+    assert (data_home / "legacy-top.json").read_text(encoding="utf-8") == "LEGACY"
+    assert list(data_home.parent.rglob("legacy-top.json"))
+
+
 def test_apply_version_marker_only_runs_just_step_zero(tmp_path):
     """#361 boot fast-path: `apply_version_marker_only()` must touch only
     the version marker, never re-walk the rest of the ladder."""

@@ -1569,9 +1569,10 @@
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.cli",
-        "agent_takkub.core.migration.engine"
+        "agent_takkub.core.migration.engine",
+        "agent_takkub.doctor"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 9
     },
     {
@@ -2538,6 +2539,7 @@
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.core.context_sources.doctor_section",
         "agent_takkub.core.conversation.flag",
+        "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.resilience.doctor_section",
         "agent_takkub.core.routing.flag",
         "agent_takkub.core.scheduling.flag",
@@ -2575,7 +2577,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 41
+      "fan_out": 42
     },
     {
       "module": "agent_takkub.editor_service",
