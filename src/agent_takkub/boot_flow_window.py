@@ -225,7 +225,13 @@ def _version_diff_widget(current: str, latest: str | None, mono: str) -> QWidget
 def _fmt_gb(num_bytes: float | None) -> str | None:
     if num_bytes is None:
         return None
-    return f"{num_bytes / 1e9:.1f} GB"
+    gb = num_bytes / 1e9
+    if gb < 1:
+        return f"{round(num_bytes / 1e6)} MB"
+    text = f"{gb:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text} GB"
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -239,10 +245,73 @@ def _fmt_duration(seconds: float | None) -> str:
 
 
 def _fmt_eta(seconds: float | None) -> str:
-    if seconds is None:
+    # R5-M4: an `eta_s` under 30s used to floor up to "ประมาณ 1 นาที",
+    # which reads as up to a minute left when there's really only
+    # seconds. `eta_s <= 0` clears the slot entirely (nothing left to
+    # estimate); 0 < eta_s < 30s reads as "not even a minute" instead of
+    # rounding up to one.
+    if seconds is None or seconds <= 0:
         return ""
+    if seconds < 30:
+        return "เหลืออีกไม่ถึงนาที"
     minutes = max(1, round(seconds / 60))
     return f"เหลืออีกประมาณ {minutes} นาที"
+
+
+# R5-L1: production sends the raw ladder step id (`boot_flow.py`'s
+# `_LADDER_STEP_ORDER`) as `log_operation`/the colon-shape `_parse_log_line`
+# operation, but the mockup's log column is a short human word (`promote`,
+# `backup`, `archive`, `validate`). Not imported from `boot_flow.py` —
+# duplicated as literals the same way `engine.py` and `boot_flow.py`
+# already duplicate each other's step-id literals, keeping this window
+# decoupled from the backend module. An id outside this map (a future
+# ladder step, or the already-short literal `info`) renders unchanged.
+_LOG_OPERATION_LABELS: dict[str, str] = {
+    "pre-migrate-backup": "backup",
+    "promote-v2-root": "promote",
+    "archive-v1-legacy": "archive",
+    "readonly-registries": "validate",
+    "role-agent": "validate",
+    "capability": "validate",
+    "project": "validate",
+    "state": "validate",
+    "credential-reference": "validate",
+    "runtime-triage": "validate",
+    "core-internal-store": "validate",
+}
+
+
+def _short_operation(operation: str) -> str:
+    return _LOG_OPERATION_LABELS.get(operation, operation)
+
+
+def _split_two_lines_at_delimiter(
+    text: str, line_width: int, fm: QFontMetrics
+) -> tuple[str, str] | None:
+    """R4-N1: picks a `/`-or-`-` split point (delimiter kept at the end of
+    line 1) such that both halves fit within `line_width`, preferring `/`
+    (the real path separator) over `-` (often just part of one token, e.g.
+    a date-stamped dirname) and, within each, the rightmost candidate that
+    still fits both lines — the same greedy "fill line 1" behavior normal
+    word-wrap gives at whitespace. Returns `None` when no such split
+    exists, leaving the caller to fall back to Qt's own (character-level)
+    wrap."""
+    for delimiters in (("/",), ("/", "-")):
+        best = None
+        for i, ch in enumerate(text):
+            if ch not in delimiters:
+                continue
+            first, second = text[: i + 1], text[i + 1 :]
+            if not second:
+                continue
+            if (
+                fm.horizontalAdvance(first) <= line_width
+                and fm.horizontalAdvance(second) <= line_width
+            ):
+                best = (first, second)
+        if best is not None:
+            return best
+    return None
 
 
 def _shorten_current_path(path: str) -> str:
@@ -1361,7 +1430,22 @@ class BootFlowWindow(QDialog):
         if line_width <= 0:
             line_width = self._migrate_footer_right.maximumWidth()
         budget = line_width * 2
+        if fm.horizontalAdvance(text) <= line_width:
+            self._migrate_footer_right.setTextFormat(Qt.TextFormat.PlainText)
+            self._migrate_footer_right.setText(text)
+            return
         if fm.horizontalAdvance(text) <= budget:
+            # R4-N1: a path is nearly one unbreakable "word" apart from
+            # its own `/`/`-` characters, so Qt's own word-wrap can land
+            # the break mid-token (e.g. splitting "pre-migrate..." right
+            # after "pre-"). Prefer a delimiter-aligned split whenever one
+            # keeps both lines inside the column's own width; otherwise
+            # fall back to Qt's own wrap.
+            split = _split_two_lines_at_delimiter(text, line_width, fm)
+            if split is not None:
+                self._migrate_footer_right.setTextFormat(Qt.TextFormat.RichText)
+                self._migrate_footer_right.setText("<br>".join(html.escape(line) for line in split))
+                return
             self._migrate_footer_right.setTextFormat(Qt.TextFormat.PlainText)
             self._migrate_footer_right.setText(text)
             return
@@ -1587,16 +1671,20 @@ class BootFlowWindow(QDialog):
         log_operation = getattr(event, "log_operation", None)
         log_detail = getattr(event, "log_detail", None)
         log_line = getattr(event, "log_line", None)
-        # R4-M3: the production backend's file-progress detail is a bare
-        # "<files_done>/<files_total>" digit pair (`boot_flow.py:698`) —
-        # reformat it with the same thousands-separator + unit-word
-        # treatment the phase row's own count already got above
-        # (`count_text`), rather than showing the raw numbers the mockup
-        # never does. Only touches a detail that IS exactly that raw pair
-        # (a real human `log_detail` like "คัดลอกแล้ว" is untouched).
-        # Fetched independently of `count_text`'s own `files_done`/
-        # `files_total` above, which are only ever assigned inside that
-        # block's `done is not None and total is not None` guard.
+        # R4-M3/R5-M2: the production backend's file-progress detail is a
+        # bare "<files_done>/<files_total>" digit pair (`boot_flow.py:698`)
+        # — reformat it with a thousands-separator, rather than showing the
+        # raw numbers the mockup never does. `files_done`/`files_total`
+        # always count files (they come straight from
+        # `ProgressEvent.files_done`/`files_total`, not the row's own
+        # `unit`, which now always reads "รายการ" per R4-H1) so the literal
+        # "ไฟล์" is correct here even though the phase row above it may be
+        # labelled with a different noun for the same numbers. Only
+        # touches a detail that IS exactly that raw pair (a real human
+        # `log_detail` like "คัดลอกแล้ว" is untouched). Fetched
+        # independently of `count_text`'s own `files_done`/`files_total`
+        # above, which are only ever assigned inside that block's `done is
+        # not None and total is not None` guard.
         raw_files_done = getattr(event, "files_done", None)
         raw_files_total = getattr(event, "files_total", None)
         if (
@@ -1605,7 +1693,7 @@ class BootFlowWindow(QDialog):
             and raw_files_total is not None
             and str(log_detail).strip() == f"{raw_files_done}/{raw_files_total}"
         ):
-            log_detail = f"{raw_files_done:,}/{raw_files_total:,} {unit or 'ไฟล์'}".strip()
+            log_detail = f"{raw_files_done:,}/{raw_files_total:,} ไฟล์".strip()
         if log_timestamp is not None or log_operation is not None or log_detail:
             timestamp = str(log_timestamp or "")
             operation = str(log_operation or "")
@@ -1630,6 +1718,7 @@ class BootFlowWindow(QDialog):
                 )
             else:
                 timestamp = operation = path = detail = ""
+        operation = _short_operation(operation)
         if timestamp or operation or path or detail:
             spans = [
                 (timestamp, theme.TEXT_FAINT),

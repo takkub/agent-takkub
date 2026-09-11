@@ -220,6 +220,68 @@ class TestPreMigratePage:
         assert flow.run_migration_calls == 1
         assert w._stack.currentIndex() == bfw.PAGE_DONE
 
+    def test_free_disk_space_has_no_trailing_zero(self) -> None:
+        # R3-N1: the mockup writes whole-number gigabytes ("123 GB"), not
+        # "123.0 GB" — `_plan()`'s default `free_bytes=123e9` is exactly
+        # 123 GB.
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        texts = {lbl.text() for lbl in w.findChildren(QLabel)}
+        assert any("ว่างในดิสก์ 123 GB" in t for t in texts)
+        assert not any("123.0 GB" in t for t in texts)
+
+
+class TestFmtGb:
+    """R3-N1: `_fmt_gb` drops a trailing `.0` and drops to MB under 1 GB."""
+
+    def test_whole_gb_has_no_decimal(self) -> None:
+        assert bfw._fmt_gb(123e9) == "123 GB"
+
+    def test_fractional_gb_keeps_one_decimal(self) -> None:
+        assert bfw._fmt_gb(1.2e9) == "1.2 GB"
+
+    def test_under_one_gb_renders_as_mb(self) -> None:
+        assert bfw._fmt_gb(500e6) == "500 MB"
+
+    def test_none_stays_none(self) -> None:
+        assert bfw._fmt_gb(None) is None
+
+
+class TestFmtEta:
+    """R5-M4: an `eta_s` under 30s used to floor up to "ประมาณ 1 นาที"."""
+
+    def test_zero_eta_clears(self) -> None:
+        assert bfw._fmt_eta(0.0) == ""
+
+    def test_negative_eta_clears(self) -> None:
+        assert bfw._fmt_eta(-5.0) == ""
+
+    def test_sub_30_seconds_reads_as_not_even_a_minute(self) -> None:
+        assert bfw._fmt_eta(15.0) == "เหลืออีกไม่ถึงนาที"
+
+    def test_none_stays_empty(self) -> None:
+        assert bfw._fmt_eta(None) == ""
+
+    def test_a_minute_or_more_still_rounds_to_minutes(self) -> None:
+        assert bfw._fmt_eta(90.0) == "เหลืออีกประมาณ 2 นาที"
+
+
+class TestShortOperation:
+    """R5-L1: the log's operation column shows a short human word, not the
+    raw ladder step id."""
+
+    def test_known_ladder_step_ids_map_to_mockup_words(self) -> None:
+        assert bfw._short_operation("pre-migrate-backup") == "backup"
+        assert bfw._short_operation("promote-v2-root") == "promote"
+        assert bfw._short_operation("archive-v1-legacy") == "archive"
+        assert bfw._short_operation("readonly-registries") == "validate"
+        assert bfw._short_operation("core-internal-store") == "validate"
+
+    def test_unknown_id_renders_unchanged(self) -> None:
+        assert bfw._short_operation("info") == "info"
+        assert bfw._short_operation("some-future-step") == "some-future-step"
+
 
 class TestMigratingPageCloseGuard:
     def test_close_ignored_while_migrating(self) -> None:
@@ -365,8 +427,13 @@ class TestMigratingFooterWrap:
         w = bfw.BootFlowWindow(flow=flow)
         full_text = "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832-nested/"
         w._set_footer_right_elided(full_text)
-        assert w._migrate_footer_right.text() == full_text
-        assert "…" not in w._migrate_footer_right.text()
+        rendered = w._migrate_footer_right.text()
+        assert "…" not in rendered
+        # R4-N1: needing 2 lines now breaks at the "/" path separator
+        # (kept at the end of line 1) instead of Qt's own mid-hyphen
+        # break, so no character of the original text is lost.
+        assert rendered.replace("<br>", "") == full_text
+        assert rendered == "สำรองไว้ที่ backups/<br>pre-migrate-2026-09-11-0832-nested/"
 
     def test_very_long_backup_path_is_middle_elided_and_footer_stays_68px(self) -> None:
         """#574 round-3 audit R3-B1 (residual): C's footer must stay the
@@ -449,7 +516,10 @@ class TestMigratingFooterWrap:
                 )
             )
             w._apply_pending_event()
-            assert w._migrate_footer_right.text() == "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832/"
+            assert (
+                w._migrate_footer_right.text()
+                == "สำรองไว้ที่ backups/<br>pre-migrate-2026-09-11-0832/"
+            )
         finally:
             w._migrate_throttle.stop()
 
@@ -1336,7 +1406,10 @@ class TestRealBackendDataclasses:
             w._on_progress(event)
             w._apply_pending_event()
             html_text = w._log_box.text()
-            assert "promote-v2-root" in html_text
+            # R5-L1: the raw ladder step id is mapped to the mockup's
+            # short word ("promote"), not shown verbatim.
+            assert "promote-v2-root" not in html_text
+            assert "promote" in html_text
             assert "providers/codex/default" in html_text
             assert theme.TEXT_MUTED in html_text
             assert theme.TEXT_PRIMARY in html_text
