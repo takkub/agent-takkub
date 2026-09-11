@@ -140,3 +140,88 @@ Token values match at construction. Token *selection* still fails where document
 ## Required follow-up before acceptance
 
 Fix V1–V15, close all migration dismissal paths (B1), and integrate the missing backend (B2). Add focused regressions for B→C header/bar and Escape with an active worker. Then rerender A–E in both themes through real transitions with the same full fixture data. Keep the chip pill implementation: its background is already correct. Production data migration/rollback acceptance remains outside this fake-flow UI review.
+
+
+## Round 2 — 69f81337
+
+**Verdict: FAIL. wizard matches approved mockup: no**
+
+Reviewed main/worktree `69f81337`, including frontend `ca9bbe23` and the real `boot_flow.py`. During the audit main advanced to `00205fbd` (dead legacy `boot_update_window.py` removal); `git diff 69f81337 00205fbd -- src/agent_takkub/boot_flow_window.py src/agent_takkub/boot_flow.py` is empty, so the audited wizard/backend code is still current. No application source or existing tests changed. The round-1 missing-module finding B2 is **closed as an import prerequisite**, but actual backend/UI interoperability fails below. Escape itself is fixed. This section supersedes the round-1 status for each V row.
+
+### Method, evidence, and limits
+
+Used the original `574-review-render.py` capture/metrics routine, offscreen **real PyQt6 widgets**, bundled fonts, Windows/Python 3.11, **96 DPI / DPR 1 / 640 × 540**, for A–E in both themes. Read approved PreMigrate/Migrating/Done/Failed HTML/CSS at the exact original design path. The expected values in the original table remain the specification. Light colors are checked against current light theme tokens, since no separate approved light HTML exists. All ten new images were opened and visually inspected.
+
+Unlike the earlier fake flow, `BootFlowWindow()` resolves the actual imported `agent_takkub.boot_flow` module. Its check/plan/migration functions are patched at their external work boundary to return fake values constructed with the **actual frozen/slotted backend dataclasses**. QThread.start is **not patched**. Provider check and plan return through real workers; B→C uses the real migration worker, held by threading.Event; completion reaches D. No real user-data migration, provider update, or cockpit launch runs.
+
+**Exact contract execution cannot render B–E:** `MigrationPlanSummary.backup_dir` is a `Path`, and the B slot passes it directly to `QLabel`, aborting the subprocess with TypeError. Therefore the complete ten-page set uses a clearly separate **path-normalized fixture**: only backup/archive/log paths are converted to strings. This is a diagnostic bypass in the artifact script, not a source fix or proof that production works. Four-tuple backup rows, numeric phases, and actual available dataclass fields are retained; no invented `verify_steps`/`current_path` is attached to make the screenshots pass. The exact dataclasses currently cannot accept those two requested fields. `MigrationOutcome.validated_steps`, `failed_step_index`, and `failed_step_total` do exist and are supplied as 11, 7, and 11.
+
+ART retains its definition above. New artifacts:
+
+| Evidence | Relative to ART |
+| --- | --- |
+| Exact-contract real-module/worker renderer (reproduces process failure at B) | `574-round2-review.py`, `574-round2-exact-contract.log` |
+| Path-normalized renderer and real QThread/Escape probes | `574-round2-normalized.py`, `574-round2-normalized.log` |
+| All ten images | `screenshots/boot-flow-review-round2/{A,B,C,D,E}-{dark,light}.png` |
+| Rectangles, resolved px fonts, QSS, tokens, layout gaps, font metrics, wrapping | `screenshots/boot-flow-review-round2/widget-metrics.json` |
+| Dataclass fields, real-thread identity, Escape, repeated phase, direct done results | `screenshots/boot-flow-review-round2/behavior.json` |
+| Independently caught B/D/E Path and E log failures, baseline/log-gap measurements | `574-round2-contract-probes.py`, `574-round2-contract-probes.log`, `screenshots/boot-flow-review-round2/contract-probes.json` |
+| Existing test run | `574-round2-pytest.log` |
+
+Reproduce using the reviewed worktree as cwd: `python <ART>/574-review-run.py 60 python <ART>/574-round2-normalized.py`. Exact-contract reproduction: substitute `574-round2-review.py`; expect nonzero process exit. Probes: substitute `574-round2-contract-probes.py`. Commands have bounded subprocess deadlines (render 60s, contract 20–30s, tests 120s); worker waits/event-loop waits are bounded too.
+
+### V1–V15 remeasurement — both dark and light
+
+PASS below concerns the specified visual row in the diagnostic render; it does not waive the blocking Path integration failure. Values are the same in both themes unless colors are listed separately.
+
+| ID / page / element | Expected from approved HTML | Round-2 actual measurement | Verdict |
+| --- | --- | --- | --- |
+| V1 — A–E typography | Title 16px/700; subtitle 12px/400; body/button 13px; chip/log 11px; percent 22px/700; inherited line-height 1.45 | All requested/resolved font **pixel sizes and weights now match**. But line rhythm is still native Qt: title rect `(20,20,600,20)` versus CSS line box **23.2px**; subtitle starts **y=44** versus **47.2** from 20 + 23.2 + 4. Header track starts **y=74** versus CSS **76.6**. Native 13px Latin line spacing is **17px**, versus CSS **18.85px**. No 1.45 equivalent is applied. | **FAIL** — size units fixed; line-height remains |
+| V2 — A/B aggregate track | Visible 4px GROUND_INPUT at zero, above hairline | Both pages show `(0,74,640,4)` track; dark `#0F172A`, light `#F8FAFC`; 1px hairline below. | **PASS** |
+| V3 — C header/aggregate | Migration subtitle phase 2/5; 4px aggregate at 34%; stable phase for repeated events in that phase | First backup then promote event yields **2/5**, **34%**, 4px track and 8px main bar. However another actual `ProgressEvent(phase=2, done=4, total=9, percent_overall=40)` changes header to **3/5** and activates verify. Numeric phase is treated as unknown, so event count determines phase. | **FAIL** — initial frame fixed; actual event contract fails |
+| V4 — B/D/E key/value grid | 150px key + 12px gap, value x=196, aligned baselines | Keys **150px**, gap **12px**, values **x=196**. B first key/path widgets `(34,281,150,20)` / `(196,281,410,20)`. QTextLayout first-line baselines both **y=295** (Thai ascent 14; centered mono ascent 12 + 2px). Other shown rows visually align. | **PASS** for rendered sample |
+| V5 — B section heading spacing | Heading-card gap 6px; tracking 0.04em = 0.48px | Heading y=91 h=18, card y=115: **6px**. QSS **0.48px**, resolved QFont **0.46875px** (Qt subpixel quantization). | **PASS** |
+| V6 — B backup units | `15,747 ไฟล์`, `29 โปรเจค`, `15 ไฟล์`, `4 รายการ` | Actual `(label,count,bytes,unit)` fixtures render **`15,747 1200000000`**, **`29 29000`**, **`15 15000`**, **`4 4000`**. UI consumes tuple index 2 (bytes) as unit, ignoring index 3. | **FAIL** |
+| V7 — B explanatory note | 16px info circle, 8px gap, 1px top offset; bold primary phrase, muted rest | Icon `(20,375,16,16)`, text `(44,375,576,36)`: size/gap pass; **top offset 0px**, expected icon y=376. Bold primary span and muted prose now render correctly. | **FAIL** — remaining 1px offset |
+| V8 — C future-phase dots | Numbers 3/4/5, diameter 22px, text 11px/600 | Actual todo numbers **3,4,5**, all **22×22**; painter font **11px/600**; active 2 uses 700. Visible in both captures. | **PASS** |
+| V9 — C counters | Verify 11 actual validation steps; active `3 / 9 รายการ · providers/…` in PRIMARY | Verify still **9 ขั้น**. Dataclass has **no verify_steps**, so UI falls back to 9 promoted categories. Active **`3 / 9 รายการ`** has correct PRIMARY (`#F3F4F6` / `#0F172A`), but **no path segment**, because actual ProgressEvent has **no current_path**. | **FAIL** |
+| V10 — C log styling | 11px mono; faint timestamp, muted operation/detail, primary path; 8px gaps | Font now **11px IBM Plex Mono**. Actual backend-shaped `promote-v2-root: providers/codex/default` is put entirely into the first span, colored **FAINT** (`#4B5563` / `#94A3B8`); timestamp/operation/path separation absent. Parser requires double spaces while backend emits `step_id: name`. Even structured sample input uses two NBSPs measuring **14px**, not an 8px gap. | **FAIL** |
+| V11 — C footer | Margins 14/20/18; warning x=20, 8px icon/text gap; complete wrapping backup note | Icon **x=20**, text **x=44**, gap **8px**; correct outer margins. Warning text advance **328px** fits its **340px** slot. Complete right note `(471,489,149,33)` wraps without ellipsis; prefix and timestamped path present. | **PASS** |
+| V12 — D validation result | Heading includes 11 validation steps; exactly 3 summary rows | Actual MigrationOutcome(validated_steps=11) produces **ตรวจสอบครบ 11 ขั้น — ไม่มีข้อมูลหาย**; actual summary layout has **3 rows** in both themes. | **PASS** |
+| V13 — D downgrade instructions | Muted Thai prose; inline command in 12px IBM Plex Mono | Value `(196,335,410,20)` is RichText, surrounding **13px sans/MUTED**, command span **12px IBM Plex Mono**. Optional previous-version suffix absent because backend outcome lacks previous_version and local fallback yields none; not hardcoded for this audit. | **PASS** for styling |
+| V14 — D footer hint | FAINT prose and MUTED `Settings → Storage` | Actual RichText has base **#4B5563 / #94A3B8**, embedded span **#6B7280 / #64748B**, font **12px**. | **PASS** |
+| V15 — E failure icon | 36px tinted disk, 20px outlined warning triangle + !, SVG-equivalent stroke 2.5 | Visible triangle + ! now inside **36×36** disk; drawing helper uses **20px** viewbox scale and stroke **2.5 × 20/24**. Correct dark/light disk/error tokens. Exact curved SVG corners versus Qt polygon rasterization remain the original N1 limitation. | **PASS** |
+
+**Visual rows: 9 PASS, 6 FAIL (V1, V3, V6, V7, V9, V10).** These failures include small spacing differences because the approved mockup remains the specification. Chip pills remain correct, including **20px** height/radius **10px** and correct input-background tokens. No new missing-chip finding.
+
+### B1 — actual Escape test passes; direct completion API remains unguarded
+
+In **both themes**, after the actual module's patched migration callable entered a real QThread, `QTest.keyClick(w, Qt.Key.Key_Escape)` returned:
+
+```json
+{"visible": true, "finished": [], "worker_running": true}
+```
+
+The callable confirmed `QThread.currentThread() is not app.thread()`. Native `w.close()` returned false. Calling `accept()` and `reject()` also retained visibility and emitted nothing. Releasing the worker reached D. **The original user-key Escape bypass is fixed.** These probes need the explicitly documented path-normalized plan to reach C at this HEAD.
+
+A separate held-worker probe of `w.done(0)` still returns `{"visible": false, "finished": [true], "worker_running": true}`. `done()` at lines 1716–1718 calls its superclass and emits unconditionally. This is a **remaining completion-API guard hole**, not a claim that Escape still reaches it or that a current user action invokes it. Guard the final completion boundary as requested in round 1; direct API reachability is demonstrated, production user-trigger reachability is not established.
+
+### Remaining MUST-FIX — element / expected / actual
+
+| Finding | Element / expected | Actual / cause / reference |
+| --- | --- | --- |
+| R2-B1 — blocking integration | B/D/E path labels and E log list must accept actual backend Path fields | Exact plan result aborts GUI subprocess at B; independently caught B/D/E label calls all throw WindowsPath TypeError. With backup path removed, E still throws joining `list[Path]`. `boot_flow_window.py:517,957,1374,1379,1543,1548`. Normalize at display boundaries; do not change fixtures to conceal it. |
+| R2-B2 — phase integration | Repeated numeric phase 2 stays promote; failed numeric phase 3 with step 7/11 shows `ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน` | C advances to verify on the second phase-2 event. E renders **ขั้นตอน 3 ไม่ผ่าน**, losing both translated phase and 7/11 despite fields being supplied. GUI only recognizes string keys; actual backend uses ints. `boot_flow_window.py:1192–1207,1474–1496`. |
+| R2-B3 — plan/progress interface | Correct four-tuple unit; real validation-step total and current path; compatible structured/color log | Bytes displayed as units; verify fallback 9; missing current path; complete backend log colored FAINT. See V6/V9/V10 and actual field inventory in behavior.json. `boot_flow_window.py:925–926,1152–1155,1218–1239`; real boot_flow dataclasses and emit/on_entry. Coordinate the actual shared contract rather than adding optional duck-typed fields only to tests. |
+| R2-V1 — typography | CSS 1.45 line boxes | Native Qt title 20px instead of 23.2px; header/subtitle shifted upward. Font px conversion is fixed; line-height still is not. See V1. |
+| R2-V7 — note icon | 1px top offset | Icon and note both y=375, delta 0. See V7; `boot_flow_window.py:878`. |
+| R2-V10 — log separation | Exact 8px inline gaps | Two NBSPs measure 14px at the new 11px mono font. See V10, independently measured in contract-probes.json. |
+| B1 residual — completion API | Final done boundary cannot signal proceed during C | Direct `done(0)` still dismisses and emits true while worker runs; Escape/accept/reject are fixed. `boot_flow_window.py:1716–1718`. Latent API hole, not demonstrated user-key bypass. |
+
+### Verification result and acceptance
+
+Existing tests **90 passed**, exit 0: `tests/test_boot_flow_window.py`, `tests/test_boot_main_window_gate.py`, `tests/test_boot_flow.py`, and `tests/test_boot_flow_terminal.py` (`-q` plus project quiet options omit the textual count summary; progress is 72 + 18). These tests do not invalidate the independently reproduced real-contract failures: the window tests explicitly use their own fake interface and synchronous QThread patch. This round did not repeat the prior event-flood benchmark; no new flood-performance claim is made.
+
+All ten diagnostic renders and requested real-key Escape probes completed. Exact production-type integration was tested and fails before B can render; no claim of end-to-end migration success is made. Fix the remaining contract and visual differences, then rerun the exact-contract renderer without any path normalization.
+
+**wizard matches approved mockup: no**
