@@ -3315,7 +3315,23 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     # just finished — a stale marker is a much smaller problem than
     # undoing a otherwise-successful restore over it.
     _emit_restore_phase("version-marker")
-    version_marker_report = engine.get_step("version-marker").apply()
+    try:
+        version_marker_step = engine.get_step("version-marker")
+    except KeyError:
+        # A ladder built without a `version-marker` step (e.g. tests/
+        # harnesses constructing `MigrationEngine([archive, promote], ...)`
+        # directly) has nothing to re-apply here — restore-v1 must not
+        # raise for that, per the note above: a stale marker is a smaller
+        # problem than surfacing a crash after archive/promote restore
+        # already succeeded.
+        version_marker_report = StepReport(
+            "version-marker",
+            "restore",
+            True,
+            "skipped: engine has no version-marker step",
+        )
+    else:
+        version_marker_report = version_marker_step.apply()
     reports.append(version_marker_report)
     _emit_restore_phase("done", ok=version_marker_report.ok)
     return reports
