@@ -1558,3 +1558,217 @@ gitignored: `504-round8-faults.py`, the six copied legacy suites plus
 `504-review-repro.py`, `r8c-restore-probe.py`, `r8c-round12-seed.py`, and
 `r8c-evidence/` holding every suite log and stderr, `r12-apply.stdout.json` and
 `r12-ctl-apply.json`.
+
+## Round 9 — d46487b7
+
+Reviewed: `3ba889a6` (#504/#574 round 13 — the fourteen findings round 8 and the
+round-4 UI review left open, plus Lead's two byte-rehearsal items), merged to
+`main` as `d46487b7`. Working tree `wt/reviewer-1789119877`.
+
+**Verdict: 2.1.0 migration releasable: no.** Round 13 is the strongest round so
+far: all fourteen assigned findings close, every one of them reproducibly — my
+own round-9 suite scores **19/22 on `d46487b7` and 2/22 on a `git archive` of
+its parent `39d4c8aa`**, so nothing here passes vacuously. What stops the
+release is one **HIGH** the new fixes finally made visible rather than caused:
+`restore-v1` still leaves `models/registry.json` holding V2 content, and a
+2.0.8 downgrade onto the restored store now gets far enough to say so.
+
+### 1. Findings
+
+| ID | Sev | Where | What | Regression? |
+|----|-----|-------|------|-------------|
+| R9-H1 | HIGH | `cli.py:3357-3410`, `pre_migrate_backup.restore_deleted_outright_items` | `takkub migrate restore-v1` restores the archive, the promote and #504 item-5's junk, but **not the one V1 file a domain step overwrote in place**. After a full apply → restore-v1 round trip on a 41-file fixture, `missing: 0` and exactly one non-marker file differs: `models/registry.json`, whose V1 payload `{"v1":"models-registry"}` has become `readonly-registries`' V2 envelope. Item 14 unblocked 2.0.8's own `migrate validate` past `version-marker`, and the very next step is now red: **`readonly-registries: 5 target(s) mismatched`** under the shipped 2.0.8 code. The V1 bytes are intact in `backups/pre-migrate-<ts>/models/registry.json` and `restore_from_backup_dir()` puts them back correctly — restore-v1 simply never asks for them, because item 13's new call filters the manifest down to the junk names only. | No — `models/registry.json` differs identically on `39d4c8aa` |
+| R9-M1 | MED | `verify_copy.copy_verified` (the new boundary call) via `boot_flow.on_file_progress` | R8-M3's fix fires an explicit, unthrottled `on_file(0, len(files), "")` at the copy-to-verify boundary. That call reaches `boot_flow.on_file_progress` exactly like a real one, so the within-entry file counter **snaps back to zero once per directory entry**: on the 1,000-file run, `promote-v2-root` reports `1001/1001` and then `0/1001` for the same entry, with `current_path` degrading to `"models/"` and `log_detail` to `"0/1001"`. Four such resets-to-zero on `d46487b7`, zero on `39d4c8aa` (whose two resets are the pre-existing pass turnover, `401 → 200`, never to 0). | **Yes — new in `3ba889a6`** |
+| R9-L1 | LOW | `cli.py:3410-3421` | The R8-B1 "nothing to restore" report the commit message advertises is **unreachable**. `promote_had_something` false means the promote manifest and the legacy root are both absent, so `engine.rollback_step("promote-v2-root")` at `cli.py:3314` returns not-ok and the function returns at `:3320` — long before the new block at the end. The operator still gets a non-zero exit and a failing `done` event, but the message is the internal `promote manifest at …\runtime\… not found`, never the sentence written for them. | New dead code in `3ba889a6` |
+| R9-L2 | LOW | `engine.py:278` | `MigrationEngine._notify_step`'s bare `except Exception: return` carries no `# swallow-ok:` comment, so the repo's own linter test `test_t4_no_unexplained_or_delete_write_path_bare_except_swallow` fails. That single failure is the only red in my 253-test targeted run. Backend flagged it as out of scope; confirmed pre-existing at `engine.py:275` on `39d4c8aa`. A one-line comment. | No — identical on `39d4c8aa` |
+| R9-L3 | LOW | `engine.py` `apply()` vs `apply_pending()` | The second gap backend flagged: `apply()` has no H6-style `version-marker` re-apply after `promote-v2-root` flips `core_home()` mid-pass. Real, and red when forced — on a seed carrying a legacy nested `v2/` root, `apply()` ends with `version-marker: post-ladder validate failed` and `core-internal-store: 1 entrie(s) mismatched`. **Not reachable in production**: `apply()` only runs when `layout_state()` returns `"v1"`, which requires no `v2/` directory at all, and on that shape the ladder is green end to end (verified both ways, on `d46487b7` and `39d4c8aa` alike). Every fixture I could build that trips it routes through `apply_pending()`, which already has the fix. | No — identical on `39d4c8aa` |
+
+Not a finding, recorded so the next round does not re-open it: 15 events per run
+carry a `log_line` and an empty `log_detail`. All 15 are plain entry-copy
+events, which `docs/v2/574-boot-flow-interface.md` ("log structure", item 4)
+explicitly allows — "Empty string for a plain entry-copy event (the path IS the
+detail)".
+
+### 2. Round-8 findings, one row at a time
+
+Every row below is my own repro on `d46487b7` with the same fixture run against
+`git archive 39d4c8aa` as a control. "FIXED" means the case passes on
+`d46487b7` and fails on the control — the fix is doing work, not the fixture.
+
+| ID | Verdict | Evidence |
+|----|---------|----------|
+| R8-B1 — `restore-v1` a silent no-op with no archive generation | **CLOSED** | `restore_v1_promoted_only` FIXED: on a store promoted but never archived, `promote-v2-root`'s rollback now runs and both `v2/models/promoted.json` and `v2/system/keep.json` come back; the control fails with "promoted v2/ entries were not moved back". `restore_v1_never_applied` FIXED: with nothing promoted and nothing archived the command is **not ok** (so the CLI's `all(r.ok)` exit is non-zero) and the stderr stream carries a `restore_phase` `done` event with `ok: false`; the control reported `ok: true`. Nothing on disk is touched either way (`changed: []`, `lost: []`). See R9-L1 for the message wording. |
+| R8-H1 — `apply_pending()` walked on past a failed backup | **CLOSED** | Two fixtures, both FIXED. Through the real boot gate on a promoted (`layout_state: mixed`) home, `run_boot_stage` returns `pending_rolled_back`, reason `pre-migrate-backup: R9 injected: backup unwritable (ENOSPC)`, `steps: [("pre-migrate-backup", false)]` and **nothing else** — 0 created, 0 changed, 0 lost. The control overwrites `models/registry.json`. The only two files that appear are `runtime/core/migration_journal.jsonl` and `system/auto-migrate-state.json`, the boot gate's own bookkeeping, written by `run_boot_stage` itself and carrying no user data. Straight through `MigrationEngine.apply_pending()` the report list is exactly `["pre-migrate-backup"]`; the control ran all 13. |
+| R8-H2 — `_already_backed_up()` checked names only | **CLOSED** | `already_backed_up_recopies` FIXED: a deleted payload is genuinely re-copied (`recopied: true`), apply and validate are both ok and the summary no longer says "resumed". `already_backed_up_corrupted`, new this round, FIXED too — a payload whose **content** drifted is also re-copied byte-for-byte, so the fix is the hash check it claims to be and not an existence probe. Both fail on the control. |
+| R8-H3 — `archive-v1-legacy` archived what `promote-v2-root` just created | **CLOSED** | `archive_excludes_promoted` FIXED, with the repro shape sharpened: a nested-`v2/` child named `plugin-store`, deliberately outside `promote_v1._V2_TOP_LEVEL_NAMES`. `migrate run --providers none --yes --json` exits 0 and `migrate validate` is then **12 steps, all green**, with `plugin-store` sitting at the top level. The control's validate is red on `promote-v2-root: promoted file missing`. |
+| R8-H4 (= R7-H2) — orphaned top-level copies after prune failure | **CLOSED** | `prune_orphans_after_rollback` FIXED: `orphans: []` and all seven `v2/d*/f*.json` back where they started. The control leaves `['d2/f002.json', 'd3/f003.json', 'd4/f004.json', 'd5/f005.json', 'd6/f006.json']`. Open since round 7; this is the one that finally closes it. |
+| R8-M1 — `percent_overall`/`phase` walked backwards | **CLOSED** | `progress_monotonic` FIXED over a real 400-file `run_migration()`: 57 events, phases 1–5, zero percent regressions, zero phase regressions. The control regresses `99.0 → 70.0` three times, all around `promote-v2-root`'s deferred prune. |
+| R8-M2 — phase 3 claimed a validation that never ran | **CLOSED** | `validated_steps_real` FIXED: on the `apply_pending` path `MigrationOutcome.validated_steps` is now **12** (control: 0), and the phase-3 wording is `กำลังย้ายข้อมูล` / `ย้ายข้อมูลแล้ว` — no longer claiming verification around a bare apply. `validate_ok_steps_truthful`, new this round, confirms the new helper is not a rubber stamp: inject a red `validate()` into `core-internal-store` and it comes back red, all 12 steps still returned, still in ladder order. |
+| R8-M3 — silent gap at the copy-to-verify turnover | **CLOSED**, with R9-M1 | `throttle_gap_no_reenumerate` FIXED: over a 5,000-file entry the source is walked **once** (control: twice) and the worst progress gap is 0.33 s against the 2.0 s ceiling. The boundary check-in that achieves it is also what causes R9-M1. |
+| R8-M4 — the clamp hid a short plan | **CLOSED** | `progress_done_le_total`: zero `done > total` across 55 events, and the phase-4 total grows 2 → 3 rather than sticking. The commit's own new regression test, `test_a_real_done_past_the_plans_own_total_grows_the_total_instead_of_clamping`, passes and asserts the `undercounted` note lands in `log_detail`. Worth saying plainly: no natural run of mine drove `done` past its plan, so the growth-and-note path is demonstrated by that test, not by my stream capture. |
+| R8-L1 — `TestProviderChoice` order dependency | **CLOSED** | `pytest tests/test_boot_flow.py` on its own: **33 passed**. That is the exact command that failed in round 8. |
+
+### 3. Round-4 UI review rows, and Lead's two rehearsal items
+
+| ID | Verdict | Evidence |
+|----|---------|----------|
+| R4-H1 — the entry counter's unit flipped mid-phase | **CLOSED** | `progress_unit_stable` FIXED. Over a real run the unit is constant within every phase: phases 1, 2 and 4 are `รายการ`, phase 3 is `ขั้น`, and `phases_with_multiple_units` is empty. The control still flips phase 1 between `รายการ` and `ไฟล์`. |
+| R4-H2 — the two bracketing `info` events carried no `log_detail` | **CLOSED** | `progress_log_detail` FIXED: **zero** `info`/`validate` events with a `log_line` and no `log_detail`. The control has exactly two, `เริ่มย้ายข้อมูล` at index 0 and `เสร็จ` at index 48 — the pair the finding named. |
+| item 13 — restore the outright-deleted junk | **CLOSED** | `restore_junk_deleted_outright` FIXED. `archive-v1-legacy` deletes both `openviking/junk.txt` and `.takkub_issues.synced-2020.bak.json`; after restore-v1 both are back **byte-identical**, reported as `restored 2 deleted-outright item(s)`. The control loses both permanently. |
+| item 14 — the version-marker mirror | **CLOSED** | `version_marker_mirror` FIXED: after restore-v1 the legacy `v2/system/version.json` exists and matches `version_doc_path()` byte for byte. On the control the mirror is absent entirely, and it is precisely what made 2.0.8's validate stop at `version-marker: app component missing/mismatched`. With item 14 in, 2.0.8 gets past that step — and straight into R9-H1. |
+
+### 4. The three deep-dives Lead asked for
+
+**(a) `restore-v1` on three store shapes.** All three behave correctly and the
+exit code matches.
+
+| Store shape | `v2/` back | reports | CLI exit |
+|-------------|-----------|---------|----------|
+| promoted **and** archived | yes | archive / promote / version-marker / junk, all ok | 0 |
+| promoted, **never** archived | yes, both entries | `archive-v1-legacy: no v1-archive found`, `promote-v2-root: moved 2 item(s) back`, `version-marker` ok | 0 |
+| never applied at all | n/a | `promote-v2-root` not ok | **non-zero**, plus a `done` event with `ok: false` |
+
+**(b) Backup failure on the `apply_pending` path.** Covered in the R8-H1 row
+above: nothing is touched after the failure, on the direct call and through the
+real boot gate alike.
+
+**(c) Byte-identical apply → restore-v1, with junk and a marker.** 41 files
+before, `missing: 0`. `changed` is two entries: `runtime/core/version.json`, the
+deliberate re-stamp round 8 §5 already accepted as correct, and
+`models/registry.json` — **R9-H1**. The control fails this case differently, on
+the two junk files item 13 now restores.
+
+**(d) Downgrade onto 2.0.8.** `git archive v2.0.8 src`, run against the restored
+store in its own subprocess. The 2.0.8 build imports cleanly, reports
+`version: 2.0.8`, and **reads its projects correctly** (`{"p1": {"name": "P1"}}`
+— no data loss). Its `migrate validate` walks `version-marker` green, then stops
+red on `readonly-registries: 5 target(s) mismatched`. On the control it never
+got that far, stopping red on `version-marker` itself.
+
+**(e) UI side, one real `run_migration()` over 1,000 files.** 63 events.
+
+| Claim | Result |
+|-------|--------|
+| unit constant per phase | **PASS** — 1/2/4 `รายการ`, 3 `ขั้น`, no flips |
+| every `log_line` event has `log_detail` | **PASS** for `info`/`validate`; the 15 entry-copy events with an empty detail are what the interface contract prescribes |
+| `percent_overall` / `phase` monotonic | **PASS** — zero regressions |
+| `done <= total` | **PASS** — zero violations |
+| phases present | **PASS** — 1 through 5 |
+| `validated_steps` | **12** |
+| file counts | peak `1001/1001`, 35 events carrying `eta_s` |
+| within-entry file counter | **FAIL** — four resets to zero, R9-M1 |
+
+### 5. Harness results
+
+Every suite run as:
+
+```
+env -u TAKKUB_STORAGE_ROOT -u TAKKUB_PORT_FILE \
+PYTHONPATH=src TAKKUB_ARTIFACTS_DIR=<an ABSOLUTE empty scratch dir per suite> \
+timeout 2400 python runtime/exports/2026-09-11/agent-takkub/<suite>.py
+```
+
+`TAKKUB_ARTIFACTS_DIR` must be **absolute**. A relative one makes
+`504-round2-repro.py` fail `tagged_roundtrip` with an `ImportError`: it passes
+its own derived `oldroot/src` as `PYTHONPATH` to a subprocess whose `cwd` is
+`oldroot`, so a relative base resolves one level too deep and the 2.0.8 import
+falls through to whatever `agent_takkub` is in site-packages. Harness recipe,
+not a product defect — round 8's note about clearing the two env vars still
+applies on top of it.
+
+| Suite | Result |
+|-------|--------|
+| `504-round2-repro.py` | `failures: []` |
+| `504-round2-extra.py` | `failures: []` |
+| `504-round3-faults.py` | `failures: []` |
+| `504-round4-faults.py` | 56/56 |
+| `504-round5-faults.py` | 12/12 |
+| `504-round6-faults.py` | 12/12 |
+| `504-round8-faults.py` | **44/44** |
+| `504-round9-faults.py` (new) | **19/22** on `d46487b7`, **2/22** on `39d4c8aa` |
+
+One correction to carry forward: the `504-round8-faults.py` sitting in
+`runtime/exports/` is the **44-case** variant, not the 45-case file round 8 was
+written from — it has no `progress_monotonic` fixture, which is why 44/44 is the
+right number here rather than 45/45. Round 9's suite carries that fixture
+instead, along with 21 others.
+
+Round-9 suite, case by case: **17 FIXED** (pass on `d46487b7`, fail on
+`39d4c8aa`) — `restore_v1_promoted_only`, `restore_v1_never_applied`,
+`backup_failure_boot_apply_pending`, `backup_failure_apply_pending_direct`,
+`already_backed_up_recopies`, `already_backed_up_corrupted`,
+`archive_excludes_promoted`, `progress_monotonic`, `progress_unit_stable`,
+`progress_log_detail`, `validated_steps_real`, `validate_ok_steps_truthful`,
+`throttle_gap_no_reenumerate`, `restore_junk_deleted_outright`,
+`version_marker_mirror`, `prune_orphans_after_rollback` and
+`ui_run_migration_1000`; **2 pass on both**, `restore_v1_promoted_and_archived`
+and `progress_done_le_total`, neither of which round 8 had flagged; **3 fail on
+both** — `apply_restore_byte_identical` and `downgrade_2_0_8_validate` (R9-H1),
+and `progress_file_counter_monotonic`, whose head run adds four resets-to-zero
+the control does not have (R9-M1).
+
+**Targeted tests.** 253 tests across `test_boot_flow.py`, `test_cli_migrate.py`,
+`test_core_migration.py`, `test_boot_flow_terminal.py`,
+`test_core_migration_pre_migrate_backup.py`,
+`test_core_migration_promote_v1.py`, `test_core_migration_round4_wal.py` and
+`test_auto_migrate_boot.py`: **252 pass, 1 fails** —
+`test_t4_no_unexplained_or_delete_write_path_bare_except_swallow`, which is
+R9-L2 and reproduces on the control.
+
+**Import contracts.** `python -m importlinter.cli lint-imports` exits 0 against
+all **29** contracts declared in `pyproject.toml`.
+
+### 6. Prod rehearsal
+
+Not re-run, per the assignment. The latest numbers are Lead's, in the #504
+comment: apply 772 s, restore-v1 448 s, `missing: 2`, `changed: 1`. Read against
+this round: the `missing: 2` is item 13's junk, which `restore_junk_deleted_outright`
+now restores byte-identically, and the `changed: 1` is the version marker, which
+round 8 §5 already accepted. What that rehearsal predates is R9-H1 — a re-run on
+`d46487b7` should be expected to report `missing: 0` and `changed: 2`, the marker
+plus `models/registry.json`.
+
+### 7. What has to happen before 2.1.0 ships
+
+- [ ] **R9-H1**: have `restore-v1` restore the domain-step half of the
+      pre-migrate backup too, not only the deleted-outright names. The data and
+      the mechanism both already exist — `restore_from_backup_dir()` on the same
+      `backups/pre-migrate-<ts>` puts `models/registry.json` back byte-identically.
+      This also closes #568 item 1, open since round 6.
+- [ ] **R9-M1**: make the copy-to-verify check-in carry the completed count
+      rather than 0 — `on_file(len(files), len(files), "")` keeps the anti-stall
+      guarantee without resetting the counter, or let `boot_flow` ignore a
+      `files_done` lower than the one it last reported for the same entry.
+- [ ] **R9-L1**: either drop the unreachable block, or move the
+      `promote_had_something` check ahead of the promote rollback so the message
+      written for the operator is the one they actually see.
+- [ ] **R9-L2**: add the `# swallow-ok:` comment at `engine.py:278`. The repo's
+      own gate is red until it lands.
+- [ ] **R9-L3**: give `apply()` the same H6 re-apply `apply_pending()` has, or
+      write the reachability argument down. Not a shipping blocker.
+- [ ] Still open from earlier rounds and untouched by round 13: the per-provider
+      authenticated login check, and CI green on both `windows-latest` and
+      `macos-latest`.
+
+### 8. Working notes
+
+`504-round9-faults.py` never edits repository source and never touches a real
+home: every fixture is its own directory under `TAKKUB_ARTIFACTS_DIR`, with
+`config.DATA_HOME`, `SETTINGS_HOME`, `RUNTIME_DIR` and `migration_home()` all
+redirected there. Where round 8 seeded a migrated store by calling
+`MigrationEngine.apply()` directly, round 9 seeds through `run_boot_stage()` —
+on a store with a legacy nested `v2/` root `layout_state()` reads `mixed`, so
+that is `apply_pending()`, the path a real 2.0.x machine takes and the one round
+13's fixes were written against. `apply()` on that same shape is red for the
+R9-L3 reason, identically on both commits. Every control used `git archive
+39d4c8aa | tar -x` into a scratch tree with `PYTHONPATH` pointed at it — no
+branch switch, no worktree mutation. Lead's `home2` and `home3` were not read or
+written at all this round.
+
+Evidence, all under `runtime/exports/2026-09-11/agent-takkub/`, which is
+gitignored: `504-round9-faults.py`, the seven copied legacy suites plus
+`504-review-repro.py`, and `r9-evidence/` holding `504-round9-faults.jsonl` and
+`504-round9-faults.control.jsonl` (the head/control pair), every legacy suite's
+log and stderr, `pytest-targeted.xml`, `lint-imports.log`, the `ctl-39d4c8aa`
+control tree, and the per-case artifact directories including each run's
+captured `events.jsonl`, `run.jsonl`, `validate.json` and `downgrade.txt`.
