@@ -85,7 +85,11 @@ class TestDiskGate:
         runtime.mkdir(parents=True)
         (runtime / "a.txt").write_bytes(b"x" * 100)
         (runtime / "b.txt").write_bytes(b"y" * 50)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 150
+        # #574: `pre-migrate-backup` copies this SAME content a second
+        # time before promote/archive do — the estimate doubles the base
+        # walk to account for it (see `_estimate_copy_bytes`'s own
+        # docstring).
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 300
 
     def test_room_available_passes(self) -> None:
         assert auto_migrate_boot._disk_has_room(config.DATA_HOME) is True
@@ -251,6 +255,48 @@ class TestRunBootStageMixedPendingApply:
         assert auto_migrate_boot.load_state()["rolled_back_steps"] == {
             "core-internal-store": app_version
         }
+
+    def test_cleanup_pending_step_failure_is_neither_rolled_back_nor_guarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#574 round9 G11 `boot_completes_after_a_transient_prune_denial`:
+        a step whose failure detail names `cleanup_pending` (a transient
+        prune denial — every file this attempt already copy-verified STAYS
+        at its new home, only the source removal is outstanding) must be
+        left alone — no `rollback_step()` call, and never added to
+        `rolled_back_steps` — so the very next boot retries it
+        unconditionally instead of being version-gated away forever."""
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(MigrationEngine, "applied_step_ids", lambda self: ["state"])
+        monkeypatch.setattr(
+            MigrationEngine,
+            "apply_pending",
+            lambda self, **kw: [
+                StepReport(
+                    "promote-v2-root",
+                    "apply",
+                    False,
+                    "cleanup-pending: prune denied",
+                    detail={"cleanup_pending": ["state"]},
+                )
+            ],
+        )
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            MigrationEngine,
+            "rollback_step",
+            lambda self, step_id: (
+                rollback_calls.append(step_id) or StepReport(step_id, "rollback", True, "restored")
+            ),
+        )
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "cleanup_pending"
+        assert rollback_calls == []
+        assert auto_migrate_boot.load_state().get("rolled_back_steps", {}) == {}
 
     def test_new_pending_step_retry_guard_skips_it_on_the_next_boot_same_version(
         self, monkeypatch: pytest.MonkeyPatch
@@ -769,7 +815,12 @@ class TestPromoteBootFailureHandling:
         assert result.action == "pending_rolled_back"
         assert list(data_home.rglob("only-copy.json"))
         assert not (data_home / "state" / "only-copy.json").exists()
-        assert not (data_home / "backups").exists()
+        # `archive-v1-legacy` must never have run in this same pass — #574's
+        # `pre-migrate-backup` legitimately DOES create `backups/pre-migrate-
+        # <ts>/` on this fixture (it has real V1 content), so check for the
+        # ABSENCE of an archive generation specifically, not of `backups/`
+        # itself.
+        assert not list(data_home.glob("backups/v1-archive-*"))
 
     def test_disk_gate_runs_on_the_mixed_pending_path_too(
         self, monkeypatch: pytest.MonkeyPatch
@@ -803,7 +854,8 @@ class TestPromoteBootFailureHandling:
         data_home = config.DATA_HOME
         (data_home / "v2" / "models").mkdir(parents=True)
         (data_home / "v2" / "models" / "large.bin").write_bytes(b"x" * 4096)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096
+        # #574: doubled — `pre-migrate-backup` copies this content too.
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096 * 2
 
     def test_disk_estimate_counts_archive_only_candidates(self) -> None:
         """#504 R2-H3 `disk_archive_inventory`: a fixture with ONLY a V1
@@ -813,7 +865,8 @@ class TestPromoteBootFailureHandling:
         data_home = config.DATA_HOME
         (data_home / "unmapped-legacy").mkdir(parents=True)
         (data_home / "unmapped-legacy" / "large.bin").write_bytes(b"x" * 8192)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192
+        # #574: doubled — `pre-migrate-backup` copies this content too.
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192 * 2
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
                 auto_migrate_boot.shutil,

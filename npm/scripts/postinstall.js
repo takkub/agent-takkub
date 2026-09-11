@@ -139,6 +139,14 @@ function main() {
     /* best-effort — a missing shortcut never fails the install */
   }
   console.log('   Left untouched: ~/.claude plugins, ~/.takkub config (nothing overwritten).');
+  // #574: the migration itself never runs here (postinstall stays a plain
+  // Python/venv/npm bootstrap) — just set expectations before the first
+  // real boot does it, since that boot backs up first and can take a
+  // couple of minutes on an existing, populated data directory.
+  console.log(
+    '\n   ℹ First boot after this install will move your data to the new storage layout —'
+  );
+  console.log('     it backs up everything first, so this is safe to let run.');
   console.log('\n   Next steps:');
   if (!claudeOk) {
     console.log('     • install the claude CLI: npm i -g @anthropic-ai/claude-code');

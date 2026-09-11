@@ -104,6 +104,26 @@ _LEGACY_V2_NAME = "v2"
 _ARCHIVE_DIR_NAME = "backups"
 _MANIFEST_NAME = "manifest.json"
 
+# #574 round8 R8-P1 (production timing finding, 244k-file rehearsal): a
+# restore's own entry reconstruction is per-FILE (surgical partial restore
+# — see `PromoteV2RootStep.rollback()`'s own docstring for why), unlike
+# apply's handful of per-DOMAIN entries. Measured: 3,429/15,747 files in 30
+# minutes (~1.9 files/s) — `_copy_phase` was durably rewriting + fsyncing
+# the WHOLE (up to ~3.6MB, growing) WAL payload after every SINGLE file.
+# `_restore_fsync_batch()` targets a roughly CONSTANT number of checkpoints
+# regardless of entry count (never a fixed batch size), so total bytes
+# written stays O(n) — not just a smaller constant on the same O(n²) curve
+# — as a real production restore's file count grows well past today's
+# 15.7k. On-disk WAL FORMAT is unchanged (still one record per file, same
+# JSON shape) — only how often it's flushed — so an in-flight WAL from
+# before this fix (partially VERIFIED) resumes correctly under it.
+_RESTORE_CHECKPOINT_TARGET = 60
+
+
+def _restore_fsync_batch(entry_count: int) -> int:
+    return max(1, -(-entry_count // _RESTORE_CHECKPOINT_TARGET))  # ceil div, no float rounding
+
+
 # Every top-level basename `core.storage.layout.storage_layout_v2()` itself
 # ever computes — a domain step earlier in THIS SAME ladder run may have just
 # created one of these moments before `ArchiveV1LegacyStep.apply()` runs
@@ -171,6 +191,17 @@ _ARCHIVE_SKIP_NAMES: frozenset[str] = (
     )
     | _V2_TOP_LEVEL_NAMES
 )
+
+# #574 round9 (`never_touch_promote_collision`): the one `_V2_TOP_LEVEL_NAMES`
+# entry that is itself a home for genuinely LIVE, externally-owned content
+# (a provider account's own credential files, #504 R3-B1's "Kimi credential
+# directory") rather than something only migration ever writes. A same-path
+# copy collision under any OTHER top-level name (`models/`, `state/`, ...) is
+# always this transaction's own prior attempt and safe for `copy_only`'s
+# duplicate-aside rescue; a collision under `providers/` must instead refuse
+# outright (`_refuse_live_collision`, called before `copy_verified` ever
+# runs) — never even momentarily move the live file aside.
+_STRICT_COLLISION_NAMES: frozenset[str] = frozenset({"providers"})
 
 # #504 item 5 — explicitly named as "not data", deleted outright rather than
 # archived. Exact names only; nothing here is a guess.
@@ -413,6 +444,10 @@ class CopyOutcome:
     ok: bool
     digests: dict[str, dict[str, str]] = field(default_factory=dict)
     error: str = ""
+    # #574 round6 R6-M2: entry name -> relative paths of foreign files
+    # `copy_only` moved aside as `.duplicate-<ts>` rather than blocking on
+    # forever — empty on the normal path.
+    duplicates_kept: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _source_digests(entry: TransferEntry) -> dict[str, str]:
@@ -463,7 +498,15 @@ def _verified_target_intact(entry: TransferEntry, rec: dict) -> bool:
     if not expected:
         return False
     if entry.kind == "file":
-        return entry.dest.is_file() and expected.get(entry.name) == _sha256(entry.dest)
+        # #574 round6 R6-M1: keyed by `entry.src.name` (the bare filename),
+        # NOT `entry.name` (the full relative-path name an archive/shared-
+        # dir-legacy entry uses, which can contain "/") — `verify_only()`'s
+        # own file-branch (`verify_copy.py`) and `_source_digests()` below
+        # both key their digest dict this same way; using `entry.name` here
+        # instead made this guard a dead no-op (silent `None == sha` always
+        # False) for any file entry whose name differs from its basename,
+        # defeating resumability without ever raising an error about it.
+        return entry.dest.is_file() and expected.get(entry.src.name) == _sha256(entry.dest)
     for rel, digest in expected.items():
         target = entry.dest / rel
         if not target.is_file() or _sha256(target) != digest:
@@ -498,8 +541,48 @@ def _demote_verified_before_undo(
         _log_event("migration_undo_demote_failed", error=str(e))
 
 
+def _refuse_live_collision(entry: TransferEntry) -> None:
+    """#574 round9 (`never_touch_promote_collision`): called ONLY for an
+    entry whose top level is `_STRICT_COLLISION_NAMES` (a home for
+    genuinely LIVE, externally-owned content, #504 R3-B1's "a Kimi
+    credential directory") — raises `VerifyMismatchError` on the FIRST
+    pre-existing *dest* file whose content differs from *entry*'s own
+    source, exactly like the pre-round6 R4-H5 contract, BEFORE
+    `copy_verified` (and its round6 duplicate-aside rescue, right for
+    every OTHER top-level name but wrong here) ever touches it. A
+    same-content match is never a collision — it's the ordinary
+    already-copied-once case every resumed entry can hit."""
+    if entry.kind == "file":
+        rel_pairs = [(entry.src, entry.dest)]
+    else:
+        rel_pairs = [(entry.src / rel, entry.dest / rel) for rel in entry.paths]
+    for src_file, dest_file in rel_pairs:
+        if dest_file.is_file() and src_file.is_file() and _sha256(dest_file) != _sha256(src_file):
+            raise VerifyMismatchError(
+                f"pre-existing content at {dest_file} would be overwritten by this "
+                "transaction's own copy — refusing to touch a live, externally-owned home"
+            )
+
+
+def _notify_entry(on_entry: Callable[[str], None] | None, name: str) -> None:
+    """Best-effort per-entry progress observer (#574) — never lets a
+    caller's callback failure affect the copy/prune phase it's observing."""
+    if on_entry is None:
+        return
+    try:
+        on_entry(name)
+    except Exception:
+        return  # swallow-ok: pure progress notification, not a phase input.
+
+
 def _copy_phase(
-    entries: list[TransferEntry], backups: BackupManager, step_id: str, ledger: TransferLedger
+    entries: list[TransferEntry],
+    backups: BackupManager,
+    step_id: str,
+    ledger: TransferLedger,
+    *,
+    on_entry: Callable[[str], None] | None = None,
+    fsync_every: int = 1,
 ) -> CopyOutcome:
     """Copy-verify every entry's `src` into its `dest` via `copy_verified`
     (single call — #504 round4 wal_contract's own seam), backing up any
@@ -524,7 +607,26 @@ def _copy_phase(
     resumed already-past `PENDING`) is undone (restored from its own
     backup, or removed if it never existed before), and the ledger is
     cleared — the caller sees `src` fully intact for the whole batch, so a
-    retry starts clean."""
+    retry starts clean.
+
+    *fsync_every* (#574 round8, production timing finding): every entry's
+    `states` dict write above is a FULL rewrite of the whole (growing) WAL
+    payload, not an append — with the default of 1, `n` entries costs
+    O(n) durable writes of up to O(n)-sized payloads each, i.e. O(n²)
+    bytes written overall. Fine for the handful of top-level entries a
+    normal `apply()` ever sees; ruinous for a caller that reconstructs one
+    `TransferEntry` PER FILE (`PromoteV2RootStep.rollback()`'s surgical
+    per-file restore, tens of thousands of entries on a real machine — a
+    244k-file production rehearsal timed this out at 1800s). Raising
+    *fsync_every* durably flushes every Nth entry (and always the last)
+    instead of every one — an O(n²/N) reduction, never a correctness
+    change: a crash between two batched flushes just means up to N-1
+    entries redo their (idempotent, safe) copy+verify on resume, exactly
+    like having no WAL at all for those few. The one exception is the
+    INITIAL all-PENDING write below, which stays a single unbatched write
+    regardless — every entry must be nameable before the first byte of any
+    of them is copied (T1), independent of how the per-entry advances are
+    later batched."""
     states = ledger.read()
     for entry in entries:
         if entry.name not in states:
@@ -536,16 +638,49 @@ def _copy_phase(
         return CopyOutcome(ok=False, error=f"could not write WAL before first copy: {e}")
 
     digests: dict[str, dict[str, str]] = {}
+    duplicates_kept: dict[str, tuple[str, ...]] = {}
     attempted: list[tuple[TransferEntry, Path | None]] = []
-    for entry in entries:
+    dirty_since_flush = False
+    last_index = len(entries) - 1
+    for index, entry in enumerate(entries):
         rec = states[entry.name]
         state = rec["state"]
         if state == STATE_SOURCE_PRUNED:
-            digests[entry.name] = rec.get("sha256", {})
-            continue
+            if _verified_target_intact(entry, rec):
+                digests[entry.name] = rec.get("sha256", {})
+                _notify_entry(on_entry, entry.name)
+                continue
+            # #574 round6 R6-B1 (latent BLOCKER): a WAL record claiming
+            # SOURCE_PRUNED is a claim, not proof — the old code trusted it
+            # blindly here, so a `dest` lost/corrupted by an apply ->
+            # rollback -> apply sequence read back as "still a complete
+            # copy" with ZERO actual copies left anywhere, reported ok:true.
+            # `entry.src` no longer existing is exactly what SOURCE_PRUNED
+            # is supposed to mean, so it alone is never proof either way —
+            # if it's still there (the WAL claim was stale), treat this
+            # exactly like a fresh PENDING entry and fall through to the
+            # real copy below; only when BOTH copies are gone is there
+            # nothing left to recover from, and that must fail loudly, not
+            # silently report success.
+            if not entry.src.exists():
+                _demote_verified_before_undo(states, attempted, ledger)
+                undo_errors = [
+                    msg
+                    for e2, bp in attempted
+                    if (msg := _undo_copied_dest(e2.dest, bp)) is not None
+                ]
+                ledger.clear()
+                error = (
+                    f"{entry.name}: WAL claims pruned but target no longer matches its "
+                    "recorded checksum, and the source is also gone — missing both, cannot recover"
+                )
+                if undo_errors:
+                    error += "; undo incomplete: " + "; ".join(undo_errors)
+                return CopyOutcome(ok=False, error=error)
         if state == STATE_VERIFIED and _verified_target_intact(entry, rec):
             attempted.append((entry, backups.latest_backup(step_id, entry.dest.name)))
             digests[entry.name] = rec.get("sha256", {})
+            _notify_entry(on_entry, entry.name)
             continue
         # A `VERIFIED` record whose target no longer matches (#504 round5
         # R5-B1) falls through to a real re-copy below instead of being
@@ -554,6 +689,8 @@ def _copy_phase(
         backup_path = backups.backup(step_id, entry.dest) if entry.dest.exists() else None
         attempted.append((entry, backup_path))
         try:
+            if entry.name in _STRICT_COLLISION_NAMES:
+                _refuse_live_collision(entry)
             verify = copy_verified(entry.src, entry.dest)
         except (OSError, VerifyMismatchError) as e:
             _demote_verified_before_undo(states, attempted, ledger)
@@ -566,21 +703,48 @@ def _copy_phase(
                 error += "; undo incomplete: " + "; ".join(undo_errors)
             return CopyOutcome(ok=False, error=error)
         digests[entry.name] = verify.digests
+        if verify.duplicates:
+            duplicates_kept[entry.name] = verify.duplicates
+            _log_event(
+                "migration_duplicate_kept",
+                step_id=step_id,
+                entry=entry.name,
+                paths=list(verify.duplicates),
+            )
         rec["state"] = STATE_VERIFIED
         rec["sha256"] = verify.digests
+        dirty_since_flush = True
+        # #574 round8: durable every Nth entry (and always the last) rather
+        # than every one — see this function's own docstring for why.
+        if fsync_every <= 1 or (index + 1) % fsync_every == 0 or index == last_index:
+            try:
+                ledger.write(states)  # durable BEFORE the next entry / prune phase (T2)
+            except OSError as e:
+                _demote_verified_before_undo(states, attempted, ledger)
+                undo_errors = [
+                    msg
+                    for e2, bp in attempted
+                    if (msg := _undo_copied_dest(e2.dest, bp)) is not None
+                ]
+                ledger.clear()
+                error = f"could not record WAL VERIFIED state for {entry.name}: {e}"
+                if undo_errors:
+                    error += "; undo incomplete: " + "; ".join(undo_errors)
+                return CopyOutcome(ok=False, error=error)
+            dirty_since_flush = False
+        _notify_entry(on_entry, entry.name)
+    if dirty_since_flush:
+        # Reachable whenever the LAST entry in `entries` took a fast-skip
+        # path (already SOURCE_PRUNED/VERIFIED-intact) after an earlier,
+        # still-unflushed batched write — the `index == last_index` flush
+        # above only fires from the real-copy branch, so this is the
+        # guaranteed final flush for that case.
         try:
-            ledger.write(states)  # durable BEFORE the next entry / prune phase (T2)
+            ledger.write(states)
         except OSError as e:
-            _demote_verified_before_undo(states, attempted, ledger)
-            undo_errors = [
-                msg for e2, bp in attempted if (msg := _undo_copied_dest(e2.dest, bp)) is not None
-            ]
-            ledger.clear()
-            error = f"could not record WAL VERIFIED state for {entry.name}: {e}"
-            if undo_errors:
-                error += "; undo incomplete: " + "; ".join(undo_errors)
+            error = f"could not record final WAL state(s): {e}"
             return CopyOutcome(ok=False, error=error)
-    return CopyOutcome(ok=True, digests=digests)
+    return CopyOutcome(ok=True, digests=digests, duplicates_kept=duplicates_kept)
 
 
 @dataclass(frozen=True, slots=True)
@@ -745,6 +909,8 @@ def _prune_phase(
     entries: list[TransferEntry],
     write_committed: Callable[[list[TransferEntry], TransferEntry | None], None],
     ledger: TransferLedger,
+    *,
+    on_entry: Callable[[str], None] | None = None,
 ) -> PruneOutcome:
     """Remove each entry's `src`, one at a time — but only ever AFTER
     `write_committed` (the step's own FINAL manifest, merged with whatever
@@ -803,6 +969,7 @@ def _prune_phase(
         if kept:
             late_write_kept[entry.name] = kept
         ledger_states.setdefault(entry.name, {})["sha256"] = sha256
+        _notify_entry(on_entry, entry.name)
 
     newly: list[TransferEntry] = []
     failed: TransferEntry | None = None
@@ -842,6 +1009,7 @@ def _prune_phase(
             late_write_kept[entry.name] = kept
         ledger_states[entry.name]["sha256"] = sha256
         newly.append(entry)
+        _notify_entry(on_entry, entry.name)
 
     digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
     if failed is None:
@@ -1378,6 +1546,10 @@ class PromoteV2RootStep:
     journal: MigrationJournal = field(default_factory=MigrationJournal)
     backups: BackupManager = field(default_factory=BackupManager)
     data_home: Path = field(default_factory=lambda: config.DATA_HOME)
+    # Best-effort per-entry progress observer (#574) — see
+    # `_notify_entry()`'s docstring; forward path only (apply_copy_only /
+    # prune), never wired into rollback/restore.
+    on_entry: Callable[[str], None] | None = None
 
     def _legacy_root(self) -> Path:
         return self.data_home / _LEGACY_V2_NAME
@@ -1547,18 +1719,23 @@ class PromoteV2RootStep:
                 else:
                     new_entries.append(TransferEntry(src.name, "file", src, dest))
 
-        copied = _copy_phase(new_entries, self.backups, self.step_id, ledger)
+        copied = _copy_phase(
+            new_entries, self.backups, self.step_id, ledger, on_entry=self.on_entry
+        )
         if not copied.ok:
             self.journal.record(self.step_id, "apply", False, copied.error)
             return StepReport(
                 self.step_id, "apply", False, f"promote failed, rolled back: {copied.error}"
             )
+        detail: dict = {"items": [e.name for e in new_entries]}
+        if copied.duplicates_kept:
+            detail["duplicates_kept"] = copied.duplicates_kept
         return StepReport(
             self.step_id,
             "apply",
             True,
             f"copy-verified {len(new_entries)} item(s) from {self._legacy_root()}; prune pending",
-            detail={"items": [e.name for e in new_entries]},
+            detail=detail,
         )
 
     def prune(self) -> StepReport:
@@ -1601,7 +1778,7 @@ class PromoteV2RootStep:
                 self._manifest_path(), {"schema": 3, "created_at": time.time(), "promoted": merged}
             )
 
-        prune = _prune_phase(new_entries, write_committed, ledger)
+        prune = _prune_phase(new_entries, write_committed, ledger, on_entry=self.on_entry)
         if not prune.ok:
             self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {prune.error}")
             return StepReport(
@@ -1778,12 +1955,19 @@ class PromoteV2RootStep:
                 manifest_path, {"schema": 3, "created_at": time.time(), "promoted": new_promoted}
             )
 
-        copied = _copy_phase(entries, self.backups, self.step_id, ledger)
+        copied = _copy_phase(
+            entries,
+            self.backups,
+            self.step_id,
+            ledger,
+            on_entry=self.on_entry,
+            fsync_every=_restore_fsync_batch(len(entries)),
+        )
         if not copied.ok:
             self.journal.record(self.step_id, "rollback", False, copied.error)
             return StepReport(self.step_id, "rollback", False, f"restore failed: {copied.error}")
 
-        prune = _prune_phase(entries, write_committed, ledger)
+        prune = _prune_phase(entries, write_committed, ledger, on_entry=self.on_entry)
         if not prune.ok:
             self.journal.record(self.step_id, "rollback", False, f"cleanup-pending: {prune.error}")
             return StepReport(
@@ -1820,6 +2004,9 @@ class ArchiveV1LegacyStep:
     journal: MigrationJournal = field(default_factory=MigrationJournal)
     backups: BackupManager = field(default_factory=BackupManager)
     data_home: Path = field(default_factory=lambda: config.DATA_HOME)
+    # Best-effort per-entry progress observer (#574) — forward path only
+    # (apply_copy_only / prune), never wired into rollback/restore.
+    on_entry: Callable[[str], None] | None = None
 
     _run_id: ClassVar[str] = ""  # unused; timestamp is computed per apply()
 
@@ -2173,7 +2360,9 @@ class ArchiveV1LegacyStep:
                 self.journal.record(self.step_id, "apply", False, msg)
                 return StepReport(self.step_id, "apply", False, msg)
 
-        copied = _copy_phase(new_entries, self.backups, self.step_id, ledger)
+        copied = _copy_phase(
+            new_entries, self.backups, self.step_id, ledger, on_entry=self.on_entry
+        )
         if not copied.ok:
             # `_copy_phase` already reversed every `dest` it touched — any
             # directory structure left under a fresh `archive_root` (its
@@ -2194,12 +2383,15 @@ class ArchiveV1LegacyStep:
             return StepReport(
                 self.step_id, "apply", False, f"archive failed, rolled back: {copied.error}"
             )
+        detail: dict = {"archive_root": str(archive_root)}
+        if copied.duplicates_kept:
+            detail["duplicates_kept"] = copied.duplicates_kept
         return StepReport(
             self.step_id,
             "apply",
             True,
             f"copy-verified {len(new_entries)} item(s) into {archive_root}; prune pending",
-            detail={"archive_root": str(archive_root)},
+            detail=detail,
         )
 
     def prune(self) -> StepReport:
@@ -2243,7 +2435,7 @@ class ArchiveV1LegacyStep:
                 },
             )
 
-        prune = _prune_phase(new_entries, write_committed, ledger)
+        prune = _prune_phase(new_entries, write_committed, ledger, on_entry=self.on_entry)
         if not prune.ok:
             self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {prune.error}")
             return StepReport(
@@ -2527,7 +2719,14 @@ class ArchiveV1LegacyStep:
             migration_home() / "restore-v1-copy-wal" / f"{archive_root.name}.json",
             write_fn=write_json_atomic,
         )
-        copied = _copy_phase(entries, self.backups, self.step_id, ledger)
+        copied = _copy_phase(
+            entries,
+            self.backups,
+            self.step_id,
+            ledger,
+            on_entry=self.on_entry,
+            fsync_every=_restore_fsync_batch(len(entries)),
+        )
         ledger.clear()
         if not copied.ok:
             self.journal.record(self.step_id, "rollback", False, copied.error)

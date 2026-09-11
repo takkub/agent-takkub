@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+from .core.migration.report import StepReport
 
 _STATE_FILE = "auto-migrate-state.json"
 
@@ -152,7 +153,7 @@ def _save_state(data: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         config._write_json_atomic(path, data)
     except OSError:
-        pass
+        return  # swallow-ok: a failed save just means recomputing state next boot.
 
 
 def _dir_size(root: Path) -> int:
@@ -162,7 +163,7 @@ def _dir_size(root: Path) -> int:
             try:
                 total += (Path(dirpath) / name).stat().st_size
             except OSError:
-                pass
+                continue  # swallow-ok: an unmeasurable file just doesn't add to the total.
     return total
 
 
@@ -214,9 +215,34 @@ def _estimate_copy_bytes(data_home: Path) -> int:
         archive = ArchiveV1LegacyStep(data_home=data_home)
         for src in archive._archive_candidates() + archive._shared_dir_legacy_candidates():
             total += _path_size(src)
-    except OSError:
-        pass
+    except OSError as e:
+        # swallow-ok: read-only estimate; a failure here just means the
+        # margin below is computed from a smaller `total` than the real
+        # disk state, so it's logged (never a bare swallow) rather than
+        # left silent.
+        _log_boot_event("migration_disk_estimate_partial", error=str(e))
+
+    # #574: `PreMigrateBackupStep` (ladder position 0) copies this SAME
+    # `total` worth of content a second time — once into the backup, once
+    # again as every domain step below promotes/archives it for real — plus
+    # `projects/`/`agents/` (protected from `_archive_candidates()` above
+    # since the domain steps below WRITE into them this same pass, but the
+    # backup copies them too, as an extra safety net). Doubling `total`
+    # rather than adding a third independent walk keeps this in sync with
+    # whatever the promote/archive walk above already counts.
+    extra_backup_only = 0
+    for name in ("projects", "agents"):
+        p = data_home / name
+        if p.is_dir():
+            extra_backup_only += _dir_size(p)
+    total = total * 2 + extra_backup_only
     return total
+
+
+# Public alias — `boot_flow.plan_migration()` (#574) reuses this exact
+# estimate for consistency with the disk gate below, rather than a second,
+# independently-drifting size computation.
+estimate_copy_bytes = _estimate_copy_bytes
 
 
 def _estimate_restore_bytes(data_home: Path) -> int:
@@ -312,9 +338,12 @@ def _disk_has_room(data_home: Path, *, estimate: int | None = None) -> bool:
     volumes = {_existing_ancestor(data_home)}
     try:
         volumes.add(_existing_ancestor(migration_home()))
-    except OSError:
-        pass  # swallow-ok: read-only path resolution; if this can't even
-        # be computed, the data_home-only check below still applies.
+    except OSError as e:
+        # swallow-ok: read-only path resolution; if this can't even be
+        # computed, the data_home-only check below still applies. Logged
+        # (never a bare swallow) since a caller relying on this volume
+        # actually being checked would otherwise never know it wasn't.
+        _log_boot_event("migration_disk_gate_volume_unresolved", error=str(e))
     needed = estimate if estimate is not None else _estimate_copy_bytes(data_home)
     needed += _live_preimage_bytes(data_home)
     for volume in volumes:
@@ -338,7 +367,8 @@ def _log_boot_event(event: str, **details: object) -> None:
 
         _log_event(event, **details)
     except Exception:
-        pass
+        return  # swallow-ok: this IS the fallback logging path itself — no
+        # further sink to report its own failure to.
 
 
 @dataclass
@@ -348,12 +378,28 @@ class BootMigrationResult:
     every progress line reported via `progress_cb`, in order — kept here too
     so a caller that didn't pass a callback can still inspect what happened."""
 
-    action: str  # "skipped" | "applied" | "rolled_back" | "pending_applied" | "pending_rolled_back" | "error"
+    action: str  # "skipped" | "applied" | "rolled_back" | "pending_applied" | "pending_rolled_back" | "cleanup_pending" | "error"
     reason: str = ""
     messages: list[str] = field(default_factory=list)
+    # #574: the ladder's own step reports for this call — apply_reports (or
+    # apply_pending's), validate_reports, or rollback_reports, whichever
+    # this stage's own branch actually produced. Additive: every existing
+    # caller (`boot_update_window.py`, tests) reads only `action`/`reason`/
+    # `messages` and is unaffected by this staying empty when unset.
+    reports: list[StepReport] = field(default_factory=list)
+    # #574: the full-ladder `validate()` pass specifically (v1-state first
+    # apply only — `apply_pending()` has no equivalent single pass, it
+    # calls `validate()` per-step internally instead) — additive, empty
+    # for every other action. Lets a caller report "step 7/11 ตรวจสอบ
+    # ไม่ผ่าน" (screen E) without re-running validate() a second time.
+    validate_reports: list[StepReport] = field(default_factory=list)
 
 
-def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrationResult:
+def _run_apply_pending(
+    progress_cb: Callable[[str], None] | None,
+    *,
+    on_entry: Callable[[str, str], None] | None = None,
+) -> BootMigrationResult:
     """Every boot after a successful full apply (`layout_state() ==
     "mixed"`) — run only the ladder steps this machine still needs (#362):
     `version-marker`'s re-pin every version bump (closes the prod incident
@@ -383,7 +429,7 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
             try:
                 progress_cb(msg)
             except Exception:
-                pass
+                return  # swallow-ok: an observer failure must never affect migration.
 
     from . import __version__ as app_version
     from .core.migration.engine import MigrationEngine
@@ -401,7 +447,7 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
         return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
-    engine = MigrationEngine()
+    engine = MigrationEngine(on_entry=on_entry)
     applied_before = set(engine.applied_step_ids())
     guard = load_state().get("rolled_back_steps", {})
     guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
@@ -430,7 +476,32 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
         _save_state(st)
 
     if new_failures:
-        for r in new_failures:
+        # #574 round9 G11 `boot_completes_after_a_transient_prune_denial`:
+        # a step whose OWN failure detail names `cleanup_pending` (`_prune_
+        # phase`'s DUPLICATE/PRUNE_FAILED entry — every file this attempt
+        # already copy-verified STAYS at its new home, only the one denied
+        # source removal is still outstanding) is not a genuinely broken
+        # step the way every OTHER `new_failures` entry is — it's a
+        # transient environment blip (a locked file, a permission blip)
+        # that a LATER boot, with the block lifted, can and must finish on
+        # its own. Rolling it back (undoing already-safely-copied work) and
+        # version-gating its retry (per the guard's whole design point:
+        # never retry a REAL bug every boot) both actively work against
+        # that self-heal — the WAL `apply_copy_only()`/`prune()` already
+        # left behind IS the resume state, so this step is deliberately
+        # left OUT of both the rollback loop and `rolled_back_steps` below,
+        # unguarded, so the very next boot's `apply_pending()` retries it
+        # unconditionally.
+        cleanup_pending = [r for r in new_failures if r.detail.get("cleanup_pending")]
+        hard_failures = [r for r in new_failures if not r.detail.get("cleanup_pending")]
+        for r in cleanup_pending:
+            _log_boot_event(
+                "auto_migrate_cleanup_pending", step_id=r.step_id, summary=r.summary[:200]
+            )
+            _report(
+                f"'{r.step_id}' ลบต้นทางไม่ได้ตอนนี้ (ข้อมูลปลอดภัย, คัดลอกไว้แล้ว) — จะลองใหม่ตอน boot ครั้งถัดไป"
+            )
+        for r in hard_failures:
             _report(f"'{r.step_id}' ไม่ผ่าน — กำลัง rollback เฉพาะ step นี้…")
             rb = engine.rollback_step(r.step_id)
             _log_boot_event(
@@ -440,23 +511,27 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
                 rollback_ok=rb.ok,
             )
             _report(f"rollback {r.step_id} " + ("สำเร็จ" if rb.ok else "ไม่สำเร็จ — ต้องตรวจด้วยมือ"))
-        st = load_state()
-        guard_map = dict(st.get("rolled_back_steps", {}))
-        guard_map.update({r.step_id: app_version for r in new_failures})
-        st["rolled_back_steps"] = guard_map
-        _save_state(st)
+        if hard_failures:
+            st = load_state()
+            guard_map = dict(st.get("rolled_back_steps", {}))
+            guard_map.update({r.step_id: app_version for r in hard_failures})
+            st["rolled_back_steps"] = guard_map
+            _save_state(st)
         return BootMigrationResult(
-            "pending_rolled_back",
+            "pending_rolled_back" if hard_failures else "cleanup_pending",
             "; ".join(f"{r.step_id}: {r.summary}" for r in new_failures),
             messages,
+            reports=reports,
         )
 
     _report("pending step(s) apply สำเร็จ")
-    return BootMigrationResult("pending_applied", messages=messages)
+    return BootMigrationResult("pending_applied", messages=messages, reports=reports)
 
 
 def run_boot_stage(
     progress_cb: Callable[[str], None] | None = None,
+    *,
+    on_entry: Callable[[str, str], None] | None = None,
 ) -> BootMigrationResult:
     """The whole boot-time gate, in order (#361 design §2-4):
 
@@ -484,10 +559,17 @@ def run_boot_stage(
             try:
                 progress_cb(msg)
             except Exception:
-                pass
+                return  # swallow-ok: an observer failure must never affect migration.
 
-    def _done(action: str, reason: str = "") -> BootMigrationResult:
-        return BootMigrationResult(action, reason, messages)
+    def _done(
+        action: str,
+        reason: str = "",
+        reports: list[StepReport] = (),
+        validate_reports: list[StepReport] = (),
+    ) -> BootMigrationResult:
+        return BootMigrationResult(
+            action, reason, messages, reports=list(reports), validate_reports=list(validate_reports)
+        )
 
     if not auto_migrate_enabled():
         return _done("skipped", "disabled")
@@ -511,7 +593,7 @@ def run_boot_stage(
         # existed the boot it first reached "v2" — each step's own
         # apply()/validate() being cheap existence-ish checks is what makes
         # calling this every boot fine even when truly nothing is pending.
-        return _run_apply_pending(progress_cb)
+        return _run_apply_pending(progress_cb, on_entry=on_entry)
 
     # state == "v1" from here — the only state a first-run apply is allowed on.
     st = load_state()
@@ -523,8 +605,9 @@ def run_boot_stage(
     _report("กำลังตั้งค่า storage layout ใหม่ (ครั้งแรกหลังอัป)…")
     from .core.migration.engine import MigrationEngine
 
-    engine = MigrationEngine()
+    engine = MigrationEngine(on_entry=on_entry)
     apply_reports = engine.apply()
+    validate_reports: list[StepReport] = []
     failing = next((r for r in apply_reports if not r.ok), None)
     if failing is None:
         _report("apply สำเร็จ — กำลัง validate…")
@@ -543,12 +626,17 @@ def run_boot_stage(
             rollback_ok=rollback_ok,
         )
         _report("rollback " + ("สำเร็จ" if rollback_ok else "ไม่สำเร็จ — ต้องตรวจด้วยมือ"))
-        return _done("rolled_back", failing.summary)
+        return _done(
+            "rolled_back",
+            failing.summary,
+            reports=rollback_reports,
+            validate_reports=validate_reports,
+        )
 
     _save_state({"applied_version": app_version})
     _log_boot_event("auto_migrate_applied", steps=len(apply_reports))
     _report("apply + validate สำเร็จ")
-    return _done("applied")
+    return _done("applied", reports=apply_reports, validate_reports=validate_reports)
 
 
 __all__ = [

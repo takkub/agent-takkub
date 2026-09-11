@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,12 @@ class CopyVerification:
     # review finding H9: a green migration validate previously proved
     # nothing about target integrity).
     digests: dict[str, str] = field(default_factory=dict)
+    # #574 round6 R6-M2: relative-posix paths of any pre-existing, foreign
+    # (not part of this transaction's own source) file `copy_only` found
+    # colliding with a same-named target it needed to write — moved aside
+    # as a `.duplicate-<ts>` sibling rather than left blocking every retry
+    # forever. Empty on the overwhelmingly common no-collision path.
+    duplicates: tuple[str, ...] = ()
 
 
 def _sha256(path: Path) -> str:
@@ -55,36 +62,52 @@ def _source_files(src: Path) -> list[Path]:
     return sorted(p for p in src.rglob("*") if p.is_file())
 
 
-def copy_only(src: Path, dest: Path) -> None:
+def copy_only(src: Path, dest: Path) -> list[str]:
     """Just the physical copy half of `copy_verified` — no checksum pass.
     Split out so a WAL-aware caller (`promote_v1._copy_phase`) can record a
     durable `COPIED` checkpoint between the copy landing on disk and its
     checksum being verified, rather than treating "copied" and "verified"
     as one indivisible moment (#504 round4 T2/T3).
 
-    #504 round4 R4-H5: a directory merge (`dirs_exist_ok=True`) never
-    silently overwrites a file that ALREADY exists at *dest* with
-    DIFFERENT content — that file was never part of *src*'s own tree
-    before this copy started, so it belongs to whoever put it there (a
-    live provider home sharing a parent directory with what's being
-    promoted/archived, #504 design note). Raises `VerifyMismatchError`
-    BEFORE touching anything if such a collision is found, so the
-    caller's own backup-restore undo (already taken before this call,
-    #504 B3) puts the untouched live file straight back with nothing
-    lost — never a race where the collision is detected only after
-    `shutil.copytree` has already clobbered it."""
+    Returns the relative-posix path of every pre-existing, foreign file it
+    had to move aside (see below) — empty on the normal, no-collision path.
+
+    #504 round4 R4-H5 / #574 round6 R6-M2: a directory merge
+    (`dirs_exist_ok=True`) never silently OVERWRITES a file that ALREADY
+    exists at *dest* with DIFFERENT content — that file was never part of
+    *src*'s own tree before this copy started, so it belongs to whoever put
+    it there (a live provider home sharing a parent directory with what's
+    being promoted/archived, #504 design note). R4-H5 originally made this
+    raise `VerifyMismatchError` and refuse outright; round 6 review found
+    that a live writer re-creating the same colliding file between retries
+    (nothing here ever removes it) then blocks every retry identically,
+    forever. Instead: rename the foreign file aside to a `.duplicate-<ts>`
+    sibling (never deleted — same "copy/keep, never lose" contract as
+    everything else in this package) and let this transaction's own copy
+    proceed into the now-clear spot; the caller reports every path this
+    returns rather than the collision going unnoticed.
+
+    #574 round9 (`never_touch_promote_collision`): a top-level name that is
+    itself a home for genuinely LIVE, externally-owned content (`providers/`,
+    #504 R3-B1's "a Kimi credential directory") must never even get this far
+    — `promote_v1._copy_phase` refuses a collision under one of those names
+    OUTRIGHT before ever calling this function, so this rename-aside rescue
+    only ever runs for a name only migration itself writes (`models/`,
+    `state/`, ...)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    duplicated: list[str] = []
     if src.is_dir():
         for f in _source_files(src):
-            target = dest / f.relative_to(src)
+            rel = f.relative_to(src)
+            target = dest / rel
             if target.is_file() and _sha256(target) != _sha256(f):
-                raise VerifyMismatchError(
-                    f"collision: {target} already exists with different content — "
-                    "never part of this transaction's own source, refusing to overwrite it"
-                )
+                aside = target.with_name(f"{target.name}.duplicate-{time.time():.6f}")
+                target.rename(aside)
+                duplicated.append(rel.as_posix())
         shutil.copytree(src, dest, dirs_exist_ok=True)
     else:
         shutil.copy2(src, dest)
+    return duplicated
 
 
 def verify_only(src: Path, dest: Path) -> CopyVerification:
@@ -114,5 +137,10 @@ def copy_verified(src: Path, dest: Path) -> CopyVerification:
     Never touches *src* — the caller removes the original only after this
     returns without raising, per the module's own copy-verify-then-remove
     contract."""
-    copy_only(src, dest)
-    return verify_only(src, dest)
+    duplicated = copy_only(src, dest)
+    result = verify_only(src, dest)
+    if duplicated:
+        return CopyVerification(
+            result.file_count, result.total_bytes, result.digests, tuple(duplicated)
+        )
+    return result

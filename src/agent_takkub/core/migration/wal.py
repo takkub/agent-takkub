@@ -132,6 +132,6 @@ def _log_event(event: str, **details: object) -> None:
 
         _emit(event, **details)
     except Exception:
-        pass  # swallow-ok: this IS the fallback logging path itself — no
+        return  # swallow-ok: this IS the fallback logging path itself — no
         # further sink to report its own failure to, and it never
         # mutates anything.
