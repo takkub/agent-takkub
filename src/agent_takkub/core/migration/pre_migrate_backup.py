@@ -1,10 +1,13 @@
 """`PreMigrateBackupStep` (#574) — a copy-only, copy-verified snapshot of
 every V1 artifact the rest of the ladder might OVERWRITE, MERGE INTO, or
 DELETE OUTRIGHT, taken BEFORE any other step runs. Ladder position: first,
-ahead of even `version-marker` — `MigrationEngine.apply()`/`apply_pending()`
-already stop at the first failing step, so putting this step first is what
-makes "a failed backup aborts the whole ladder before anything else is
-touched" true for free, with no new stop-the-line logic needed here.
+ahead of even `version-marker` — `MigrationEngine.apply()` already stops at
+the first failing step, so putting this step first is what makes "a failed
+backup aborts the whole ladder before anything else is touched" true for
+free on THAT path, with no extra logic needed here. `apply_pending()`'s own
+"No stop-the-line" contract does NOT get this for free (#504/#574 R8-H1) —
+it carries one explicit exception for this step's id instead, right next to
+the `promote-v2-root` one it already had.
 
 #574 round11 item 1 (SCOPE): this used to ALSO back up every pure-move
 candidate (every `ArchiveV1LegacyStep` archive/shared-dir-legacy item, every
@@ -61,6 +64,7 @@ deleted, and `_already_backed_up()` only ever requires the CURRENT
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import time
 from collections.abc import Callable
@@ -74,12 +78,15 @@ from ..storage.paths import migration_home
 from .backup import BackupManager
 from .journal import MigrationJournal
 from .promote_v1 import (
+    _DELETE_OUTRIGHT_GLOB,
+    _DELETE_OUTRIGHT_NAMES,
     _LEGACY_V2_NAME,
     ArchiveV1LegacyStep,
     PromoteV2RootStep,
     TransferEntry,
     _copy_phase,
     _rel_files,
+    _verified_target_intact,
 )
 from .registry_copy_step import write_json_atomic
 from .report import StepReport
@@ -362,14 +369,30 @@ class PreMigrateBackupStep:
         A version upgrade that narrows or widens scope compares cleanly
         either way: fewer/different names than a prior manifest still
         resolves correctly here, no assumption of a stable entry set
-        across versions."""
+        across versions.
+
+        #504/#574 R8-H2: a manifest NAME match alone used to be enough —
+        delete one recorded payload out from under it and `apply()` still
+        reported "already backed up (resumed)" without ever re-copying it,
+        the ladder then walking on with one fewer file actually protected
+        than the manifest claimed. Every entry's OWN recorded `sha256` is
+        now recomputed against `backup_dir`'s CURRENT on-disk content (the
+        exact same `_verified_target_intact` resume check `promote_v1`'s
+        own copy/prune WAL already trusts) — a missing file or a
+        content mismatch means this entry is NOT actually backed up,
+        triggering a real re-copy rather than a false "resumed"."""
         manifest = self._existing_manifest()
         if manifest is None:
             return False
         done = {
-            item.get("name") for item in manifest.get("items", []) if not item.get("out_of_scope")
+            item["name"]: item
+            for item in manifest.get("items", [])
+            if not item.get("out_of_scope") and item.get("name")
         }
-        return all(e.name in done for e in entries)
+        # `e.dest` is already `backup_dir / e.name` — `_input_entries()`
+        # builds every entry that way — so `_verified_target_intact` reads
+        # back exactly what a real backup would have written there.
+        return all(e.name in done and _verified_target_intact(e, done[e.name]) for e in entries)
 
     def inspect(self) -> StepReport:
         entries = self._input_entries()
@@ -666,4 +689,68 @@ def restore_from_backup_dir(
     )
 
 
-__all__ = ["STEP_ID", "PreMigrateBackupStep", "resolve_backup_dir", "restore_from_backup_dir"]
+def restore_deleted_outright_items(backup_dir: Path, data_home: Path) -> StepReport:
+    """`takkub migrate restore-v1`'s own missing half (#504/#574 item 13):
+    #504 item 5's named junk (`_DELETE_OUTRIGHT_NAMES`/`_DELETE_OUTRIGHT_GLOB`
+    — `openviking`, `claude-config.partial`, `.takkub_issues.synced-*
+    .bak.json`) is DELETED OUTRIGHT by `archive-v1-legacy`, never archived —
+    this step's own manifest (item 4 of `_input_entries()`'s docstring) is
+    the ONE place a copy of it survives. The normal `restore-v1` path
+    (`archive_step.rollback()` + `promote_step.rollback()`) has no way to
+    bring these back at all — neither rollback owns them. Copy-only, from
+    *backup_dir*'s CURRENT manifest, filtered to just the junk names (never
+    the rest of the manifest's much larger domain-step/promote-merge scope
+    — those are already covered by the archive/promote rollback this runs
+    alongside). A missing/unreadable manifest, or a manifest with no junk
+    entries, is a normal no-op — most stores never had any."""
+    manifest_path = backup_dir / _MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return StepReport(
+            STEP_ID, "restore", True, f"no pre-migrate backup manifest at {manifest_path}"
+        )
+    junk_items = [
+        item
+        for item in manifest.get("items", [])
+        if item.get("name")
+        and (
+            item["name"] in _DELETE_OUTRIGHT_NAMES
+            or fnmatch.fnmatch(item["name"], _DELETE_OUTRIGHT_GLOB)
+        )
+    ]
+    if not junk_items:
+        return StepReport(STEP_ID, "restore", True, "no deleted-outright item(s) to restore")
+    entries = [
+        TransferEntry(
+            item["name"],
+            item.get("kind", "file"),
+            backup_dir / item["name"],
+            data_home / item["name"],
+            tuple(item.get("paths", ())),
+        )
+        for item in junk_items
+    ]
+    ledger = TransferLedger(
+        migration_home() / "pre-migrate-restore-deleted-wal.json", write_fn=write_json_atomic
+    )
+    outcome = _copy_phase(entries, BackupManager(), STEP_ID, ledger)
+    ledger.clear()
+    if not outcome.ok:
+        return StepReport(STEP_ID, "restore", False, f"restore failed: {outcome.error}")
+    return StepReport(
+        STEP_ID,
+        "restore",
+        True,
+        f"restored {len(entries)} deleted-outright item(s) from {backup_dir}",
+        detail={"items": [e.name for e in entries]},
+    )
+
+
+__all__ = [
+    "STEP_ID",
+    "PreMigrateBackupStep",
+    "resolve_backup_dir",
+    "restore_deleted_outright_items",
+    "restore_from_backup_dir",
+]

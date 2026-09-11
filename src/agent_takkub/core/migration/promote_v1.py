@@ -813,6 +813,18 @@ class PruneOutcome:
     # candidate. `False` (the default) is the existing single-entry
     # `_remove_entry_source` failure shape, unchanged.
     unknown_batch: bool = False
+    # #504/#574 R8-H4 (= R7-H2, carried): every entry this call's *entries*
+    # named that was NEVER attempted at all — not pruned, not the one
+    # `failed`/DUPLICATE entry, just never reached because a sibling's
+    # removal failure (or a batch-level I/O fault) stopped this pass before
+    # its batch, or an entirely later batch, was ever entered. These are
+    # still fully copy-verified at `dest` (this function only ever removes
+    # `src` after `dest` is durably confirmed) with `src` also fully
+    # intact — a caller that ONLY records `pruned`/`failed` in its final
+    # manifest silently drops ownership of these, leaving a top-level copy
+    # nobody's rollback/validate/doctor knows to look for (the reviewed
+    # `prune_orphans_after_rollback` repro).
+    never_touched: list[TransferEntry] = field(default_factory=list)
 
 
 def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
@@ -1055,6 +1067,11 @@ def _prune_phase(
     newly: list[TransferEntry] = []
     failed: TransferEntry | None = None
     error = ""
+    # #504/#574 R8-H4 (= R7-H2): every entry never even attempted this call
+    # — batch siblings after a mid-batch failure, or an entirely later
+    # batch this pass never reached — set at whichever failure branch below
+    # actually stops the loop.
+    never_touched: list[TransferEntry] = []
     # #574 round11 R7-M5: True only for a batch-level `write_committed`/
     # `ledger.write` failure (an I/O fault unrelated to any one entry's
     # own content — NOTHING in the batch was touched, removal never even
@@ -1081,6 +1098,7 @@ def _prune_phase(
                 f"{failed.name}: {e}"
             )
             batch_level_failure = True
+            never_touched = [*batch, *remaining[index + 1 :]]
             batch = []
             break
         # #574 round11 item 6 (R7-H1, reviewer round 7): snapshot every
@@ -1111,6 +1129,7 @@ def _prune_phase(
                 f"starting at {failed.name}: {e}"
             )
             batch_level_failure = True
+            never_touched = [*batch, *remaining[index + 1 :]]
             batch = []
             break
         ledger_states = candidate_states
@@ -1161,6 +1180,7 @@ def _prune_phase(
                     ledger_states[e2.name] = pre_batch_states[e2.name]
                 else:
                     ledger_states.pop(e2.name, None)
+            never_touched = [*not_yet_attempted, *remaining[index + 1 :]]
             break
 
     digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
@@ -1201,6 +1221,7 @@ def _prune_phase(
             late_write_kept=late_write_kept,
             digests=digests,
             unknown_batch=True,
+            never_touched=never_touched,
         )
 
     ledger_states[failed.name] = _entry_to_wal(
@@ -1225,6 +1246,7 @@ def _prune_phase(
         error=error,
         late_write_kept=late_write_kept,
         digests=digests,
+        never_touched=never_touched,
     )
 
 
@@ -1968,6 +1990,43 @@ class PromoteV2RootStep:
 
         prune = _prune_phase(new_entries, write_committed, ledger, on_entry=self.on_entry)
         if not prune.ok:
+            # #504/#574 R8-H4 (= R7-H2): `write_committed` above only ever
+            # records `pruned`/the one `failed` entry — every entry
+            # `prune.never_touched` names is fully copy-verified at its
+            # top-level `dest` (this pass's own earlier `_copy_phase`
+            # already confirmed that) with `src` also fully intact, yet
+            # would otherwise vanish from the manifest entirely: no
+            # ownership record for `rollback()`/`validate()`/`doctor` to
+            # find it by, an orphaned top-level copy nobody undoes.
+            # Recorded PENDING (copied, not yet pruned) — `rollback()`
+            # doesn't gate on state for restoring, so this alone lets a
+            # later `rollback()`/`restore-v1` move it back same as any
+            # other promoted entry. Best-effort: a failure here just means
+            # the SAME gap this fix closes, logged rather than silent.
+            if prune.never_touched:
+                try:
+                    current = _read_committed_entries(self._manifest_path(), "promoted")
+                except (OSError, ValueError):
+                    current = list(existing)
+                recorded = {e["name"] for e in current if isinstance(e, dict) and e.get("name")}
+                pending_digests = ledger.read()
+                additions = [
+                    e.to_ledger(pending_digests.get(e.name, {}).get("sha256", {}), state="PENDING")
+                    for e in prune.never_touched
+                    if e.name not in recorded
+                ]
+                if additions:
+                    try:
+                        write_json_atomic(
+                            self._manifest_path(),
+                            {
+                                "schema": 3,
+                                "created_at": time.time(),
+                                "promoted": current + additions,
+                            },
+                        )
+                    except OSError as e:
+                        _log_event("migration_promote_pending_record_failed", error=str(e))
             self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {prune.error}")
             return StepReport(
                 self.step_id,
@@ -2275,11 +2334,67 @@ class ArchiveV1LegacyStep:
                 out.append(p)
         return out
 
+    def _promoted_top_level_names(self) -> set[str]:
+        """Every top-level name `PromoteV2RootStep` owns or is about to own
+        — #504/#574 R8-H3: `_V2_TOP_LEVEL_NAMES` above is a FIXED, hand-
+        enumerated set of the common V2 directory names; a promoted name
+        that happens to fall OUTSIDE it (anything that lived under a
+        legacy `v2/` root besides those well-known ones) was archived away
+        as if it were a genuine V1 leftover.
+
+        Two sources, because `MigrationEngine.apply()`'s own 2-pass split
+        (#504 round4 B1/B3) means this step's own copy lands at the top
+        level BEFORE its prune ever writes the committed manifest this
+        module reads elsewhere: `archive-v1-legacy`'s copy-only phase
+        (this pass's own Pass A) runs AFTER `promote-v2-root`'s copy but
+        BEFORE `promote-v2-root`'s prune (Pass B, for every step together)
+        — the exact "created in THIS SAME ladder pass" case the reviewed
+        repro hit, where the manifest genuinely does not exist yet.
+
+        1. the WAL `apply_copy_only()`'s own `_copy_phase` durably writes
+           BEFORE it returns, PENDING then VERIFIED per name — available
+           the instant this same pass's copy lands, long before any prune;
+        2. the committed manifest, for a promote that fully finished
+           (prune included) in an EARLIER, separate pass — the WAL is
+           cleared once that finishes, so the manifest is this case's own
+           source of truth instead.
+
+        Best-effort: a missing/unreadable WAL or manifest just protects
+        nothing extra from that source, matching
+        `_named_account_home_names()`'s own fail-open contract."""
+        names: set[str] = set()
+        try:
+            wal_states = TransferLedger(
+                _promote_v2_root_wal_path(self.data_home), list_key="promoted"
+            ).read()
+        except (OSError, ValueError):
+            wal_states = {}
+        names.update(wal_states.keys())
+        try:
+            manifest = json.loads(
+                PromoteV2RootStep(data_home=self.data_home)
+                ._manifest_path()
+                .read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            manifest = None
+        if isinstance(manifest, dict):
+            names.update(
+                entry["name"]
+                for entry in manifest.get("promoted", [])
+                if isinstance(entry, dict) and entry.get("name")
+            )
+        return names
+
     def _archive_candidates(self) -> list[Path]:
         if not self.data_home.is_dir():
             return []
         delete_names = {p.name for p in self._delete_candidates()}
-        protected = _ARCHIVE_SKIP_NAMES | self._named_account_home_names()
+        protected = (
+            _ARCHIVE_SKIP_NAMES
+            | self._named_account_home_names()
+            | self._promoted_top_level_names()
+        )
         return [
             p
             for p in sorted(self.data_home.iterdir())

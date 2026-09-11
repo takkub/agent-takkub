@@ -438,6 +438,7 @@
         "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.report",
         "agent_takkub.core.secrets.manager",
+        "agent_takkub.core.versioning.store",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
         "agent_takkub.doctor",
@@ -471,7 +472,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 44
+      "fan_out": 45
     },
     {
       "module": "agent_takkub.cli_server",
@@ -2467,9 +2468,10 @@
       "imported_by": [
         "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
+        "agent_takkub.cli",
         "agent_takkub.core.migration.steps"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 3
     },
     {

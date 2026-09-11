@@ -127,7 +127,11 @@ def _source_files(src: Path) -> list[Path]:
 
 
 def copy_only(
-    src: Path, dest: Path, *, on_file: Callable[[int, int, str], None] | None = None
+    src: Path,
+    dest: Path,
+    *,
+    on_file: Callable[[int, int, str], None] | None = None,
+    files: list[Path] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Just the physical copy half of `copy_verified` — no checksum pass.
     Split out so a WAL-aware caller (`promote_v1._copy_phase`) can record a
@@ -172,12 +176,17 @@ def copy_only(
     `_PROGRESS_EVERY_N_FILES` files or `_PROGRESS_EVERY_N_SECONDS`
     seconds (see `_FileProgressThrottle`), plus always once more on the
     final file. Never called for a `file`-kind *src* (one file, nothing
-    to show progress within)."""
+    to show progress within).
+
+    *files* (#504/#574 R8-M3): the entry's own file list, when the caller
+    already enumerated it (`copy_verified` below) — skips a second
+    `_source_files(src)` walk. `None` (the default) re-enumerates, exactly
+    the prior behavior for every other direct caller."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     duplicated: list[str] = []
     source_digests: dict[str, str] = {}
     if src.is_dir():
-        files = _source_files(src)
+        files = files if files is not None else _source_files(src)
         throttle = _FileProgressThrottle(on_file, len(files))
         for i, f in enumerate(files, start=1):
             rel = f.relative_to(src)
@@ -204,6 +213,7 @@ def verify_only(
     source_digests: dict[str, str] | None = None,
     *,
     on_file: Callable[[int, int, str], None] | None = None,
+    files: list[Path] | None = None,
 ) -> CopyVerification:
     """Just the checksum half of `copy_verified` — assumes `copy_only(src,
     dest)` already ran. Raises `VerifyMismatchError` (never returns) on any
@@ -219,10 +229,19 @@ def verify_only(
 
     *on_file* (#574 round11 item 3): same throttled progress observer as
     `copy_only`'s own — called with `src`-relative paths as this pass
-    reads each TARGET file's content back."""
+    reads each TARGET file's content back.
+
+    *files* (#504/#574 R8-M3): reuse `copy_only`'s own already-enumerated
+    file list instead of walking *src* a second time — on a 5,000-file
+    entry that second `_source_files(src)` walk alone cost ~0.9s with zero
+    progress signal, landing right at the copy-to-verify pass boundary
+    where `_FileProgressThrottle`'s own fresh-throttle silence (up to
+    `_PROGRESS_EVERY_N_SECONDS`) already stacked on top of it — together, a
+    gap past the throttle's own 2s ceiling. `None` (the default) re-
+    enumerates, exactly the prior behavior for every other direct caller."""
     total_bytes = 0
     digests: dict[str, str] = {}
-    source_files = _source_files(src)
+    source_files = files if files is not None else _source_files(src)
     throttle = _FileProgressThrottle(on_file, len(source_files))
     for i, f in enumerate(source_files, start=1):
         target = (dest / f.relative_to(src)) if src.is_dir() else dest
@@ -254,8 +273,20 @@ def copy_verified(
     *on_file* (#574 round11 item 3): forwarded to both the copy and
     verify passes — a caller sees progress covering the whole entry, copy
     phase then verify phase, not just one half of it."""
-    duplicated, source_digests = copy_only(src, dest, on_file=on_file)
-    result = verify_only(src, dest, source_digests, on_file=on_file)
+    # #504/#574 R8-M3: enumerate ONCE, share the list with both passes —
+    # see `verify_only`'s own docstring for why the second walk mattered.
+    files = _source_files(src) if src.is_dir() else None
+    duplicated, source_digests = copy_only(src, dest, on_file=on_file, files=files)
+    if on_file is not None and files is not None:
+        # An explicit, unthrottled check-in exactly at the copy-to-verify
+        # boundary — never left to `verify_only`'s own fresh throttle to
+        # eventually cover on its own timing, which is what let the gap
+        # exceed 2s in the first place.
+        try:
+            on_file(0, len(files), "")
+        except Exception:
+            pass  # swallow-ok: pure progress notification, never a phase input.
+    result = verify_only(src, dest, source_digests, on_file=on_file, files=files)
     if duplicated:
         return CopyVerification(
             result.file_count, result.total_bytes, result.digests, tuple(duplicated)

@@ -129,6 +129,60 @@ def test_copy_verified_directory_still_detects_target_corruption(tmp_path, monke
         verify_copy.copy_verified(src, dest)
 
 
+def test_copy_verified_directory_enumerates_the_source_only_once(tmp_path, monkeypatch):
+    """#504/#574 R8-M3: `verify_only` used to re-enumerate the whole entry
+    from scratch (a second `_source_files(src)` walk) right after
+    `copy_only` had already built that exact list — on a large directory
+    entry that redundant walk, plus `_FileProgressThrottle`'s own fresh
+    silence at the start of the verify pass, stacked into a gap past the
+    throttle's 2s ceiling at the copy-to-verify pass boundary.
+    `copy_verified` now enumerates once and passes the SAME list to both."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        (src / f"f{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    from agent_takkub.core.migration import verify_copy
+
+    real_source_files = verify_copy._source_files
+    call_count = {"n": 0}
+
+    def counting(path: Path) -> list[Path]:
+        call_count["n"] += 1
+        return real_source_files(path)
+
+    monkeypatch.setattr(verify_copy, "_source_files", counting)
+    result = verify_copy.copy_verified(src, dest)
+
+    assert result.file_count == 5
+    assert call_count["n"] == 1  # copy_verified's own enumeration — never a second walk
+
+
+def test_copy_verified_bridges_the_copy_to_verify_gap_with_an_explicit_call(tmp_path):
+    """#504/#574 R8-M3: an explicit, unthrottled `on_file` check-in fires
+    exactly at the copy-to-verify boundary (`done=0`) — never left to
+    `verify_only`'s own fresh throttle to eventually cover on its own
+    timing, which is what let the silent gap exceed the 2s ceiling."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(3):
+        (src / f"f{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    calls: list[tuple[int, int, str]] = []
+    verify_copy.copy_verified(
+        src, dest, on_file=lambda done, total, path: calls.append((done, total, path))
+    )
+
+    assert (0, 3, "") in calls
+    boundary_index = calls.index((0, 3, ""))
+    # At least one more call follows — the verify pass itself still runs
+    # (the last-file guarantee always fires at minimum).
+    assert boundary_index < len(calls) - 1 or calls[-1] == (0, 3, "")
+    assert calls[-1][0] == calls[-1][1] == 3  # final call always reports done == total
+
+
 def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path):
     """#574 round11 item 3: a large directory entry's copy+verify must
     surface progress WITHIN itself — not just one `on_entry` fire for the
@@ -493,6 +547,39 @@ def test_restore_does_not_recover_item_5_deleted_junk(tmp_path, journal_backups)
     assert not (data_home / "openviking").exists()
 
 
+def test_archive_never_sweeps_a_name_promote_just_promoted_this_pass(tmp_path, journal_backups):
+    """#504/#574 R8-H3: `_V2_TOP_LEVEL_NAMES` is a FIXED, hand-enumerated
+    set of the common V2 directory names — a name promoted from a legacy
+    `v2/` root that happens to fall OUTSIDE it (anything other than the
+    well-known ones) used to be archived away as if it were a genuine V1
+    leftover, including a name `promote-v2-root` created in THIS SAME
+    ladder pass. End to end: `migrate run` exits ok, `migrate validate`
+    then permanently reports `promote-v2-root: promoted file missing`,
+    even though content survives inside the archive — apply and validate
+    flatly contradict each other."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "custom-plugin" / "config.json").parent.mkdir(parents=True)
+    (data_home / "v2" / "custom-plugin" / "config.json").write_text(
+        '{"unique": true}', encoding="utf-8"
+    )
+
+    promote = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert promote.apply().ok
+    assert (data_home / "custom-plugin" / "config.json").is_file()
+
+    archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    candidate_names = {p.name for p in archive._archive_candidates()}
+    assert "custom-plugin" not in candidate_names
+
+    report = archive.apply()
+    assert report.ok, report.summary
+    assert (data_home / "custom-plugin" / "config.json").read_text(
+        encoding="utf-8"
+    ) == '{"unique": true}'
+    assert promote.validate().ok, promote.validate().summary
+
+
 # ---------------------------------------------------------------------------
 # 2026-09-10 acceptance review (docs/audit/2026-09-10-504-acceptance-review.md)
 # B2/B3/B4, H1/H2/H3/H7/H9 — regressions reproduced from the reviewer's own
@@ -855,6 +942,56 @@ def test_promote_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     assert step.apply().ok
     assert (data_home / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
     assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+
+
+def test_promote_rollback_leaves_no_orphaned_top_level_copy_after_a_prune_failure(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504/#574 R8-H4 (= R7-H2, carried across rounds 7 and 8): a prune
+    failure on entry 2 of 3 used to leave entry 3 (never even attempted —
+    the outer batch loop stops at the first failure) with NO ownership
+    record in the manifest at all: `apply_copy_only()`'s final
+    `write_committed` call only ever named `pruned`/the one `failed` entry,
+    silently dropping every entry after it. `rollback()` then had no way
+    to find it by, leaving a top-level copy nobody's rollback/validate/
+    doctor knew to look for. One `rollback()` call must now put EVERY
+    promoted entry back, none left stranded at the top level."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    for i in range(3):
+        (data_home / "v2" / f"d{i}" / f"f{i}.json").parent.mkdir(parents=True)
+        (data_home / "v2" / f"d{i}" / f"f{i}.json").write_text(f"content-{i}", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove_entry_source = promote_mod._remove_entry_source
+    call_count = {"n": 0}
+
+    def _fail_on_second_call(entry, digests):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("injected mid-pass removal failure")
+        return real_remove_entry_source(entry, digests)
+
+    monkeypatch.setattr(promote_mod, "_remove_entry_source", _fail_on_second_call)
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+    assert not report.ok
+    monkeypatch.undo()
+
+    # Every entry's copy landed at top level from `apply_copy_only()`
+    # regardless of what prune got to — the pre-fix state this repro caught.
+    for i in range(3):
+        assert (data_home / f"d{i}" / f"f{i}.json").is_file()
+
+    rollback = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home).rollback()
+    assert rollback.ok, rollback.summary
+
+    for i in range(3):
+        assert not (data_home / f"d{i}" / f"f{i}.json").exists(), f"d{i} orphaned at top level"
+        assert (data_home / "v2" / f"d{i}" / f"f{i}.json").read_text(
+            encoding="utf-8"
+        ) == f"content-{i}"
 
 
 def test_archive_delete_phase_failure_leaves_only_the_denied_entry_duplicate(

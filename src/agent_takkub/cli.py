@@ -3218,8 +3218,23 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     else:
         generations = [a["ts"] for a in reversed(list_v1_archives(config.DATA_HOME))]
 
-    if not generations:
-        return [archive_step.rollback()]  # the "nothing to restore" report
+    # #504/#574 R8-B1 BLOCKER: no `v1-archive-<ts>` generation existing must
+    # NEVER mean "nothing to restore" outright — a store can be promoted
+    # (top-level merged) with nothing ever archived (the ladder stopped
+    # between the two steps, or there was genuinely no V1 leftover to
+    # archive at all) and still need `promote-v2-root`'s own rollback to put
+    # it back. This used to `return` right here, skipping straight past
+    # every line below — including the `promote-v2-root` rollback the rest
+    # of this function already does unconditionally once the (now
+    # no-op-for-an-empty-`generations`) archive loop finishes. Whether
+    # `promote-v2-root` genuinely has nothing to undo either is checked
+    # AFTER its own rollback runs (below): its own `rollback()` already
+    # reports a truthful "nothing to undo" in that case — never a bare
+    # `return` before it even got the chance to try.
+    promote_had_something = (
+        promote_step._manifest_path().is_file() or promote_step._legacy_root().is_dir()
+    )
+    reports: list = [archive_step.rollback()] if not generations else []
 
     # #504 R3-B3: snapshot every name ANY selected generation could touch
     # ONCE, before the walk starts — never a per-generation "latest backup
@@ -3268,12 +3283,21 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
             )
         return reports
 
+    # No generations to walk (the loop below is then a no-op) — the single
+    # no-arg `archive_step.rollback()` already collected into `reports`
+    # above still needs the SAME stop-the-line the loop gives every OTHER
+    # archive rollback call: a failure there must never let promote-v2-
+    # root's own rollback run next.
+    if not generations and reports and not reports[0].ok:
+        if not json_mode:
+            print()  # move past the \r progress line
+        return _revert(reports)
+
     # #504 R2-H1: a multi-generation restore-v1 (no --archive: walk every
     # generation oldest-first) is all-or-nothing — if a LATER generation's
     # restore fails, revert every name this whole command could have
     # touched back to the snapshot above, rather than leaving DATA_HOME
     # with only some of the requested generations applied.
-    reports = []
     for ts in generations:
         _emit_restore_phase("archive-v1-legacy", archive_ts=ts)
         r = archive_step.rollback(archive_ts=ts)
@@ -3315,6 +3339,7 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     # just finished — a stale marker is a much smaller problem than
     # undoing a otherwise-successful restore over it.
     _emit_restore_phase("version-marker")
+    version_marker_ran = False
     try:
         version_marker_step = engine.get_step("version-marker")
     except KeyError:
@@ -3332,7 +3357,74 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
         )
     else:
         version_marker_report = version_marker_step.apply()
+        version_marker_ran = True
     reports.append(version_marker_report)
+
+    # #504/#574 item 14: `version_marker_step.apply()` above writes only
+    # WHEREVER `core.versioning.store.version_doc_path()` currently
+    # resolves — `RUNTIME_DIR/core/version.json`, since `promote_step
+    # .rollback()` just un-flipped `core_home()` away from the top-level
+    # `system/` it removed. The legacy mirror `promote_step.rollback()`
+    # itself just recreated at `data_home/v2/system/version.json` is left
+    # holding whatever stamp it had at the moment of that rollback (the
+    # CURRENT build's, from before this restore ran) — a real byte
+    # rehearsal caught this as the one unexpected changed file after an
+    # apply-then-restore round trip. Mirror the freshly re-applied stamp
+    # into it too so both copies of "the running build's version" agree —
+    # best-effort, never escalated over a restore that otherwise succeeded.
+    # Only when a real version-marker step actually ran (never the
+    # "skipped: no such step" harness path above) AND its target actually
+    # exists — a reduced-engine test fixture with no version-marker step
+    # has nothing to mirror from, never a real failure.
+    if version_marker_ran and version_marker_report.ok:
+        try:
+            from .core.versioning.store import version_doc_path
+
+            marker_path = version_doc_path()
+            legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
+            if marker_path.is_file() and legacy_mirror.parent.is_dir():
+                legacy_mirror.write_bytes(marker_path.read_bytes())
+        except OSError as e:
+            if not json_mode:
+                _utf8_print(f"  (warn) could not mirror version-marker to legacy v2/system/: {e}")
+
+    # #504/#574 item 13: the normal archive/promote rollback above has no
+    # way to bring back #504 item 5's outright-deleted junk (never
+    # archived, no other recovery path) — restore it from the CURRENT
+    # pre-migrate backup, alongside, never blocking on it (a missing/older
+    # pre-migrate backup just means these specific few files stay absent,
+    # same as restore-v1 always could do nothing about them before).
+    from .core.migration.pre_migrate_backup import _marker_path, restore_deleted_outright_items
+
+    # Read the marker directly rather than `resolve_backup_dir()` — that
+    # helper CREATES a fresh marker (and a not-yet-existing backup dir
+    # name) when none is on record yet, which is right for a real backup
+    # pass about to run but wrong here: a machine that never took a
+    # pre-migrate backup must not have restore-v1 leave a stray marker
+    # behind pointing at a directory nothing ever wrote.
+    try:
+        _marker_name = _marker_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        _marker_name = ""
+    if _marker_name:
+        junk_report = restore_deleted_outright_items(
+            config.DATA_HOME / "backups" / _marker_name, config.DATA_HOME
+        )
+        reports.append(junk_report)
+
+    # #504/#574 R8-B1: when NEITHER archive nor promote had anything to
+    # restore (no archive generation existed AND promote-v2-root never
+    # promoted anything on this data_home), the command must say so
+    # plainly and fail — never report ok:true 0-effect success.
+    if not generations and not promote_had_something:
+        msg = (
+            "nothing to restore — no v1-archive-<ts> generation exists and "
+            "promote-v2-root never promoted anything on this data_home"
+        )
+        reports.append(StepReport("restore-v1", "rollback", False, msg))
+        _emit_restore_phase("done", ok=False, reason="nothing_to_restore")
+        return reports
+
     _emit_restore_phase("done", ok=version_marker_report.ok)
     return reports
 

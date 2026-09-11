@@ -264,6 +264,7 @@ def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(
     """#504 H3: `cli.py` used to run `promote-v2-root`'s rollback even when
     `archive-v1-legacy`'s just failed, reconstructing only half of the
     pre-2.1.0 shape while reporting the command as having tried both."""
+    from agent_takkub.core.migration.backup import BackupManager
     from agent_takkub.core.migration.engine import MigrationEngine
     from agent_takkub.core.migration.report import StepReport
 
@@ -272,6 +273,11 @@ def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(
 
     class _FailingArchiveStep:
         step_id = "archive-v1-legacy"
+        # #504/#574 R8-B1: restore-v1's own "no v1-archive generation"
+        # branch now runs its stop-the-line check through `_revert()`,
+        # same as the per-generation loop always did — that reads
+        # `archive_step.backups`, so this fake needs one too.
+        backups = BackupManager()
 
         def rollback(self, archive_ts=None):
             calls.append("archive")
@@ -300,6 +306,138 @@ def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(
     out = _json_body(capsys.readouterr().out)
     assert [r["step_id"] for r in out] == ["archive-v1-legacy"]
     assert "promote-v2-root" not in calls
+
+
+def test_restore_v1_still_rolls_back_promote_when_no_archive_generation_exists(capsys):
+    """#504/#574 R8-B1 BLOCKER: `restore-v1` used to return the moment
+    `list_v1_archives()` came back empty — "no v1-archive found — nothing
+    to restore", exit 0 — without ever reaching `promote-v2-root`'s own
+    rollback. A store can be promoted (top-level merged) with nothing ever
+    archived (the ladder stopped between the two steps, or there was
+    genuinely no V1 leftover to archive at all) and still need
+    `promote-v2-root` put back. The documented "put V1 back" escape hatch
+    must not do nothing while reporting success."""
+    from agent_takkub import config
+
+    # A name unique to this legacy v2/ root — NOT one of the real domain
+    # steps' own V2 targets (e.g. "models"), which would get overwritten
+    # by that step's own apply() during the SAME `migrate apply` below.
+    (config.DATA_HOME / "v2" / "custom-plugin").mkdir(parents=True)
+    (config.DATA_HOME / "v2" / "custom-plugin" / "data.json").write_text(
+        '{"unique": true}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    assert (config.DATA_HOME / "custom-plugin" / "data.json").read_text(
+        encoding="utf-8"
+    ) == '{"unique": true}'
+
+    # Simulate "no archive generation exists" regardless of why (ladder
+    # stopped between the two steps, nothing to archive at all, ...) —
+    # remove every v1-archive-<ts> generation this apply may have created.
+    backups_dir = config.DATA_HOME / "backups"
+    if backups_dir.is_dir():
+        import shutil
+
+        for p in backups_dir.iterdir():
+            if p.name.startswith("v1-archive-"):
+                shutil.rmtree(p)
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    promote_report = next(r for r in out if r["step_id"] == "promote-v2-root")
+    assert promote_report["ok"], promote_report["summary"]
+    assert (config.DATA_HOME / "v2" / "custom-plugin" / "data.json").read_text(
+        encoding="utf-8"
+    ) == '{"unique": true}'
+
+
+def test_restore_v1_reports_a_real_failure_when_genuinely_nothing_to_restore(capsys):
+    """#504/#574 R8-B1: when NEITHER an archive generation exists NOR
+    promote-v2-root ever promoted anything, `restore-v1` must say so
+    plainly and exit non-zero — never a bare ok:true 0-effect success."""
+    from agent_takkub import config
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+
+    assert rc != 0
+    out = _json_body(capsys.readouterr().out)
+    assert any(not r["ok"] and "nothing to restore" in r["summary"] for r in out)
+
+
+def test_restore_v1_brings_back_item_5_junk_from_the_pre_migrate_backup(capsys):
+    """#504/#574 item 13: `archive-v1-legacy` deletes #504 item 5's named
+    junk OUTRIGHT (no archive copy anywhere else — `pre-migrate-backup` is
+    the ONE place a copy of it survives). The normal `restore-v1` path
+    (archive/promote rollback) has no way to bring it back at all — neither
+    rollback owns it. A real apply-then-restore round trip must not lose
+    it, even though `pre-migrate-backup`'s own docstring already flagged
+    this as "the one case with no other recovery path"."""
+    from agent_takkub import config
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "openviking").write_text("junk-content", encoding="utf-8")
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    # archive-v1-legacy deleted it outright — the normal, expected result
+    # of a forward apply.
+    assert not (config.DATA_HOME / "openviking").exists()
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    junk_report = next(
+        r for r in out if r["stage"] == "restore" and "deleted-outright" in r["summary"]
+    )
+    assert junk_report["ok"], junk_report["summary"]
+    assert (config.DATA_HOME / "openviking").read_text(encoding="utf-8") == "junk-content"
+
+
+def test_restore_v1_mirrors_the_reapplied_version_marker_to_the_legacy_location(capsys):
+    """#504/#574 item 14: `version_marker_step.apply()` after
+    `promote_step.rollback()` writes only wherever `core_home()` currently
+    resolves (`RUNTIME_DIR/core/version.json`, since the rollback just
+    un-flipped it away from the top-level `system/` it removed) — the
+    legacy mirror `promote_step.rollback()` itself just recreated at
+    `data_home/v2/system/version.json` was left holding a stale, different
+    stamp. A real byte rehearsal caught this as the one unexpected changed
+    file after an apply-then-restore round trip; both copies of "the
+    running build's version" must agree afterward."""
+    from argparse import Namespace
+
+    from agent_takkub import config
+    from agent_takkub.cli import _cmd_migrate_restore_v1
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.versioning.store import version_doc_path
+
+    # A legacy nested `v2/system/` — pre-#504's own `CoreInternalStoreStep`
+    # location, complete with its own prior `version.json` (a real 2.0.x
+    # snapshot always has one) — promoted directly (bypassing the full
+    # ladder's own version-marker/system-flip interaction, a separate,
+    # pre-existing concern outside this fix's scope) so `promote_step
+    # .rollback()` below has a real `v2/system/` to un-flip back into.
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "v2" / "system").mkdir(parents=True)
+    (config.DATA_HOME / "v2" / "system" / "version.json").write_text(
+        '{"version": "2.0.8"}', encoding="utf-8"
+    )
+
+    engine = MigrationEngine()
+    assert engine.get_step("promote-v2-root").apply().ok
+
+    reports = _cmd_migrate_restore_v1(engine, Namespace(archive_ts=None, json=True))
+    assert all(r.ok for r in reports), [(r.step_id, r.summary) for r in reports]
+
+    legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
+    assert legacy_mirror.is_file()
+    assert legacy_mirror.read_bytes() == version_doc_path().read_bytes()
 
 
 # ---------------------------------------------------------------------------
