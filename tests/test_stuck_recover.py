@@ -76,6 +76,7 @@ class _FakeOrch:
         self.spawn_calls: list[tuple[str, str | None, str]] = []
         self.tty_surface_calls: list[tuple[str, str, str]] = []
         self.notify_calls: list[tuple[str, str, str | None]] = []
+        self.snapshot_calls: list[tuple[str, str, dict | None, str]] = []
 
     def _ps(self, key: str) -> PaneState:
         try:
@@ -151,6 +152,15 @@ class _FakeOrch:
         # for real, the same way _check_shell_open_dialog is driven here.
         return Orchestrator._defer_stuck_recover_for_live_children(  # type: ignore[arg-type]
             self, role, project, pane, ps_ck, now
+        )
+
+    def _snapshot_dirty_worktree_if_needed(self, project, role, worktree, reason) -> None:
+        # Record the call for tests to assert on, then delegate to the real
+        # method (safe: real PaneState.worktree defaults to None, so it's a
+        # no-op unless a test explicitly sets one, #573).
+        self.snapshot_calls.append((project, role, worktree, reason))
+        Orchestrator._snapshot_dirty_worktree_if_needed(  # type: ignore[arg-type]
+            self, project, role, worktree, reason
         )
 
 
@@ -556,6 +566,55 @@ class TestStuckRecoverCap:
         fake._panes_by_project["p"] = {"backend": pane, LEAD.name: lead}
         _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
         fake._inject_auto_chain_handoff.assert_not_called()
+
+    def test_give_up_snapshots_dirty_worktree(self, monkeypatch) -> None:
+        """#573: a stuck-capped pane is left ALIVE but unattended from here on
+        — its dirty worktree must be safety-net committed right here, not
+        left to rot until an operator eventually closes/reassigns it (or it
+        crashes first)."""
+        from agent_takkub import worktree_manager as wm
+
+        calls: list[tuple[str, str, str]] = []
+
+        class _FakeMgr:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def real_dirty(self, _info):
+                return True
+
+            def snapshot_dirty_worktree(self, info, role, reason):
+                calls.append((info.branch, role, reason))
+                return True, None
+
+        monkeypatch.setattr(wm, "WorktreeManager", _FakeMgr)
+
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        fake._ps("p::backend").worktree = {
+            "path": "/wt/backend-1",
+            "branch": "wt/backend-1",
+            "base_sha": "abc",
+            "git_root": "/repo",
+        }
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
+        assert calls == [("wt/backend-1", "backend", "stuck_recover_capped")]
+
+    def test_give_up_skips_snapshot_when_no_worktree(self, monkeypatch) -> None:
+        """A shared-cwd (non-isolated) pane has `PaneState.worktree is None` —
+        must be a clean no-op, never a crash from `WorktreeInfo.from_dict`."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(
+            wm, "WorktreeManager", lambda *a, **k: (_ for _ in ()).throw(AssertionError("boom"))
+        )
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        # ps.worktree left at its default (None).
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)  # must not raise
+        assert fake._pane_state["p::backend"].stuck_recover_gave_up is True
 
 
 class TestResumeNudgeAndLog:

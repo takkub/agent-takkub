@@ -119,6 +119,18 @@ class _FakeMgr:
     def diffstat(self, info):
         return " src/x.ts | 3 +++"
 
+    def dirty_diffstat(self, info):
+        # #573: mirrors the real "N files, +A/-D" shape closely enough for
+        # notice-text assertions without needing real git plumbing here.
+        return f"{self._uncommitted} files, +0/-0" if self._uncommitted else ""
+
+    def snapshot_dirty_worktree(self, info, role, reason):
+        # #573 abnormal-exit snapshot — TestFinalizeWorktree drives
+        # `_finalize_worktree` directly (not the close()/give-up call sites
+        # that call this), so no test here exercises it; present only so a
+        # stray call never raises AttributeError.
+        return False, None
+
     def auto_commit_snapshot(self, info, role, summary=""):
         # #525: mirrors the real method — a successful snapshot commit moves
         # HEAD, so a subsequent `commit_count`/`real_dirty`/`real_uncommitted_
@@ -494,6 +506,20 @@ class TestFinalizeWorktree:
         assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn  # kept, not lost
         assert "uncommitted changes" in warn
 
+    def test_no_commit_kept_warning_includes_diff_stat(self, orch, monkeypatch):
+        """#573: the "done แต่ไม่มี commit" warning must say HOW MUCH is
+        sitting uncommitted (files / +N/-M), not just that some exists — a
+        bare "dirty" gave Lead no sense of whether it was worth chasing."""
+        fake = _FakeMgr(
+            info=_info(), commits=0, dirty=True, uncommitted=7, auto_commit_result=False
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "qa", _info().as_dict())
+        warn = orch._notify_lead.call_args[0][1]
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn
+        assert "7 files" in warn
+
     def test_no_commit_but_branch_already_merged_suppresses_false_alarm(self, orch, monkeypatch):
         """#536: `commit_count` can legitimately read 0 even though real work
         happened and Lead already merged it (`rediscover_worktree`'s
@@ -544,6 +570,55 @@ class TestFinalizeWorktree:
         orch._finalize_worktree("proj", "qa", {"bogus": True})
         # no exception; nothing proposed
         assert not orch._notify_lead.called
+
+
+class TestCloseSnapshotsDirtyWorktreeBeforeFinalize:
+    """#573 — `close()` must snapshot a dirty worktree BEFORE `_finalize_
+    worktree` runs (so a branch that already has earlier commits, with fresh
+    uncommitted work on top, gets that work committed too — not just a
+    zero-commits branch, which is all `_finalize_worktree`'s own #525
+    auto-commit covers)."""
+
+    def _close_ready_orch(self, orch, monkeypatch, worktree: dict | None):
+        import agent_takkub.task_ledger as task_ledger_mod
+
+        pane = MagicMock()
+        pane.session = None  # not alive — skip the terminate/live-children path
+        orch._panes_by_project["proj"] = {"backend": pane}
+        orch._pane_state["proj::backend"] = PaneState(worktree=worktree)
+        monkeypatch.setattr(task_ledger_mod, "mark_done", lambda *a, **k: "")
+        orch._drain_pane_health = MagicMock(return_value="")
+        orch._maybe_fire_auto_chain_handoff = MagicMock()
+        orch._schedule_native_chrome_idle_release = MagicMock()
+        return orch
+
+    def test_snapshot_runs_before_finalize_with_the_captured_worktree(self, orch, monkeypatch):
+        calls: list[str] = []
+        worktree = _info().as_dict()
+        self._close_ready_orch(orch, monkeypatch, worktree)
+        orch._snapshot_dirty_worktree_if_needed = MagicMock(
+            side_effect=lambda *a, **k: calls.append("snapshot")
+        )
+        orch._finalize_worktree = MagicMock(side_effect=lambda *a, **k: calls.append("finalize"))
+
+        ok, _ = orch.close("backend", project="proj")
+
+        assert ok is True
+        assert calls == ["snapshot", "finalize"]
+        orch._snapshot_dirty_worktree_if_needed.assert_called_once_with(
+            "proj", "backend", worktree, "close"
+        )
+        orch._finalize_worktree.assert_called_once_with("proj", "backend", worktree)
+
+    def test_no_worktree_skips_both(self, orch, monkeypatch):
+        self._close_ready_orch(orch, monkeypatch, None)
+        orch._snapshot_dirty_worktree_if_needed = MagicMock()
+        orch._finalize_worktree = MagicMock()
+
+        orch.close("backend", project="proj")
+
+        orch._snapshot_dirty_worktree_if_needed.assert_not_called()
+        orch._finalize_worktree.assert_not_called()
 
 
 class TestLiveWorktreePaths:

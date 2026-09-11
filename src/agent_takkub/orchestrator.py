@@ -3569,6 +3569,74 @@ class Orchestrator(
             if callable(setter):
                 setter(branch)
 
+    def _snapshot_dirty_worktree_if_needed(
+        self, project: str, role: str, worktree: dict | None, reason: str
+    ) -> None:
+        """#573: safety-net commit for a pane that goes away OUTSIDE the
+        normal done() flow — stuck-recover give-up, `close()`, or the
+        done-typed-as-text notice — while its own isolated worktree still
+        holds uncommitted work.
+
+        `WorktreeManager.auto_commit_snapshot` (#525) only fires from
+        `_finalize_worktree` when `commit_count == 0` — it exists to give a
+        NEVER-committed branch its first commit so a merge proposal can go
+        out. It does nothing for the far more common shape here: a branch
+        that already has earlier accepted commits, with fresh uncommitted
+        work sitting on top when the pane is yanked away before it ever runs
+        its own `takkub done`/commit. That gap is exactly what left a
+        593-line diff unsnapshotted in the reported incident. This fires on
+        ANY dirty worktree regardless of prior commit count, so it must run
+        BEFORE `_finalize_worktree` (its own commit-if-zero-commits branch
+        then simply finds nothing left to do).
+
+        *worktree* is passed explicitly (the caller's own already-fetched
+        dict — see `PaneState.worktree`/`_finalize_worktree`'s *worktree*
+        param) rather than re-read from `_pane_state` here: `close()` pops
+        that entry before this can run in the common (task-delivered) case,
+        so a lookup-by-key here would silently find nothing every time.
+
+        Never raises — a git hiccup here must never break the caller's own
+        teardown (close/give-up/notice all continue either way).
+        """
+        if not worktree:
+            return
+        try:
+            from .worktree_manager import WorktreeInfo, WorktreeManager
+
+            info = WorktreeInfo.from_dict(worktree)
+            mgr = WorktreeManager()
+            if not mgr.real_dirty(info):
+                return
+            committed, wip_ref = mgr.snapshot_dirty_worktree(info, role, reason)
+            _log_event(
+                "worktree_dirty_snapshot",
+                role=role,
+                project=project,
+                branch=info.branch,
+                reason=reason,
+                committed=committed,
+                wip_ref=wip_ref,
+            )
+            if wip_ref:
+                self._notify_lead(
+                    project,
+                    f"⚠️ [{role}] worktree `{info.branch}` มี uncommitted changes ตอน "
+                    f"{reason} — pre-commit hook ไม่ผ่าน เก็บ snapshot ไว้ที่ ref แยก "
+                    f"`{wip_ref}` แทน (ไม่แตะ branch หลัก) กู้คืนด้วย "
+                    f"`git -C {info.git_root} show {wip_ref}`",
+                    from_role=role,
+                    note="",
+                    kind="worktree-dirty-snapshot-sidelined",
+                )
+        except Exception as exc:  # never let this break the caller's teardown
+            _log_event(
+                "worktree_dirty_snapshot_error",
+                role=role,
+                project=project,
+                reason=reason,
+                error=str(exc)[:200],
+            )
+
     def _finalize_worktree(
         self,
         project_ns: str,
@@ -3743,11 +3811,17 @@ class Orchestrator(
                 branch=info.branch,
                 dirty=dirty,
             )
-            state_note = (
-                "มี uncommitted changes ในนั้น — ยังกู้ได้"
-                if dirty
-                else "working tree clean ด้วย — เช็คให้ชัวร์ว่างานหายไปจริงหรือแค่ลืม commit"
-            )
+            # #573: the Lead notice must say HOW MUCH is sitting uncommitted,
+            # not just that some is — a bare "dirty" gave no sense of whether
+            # this was worth chasing before `takkub worktree clean` could
+            # touch it.
+            dirty_stat = mgr.dirty_diffstat(info) if dirty else ""
+            if dirty and dirty_stat:
+                state_note = f"มี uncommitted changes ในนั้น — ยังกู้ได้ ({dirty_stat})"
+            elif dirty:
+                state_note = "มี uncommitted changes ในนั้น — ยังกู้ได้"
+            else:
+                state_note = "working tree clean ด้วย — เช็คให้ชัวร์ว่างานหายไปจริงหรือแค่ลืม commit"
             self._notify_lead(
                 project_ns,
                 f"⚠️ [{from_role}] done แต่ไม่มี commit ใน worktree `{info.branch}` — "
@@ -4836,6 +4910,9 @@ class Orchestrator(
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close:
+            self._snapshot_dirty_worktree_if_needed(
+                project_ns, role_name, had_worktree_close, "close"
+            )
             self._finalize_worktree(project_ns, role_name, had_worktree_close)
         # Revoke the pane's capability token so stale done/send requests from
         # the closing pane are rejected after it terminates.
@@ -11271,6 +11348,10 @@ class Orchestrator(
             project=project,
             attempts=ps.stuck_recover_attempts,
         )
+        # #573: the pane is left alive but unattended from here on — snapshot
+        # any dirty worktree now, before an operator's later `close`/reassign
+        # (or another crash) has a chance to lose it.
+        self._snapshot_dirty_worktree_if_needed(project, role, ps.worktree, "stuck_recover_capped")
         # An auto-chain verify-hop sibling would wait forever for this pane's
         # done event; drop the tag so a capped pane can't keep a hop open. If it
         # was the last blocker, release the chain so the hop doesn't deadlock
@@ -11916,6 +11997,11 @@ class Orchestrator(
         _delayed_enter(pane, _dt_sess, 150)
         ps.done_text_notice_ts = now
         _log_event("done_typed_as_text", role=role, project=project, line=matched[:120])
+        # #573: this pane THINKS it reported done but never did — a real
+        # `takkub done`/close could still be a while away (or never come at
+        # all if the pane crashes first). Snapshot any dirty worktree now
+        # rather than betting on the nudge above landing in time.
+        self._snapshot_dirty_worktree_if_needed(project, role, ps.worktree, "done_typed_as_text")
 
     def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
         """Close every non-Lead pane in `project` (defaults to active).
