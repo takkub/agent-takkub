@@ -3352,7 +3352,18 @@ def cmd_migrate_run(args: argparse.Namespace) -> dict:
     if args.json:
         argv.append("--json")
     code = boot_flow_terminal.run_cli(argv)
-    return {"ok": code == 0, "msg": "migrate run finished" if code == 0 else "migrate run failed"}
+    ok = code == 0
+    if args.json:
+        # #574 round12 item 1: `main()` below unconditionally prints
+        # `("ok: " if ok else "err: ") + msg` for any non-empty `msg` — a
+        # bare, non-JSON line that used to land as the LAST line of
+        # `--json`'s own stdout stream, breaking any consumer parsing every
+        # line as JSON (`json.loads` on `"ok: migrate run finished"`
+        # raises). `boot_flow_terminal.run_cli` already prints its own
+        # `{"type": "outcome", ...}` JSON line; `quiet=True` here opts out
+        # of a second, non-JSON summary line on top of it.
+        return {"ok": ok, "msg": "", "quiet": True}
+    return {"ok": ok, "msg": "migrate run finished" if ok else "migrate run failed"}
 
 
 def cmd_migrate(args: argparse.Namespace) -> dict:

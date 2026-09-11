@@ -79,6 +79,60 @@ def test_migrate_text_output_shows_step_id(capsys):
     assert "version-marker" in out
 
 
+# ---------------------------------------------------------------------------
+# #574 round12 item 1: `migrate run --json`'s stdout is "one JSON object per
+# line" (boot_flow_terminal.run_cli's own contract) — `main()`'s epilogue
+# used to unconditionally print a bare "ok: <msg>"/"err: <msg>" AFTER that,
+# a non-JSON line that broke any consumer parsing every stdout line as JSON.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_run_json_prints_no_trailing_non_json_line(capsys, monkeypatch):
+    from agent_takkub import boot_flow_terminal
+
+    def fake_run_cli(argv, *, out=None):
+        import json as _json
+
+        print(_json.dumps({"type": "outcome", "ok": True}), file=out)
+        return 0
+
+    monkeypatch.setattr(boot_flow_terminal, "run_cli", fake_run_cli)
+
+    rc = cli.main(["migrate", "run", "--json", "--yes"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines, "expected at least the outcome line"
+    for line in lines:
+        json.loads(line)  # every stdout line must parse as JSON — no bare "ok: ..." tail
+
+
+def test_migrate_run_json_failure_still_reports_ok_false(capsys, monkeypatch):
+    from agent_takkub import boot_flow_terminal
+
+    def fake_run_cli(argv, *, out=None):
+        return 1
+
+    monkeypatch.setattr(boot_flow_terminal, "run_cli", fake_run_cli)
+
+    rc = cli.main(["migrate", "run", "--json", "--yes"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert out.strip() == ""  # quiet=True: no bare status line even on failure
+
+
+def test_migrate_run_text_mode_keeps_its_status_line(capsys, monkeypatch):
+    """Non-`--json` callers still get the human "ok: migrate run finished"
+    line — only `--json` opts out of it."""
+    from agent_takkub import boot_flow_terminal
+
+    monkeypatch.setattr(boot_flow_terminal, "run_cli", lambda argv, **k: 0)
+
+    rc = cli.main(["migrate", "run", "--yes"])
+    assert rc == 0
+    assert "ok: migrate run finished" in capsys.readouterr().out
+
+
 def test_migrate_requires_a_subcommand():
     with pytest.raises(SystemExit) as exc:
         cli.main(["migrate"])

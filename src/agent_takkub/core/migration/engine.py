@@ -153,6 +153,7 @@ class MigrationEngine:
         journal: MigrationJournal | None = None,
         on_entry: Callable[[str, str], None] | None = None,
         on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
+        on_step: Callable[[str, str], None] | None = None,
     ) -> None:
         """*on_entry* (#574): best-effort ``(step_id, entry_name)``
         progress observer, forwarded ONLY into the three steps whose
@@ -168,7 +169,21 @@ class MigrationEngine:
         files_done, files_total, current_path)``, for progress WITHIN one
         directory entry's own copy+verify (`on_entry` above only fires
         once per whole entry, not fine-grained enough for a directory
-        holding tens of thousands of files)."""
+        holding tens of thousands of files).
+
+        *on_step* (#574 round12 item 3): best-effort ``(step_id, "start"|
+        "done")`` fired around EVERY ladder step's own copy-apply, in
+        `apply()`/`apply_pending()` below — unlike *on_entry*/
+        *on_file_progress* (bound only into the 3 steps that move real file
+        trees), this fires for every step, so a caller can also observe the
+        8 domain steps (`readonly-registries`, `role-agent`, `capability`,
+        `project`, `state`, `credential-reference`, `runtime-triage`,
+        `core-internal-store`) that otherwise produce zero progress signal
+        at all — they write in one shot, with nothing to report mid-step,
+        so "start" then "done" is the most granular truthful signal
+        available. Stored directly (never per-step-bound like *on_entry*
+        above) since every call site already has `step_id` in hand from
+        its own loop over `self._steps`."""
 
         def _bound(step_id: str) -> Callable[[str], None] | None:
             if on_entry is None:
@@ -182,6 +197,7 @@ class MigrationEngine:
                 step_id, name, done, total, path
             )
 
+        self._on_step = on_step
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
             # Only known when the caller opts in explicitly — a hand-built
@@ -246,6 +262,18 @@ class MigrationEngine:
                     on_file_progress=_bound_file("archive-v1-legacy"),
                 ),
             ]
+
+    def _notify_step(self, step_id: str, kind: str) -> None:
+        """Best-effort `on_step(step_id, "start"|"done")` — never lets an
+        observer failure affect the ladder step it's observing (#574
+        round12 item 3, matching `_notify_entry`'s own swallow-ok
+        contract in `promote_v1.py`)."""
+        if self._on_step is None:
+            return
+        try:
+            self._on_step(step_id, kind)
+        except Exception:
+            return
 
     def step_count(self) -> int:
         """Ladder length — the same step list `validate()` below walks, so
@@ -368,7 +396,9 @@ class MigrationEngine:
                     continue
                 if s.validate().ok:
                     continue
+            self._notify_step(step_id, "start")
             r = self._copy_only_apply(s)
+            self._notify_step(step_id, "done")
             steps_run.append(s)
             reports.append(r)
             if step_id == _PROMOTE_V2_ROOT_STEP_ID:
@@ -532,14 +562,19 @@ class MigrationEngine:
         )
         reports: list[StepReport] = []
         for s in steps:
+            step_id = getattr(s, "step_id", "")
+            self._notify_step(step_id, "start")
             r = self._copy_only_apply(s)
+            self._notify_step(step_id, "done")
             reports.append(r)
             if not r.ok:
                 return reports
         verified = self._downgrade_on_health(steps, reports)
         all_steps, all_reports = steps, verified
         if archive_step is not None and not any(not r.ok for r in verified):
+            self._notify_step(archive_step.step_id, "start")
             archive_report = self._copy_only_apply(archive_step)
+            self._notify_step(archive_step.step_id, "done")
             all_steps = [*steps, archive_step]
             all_reports = [*verified, *self._downgrade_on_health([archive_step], [archive_report])]
         return self._finish_deferred_prune(all_steps, all_reports)

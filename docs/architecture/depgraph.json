@@ -316,6 +316,7 @@
         "agent_takkub.core.migration.journal",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.v2_target",
+        "agent_takkub.core.versioning.store",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_update"
       ],
@@ -324,7 +325,7 @@
         "agent_takkub.boot_flow_window"
       ],
       "fan_in": 2,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.boot_flow_terminal",
@@ -2464,10 +2465,11 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
+        "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
         "agent_takkub.core.migration.steps"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 3
     },
     {

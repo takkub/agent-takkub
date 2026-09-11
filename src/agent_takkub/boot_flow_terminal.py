@@ -42,7 +42,11 @@ def format_progress_line(event: boot_flow.ProgressEvent) -> str:
     (a test, an older serialized event) may not carry them at all."""
     step_part = f"ขั้น {event.phase}/{event.phases_total} {event.phase_label}"
     if event.done is not None and event.total:
-        step_part += f" {event.done}/{event.total}"
+        # #574 round12 (R3-M4): `unit` reads defensively (`getattr`) —
+        # a hand-built/older event may predate the field, same convention
+        # as `files_done`/`files_total` below.
+        unit = getattr(event, "unit", "รายการ")
+        step_part += f" {event.done}/{event.total} {unit}"
     files_done = getattr(event, "files_done", None)
     files_total = getattr(event, "files_total", None)
     if files_done is not None and files_total:
