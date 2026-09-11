@@ -968,17 +968,17 @@ def _boot_main_window() -> MainWindow:
     provider never blocks the cockpit itself from opening; only that
     provider's row reports the failure.
     """
-    from .boot_update_window import boot_update_enabled, run_boot_update_gate
+    from .boot_flow_window import boot_update_enabled, run_boot_flow_gate
 
     if not boot_update_enabled():
-        # No provider-update splash to piggyback a progress surface on
-        # (TAKKUB_BOOT_UPDATE=0, normally a dev/test opt-out) — the
+        # No provider-update/migration wizard to piggyback a progress surface
+        # on (TAKKUB_BOOT_UPDATE=0, normally a dev/test opt-out) — the
         # storage-layout auto-migrate gate (#361) must still run and still
         # finish before MainWindow spawns any pane; only the UI progress
         # surface is skipped, logged to the boot log instead.
         _run_auto_migrate_headless()
         return MainWindow()
-    return run_boot_update_gate(MainWindow)
+    return run_boot_flow_gate(MainWindow)
 
 
 def _run_auto_migrate_headless() -> None:

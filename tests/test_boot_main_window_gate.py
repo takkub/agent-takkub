@@ -1,5 +1,7 @@
 """Tests for app._boot_main_window — the TAKKUB_BOOT_UPDATE on/off switch
-that decides whether MainWindow is gated behind the provider-update splash.
+that decides whether MainWindow is gated behind the boot-flow wizard (#574,
+`boot_flow_window.py` — replaced the old provider-update-only splash in
+`boot_update_window.py`).
 
 Import order note: agent_takkub.app is imported at module level so
 QtWebEngineWidgets loads before any QCoreApplication is created (mirrors
@@ -23,7 +25,7 @@ class TestBootMainWindowGate:
         sentinel = object()
         monkeypatch.setattr(app_mod, "MainWindow", lambda: sentinel)
         gate = MagicMock()
-        monkeypatch.setattr("agent_takkub.boot_update_window.run_boot_update_gate", gate)
+        monkeypatch.setattr("agent_takkub.boot_flow_window.run_boot_flow_gate", gate)
         # #361: no provider-update splash to piggyback progress on, but the
         # storage-layout auto-migrate stage must still run headlessly (never
         # skipped just because the splash is off) — stub it so this test
@@ -41,7 +43,7 @@ class TestBootMainWindowGate:
         monkeypatch.setenv("TAKKUB_BOOT_UPDATE", "0")
         sentinel = object()
         monkeypatch.setattr(app_mod, "MainWindow", lambda: sentinel)
-        monkeypatch.setattr("agent_takkub.boot_update_window.run_boot_update_gate", MagicMock())
+        monkeypatch.setattr("agent_takkub.boot_flow_window.run_boot_flow_gate", MagicMock())
 
         def _boom(progress_cb=None):
             raise RuntimeError("boom")
@@ -54,7 +56,7 @@ class TestBootMainWindowGate:
         monkeypatch.delenv("TAKKUB_BOOT_UPDATE", raising=False)
         sentinel = object()
         gate = MagicMock(return_value=sentinel)
-        monkeypatch.setattr("agent_takkub.boot_update_window.run_boot_update_gate", gate)
+        monkeypatch.setattr("agent_takkub.boot_flow_window.run_boot_flow_gate", gate)
         result = app_mod._boot_main_window()
         assert result is sentinel
         gate.assert_called_once_with(app_mod.MainWindow)
