@@ -25,11 +25,16 @@ dataclass shape, since that interface hadn't shipped yet when this was
 written — see the `takkub send --to backend` note this task ends with for
 the exact assumptions made (phase-key vocabulary, item tuple shapes, the
 version-number fields the mockup shows but the documented interface doesn't
-carry).
+carry, plus this round's additions: ``plan.backup_items`` entries may carry
+an optional 3rd ``unit`` string; ``plan.verify_steps`` is the true
+validation-step count, distinct from ``len(plan.promote_items)``;
+``ProgressEvent.current_path`` names the item actively being processed, for
+the migrating page's active-row counter).
 """
 
 from __future__ import annotations
 
+import html
 import os
 import sys
 from collections.abc import Callable
@@ -164,7 +169,14 @@ class _MigrationWorker(QThread):
 
 
 def _font(family: str, size: int, weight: int = 400) -> QFont:
-    f = QFont(family, size)
+    """`size` is a literal CSS pixel value (the mockup's spec unit) — every
+    call site below already passes the mockup's px number, so this must use
+    `setPixelSize`, never the constructor's point-size overload (round 2's
+    bug: `QFont(family, size)` treats `size` as *points*, which at a typical
+    96 DPI renders ~33% larger than the spec, throwing off wrapping and
+    spacing on every page)."""
+    f = QFont(family)
+    f.setPixelSize(size)
     f.setWeight(QFont.Weight(weight))
     return f
 
@@ -227,6 +239,31 @@ def _fmt_eta(seconds: float | None) -> str:
         return ""
     minutes = max(1, round(seconds / 60))
     return f"เหลืออีกประมาณ {minutes} นาที"
+
+
+def _shorten_current_path(path: str) -> str:
+    """`providers/codex/default` -> `providers/…` (mockup: the active-row
+    counter only ever shows the first path segment, not the full item
+    path — that full detail belongs to the log line below it)."""
+    head, sep, rest = path.partition("/")
+    return f"{head}/…" if sep and rest else path
+
+
+def _parse_log_line(text: str) -> tuple[str, str, str, str]:
+    """Splits a composed `log_line` string (`"08:31:12  promote  providers/
+    codex/default  คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง"`, double-space
+    separated — the shape #574's backend interface produces; there's no
+    structured per-field alternative yet, see module docstring) into the
+    mockup's 4 differently-colored runs: timestamp, operation, current
+    path, explanation. Pads with empty strings on a short/malformed line
+    rather than raising — a log line failing to parse should render as a
+    plain (if under-colored) line, never crash the migration page."""
+    parts = [p for p in text.strip().split("  ") if p]
+    timestamp = parts[0] if len(parts) > 0 else ""
+    operation = parts[1] if len(parts) > 1 else ""
+    path = parts[2] if len(parts) > 2 else ""
+    detail = "  ".join(parts[3:]) if len(parts) > 3 else ""
+    return timestamp, operation, path, detail
 
 
 class _CheckSquare(QWidget):
@@ -327,17 +364,52 @@ class _PhaseDot(QWidget):
             painter.drawEllipse(rect)
             painter.setPen(QColor(theme.TEXT_MUTED))
         font = QFont(self.font())
-        font.setPointSize(11)
+        font.setPixelSize(11)
         font.setWeight(QFont.Weight(700 if self._kind == "active" else 600))
         painter.setFont(font)
         painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self._number)
 
 
+def _draw_warn_triangle(painter: QPainter, size: float, color: str) -> None:
+    """Outline warning-triangle + exclamation mark (mockup's SVG icon,
+    viewBox 24, stroke-width 2.5) scaled to `size` — not the "⚠" text glyph,
+    which tofus on the bundled IBM Plex fonts exactly like the other glyphs
+    `boot_update_window.py` already documents replacing for the same
+    reason. Shared by `_WarnTriangle` (the 16px footer/legend icon) and the
+    failed-page 36px result disk's 20px icon so both trace to one drawing."""
+    scale = size / 24.0
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.5 * scale)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    top, left, right = 3.9 * scale, 1.8 * scale, 22.2 * scale
+    bottom = 21 * scale
+    triangle = [QPointF(12 * scale, top), QPointF(right, bottom), QPointF(left, bottom)]
+    painter.drawPolygon(triangle)
+    painter.drawLine(QPointF(12 * scale, 9 * scale), QPointF(12 * scale, 13 * scale))
+    painter.drawPoint(QPointF(12 * scale, 17 * scale))
+
+
 class _WarnTriangle(QWidget):
-    """Painted outline warning-triangle + exclamation mark (mockup's SVG
-    icon) — not the "⚠" text glyph, which tofus on the bundled IBM Plex
-    fonts exactly like the other glyphs `boot_update_window.py` already
-    documents replacing for the same reason."""
+    """16px painted warning-triangle + "!" — see `_draw_warn_triangle`."""
+
+    def __init__(self, color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._color = color
+        self.setFixedSize(16, 16)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        _draw_warn_triangle(painter, 16, self._color)
+
+
+class _InfoCircle(QWidget):
+    """16px painted outline info-circle + dot/line (mockup's SVG lucide
+    "info" icon, viewBox 24) — same tofu-avoidance reasoning as
+    `_WarnTriangle`."""
 
     def __init__(self, color: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -353,10 +425,9 @@ class _WarnTriangle(QWidget):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        triangle = [QPointF(8, 1.5), QPointF(14.5, 13.5), QPointF(1.5, 13.5)]
-        painter.drawPolygon(triangle)
-        painter.drawLine(QPointF(8, 6), QPointF(8, 9.5))
-        painter.drawPoint(QPointF(8, 11.8))
+        painter.drawEllipse(QPointF(8, 8), 6.5, 6.5)
+        painter.drawLine(QPointF(8, 8.5), QPointF(8, 11))
+        painter.drawPoint(QPointF(8, 5.3))
 
 
 def _styled(widget: QWidget, css: str) -> QWidget:
@@ -418,7 +489,7 @@ def _kv_key_label(key: str, sans: str) -> QLabel:
     key_lbl = QLabel(key)
     key_lbl.setFont(_font(sans, 13))
     key_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
-    key_lbl.setFixedWidth(170)
+    key_lbl.setFixedWidth(150)
     key_lbl.setWordWrap(True)
     key_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
     return key_lbl
@@ -478,6 +549,25 @@ def _kv_row_mixed(key: str, sans: str, *segments: tuple[str, bool]) -> QWidget:
     return row
 
 
+def _kv_row_rich(key: str, sans: str, value_html: str, color: str) -> QWidget:
+    """Like `_kv_row`, but the value is HTML so one inline run (the mono
+    command in the restore-version line) can carry its own font while the
+    rest of the sentence stays `sans`/`color` — needed because `_kv_row`'s
+    `color` only ever paints one uniform tone across the whole value."""
+    row = QWidget()
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(12)
+    lay.addWidget(_kv_key_label(key, sans))
+    val_lbl = QLabel(value_html)
+    val_lbl.setTextFormat(Qt.TextFormat.RichText)
+    val_lbl.setWordWrap(True)
+    val_lbl.setFont(_font(sans, 13))
+    val_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+    lay.addWidget(val_lbl, 1)
+    return row
+
+
 def _footer(sans: str, left: QWidget | str | None, buttons: list[QPushButton]) -> QWidget:
     footer = QWidget()
     _styled(footer, f"border-top: 1px solid {theme.BORDER_CARD};")
@@ -491,7 +581,7 @@ def _footer(sans: str, left: QWidget | str | None, buttons: list[QPushButton]) -
         lbl.setWordWrap(True)
         lay.addWidget(lbl, 1)
     elif left is not None:
-        lay.addWidget(left, 1)
+        lay.addWidget(left, 1, Qt.AlignmentFlag.AlignVCenter)
     else:
         lay.addStretch(1)
     btn_row = QHBoxLayout()
@@ -602,9 +692,13 @@ class BootFlowWindow(QDialog):
 
     # ── header ──────────────────────────────────────────────────
     def _set_header(self, subtitle: str, color: str, percent: int | None) -> None:
+        """The 4px aggregate track is always visible (mockup: A/B show it
+        empty at 0%, C/D/E show it filled) — `percent=None` only means "no
+        new value to apply this call", never "hide the bar"; leaving it out
+        keeps whatever value was last set instead of resetting to 0."""
         self._subtitle_label.setText(subtitle)
         self._subtitle_label.setStyleSheet(f"color: {color};")
-        self._agg_bar.setVisible(percent is not None)
+        self._agg_bar.setVisible(True)
         if percent is not None:
             self._agg_bar.setValue(max(0, min(100, percent)))
 
@@ -750,16 +844,24 @@ class BootFlowWindow(QDialog):
         body_lay.setContentsMargins(20, 12, 20, 0)
         body_lay.setSpacing(12)
 
+        # Heading-to-card gap (6px) is its own group, nested inside the
+        # 12px-spaced outer column alongside the info box and note below —
+        # the mockup's two gap values (6 inside this group, 12 between
+        # groups) aren't the same number, so they can't share one flat
+        # QVBoxLayout.
+        section_group = QVBoxLayout()
+        section_group.setSpacing(6)
         section_lbl = QLabel("จะสำรองข้อมูลก่อนย้าย")
         section_lbl.setFont(_font(self._sans, 12, 600))
-        section_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; letter-spacing: 1px;")
-        body_lay.addWidget(section_lbl)
+        section_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; letter-spacing: 0.48px;")
+        section_group.addWidget(section_lbl)
 
         self._backup_card = _card()
         self._backup_card_lay = QVBoxLayout(self._backup_card)
         self._backup_card_lay.setContentsMargins(0, 0, 0, 0)
         self._backup_card_lay.setSpacing(0)
-        body_lay.addWidget(self._backup_card)
+        section_group.addWidget(self._backup_card)
+        body_lay.addLayout(section_group)
 
         self._backup_info_box = QWidget()
         _styled(self._backup_info_box, f"background: {theme.GROUND_INPUT}; border-radius: 8px;")
@@ -768,23 +870,30 @@ class BootFlowWindow(QDialog):
         self._backup_info_lay.setSpacing(6)
         body_lay.addWidget(self._backup_info_box)
 
-        # ponytail: mockup bolds "คัดลอกก่อนเสมอ" mid-sentence — dropped to a
-        # uniform tone here since this line wraps across 2 lines, and a
-        # QLabel mixing RichText formatting runs paints a stray box behind
-        # the whole label once rendered through a `grab()` from an ancestor
-        # (see `_kv_row`'s docstring); a wrapping multi-line sentence can't
-        # be split into separate per-run QLabels the way `_kv_row_mixed`
-        # does for a short single-line value. Upgrade if a RichText fix
-        # surfaces upstream.
+        note_row = QWidget()
+        note_lay = QHBoxLayout(note_row)
+        note_lay.setContentsMargins(0, 0, 0, 0)
+        note_lay.setSpacing(8)
+        note_icon = _InfoCircle(theme.TEXT_MUTED)
+        note_lay.addWidget(note_icon, 0, Qt.AlignmentFlag.AlignTop)
+        # RichText for the bold "คัดลอกก่อนเสมอ" mid-sentence run. Round-2
+        # dropped this to plain text over a (never actually verified against
+        # RichText) worry that the ancestor-`grab()` stray-box artifact
+        # `_kv_row`'s docstring documents would reappear here; the same
+        # explicit background/border override that fixes it there fixes it
+        # for this wrapped 2-line RichText label too (confirmed by real
+        # render, not just reasoning from that docstring).
         note = QLabel(
-            "ระหว่างย้าย จะคัดลอกก่อนเสมอ "
+            "ระหว่างย้าย จะ"
+            f'<b style="color: {theme.TEXT_PRIMARY};">คัดลอกก่อนเสมอ</b> '
             "และลบของเก่าเฉพาะหลังตรวจสอบครบทุกรายการ — ของเก่าถูกเก็บไว้ใน archive ไม่ถูกลบทิ้ง"
         )
-        note.setTextFormat(Qt.TextFormat.PlainText)
+        note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         note.setFont(_font(self._sans, 12))
-        note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        body_lay.addWidget(note)
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
+        note_lay.addWidget(note, 1)
+        body_lay.addWidget(note_row)
         body_lay.addStretch(1)
 
         outer.addWidget(body, 1)
@@ -810,7 +919,15 @@ class BootFlowWindow(QDialog):
                 w.deleteLater()
         backup_items = list(getattr(plan, "backup_items", []) or [])
         for i, entry in enumerate(backup_items):
-            label, count = (entry[0], entry[1]) if len(entry) >= 2 else (str(entry), 0)
+            # `entry[2]` is the mockup's per-row unit (ไฟล์/โปรเจค/รายการ —
+            # not one blanket "รายการ" for every row); optional 3rd tuple
+            # element so older 2-tuple fixtures/backends still work.
+            if len(entry) >= 3:
+                label, count, unit = entry[0], entry[1], entry[2]
+            elif len(entry) == 2:
+                label, count, unit = entry[0], entry[1], "รายการ"
+            else:
+                label, count, unit = str(entry), 0, "รายการ"
             row = QWidget()
             row_lay = QHBoxLayout(row)
             row_lay.setContentsMargins(14, 8, 14, 8)
@@ -823,7 +940,7 @@ class BootFlowWindow(QDialog):
             )
             row_lay.addWidget(key_lbl)
             row_lay.addStretch(1)
-            val_lbl = QLabel(f"{count:,} รายการ")
+            val_lbl = QLabel(f"{count:,} {unit}")
             val_lbl.setFont(_font(self._mono, 12))
             val_lbl.setStyleSheet(
                 f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
@@ -915,15 +1032,20 @@ class BootFlowWindow(QDialog):
             row_lay.addWidget(lbl)
             count_lbl = QLabel("")
             count_lbl.setFont(_font(self._mono, 12))
-            count_lbl.setStyleSheet(f"color: {theme.TEXT_FAINT};")
+            count_lbl.setStyleSheet(
+                f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
+            )
             self._phase_count_labels[key] = count_lbl
             row_lay.addWidget(count_lbl, 1)
             self._phase_list.addWidget(row)
         body_lay.addLayout(self._phase_list)
 
         self._log_box = QLabel("")
+        self._log_box.setTextFormat(Qt.TextFormat.RichText)
         self._log_box.setFont(_font(self._mono, 11))
-        self._log_box.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent;")
+        self._log_box.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
+        )
         self._log_box.setWordWrap(False)
         log_wrap = QWidget()
         _styled(log_wrap, f"background: {theme.GROUND_INPUT}; border-radius: 6px;")
@@ -940,7 +1062,7 @@ class BootFlowWindow(QDialog):
         warn_lay.setContentsMargins(0, 0, 0, 0)
         warn_lay.setSpacing(8)
         warn_icon = _WarnTriangle(theme.STATE_WARN)
-        warn_lay.addWidget(warn_icon, 0, Qt.AlignmentFlag.AlignTop)
+        warn_lay.addWidget(warn_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         warn_lbl = QLabel("อย่าปิดโปรแกรมระหว่างนี้ — ถ้าปิด ระบบจะกู้คืนให้เองตอนเปิดครั้งถัดไป")
         warn_lbl.setFont(_font(self._sans, 12))
         warn_lbl.setStyleSheet(f"color: {theme.STATE_WARN}; background: transparent; border: none;")
@@ -950,14 +1072,22 @@ class BootFlowWindow(QDialog):
         # both this label and `_migrate_footer_right` clip instead.
         warn_lbl.setWordWrap(True)
         warn_lbl.setFixedWidth(340)
-        warn_lay.addWidget(warn_lbl)
+        warn_lay.addWidget(warn_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Both children are fixed-size and neither has a stretch factor, so
+        # without this, `warn_wrap`'s own stretch (below, against
+        # `_migrate_footer_right`) leaves leftover width *inside* warn_lay
+        # too — Qt then spreads that leftover on both sides of each item
+        # instead of packing them at the left (confirmed empirically: the
+        # icon rendered ~25px right of x=0 without this stretch anchor).
+        warn_lay.addStretch(1)
         self._migrate_warn_label = warn_lbl
         self._migrate_footer_right = QLabel("")
         self._migrate_footer_right.setFont(_font(self._sans, 12))
         self._migrate_footer_right.setStyleSheet(
             f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
         )
-        self._migrate_footer_right.setMaximumWidth(190)
+        self._migrate_footer_right.setWordWrap(True)
+        self._migrate_footer_right.setMaximumWidth(220)
         self._migrate_footer_right.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -966,27 +1096,27 @@ class BootFlowWindow(QDialog):
         # `_footer()` builds it since that helper's `left` slot takes the
         # warning instead here (mirrors the mockup's two-sided footer).
         footer_widget = outer.itemAt(outer.count() - 1).widget()
-        footer_widget.layout().addWidget(self._migrate_footer_right)
+        footer_widget.layout().addWidget(
+            self._migrate_footer_right, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         return page
 
     def _set_footer_right_elided(self, text: str) -> None:
-        """Elides from the left (mockup: `…/pre-migrate-2026-09-11-0832/`) so
-        a long backup path never overflows the fixed-width footer slot —
-        the meaningful tail (the timestamped dir name) stays visible instead
-        of the fixed `สำรองไว้ที่` prefix."""
-        metrics = self._migrate_footer_right.fontMetrics()
-        elided = metrics.elidedText(
-            text, Qt.TextElideMode.ElideLeft, self._migrate_footer_right.maximumWidth()
-        )
-        self._migrate_footer_right.setText(elided)
-        self._migrate_footer_right.setToolTip(text)
+        """Wraps rather than elides (the mockup has no ellipsis rule here) —
+        the full backup path stays readable across up to a couple of lines
+        instead of losing its `สำรองไว้ที่` prefix or its timestamped
+        directory name to a fixed-width single-line clip. Name kept for
+        callers/tests; behavior is "wrap", not "elide"."""
+        self._migrate_footer_right.setText(text)
 
     def _set_phase_row_kind(self, key: str, kind: str) -> None:
-        """Matches the mockup: the active row's label goes bold+bright,
-        done/todo stay muted — only the dot (`_PhaseDot`) painted the
-        active/done distinction before this, leaving every label the same
-        dim gray regardless of state."""
+        """Matches the mockup: the active row's label AND its right-hand
+        count both go bright (label bold+`TEXT_PRIMARY_ALT`, count
+        `TEXT_PRIMARY`); done/todo stay muted/faint — only the dot
+        (`_PhaseDot`) painted the active/done distinction before this,
+        leaving every label/count the same dim gray regardless of state."""
         lbl = self._phase_labels.get(key)
+        count_lbl = self._phase_count_labels.get(key)
         if lbl is None:
             return
         if kind == "active":
@@ -994,23 +1124,43 @@ class BootFlowWindow(QDialog):
             lbl.setStyleSheet(
                 f"color: {theme.TEXT_PRIMARY_ALT}; font-weight: 600; background: transparent; border: none;"
             )
+            if count_lbl is not None:
+                count_lbl.setStyleSheet(
+                    f"color: {theme.TEXT_PRIMARY}; background: transparent; border: none;"
+                )
         else:
             lbl.setFont(_font(self._sans, 13))
             lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
+            if count_lbl is not None:
+                count_lbl.setStyleSheet(
+                    f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
+                )
 
     def _start_migration(self) -> None:
         self._next_phase_slot = 0
-        for key, _ in _PHASE_ORDER:
-            self._phase_rows[key].set_state("todo", "")
+        for i, (key, _) in enumerate(_PHASE_ORDER):
+            self._phase_rows[key].set_state("todo", str(i + 1))
             self._set_phase_row_kind(key, "todo")
         plan = self._plan
         if plan is not None:
-            self._phase_count_labels["verify"].setText(
-                f"{len(getattr(plan, 'promote_items', []) or [])} ขั้น"
-            )
+            # `plan.verify_steps` — optional, not in the documented
+            # interface yet (see module docstring): the true validation
+            # step count, distinct from `len(promote_items)` (the promoted
+            # *category* count, a different number in the mockup — 9
+            # categories, 11 validation steps). Falls back to the category
+            # count only so this never crashes ahead of the field landing.
+            verify_steps = getattr(plan, "verify_steps", None)
+            if verify_steps is None:
+                verify_steps = len(getattr(plan, "promote_items", []) or [])
+            self._phase_count_labels["verify"].setText(f"{verify_steps} ขั้น")
             self._phase_count_labels["archive"].setText(
                 f"{len(getattr(plan, 'archive_items', []) or [])} รายการ"
             )
+        self._set_header(
+            f"กำลังย้ายข้อมูลเป็นโครงใหม่ ({_app_version()}) — ขั้นตอน 1 จาก {len(_PHASE_ORDER)}",
+            theme.TEXT_MUTED,
+            0,
+        )
         signals = _MigrationSignals(self)
         signals.progress.connect(self._on_progress)
         self._migrate_pending_event = None
@@ -1036,7 +1186,6 @@ class BootFlowWindow(QDialog):
             self._last_percent = int(percent)
             self._pct_label.setText(f"{int(percent)}%")
             self._migrate_bar.setValue(int(percent))
-            self._agg_bar.setValue(int(percent))
         eta = _fmt_eta(getattr(event, "eta_s", None))
         if eta:
             self._eta_label.setText(eta)
@@ -1053,17 +1202,42 @@ class BootFlowWindow(QDialog):
                 self._phase_rows[key].set_state("active", str(idx + 1))
                 self._set_phase_row_kind(key, "active")
             else:
-                self._phase_rows[key].set_state("todo")
+                self._phase_rows[key].set_state("todo", str(i + 1))
                 self._set_phase_row_kind(key, "todo")
         self._next_phase_slot = max(self._next_phase_slot, idx + 1)
+        self._set_header(
+            f"กำลังย้ายข้อมูลเป็นโครงใหม่ ({_app_version()}) — ขั้นตอน {idx + 1} จาก {len(_PHASE_ORDER)}",
+            theme.TEXT_MUTED,
+            int(percent) if percent is not None else None,
+        )
         done = getattr(event, "done", None)
         total = getattr(event, "total", None)
         unit = getattr(event, "unit", "") or ""
         if done is not None and total is not None:
-            self._phase_count_labels[phase_key].setText(f"{done:,} / {total:,} {unit}".strip())
+            count_text = f"{done:,} / {total:,} {unit}".strip()
+            # `current_path` — optional, not in the documented interface yet
+            # (see module docstring): the mockup only appends the "· providers/…"
+            # segment to the row that's actively running.
+            current_path = getattr(event, "current_path", None)
+            if current_path:
+                count_text += f" · {_shorten_current_path(str(current_path))}"
+            self._phase_count_labels[phase_key].setText(count_text)
         log_line = getattr(event, "log_line", None)
         if log_line:
-            self._log_box.setText(str(log_line))
+            timestamp, operation, path, detail = _parse_log_line(str(log_line))
+            spans = [
+                (timestamp, theme.TEXT_FAINT),
+                (operation, theme.TEXT_MUTED),
+                (path, theme.TEXT_PRIMARY),
+                (detail, theme.TEXT_MUTED),
+            ]
+            self._log_box.setText(
+                "&nbsp;&nbsp;".join(
+                    f'<span style="color: {color};">{html.escape(text)}</span>'
+                    for text, color in spans
+                    if text
+                )
+            )
         backup_dir = getattr(event, "backup_dir", None)
         if backup_dir:
             self._set_footer_right_elided(f"สำรองไว้ที่ {backup_dir}")
@@ -1131,18 +1305,31 @@ class BootFlowWindow(QDialog):
         self._done_open_btn = _primary_button("เปิดโปรแกรม", self._sans)
         self._done_log_btn.clicked.connect(lambda: self._open_first_log(self._outcome))
         self._done_open_btn.clicked.connect(self._on_done_open_clicked)
-        outer.addWidget(
-            _footer(
-                self._sans,
-                "ดูรายละเอียดได้ที่ Settings → Storage",
-                [self._done_log_btn, self._done_open_btn],
-            )
+        done_hint = QLabel(
+            f'ดูรายละเอียดได้ที่ <span style="color: {theme.TEXT_MUTED};">Settings → Storage</span>'
         )
+        done_hint.setTextFormat(Qt.TextFormat.RichText)
+        done_hint.setFont(_font(self._sans, 12))
+        done_hint.setStyleSheet(
+            f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
+        )
+        done_hint.setWordWrap(True)
+        outer.addWidget(_footer(self._sans, done_hint, [self._done_log_btn, self._done_open_btn]))
         return page
 
     def _show_done(self, outcome: Any) -> None:
         self._set_header(f"ย้ายข้อมูลเสร็จแล้ว — พร้อมเปิดใช้งาน {_app_version()}", theme.STATE_OK, 100)
-        self._done_heading.setText("ตรวจสอบครบทุกขั้น — ไม่มีข้อมูลหาย")
+        # `validated_steps` — optional, not in the documented interface yet
+        # (see module docstring's backend-assumptions note): the mockup
+        # folds the count straight into this heading, not a separate
+        # summary row, so an outcome that predates the field just falls
+        # back to the old unqualified wording.
+        validated_steps = getattr(outcome, "validated_steps", None)
+        self._done_heading.setText(
+            f"ตรวจสอบครบ {validated_steps} ขั้น — ไม่มีข้อมูลหาย"
+            if validated_steps is not None
+            else "ตรวจสอบครบทุกขั้น — ไม่มีข้อมูลหาย"
+        )
         duration = _fmt_duration(getattr(outcome, "duration_s", None))
         self._done_sub.setText(f"ใช้เวลา {duration}" if duration else "")
 
@@ -1176,15 +1363,6 @@ class BootFlowWindow(QDialog):
                     color=theme.STATE_OK,
                 )
             )
-        # Optional — not in the documented interface yet (see module
-        # docstring's backend-assumptions note), so absent on any outcome
-        # that predates it.
-        validated_steps = getattr(outcome, "validated_steps", None)
-        if validated_steps is not None:
-            self._done_summary_lay.addWidget(
-                _kv_row("ตรวจสอบ", f"ครบ {validated_steps} ขั้น", self._sans, color=theme.STATE_OK)
-            )
-
         while self._done_paths_lay.count():
             child = self._done_paths_lay.takeAt(0)
             w = child.widget()
@@ -1206,12 +1384,16 @@ class BootFlowWindow(QDialog):
         # `_done_paths_box`'s width, and `_kv_row_mixed`'s segments (each
         # `QSizePolicy.Fixed`) can't reflow — they'd rather silently clip
         # mid-word (as `note`'s docstring already found for RichText) than
-        # wrap. Costs the command's monospace styling; keeps the text intact
-        # for any length of `prev`.
-        restore_text = "รัน takkub migrate restore-v1"
+        # wrap: RichText (see `_kv_row_rich`) rather than plain text, so the
+        # command keeps its mono styling inline without `_kv_row_mixed`'s
+        # fixed-width segments, which can't reflow and would clip mid-word
+        # for a long `prev` instead.
+        restore_html = f"รัน <span style=\"font-family: '{self._mono}'; font-size: 12px;\">takkub migrate restore-v1</span>"
         if prev:
-            restore_text += f" ก่อนติดตั้ง {prev}"
-        self._done_paths_lay.addWidget(_kv_row("ถ้าต้องกลับเวอร์ชันเดิม", restore_text, self._sans))
+            restore_html += f" ก่อนติดตั้ง {html.escape(str(prev))}"
+        self._done_paths_lay.addWidget(
+            _kv_row_rich("ถ้าต้องกลับเวอร์ชันเดิม", self._sans, restore_html, theme.TEXT_MUTED)
+        )
 
         self._show_page(PAGE_DONE, subtitle_only=True)
 
@@ -1509,6 +1691,26 @@ class BootFlowWindow(QDialog):
             return
         super().closeEvent(event)
 
+    def reject(self) -> None:
+        """QDialog's Escape-key handling calls `reject()` directly — it
+        does NOT go through `closeEvent` (`reject()` -> `done()` skips it
+        entirely), so `closeEvent`'s guard above never sees an Escape press.
+        Round-2 missed this: Escape during a real migration worker closed
+        the dialog and `done()` (below) emitted `flowFinished(True)`,
+        letting the gate build the cockpit while the worker was still
+        running (#574 fix-loop round 3, B1)."""
+        if self._stack.currentIndex() == PAGE_MIGRATING:
+            return
+        super().reject()
+
+    def accept(self) -> None:
+        """Same guard as `reject()`, for symmetry — nothing in this module
+        currently calls `accept()` while on the migrating page, but a
+        future completion path shouldn't have to remember this rule too."""
+        if self._stack.currentIndex() == PAGE_MIGRATING:
+            return
+        super().accept()
+
     def done(self, result: int) -> None:
         super().done(result)
         self.flowFinished.emit(self._proceed)
@@ -1532,12 +1734,10 @@ def _circle_icon(bg: str, check: bool = False, warn: bool = False) -> QWidget:
                 painter.drawLine(cx - 6, cy, cx - 2, cy + 5)
                 painter.drawLine(cx - 2, cy + 5, cx + 7, cy - 6)
             elif warn:
-                pen = QPen(QColor(theme.STATE_ERROR_BRIGHT))
-                pen.setWidth(2)
-                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                painter.setPen(pen)
-                painter.drawLine(cx, cy - 6, cx, cy + 1)
-                painter.drawPoint(cx, cy + 5)
+                painter.save()
+                painter.translate(cx - 10, cy - 10)
+                _draw_warn_triangle(painter, 20, theme.STATE_ERROR_BRIGHT)
+                painter.restore()
 
     icon = _Icon()
     icon.setFixedSize(36, 36)
