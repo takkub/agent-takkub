@@ -85,7 +85,11 @@ class TestDiskGate:
         runtime.mkdir(parents=True)
         (runtime / "a.txt").write_bytes(b"x" * 100)
         (runtime / "b.txt").write_bytes(b"y" * 50)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 150
+        # #574: `pre-migrate-backup` copies this SAME content a second
+        # time before promote/archive do — the estimate doubles the base
+        # walk to account for it (see `_estimate_copy_bytes`'s own
+        # docstring).
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 300
 
     def test_room_available_passes(self) -> None:
         assert auto_migrate_boot._disk_has_room(config.DATA_HOME) is True
@@ -769,7 +773,12 @@ class TestPromoteBootFailureHandling:
         assert result.action == "pending_rolled_back"
         assert list(data_home.rglob("only-copy.json"))
         assert not (data_home / "state" / "only-copy.json").exists()
-        assert not (data_home / "backups").exists()
+        # `archive-v1-legacy` must never have run in this same pass — #574's
+        # `pre-migrate-backup` legitimately DOES create `backups/pre-migrate-
+        # <ts>/` on this fixture (it has real V1 content), so check for the
+        # ABSENCE of an archive generation specifically, not of `backups/`
+        # itself.
+        assert not list(data_home.glob("backups/v1-archive-*"))
 
     def test_disk_gate_runs_on_the_mixed_pending_path_too(
         self, monkeypatch: pytest.MonkeyPatch
@@ -803,7 +812,8 @@ class TestPromoteBootFailureHandling:
         data_home = config.DATA_HOME
         (data_home / "v2" / "models").mkdir(parents=True)
         (data_home / "v2" / "models" / "large.bin").write_bytes(b"x" * 4096)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096
+        # #574: doubled — `pre-migrate-backup` copies this content too.
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 4096 * 2
 
     def test_disk_estimate_counts_archive_only_candidates(self) -> None:
         """#504 R2-H3 `disk_archive_inventory`: a fixture with ONLY a V1
@@ -813,7 +823,8 @@ class TestPromoteBootFailureHandling:
         data_home = config.DATA_HOME
         (data_home / "unmapped-legacy").mkdir(parents=True)
         (data_home / "unmapped-legacy" / "large.bin").write_bytes(b"x" * 8192)
-        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192
+        # #574: doubled — `pre-migrate-backup` copies this content too.
+        assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192 * 2
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
                 auto_migrate_boot.shutil,

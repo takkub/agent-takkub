@@ -3163,6 +3163,48 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     from .core.migration.report import StepReport
 
     archive_step = engine.get_step("archive-v1-legacy")
+    promote_step = engine.get_step("promote-v2-root")
+
+    # #574 round8 R8-P1: restore-v1 gets the same per-entry ProgressEvent-
+    # shaped feedback `migrate run`'s forward apply already has — a
+    # multi-thousand-file restore used to run silent for the better part of
+    # an hour with nothing on screen. `--json`'s stdout contract for every
+    # `migrate` subcommand is already "the whole output is one JSON array
+    # of reports" (existing tests parse it that way) — progress lines go to
+    # STDERR instead, one JSON object per line, so charting per-phase
+    # timing (`--json 2>timing.jsonl`) never has to compete with that.
+    json_mode = bool(getattr(args, "json", False))
+    _restore_started = time.monotonic()
+    _restore_done = 0
+
+    def _stderr_json(payload: dict) -> None:
+        print(json.dumps(payload), file=sys.stderr, flush=True)
+
+    def _on_restore_entry(name: str) -> None:
+        nonlocal _restore_done
+        _restore_done += 1
+        elapsed = time.monotonic() - _restore_started
+        if json_mode:
+            _stderr_json(
+                {"type": "restore_entry", "name": name, "done": _restore_done, "elapsed_s": elapsed}
+            )
+        else:
+            print(f"\rrestore-v1: {_restore_done} รายการ · {elapsed:.0f}s", end="", flush=True)
+
+    def _emit_restore_phase(phase: str, **extra: object) -> None:
+        if json_mode:
+            _stderr_json(
+                {
+                    "type": "restore_phase",
+                    "phase": phase,
+                    "elapsed_s": time.monotonic() - _restore_started,
+                    **extra,
+                }
+            )
+
+    archive_step.on_entry = _on_restore_entry
+    promote_step.on_entry = _on_restore_entry
+
     archive_ts = getattr(args, "archive_ts", None)
     if archive_ts is not None:
         generations = [archive_ts]
@@ -3226,19 +3268,46 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     # with only some of the requested generations applied.
     reports = []
     for ts in generations:
+        _emit_restore_phase("archive-v1-legacy", archive_ts=ts)
         r = archive_step.rollback(archive_ts=ts)
         reports.append(r)
         if not r.ok:
+            if not json_mode:
+                print()  # move past the \r progress line
             return _revert(reports)
 
     # #504 round4 R4-H7: `promote-v2-root`'s own rollback is part of the
     # SAME all-or-nothing command — a failure here must also revert every
     # archive generation this call just restored, not just its own half.
+    _emit_restore_phase("promote-v2-root")
     promote_report = engine.rollback_step("promote-v2-root")
     reports.append(promote_report)
+    if not json_mode and _restore_done:
+        print()  # move past the \r progress line
+    _emit_restore_phase("done", ok=promote_report.ok)
     if not promote_report.ok:
         return _revert(reports)
     return reports
+
+
+def cmd_migrate_run(args: argparse.Namespace) -> dict:
+    """`takkub migrate run` (#574) — the interactive boot flow (provider
+    updates + migrate, with progress) outside the Qt cockpit. Thin
+    argv-forwarding shim: `boot_flow_terminal.run_cli` owns the real
+    argparse/rendering so it stays independently runnable and testable."""
+    from . import boot_flow_terminal
+
+    argv = ["--providers", args.providers]
+    if args.remember:
+        argv.append("--remember")
+    if args.yes:
+        argv.append("--yes")
+    if args.no_backup:
+        argv.append("--no-backup")
+    if args.json:
+        argv.append("--json")
+    code = boot_flow_terminal.run_cli(argv)
+    return {"ok": code == 0, "msg": "migrate run finished" if code == 0 else "migrate run failed"}
 
 
 def cmd_migrate(args: argparse.Namespace) -> dict:
@@ -3251,6 +3320,13 @@ def cmd_migrate(args: argparse.Namespace) -> dict:
     from .core.migration.promote_v1 import list_v1_archives
 
     engine = MigrationEngine()
+
+    if args.migrate_cmd == "restore-v1" and getattr(args, "from_backup", None):
+        from .core.migration.pre_migrate_backup import restore_from_backup_dir
+
+        report = restore_from_backup_dir(Path(args.from_backup), config.DATA_HOME)
+        _utf8_print(("✓ " if report.ok else "✗ ") + report.summary)
+        return {"ok": report.ok, "msg": report.summary}
 
     if args.migrate_cmd == "restore-v1" and getattr(args, "list_archives", False):
         archives = list_v1_archives(config.DATA_HOME)
@@ -5490,7 +5566,29 @@ def main(argv: list[str] | None = None) -> int:
                 help="list available v1-archive-<ts> generations and exit, without "
                 "restoring anything",
             )
+            _p.add_argument(
+                "--from-backup",
+                dest="from_backup",
+                default=None,
+                metavar="DIR",
+                help="#574: restore from a pre-migrate-backup/ directory instead of the "
+                "normal v1-archive-<ts> generation walk — an alternate recovery path",
+            )
         _p.set_defaults(func=cmd_migrate)
+
+    srun = smig_sub.add_parser(
+        "run",
+        help="#574: interactive boot flow (provider updates + migrate) with progress, "
+        "outside the Qt cockpit",
+    )
+    srun.add_argument("--providers", default="ask", help="ask|all|none|<csv of provider names>")
+    srun.add_argument("--remember", action="store_true", help="remember this provider choice")
+    srun.add_argument("--yes", action="store_true", help="skip the pre-migrate confirm prompt")
+    srun.add_argument(
+        "--no-backup", action="store_true", help="DANGEROUS: skip the pre-migrate backup"
+    )
+    srun.add_argument("--json", action="store_true", help="emit JSON lines instead of text screens")
+    srun.set_defaults(func=cmd_migrate_run)
 
     sprv = sub.add_parser(
         "provider",

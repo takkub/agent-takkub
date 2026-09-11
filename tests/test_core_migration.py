@@ -199,14 +199,16 @@ class _FakeStep:
 
 
 def test_engine_default_steps_starts_with_version_marker(tmp_path, monkeypatch):
-    """The default ladder (#309 Phase 8b, plan §5.3, + #504's promote pair)
-    is version-marker + promote-v2-root + the 7 V1->V2 steps + archive-v1-
-    legacy, in risk order — version-marker stays first since it predates the
-    ladder and other code (doctor) depends on it running; promote-v2-root
-    comes right after it (before any V1->V2 step's validate() runs in the
-    same pass — see `core.migration.promote_v1`'s module docstring) and
-    archive-v1-legacy stays last (every step above needs its V1 source still
-    on disk to read from)."""
+    """The default ladder (#309 Phase 8b, plan §5.3, + #504's promote pair,
+    + #574's pre-migrate-backup) is pre-migrate-backup + version-marker +
+    promote-v2-root + the 7 V1->V2 steps + archive-v1-legacy, in risk order
+    — pre-migrate-backup runs FIRST of all (a failed backup must abort the
+    whole ladder before anything else is touched, achieved purely by ladder
+    POSITION); version-marker predates the ladder and other code (doctor)
+    depends on it running; promote-v2-root comes right after it (before any
+    V1->V2 step's validate() runs in the same pass — see `core.migration
+    .promote_v1`'s module docstring) and archive-v1-legacy stays last
+    (every step above needs its V1 source still on disk to read from)."""
     monkeypatch.setattr(
         "agent_takkub.core.migration.steps.version_doc_path", lambda: tmp_path / "version.json"
     )
@@ -214,9 +216,10 @@ def test_engine_default_steps_starts_with_version_marker(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", tmp_path / "settings_home")
     engine = MigrationEngine()
     reports = engine.inspect()
-    assert len(reports) == 11
-    assert reports[0].step_id == "version-marker"
-    assert [r.step_id for r in reports[1:]] == [
+    assert len(reports) == 12
+    assert reports[0].step_id == "pre-migrate-backup"
+    assert reports[1].step_id == "version-marker"
+    assert [r.step_id for r in reports[2:]] == [
         "promote-v2-root",
         "readonly-registries",
         "role-agent",
@@ -706,7 +709,14 @@ def test_core_internal_store_step_never_copies_journal_or_backups(tmp_path):
     target = data_home / "system"
 
     excluded = set(step.inspect().detail["excluded"])
-    assert excluded == {"migration_journal.jsonl", "migration_backups"}
+    # #574: `pre-migrate-backup`'s own marker/WAL files live in this SAME
+    # source directory (`RUNTIME_DIR/core`) for the identical reason.
+    assert excluded == {
+        "migration_journal.jsonl",
+        "migration_backups",
+        "pre-migrate-backup-dir.txt",
+        "pre-migrate-backup-wal.json",
+    }
 
     report = step.apply()
     assert report.ok, report.summary
@@ -927,9 +937,8 @@ def test_core_internal_store_step_reapply_never_clobbers_version_marker(tmp_path
         second_reports = engine.apply()
         assert all(r.ok for r in second_reports), [(r.step_id, r.summary) for r in second_reports]
 
-        version_marker_report = second_reports[0]
+        version_marker_report = next(r for r in second_reports if r.step_id == "version-marker")
         core_internal_report = next(r for r in second_reports if r.step_id == "core-internal-store")
-        assert version_marker_report.step_id == "version-marker"
         assert version_marker_report.ok, version_marker_report.summary
         assert core_internal_report.ok, core_internal_report.summary
 
