@@ -851,6 +851,42 @@ def test_promote_survives_a_crash_right_after_a_real_source_removal(
     assert (data_home / "v2" / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
 
 
+def test_promote_resume_recopies_a_verified_target_an_earlier_crash_deleted(
+    tmp_path, journal_backups
+):
+    """#504 round5 R5-B1 (`copy_undo_crash_direct`): a resumed `VERIFIED`
+    WAL record is a durability CLAIM, not proof. A crash inside an
+    earlier attempt's own copy-failure undo — after the destination was
+    rolled back but before the WAL itself was cleared — leaves the WAL
+    still claiming VERIFIED for a target that no longer exists. Before
+    this fix `_copy_phase` trusted `state == VERIFIED` outright and
+    skipped the copy on resume, so `prune()` then removed the source
+    too, ending with ZERO copies anywhere. It must re-verify the
+    target's own recorded checksum before ever trusting VERIFIED."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "a.json").write_text("A", encoding="utf-8")
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+
+    assert step.apply_copy_only().ok
+    target = data_home / "models" / "a.json"
+    assert target.read_text(encoding="utf-8") == "A"
+
+    # Simulate the crash window directly: the WAL still names this entry
+    # VERIFIED (never reached its own `ledger.clear()`), but the target
+    # an earlier, interrupted undo already deleted is gone.
+    target.unlink()
+
+    resumed = step.apply_copy_only()
+    assert resumed.ok, resumed.summary
+    assert target.read_text(encoding="utf-8") == "A"
+
+    assert step.prune().ok
+    assert (data_home / "models" / "a.json").read_text(encoding="utf-8") == "A"
+    assert not (data_home / "v2" / "models" / "a.json").exists()
+
+
 def test_restore_v1_refuses_when_an_archived_member_is_missing(tmp_path, journal_backups):
     """#504 R2-H1/H2 residual: `ArchiveV1LegacyStep.rollback()` used to skip
     a missing archived member per-entry (`if not src.exists(): continue`)
@@ -1146,6 +1182,44 @@ def test_promote_validate_detects_a_missing_promoted_file(tmp_path, journal_back
     report = step.validate()
     assert not report.ok
     assert "unique-extra.json" in report.summary
+
+
+def test_promote_validate_detects_a_corrupted_promoted_json_target(tmp_path, journal_backups):
+    """#504 round5 R5-H2 (`promoted_target_integrity`, #568 item 1): the
+    promote manifest records a per-file sha256/JSON-shape at commit time,
+    but `validate()` used to check only `is_file()` — a promoted target
+    silently corrupted into garbage still validated green forever."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "registry.json").write_text(
+        json.dumps({"real": "data"}), encoding="utf-8"
+    )
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    assert step.validate().ok
+
+    (data_home / "models" / "registry.json").write_text("CORRUPTED-NOT-JSON", encoding="utf-8")
+
+    report = step.validate()
+    assert not report.ok
+    assert "registry.json" in report.summary
+
+
+def test_promote_validate_never_requires_json_from_a_file_that_never_was(tmp_path, journal_backups):
+    """#504 round5 R5-H2 regression guard: not every promoted V1 leftover
+    is a real registry — a `*.json`-named file that was never valid JSON
+    to begin with (an arbitrary leftover, not a domain-managed target)
+    must keep validating on presence alone, exactly like before this
+    fix, never start failing just because the new JSON-readability check
+    exists."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "v2" / "models").mkdir(parents=True)
+    (data_home / "v2" / "models" / "not-json.json").write_text("not json at all", encoding="utf-8")
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    assert step.validate().ok  # never was JSON — still just a presence check
 
 
 def test_archive_validate_detects_a_generation_with_a_missing_manifest(tmp_path, journal_backups):

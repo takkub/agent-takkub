@@ -409,12 +409,29 @@ class MigrationEngine:
         NO step in it prunes — every V1 source copy-verified this pass
         stays fully intact, safely retryable next pass, matching #504's
         own Pass-1/Pass-2 contract (never delete until the whole ladder
-        validates)."""
+        validates).
+
+        #504 round5 R5-H1: that gate only decides whether pass 2 STARTS.
+        Once started, a step's own `prune()` can itself fail (a denied
+        removal, recorded DUPLICATE) partway through the loop — every
+        LATER step in this SAME pass must stop pruning too, never keep
+        deleting further V1 sources on top of an already-half-failed
+        pass. Every step at and after the failure keeps its pass-1 report
+        untouched (its own `prune()` never ran), so its V1 source stays
+        fully intact, retryable next pass, exactly like the whole-pass
+        gate above already guarantees for a pass-1 failure."""
         if any(not r.ok for r in reports):
             return list(reports)
         out: list[StepReport] = []
+        stopped = False
         for s, r in zip(steps, reports, strict=True):
-            out.append(s.prune() if self._prune_deferred(s) else r)
+            if stopped or not self._prune_deferred(s):
+                out.append(r)
+                continue
+            pruned = s.prune()
+            out.append(pruned)
+            if not pruned.ok:
+                stopped = True
         return out
 
     def rollback_step(self, step_id: str) -> StepReport:

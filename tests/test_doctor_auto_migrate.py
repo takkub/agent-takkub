@@ -130,6 +130,70 @@ class TestMixedLayoutStateFinding:
         assert "dev checkout" in f.detail
 
 
+class TestPendingDuplicateFinding:
+    """#504 round5 R5-M1 (`duplicate_doctor_visibility`): `_prune_failure_
+    summary` tells the operator a denied prune left a named DUPLICATE and
+    that `takkub doctor --storage-layout` surfaces it — before this fix
+    nothing here ever read either manifest, so the only signal was the
+    generic mixed-layout WARN, which names no file and is downgraded to
+    OK on a dev checkout."""
+
+    def _apply_with_denied_state_prune(self) -> None:
+        from unittest.mock import patch
+
+        import agent_takkub.core.migration.promote_v1 as promote_mod
+        from agent_takkub.core.migration.backup import BackupManager
+        from agent_takkub.core.migration.journal import MigrationJournal
+        from agent_takkub.core.storage.jsonl_store import JsonlStore
+
+        (config.DATA_HOME / "v2" / "models").mkdir(parents=True)
+        (config.DATA_HOME / "v2" / "models" / "a.json").write_text("A", encoding="utf-8")
+        (config.DATA_HOME / "v2" / "state").mkdir(parents=True)
+        (config.DATA_HOME / "v2" / "state" / "b.json").write_text("B", encoding="utf-8")
+        journal = MigrationJournal(JsonlStore(config.DATA_HOME.parent / "journal.jsonl"))
+        backups = BackupManager(config.DATA_HOME.parent / "step-backups")
+        step = promote_mod.PromoteV2RootStep(
+            journal=journal, backups=backups, data_home=config.DATA_HOME
+        )
+        real_remove = promote_mod._remove
+        denied = config.DATA_HOME / "v2" / "state"
+
+        def _deny(path):
+            if path == denied:
+                raise PermissionError("prune denied")
+            return real_remove(path)
+
+        with patch.object(promote_mod, "_remove", side_effect=_deny):
+            report = step.apply()
+        assert not report.ok
+        assert "DUPLICATE" in report.summary
+
+    def test_pending_duplicate_reports_warn_naming_the_file(self) -> None:
+        self._apply_with_denied_state_prune()
+        findings = doctor.check_storage_layout_state()
+        warns = [f for f in findings if f.name == "duplicate"]
+        assert warns, [f.name for f in findings]
+        assert warns[0].status == doctor.Status.WARN
+        assert "b.json" in warns[0].detail
+        assert "DUPLICATE" in warns[0].detail
+
+    def test_pending_duplicate_reports_even_on_a_dev_checkout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dev checkout downgrades the generic mixed-layout WARN to OK
+        (`TestMixedLayoutStateFinding`) — the duplicate-specific finding
+        must stay a WARN regardless, since a live checkout with a pending
+        DUPLICATE is just as broken as an installed one."""
+        monkeypatch.setattr(config, "REPO_ROOT", config.DATA_HOME)
+        self._apply_with_denied_state_prune()
+        f = _finding(name="duplicate")
+        assert f.status == doctor.Status.WARN
+
+    def test_no_duplicate_omits_the_finding(self) -> None:
+        findings = doctor.check_storage_layout_state()
+        assert not [f for f in findings if f.name == "duplicate"]
+
+
 class TestV2AuthorityRetirementFinding:
     """#504 cut half: dual-write/v1-only-write drift telemetry is gone
     (nothing left to compare — every domain reads/writes its `v2/` target

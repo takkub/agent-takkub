@@ -321,7 +321,34 @@ class TransferEntry:
             "path": self.name,
             "state": state,
             "sha256": digests or {},
+            "json": self._committed_json_shape(),
         }
+
+    def _committed_json_shape(self) -> dict[str, bool]:
+        """Which of this entry's own ``.json``-named files parse as JSON
+        RIGHT NOW, at commit time (#504 round5 R5-H2) — recorded once so a
+        later `validate()` can require a promoted/archived target to STAY
+        JSON-readable forever WITHOUT assuming every promoted file was
+        ever meant to be JSON-shaped: an arbitrary V1 leftover (never
+        real registry data) gets promoted right alongside genuine
+        registries, and `_committed_target_problems` must never flag one
+        of those as broken just because it never was valid JSON to begin
+        with."""
+        targets = (
+            [(self.name, self.dest)]
+            if self.kind == "file"
+            else [(rel, self.dest / rel) for rel in self.paths]
+        )
+        shape: dict[str, bool] = {}
+        for rel, path in targets:
+            if not rel.endswith(".json") or not path.is_file():
+                continue
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+                shape[rel] = True
+            except (OSError, ValueError):
+                shape[rel] = False
+        return shape
 
     def restore_source_from_dest(self) -> list[str]:
         """Self-heal ONLY the files `paths` recorded that are no longer at
@@ -424,6 +451,53 @@ def _entry_from_wal(rec: dict) -> TransferEntry:
     )
 
 
+def _verified_target_intact(entry: TransferEntry, rec: dict) -> bool:
+    """A resumed `VERIFIED` ledger record is a durability CLAIM, not proof
+    — recompute every file this entry's own recorded `sha256` names and
+    compare against `dest`'s CURRENT content, so a target an earlier
+    crashed attempt's own undo already deleted or reverted (#504 round5
+    R5-B1) is never skipped as if it were still safely copied. An
+    existence probe alone (what `_health_problems` used before) cannot
+    tell "copied" from "undone-but-WAL-not-yet-cleared" apart."""
+    expected = rec.get("sha256") or {}
+    if not expected:
+        return False
+    if entry.kind == "file":
+        return entry.dest.is_file() and expected.get(entry.name) == _sha256(entry.dest)
+    for rel, digest in expected.items():
+        target = entry.dest / rel
+        if not target.is_file() or _sha256(target) != digest:
+            return False
+    return True
+
+
+def _demote_verified_before_undo(
+    states: dict[str, dict],
+    attempted: list[tuple[TransferEntry, Path | None]],
+    ledger: TransferLedger,
+) -> None:
+    """Before undoing any dest this call already copied, durably strip its
+    WAL record back to `PENDING` (#504 round5 R5-B1) — a crash between
+    here and this call's own `ledger.clear()` must never leave the WAL
+    claiming `VERIFIED` for a target the undo below is about to delete or
+    overwrite. Best-effort: `_verified_target_intact` is the real safety
+    net on resume regardless of whether this particular write lands, so a
+    failure here is logged, never escalated over the original failure
+    this call is already unwinding from."""
+    changed = False
+    for entry, _bp in attempted:
+        rec = states.get(entry.name)
+        if rec is not None and rec.get("state") == STATE_VERIFIED:
+            rec["state"] = STATE_PENDING
+            changed = True
+    if not changed:
+        return
+    try:
+        ledger.write(states)
+    except OSError as e:
+        _log_event("migration_undo_demote_failed", error=str(e))
+
+
 def _copy_phase(
     entries: list[TransferEntry], backups: BackupManager, step_id: str, ledger: TransferLedger
 ) -> CopyOutcome:
@@ -469,15 +543,20 @@ def _copy_phase(
         if state == STATE_SOURCE_PRUNED:
             digests[entry.name] = rec.get("sha256", {})
             continue
-        if state == STATE_VERIFIED:
+        if state == STATE_VERIFIED and _verified_target_intact(entry, rec):
             attempted.append((entry, backups.latest_backup(step_id, entry.dest.name)))
             digests[entry.name] = rec.get("sha256", {})
             continue
+        # A `VERIFIED` record whose target no longer matches (#504 round5
+        # R5-B1) falls through to a real re-copy below instead of being
+        # trusted — `backup_path` below then reflects whatever is
+        # actually at `dest` right now, not a stale assumption.
         backup_path = backups.backup(step_id, entry.dest) if entry.dest.exists() else None
         attempted.append((entry, backup_path))
         try:
             verify = copy_verified(entry.src, entry.dest)
         except (OSError, VerifyMismatchError) as e:
+            _demote_verified_before_undo(states, attempted, ledger)
             undo_errors = [
                 msg for e2, bp in attempted if (msg := _undo_copied_dest(e2.dest, bp)) is not None
             ]
@@ -492,6 +571,7 @@ def _copy_phase(
         try:
             ledger.write(states)  # durable BEFORE the next entry / prune phase (T2)
         except OSError as e:
+            _demote_verified_before_undo(states, attempted, ledger)
             undo_errors = [
                 msg for e2, bp in attempted if (msg := _undo_copied_dest(e2.dest, bp)) is not None
             ]
@@ -1263,6 +1343,35 @@ def _revert_to_command_snapshot(
 # ---------------------------------------------------------------------------
 
 
+def _committed_target_problems(path: Path, require_json: bool) -> list[str]:
+    """Presence + (when *require_json* says this file WAS JSON at commit
+    time, `TransferEntry._committed_json_shape`) JSON-readability, for one
+    FINAL, already-pruned promoted target (#504 round5 R5-H2, #568 item
+    1) — never a byte/sha256 match against its original migration-time
+    snapshot: once `prune()` commits, a promoted target is a live,
+    mutable file (a project registry gets written to, credentials get
+    refreshed), so only its own basic health can be required forever,
+    exactly the same tradeoff `engine._domain_target_problems` already
+    makes for the 8 domain steps below this one in the ladder. Never
+    inferred from the filename alone — an arbitrary V1 leftover that
+    happens to be named ``*.json`` but was never real JSON to begin with
+    must not start failing validate() just because this check exists. A
+    checksum comparison is intentionally NOT made even mid-transaction
+    (`_health_problems` below stays presence-only) — a LATER domain step
+    in the SAME pass can legitimately overwrite this exact physical
+    target before `_finish_deferred_prune` ever revisits it (e.g.
+    `readonly-registries` writing its own default content into the very
+    path `promote-v2-root` just moved up)."""
+    if not path.is_file():
+        return [f"missing: {path}"]
+    if require_json:
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return [f"unreadable ({e}): {path}"]
+    return []
+
+
 @dataclass
 class PromoteV2RootStep:
     step_id: str = "promote-v2-root"
@@ -1364,16 +1473,21 @@ class PromoteV2RootStep:
         for entry in manifest.get("promoted", []):
             name = entry["name"]
             kind = entry.get("kind", "file")
+            json_shape = entry.get("json") or {}
             if kind == "file":
-                if not (self.data_home / name).is_file():
-                    problems.append(f"missing: {self.data_home / name}")
+                problems.extend(
+                    _committed_target_problems(self.data_home / name, json_shape.get(name, False))
+                )
                 continue
             paths = entry.get("paths")
             if paths is None:
                 continue  # pre-#504-fix manifest — no per-file record to check
             for rel in paths:
-                if not (self.data_home / name / rel).is_file():
-                    problems.append(f"missing: {self.data_home / name / rel}")
+                problems.extend(
+                    _committed_target_problems(
+                        self.data_home / name / rel, json_shape.get(rel, False)
+                    )
+                )
         return problems
 
     def _wal_path(self) -> Path:

@@ -3455,6 +3455,79 @@ def check_storage_layout_state() -> list[Finding]:
                 )
             )
     findings.extend(_auto_migrate_boot_findings())
+    findings.extend(_pending_duplicate_findings())
+    return findings
+
+
+def _duplicate_entries_in_manifest(
+    path: Path, phase: str, list_key: str, data_home: Path
+) -> list[Finding]:
+    """Every `state: DUPLICATE` entry recorded in one promote/archive
+    manifest (#504 round5 R5-M1) — a denied prune that `_prune_failure_
+    summary` already tells the operator this exact command surfaces, but
+    which nothing here used to actually read."""
+    if not path.is_file():
+        return []
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []  # swallow-ok: read-only probe feeding an ADDITIVE-only
+        # check — an unreadable manifest already fails validate() on its
+        # own elsewhere; this function only ever adds findings, never
+        # withholds one, so a read failure here is simply nothing more to
+        # add, not a reason to fail this check itself.
+    src_root, dest_root = (
+        (data_home / "v2", data_home) if phase == "promote" else (data_home, path.parent)
+    )
+    out: list[Finding] = []
+    for entry in manifest.get(list_key, []):
+        if entry.get("state") != "DUPLICATE":
+            continue
+        name = entry.get("name", "?")
+        rels = entry.get("paths") if entry.get("kind") == "dir" else None
+        rel = (rels or [name])[0]
+        more = f" (+{len(rels) - 1} more file(s))" if rels and len(rels) > 1 else ""
+        located = f"{name}/{rel}" if rels else name
+        out.append(
+            Finding(
+                "storage-layout",
+                "duplicate",
+                Status.WARN,
+                f"{phase} left {located!r} as DUPLICATE{more} — source "
+                f"{src_root / located} and target {dest_root / located} both still "
+                f"exist (manifest: {path}); needs manual cleanup, see "
+                "`takkub migrate inspect`",
+            )
+        )
+    return out
+
+
+def _pending_duplicate_findings() -> list[Finding]:
+    """[storage-layout/duplicate] — #504 round5 R5-M1: `_prune_failure_
+    summary` (`promote_v1.py`) tells the operator a denied prune left a
+    named DUPLICATE and that `takkub doctor --storage-layout` surfaces
+    it — this reads both the promote and every archive generation's own
+    manifest directly, independent of `state`/dev-checkout above (which
+    never reads either manifest and, on a dev checkout, downgrades to
+    OK), so a pending DUPLICATE is always its own WARN, everywhere,
+    naming the file and both of its surviving copies."""
+    from . import config
+
+    data_home = config.DATA_HOME
+    findings = _duplicate_entries_in_manifest(
+        data_home / "backups" / "promote-v2-root-manifest.json", "promote", "promoted", data_home
+    )
+    try:
+        from .core.migration.promote_v1 import list_v1_archives
+    except Exception:
+        return findings
+    for gen in list_v1_archives(data_home):
+        if gen.get("unreadable"):
+            continue
+        manifest_path = Path(gen["path"]) / "manifest.json"
+        findings.extend(
+            _duplicate_entries_in_manifest(manifest_path, "archive", "archived", data_home)
+        )
     return findings
 
 
