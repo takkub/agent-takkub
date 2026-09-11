@@ -35,6 +35,7 @@ the migrating page's active-row counter).
 from __future__ import annotations
 
 import html
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -55,6 +56,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme as theme
+
+_LOG = logging.getLogger(__name__)
 
 PAGE_MAIN = 0
 PAGE_PREMIGRATE = 1
