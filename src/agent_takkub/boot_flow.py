@@ -388,6 +388,15 @@ class ProgressEvent:
     # `None` for every event with no single item behind it (phases 3/5,
     # and the very first phase-1 kickoff before any entry has fired yet).
     current_path: str | None = None
+    # #574 round11 item 3: progress WITHIN one large directory entry's own
+    # copy+verify (from `on_file_progress`, not `on_entry`) — `None` for
+    # every event this doesn't apply to (a `file`-kind entry, one entry
+    # small enough its own top-level `on_entry` fire is the only signal,
+    # or any event with no single entry behind it at all). A consumer
+    # must read both fields defensively (`getattr(event, "files_done",
+    # None)`) — they were added after `ProgressEvent` first shipped.
+    files_done: int | None = None
+    files_total: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,6 +491,8 @@ def run_migration(
         total: int | None = None,
         log_line: str = "",
         current_path: str | None = None,
+        files_done: int | None = None,
+        files_total: int | None = None,
     ) -> None:
         if progress_cb is None:
             return
@@ -507,6 +518,8 @@ def run_migration(
                     log_line=log_line,
                     backup_dir=plan.backup_dir if plan else None,
                     current_path=current_path,
+                    files_done=files_done,
+                    files_total=files_total,
                 )
             )
         except Exception:
@@ -537,8 +550,31 @@ def run_migration(
         else:
             emit(state["phase"], log_line=msg)
 
+    def on_file_progress(
+        step_id: str, name: str, files_done: int, files_total: int, current_path: str
+    ) -> None:
+        # #574 round11 item 3: progress WITHIN one entry's own copy+verify
+        # — `step_done[step_id]` (whole-entry count) stays whatever
+        # `on_entry` last set it to; this only refines `current_path`/
+        # `files_done`/`files_total` for the SAME phase/step in between
+        # `on_entry` fires, so a large directory entry never goes silent.
+        phase = _phase_of_step(step_id)
+        if phase not in (1, 2, 4):
+            return
+        emit(
+            phase,
+            done=step_done.get(step_id, 0),
+            total=totals[phase],
+            log_line=f"{step_id}: {name} ({files_done}/{files_total})",
+            current_path=f"{name}/{current_path}",
+            files_done=files_done,
+            files_total=files_total,
+        )
+
     emit(1, done=0, total=totals[1], log_line="เริ่มย้ายข้อมูล")
-    result = auto_migrate_boot.run_boot_stage(progress_cb=on_text, on_entry=on_entry)
+    result = auto_migrate_boot.run_boot_stage(
+        progress_cb=on_text, on_entry=on_entry, on_file_progress=on_file_progress
+    )
     emit(5, log_line="เสร็จ" if result.action in ("applied", "pending_applied") else "จบการทำงาน")
     return _outcome_from_result(result, plan, started)
 

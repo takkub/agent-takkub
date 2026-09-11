@@ -450,20 +450,23 @@ class CopyOutcome:
     duplicates_kept: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
-def _source_digests(entry: TransferEntry) -> dict[str, str]:
-    """Sha256 of *entry*'s `src` content, computed from the SOURCE before
-    any copy ever runs — used to populate a fresh ledger entry's `sha256`
-    field from its very first (PENDING) write, so the ledger's durability
-    contract holds from that first write onward, not only once a copy+
-    verify completes (#504 round4 wal_contract "states": every entry this
-    step's own ledger ever names must carry a real checksum, in every
-    write, not just the last one)."""
-    if entry.kind == "file":
-        return {entry.src.name: _sha256(entry.src)} if entry.src.is_file() else {}
-    return {rel: _sha256(entry.src / rel) for rel in entry.paths if (entry.src / rel).is_file()}
-
-
 def _entry_to_wal(entry: TransferEntry, state: str, sha256: dict[str, str] | None = None) -> dict:
+    """#574 round11: *sha256* used to default to a full re-hash of every
+    file `entry.src` names (`_source_digests`, now removed) whenever a
+    caller didn't pass one explicitly — i.e. on EVERY entry's first
+    (`STATE_PENDING`) ledger write, before its own copy has even started.
+    That value was never actually read back by anything: `_copy_phase`
+    only ever consults a record's `sha256` for `STATE_VERIFIED` /
+    `STATE_SOURCE_PRUNED` (via `_verified_target_intact`), and a resumed
+    `STATE_PENDING` record falls straight through to a fresh
+    `copy_verified()` call regardless of what its `sha256` held
+    (`test_resume_from_a_partially_verified_restore_wal_finishes_the_rest`
+    already covers a `STATE_PENDING` record with `sha256={}` resuming
+    correctly). It was a second full read of the entire source tree, for
+    every entry, on every fresh (non-resumed) apply — real cost on a
+    ~200k-file backup, for a number that was never used. Defaults to
+    `{}` now; every REAL digest still gets written once `copy_verified`/
+    `_prune_phase` actually computes one."""
     out = {
         "name": entry.name,
         "kind": entry.kind,
@@ -471,7 +474,7 @@ def _entry_to_wal(entry: TransferEntry, state: str, sha256: dict[str, str] | Non
         "dest": str(entry.dest),
         "paths": list(entry.paths),
         "state": state,
-        "sha256": sha256 or _source_digests(entry),
+        "sha256": sha256 or {},
     }
     return out
 
@@ -501,8 +504,8 @@ def _verified_target_intact(entry: TransferEntry, rec: dict) -> bool:
         # #574 round6 R6-M1: keyed by `entry.src.name` (the bare filename),
         # NOT `entry.name` (the full relative-path name an archive/shared-
         # dir-legacy entry uses, which can contain "/") — `verify_only()`'s
-        # own file-branch (`verify_copy.py`) and `_source_digests()` below
-        # both key their digest dict this same way; using `entry.name` here
+        # own file-branch (`verify_copy.py`) keys its digest dict this same
+        # way; using `entry.name` here
         # instead made this guard a dead no-op (silent `None == sha` always
         # False) for any file entry whose name differs from its basename,
         # defeating resumability without ever raising an error about it.
@@ -582,6 +585,7 @@ def _copy_phase(
     ledger: TransferLedger,
     *,
     on_entry: Callable[[str], None] | None = None,
+    on_file_progress: Callable[[str, int, int, str], None] | None = None,
     fsync_every: int = 1,
 ) -> CopyOutcome:
     """Copy-verify every entry's `src` into its `dest` via `copy_verified`
@@ -593,9 +597,11 @@ def _copy_phase(
     clobbered). *src* is NEVER touched here.
 
     #504 round4 T1/T2 — the WAL: every entry in *entries* is durably
-    recorded as `PENDING` (with its SOURCE checksum already attached, via
-    `_source_digests`) BEFORE this call's first byte is copied — or, on a
-    resumed call, `ledger` already holds that record from the attempt this
+    recorded as `PENDING` (#574 round11: with an empty `sha256` — no
+    consumer ever reads a `PENDING` record's checksum, so pre-hashing the
+    whole source tree there was pure wasted cost, removed) BEFORE this
+    call's first byte is copied — or, on a resumed call, `ledger` already
+    holds that record from the attempt this
     one is continuing, never re-written from scratch. Each entry then
     durably advances `PENDING -> VERIFIED`, one fsync'd ledger write, before
     the next entry's own first transition is attempted. An entry already at
@@ -626,7 +632,18 @@ def _copy_phase(
     INITIAL all-PENDING write below, which stays a single unbatched write
     regardless — every entry must be nameable before the first byte of any
     of them is copied (T1), independent of how the per-entry advances are
-    later batched."""
+    later batched.
+
+    *on_file_progress* (#574 round11 item 3): best-effort ``(entry_name,
+    files_done, files_total, current_path)`` observer for WITHIN one
+    directory entry's own copy+verify — `on_entry` above only ever fires
+    once per whole top-level entry, which for a directory holding tens of
+    thousands of files left a real pre-migrate-backup rehearsal sitting on
+    the SAME entry for 17+ minutes with nothing on screen. Forwarded into
+    `copy_verified`'s own `on_file` (see `verify_copy._FileProgressThrottle`
+    for the actual every-N-files-or-every-T-seconds throttle) — never
+    called for a `file`-kind entry (one file, nothing to show progress
+    within)."""
     states = ledger.read()
     for entry in entries:
         if entry.name not in states:
@@ -691,7 +708,23 @@ def _copy_phase(
         try:
             if entry.name in _STRICT_COLLISION_NAMES:
                 _refuse_live_collision(entry)
-            verify = copy_verified(entry.src, entry.dest)
+            if on_file_progress is None:
+                # #574 round11 item 3: omit the `on_file=` kwarg entirely
+                # (rather than passing `on_file=None`) when no progress
+                # observer is wired — keeps `copy_verified`'s call shape
+                # byte-identical to before this feature existed for the
+                # overwhelmingly common case, so every existing caller that
+                # monkeypatches `copy_verified` with a plain 2-arg fake
+                # (this module's own test suite included) keeps working.
+                verify = copy_verified(entry.src, entry.dest)
+            else:
+                verify = copy_verified(
+                    entry.src,
+                    entry.dest,
+                    on_file=lambda done, total, path, _name=entry.name: on_file_progress(
+                        _name, done, total, path
+                    ),
+                )
         except (OSError, VerifyMismatchError) as e:
             _demote_verified_before_undo(states, attempted, ledger)
             undo_errors = [
@@ -769,6 +802,17 @@ class PruneOutcome:
     # skipped ALL integrity checking because every recorded digest map was
     # empty).
     digests: dict[str, dict[str, str]] = field(default_factory=dict)
+    # #574 round11 R7-M5: True only for a batch-level `write_committed`/
+    # `ledger.write` I/O failure — one unrelated to any specific entry's
+    # own content, where NOTHING in the batch was actually touched (no
+    # removal attempt even started for any of them). `failed_name` still
+    # names a representative entry (so a human/log has somewhere to look)
+    # but is never recorded as `DUPLICATE` in the manifest — none of the
+    # batch has a real duplicate; every entry in it is exactly as it was
+    # before the batch started, safely retryable as a normal, un-pruned
+    # candidate. `False` (the default) is the existing single-entry
+    # `_remove_entry_source` failure shape, unchanged.
+    unknown_batch: bool = False
 
 
 def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
@@ -776,6 +820,16 @@ def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
     never "restore-then-revert" — `prune.failed_name`'s source and target
     both simply remain (recorded DUPLICATE), and every OTHER entry this
     call already pruned stays pruned, never undone alongside it."""
+    if prune.unknown_batch:
+        # #574 round11 R7-M5: never claim a specific DUPLICATE for a
+        # batch-level I/O fault that touched no one entry more than any
+        # other — every entry in that batch is untouched, not duplicated.
+        return (
+            f"{action} copy-verified {count} item(s) but a batch write failed before any "
+            f"removal in it was attempted — {prune.failed_name}, every entry in that batch "
+            f"left exactly as it was (nothing pruned, nothing duplicated), safely retryable: "
+            f"{prune.error}"
+        )
     return (
         f"{action} copy-verified {count} item(s) but {prune.failed_name!r}'s source could not "
         f"be removed — recorded DUPLICATE (both source and target copies intact, needs manual "
@@ -1001,6 +1055,14 @@ def _prune_phase(
     newly: list[TransferEntry] = []
     failed: TransferEntry | None = None
     error = ""
+    # #574 round11 R7-M5: True only for a batch-level `write_committed`/
+    # `ledger.write` failure (an I/O fault unrelated to any one entry's
+    # own content — NOTHING in the batch was touched, removal never even
+    # started) — as opposed to a genuine per-file `_remove_entry_source`
+    # failure, where `failed` really is the one entry whose removal
+    # actually raised. Read below (right before the final `return`).
+    batch_level_failure = False
+    unknown_batch_size = 0
     remaining = [e for e in entries if e.name not in baseline_names]
     last_index = len(remaining) - 1
     batch: list[TransferEntry] = []
@@ -1013,9 +1075,20 @@ def _prune_phase(
             write_committed([*baseline, *newly, *batch], None)
         except OSError as e:
             failed = batch[0]
-            error = f"could not record removal of {failed.name}: {e}"
+            unknown_batch_size = len(batch)
+            error = (
+                f"could not record removal for a {len(batch)}-entry batch starting at "
+                f"{failed.name}: {e}"
+            )
+            batch_level_failure = True
             batch = []
             break
+        # #574 round11 item 6 (R7-H1, reviewer round 7): snapshot every
+        # state this batch is about to overwrite BEFORE overwriting it —
+        # a mid-batch removal failure below needs to put each UNTOUCHED
+        # sibling's WAL record back to exactly this, never leave it at
+        # the batch-wide `SOURCE_PRUNED` write two lines down.
+        pre_batch_states = dict(ledger_states)
         # Mutate a COPY first, never `ledger_states` itself, until
         # `ledger.write` below actually durably succeeds — otherwise a
         # failed write here would still leave this batch looking
@@ -1032,12 +1105,18 @@ def _prune_phase(
             ledger.write(candidate_states)
         except OSError as e:
             failed = batch[0]
-            error = f"could not record WAL removal state for {failed.name}: {e}"
+            unknown_batch_size = len(batch)
+            error = (
+                f"could not record WAL removal state for a {len(batch)}-entry batch "
+                f"starting at {failed.name}: {e}"
+            )
+            batch_level_failure = True
             batch = []
             break
         ledger_states = candidate_states
         removal_failed = False
-        for e2 in batch:
+        not_yet_attempted: list[TransferEntry] = []
+        for pos, e2 in enumerate(batch):
             sha256 = batch_sha[e2.name]
             try:
                 _removed, kept = _remove_entry_source(e2, sha256)
@@ -1054,6 +1133,10 @@ def _prune_phase(
                         "location: " + "; ".join(heal_errors)
                     )
                 removal_failed = True
+                # #574 round11 item 6 (R7-H1): every sibling AFTER `e2` in
+                # this SAME batch never had its own `_remove_entry_source`
+                # even attempted — its file(s) are still fully on disk.
+                not_yet_attempted = batch[pos + 1 :]
                 break
             if kept:
                 late_write_kept[e2.name] = kept
@@ -1062,6 +1145,22 @@ def _prune_phase(
             _notify_entry(on_entry, e2.name)
         batch = []
         if removal_failed:
+            # The batch-wide `ledger.write(candidate_states)` above
+            # already (correctly, per this function's own T1 "record
+            # before delete" contract) durably marked the WHOLE batch
+            # `SOURCE_PRUNED` before any of its files were removed — a
+            # partial-batch failure makes that claim FALSE for every
+            # entry that never got its own removal attempt. Revert each
+            # one back to its exact pre-batch record (or drop it if this
+            # was its first-ever WAL write) so the WAL never durably
+            # claims a source is pruned while it's still fully present —
+            # the same "a WAL claim is not proof" contract
+            # `_verified_target_intact`/R6-B1 already enforce on resume.
+            for e2 in not_yet_attempted:
+                if e2.name in pre_batch_states:
+                    ledger_states[e2.name] = pre_batch_states[e2.name]
+                else:
+                    ledger_states.pop(e2.name, None)
             break
 
     digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
@@ -1077,6 +1176,31 @@ def _prune_phase(
             ledger.clear()
         return PruneOutcome(
             pruned=[*baseline, *newly], ok=True, late_write_kept=late_write_kept, digests=digests
+        )
+
+    if batch_level_failure:
+        # #574 round11 R7-M5: `ledger_states` was never mutated for this
+        # batch on either failure path above (both `except` blocks raise
+        # BEFORE `ledger_states = candidate_states` ever runs) — it's
+        # already exactly what it was before this batch started, nothing
+        # to revert. Never call `write_committed` to mark `failed` (really
+        # just "the first entry in an untouched batch") as DUPLICATE —
+        # that would durably record a false claim for an entry that was
+        # never actually touched, the exact defect this fix removes.
+        try:
+            ledger.write(ledger_states)
+        except OSError as e:
+            _log_event("migration_wal_write_after_failure_failed", error=str(e))
+        return PruneOutcome(
+            pruned=[*baseline, *newly],
+            ok=False,
+            failed_name=f"{failed.name} (+{unknown_batch_size - 1} more in the same batch)"
+            if unknown_batch_size > 1
+            else failed.name,
+            error=error,
+            late_write_kept=late_write_kept,
+            digests=digests,
+            unknown_batch=True,
         )
 
     ledger_states[failed.name] = _entry_to_wal(
@@ -1600,9 +1724,15 @@ class PromoteV2RootStep:
     backups: BackupManager = field(default_factory=BackupManager)
     data_home: Path = field(default_factory=lambda: config.DATA_HOME)
     # Best-effort per-entry progress observer (#574) — see
-    # `_notify_entry()`'s docstring; forward path only (apply_copy_only /
-    # prune), never wired into rollback/restore.
+    # `_notify_entry()`'s docstring; wired into `apply_copy_only()`,
+    # `prune()`, AND `rollback()`'s own copy/prune calls (`cli.py`'s
+    # `restore-v1` sets it before calling either).
     on_entry: Callable[[str], None] | None = None
+    # Best-effort WITHIN-entry progress observer (#574 round11 item 3) —
+    # `(entry_name, files_done, files_total, current_path)`, forwarded
+    # straight into `_copy_phase`'s own `on_file_progress` wherever
+    # `on_entry` above is also wired.
+    on_file_progress: Callable[[str, int, int, str], None] | None = None
 
     def _legacy_root(self) -> Path:
         return self.data_home / _LEGACY_V2_NAME
@@ -1773,7 +1903,12 @@ class PromoteV2RootStep:
                     new_entries.append(TransferEntry(src.name, "file", src, dest))
 
         copied = _copy_phase(
-            new_entries, self.backups, self.step_id, ledger, on_entry=self.on_entry
+            new_entries,
+            self.backups,
+            self.step_id,
+            ledger,
+            on_entry=self.on_entry,
+            on_file_progress=self.on_file_progress,
         )
         if not copied.ok:
             self.journal.record(self.step_id, "apply", False, copied.error)
@@ -2014,6 +2149,7 @@ class PromoteV2RootStep:
             self.step_id,
             ledger,
             on_entry=self.on_entry,
+            on_file_progress=self.on_file_progress,
             fsync_every=_restore_fsync_batch(len(entries)),
         )
         if not copied.ok:
@@ -2063,9 +2199,13 @@ class ArchiveV1LegacyStep:
     journal: MigrationJournal = field(default_factory=MigrationJournal)
     backups: BackupManager = field(default_factory=BackupManager)
     data_home: Path = field(default_factory=lambda: config.DATA_HOME)
-    # Best-effort per-entry progress observer (#574) — forward path only
-    # (apply_copy_only / prune), never wired into rollback/restore.
+    # Best-effort per-entry progress observer (#574) — wired into
+    # `apply_copy_only()`, `prune()`, AND `rollback()`'s own copy/prune
+    # calls (`cli.py`'s `restore-v1` sets it before calling either).
     on_entry: Callable[[str], None] | None = None
+    # Best-effort WITHIN-entry progress observer (#574 round11 item 3) —
+    # see `PromoteV2RootStep.on_file_progress`'s twin docstring.
+    on_file_progress: Callable[[str, int, int, str], None] | None = None
 
     _run_id: ClassVar[str] = ""  # unused; timestamp is computed per apply()
 
@@ -2420,7 +2560,12 @@ class ArchiveV1LegacyStep:
                 return StepReport(self.step_id, "apply", False, msg)
 
         copied = _copy_phase(
-            new_entries, self.backups, self.step_id, ledger, on_entry=self.on_entry
+            new_entries,
+            self.backups,
+            self.step_id,
+            ledger,
+            on_entry=self.on_entry,
+            on_file_progress=self.on_file_progress,
         )
         if not copied.ok:
             # `_copy_phase` already reversed every `dest` it touched — any
@@ -2784,6 +2929,7 @@ class ArchiveV1LegacyStep:
             self.step_id,
             ledger,
             on_entry=self.on_entry,
+            on_file_progress=self.on_file_progress,
             fsync_every=_restore_fsync_batch(len(entries)),
         )
         ledger.clear()

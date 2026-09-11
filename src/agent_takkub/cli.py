@@ -3291,9 +3291,33 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     reports.append(promote_report)
     if not json_mode and _restore_done:
         print()  # move past the \r progress line
-    _emit_restore_phase("done", ok=promote_report.ok)
     if not promote_report.ok:
+        _emit_restore_phase("done", ok=False)
         return _revert(reports)
+
+    # #574 round11 item 5: `promote-v2-root`'s own rollback above can
+    # un-flip `core.storage.paths.core_home()` back to its pre-#504
+    # fallback (`RUNTIME_DIR/core`) whenever the generation being restored
+    # had promoted `system/` up from a legacy nested `v2/system/` — a real
+    # prod "resume restore" rehearsal hit exactly this and then failed
+    # `takkub migrate validate` with "app component missing/mismatched"
+    # for `version-marker`, because wherever `version_doc_path()` resolves
+    # to post-restore was never re-stamped with the CURRENTLY running
+    # build's version. Deliberately NOT a byte-for-byte revert to whatever
+    # `version.json` held before this whole ladder's original apply (that
+    # value only ever meant "V1, running an older/different build" — a
+    # value restore-v1 has no business resurrecting on a machine that is,
+    # right now, still running the CURRENT build): re-apply `version-
+    # marker` instead, mirroring `MigrationEngine.apply_pending()`'s own
+    # H6 fix for the identical post-flip re-stamp problem on the forward
+    # path. A failure here is reported like any other step but never
+    # cascades into reverting the archive/promote restore this command
+    # just finished — a stale marker is a much smaller problem than
+    # undoing a otherwise-successful restore over it.
+    _emit_restore_phase("version-marker")
+    version_marker_report = engine.get_step("version-marker").apply()
+    reports.append(version_marker_report)
+    _emit_restore_phase("done", ok=version_marker_report.ok)
     return reports
 
 
@@ -3309,8 +3333,6 @@ def cmd_migrate_run(args: argparse.Namespace) -> dict:
         argv.append("--remember")
     if args.yes:
         argv.append("--yes")
-    if args.no_backup:
-        argv.append("--no-backup")
     if args.json:
         argv.append("--json")
     code = boot_flow_terminal.run_cli(argv)
@@ -5599,9 +5621,6 @@ def main(argv: list[str] | None = None) -> int:
     srun.add_argument("--providers", default="ask", help="ask|all|none|<csv of provider names>")
     srun.add_argument("--remember", action="store_true", help="remember this provider choice")
     srun.add_argument("--yes", action="store_true", help="skip the pre-migrate confirm prompt")
-    srun.add_argument(
-        "--no-backup", action="store_true", help="DANGEROUS: skip the pre-migrate backup"
-    )
     srun.add_argument("--json", action="store_true", help="emit JSON lines instead of text screens")
     srun.set_defaults(func=cmd_migrate_run)
 
