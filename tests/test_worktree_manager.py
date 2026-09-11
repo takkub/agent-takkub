@@ -2928,6 +2928,103 @@ class TestMergeConflictFiles:
         assert "--check" in text
 
 
+class TestStuckGitOpGuard:
+    """#575 — a stuck merge/rebase/cherry-pick on the PRIMARY checkout must
+    block any further mutating git op there, and a failed `merge --abort`
+    must never be reported as if it had actually cleared MERGE_HEAD."""
+
+    def test_stuck_git_op_detects_each_marker(self, tmp_path):
+        from agent_takkub.worktree_manager import _stuck_git_op
+
+        (tmp_path / ".git").mkdir()
+        assert _stuck_git_op(str(tmp_path)) is None
+
+        for marker, abort_cmd in (
+            ("MERGE_HEAD", "git merge --abort"),
+            ("REBASE_HEAD", "git rebase --abort"),
+            ("CHERRY_PICK_HEAD", "git cherry-pick --abort"),
+        ):
+            f = tmp_path / ".git" / marker
+            f.write_text("deadbeef\n")
+            assert _stuck_git_op(str(tmp_path)) == (marker, abort_cmd)
+            f.unlink()
+
+    def test_merge_isolated_refuses_when_primary_already_stuck(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+        r = FakeRunner([])
+
+        ok, msg = WorktreeManager(r).merge_isolated(str(tmp_path), "wt/frontend-9")
+
+        assert not ok
+        assert "MERGE_HEAD" in msg and "git merge --abort" in msg
+        assert r.calls == []  # refused before a single git command ran
+
+    def test_merge_isolated_check_only_also_refuses_when_stuck(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "REBASE_HEAD").write_text("deadbeef\n")
+        r = FakeRunner([])
+
+        ok, msg = WorktreeManager(r).merge_isolated(str(tmp_path), "wt/frontend-9", check_only=True)
+
+        assert not ok
+        assert "REBASE_HEAD" in msg
+        assert r.calls == []
+
+    def test_clean_isolated_refuses_when_primary_already_stuck(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "CHERRY_PICK_HEAD").write_text("deadbeef\n")
+        r = FakeRunner([])
+
+        lines = WorktreeManager(r).clean_isolated(str(tmp_path))
+
+        assert len(lines) == 1
+        assert "REFUSED" in lines[0] and "CHERRY_PICK_HEAD" in lines[0]
+        assert r.calls == []
+
+    def test_merge_isolated_surfaces_a_failed_abort_instead_of_hiding_it(
+        self, monkeypatch, tmp_path
+    ):
+        """A real conflicting `git merge` leaves MERGE_HEAD; if the follow-up
+        `git merge --abort` itself fails to clear it (e.g. a locked ref on
+        Windows), the caller must be told the tree is still stuck — never
+        the pre-#575 "abort แล้ว" message that implied a clean recovery."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        merge_head = tmp_path / ".git" / "MERGE_HEAD"
+
+        class _ConflictingMergeRunner(FakeRunner):
+            def __call__(self, args, cwd):
+                res = super().__call__(args, cwd)
+                if "merge" in args and "--no-ff" in args:
+                    # A real conflicting merge would leave MERGE_HEAD behind;
+                    # the fake never touches disk, so simulate that side
+                    # effect directly — the fake "--abort" call below never
+                    # removes it, exactly the failed-abort scenario.
+                    merge_head.parent.mkdir(parents=True, exist_ok=True)
+                    merge_head.write_text("deadbeef\n")
+                return res
+
+        r = _ConflictingMergeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("1\n")),
+                (["status", "--porcelain"], _ok("")),
+                (["merge-tree", "--write-tree"], _ok("abc123\n")),  # pre-check: clean
+                (["merge", "--no-ff"], _fail("CONFLICT (content): merge conflict", 1)),
+                (["merge", "--abort"], _ok("")),
+            ]
+        )
+
+        ok, msg = WorktreeManager(r).merge_isolated(str(tmp_path), "wt/frontend-9")
+
+        assert not ok
+        assert "abort ไม่สำเร็จ" in msg
+        assert "MERGE_HEAD" in msg
+        assert r.ran("merge", "--abort")
+
+
 class TestCleanIsolatedBranchFilter:
     """#439 — `takkub worktree clean --branch wt/x` touches only that one."""
 
