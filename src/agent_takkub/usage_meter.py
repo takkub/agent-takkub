@@ -41,6 +41,42 @@ PROVIDER_LABELS: dict[str, str] = {
     "cursor": "Cursor",
 }
 
+# Display label per `ProviderUsage.windows[i]["name"]` (#204's generic
+# multi-window shape — codex's primary/secondary, gemini's grouped tiers,
+# any future provider). `five_hour`/`seven_day` match claude's own long-
+# standing short labels exactly (claude never reaches this map — see
+# `_provider_body_entries`'s claude-only `raw_data["windows"]` branch — but
+# the pair stays defined here too so a future caller can't silently diverge
+# from what the compact chip already prints). Unknown names fall back to the
+# raw key (`_window_label`) — never dropped.
+WINDOW_LABELS: dict[str, str] = {
+    "five_hour": "5h",
+    "seven_day": "7d",
+    "seven_day_sonnet": "7d Sonnet",
+    "primary": "หลัก",
+    "secondary": "รายสัปดาห์",
+    "quota": "โควต้า",
+}
+
+
+def _window_label(name: str) -> str:
+    return WINDOW_LABELS.get(name, name)
+
+
+def _parse_window_resets_at(resets_at: str | None) -> datetime | None:
+    """`ProviderUsage.windows[i]["resets_at"]` is an ISO string (or None) —
+    never a `datetime` — since it crosses the same JSON-safe boundary
+    `usage_to_dict()` serializes for the remote endpoint. Malformed input
+    (there shouldn't be any — every writer round-trips `datetime.isoformat()`)
+    degrades to no ETA rather than raising."""
+    if not resets_at:
+        return None
+    try:
+        return datetime.fromisoformat(resets_at)
+    except ValueError:
+        return None
+
+
 _STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
 _DETAIL_POPUP_WIDTH = 380
 _DETAIL_POPUP_SCREEN_MARGIN = 8
@@ -149,10 +185,10 @@ def _provider_body_entries(
 
     entries: list[tuple[str, str, str] | tuple[str, str, float, str, bool]] = []
     stale = u.status == "stale"
-    windows = (u.raw_data or {}).get("windows") if u.provider == "claude" else None
-    if windows:
+    claude_windows = (u.raw_data or {}).get("windows") if u.provider == "claude" else None
+    if claude_windows:
         for key, wlabel in (("five_hour", "5h"), ("seven_day", "7d")):
-            w = windows.get(key)
+            w = claude_windows.get(key)
             if w is None:
                 continue
             pct = w.get("utilization")
@@ -174,6 +210,28 @@ def _provider_body_entries(
                 entries.append(("bar", wlabel, pct, color, stale))
             entries.append(("text", line, color))
         entries.append(("text", "ยอดรวมทั้งบัญชี ไม่ใช่ pane นี้เท่านั้น", cockpit_theme.TEXT_FAINT))
+    elif u.windows:
+        # #513 follow-up: every OTHER provider's multi-window snapshot
+        # (codex's primary/secondary, gemini's grouped quota tiers, …) rides
+        # in the generic `ProviderUsage.windows` list (#204) — claude alone
+        # keeps its own dict-shaped `raw_data["windows"]` branch above
+        # (unchanged, byte-for-byte) so its popup output can never drift.
+        # Never drop a window this list actually carries: a missing % is
+        # "—", never a fabricated 0%, and an unrecognized `name` still
+        # renders under its own raw key via `_window_label`.
+        for w in u.windows:
+            name = w.get("name")
+            if not name:
+                continue
+            wlabel = _window_label(name)
+            pct = w.get("utilization")
+            text = "—" if pct is None else f"{round(pct)}%"
+            eta = fmt_eta(_parse_window_resets_at(w.get("resets_at")), now)
+            line = f"{wlabel}: {text}" + (f" · reset ใน {eta}" if eta else "")
+            color = severity_color(pct)
+            if pct is not None:
+                entries.append(("bar", wlabel, pct, color, stale))
+            entries.append(("text", line, color))
     elif u.utilization is not None:
         pct_used = round(u.utilization)
         pct_left = max(0, round(100 - u.utilization))
@@ -318,7 +376,12 @@ def _build_bar_row(
     lay.setSpacing(6)
     if label:
         tag = QLabel(label, row)
-        tag.setFixedWidth(_BAR_LABEL_WIDTH)
+        # Minimum, not fixed: claude's own "5h"/"7d" tags (the only labels
+        # this ever rendered pre-#204-generalization) stay pixel-identical
+        # since both are narrower than _BAR_LABEL_WIDTH, but a longer Thai
+        # window label (e.g. "รายสัปดาห์") now gets to grow instead of
+        # clipping mid-word.
+        tag.setMinimumWidth(_BAR_LABEL_WIDTH)
         tag.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:10px; font-weight:600;")
         lay.addWidget(tag)
     lay.addWidget(_UsageBar(pct_used, color, stale=stale, parent=row), 1)

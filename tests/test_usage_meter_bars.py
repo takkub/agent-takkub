@@ -159,3 +159,99 @@ def test_error_status_with_no_error_message_falls_back_to_generic_text():
     usage = ProviderUsage(provider="gemini", status="error")
     texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
     assert texts == ["ดึงข้อมูลไม่สำเร็จ"]
+
+
+# ── #513 follow-up: every provider's `.windows` list (#204), not just claude ──
+
+
+def test_codex_windows_render_two_labelled_bars_via_generic_path():
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="codex",
+        status="active",
+        fetched_at=now,
+        windows=[
+            {
+                "name": "primary",
+                "utilization": 40.0,
+                "resets_at": (now + timedelta(hours=2)).isoformat(),
+            },
+            {
+                "name": "secondary",
+                "utilization": 70.0,
+                "resets_at": (now + timedelta(days=3)).isoformat(),
+            },
+        ],
+    )
+    entries = _provider_body_entries(usage, now)
+    bars = _bars(entries)
+    assert [b[1] for b in bars] == ["หลัก", "รายสัปดาห์"]
+    assert [b[2] for b in bars] == [40.0, 70.0]
+    texts = [e[1] for e in entries if e[0] == "text"]
+    assert any(t.startswith("หลัก: 40%") and "reset ใน" in t for t in texts)
+    assert any(t.startswith("รายสัปดาห์: 70%") and "reset ใน" in t for t in texts)
+
+
+def test_generic_window_missing_utilization_shows_dash_not_a_bar():
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="codex",
+        status="active",
+        fetched_at=now,
+        windows=[{"name": "primary", "utilization": None, "resets_at": None}],
+    )
+    entries = _provider_body_entries(usage, now)
+    assert _bars(entries) == []
+    texts = [e[1] for e in entries if e[0] == "text"]
+    assert texts == ["หลัก: —"]
+
+
+def test_unrecognized_window_name_still_renders_under_its_raw_name():
+    # Never drop a window a provider actually reported — an unknown `name`
+    # falls back to itself rather than vanishing from the card.
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="gemini",
+        status="active",
+        fetched_at=now,
+        windows=[{"name": "gemini-3-pro +5 more", "utilization": 12.0, "resets_at": None}],
+    )
+    entries = _provider_body_entries(usage, now)
+    bars = _bars(entries)
+    assert bars[0][1] == "gemini-3-pro +5 more"
+    texts = [e[1] for e in entries if e[0] == "text"]
+    assert texts == ["gemini-3-pro +5 more: 12%"]
+
+
+def test_generic_windows_never_get_the_claude_only_auto_continue_hint():
+    # #322's auto-continue nudge is specific to claude's five_hour window
+    # (cockpit's own park→wake) — a codex/gemini window named "five_hour"
+    # coincidentally would still be wrong to tag with a claude-specific
+    # behaviour claim.
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="codex",
+        status="active",
+        fetched_at=now,
+        windows=[{"name": "five_hour", "utilization": 99.0, "resets_at": None}],
+    )
+    texts = [e[1] for e in _provider_body_entries(usage, now) if e[0] == "text"]
+    assert not any("auto-continue" in t for t in texts)
+
+
+def test_claude_output_unchanged_when_generic_windows_field_is_also_present():
+    # Claude's dedicated `raw_data["windows"]` dict branch must win even if
+    # `.windows` (the generic list field) happened to be populated too —
+    # claude's popup output must never drift (#513: compared byte-for-byte
+    # against pre-change screenshots).
+    now = datetime.now(tz=UTC)
+    usage = ProviderUsage(
+        provider="claude",
+        status="active",
+        fetched_at=now,
+        raw_data={"windows": {"five_hour": {"utilization": 42.0, "eta": "1ชม. 2น."}}},
+        windows=[{"name": "five_hour", "utilization": 999.0, "resets_at": None}],
+    )
+    entries = _provider_body_entries(usage, now)
+    bars = _bars(entries)
+    assert bars == [("bar", "5h", 42.0, bars[0][3], False)]
