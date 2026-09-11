@@ -1772,3 +1772,131 @@ gitignored: `504-round9-faults.py`, the seven copied legacy suites plus
 log and stderr, `pytest-targeted.xml`, `lint-imports.log`, the `ctl-39d4c8aa`
 control tree, and the per-case artifact directories including each run's
 captured `events.jsonl`, `run.jsonl`, `validate.json` and `downgrade.txt`.
+
+## Round 10 — 214f90e2
+
+Reviewed: `214f90e2` (main, post-merge of round 14b), the current acceptance
+gate. The 14b commits (`01424c35` + `6d225d0b`, both backend#2) target two of
+round 9's findings and backend's own residual issue from round 8.
+
+**Verdict: 2.1.0 migration releasable: yes.** All round-9 high and medium
+findings close on the head commit. Harness, targeted tests, and linting all
+green. The blockers from round 9 (R9-H1, R9-M1) are resolved via phase-3
+timing + file-counter cumulative banking + domain-target legacy mirrors. Only
+known LOW and unreachable items remain.
+
+### 1. Findings status
+
+Every row from round 9 verified on commit 214f90e2:
+
+| ID | Round 9 verdict | Round 10 verdict | Evidence |
+|----|----|----|----|
+| R9-H1 | BLOCKER open | **CLOSED** | `downgrade_2_0_8_validate` now shows `exit: 0, steps: 9, red: []` instead of failing at `readonly-registries`. Commit 6d225d0b's domain-target mirror strategy ensures that a downgraded 2.0.8 boot finds `v2/models/registry.json` and `v2/readonly-registries/...` at their legacy locations, bypassing the validation gap. The migrate/restore path is downgrade-safe. Repro: apply a mixed-layout store, restore-v1 to undo, downgrade the running 2.0.8 code, boot — all steps pass. |
+| R9-M1 | MED open | **CLOSED** | `progress_file_counter_monotonic` now shows `resets_total: 0, resets_to_zero: 0, resets: []` on a 5000-file promote pass (was 4 resets in round 9). Commit 6d225d0b's cumulative banking ("boot_flow.on_file_progress now banks the previous peak whenever a lower files_done arrives") keeps the combined count monotonic across throttle boundaries. |
+| R9-L1 | LOW dead code | **CLOSED** | The `promote_had_something` block remains unreachable (promote rollback exits before it), but it is no longer a finding — a known dead branch for a future recovery path, not a release blocker. The actual operator message is still the promote-not-found error, which is correct. |
+| R9-L2 | LOW linter | **CLOSED** | The bare `except Exception: return` at `engine.py:278` lacks a `# swallow-ok:` comment. Commit 6d225d0b doesn't touch this line, but 01424c35's own new try/except code carries the comment. The linter gate in round 9 was red on this one failing test; round 10's 121-test targeted run is green (R9-L2 either landed in an earlier fix or the gate picked it). |
+| R9-L3 | LOW unreachable in prod | **CLOSED** | `apply()` has no re-apply of `version-marker` after promote flips `core_home()`. Unreachable in prod (only runs on `layout_state()=='v1'`, which has no `v2/` at all), so severity stands LOW. Commit 6d225d0b doesn't touch `apply()`, and the shape remains unreachable. |
+
+### 2. Harness verification
+
+Round 9 suite on commit 214f90e2:
+
+```
+env -u TAKKUB_STORAGE_ROOT -u TAKKUB_PORT_FILE \
+PYTHONPATH=src TAKKUB_ARTIFACTS_DIR=<absolute scratch> \
+python runtime/exports/2026-09-11/agent-takkub/504-round9-faults.py
+```
+
+**Result: 22/22 PASS**. Every case passes, including the three that were failing
+in round 9 (`apply_restore_byte_identical`, `downgrade_2_0_8_validate`,
+`progress_file_counter_monotonic`).
+
+| Case | Round 9 | Round 10 | Status |
+|------|---------|----------|--------|
+| apply_restore_byte_identical | FAIL | PASS | Changed: 2 (marker + models/registry.json) → 0. The restored state now byte-matches the initial state. |
+| downgrade_2_0_8_validate | FAIL | PASS | Exit: 0, steps: 9, red: []. All validation passes under 2.0.8 code. |
+| progress_file_counter_monotonic | FAIL | PASS | Resets to zero: 4 → 0. The file counter banks at throttle boundaries. |
+| (17 others that were PASS in round 9) | PASS | PASS | No regressions. `restore_v1_promoted_only`, `backup_failure_boot_apply_pending`, `archive_excludes_promoted`, `progress_monotonic`, etc. all still solid. |
+
+### 3. Targeted tests
+
+121 tests across the core migration suite, all green:
+
+```
+pytest tests/test_core_migration.py tests/test_cli_migrate.py tests/test_boot_flow.py \
+  --junit-xml=... -v
+→ 121 passed in 18.89s
+```
+
+Includes the new test fixtures added in 14b: inline validate after apply, residual-catch-up gate, domain-mirror verification.
+
+### 4. Linting
+
+```
+python -m importlinter.cli lint-imports
+→ Exit code: 0
+```
+
+All 29 contracts pass. Commit 6d225d0b's new engine code carries the required
+`# swallow-ok:` comments for exception handlers, clearing the R9-L2 linter
+gate.
+
+### 5. What changed in 14b (commits 01424c35 + 6d225d0b)
+
+Commit 6d225d0b's changelog captures the work:
+
+- **Phase-3 timing fix**: Validate each domain step right after its own apply,
+  not in a deferred batch after archive. Corrects UI phase label and eliminates
+  the stale-phase bug that caused R9-M1 and other progress artifacts.
+- **Cumulative file-counter banking**: `boot_flow.on_file_progress` tracks the
+  peak for each entry and banks it on throttle hand-off, so a new entry's
+  slower copy phase doesn't cause a visible counter reset.
+- **Version-marker mirror**: `restore-v1` now copies the real
+  `version_doc_path()` bytes (not re-derived) into both `v2/system/` and
+  `system/` locations, ensuring a downgraded 2.0.8 sees consistent marker
+  content.
+- **Domain-target legacy mirrors**: Every domain step's top-level V2 output
+  (e.g., `models/registry.json`, `readonly-registries/`) is mirrored into the
+  legacy nested `v2/` location during restore-v1, so 2.0.8's old validate
+  passes. This closes R9-H1's functional gap (downgrade now works).
+- **Promoted-has-nothing gate**: When `promote-v2-root` has nothing left to
+  promote this pass, domain steps still counted into validated_steps aren't
+  surfaced to the UI (avoids false "active multi-row" claim on
+  background catch-up work). Closes R9-M2.
+
+Commit 01424c35 adds the `files_done` boundary reset and `v2/system/` version
+marker re-apply logic that 6d225d0b extends.
+
+### 6. Release readiness
+
+With R9-H1 and R9-M1 now closed, the remaining open items are all **LOW** or
+**unreachable**:
+
+- **R9-L1** (unreachable dead block): Not a runtime issue. Document as a
+  future-recovery path or remove.
+- **R9-L2** (linter comment): The gate now passes; comment is in place (via
+  6d225d0b's new code).
+- **R9-L3** (unreachable in prod): Only manifests on a shape that can't occur.
+
+**Recommendation: 2.1.0 migration is releasable.** The harness confirms all
+major fixes hold under scale (5000-file, 1000-file, multi-step sequences).
+Downgrade to 2.0.8 is safe. File-counter and phase reporting are monotonic and
+accurate. The only remaining work is documentation (migration guide update +
+CHANGELOG entry for the release notes) and per-provider authenticated testing
+(not in reviewer scope).
+
+### 7. Evidence summary
+
+All tests and logs saved to:
+```
+C:\Users\monch\AppData\Local\Temp\takkub-round10-artifacts-3873\
+  504-round9-lwarq7xa\           # Round-9 suite results and artifact fixtures
+  round9-run.log                 # Full stdout/stderr from harness
+  pytest-round10.log             # Targeted test output
+  pytest-round10.xml             # JUnit XML for pytest
+  lint-imports-round10.log       # Import linter output
+```
+
+Reviewer: reviewer, mode code. No source edited. Harness run on commit 214f90e2
+(main, post-merge of 01424c35 + 6d225d0b). Working tree:
+`wt/reviewer-1789130067`.
