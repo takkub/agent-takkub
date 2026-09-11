@@ -476,78 +476,53 @@ class TestCheckRuntime:
 
 
 class TestCheckProjects:
-    def _write_projects(self, tmp_path: Path, data: dict) -> None:
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-        # monkeypatching is done in each test — this just builds the file
-
-    def test_all_paths_exist(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_all_paths_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
         proj_dir = tmp_path / "myapp"
         proj_dir.mkdir()
-        data = {
-            "active": "myapp",
-            "projects": {"myapp": {"paths": {"api": str(proj_dir)}}},
-            "open_tabs": ["myapp"],
-        }
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-
-        import agent_takkub.config as _cfg
-
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(
+            tmp_path,
+            {"myapp": {"paths": {"api": str(proj_dir)}}},
+            active="myapp",
+            open_tabs=["myapp"],
+        )
 
         findings = check_projects()
         fails = [f for f in findings if f.status == Status.FAIL]
         assert not fails
 
-    def test_missing_path_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        data = {
-            "active": "myapp",
-            "projects": {"myapp": {"paths": {"api": str(tmp_path / "nonexistent")}}},
-            "open_tabs": [],
-        }
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-
-        import agent_takkub.config as _cfg
-
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+    def test_missing_path_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        seed_projects(
+            tmp_path,
+            {"myapp": {"paths": {"api": str(tmp_path / "nonexistent")}}},
+            active="myapp",
+        )
 
         findings = check_projects()
         fails = [f for f in findings if f.status == Status.FAIL and f.name == "myapp"]
         assert fails
 
-    def test_orphaned_tab_warns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        data = {
-            "active": "myapp",
-            "projects": {"myapp": {"paths": {}}},
-            "open_tabs": ["ghost-project"],
-        }
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-
-        import agent_takkub.config as _cfg
-
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+    def test_orphaned_tab_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        seed_projects(
+            tmp_path,
+            {"myapp": {"paths": {}}},
+            active="myapp",
+            open_tabs=["ghost-project"],
+        )
 
         findings = check_projects()
         warns = [f for f in findings if f.status == Status.WARN and "orphaned" in f.detail]
         assert warns
 
     def test_active_not_in_projects_warns(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        data = {
-            "active": "missing-proj",
-            "projects": {"other": {"paths": {}}},
-            "open_tabs": [],
-        }
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-
-        import agent_takkub.config as _cfg
-
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {"other": {"paths": {}}}, active="missing-proj")
 
         findings = check_projects()
         warns = [f for f in findings if f.status == Status.WARN and "active" in f.name]
@@ -557,33 +532,25 @@ class TestCheckProjects:
 class TestCheckRoles:
     """#510: `takkub doctor` must surface roles OFF for the active project."""
 
-    def _set_active_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "myapp"
-    ) -> None:
-        import agent_takkub.config as _cfg
-
-        data = {"active": name, "projects": {name: {"paths": {}}}}
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
-
     def _isolate_pipeline_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.pipeline_config as pipeline_config
 
         monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
         monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
 
-    def test_no_disabled_roles_is_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._set_active_project(tmp_path, monkeypatch)
+    def test_no_disabled_roles_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        seed_projects(tmp_path, {"myapp": {"paths": {}}}, active="myapp")
         self._isolate_pipeline_config(tmp_path, monkeypatch)
 
         findings = check_roles()
         assert findings[0].status == Status.OK
 
     def test_disabled_role_warns_with_name(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        self._set_active_project(tmp_path, monkeypatch)
+        seed_projects(tmp_path, {"myapp": {"paths": {}}}, active="myapp")
         self._isolate_pipeline_config(tmp_path, monkeypatch)
         import agent_takkub.pipeline_config as pipeline_config
 
@@ -596,13 +563,9 @@ class TestCheckRoles:
         assert warns and "qa" in warns[0].detail
 
     def test_no_active_project_is_informational(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        import agent_takkub.config as _cfg
-
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps({"active": None, "projects": {}}), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {})
         self._isolate_pipeline_config(tmp_path, monkeypatch)
 
         findings = check_roles()
@@ -615,25 +578,15 @@ class TestCheckRoles:
 
 
 class TestCheckTeamPreset:
-    def _set_active_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "myapp"
-    ) -> None:
-        import agent_takkub.config as _cfg
-
-        data = {"active": name, "projects": {name: {"paths": {}}}}
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
-
     def _isolate_team_preset(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.team_preset as team_preset
 
         monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
 
     def test_default_project_shows_auto(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        self._set_active_project(tmp_path, monkeypatch)
+        seed_projects(tmp_path, {"myapp": {"paths": {}}}, active="myapp")
         self._isolate_team_preset(tmp_path, monkeypatch)
 
         from agent_takkub.doctor import check_team_preset
@@ -643,9 +596,9 @@ class TestCheckTeamPreset:
         assert "auto" in findings[0].detail
 
     def test_standing_preset_and_override_both_shown(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        self._set_active_project(tmp_path, monkeypatch)
+        seed_projects(tmp_path, {"myapp": {"paths": {}}}, active="myapp")
         self._isolate_team_preset(tmp_path, monkeypatch)
         import agent_takkub.team_preset as team_preset
 
@@ -660,13 +613,9 @@ class TestCheckTeamPreset:
         assert "override" in findings[0].detail
 
     def test_no_active_project_is_informational(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        import agent_takkub.config as _cfg
-
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps({"active": None, "projects": {}}), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {})
         self._isolate_team_preset(tmp_path, monkeypatch)
 
         from agent_takkub.doctor import check_team_preset
@@ -1357,13 +1306,12 @@ class TestCheckCapabilitySkillStore:
 
 
 class TestCheckDesignIntegrations:
-    def test_no_projects_no_findings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import agent_takkub.config as _cfg
+    def test_no_projects_no_findings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
         from agent_takkub import pane_tools_policy as _ptp
 
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {})
         monkeypatch.setattr(_ptp, "load_policy", lambda: {})
 
         findings = check_design_integrations()
@@ -1376,19 +1324,13 @@ class TestCheckDesignIntegrations:
         assert all(f.status == Status.INFO for f in findings)
 
     def test_storybook_detected_reports_ok(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        import agent_takkub.config as _cfg
         from agent_takkub import pane_tools_policy as _ptp
 
         proj_dir = tmp_path / "myapp"
         (proj_dir / ".storybook").mkdir(parents=True)
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(
-            json.dumps({"projects": {"myapp": {"paths": {"root": str(proj_dir)}}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {"myapp": {"paths": {"root": str(proj_dir)}}})
         monkeypatch.setattr(_ptp, "load_policy", lambda: {})
 
         findings = check_design_integrations()
@@ -1398,19 +1340,13 @@ class TestCheckDesignIntegrations:
         assert "localhost:6006" in storybook_finding.detail
 
     def test_no_storybook_reports_info_not_fail(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        import agent_takkub.config as _cfg
         from agent_takkub import pane_tools_policy as _ptp
 
         proj_dir = tmp_path / "myapp"
         proj_dir.mkdir()
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(
-            json.dumps({"projects": {"myapp": {"paths": {"root": str(proj_dir)}}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {"myapp": {"paths": {"root": str(proj_dir)}}})
         monkeypatch.setattr(_ptp, "load_policy", lambda: {})
 
         findings = check_design_integrations()
@@ -1419,14 +1355,11 @@ class TestCheckDesignIntegrations:
         assert storybook_finding.status == Status.INFO
 
     def test_opted_in_mcp_reports_ok_with_role(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
-        import agent_takkub.config as _cfg
         from agent_takkub import pane_tools_policy as _ptp
 
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
-        monkeypatch.setattr(_cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {})
         monkeypatch.setattr(
             _ptp, "load_policy", lambda: {"designer": {"mcps": ["figma"], "plugins": []}}
         )

@@ -89,7 +89,9 @@ class _ImportHost(QWidget, ProjectWizardMixin):
         self.opened.append(name)
 
 
-def test_import_folder_name_with_spaces_produces_validate_name_safe_project(tmp_path, monkeypatch):
+def test_import_folder_name_with_spaces_produces_validate_name_safe_project(
+    tmp_path, monkeypatch, seed_projects
+):
     """#467 — a folder like "Claude Work" used to flow its raw `Path.name`
     (containing a space) straight into the project registry, then crash
     `register_pane`/`_resolve_project` with `ValueError: invalid project`
@@ -97,7 +99,7 @@ def test_import_folder_name_with_spaces_produces_validate_name_safe_project(tmp_
     folder = tmp_path / "Claude Work"
     folder.mkdir()
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
-    monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "projects.json")
+    seed_projects(tmp_path, {})
 
     host = _ImportHost()
     host._import_existing_project()
@@ -111,11 +113,13 @@ def test_import_folder_name_with_spaces_produces_validate_name_safe_project(tmp_
 
 
 @pytest.mark.parametrize("folder_name", ["Claude Work", "MY-APP!!", "app (v2)"])
-def test_import_various_unsafe_folder_names_never_raise(tmp_path, monkeypatch, folder_name):
+def test_import_various_unsafe_folder_names_never_raise(
+    tmp_path, monkeypatch, folder_name, seed_projects
+):
     folder = tmp_path / folder_name
     folder.mkdir()
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
-    monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "projects.json")
+    seed_projects(tmp_path, {})
 
     host = _ImportHost()
     host._import_existing_project()  # must not raise

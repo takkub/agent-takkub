@@ -207,17 +207,15 @@ class TestEnableDisableAreLeadOnly:
 
 class TestDoctorSubcommand:
     def test_doctor_prints_report_and_never_hits_network(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        tmp_path,
+        seed_projects,
     ) -> None:
-        import json
-
-        import agent_takkub.config as cfg
-
         _clear_role_env(monkeypatch)
         monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
-        projects_file = tmp_path / "projects.json"
-        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
-        monkeypatch.setattr(cfg, "PROJECTS_JSON", projects_file)
+        seed_projects(tmp_path, {})
 
         import urllib.request
 

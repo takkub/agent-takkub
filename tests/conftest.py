@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import json
 import os
 import shutil
 import stat
@@ -891,6 +892,76 @@ def isolated_v2_data_home(tmp_path):
     catalog) needs to write into this SAME tree — not just any tmp dir — so
     the façade's own default resolution finds what the test migrated."""
     return tmp_path / "_isolated_takkub" / "data-home"
+
+
+class ProjectRegistryHandle:
+    """Handle onto a seeded V2 project registry file (`#566` — the target
+    `core.migration.steps_v1.ProjectMigrationStep` promotes `projects.json`
+    to, see `config._v2_project_registry_path`'s docstring). `.read()`/
+    `.write()` transparently unwrap/wrap the `{"schema": 1, "data": {...}}`
+    envelope so callers work with the plain `{"active": ..., "projects":
+    {...}}` shape `config.load_projects()` itself returns."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def read(self) -> dict:
+        registry = json.loads(self.path.read_text(encoding="utf-8"))
+        return registry.get("data", {})
+
+    def write(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"schema": 1, "data": data}), encoding="utf-8")
+
+
+@pytest.fixture
+def seed_projects(monkeypatch: pytest.MonkeyPatch):
+    """Seed a fixture project list into the V2 project registry — the
+    target `config.load_projects()`/`save_projects_json()` read/write FIRST
+    (#566) — instead of the plain V1 `projects.json` file, so fixtures model
+    the same registry a real (migrated) machine actually has on disk rather
+    than relying on the V1-fallback branch that only fires pre-migration or
+    on a dev checkout (`auto_migrate_boot.is_dev_checkout()`).
+
+    Usage: ``seed_projects(tmp_home, {"demo": {"paths": {...}}}, active="demo")``.
+    Points `config.DATA_HOME` at *tmp_home* (a test's own isolated dir — most
+    callers just pass their `tmp_path`) and writes the registry under
+    `storage_layout_v2(tmp_home).projects_root`. Returns a
+    `ProjectRegistryHandle` for tests that need to rewrite or read back the
+    seeded data through the same file `save_projects_json` will write to.
+
+    A test that deliberately exercises the V1-fallback/migration path itself
+    (e.g. `test_config_project_registry_v2.py`, `test_project_identity.py`'s
+    `TestResolveFromV1Fallback`) should keep seeding `config.PROJECTS_JSON`
+    directly instead — this fixture is for everyone else's fixture
+    scaffolding.
+
+    Call this AFTER a test's own `monkeypatch.setattr(config, "REPO_ROOT",
+    ...)`, if it sets one — `storage_layout_v2` nests the registry under a
+    `v2/` root iff `data_home == config.REPO_ROOT` (the dev-checkout
+    branch, see its own docstring), read at the moment THIS function writes
+    the file. Seeding before a later `REPO_ROOT` patch writes to one path
+    while every subsequent `config.load_projects()` call resolves to
+    another — silently reading back an empty registry.
+    """
+
+    def _seed(
+        tmp_home: Path,
+        projects: dict | None = None,
+        *,
+        active: str | None = None,
+        **extra,
+    ) -> ProjectRegistryHandle:
+        import agent_takkub.config as config
+        from agent_takkub.core.storage.layout import storage_layout_v2
+
+        monkeypatch.setattr(config, "DATA_HOME", tmp_home, raising=False)
+        registry_path = storage_layout_v2(tmp_home).projects_root / "registry.json"
+        handle = ProjectRegistryHandle(registry_path)
+        handle.write({"active": active, "projects": projects or {}, **extra})
+        return handle
+
+    return _seed
 
 
 # #344: pytest install no sys.excepthook of its own, and PyQt6's default

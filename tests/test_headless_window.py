@@ -10,7 +10,6 @@ that machinery is covered by the existing spawn_engine test suite.
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import MagicMock
 
@@ -33,21 +32,16 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture
-def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """A real projects.json with one project ("proj") whose Lead cwd exists
-    on disk, so project_folder_exists()/set_active_project() succeed."""
+def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
+    """A real V2 project registry (#566) with one project ("proj") whose
+    Lead cwd exists on disk, so project_folder_exists()/set_active_project()
+    succeed."""
     proj_dir = tmp_path / "proj" / "api"
     proj_dir.mkdir(parents=True)
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps({"active": None, "projects": {"proj": {"paths": {"api": str(proj_dir)}}}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
-    return pj
+    return seed_projects(tmp_path, {"proj": {"paths": {"api": str(proj_dir)}}})
 
 
 @pytest.fixture

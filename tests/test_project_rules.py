@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -159,14 +158,11 @@ def lead_context_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    projects_json = tmp_path / "projects.json"
-
     from agent_takkub import lead_context as lc_mod
 
     monkeypatch.setattr(lc_mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(lc_mod, "ASSETS_ROOT", tmp_path)
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
-    monkeypatch.setattr(config_mod, "PROJECTS_JSON", projects_json)
     monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(config_mod, "RUNTIME_DIR", runtime)
 
@@ -188,22 +184,17 @@ def lead_context_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     return tmp_path
 
 
-def _write_projects(tmp_path: Path, proj_root: Path, name: str = "myapp") -> None:
-    data = {
-        "active": name,
-        "projects": {
-            name: {
-                "paths": {"main": str(proj_root.as_posix())},
-                "presets": [],
-            }
-        },
-    }
-    (tmp_path / "projects.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+def _write_projects(seed_projects, tmp_path: Path, proj_root: Path, name: str = "myapp") -> None:
+    seed_projects(
+        tmp_path,
+        {name: {"paths": {"main": str(proj_root.as_posix())}, "presets": []}},
+        active=name,
+    )
 
 
 class TestLeadContextProjectRulesInjection:
     def test_injects_project_rules_when_present(
-        self, lead_context_env: Path, tmp_path: Path
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
     ) -> None:
         """Project CLAUDE.md contents should appear in the rendered lead context."""
         proj_root = tmp_path / "ext" / "myapp"
@@ -211,7 +202,7 @@ class TestLeadContextProjectRulesInjection:
         (proj_root / "CLAUDE.md").write_text(
             "# Project rules\n- deploy to Fly.io\n", encoding="utf-8"
         )
-        _write_projects(tmp_path, proj_root)
+        _write_projects(seed_projects, tmp_path, proj_root)
 
         from agent_takkub.lead_context import _render_lead_context
 
@@ -227,12 +218,12 @@ class TestLeadContextProjectRulesInjection:
         assert "Project rules" in content
 
     def test_no_injection_when_no_project_claude_md(
-        self, lead_context_env: Path, tmp_path: Path
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
     ) -> None:
         proj_root = tmp_path / "ext" / "emptyapp"
         proj_root.mkdir(parents=True)
         # no CLAUDE.md in proj_root
-        _write_projects(tmp_path, proj_root, name="emptyapp")
+        _write_projects(seed_projects, tmp_path, proj_root, name="emptyapp")
 
         from agent_takkub.lead_context import _render_lead_context
 
@@ -242,22 +233,15 @@ class TestLeadContextProjectRulesInjection:
         assert "📋 Project rules" not in content
 
     def test_no_double_inject_when_project_root_is_repo_root(
-        self, lead_context_env: Path, tmp_path: Path
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
     ) -> None:
         """When the project root IS the cockpit repo, skip the project-rules section
         to avoid injecting the cockpit CLAUDE.md twice."""
         # project paths point directly at tmp_path (== REPO_ROOT in this fixture)
-        data = {
-            "active": "cockpit",
-            "projects": {
-                "cockpit": {
-                    "paths": {"main": str(tmp_path.as_posix())},
-                    "presets": [],
-                }
-            },
-        }
-        (tmp_path / "projects.json").write_text(
-            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        seed_projects(
+            tmp_path,
+            {"cockpit": {"paths": {"main": str(tmp_path.as_posix())}, "presets": []}},
+            active="cockpit",
         )
         # The cockpit CLAUDE.md already lives at tmp_path/CLAUDE.md (base)
         from agent_takkub.lead_context import _render_lead_context
@@ -268,12 +252,14 @@ class TestLeadContextProjectRulesInjection:
         # The section header must NOT appear — that would be a double inject
         assert "📋 Project rules" not in content
 
-    def test_rules_truncated_at_3000_chars(self, lead_context_env: Path, tmp_path: Path) -> None:
+    def test_rules_truncated_at_3000_chars(
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
+    ) -> None:
         proj_root = tmp_path / "ext" / "bigapp"
         proj_root.mkdir(parents=True)
         long_rules = "# Rules\n" + ("- rule X\n" * 500)  # >> 3000 chars
         (proj_root / "CLAUDE.md").write_text(long_rules, encoding="utf-8")
-        _write_projects(tmp_path, proj_root, name="bigapp")
+        _write_projects(seed_projects, tmp_path, proj_root, name="bigapp")
 
         from agent_takkub.lead_context import _render_lead_context
 
@@ -283,14 +269,16 @@ class TestLeadContextProjectRulesInjection:
         content = Path(out_path).read_text(encoding="utf-8")
         assert "…(truncated)" in content
 
-    def test_skipped_when_cwd_auto_loads_it(self, lead_context_env: Path, tmp_path: Path) -> None:
+    def test_skipped_when_cwd_auto_loads_it(
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
+    ) -> None:
         """tok-4: the dominant real case — Lead spawns AT the single-path project
         root, so claude auto-discovers its CLAUDE.md. The system-prompt injection
         must be skipped to avoid doubling ~750 tok of identical rules."""
         proj_root = tmp_path / "ext" / "soloapp"
         proj_root.mkdir(parents=True)
         (proj_root / "CLAUDE.md").write_text("# Project rules\n- deploy to Fly.io\n", "utf-8")
-        _write_projects(tmp_path, proj_root, name="soloapp")
+        _write_projects(seed_projects, tmp_path, proj_root, name="soloapp")
 
         from agent_takkub.lead_context import _render_lead_context
 
@@ -313,9 +301,9 @@ class TestProviderNeutralLeadDelegationPolicy:
         assert "ถ้าไม่แน่ใจว่าเป็นงานเล็กหรือไม่" in content
 
     def test_claude_context_keeps_policy_when_cockpit_is_active(
-        self, lead_context_env: Path
+        self, lead_context_env: Path, seed_projects
     ) -> None:
-        _write_projects(lead_context_env, lead_context_env, name="cockpit")
+        _write_projects(seed_projects, lead_context_env, lead_context_env, name="cockpit")
 
         from agent_takkub.lead_context import _render_lead_context
 
@@ -327,12 +315,12 @@ class TestProviderNeutralLeadDelegationPolicy:
         assert "source code remains protected" in content
 
     def test_all_nonclaude_provider_specs_receive_identical_policy(
-        self, lead_context_env: Path
+        self, lead_context_env: Path, seed_projects
     ) -> None:
         from agent_takkub.lead_context import render_lead_agents_md
         from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
-        _write_projects(lead_context_env, lead_context_env, name="cockpit")
+        _write_projects(seed_projects, lead_context_env, lead_context_env, name="cockpit")
         for provider, spec in PROVIDER_REGISTRY.items():
             if provider == "claude":
                 continue

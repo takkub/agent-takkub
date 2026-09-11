@@ -120,8 +120,9 @@ class TestValidateName:
 
 
 @pytest.fixture
-def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Set up a minimal two-path project and redirect REPO_ROOT + PROJECTS_JSON."""
+def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects) -> dict:
+    """Set up a minimal two-path project and redirect REPO_ROOT + the V2
+    project registry (#566)."""
     proj_web = tmp_path / "myproject" / "web"
     proj_api = tmp_path / "myproject" / "api"
     proj_web.mkdir(parents=True)
@@ -130,26 +131,13 @@ def project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> dict
     repo = tmp_path / "cockpit"
     repo.mkdir()
 
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "myproject",
-                "projects": {
-                    "myproject": {
-                        "paths": {
-                            "web": str(proj_web),
-                            "api": str(proj_api),
-                        }
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
     monkeypatch.setattr(config_mod, "REPO_ROOT", repo)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", repo)
+    seed_projects(
+        tmp_path,
+        {"myproject": {"paths": {"web": str(proj_web), "api": str(proj_api)}}},
+        active="myproject",
+    )
 
     return {"web": proj_web, "api": proj_api, "repo": repo, "project": "myproject"}
 
@@ -207,28 +195,22 @@ class TestProjectRootDir:
         assert _project_root_dir("nonexistent-project") is None
 
     def test_none_when_common_parent_does_not_exist(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
         # Configured paths whose common parent was never created on disk —
         # must not fabricate a bypass for a directory that doesn't exist.
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": "ghost",
-                    "projects": {
-                        "ghost": {
-                            "paths": {
-                                "web": str(tmp_path / "never-created" / "web"),
-                                "api": str(tmp_path / "never-created" / "api"),
-                            }
-                        }
-                    },
+        seed_projects(
+            tmp_path,
+            {
+                "ghost": {
+                    "paths": {
+                        "web": str(tmp_path / "never-created" / "web"),
+                        "api": str(tmp_path / "never-created" / "api"),
+                    }
                 }
-            ),
-            encoding="utf-8",
+            },
+            active="ghost",
         )
-        monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
         assert _project_root_dir("ghost") is None
 
 
@@ -287,28 +269,14 @@ class TestCwdValidationError:
 
 
 @pytest.fixture
-def single_path_project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+def single_path_project_env(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+) -> dict:
     """A project configured with exactly one path (e.g. agent-takkub's `main`)."""
     main = tmp_path / "myproject"
     main.mkdir(parents=True)
 
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "myproject",
-                "projects": {
-                    "myproject": {
-                        "paths": {
-                            "main": str(main),
-                        }
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
+    seed_projects(tmp_path, {"myproject": {"paths": {"main": str(main)}}}, active="myproject")
 
     return {"main": main, "project": "myproject"}
 

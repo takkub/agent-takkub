@@ -17,7 +17,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import pathlib
 import time
 from unittest.mock import MagicMock
@@ -70,38 +69,31 @@ def _isolate_team_preset(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.fixture
-def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """projects.json with two independent projects."""
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "proj_a",
-                "projects": {
-                    "proj_a": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_a" / "api"),
-                            "web": str(tmp_path / "proj_a" / "web"),
-                        }
-                    },
-                    "proj_b": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_b" / "api"),
-                        }
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
+    """V2 project registry (#566) with two independent projects."""
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
-    return pj
+    return seed_projects(
+        tmp_path,
+        {
+            "proj_a": {
+                "paths": {
+                    "api": str(tmp_path / "proj_a" / "api"),
+                    "web": str(tmp_path / "proj_a" / "web"),
+                }
+            },
+            "proj_b": {
+                "paths": {
+                    "api": str(tmp_path / "proj_b" / "api"),
+                }
+            },
+        },
+        active="proj_a",
+    )
 
 
 def _make_orch_with_fake_panes(

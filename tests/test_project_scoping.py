@@ -37,39 +37,32 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture
-def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """projects.json with two independent projects; active = proj_b."""
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "proj_b",
-                "projects": {
-                    "proj_a": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_a" / "api"),
-                            "web": str(tmp_path / "proj_a" / "web"),
-                        }
-                    },
-                    "proj_b": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_b" / "api"),
-                            "web": str(tmp_path / "proj_b" / "web"),
-                        }
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
+    """V2 project registry (#566) with two independent projects; active = proj_b."""
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
-    return pj
+    return seed_projects(
+        tmp_path,
+        {
+            "proj_a": {
+                "paths": {
+                    "api": str(tmp_path / "proj_a" / "api"),
+                    "web": str(tmp_path / "proj_a" / "web"),
+                }
+            },
+            "proj_b": {
+                "paths": {
+                    "api": str(tmp_path / "proj_b" / "api"),
+                    "web": str(tmp_path / "proj_b" / "web"),
+                }
+            },
+        },
+        active="proj_b",
+    )
 
 
 # ─────────────────────────────────────────────────────────────

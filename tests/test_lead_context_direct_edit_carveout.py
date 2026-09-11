@@ -10,7 +10,9 @@ import pytest
 
 
 @pytest.fixture
-def dev_mode_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
+def dev_mode_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, seed_projects
+) -> pathlib.Path:
     cockpit_md = tmp_path / "CLAUDE.md"
     cockpit_md.write_text("# Cockpit CLAUDE.md\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
@@ -22,9 +24,9 @@ def dev_mode_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pat
     monkeypatch.setattr(lc_mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(lc_mod, "ASSETS_ROOT", tmp_path)
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
-    monkeypatch.setattr(config_mod, "PROJECTS_JSON", tmp_path / "projects.json")
     monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(config_mod, "RUNTIME_DIR", runtime)
+    seed_projects(tmp_path, {})
     monkeypatch.setattr(lc_mod, "_recent_session_brief", lambda _proj: None)
     try:
         from agent_takkub import provider_state as ps_mod

@@ -628,24 +628,16 @@ class TestSyncCwdValidation:
     an async [spawn-failed] notice after the CLI already printed ok."""
 
     @pytest.fixture
-    def project_setup(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
-        import agent_takkub.config as config_mod
-
+    def project_setup(self, tmp_path, monkeypatch: pytest.MonkeyPatch, seed_projects):
         web = tmp_path / "myproject" / "web"
         api = tmp_path / "myproject" / "api"
         web.mkdir(parents=True)
         api.mkdir(parents=True)
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": "myproject",
-                    "projects": {"myproject": {"paths": {"web": str(web), "api": str(api)}}},
-                }
-            ),
-            encoding="utf-8",
+        seed_projects(
+            tmp_path,
+            {"myproject": {"paths": {"web": str(web), "api": str(api)}}},
+            active="myproject",
         )
-        monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
         return {"web": web, "api": api, "root": web.parent, "tmp_path": tmp_path}
 
     def test_assign_rejects_cwd_outside_project_before_ack(

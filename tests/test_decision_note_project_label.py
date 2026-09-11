@@ -12,26 +12,26 @@ completely untouched — only the on-disk filing label for the decision note.
 
 from __future__ import annotations
 
-import json
 import pathlib
 
 from agent_takkub import config
 from agent_takkub.orchestrator_text import _decision_note_project_label
 
 
-def _write_projects_json(tmp_path: pathlib.Path, monkeypatch, projects: dict) -> None:
-    pj = tmp_path / "projects.json"
-    pj.write_text(json.dumps({"active": "proj_a", "projects": projects}), encoding="utf-8")
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def _write_projects_json(
+    tmp_path: pathlib.Path, monkeypatch, seed_projects, projects: dict
+) -> None:
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
+    seed_projects(tmp_path, projects, active="proj_a")
 
 
 class TestDecisionNoteProjectLabel:
-    def test_cwd_inside_project_keeps_project_unchanged(self, tmp_path, monkeypatch):
+    def test_cwd_inside_project_keeps_project_unchanged(self, tmp_path, monkeypatch, seed_projects):
         _write_projects_json(
             tmp_path,
             monkeypatch,
+            seed_projects,
             {"proj_a": {"paths": {"backend": str(tmp_path / "proj_a" / "backend")}}},
         )
         cwd = str(tmp_path / "proj_a" / "backend")
@@ -40,13 +40,16 @@ class TestDecisionNoteProjectLabel:
 
         assert label == "proj_a"
 
-    def test_cross_repo_cwd_derives_label_from_repo_folder_name(self, tmp_path, monkeypatch):
+    def test_cross_repo_cwd_derives_label_from_repo_folder_name(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """The reported scenario: `--cwd` resolves OUTSIDE every root
         `proj_a` has registered — file the note under the repo's own
         folder name instead of the umbrella project."""
         _write_projects_json(
             tmp_path,
             monkeypatch,
+            seed_projects,
             {"proj_a": {"paths": {"backend": str(tmp_path / "proj_a" / "backend")}}},
         )
         other_repo = tmp_path / "weid_gateway_api"
@@ -56,16 +59,18 @@ class TestDecisionNoteProjectLabel:
 
         assert label == "weid_gateway_api"
 
-    def test_no_cwd_keeps_project_unchanged(self, tmp_path, monkeypatch):
-        _write_projects_json(tmp_path, monkeypatch, {"proj_a": {"paths": {}}})
+    def test_no_cwd_keeps_project_unchanged(self, tmp_path, monkeypatch, seed_projects):
+        _write_projects_json(tmp_path, monkeypatch, seed_projects, {"proj_a": {"paths": {}}})
 
         assert _decision_note_project_label("proj_a", None, "backend") == "proj_a"
 
-    def test_lead_cockpit_repo_root_bypass_keeps_project_unchanged(self, tmp_path, monkeypatch):
+    def test_lead_cockpit_repo_root_bypass_keeps_project_unchanged(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """`_cwd_within_project`'s Lead-only cockpit-repo-root bypass must
         still short-circuit here — Lead editing the cockpit itself is not
         a cross-repo task needing re-attribution."""
-        _write_projects_json(tmp_path, monkeypatch, {"proj_a": {"paths": {}}})
+        _write_projects_json(tmp_path, monkeypatch, seed_projects, {"proj_a": {"paths": {}}})
         cockpit = tmp_path / "cockpit"
         cockpit.mkdir()
 
@@ -73,8 +78,8 @@ class TestDecisionNoteProjectLabel:
 
         assert label == "proj_a"
 
-    def test_unresolvable_cwd_falls_back_to_project(self, tmp_path, monkeypatch):
-        _write_projects_json(tmp_path, monkeypatch, {"proj_a": {"paths": {}}})
+    def test_unresolvable_cwd_falls_back_to_project(self, tmp_path, monkeypatch, seed_projects):
+        _write_projects_json(tmp_path, monkeypatch, seed_projects, {"proj_a": {"paths": {}}})
 
         # A path with an illegal component on Windows/POSIX alike still
         # must not raise out of this helper — best-effort fallback.

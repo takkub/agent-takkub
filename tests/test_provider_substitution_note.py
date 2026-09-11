@@ -19,9 +19,10 @@ from agent_takkub import provider_config, provider_state
 
 
 @pytest.fixture
-def ctx(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
+def ctx(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, seed_projects) -> pathlib.Path:
     """Minimal filesystem scaffold for _render_lead_context with all
-    provider-related side effects isolated (plan_tier, projects.json, etc.)."""
+    provider-related side effects isolated (plan_tier, the V2 project
+    registry (#566), etc.)."""
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     cockpit = tmp_path / "cockpit"
@@ -32,7 +33,7 @@ def ctx(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path
     # real runtime/ and reads from the tmp cockpit CLAUDE.md.
     monkeypatch.setattr(cfg_mod, "REPO_ROOT", cockpit)
     monkeypatch.setattr(cfg_mod, "RUNTIME_DIR", runtime)
-    monkeypatch.setattr(cfg_mod, "PROJECTS_JSON", cockpit / "projects.json")
+    seed_projects(cockpit, {})
     monkeypatch.setattr(lc_mod, "REPO_ROOT", cockpit)
     monkeypatch.setattr(lc_mod, "ASSETS_ROOT", cockpit)
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)

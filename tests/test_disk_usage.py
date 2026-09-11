@@ -555,23 +555,17 @@ class TestRobustRmtree:
 class TestGraftGraphsScan:
     """`graft-graphs/` — external code-graph store (#146 follow-up). Orphan
     classification compares each store dir's own name (its `graph_key`)
-    against every path currently configured in projects.json, so every test
-    here isolates `config.PROJECTS_JSON` under tmp_path — never the real
-    dev machine's project list.
+    against every path currently configured in the project list, so every
+    test here seeds the V2 project registry (#566, `seed_projects`) under
+    tmp_path — never the real dev machine's project list.
 
     The store root itself is never DATA_HOME-relative (see graft_store.py's
     module docstring), so `scan_graft_graphs`'s `data_home` arg is a no-op —
     every test here monkeypatches `graft_store.GRAFT_STORE_ROOT` directly to
     an isolated tmp dir instead."""
 
-    def _isolate_projects(self, monkeypatch, tmp_path, projects: dict) -> None:
-        import json as _json
-
-        from agent_takkub import config
-
-        pj = tmp_path / "projects.json"
-        pj.write_text(_json.dumps({"active": None, "projects": projects}), encoding="utf-8")
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+    def _isolate_projects(self, seed_projects, tmp_path, projects: dict) -> None:
+        seed_projects(tmp_path, projects)
 
     def test_no_root_dir_is_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
@@ -585,11 +579,11 @@ class TestGraftGraphsScan:
             "oversized_live": [],
         }
 
-    def test_live_store_matches_configured_project_path(self, tmp_path, monkeypatch):
+    def test_live_store_matches_configured_project_path(self, tmp_path, monkeypatch, seed_projects):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
         target = tmp_path / "some-project" / "api"
         target.mkdir(parents=True)
-        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"api": str(target)}}})
+        self._isolate_projects(seed_projects, tmp_path, {"proj": {"paths": {"api": str(target)}}})
 
         store = tmp_path / "graft-graphs" / graft_store.graph_key(target)
         (store / "graft").mkdir(parents=True)
@@ -600,9 +594,9 @@ class TestGraftGraphsScan:
         assert result["live_bytes"] == 40
         assert result["orphan_count"] == 0
 
-    def test_orphan_store_not_referenced_by_any_project(self, tmp_path, monkeypatch):
+    def test_orphan_store_not_referenced_by_any_project(self, tmp_path, monkeypatch, seed_projects):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
-        self._isolate_projects(monkeypatch, tmp_path, {})
+        self._isolate_projects(seed_projects, tmp_path, {})
 
         store = tmp_path / "graft-graphs" / ("0" * 64)
         (store / "graft").mkdir(parents=True)
@@ -613,18 +607,20 @@ class TestGraftGraphsScan:
         assert result["orphan_bytes"] == 25
         assert result["live_count"] == 0
 
-    def test_entry_carries_manifest_source_when_present(self, tmp_path, monkeypatch):
+    def test_entry_carries_manifest_source_when_present(self, tmp_path, monkeypatch, seed_projects):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
-        self._isolate_projects(monkeypatch, tmp_path, {})
+        self._isolate_projects(seed_projects, tmp_path, {})
         target = tmp_path / "orphaned-project"
         target.mkdir()
         graft_store.write_store_manifest(target)
 
         result = disk_usage.scan_graft_graphs(tmp_path)
         assert result["entries"][0]["source"] == str(target.resolve())
-        assert result["entries"][0]["orphan"] is True  # not in projects.json paths
+        assert result["entries"][0]["orphan"] is True  # not in the seeded project registry
 
-    def test_live_store_size_folds_in_paired_staging_mirror(self, tmp_path, monkeypatch):
+    def test_live_store_size_folds_in_paired_staging_mirror(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """H1 follow-up (2026-08-06): the persistent staging mirror
         (`graft_store.staging_dir_for`, same `graph_key` as the store) is
         reported as part of the SAME entry, not invisible — otherwise the
@@ -634,7 +630,7 @@ class TestGraftGraphsScan:
         monkeypatch.setattr(graft_store, "GRAFT_STAGING_ROOT", tmp_path / "graft-staging")
         target = tmp_path / "some-project" / "api"
         target.mkdir(parents=True)
-        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"api": str(target)}}})
+        self._isolate_projects(seed_projects, tmp_path, {"proj": {"paths": {"api": str(target)}}})
 
         key = graft_store.graph_key(target)
         store = tmp_path / "graft-graphs" / key
@@ -648,7 +644,7 @@ class TestGraftGraphsScan:
         assert result["live_count"] == 1
         assert result["live_bytes"] == 50  # 40 (store) + 10 (staging)
 
-    def test_oversized_live_store_flagged(self, tmp_path, monkeypatch):
+    def test_oversized_live_store_flagged(self, tmp_path, monkeypatch, seed_projects):
         """H1(c): a live store over the size threshold shows up in
         `oversized_live` so `takkub disk` can warn about it — orphan stores
         (already reclaimable) are never flagged, only live ones (which had
@@ -657,7 +653,7 @@ class TestGraftGraphsScan:
         monkeypatch.setattr(disk_usage, "_GRAFT_STORE_WARN_BYTES", 10)
         target = tmp_path / "big-project"
         target.mkdir()
-        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"a": str(target)}}})
+        self._isolate_projects(seed_projects, tmp_path, {"proj": {"paths": {"a": str(target)}}})
         store = tmp_path / "graft-graphs" / graft_store.graph_key(target)
         (store / "graft").mkdir(parents=True)
         (store / "graft" / "index.json").write_bytes(b"x" * 40)  # 40 > the 10-byte threshold
@@ -667,7 +663,9 @@ class TestGraftGraphsScan:
         assert len(result["oversized_live"]) == 1
         assert result["oversized_live"][0]["size_bytes"] == 40
 
-    def test_legacy_64char_instance_dir_reported_as_orphan(self, tmp_path, monkeypatch):
+    def test_legacy_64char_instance_dir_reported_as_orphan(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """H2 migration: pre-fix code keyed the instance dir with a FULL
         64-hex-char SHA-256 digest (H2 truncated to 16). A leftover 64-char
         instance dir from before this fix must show up as orphan — not sit
@@ -675,7 +673,7 @@ class TestGraftGraphsScan:
         (16-char) `GRAFT_STORE_ROOT` (see `_legacy_orphan_entries`)."""
         current_root = tmp_path / "graft-graphs" / "abc123ef"  # current-format, short
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", current_root)
-        self._isolate_projects(monkeypatch, tmp_path, {})
+        self._isolate_projects(seed_projects, tmp_path, {})
         legacy_instance = tmp_path / "graft-graphs" / ("f" * 64)
         legacy_store = legacy_instance / ("a" * 64)
         legacy_store.mkdir(parents=True)
@@ -688,13 +686,15 @@ class TestGraftGraphsScan:
         assert result["entries"][0]["path"] == str(legacy_store)
         assert result["entries"][0]["orphan"] is True
 
-    def test_current_format_sibling_instance_dir_not_treated_as_legacy(self, tmp_path, monkeypatch):
+    def test_current_format_sibling_instance_dir_not_treated_as_legacy(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """A SAME-length (16-char) sibling instance dir might be a second,
         genuinely live cockpit instance (dev + prod, `_instance_key`'s own
         docstring) — must never be swept up as a migration leftover."""
         current_root = tmp_path / "graft-graphs" / "abc123ef"
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", current_root)
-        self._isolate_projects(monkeypatch, tmp_path, {})
+        self._isolate_projects(seed_projects, tmp_path, {})
         other_live_instance = tmp_path / "graft-graphs" / "9998887766"
         (other_live_instance / "somehash").mkdir(parents=True)
         (other_live_instance / "somehash" / "f.md").write_bytes(b"q" * 5)
@@ -706,13 +706,9 @@ class TestGraftGraphsScan:
 
 
 class TestPruneGraftGraphs:
-    def test_dry_run_does_not_delete_orphan_store(self, tmp_path, monkeypatch):
-        from agent_takkub import config
-
+    def test_dry_run_does_not_delete_orphan_store(self, tmp_path, monkeypatch, seed_projects):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
-        pj = tmp_path / "projects.json"
-        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {})
         store = tmp_path / "graft-graphs" / ("1" * 64)
         (store / "graft").mkdir(parents=True)
 
@@ -720,20 +716,11 @@ class TestPruneGraftGraphs:
         assert store.exists()
         assert result["categories"][0]["target_count"] == 1
 
-    def test_yes_removes_orphan_store_only(self, tmp_path, monkeypatch):
-        from agent_takkub import config
-
+    def test_yes_removes_orphan_store_only(self, tmp_path, monkeypatch, seed_projects):
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
         live_target = tmp_path / "live-project"
         live_target.mkdir()
-        pj = tmp_path / "projects.json"
-        import json as _json
-
-        pj.write_text(
-            _json.dumps({"active": None, "projects": {"p": {"paths": {"a": str(live_target)}}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {"p": {"paths": {"a": str(live_target)}}})
 
         live_store = tmp_path / "graft-graphs" / graft_store.graph_key(live_target)
         (live_store / "graft").mkdir(parents=True)
@@ -745,19 +732,17 @@ class TestPruneGraftGraphs:
         assert live_store.exists()
         assert result["categories"][0]["removed_count"] == 1
 
-    def test_yes_removes_orphan_staging_mirror_alongside_store(self, tmp_path, monkeypatch):
+    def test_yes_removes_orphan_staging_mirror_alongside_store(
+        self, tmp_path, monkeypatch, seed_projects
+    ):
         """H1 follow-up (2026-08-06): deleting an orphan store must delete
         its paired staging mirror too — otherwise the mirror is permanent,
         unreclaimable garbage the moment its source project is removed from
-        projects.json (same class of blind spot H1c fixed for the store
-        itself)."""
-        from agent_takkub import config
-
+        the project registry (same class of blind spot H1c fixed for the
+        store itself)."""
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
         monkeypatch.setattr(graft_store, "GRAFT_STAGING_ROOT", tmp_path / "graft-staging")
-        pj = tmp_path / "projects.json"
-        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {})
         key = "2" * 16
         orphan_store = tmp_path / "graft-graphs" / key
         (orphan_store / "graft").mkdir(parents=True)
@@ -772,24 +757,15 @@ class TestPruneGraftGraphs:
         assert result["categories"][0]["removed_count"] == 1
         assert result["categories"][0]["errors"] == []
 
-    def test_include_live_deletes_live_store_too(self, tmp_path, monkeypatch):
+    def test_include_live_deletes_live_store_too(self, tmp_path, monkeypatch, seed_projects):
         """H1(c): before this fix, a live store had NO reclaim path at all —
         `--include-live` is the escape hatch (same shape as `node-modules`'s)
         for when a store grew unbounded and the user wants it gone now,
         accepting that the next build just starts from scratch."""
-        from agent_takkub import config
-
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
         live_target = tmp_path / "live-project"
         live_target.mkdir()
-        pj = tmp_path / "projects.json"
-        import json as _json
-
-        pj.write_text(
-            _json.dumps({"active": None, "projects": {"p": {"paths": {"a": str(live_target)}}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {"p": {"paths": {"a": str(live_target)}}})
         live_store = tmp_path / "graft-graphs" / graft_store.graph_key(live_target)
         (live_store / "graft").mkdir(parents=True)
 
@@ -805,7 +781,7 @@ class TestPruneGraftGraphs:
         assert result["categories"][0]["removed_count"] == 1
         assert result["categories"][0]["level"] == "review"
 
-    def test_never_deletes_outside_store_root(self, tmp_path, monkeypatch):
+    def test_never_deletes_outside_store_root(self, tmp_path, monkeypatch, seed_projects):
         # `_prune_graft_graphs` reuses `_assert_under` like every other
         # category — a store dir reported outside `GRAFT_STORE_ROOT.parent`
         # (the whole `graft-graphs/` dir, widened from the narrower current-
@@ -820,14 +796,10 @@ class TestPruneGraftGraphs:
         # this test specifically exercises the `.parent` boundary, and a
         # 1-level `GRAFT_STORE_ROOT` would make `.parent` == `tmp_path`
         # itself, silently widening the boundary to include `escaped` below.
-        from agent_takkub import config
-
         monkeypatch.setattr(
             graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs" / "instance-key"
         )
-        pj = tmp_path / "projects.json"
-        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {})
         home = tmp_path / "home"
         home.mkdir()
         escaped = tmp_path / "outside" / "evil-store"  # not under graft-graphs/ at all
