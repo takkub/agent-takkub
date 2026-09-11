@@ -1377,6 +1377,15 @@ class BootFlowWindow(QDialog):
         unit = getattr(event, "unit", "") or ""
         if done is not None and total is not None:
             count_text = f"{done:,} / {total:,} {unit}".strip()
+            # #574 round11 item 3: `files_done`/`files_total` — progress
+            # WITHIN one large directory entry (`on_file_progress`, not
+            # `on_entry`) — read defensively, same reasoning as
+            # `current_path` below: added to `ProgressEvent` after this
+            # window's own interface was first documented.
+            files_done = getattr(event, "files_done", None)
+            files_total = getattr(event, "files_total", None)
+            if files_done is not None and files_total:
+                count_text += f" ({files_done:,}/{files_total:,} ไฟล์)"
             # `current_path` — optional, not in the documented interface yet
             # (see module docstring): the mockup only appends the "· providers/…"
             # segment to the row that's actively running.

@@ -152,6 +152,7 @@ class MigrationEngine:
         data_home: Path | None = None,
         journal: MigrationJournal | None = None,
         on_entry: Callable[[str, str], None] | None = None,
+        on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
     ) -> None:
         """*on_entry* (#574): best-effort ``(step_id, entry_name)``
         progress observer, forwarded ONLY into the three steps whose
@@ -160,12 +161,26 @@ class MigrationEngine:
         each gets its own step_id-bound partial of *on_entry*, since those
         steps' own `on_entry` field only ever passes the entry name. A pure
         additive wiring: `None` (the default) reproduces every existing
-        caller's behavior exactly."""
+        caller's behavior exactly.
+
+        *on_file_progress* (#574 round11 item 3): the SAME three steps'
+        own `on_file_progress` field — best-effort ``(step_id, entry_name,
+        files_done, files_total, current_path)``, for progress WITHIN one
+        directory entry's own copy+verify (`on_entry` above only fires
+        once per whole entry, not fine-grained enough for a directory
+        holding tens of thousands of files)."""
 
         def _bound(step_id: str) -> Callable[[str], None] | None:
             if on_entry is None:
                 return None
             return lambda name: on_entry(step_id, name)
+
+        def _bound_file(step_id: str) -> Callable[[str, int, int, str], None] | None:
+            if on_file_progress is None:
+                return None
+            return lambda name, done, total, path: on_file_progress(
+                step_id, name, done, total, path
+            )
 
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
@@ -199,6 +214,7 @@ class MigrationEngine:
                     backups=backups,
                     data_home=home,
                     on_entry=_bound("pre-migrate-backup"),
+                    on_file_progress=_bound_file("pre-migrate-backup"),
                 ),
                 VersionMarkerStep(journal=journal, backups=backups),
                 # #504: right after version-marker, before any of the 8 V1->V2
@@ -210,6 +226,7 @@ class MigrationEngine:
                     backups=backups,
                     data_home=home,
                     on_entry=_bound("promote-v2-root"),
+                    on_file_progress=_bound_file("promote-v2-root"),
                 ),
                 build_readonly_registries_step(journal, backups, data_home=home),
                 RoleAgentMigrationStep(journal=journal, backups=backups, data_home=home),
@@ -226,6 +243,7 @@ class MigrationEngine:
                     backups=backups,
                     data_home=home,
                     on_entry=_bound("archive-v1-legacy"),
+                    on_file_progress=_bound_file("archive-v1-legacy"),
                 ),
             ]
 

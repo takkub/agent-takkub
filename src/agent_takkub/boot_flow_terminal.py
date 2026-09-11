@@ -33,12 +33,21 @@ def _fmt_eta(eta_s: float | None) -> str:
 
 def format_progress_line(event: boot_flow.ProgressEvent) -> str:
     """One `\\r`-refreshable line (screen C) — the mockup's own format:
-    ``[████░░░░░░] 34% · ขั้น 2/5 คัดลอกขึ้นโครงใหม่ 3/9 · เหลือ ~2 นาที``."""
-    parts = [
-        f"[{_bar(event.percent_overall)}] {event.percent_overall:.0f}%",
-        f"ขั้น {event.phase}/{event.phases_total} {event.phase_label}"
-        + (f" {event.done}/{event.total}" if event.done is not None and event.total else ""),
-    ]
+    ``[████░░░░░░] 34% · ขั้น 2/5 คัดลอกขึ้นโครงใหม่ 3/9 (120/5000 ไฟล์) · เหลือ ~2 นาที``.
+
+    #574 round11 item 3: `files_done`/`files_total` (progress WITHIN one
+    large directory entry, from `on_file_progress`) read defensively via
+    `getattr` — they were added to `ProgressEvent` after the dataclass
+    first shipped, and a caller building its own `ProgressEvent` by hand
+    (a test, an older serialized event) may not carry them at all."""
+    step_part = f"ขั้น {event.phase}/{event.phases_total} {event.phase_label}"
+    if event.done is not None and event.total:
+        step_part += f" {event.done}/{event.total}"
+    files_done = getattr(event, "files_done", None)
+    files_total = getattr(event, "files_total", None)
+    if files_done is not None and files_total:
+        step_part += f" ({files_done}/{files_total} ไฟล์)"
+    parts = [f"[{_bar(event.percent_overall)}] {event.percent_overall:.0f}%", step_part]
     eta = _fmt_eta(event.eta_s)
     if eta:
         parts.append(eta)
@@ -143,18 +152,72 @@ def _parse_selected(
     return [replace(it, selected=(it.name in wanted)) for it in items]
 
 
+def _apply_remembered_choice(
+    items: list[boot_flow.ProviderUpdateItem], remembered: dict
+) -> list[boot_flow.ProviderUpdateItem]:
+    mode = remembered.get("mode")
+    if mode == "skip":
+        return [replace(it, selected=False) for it in items]
+    if mode == "update_all":
+        return [
+            replace(it, selected=(it.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE))
+            for it in items
+        ]
+    if mode == "selected":
+        wanted = set(remembered.get("selected", []))
+        return [replace(it, selected=(it.name in wanted)) for it in items]
+    return items  # mode == "ask" (or malformed) — never applied, caller still prompts
+
+
+def _prompt_provider_choices(
+    items: list[boot_flow.ProviderUpdateItem], out
+) -> list[boot_flow.ProviderUpdateItem]:
+    """#574 round11 R7-M3: `--providers ask` (the default) must actually
+    ask — one provider at a time, `y`/`n`/`all`/`none` — never silently
+    run whatever `check_provider_updates()` happened to pre-select."""
+    result: list[boot_flow.ProviderUpdateItem] = []
+    for index, it in enumerate(items):
+        if it.status != boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE:
+            result.append(replace(it, selected=False))
+            continue
+        while True:
+            answer = (
+                input(f"  {it.label}: {it.current} → {it.latest} — อัพเดตไหม? [y/n/all/none] ")
+                .strip()
+                .lower()
+            )
+            if answer in ("y", "yes"):
+                result.append(replace(it, selected=True))
+                break
+            if answer in ("n", "no", ""):
+                result.append(replace(it, selected=False))
+                break
+            if answer == "all":
+                result.append(replace(it, selected=True))
+                result.extend(
+                    replace(
+                        later, selected=(later.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE)
+                    )
+                    for later in items[index + 1 :]
+                )
+                return result
+            if answer == "none":
+                result.append(replace(it, selected=False))
+                result.extend(replace(later, selected=False) for later in items[index + 1 :])
+                return result
+            print("  กรุณาตอบ y, n, all, หรือ none", file=out)
+    return result
+
+
 def run_cli(argv: list[str] | None = None, *, out=None) -> int:
     """`takkub migrate run` — interactive by default; `--json` emits one
     JSON object per line (provider rows, then progress events, then the
     final outcome) for automation instead of the human-readable screens."""
     out = out or sys.stdout
     parser = argparse.ArgumentParser(prog="takkub migrate run", add_help=True)
-    parser.add_argument("--providers", default="ask", help="all|none|<csv of names>")
+    parser.add_argument("--providers", default="ask", help="ask|all|none|<csv of names>")
     parser.add_argument("--remember", action="store_true")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompts")
-    parser.add_argument(
-        "--no-backup", action="store_true", help="DANGEROUS: skip the pre-migrate backup"
-    )
     parser.add_argument(
         "--json", action="store_true", help="emit JSON lines instead of text screens"
     )
@@ -164,17 +227,58 @@ def run_cli(argv: list[str] | None = None, *, out=None) -> int:
         if args.json:
             print(json.dumps(obj, default=str), file=out)
 
+    # #574 round11 R7-L1: `--json` implies `--yes` (a JSON consumer has no
+    # human to answer the confirm prompt) — record that this run's
+    # confirmation was auto-granted rather than silently treating it the
+    # same as an explicit `--yes`.
+    auto_confirmed = args.json and not args.yes
+    if auto_confirmed:
+        emit({"type": "auto_confirmed", "reason": "--json implies --yes (no prompt possible)"})
+
     # --- Screen A: provider updates ---
     items = boot_flow.check_provider_updates()
+    remembered = boot_flow.remembered_provider_choice()
+    selection_mode: str | None = None
     if args.providers == "none":
         items = [replace(it, selected=False) for it in items]
+        selection_mode = "skip"
     elif args.providers == "all":
         items = [
             replace(it, selected=(it.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE))
             for it in items
         ]
+        selection_mode = "update_all"
     elif args.providers != "ask":
         items = _parse_selected(args.providers, items)
+        selection_mode = "selected"
+    elif remembered is not None and remembered.get("mode") != "ask":
+        # #574 round11 R7-M4: a remembered non-"ask" choice from a prior
+        # run is honored on the default `ask` path — never re-prompt for
+        # something the user already asked to remember.
+        items = _apply_remembered_choice(items, remembered)
+        selection_mode = remembered.get("mode")
+        if not args.json:
+            print(f"ใช้ตัวเลือก provider ที่จำไว้ก่อนหน้า: {selection_mode}", file=out)
+    else:
+        # Genuinely "ask", nothing remembered (or the remembered choice was
+        # itself "always ask") — a non-interactive caller (`--json`, or no
+        # real TTY) has no one to answer a per-provider prompt: interpret
+        # that as "none" rather than either hanging on `input()` or
+        # silently running whatever `check_provider_updates()` pre-selected
+        # (the R7-M3 bug this whole branch exists to fix).
+        if args.json or not sys.stdin.isatty():
+            items = [replace(it, selected=False) for it in items]
+            selection_mode = "skip"
+            emit(
+                {
+                    "type": "provider_prompt_skipped",
+                    "reason": "non-interactive (--json or no tty)",
+                    "resolved_as": "none",
+                }
+            )
+        else:
+            items = _prompt_provider_choices(items, out)
+            selection_mode = "selected"
 
     if args.json:
         for it in items:
@@ -189,24 +293,19 @@ def run_cli(argv: list[str] | None = None, *, out=None) -> int:
             if args.json
             else None,
         )
-        if args.remember:
-            boot_flow.remember_provider_choice(
-                {"mode": "selected", "selected": [it.name for it in items if it.selected]}
-            )
 
-    # --- Screens B/C/D/E: migration ---
-    if args.no_backup:
-        # ponytail: warns loudly (task brief's own requirement) but does
-        # NOT currently skip the backup step — wiring a real skip needs a
-        # `skip_step_ids`-style parameter threaded through `run_boot_stage`
-        # / `MigrationEngine`, which nothing else in the ladder needs yet.
-        # Upgrade path: add that parameter the same additive way `on_entry`
-        # was added, default `()`, forwarded to `apply()`/`apply_pending()`.
-        print(
-            "⚠️  --no-backup: จะยังคงสำรองข้อมูลก่อนย้ายอยู่ (ยังไม่รองรับการข้าม) — ธงนี้แค่เตือนไว้ก่อน",
-            file=out,
+    # #574 round11 R7-M4: persist the choice for EVERY resolved mode
+    # (skip/update_all/selected), not only when something ended up
+    # selected — `--providers none --remember` must actually stick.
+    if args.remember and selection_mode is not None:
+        boot_flow.remember_provider_choice(
+            {
+                "mode": selection_mode,
+                "selected": [it.name for it in items if it.selected],
+            }
         )
 
+    # --- Screens B/C/D/E: migration ---
     plan = boot_flow.plan_migration()
     if plan is not None:
         if args.json:

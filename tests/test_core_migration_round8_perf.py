@@ -16,6 +16,7 @@ before this fix resumes correctly under it.
 
 from __future__ import annotations
 
+import itertools
 import time
 
 import pytest
@@ -28,7 +29,7 @@ from agent_takkub.core.migration.promote_v1 import (
     _restore_fsync_batch,
 )
 from agent_takkub.core.migration.registry_copy_step import write_json_atomic
-from agent_takkub.core.migration.wal import STATE_VERIFIED, TransferLedger
+from agent_takkub.core.migration.wal import STATE_SOURCE_PRUNED, STATE_VERIFIED, TransferLedger
 
 
 def _make_files(root, n: int) -> None:
@@ -209,6 +210,50 @@ def test_restore_fsync_batch_targets_a_roughly_constant_checkpoint_count():
 
 
 # ---------------------------------------------------------------------------
+# #574 round11 item 3 — WITHIN-entry progress (`on_file_progress`): a
+# directory entry holding tens of thousands of files used to go completely
+# silent between `on_entry` fires (once per whole entry) — a real
+# pre-migrate-backup rehearsal sat on ONE entry for 17+ minutes with
+# nothing on screen.
+# ---------------------------------------------------------------------------
+
+
+def test_copy_phase_on_file_progress_never_leaves_a_5000_file_entry_silent(tmp_path):
+    """Asserted precisely (not by wall-clock, same reasoning as this
+    file's other tests): on a 5,000-file directory entry, the gap between
+    consecutive `files_done` values `on_file_progress` reports must never
+    exceed the 200-file throttle window — real test I/O comfortably
+    finishes 200 file-copies in well under the 2-second time-based
+    fallback, so a count gap this small is the binding guarantee; the
+    time-based fallback itself is covered directly (via a fake clock) in
+    `test_core_migration_promote_v1.py`."""
+    n = 5000
+    src = tmp_path / "src"
+    _make_files(src, n)
+    dest = tmp_path / "dest"
+    backups = BackupManager(tmp_path / "backups")
+    entry = TransferEntry("bigdir", "dir", src, dest, paths=tuple(f"f{i}.txt" for i in range(n)))
+    ledger = TransferLedger(tmp_path / "wal.json")
+
+    seen: list[tuple[str, int, int, str]] = []
+
+    def on_file_progress(entry_name, files_done, files_total, current_path):
+        seen.append((entry_name, files_done, files_total, current_path))
+
+    outcome = _copy_phase([entry], backups, "apply-step", ledger, on_file_progress=on_file_progress)
+
+    assert outcome.ok, outcome.error
+    assert seen, "on_file_progress never fired at all"
+    assert all(name == "bigdir" and total == n for name, _done, total, _path in seen)
+    # Guaranteed final call at done == total (copy phase AND verify phase
+    # each fire their own final call).
+    assert seen[-1][1] == n
+    done_values = [d for _n, d, _t, _p in seen]
+    gaps = [b - a for a, b in itertools.pairwise(done_values) if b > a]
+    assert max(gaps, default=0) <= 200
+
+
+# ---------------------------------------------------------------------------
 # #504 round10 (R8-P2): the identical O(n^2)-bytes-written shape as above,
 # but on the PRUNE side of a restore — `PromoteV2RootStep.rollback()`'s own
 # `_prune_phase` call durably rewrote the whole manifest (`write_committed`)
@@ -307,13 +352,124 @@ def test_prune_phase_batch_write_failure_never_falsely_marks_siblings_pruned(tmp
     outcome = _prune_phase(entries, write_committed, ledger, fsync_every=5)
 
     assert not outcome.ok
-    assert outcome.failed_name == "models/f0.txt"
+    # #574 round11 R7-M5: a batch-level ledger.write failure touches NO
+    # entry in the batch more than any other — `failed_name` still names
+    # a representative entry, but `unknown_batch` is what a caller must
+    # actually check before treating this as "f0 specifically is a
+    # DUPLICATE" (it isn't — none of the 5 are).
+    assert outcome.unknown_batch
+    assert "models/f0.txt" in outcome.failed_name
     for i in range(5):
         assert (src / f"f{i}.txt").exists(), f"f{i}.txt should not have been removed"
     states = ledger.read()
     for i in range(1, 5):
         rec = states.get(f"models/f{i}.txt", {})
         assert rec.get("state") != "PRUNED", rec
+
+
+def test_prune_phase_write_committed_batch_failure_reports_unknown_not_duplicate(
+    tmp_path, monkeypatch
+):
+    """#574 round11 R7-M5: a batch-level `write_committed` failure (an I/O
+    fault, not tied to any one entry) used to blame `batch[0]` specifically
+    as `DUPLICATE` — misleading, since NOTHING in the batch was actually
+    touched (removal never even started). Must report `unknown_batch`
+    instead, and must never call `write_committed` again claiming any
+    entry as DUPLICATE — a `manifest.json` never even gets a second write
+    attempt for this failure."""
+    n = 5
+    src = tmp_path / "src"
+    _make_files(src, n)
+    dest = tmp_path / "dest"
+    backups = BackupManager(tmp_path / "backups")
+    entries = [
+        TransferEntry(f"models/f{i}.txt", "file", src / f"f{i}.txt", dest / f"f{i}.txt")
+        for i in range(n)
+    ]
+    ledger = TransferLedger(tmp_path / "wal.json")
+    copied = _copy_phase(entries, backups, "restore-step", ledger, fsync_every=n)
+    assert copied.ok, copied.error
+
+    write_committed_calls: list[list[str]] = []
+
+    def _failing_write_committed(committed_now, failed):
+        write_committed_calls.append([e.name for e in committed_now])
+        raise OSError("injected write_committed failure")
+
+    outcome = _prune_phase(entries, _failing_write_committed, ledger, fsync_every=n)
+
+    assert not outcome.ok
+    assert outcome.unknown_batch
+    assert "models/f0.txt" in outcome.failed_name
+    # Never a second `write_committed` call trying to record a DUPLICATE —
+    # the one call above (which itself failed) is the only attempt.
+    assert len(write_committed_calls) == 1
+    for i in range(n):
+        assert (src / f"f{i}.txt").exists()
+    states = ledger.read()
+    for i in range(n):
+        assert states.get(f"models/f{i}.txt", {}).get("state") != STATE_SOURCE_PRUNED
+
+
+def test_prune_phase_partial_batch_removal_failure_reverts_untouched_siblings(
+    tmp_path, monkeypatch
+):
+    """#574 round11 item 6 (R7-H1, acceptance review round 7): once a
+    batch's own `ledger.write(SOURCE_PRUNED)` succeeds, files are removed
+    one at a time — if `_remove_entry_source` then fails partway through
+    that SAME batch, every sibling AFTER the failing entry never had its
+    own removal attempted at all (source fully present, untouched). Their
+    WAL record must never be left claiming `SOURCE_PRUNED` — reverted to
+    whatever it was before this batch started, matching this module's own
+    "a WAL claim is not proof" contract (R6-B1) rather than lying about
+    it. At a real production batch size (~4,078 entries per
+    `_restore_fsync_batch`), the OLD behavior meant a single mid-batch
+    fault falsely marked thousands of still-fully-present files pruned."""
+    n = 5
+    src = tmp_path / "src"
+    _make_files(src, n)
+    dest = tmp_path / "dest"
+    backups = BackupManager(tmp_path / "backups")
+    entries = [
+        TransferEntry(f"models/f{i}.txt", "file", src / f"f{i}.txt", dest / f"f{i}.txt")
+        for i in range(n)
+    ]
+    ledger = TransferLedger(tmp_path / "wal.json")
+    copied = _copy_phase(entries, backups, "restore-step", ledger, fsync_every=n)
+    assert copied.ok, copied.error
+
+    write_committed, _ = _write_committed_counter(tmp_path / "manifest.json")
+
+    from agent_takkub.core.migration import promote_v1 as promote_mod
+
+    real_remove_entry_source = promote_mod._remove_entry_source
+
+    def _fail_on_f2(entry, digests):
+        if entry.name == "models/f2.txt":
+            raise OSError("injected mid-batch removal failure")
+        return real_remove_entry_source(entry, digests)
+
+    monkeypatch.setattr(promote_mod, "_remove_entry_source", _fail_on_f2)
+
+    # The whole 5-entry list as ONE batch — the exact shape that made the
+    # old code claim f3/f4 pruned before ever attempting their removal.
+    outcome = _prune_phase(entries, write_committed, ledger, fsync_every=n)
+
+    assert not outcome.ok
+    assert outcome.failed_name == "models/f2.txt"
+
+    # f0/f1 were removed before the failure — genuinely, correctly pruned.
+    for i in (0, 1):
+        assert not (src / f"f{i}.txt").exists()
+    # f2 (the failure itself) plus f3/f4 (never attempted) all still have
+    # their source fully, physically present.
+    for i in (2, 3, 4):
+        assert (src / f"f{i}.txt").exists()
+
+    states = ledger.read()
+    for i in (3, 4):
+        rec = states.get(f"models/f{i}.txt", {})
+        assert rec.get("state") != STATE_SOURCE_PRUNED, rec
 
 
 def test_prune_phase_batched_result_matches_unbatched_result(tmp_path):

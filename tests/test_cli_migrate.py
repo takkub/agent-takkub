@@ -123,6 +123,43 @@ def test_restore_v1_list_and_archive_select_after_a_real_archive(capsys):
     assert (config.DATA_HOME / "projects.json").exists()
 
 
+def test_restore_v1_reapplies_version_marker_so_validate_passes_after(capsys, monkeypatch):
+    """#574 round11 item 5: a real "resume restore" rehearsal ran
+    `restore-v1` successfully but left `runtime/core/version.json` (or
+    wherever `core_home()` resolves post-restore) stamped with whatever
+    build applied the ladder originally — `takkub migrate validate` then
+    failed `version-marker` ("app component missing/mismatched") the
+    moment the running build had moved on since. `restore-v1` must
+    re-stamp the marker with the CURRENTLY running build, not leave it
+    stale (never a byte-revert to the old build's value — that would
+    reintroduce the exact mismatch this fix removes on any machine that
+    hasn't also been downgraded)."""
+    from agent_takkub import config
+    from agent_takkub.core.migration import steps as steps_mod
+    from agent_takkub.core.migration.engine import MigrationEngine
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "projects.json").write_text(
+        '{"active": null, "projects": {}}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    # Simulate the app having been upgraded since the original apply.
+    monkeypatch.setattr(steps_mod, "APP_VERSION", "999.0.0")
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    assert any(r["step_id"] == "version-marker" and r["ok"] for r in out)
+
+    engine = MigrationEngine()
+    validate_report = engine.get_step("version-marker").validate()
+    assert validate_report.ok, validate_report.summary
+
+
 def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(capsys):
     """#504 H3: `cli.py` used to run `promote-v2-root`'s rollback even when
     `archive-v1-legacy`'s just failed, reconstructing only half of the
