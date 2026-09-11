@@ -281,9 +281,16 @@ def copy_verified(
         # An explicit, unthrottled check-in exactly at the copy-to-verify
         # boundary — never left to `verify_only`'s own fresh throttle to
         # eventually cover on its own timing, which is what let the gap
-        # exceed 2s in the first place.
+        # exceed 2s in the first place. #574 round14 R9-M1: `done` here
+        # must be the COMPLETED count (every file the copy pass just
+        # finished), not 0 — a caller forwarding this straight through to
+        # a UI counter (`boot_flow.on_file_progress`) used to see it snap
+        # back to zero once per entry, four times on a real 1,000-file
+        # run. `len(files)` still proves the process hasn't stalled
+        # (the whole point of this check-in) without lying about progress
+        # having been lost.
         try:
-            on_file(0, len(files), "")
+            on_file(len(files), len(files), "")
         except Exception:
             pass  # swallow-ok: pure progress notification, never a phase input.
     result = verify_only(src, dest, source_digests, on_file=on_file, files=files)

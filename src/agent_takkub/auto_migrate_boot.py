@@ -401,6 +401,7 @@ def _run_apply_pending(
     on_entry: Callable[[str, str], None] | None = None,
     on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
     on_step: Callable[[str, str], None] | None = None,
+    on_validate_step: Callable[[str, bool], None] | None = None,
 ) -> BootMigrationResult:
     """Every boot after a successful full apply (`layout_state() ==
     "mixed"`) — run only the ladder steps this machine still needs (#362):
@@ -449,7 +450,12 @@ def _run_apply_pending(
         return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
-    engine = MigrationEngine(on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step)
+    engine = MigrationEngine(
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
+        on_validate_step=on_validate_step,
+    )
     applied_before = set(engine.applied_step_ids())
     guard = load_state().get("rolled_back_steps", {})
     guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
@@ -549,6 +555,7 @@ def run_boot_stage(
     on_entry: Callable[[str, str], None] | None = None,
     on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
     on_step: Callable[[str, str], None] | None = None,
+    on_validate_step: Callable[[str, bool], None] | None = None,
 ) -> BootMigrationResult:
     """The whole boot-time gate, in order (#361 design §2-4):
 
@@ -611,7 +618,11 @@ def run_boot_stage(
         # apply()/validate() being cheap existence-ish checks is what makes
         # calling this every boot fine even when truly nothing is pending.
         return _run_apply_pending(
-            progress_cb, on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step
+            progress_cb,
+            on_entry=on_entry,
+            on_file_progress=on_file_progress,
+            on_step=on_step,
+            on_validate_step=on_validate_step,
         )
 
     # state == "v1" from here — the only state a first-run apply is allowed on.
@@ -624,7 +635,12 @@ def run_boot_stage(
     _report("กำลังตั้งค่า storage layout ใหม่ (ครั้งแรกหลังอัป)…")
     from .core.migration.engine import MigrationEngine
 
-    engine = MigrationEngine(on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step)
+    engine = MigrationEngine(
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
+        on_validate_step=on_validate_step,
+    )
     apply_reports = engine.apply()
     validate_reports: list[StepReport] = []
     failing = next((r for r in apply_reports if not r.ok), None)

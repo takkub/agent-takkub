@@ -3307,6 +3307,57 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
                 print()  # move past the \r progress line
             return _revert(reports)
 
+    # #574 round14 R9-H1's own restore (below) can bring back backed-up
+    # items even when NEITHER archive nor promote had anything — read the
+    # marker/manifest here (once; reused by that call too) so the R8-B1
+    # "nothing to restore" check just below can tell the two cases apart,
+    # never reporting failure while genuinely restoring something.
+    from .core.migration.pre_migrate_backup import _marker_path, restore_backed_up_items
+
+    # Read the marker directly rather than `resolve_backup_dir()` — that
+    # helper CREATES a fresh marker (and a not-yet-existing backup dir
+    # name) when none is on record yet, which is right for a real backup
+    # pass about to run but wrong here: a machine that never took a
+    # pre-migrate backup must not have restore-v1 leave a stray marker
+    # behind pointing at a directory nothing ever wrote.
+    try:
+        _marker_name = _marker_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        _marker_name = ""
+    backup_had_something = False
+    if _marker_name:
+        try:
+            _manifest = json.loads(
+                (config.DATA_HOME / "backups" / _marker_name / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            backup_had_something = bool(_manifest.get("items"))
+        except (OSError, ValueError):
+            backup_had_something = False
+
+    # #504/#574 R8-B1, moved earlier round14 (R9-L1): when NEITHER an
+    # archive generation existed NOR promote-v2-root ever promoted
+    # anything NOR the pre-migrate backup has anything to bring back, the
+    # command must say so plainly and fail — checked HERE, right before
+    # `promote-v2-root`'s own rollback (which is what used to fail with
+    # an internal-sounding "promote manifest ... not found" in exactly
+    # this case), not after it like this check used to sit, at the very
+    # end of the function, past that `return`. Archive's own rollback
+    # above still always runs first regardless (a real archive-generation
+    # failure there must keep stopping the line exactly as before — this
+    # check is not that one).
+    if not generations and not promote_had_something and not backup_had_something:
+        msg = (
+            "nothing to restore — no v1-archive-<ts> generation exists and "
+            "promote-v2-root never promoted anything on this data_home"
+        )
+        if not json_mode and _restore_done:
+            print()  # move past the \r progress line
+        _emit_restore_phase("done", ok=False, reason="nothing_to_restore")
+        reports.append(StepReport("restore-v1", "rollback", False, msg))
+        return reports
+
     # #504 round4 R4-H7: `promote-v2-root`'s own rollback is part of the
     # SAME all-or-nothing command — a failure here must also revert every
     # archive generation this call just restored, not just its own half.
@@ -3360,70 +3411,60 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
         version_marker_ran = True
     reports.append(version_marker_report)
 
-    # #504/#574 item 14: `version_marker_step.apply()` above writes only
-    # WHEREVER `core.versioning.store.version_doc_path()` currently
-    # resolves — `RUNTIME_DIR/core/version.json`, since `promote_step
-    # .rollback()` just un-flipped `core_home()` away from the top-level
-    # `system/` it removed. The legacy mirror `promote_step.rollback()`
-    # itself just recreated at `data_home/v2/system/version.json` is left
-    # holding whatever stamp it had at the moment of that rollback (the
-    # CURRENT build's, from before this restore ran) — a real byte
-    # rehearsal caught this as the one unexpected changed file after an
-    # apply-then-restore round trip. Mirror the freshly re-applied stamp
-    # into it too so both copies of "the running build's version" agree —
-    # best-effort, never escalated over a restore that otherwise succeeded.
-    # Only when a real version-marker step actually ran (never the
-    # "skipped: no such step" harness path above) AND its target actually
-    # exists — a reduced-engine test fixture with no version-marker step
-    # has nothing to mirror from, never a real failure.
+    # #504/#574 item 14, corrected round14 (Lead item 7a): `version_marker
+    # _step.apply()` above writes wherever `core.versioning.store
+    # .version_doc_path()` CURRENTLY resolves — `core_home()`, which flips
+    # to the top-level `system/` `core-internal-store` created the moment
+    # that directory exists, restore-v1 or not. Restore-v1 has no rollback
+    # for domain steps (core-internal-store included), so that directory
+    # is never removed here and `core_home()` keeps resolving to it — the
+    # step's own write lands there, NOT at `RUNTIME_DIR/core/version.json`,
+    # the fixed pre-#504 location a downgraded (pre-#504) build's own
+    # `core-internal-store` actually reads and compares against
+    # `v2/system/version.json`. Re-stamp that FIXED location directly
+    # (same read-modify-write `record_component` the step itself uses,
+    # same app version — a re-apply of the identical fact just written
+    # above, never an independently generated second value) and mirror
+    # THOSE exact bytes into `v2/system/version.json` too, so a downgraded
+    # build's own mirror check agrees. Best-effort, never escalated over a
+    # restore that otherwise succeeded. Only when a real version-marker
+    # step actually ran (never the "skipped: no such step" harness path
+    # above) — a reduced-engine test fixture with no version-marker step
+    # has nothing to re-stamp.
     if version_marker_ran and version_marker_report.ok:
         try:
-            from .core.versioning.store import version_doc_path
+            from . import __version__ as _app_version
+            from .core.storage.paths import migration_home
+            from .core.versioning.store import record_component
 
-            marker_path = version_doc_path()
+            legacy_marker_path = migration_home() / "version.json"
+            record_component("app", _app_version, path=legacy_marker_path)
             legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
-            if marker_path.is_file() and legacy_mirror.parent.is_dir():
-                legacy_mirror.write_bytes(marker_path.read_bytes())
+            if legacy_marker_path.is_file() and legacy_mirror.parent.is_dir():
+                legacy_mirror.write_bytes(legacy_marker_path.read_bytes())
         except OSError as e:
             if not json_mode:
                 _utf8_print(f"  (warn) could not mirror version-marker to legacy v2/system/: {e}")
 
-    # #504/#574 item 13: the normal archive/promote rollback above has no
-    # way to bring back #504 item 5's outright-deleted junk (never
-    # archived, no other recovery path) — restore it from the CURRENT
-    # pre-migrate backup, alongside, never blocking on it (a missing/older
+    # #504/#574 item 13, generalized round14 (R9-H1): the normal archive/
+    # promote rollback above only reverses what THOSE two steps themselves
+    # wrote — it has no way to bring back #504 item 5's outright-deleted
+    # junk (never archived at all), NOR a domain step's own V2-target
+    # overwrite of a pre-existing V1 file (`readonly-registries` writing
+    # its own envelope over an existing `models/registry.json`, say — a
+    # real apply-then-restore round trip left that file holding V2
+    # content, and the very next `migrate validate` on the OLD build it
+    # was restored for went red over it). Restore the WHOLE pre-migrate
+    # manifest, alongside, never blocking on it (a missing/older
     # pre-migrate backup just means these specific few files stay absent,
     # same as restore-v1 always could do nothing about them before).
-    from .core.migration.pre_migrate_backup import _marker_path, restore_deleted_outright_items
-
-    # Read the marker directly rather than `resolve_backup_dir()` — that
-    # helper CREATES a fresh marker (and a not-yet-existing backup dir
-    # name) when none is on record yet, which is right for a real backup
-    # pass about to run but wrong here: a machine that never took a
-    # pre-migrate backup must not have restore-v1 leave a stray marker
-    # behind pointing at a directory nothing ever wrote.
-    try:
-        _marker_name = _marker_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        _marker_name = ""
+    # `_marker_name` was already read above, for the "nothing to restore"
+    # check — nothing between there and here writes to the marker.
     if _marker_name:
-        junk_report = restore_deleted_outright_items(
+        backed_up_report = restore_backed_up_items(
             config.DATA_HOME / "backups" / _marker_name, config.DATA_HOME
         )
-        reports.append(junk_report)
-
-    # #504/#574 R8-B1: when NEITHER archive nor promote had anything to
-    # restore (no archive generation existed AND promote-v2-root never
-    # promoted anything on this data_home), the command must say so
-    # plainly and fail — never report ok:true 0-effect success.
-    if not generations and not promote_had_something:
-        msg = (
-            "nothing to restore — no v1-archive-<ts> generation exists and "
-            "promote-v2-root never promoted anything on this data_home"
-        )
-        reports.append(StepReport("restore-v1", "rollback", False, msg))
-        _emit_restore_phase("done", ok=False, reason="nothing_to_restore")
-        return reports
+        reports.append(backed_up_report)
 
     _emit_restore_phase("done", ok=version_marker_report.ok)
     return reports

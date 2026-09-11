@@ -169,14 +169,20 @@ but does not advance `done` again), and `emit()` unconditionally clamps
 `done <= total` and `0 <= percent_overall <= 100` on every single event,
 never only at phase end.
 
-### unit (#574 round12 item 6, R3-M4)
+### unit (#574 round12 item 6, R3-M4; round14 R5-M1)
 
-No longer hardcoded `"รายการ"` for every event. Phase 3 uses `"ขั้น"`
-(steps). Phase 1/2/4 events use the SAME per-entry-name convention
-`MigrationPlanSummary.backup_items`' own rows already use: `"projects"` →
-`"โปรเจค"`, `"runtime/core"` → `"รายการ"`, everything else → `"ไฟล์"`. A
-consumer showing "X/Y <unit>" now reads the same unit word the B-screen
-plan table already promised for that same entry.
+Stable per PHASE, never per-entry — an event's own noun must never change
+mid-phase just because a different-typed entry happens to be streaming
+through it right now (R4-H1's own finding: `done`/`total` count something
+about the PHASE, and that meaning never changes mid-phase even though
+individual entries do). Phase 1 (backup) uses `"ไฟล์"` — `done`/`total`
+count individual FILES across every backup entry (`MigrationPlanSummary
+.backup_items`' own per-row `count` field, summed), matching the approved
+mockup's "15,762 / 15,762 ไฟล์" wording for this row instead of a
+top-level-entry count that can sit on "1 / 4" for minutes on a real
+backup. Phase 2 (promote)/4 (archive) use `"รายการ"` — `done`/`total`
+there still count whole top-level entries, one per `on_entry` dedup.
+Phase 3 (validate) uses `"ขั้น"` (steps).
 
 ### eta_s (#574 round12 item 4, R3-M3)
 
@@ -213,22 +219,43 @@ fields instead:
 terminal renderer, which has no need to re-split it — it is NOT a stable
 machine-parseable format and its exact wording may change.
 
-### Domain-step phase 3 progress (#574 round12 item 3)
+### Domain-step phase 3 progress (#574 round12 item 3; round14 R5-M3/R8-M2)
 
 The 8 V1→V2 "domain" steps (`readonly-registries`, `role-agent`,
 `capability`, `project`, `state`, `credential-reference`,
 `runtime-triage`, `core-internal-store`) write in one shot and used to
 produce ZERO progress events — a real rehearsal's phase-3 event count was
 0, so a wizard watching for phase 3 jumped straight from 2 to 4.
-`MigrationEngine` now accepts an `on_step: Callable[[str, str], None]`
-observer (`(step_id, "start"|"done")`), fired around EVERY ladder step's
-own apply in both `apply()` and `apply_pending()`. `boot_flow.py` wires
-this into a start+done pair per DOMAIN step only (backup/marker/promote/
-archive already have their own phase 1/2/4 signal), positioned by the
-step's fixed ladder index out of `plan.verify_steps` — the same "step
-X/N" scheme `MigrationOutcome.failed_step_index/_total` already uses.
-`unit` for these events is `"ขั้น"`; `current_path` is always `None`
-(no single file/entry behind a domain step's own apply).
+`MigrationEngine` first closed that gap with an `on_step: Callable[[str,
+str], None]` observer, fired around every ladder step's own APPLY — but
+phase 3 is labeled "ตรวจสอบ" (validate), and an apply-time signal can
+never honestly say a step was validated (round12's own wording did:
+`apply_pending()` can apply a step and never validate it in the same
+pass, `MigrationOutcome.validated_steps` staying 0 the whole time while
+the UI claimed otherwise — R8-M2).
+
+Round14 replaces that wiring: `MigrationEngine` now also accepts an
+`on_validate_step: Callable[[str, bool], None]` observer, fired once per
+step — `(step_id, ok)` — as its own REAL `validate()` call resolves, in
+`validate()` (the full first-apply's whole-ladder pass) and
+`validate_ok_steps()` (`apply_pending()`'s per-step-applied pass). No
+event at all for a step that never actually gets validated this run
+(already applied-and-valid, skipped outright — never a synthesized
+"validated" claim). `boot_flow.py` wires this into one event per DOMAIN
+step only (backup/marker/promote/archive already have their own phase
+1/2/4 signal), positioned by the step's fixed ladder index out of
+`plan.verify_steps` — the same "step X/N" scheme
+`MigrationOutcome.failed_step_index/_total` already uses. `log_detail` is
+`"ตรวจสอบแล้ว"` (validated) when `ok`, `"ตรวจสอบไม่ผ่าน"` (validate failed)
+otherwise — the row and its own log line can never disagree about what
+happened, the way an `ok`-blind apply-time label used to. `unit` for
+these events is `"ขั้น"`; `current_path` is always `None` (no single
+file/entry behind a domain step's own validate).
+
+`on_step` itself is unchanged (still apply-time, still tested at the
+engine level) — `boot_flow.py` simply no longer wires it into
+`run_boot_stage()`, having no more use for an apply-time domain-step
+signal now that phase 3 reads from validate directly.
 
 ## 4. Outcome (screens D/E)
 

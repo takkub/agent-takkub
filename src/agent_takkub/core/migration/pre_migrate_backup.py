@@ -64,7 +64,6 @@ deleted, and `_already_backed_up()` only ever requires the CURRENT
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import time
 from collections.abc import Callable
@@ -78,8 +77,6 @@ from ..storage.paths import migration_home
 from .backup import BackupManager
 from .journal import MigrationJournal
 from .promote_v1 import (
-    _DELETE_OUTRIGHT_GLOB,
-    _DELETE_OUTRIGHT_NAMES,
     _LEGACY_V2_NAME,
     ArchiveV1LegacyStep,
     PromoteV2RootStep,
@@ -133,6 +130,24 @@ def _log_event(event: str, **details: object) -> None:
 
 
 def _marker_path() -> Path:
+    # #574 round14 (Lead item 7, investigated, NOT relocated): a
+    # 2.0.8 downgrade onto a restored store reports `pre-migrate-backup
+    # -dir.txt`'s presence under `runtime/core` as a `core-internal-store`
+    # mismatch (2.0.8 predates this marker and never excludes it the way
+    # 2.1.0's own `OWN_BOOKKEEPING_NAMES`/`_excluded_names()` do) — moving
+    # it OUTSIDE `runtime/core` (`backups/`, DATA_HOME-top-level) would
+    # fix that, but `resolve_backup_dir()` below PERSISTS a marker (and,
+    # at this new location, materializes `backups/` itself) as a side
+    # effect of merely being CALLED — including from `_input_entries()`/
+    # `validate()`'s own read-only path computation, reached even on a
+    # genuinely fresh machine with nothing to back up
+    # (`test_fresh_data_home_boot_gets_the_new_layout_with_no_archive`,
+    # `test_fresh_boot_state_file_does_not_get_archived_on_the_second_boot`
+    # both caught this: moving the marker made `backups/` appear on a
+    # fresh install with zero backup activity). Fixing that needs
+    # `resolve_backup_dir()` itself to stop writing on a read-only call —
+    # a larger, riskier change than this LOW-priority item's own budget;
+    # left at the pre-round14 location, unresolved, for a dedicated pass.
     return migration_home() / _MARKER_NAME
 
 
@@ -689,20 +704,26 @@ def restore_from_backup_dir(
     )
 
 
-def restore_deleted_outright_items(backup_dir: Path, data_home: Path) -> StepReport:
-    """`takkub migrate restore-v1`'s own missing half (#504/#574 item 13):
-    #504 item 5's named junk (`_DELETE_OUTRIGHT_NAMES`/`_DELETE_OUTRIGHT_GLOB`
-    — `openviking`, `claude-config.partial`, `.takkub_issues.synced-*
-    .bak.json`) is DELETED OUTRIGHT by `archive-v1-legacy`, never archived —
-    this step's own manifest (item 4 of `_input_entries()`'s docstring) is
-    the ONE place a copy of it survives. The normal `restore-v1` path
-    (`archive_step.rollback()` + `promote_step.rollback()`) has no way to
-    bring these back at all — neither rollback owns them. Copy-only, from
-    *backup_dir*'s CURRENT manifest, filtered to just the junk names (never
-    the rest of the manifest's much larger domain-step/promote-merge scope
-    — those are already covered by the archive/promote rollback this runs
-    alongside). A missing/unreadable manifest, or a manifest with no junk
-    entries, is a normal no-op — most stores never had any."""
+def restore_backed_up_items(backup_dir: Path, data_home: Path) -> StepReport:
+    """`takkub migrate restore-v1`'s own missing half (#504/#574 item 13;
+    generalized round14 R9-H1). The normal restore-v1 path
+    (`archive_step.rollback()` + `promote_step.rollback()`) only reverses
+    what THOSE two steps themselves wrote — it has no way to bring back a
+    DOMAIN step's own V2-target overwrite of a pre-existing V1 file
+    (`readonly-registries` writing its own envelope over an existing
+    `models/registry.json`, say — R9-H1's own repro), nor #504 item 5's
+    named junk (deleted OUTRIGHT by `archive-v1-legacy`, never archived at
+    all). This step's own manifest (item 4 of `_input_entries()`'s
+    docstring) is the ONE place a copy of ANY of that survives — restore
+    EVERY item it recorded, copy-only, from *backup_dir*'s CURRENT
+    manifest, alongside the normal archive/promote rollback (never
+    instead of it: a genuine pure-move item promote/archive already
+    restores correctly via their own WAL, and re-copying the SAME
+    pre-migrate snapshot over it here is harmless — both agree
+    byte-for-byte on a successful restore). A missing/unreadable
+    manifest, or a manifest with no items, is a normal no-op — most
+    stores never had any, or never took a pre-migrate backup at all (a
+    machine on an older release)."""
     manifest_path = backup_dir / _MANIFEST_NAME
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -710,17 +731,9 @@ def restore_deleted_outright_items(backup_dir: Path, data_home: Path) -> StepRep
         return StepReport(
             STEP_ID, "restore", True, f"no pre-migrate backup manifest at {manifest_path}"
         )
-    junk_items = [
-        item
-        for item in manifest.get("items", [])
-        if item.get("name")
-        and (
-            item["name"] in _DELETE_OUTRIGHT_NAMES
-            or fnmatch.fnmatch(item["name"], _DELETE_OUTRIGHT_GLOB)
-        )
-    ]
-    if not junk_items:
-        return StepReport(STEP_ID, "restore", True, "no deleted-outright item(s) to restore")
+    items = [item for item in manifest.get("items", []) if item.get("name")]
+    if not items:
+        return StepReport(STEP_ID, "restore", True, "no backed-up item(s) to restore")
     entries = [
         TransferEntry(
             item["name"],
@@ -729,10 +742,10 @@ def restore_deleted_outright_items(backup_dir: Path, data_home: Path) -> StepRep
             data_home / item["name"],
             tuple(item.get("paths", ())),
         )
-        for item in junk_items
+        for item in items
     ]
     ledger = TransferLedger(
-        migration_home() / "pre-migrate-restore-deleted-wal.json", write_fn=write_json_atomic
+        migration_home() / "pre-migrate-restore-items-wal.json", write_fn=write_json_atomic
     )
     outcome = _copy_phase(entries, BackupManager(), STEP_ID, ledger)
     ledger.clear()
@@ -742,7 +755,7 @@ def restore_deleted_outright_items(backup_dir: Path, data_home: Path) -> StepRep
         STEP_ID,
         "restore",
         True,
-        f"restored {len(entries)} deleted-outright item(s) from {backup_dir}",
+        f"restored {len(entries)} backed-up item(s) from {backup_dir}",
         detail={"items": [e.name for e in entries]},
     )
 
@@ -751,6 +764,6 @@ __all__ = [
     "STEP_ID",
     "PreMigrateBackupStep",
     "resolve_backup_dir",
-    "restore_deleted_outright_items",
+    "restore_backed_up_items",
     "restore_from_backup_dir",
 ]

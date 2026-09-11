@@ -161,9 +161,12 @@ def test_copy_verified_directory_enumerates_the_source_only_once(tmp_path, monke
 
 def test_copy_verified_bridges_the_copy_to_verify_gap_with_an_explicit_call(tmp_path):
     """#504/#574 R8-M3: an explicit, unthrottled `on_file` check-in fires
-    exactly at the copy-to-verify boundary (`done=0`) — never left to
-    `verify_only`'s own fresh throttle to eventually cover on its own
-    timing, which is what let the silent gap exceed the 2s ceiling."""
+    exactly at the copy-to-verify boundary — never left to `verify_only`'s
+    own fresh throttle to eventually cover on its own timing, which is
+    what let the silent gap exceed the 2s ceiling. #574 round14 R9-M1:
+    that check-in must carry the COMPLETED count (`done == total`), not
+    `done=0` — a caller forwarding this straight to a UI counter used to
+    see it snap back to zero once per entry."""
     src = tmp_path / "src"
     src.mkdir()
     for i in range(3):
@@ -175,12 +178,13 @@ def test_copy_verified_bridges_the_copy_to_verify_gap_with_an_explicit_call(tmp_
         src, dest, on_file=lambda done, total, path: calls.append((done, total, path))
     )
 
-    assert (0, 3, "") in calls
-    boundary_index = calls.index((0, 3, ""))
+    assert (3, 3, "") in calls
+    boundary_index = calls.index((3, 3, ""))
     # At least one more call follows — the verify pass itself still runs
     # (the last-file guarantee always fires at minimum).
-    assert boundary_index < len(calls) - 1 or calls[-1] == (0, 3, "")
+    assert boundary_index < len(calls) - 1 or calls[-1] == (3, 3, "")
     assert calls[-1][0] == calls[-1][1] == 3  # final call always reports done == total
+    assert all(done == total for done, total, _path in calls)  # never a false reset to 0
 
 
 def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path):
@@ -203,11 +207,15 @@ def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path
     )
 
     # Copy-phase calls: 200, 400, 500 (final). Verify-phase: same shape.
+    # Plus one more `done == n` in between: `copy_verified`'s own explicit
+    # copy-to-verify boundary check-in (#574 round14 R9-M1 — carries the
+    # completed count, not a reset to 0).
     copy_done_values = [d for d, t in calls if t == n]
     assert 200 in copy_done_values
     assert 400 in copy_done_values
-    assert copy_done_values.count(n) == 2  # once from copy_only, once from verify_only
+    assert copy_done_values.count(n) == 3  # copy_only final + boundary check-in + verify final
     assert max(copy_done_values) == n
+    assert min(d for d, t in calls) > 0  # never a false reset to 0
 
 
 def test_copy_verified_on_file_fires_on_a_time_boundary_too(tmp_path, monkeypatch):

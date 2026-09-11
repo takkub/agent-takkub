@@ -668,6 +668,57 @@ class TestValidateOkSteps:
         assert [r.step_id for r in reports] == ["a", "b"]
 
 
+class TestOnValidateStep:
+    """#574 round14 (R5-M3/R8-M2 remainder): `boot_flow.py`'s phase-3 UI
+    must read from each step's REAL `validate()` result, never from
+    `on_step` (apply-time, no pass/fail of its own to report)."""
+
+    def test_validate_notifies_per_step_with_the_real_ok(self):
+        a = _FakeStep("a", ok=True)
+        b = _FakeStep("b", ok=False)
+        events: list[tuple[str, bool]] = []
+        engine = MigrationEngine(
+            [a, b], on_validate_step=lambda step_id, ok: events.append((step_id, ok))
+        )
+        engine.validate()
+        assert events == [("a", True), ("b", False)]
+
+    def test_validate_stops_notifying_after_a_failure(self):
+        a = _FakeStep("a", ok=False)
+        b = _FakeStep("b", ok=True)
+        events: list[tuple[str, bool]] = []
+        engine = MigrationEngine(
+            [a, b], on_validate_step=lambda step_id, ok: events.append((step_id, ok))
+        )
+        engine.validate()
+        assert events == [("a", False)]  # b never reached — validate() stop-the-line
+
+    def test_validate_on_validate_step_observer_failure_never_breaks_validate(self):
+        a = _FakeStep("a", ok=True)
+
+        def _raise(_step_id, _ok):
+            raise RuntimeError("ui crashed")
+
+        engine = MigrationEngine([a], on_validate_step=_raise)
+        reports = engine.validate()
+        assert reports[0].ok is True
+
+    def test_validate_ok_steps_notifies_only_the_requested_steps(self, tmp_path):
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("a", ok=True)
+        b = _FakeStep("b", ok=True)
+        c = _FakeStep("c", ok=False)
+        events: list[tuple[str, bool]] = []
+        engine = MigrationEngine(
+            [a, b, c],
+            data_home=tmp_path,
+            journal=journal,
+            on_validate_step=lambda step_id, ok: events.append((step_id, ok)),
+        )
+        engine.validate_ok_steps(["a", "c"])
+        assert events == [("a", True), ("c", False)]  # ladder order, b never asked
+
+
 class TestRollbackStep:
     def test_rolls_back_only_the_named_step(self):
         a = _FakeStep("a", ok=True)

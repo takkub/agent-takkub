@@ -155,6 +155,7 @@ class MigrationEngine:
         on_entry: Callable[[str, str], None] | None = None,
         on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
         on_step: Callable[[str, str], None] | None = None,
+        on_validate_step: Callable[[str, bool], None] | None = None,
     ) -> None:
         """*on_entry* (#574): best-effort ``(step_id, entry_name)``
         progress observer, forwarded ONLY into the three steps whose
@@ -184,7 +185,16 @@ class MigrationEngine:
         so "start" then "done" is the most granular truthful signal
         available. Stored directly (never per-step-bound like *on_entry*
         above) since every call site already has `step_id` in hand from
-        its own loop over `self._steps`."""
+        its own loop over `self._steps`.
+
+        *on_validate_step* (#574 round14, R5-M3/R8-M2): best-effort
+        ``(step_id, ok)``, fired once per step as its own REAL
+        `validate()` call resolves, in `validate()`/`validate_ok_steps()`
+        below — unlike *on_step* (apply-time, no pass/fail of its own to
+        report), this carries the actual verdict, so a caller can show
+        "validated" only for a step that genuinely was, and label a real
+        failure honestly instead of repeating a false "validated" claim.
+        Also stored directly, same reasoning as *on_step*."""
 
         def _bound(step_id: str) -> Callable[[str], None] | None:
             if on_entry is None:
@@ -199,6 +209,7 @@ class MigrationEngine:
             )
 
         self._on_step = on_step
+        self._on_validate_step = on_validate_step
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
             # Only known when the caller opts in explicitly — a hand-built
@@ -276,7 +287,18 @@ class MigrationEngine:
         try:
             self._on_step(step_id, kind)
         except Exception:
+            return  # swallow-ok: R9-L2 — an observer failure must never affect the step it's observing.
+
+    def _notify_validate_step(self, step_id: str, ok: bool) -> None:
+        """Best-effort `on_validate_step(step_id, ok)` — never lets an
+        observer failure affect the validate() call it's observing (#574
+        round14, matching `_notify_step`'s own swallow-ok contract)."""
+        if self._on_validate_step is None:
             return
+        try:
+            self._on_validate_step(step_id, ok)
+        except Exception:
+            return  # swallow-ok: a progress-observer failure must never affect the validate() call it's observing.
 
     def step_count(self) -> int:
         """Ladder length — the same step list `validate()` below walks, so
@@ -569,7 +591,20 @@ class MigrationEngine:
         copy, re-checked the same way), Pass B (`_finish_deferred_prune`)
         removes every V1 source in one final sweep. Any failure anywhere
         in Pass A means NO step's Pass B ever runs — every source stays
-        fully intact, retryable."""
+        fully intact, retryable.
+
+        R9-L3 (#574 round14, reviewed and left as-is): unlike
+        `apply_pending()`, this method has no H6-style `version-marker`
+        re-apply after `promote-v2-root`. That gap IS real (forcing a
+        legacy nested `v2/` root onto this path reproduces a red
+        `version-marker`/`core-internal-store` validate) but not
+        reachable in production: this method only ever runs when
+        `layout_state()` is exactly `"v1"`, which requires NO `v2/`
+        directory to exist at all — `promote-v2-root` then has nothing to
+        flip `core_home()` away from, and the ladder validates green end
+        to end on every real first-time apply. A machine that DOES have a
+        legacy nested `v2/` root reads `"mixed"`, not `"v1"`, and always
+        takes `apply_pending()` instead, which already has the fix."""
         steps = [s for s in self._steps if getattr(s, "step_id", "") != _ARCHIVE_V1_STEP_ID]
         archive_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
@@ -614,7 +649,9 @@ class MigrationEngine:
         v1_retired = archive_step is not None and archive_step.validate().ok
         reports: list[StepReport] = []
         for s in self._steps:
+            step_id = getattr(s, "step_id", "")
             r = self._validate_one(s, v1_retired=v1_retired)
+            self._notify_validate_step(step_id, r.ok)
             reports.append(r)
             if not r.ok:
                 break
@@ -669,11 +706,15 @@ class MigrationEngine:
         )
         v1_retired = archive_step is not None and archive_step.validate().ok
         wanted = set(step_ids)
-        return [
-            self._validate_one(s, v1_retired=v1_retired)
-            for s in self._steps
-            if getattr(s, "step_id", "") in wanted
-        ]
+        out: list[StepReport] = []
+        for s in self._steps:
+            step_id = getattr(s, "step_id", "")
+            if step_id not in wanted:
+                continue
+            r = self._validate_one(s, v1_retired=v1_retired)
+            self._notify_validate_step(step_id, r.ok)
+            out.append(r)
+        return out
 
     def rollback(self) -> list[StepReport]:
         reports: list[StepReport] = []

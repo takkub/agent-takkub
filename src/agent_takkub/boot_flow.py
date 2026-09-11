@@ -24,11 +24,15 @@ fine-grained as `on_entry` fires — one event per top-level item
 `pre-migrate-backup`/`promote-v2-root`/`archive-v1-legacy` copy-verify (not
 per underlying file within a directory entry, and not at all for the other,
 simpler V1->V2 domain steps, which write in one shot). Phase 3 (validate)
-and phase 5 (done) have no per-item signal at all — their `ProgressEvent`s
-carry `done=None, total=None` (indeterminate) and are driven off
-`run_boot_stage`'s existing text messages. A fully granular byte-level
-meter would need every domain step wired the same way `_copy_phase`/
-`_prune_phase` now are — a larger change than #574's brief asked for.
+gets one event per domain step instead, from that step's own real
+`validate()` result (#574 round14) — still not a fine-grained WITHIN-step
+counter (nothing to report mid-step, and no event at all for a step whose
+validate() never actually ran this pass). Phase 5 (done) has no per-item
+signal at all — its `ProgressEvent`s carry `done=None, total=None`
+(indeterminate) and are driven off `run_boot_stage`'s existing text
+messages. A fully granular byte-level meter would need every domain step
+wired the same way `_copy_phase`/`_prune_phase` now are — a larger change
+than #574's brief asked for.
 """
 
 from __future__ import annotations
@@ -504,6 +508,26 @@ def _projects_count() -> int:
     return 0
 
 
+def _log_plan_runtime_mismatch(*, phase: int, done: int, planned_total: int) -> None:
+    """#574 round14 (R5-M5): a real plan/runtime count mismatch (`emit()`'s
+    own R8-M4 growing-total branch) is worth keeping SOMEWHERE, just never
+    in `ProgressEvent.log_detail` — that reaches the wizard's own
+    user-facing log verbatim, and an English developer diagnostic there
+    breaks every other line's finished Thai prose. Mirrors
+    `auto_migrate_boot._log_boot_event`'s own reasoning for not importing
+    `orchestrator._log_event` directly (Qt-heavy transitively; this module
+    documents itself as pure/no-Qt) — best-effort, a logging failure must
+    never affect the migration it's observing."""
+    try:
+        from .orchestrator_text import _log_event
+
+        _log_event(
+            "migration_plan_undercounted", phase=phase, done=done, planned_total=planned_total
+        )
+    except Exception:
+        return  # swallow-ok: this IS the fallback logging path itself.
+
+
 def _log_paths() -> list[Path]:
     from .core.migration.journal import MigrationJournal
 
@@ -528,8 +552,17 @@ def run_migration(
     started = time.monotonic()
     plan = plan_migration()
     previous_version = _read_previous_app_version()
+    # #574 round14 (R5-M1): phase 1's counter must read the same FILE
+    # total the approved mockup shows ("15,762 / 15,762 ไฟล์"), not a count
+    # of top-level entries — a real backup can sit on "1 / 4" for minutes
+    # while each of those 4 entries is itself thousands of files.
+    # `plan.backup_items`' own per-row `count` field already IS that real
+    # count (`_backup_item_row`'s own number, the same one screen B shows)
+    # — reused here, and per-entry below, instead of a second count that
+    # could drift from it.
+    backup_item_files = {name: count for name, count, _, _ in plan.backup_items} if plan else {}
     totals = {
-        1: max(1, len(plan.backup_items)) if plan else 1,
+        1: max(1, sum(backup_item_files.values())) if plan else 1,
         2: max(1, len(plan.promote_items)) if plan else 1,
         4: max(1, len(plan.archive_items)) if plan else 1,
     }
@@ -589,12 +622,17 @@ def run_migration(
         # processing 4 entries against a planned 3, say) is a real plan/
         # runtime mismatch, not a duplicate-notify artifact — silently
         # clamping it down to `total_for_phase` hid that gap behind a
-        # counter permanently stuck at 100%. Grow the total to match reality
-        # instead (and note the mismatch in `log_detail`), never clamp it
-        # away quietly.
+        # counter permanently stuck at 100%. Grow the total to match
+        # reality instead, never clamp it away quietly.
+        #
+        # #574 round14 (R5-M5): the mismatch itself used to be appended, in
+        # English, straight into `detail` — reaching the wizard's own
+        # user-facing log verbatim (finished Thai prose everywhere else).
+        # The signal is still worth keeping, just not there: it goes to the
+        # audit log instead, same as every other best-effort diagnostic
+        # this module doesn't want to fail the migration over.
         if done is not None and total_for_phase and done > total_for_phase:
-            mismatch = f"plan undercounted phase {phase}: {done} > {total_for_phase}"
-            detail = f"{detail}; {mismatch}" if detail else mismatch
+            _log_plan_runtime_mismatch(phase=phase, done=done, planned_total=total_for_phase)
             if phase in totals:
                 grand_total += done - totals[phase]
                 totals[phase] = done
@@ -673,20 +711,29 @@ def run_migration(
         seen = step_seen.setdefault(step_id, set())
         if name not in seen:
             seen.add(name)
-            step_done[step_id] = step_done.get(step_id, 0) + 1
+            # #574 round14 (R5-M1): phase 1 (backup) counts FILES, using
+            # this entry's own real file count from the plan (falling back
+            # to 1 for a name the plan never saw — a genuine plan/runtime
+            # mismatch, same `emit()` growing-total branch as any other
+            # phase). Phase 2/4 keep counting whole entries, one per name,
+            # unchanged since R4-H1.
+            step_done[step_id] = step_done.get(step_id, 0) + (
+                backup_item_files.get(name, 1) if phase == 1 else 1
+            )
         emit(
             phase,
             done=step_done.get(step_id, 0),
             total=totals[phase],
             log_line=f"{step_id}: {name}",
             current_path=name,
-            # #504/#574 R4-H1: `unit` describes what `done`/`total`
-            # THEMSELVES count — top-level entries, always "รายการ" (the
-            # mockup's own wording, V9) — never the content-type of
-            # whichever entry currently happens to be streaming through,
-            # which flipped the noun mid-phase ("1/4 ไฟล์" -> "2/4 โปรเจค")
-            # with no change in what the number meant. `emit()`'s own
-            # default already is "รายการ"; left unset here on purpose.
+            # #504/#574 R4-H1 (round14 R5-M1 for phase 1): `unit` describes
+            # what `done`/`total` THEMSELVES count, stable for the whole
+            # phase — never the content-type of whichever entry currently
+            # happens to be streaming through, which flipped the noun mid-
+            # phase ("1/4 ไฟล์" -> "2/4 โปรเจค") with no change in what the
+            # number meant. Phase 1 counts files ("ไฟล์"); phase 2/4 count
+            # entries (`emit()`'s own "รายการ" default, left unset here).
+            unit="ไฟล์" if phase == 1 else "รายการ",
             operation=step_id,
         )
 
@@ -715,27 +762,29 @@ def run_migration(
             current_path=f"{name}/{current_path}",
             files_done=files_done,
             files_total=files_total,
-            # #504/#574 R4-H1: same "รายการ" default as `on_entry` above —
-            # `unit` still describes the entry-level `done`/`total`, not
-            # `files_done`/`files_total` (those have no unit field of
-            # their own; the window renders them as a bare fraction).
+            unit="ไฟล์" if phase == 1 else "รายการ",
             operation=step_id,
             detail=f"{files_done}/{files_total}",
         )
 
-    def on_step(step_id: str, kind: str) -> None:
-        # #574 round12 item 3: the 8 domain steps (readonly-registries,
-        # role-agent, capability, project, state, credential-reference,
-        # runtime-triage, core-internal-store) write in one shot with no
-        # `on_entry`/`on_file_progress` of their own — before this, they
-        # produced ZERO progress events, so a real rehearsal's phase-3 event
-        # count was 0 (a wizard watching for phase 3 never saw it and
-        # jumped straight from 2 to 4). `MigrationEngine`'s new `on_step`
-        # observer (start/done around every ladder step's own apply) gives
-        # each domain step a start+done pair here, positioned by its FIXED
-        # ladder index (`_LADDER_STEP_ORDER`) out of the real ladder length
-        # (`plan.verify_steps`) — the same "step X/N" scheme
-        # `MigrationOutcome.failed_step_index/_total` already uses.
+    def on_validate_step(step_id: str, ok: bool) -> None:
+        # #574 round14 (R5-M3, and the remaining half of R8-M2): the 8
+        # domain steps (readonly-registries, role-agent, capability,
+        # project, state, credential-reference, runtime-triage, core-
+        # internal-store) write in one shot with no `on_entry`/
+        # `on_file_progress` of their own — phase 3's row/log must come
+        # from each one's own REAL `validate()` result, fired by
+        # `MigrationEngine` AFTER that step's apply (`on_validate_step`,
+        # `validate()`/`validate_ok_steps()`), never from `on_step`
+        # (apply-time only — R8-M2's original finding: labeling that
+        # "ตรวจสอบแล้ว"/"กำลังตรวจสอบ" claimed a verification that, on the
+        # `apply_pending()` path, might never have run at all). Positioned
+        # by the step's FIXED ladder index (`_LADDER_STEP_ORDER`) out of
+        # the real ladder length (`plan.verify_steps`) — the same
+        # "step X/N" scheme `MigrationOutcome.failed_step_index/_total`
+        # already uses. A step whose validate() genuinely failed is
+        # labeled truthfully, never "ตรวจสอบแล้ว" — the row and its own log
+        # line can never disagree about what happened, unlike before.
         if step_id not in _DOMAIN_STEP_IDS:
             return
         try:
@@ -743,21 +792,10 @@ def run_migration(
         except ValueError:
             return
         verify_total = plan.verify_steps or len(_LADDER_STEP_ORDER)
-        done = position if kind == "done" else max(0, position - 1)
-        # #504/#574 R8-M2: this fires around the step's own APPLY (engine's
-        # `on_step`, wired in `MigrationEngine.apply()`/`apply_pending()`
-        # loops around `_copy_only_apply`) — never around a real
-        # `validate()` call. Labeling it "ตรวจสอบแล้ว"/"กำลังตรวจสอบ"
-        # ("validated"/"validating") claimed a verification that, on the
-        # `apply_pending()` path, never ran at all (`validated_steps`
-        # stayed 0 the whole time) — worded here for what actually
-        # happened instead; `MigrationOutcome.validated_steps` (see
-        # `auto_migrate_boot._run_apply_pending`'s own
-        # `engine.validate_ok_steps()` call) is the real, truthful count.
-        detail = "ย้ายข้อมูลแล้ว" if kind == "done" else "กำลังย้ายข้อมูล"
+        detail = "ตรวจสอบแล้ว" if ok else "ตรวจสอบไม่ผ่าน"
         emit(
             3,
-            done=done,
+            done=position,
             total=verify_total,
             log_line=f"{step_id}: {detail}",
             unit="ขั้น",
@@ -766,12 +804,20 @@ def run_migration(
         )
 
     _start_msg = "เริ่มย้ายข้อมูล"
-    emit(1, done=0, total=totals[1], log_line=_start_msg, operation="info", detail=_start_msg)
+    emit(
+        1,
+        done=0,
+        total=totals[1],
+        log_line=_start_msg,
+        unit="ไฟล์",
+        operation="info",
+        detail=_start_msg,
+    )
     result = auto_migrate_boot.run_boot_stage(
         progress_cb=on_text,
         on_entry=on_entry,
         on_file_progress=on_file_progress,
-        on_step=on_step,
+        on_validate_step=on_validate_step,
     )
     # #504/#574 R4-H2: the interface contract (docs/v2/574-boot-flow-
     # interface.md "log structure") requires `log_detail` to carry the
