@@ -117,8 +117,10 @@ class _FakeSplashOrch:
     def _send_when_ready(self, role, task, project=None):
         pass
 
-    def _auto_recover_stuck(self, role, project, pane, now):
-        Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+    def _auto_recover_stuck(self, role, project, pane, now, *, idle_no_progress=False):
+        Orchestrator._auto_recover_stuck(  # type: ignore[arg-type]
+            self, role, project, pane, now, idle_no_progress=idle_no_progress
+        )
 
     def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty"):
         Orchestrator._maybe_surface_tty_block(  # type: ignore[arg-type]

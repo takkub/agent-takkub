@@ -380,6 +380,56 @@ def _clean_progress_line(line: str) -> str:
     return line.strip()
 
 
+_SPINNER_GLYPH_RE = re.compile(r"[⠀-⣿•●○◐◑◒◓]")
+
+
+def content_liveness_text(
+    lines: list[str],
+    *,
+    spinner_phrases: tuple[str, ...] = (),
+    volatile_re: re.Pattern | None = None,
+) -> str:
+    """Reduce a pane's visible screen to the text a stuck/liveness detector
+    should hash (#570).
+
+    `display_lines()` is already terminal-emulated (pyte) — one rendered row
+    per line, not a raw byte stream with CR-overwrite animation frames
+    concatenated together — so unlike `_clean_progress_line` above there is
+    no ANSI/CR resolution to do here. What's still missing from the plain
+    phrase/volatile-counter line filtering `_check_stuck_panes` already did:
+    a rotating spinner GLYPH (braille frame / bullet dot) embedded inline in
+    an otherwise-static status line changes that line's raw text every tick
+    even though nothing real is happening — it's a single differing
+    character, not a repeated/progressive token `_dedupe_spinner_tokens`
+    (#541/#542) would collapse on its own (that pass is built for a
+    CR-collapsed multi-frame transcript BYTE line, not one already-rendered
+    screen row with exactly one glyph in it). So the glyph itself is
+    stripped first; the dedupe pass then still runs for whatever
+    repeated-token/progressive-typing noise a source line may carry.
+
+    Deliberately does NOT attempt to reduce a genuinely rotating STATUS
+    WORD (a CLI cycling through "Pondering…"/"Marinating…"/"Gallivanting…"
+    while idle-labeling the same wait) — those are real distinct words, not
+    spinner noise, and no text-normalization heuristic can tell that case
+    apart from genuine progress. That's what the independent
+    `_compute_last_progress_ts`-based no-progress watchdog in
+    `_check_stuck_panes` (IDLE_NO_PROGRESS_MIN/ESCALATE_S) exists to catch.
+    """
+    kept = []
+    for ln in lines:
+        low = ln.lower()
+        if any(p in low for p in spinner_phrases):
+            continue
+        if volatile_re is not None and volatile_re.search(ln):
+            continue
+        stripped = _SPINNER_GLYPH_RE.sub("", ln)
+        stripped = re.sub(r"[ \t]+", " ", stripped).strip()
+        cleaned = _dedupe_spinner_tokens(stripped).strip()
+        if cleaned:
+            kept.append(cleaned)
+    return "\n".join(kept)
+
+
 def _extract_transcript_lines(raw: bytes, max_lines: int = 5) -> list[str]:
     """Extract clean trailing lines from raw PTY transcript bytes (#541, #542).
 
@@ -1270,18 +1320,33 @@ RECOVERY_REASONS: tuple[str, ...] = (
     "no_first_content_retry_failed",  # same, on the retry → degrade to claude
     "auth_failed",  # provider printed an auth-failure marker
     "account_pending",  # provider stuck on account-verification gate (#346)
+    # #570: content kept changing (marquee/spinner text the hash detector
+    # above didn't stabilize) but no tool call / file change / `takkub
+    # progress` landed for >= 2x IDLE_NO_PROGRESS_MIN — the safety net for
+    # whatever marquee shape `content_liveness_text` doesn't yet normalize.
+    "idle_no_progress",
 )
 
 
-def classify_stuck_reason(*, idle_rounds: int, live_child_defer_since: float) -> str:
-    """Pick the `reason` for a `stuck_pane_recover` from the two signals the
+def classify_stuck_reason(
+    *,
+    idle_rounds: int,
+    live_child_defer_since: float,
+    idle_no_progress: bool = False,
+) -> str:
+    """Pick the `reason` for a `stuck_pane_recover` from the signals the
     watchdog already tracks (see `RECOVERY_REASONS`). Idle reminders win over
     a live-child grace expiry: a pane that was nudged and never answered is a
-    stopped agent regardless of what its shell left running."""
+    stopped agent regardless of what its shell left running. `idle_no_progress`
+    (#570) only applies when neither of those fired AND the recovery was
+    triggered by the broader no-real-progress signal rather than the screen
+    genuinely going static — see `_check_stuck_panes`'s caller."""
     if idle_rounds > 0:
         return "idle_no_response"
     if live_child_defer_since > 0:
         return "child_alive_grace_expired"
+    if idle_no_progress:
+        return "idle_no_progress"
     return "content_static"
 
 

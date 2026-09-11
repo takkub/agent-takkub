@@ -18,6 +18,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_takkub.orchestrator import (
+    IDLE_NO_PROGRESS_ESCALATE_S,
+    IDLE_NO_PROGRESS_MIN,
+    IDLE_NO_PROGRESS_NOTICE_S,
     LEAD,
     STUCK_LIVE_CHILD_GRACE_S,
     STUCK_RECOVER_COOLDOWN_S,
@@ -27,6 +30,7 @@ from agent_takkub.orchestrator import (
     Orchestrator,
     PaneState,
     PipelineRun,
+    classify_stuck_reason,
 )
 
 
@@ -117,12 +121,14 @@ class _FakeOrch:
     def _send_when_ready(self, role: str, task: str, project: str | None = None) -> None:
         pass  # no-op in tests
 
-    def _auto_recover_stuck(self, role, project, pane, now) -> None:
+    def _auto_recover_stuck(self, role, project, pane, now, *, idle_no_progress=False) -> None:
         # Delegate to the real orchestrator method so the cooldown
         # bookkeeping + output-ts reset run for real. Tests that drive
         # `_check_stuck_panes` rely on this method being reachable on
         # the fake (the watchdog calls `self._auto_recover_stuck`).
-        Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+        Orchestrator._auto_recover_stuck(  # type: ignore[arg-type]
+            self, role, project, pane, now, idle_no_progress=idle_no_progress
+        )
 
     def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty") -> None:
         Orchestrator._maybe_surface_tty_block(  # type: ignore[arg-type]
@@ -162,6 +168,15 @@ class _FakeOrch:
         Orchestrator._snapshot_dirty_worktree_if_needed(  # type: ignore[arg-type]
             self, project, role, worktree, reason
         )
+
+    def _real_progress_ts(self, role, project_ns, pane, ps, now) -> float:
+        # #570: delegate to the real (trivial) method — reads only
+        # ps.last_send_ts / ps.last_tool_marker_seen_ts, both PaneState
+        # defaults of 0.0 unless a test sets them, so every EXISTING test
+        # in this module (none of which touch those fields) sees identical
+        # behaviour to the AttributeError-caught default the watchdog
+        # degrades to when this method is absent.
+        return Orchestrator._real_progress_ts(self, role, project_ns, pane, ps, now)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
@@ -1186,3 +1201,161 @@ class TestLiveChildrenDefer:
 
         resets = [e for e in logged if e["event"] == "stuck_recover_defer_grace_reset"]
         assert resets == []
+
+
+class TestClassifyStuckReasonIdleNoProgress:
+    """#570: RECOVERY_REASONS gained `idle_no_progress`, distinct from the
+    default `content_static` — pins down the priority order."""
+
+    def test_idle_no_progress_wins_over_default(self) -> None:
+        assert (
+            classify_stuck_reason(idle_rounds=0, live_child_defer_since=0.0, idle_no_progress=True)
+            == "idle_no_progress"
+        )
+
+    def test_defaults_to_content_static_when_flag_not_set(self) -> None:
+        assert classify_stuck_reason(idle_rounds=0, live_child_defer_since=0.0) == "content_static"
+
+    def test_idle_rounds_still_wins_over_idle_no_progress(self) -> None:
+        assert (
+            classify_stuck_reason(idle_rounds=1, live_child_defer_since=0.0, idle_no_progress=True)
+            == "idle_no_response"
+        )
+
+    def test_live_child_defer_still_wins_over_idle_no_progress(self) -> None:
+        assert (
+            classify_stuck_reason(idle_rounds=0, live_child_defer_since=5.0, idle_no_progress=True)
+            == "child_alive_grace_expired"
+        )
+
+
+class TestIdleNoProgressWatchdog:
+    """#570: a pane whose screen keeps "changing" (a rotating status word /
+    marquee — `content_liveness_text` can normalize a spinner GLYPH but not
+    a genuinely different status word each cycle) must still be caught once
+    no real progress signal (`_real_progress_ts`: a Lead dispatch, a
+    `takkub progress()` call, or a sighted provider tool-call marker — NOT
+    the content-hash clock, which is exactly what a rotating word games)
+    has landed for a long time. `_FakePane.session` is a bare MagicMock, so
+    `display_lines()` always raises and the content-hash clock never
+    self-updates past its first observation — tests simulate "content still
+    changing" the same way every other test in this module simulates
+    "content static": by setting `last_content_change_ts` directly."""
+
+    def _pane_with_progress(self, now: float, *, last_send_ts: float, content_fresh: bool = True):
+        fake = _FakeOrch()
+        pane = _FakePane(state="working", last_out=now - 5)
+        fake._panes_by_project["p"] = {"backend": pane}
+        ps = fake._ps("p::backend")
+        # "content still changing" (rotating marquee) — never reads as
+        # content-static, so content_stale stays False and only the
+        # idle-no-progress signal below can trigger anything.
+        ps.last_content_change_ts = now if content_fresh else (now - STUCK_THRESHOLD_S - 1)
+        ps.last_send_ts = last_send_ts
+        return fake, pane, ps
+
+    def test_no_notice_when_real_progress_is_recent(self) -> None:
+        now = 1_000_000.0
+        fake, _pane, _ps = self._pane_with_progress(now, last_send_ts=now - 5)
+        _check(fake, now)
+        assert fake.notify_calls == []
+        assert fake.close_calls == []
+
+    def test_notice_fires_once_past_notice_threshold(self) -> None:
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            now = 1_000_000.0
+            fake, _pane, _ps = self._pane_with_progress(
+                now, last_send_ts=now - IDLE_NO_PROGRESS_NOTICE_S - 1
+            )
+            _check(fake, now)
+        finally:
+            orch_mod._log_event = orig
+
+        notice_events = [e for e in logged if e["event"] == "pane_idle_no_progress"]
+        assert len(notice_events) == 1
+        assert notice_events[0]["role"] == "backend"
+        assert notice_events[0]["project"] == "p"
+        idle_notices = [c for c in fake.notify_calls if c[2] == "backend"]
+        assert len(idle_notices) == 1
+        assert f"{int(IDLE_NO_PROGRESS_MIN)}" in idle_notices[0][1]
+        # Content is still "changing" and escalate threshold isn't hit yet —
+        # a notice, not a recovery.
+        assert fake.close_calls == []
+
+    def test_notice_is_not_repeated_while_still_stale(self) -> None:
+        now = 1_000_000.0
+        fake, pane, ps = self._pane_with_progress(
+            now, last_send_ts=now - IDLE_NO_PROGRESS_NOTICE_S - 1
+        )
+        _check(fake, now)
+        assert len(fake.notify_calls) == 1
+
+        now2 = now + 30
+        pane._last_output_ts = now2 - 5
+        ps.last_content_change_ts = now2  # marquee still "moving"
+        _check(fake, now2)
+        assert len(fake.notify_calls) == 1, "one-shot latch must suppress the repeat"
+
+    def test_notice_fires_again_after_progress_resumes_then_stales_again(self) -> None:
+        now = 1_000_000.0
+        fake, pane, ps = self._pane_with_progress(
+            now, last_send_ts=now - IDLE_NO_PROGRESS_NOTICE_S - 1
+        )
+        _check(fake, now)
+        assert len(fake.notify_calls) == 1
+
+        # Real progress lands (e.g. a takkub progress() call) — latch clears.
+        now2 = now + 60
+        pane._last_output_ts = now2 - 5
+        ps.last_content_change_ts = now2
+        ps.last_send_ts = now2
+        _check(fake, now2)
+        assert len(fake.notify_calls) == 1, "must not notice again while progress is fresh"
+        assert ps.idle_no_progress_notified is False
+
+        # ... and goes stale again for a fresh episode.
+        now3 = now2 + IDLE_NO_PROGRESS_NOTICE_S + 1
+        pane._last_output_ts = now3 - 5
+        ps.last_content_change_ts = now3
+        _check(fake, now3)
+        assert len(fake.notify_calls) == 2, "a new stale episode must notice again"
+
+    def test_escalates_to_recovery_after_2x_threshold_despite_changing_content(self) -> None:
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            now = 1_000_000.0
+            fake, _pane, _ps = self._pane_with_progress(
+                now, last_send_ts=now - IDLE_NO_PROGRESS_ESCALATE_S - 1
+            )
+            _check(fake, now)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [("backend", "p")]
+        assert fake.spawn_calls == [("backend", "/x", "p")]
+        recover_events = [e for e in logged if e["event"] == "stuck_pane_recover"]
+        assert len(recover_events) == 1
+        assert recover_events[0]["reason"] == "idle_no_progress", (
+            "recovery reason must distinguish this from a genuinely content-static pane"
+        )
+
+    def test_tool_marker_sighting_counts_as_progress(self) -> None:
+        """A provider tool-call marker actually observed this tick is real
+        evidence, same as a Lead dispatch — must reset the no-progress clock."""
+        now = 1_000_000.0
+        fake, pane, ps = self._pane_with_progress(
+            now, last_send_ts=now - IDLE_NO_PROGRESS_NOTICE_S - 1
+        )
+        pane.session.tool_running_marker.return_value = "Running command..."
+        _check(fake, now)
+        assert fake.notify_calls == [], "a sighted tool-call marker must count as real progress"
+        assert ps.last_tool_marker_seen_ts == now

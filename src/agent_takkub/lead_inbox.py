@@ -2345,6 +2345,20 @@ class LeadInboxMixin:
         resolver the rest of the engine uses — never a claude-only signal.
         Best-effort end to end: any probe failure counts as "no evidence",
         never as proof of death.
+
+        (#570) The primary check used to be raw `seconds_since_output()` —
+        ANY PTY byte, including an animated spinner or a scrolling marquee
+        status line, counts as "output". Confirmed field incident: a gemini
+        pane sat on a "Planning Reproducible Test Design" marquee for ~4h
+        with zero tool calls, and this exact check fired
+        `delivery_stale_reap_suppressed reason=recent_output` at the tail
+        end of that stall — the marquee's own animation bytes were "recent"
+        even though nothing real had happened in hours. Swapped for
+        `_compute_last_progress_ts` (orchestrator.py): the same
+        spinner/marquee-filtered content-hash clock `_check_stuck_panes`
+        maintains, plus screenshot-mtime and last-send/`takkub progress`
+        signals — same 30s freshness window, just content-aware instead of
+        byte-aware.
         """
         pane = self._project_panes(project_ns).get(role_name)
         if pane is None or pane.session is None or not pane.session.is_alive:
@@ -2352,11 +2366,12 @@ class LeadInboxMixin:
         if getattr(pane, "state", None) != "working":
             return None
         try:
-            quiet_for = _timing_or_none(pane.session.seconds_since_output())
+            last_progress_ts = self._compute_last_progress_ts(role_name, project_ns, pane)
+            quiet_for = (time.time() - last_progress_ts) if last_progress_ts else None
         except Exception:
             quiet_for = None
         if quiet_for is not None and quiet_for < _PROGRESS_QUIET_THRESHOLD_S:
-            return "recent_output"
+            return "recent_content_progress"
         try:
             from .provider_config import effective_provider_for
 

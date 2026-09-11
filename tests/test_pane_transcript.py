@@ -263,6 +263,62 @@ class TestProgressLineCleaning:
         ]
 
 
+class TestContentLivenessText:
+    """#570: the stuck-watchdog's content-hash clock must not be fooled by a
+    braille-spinner + status-text combo that never matches any known
+    interrupt phrase or volatile-counter pattern — reuses `content_liveness_text`
+    (built on the #541/#542 spinner-token dedupe already tested above) rather
+    than the plain phrase/regex-only filtering that missed this shape."""
+
+    def test_braille_spinner_on_static_text_is_stable_across_frames(self) -> None:
+        """Same "PTY" screen re-rendered with a different braille frame each
+        tick (the animation itself, nothing else changing) must reduce to
+        IDENTICAL text — this is what lets `_check_stuck_panes`'s content-hash
+        clock finally classify the pane as stuck instead of resetting every
+        tick on the spinner glyph alone."""
+        from agent_takkub.orchestrator_text import content_liveness_text
+
+        frames = [
+            ["some prior output", f"{glyph} Working..."] for glyph in ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴")
+        ]
+        cleaned = {content_liveness_text(f) for f in frames}
+        assert len(cleaned) == 1, f"spinner-only frames must collapse to one key, got {cleaned}"
+
+    def test_known_interrupt_phrase_line_is_still_dropped(self) -> None:
+        from agent_takkub.orchestrator_text import content_liveness_text
+
+        lines = ["real output line", "Working... (esc to interrupt)"]
+        cleaned = content_liveness_text(lines, spinner_phrases=("esc to interrupt",))
+        assert "esc to interrupt" not in cleaned
+        assert "real output line" in cleaned
+
+    def test_volatile_counter_line_is_still_dropped(self) -> None:
+        import re
+
+        from agent_takkub.orchestrator_text import content_liveness_text
+
+        lines = ["real output line", "Working (412s)"]
+        cleaned = content_liveness_text(lines, volatile_re=re.compile(r"\d+s\b"))
+        assert "412s" not in cleaned
+        assert "real output line" in cleaned
+
+    def test_distinct_tool_output_is_not_collapsed(self) -> None:
+        """Regression for the flip side of the #570 ask: real, distinguishable
+        tool output across ticks must NOT be normalized away — only spinner/
+        marquee noise is. Two genuinely different command outputs must still
+        hash differently."""
+        from agent_takkub.orchestrator_text import content_liveness_text
+
+        tick_a = content_liveness_text(["Running pytest tests/test_foo.py", "5 passed"])
+        tick_b = content_liveness_text(["Running pytest tests/test_bar.py", "12 passed"])
+        assert tick_a != tick_b
+
+    def test_empty_input_yields_empty_text(self) -> None:
+        from agent_takkub.orchestrator_text import content_liveness_text
+
+        assert content_liveness_text([]) == ""
+
+
 class TestTailRoleTranscript:
     """Issue #541: tail_role_transcript reads latest transcript of live and exited panes."""
 

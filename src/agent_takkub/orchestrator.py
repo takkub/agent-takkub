@@ -119,6 +119,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _teammate_tier,
     _truncate_at_word_boundary,
     classify_stuck_reason,
+    content_liveness_text,
     cwd_validation_error,
     is_delivery_pointer_failure,
     prune_old_transcripts,
@@ -698,6 +699,26 @@ def _stale_marker_footer(sess: PtySession) -> str:
 # the recent-exit timestamp and UUID are still fresh). 10 minutes is generous enough
 # that a heavy `npm install` or a slow Lighthouse audit won't trip it.
 STUCK_THRESHOLD_S = 10 * 60
+# #570: a pane whose screen keeps changing (a rotating status word/marquee +
+# braille spinner) never trips STUCK_THRESHOLD_S even though nothing real is
+# happening — `content_liveness_text` can normalize the spinner glyph but not
+# a genuinely different status word each cycle. `_real_progress_ts` (a
+# NARROWER signal than `_compute_last_progress_ts` — deliberately excludes
+# the content-hash clock so a fake-able "changing" screen can't dominate it,
+# see that method's own docstring) is the last time real, hard-to-fake
+# evidence landed: a provider tool-call marker actually sighted, or a genuine
+# Lead dispatch / `takkub progress()` call. Past IDLE_NO_PROGRESS_MIN with no
+# such evidence, Lead gets one notice (informational — the pane may still be
+# doing something this narrower signal doesn't capture, e.g. a long-running
+# shell command with no further marker); past 2x that, `_check_stuck_panes`
+# treats it the same as a content-static pane (still gated by every existing
+# safety check below — tty-block, splash, feedback prompt, #537
+# live-children defer, cooldown/max) rather than a brand-new recovery path,
+# so a pane that ran silently for 4h behind a marquee (field incident: #570)
+# gets caught instead of never tripping the content-hash detector at all.
+IDLE_NO_PROGRESS_MIN = float(os.environ.get("TAKKUB_IDLE_NO_PROGRESS_MIN", "20"))
+IDLE_NO_PROGRESS_NOTICE_S = IDLE_NO_PROGRESS_MIN * 60
+IDLE_NO_PROGRESS_ESCALATE_S = IDLE_NO_PROGRESS_NOTICE_S * 2
 # #520: minimum wall-clock gap between two consecutive 5s watchdog ticks
 # (IDLE_WATCHDOG_INTERVAL_MS) that counts as "the machine was asleep", not
 # normal Qt-timer jitter. A suspended process runs no code at all — the
@@ -7489,6 +7510,40 @@ class Orchestrator(
 
         return ts
 
+    def _real_progress_ts(
+        self, role: str, project_ns: str, pane: AgentPane, ps: PaneState, now: float
+    ) -> float:
+        """#570: narrower than `_compute_last_progress_ts` above — only
+        hard-to-fake evidence of real work, for the idle-no-progress
+        watchdog specifically.
+
+        `_compute_last_progress_ts`'s primary signal is the same
+        spinner-filtered content-HASH clock `_check_stuck_panes` uses for
+        its content-static check. That's the right signal for that
+        method's own callers (idle-reminder/harvest-hint: "has the screen
+        moved at all", where streaming token output legitimately counts).
+        It is the WRONG signal here: the #570 field incident was exactly a
+        pane whose screen kept "changing" every tick (a rotating status
+        word / marquee + braille spinner, `content_liveness_text` above
+        can normalize the glyph but not a genuinely different word each
+        cycle) with zero real activity underneath — folding that same
+        clock in here via max() would make it dominate and the
+        idle-no-progress watchdog would never fire for precisely the case
+        it exists to catch.
+
+        Instead: the largest of `last_send_ts` (a real Lead dispatch, or
+        the pane's own `takkub progress()`/`done()` call — #234/#461) and
+        the last tick a provider tool-call marker (`tool_running_marker`,
+        #308's own per-provider table) was actually sighted on screen.
+        Caller is responsible for updating `ps.last_tool_marker_seen_ts`
+        each tick before calling this (kept as a side-effecting update
+        there, not here, so a caller that already computed the marker for
+        another purpose this tick doesn't pay for it twice)."""
+        ts = ps.last_send_ts
+        if ps.last_tool_marker_seen_ts > ts:
+            ts = ps.last_tool_marker_seen_ts
+        return ts
+
     def _role_delivery_unconfirmed(self, project_ns: str, role: str) -> bool:
         """(#263) True when a "task may not have landed" system notice
         (spawn-failed / delivery-unconfirmed / spawn-stuck / delivery-boot-stall
@@ -10651,8 +10706,13 @@ class Orchestrator(
         Microsoft documents as continuing to advance through sleep/standby,
         so it shows no divergence from wall-clock time there at all.
 
-        Only corrects the two clocks that feed the stuck-pane kill decision
-        (`PaneState.last_content_change_ts`, `AgentPane._last_output_ts`) —
+        Corrects the clocks that feed a watchdog kill/escalation decision
+        (`PaneState.last_content_change_ts`, `AgentPane._last_output_ts`,
+        and — #570 — `PaneState.last_send_ts` / `last_tool_marker_seen_ts`,
+        which `_real_progress_ts` reads for the idle-no-progress
+        notice/escalation: without this, an 8h sleep would read as 8h of
+        real silence the instant the machine woke, firing the notice or
+        even the escalate-to-recovery path on the very next tick) —
         ponytail: other wall-clock cooldowns (idle-done reminder, rate-limit
         parking, TTY-block notice spacing) still count sleep time too, but
         those only affect notification cadence, never an auto-respawn, so
@@ -10669,6 +10729,10 @@ class Orchestrator(
         for ps in self._pane_state.values():
             if ps.last_content_change_ts is not None:
                 ps.last_content_change_ts += gap
+            if ps.last_send_ts > 0.0:
+                ps.last_send_ts += gap
+            if ps.last_tool_marker_seen_ts > 0.0:
+                ps.last_tool_marker_seen_ts += gap
         for project_panes in self._panes_by_project.values():
             for pane in project_panes.values():
                 last_out = getattr(pane, "_last_output_ts", 0.0)
@@ -10724,11 +10788,15 @@ class Orchestrator(
                         # Exclude lines matching any known interrupt phrase OR volatile
                         # counter patterns (elapsed seconds, token counters) so a
                         # counter-only spinner line doesn't keep resetting the hash.
-                        _filtered_lines = "\n".join(
-                            ln
-                            for ln in disp
-                            if not any(p in ln.lower() for p in _spinner_interrupt_phrases())
-                            and not _SPINNER_VOLATILE_RE.search(ln)
+                        # #570: also runs the #541/#542 spinner-token dedupe (braille
+                        # frames, progressive-typing/marquee shimmer) on every
+                        # surviving line — a scrolling marquee status line matches
+                        # neither phrase list nor the volatile-counter regex, so
+                        # without this it still hashes differently every tick.
+                        _filtered_lines = content_liveness_text(
+                            disp,
+                            spinner_phrases=_spinner_interrupt_phrases(),
+                            volatile_re=_SPINNER_VOLATILE_RE,
                         )
                         non_spinner_hash = hashlib.blake2b(
                             _filtered_lines.encode("utf-8", errors="replace"),
@@ -10777,7 +10845,61 @@ class Orchestrator(
                                 ps_ck.tp_runaway_since = None
                     ps_ck.tp_last_total = _tp_total
                     ps_ck.tp_last_ts = now
-                    if (now - last_content_ts) < STUCK_THRESHOLD_S:
+                    # #570: narrower no-real-progress signal, independent of whether
+                    # the content-hash clock above ever stabilizes — deliberately
+                    # does NOT fold that clock in (see _real_progress_ts's own
+                    # docstring for why: a rotating status word/marquee would
+                    # otherwise always dominate the max() and this would never
+                    # fire for exactly the case it exists to catch). Runs for
+                    # every working pane each tick (not gated behind the
+                    # content_stale `continue` below), since content may still
+                    # read as "changing" for a pane with no real progress.
+                    # Best-effort, same idiom as the tool-marker/bg-work checks
+                    # above: a probe failure degrades to "no signal" (0.0) rather
+                    # than aborting the rest of this pane's watchdog pass.
+                    try:
+                        from .provider_config import effective_provider_for as _eff_provider
+
+                        _provider_np = _eff_provider(role, project=project_name)
+                        _marker_np = pane.session.tool_running_marker(_provider_np)
+                        if isinstance(_marker_np, str) and _marker_np:
+                            ps_ck.last_tool_marker_seen_ts = now
+                    except Exception:
+                        pass
+                    try:
+                        last_progress_ts = self._real_progress_ts(
+                            role, project_name, pane, ps_ck, now
+                        )
+                    except Exception:
+                        last_progress_ts = 0.0
+                    if not isinstance(last_progress_ts, (int, float)):
+                        last_progress_ts = 0.0
+                    idle_no_progress_for = (now - last_progress_ts) if last_progress_ts else 0.0
+                    if idle_no_progress_for >= IDLE_NO_PROGRESS_NOTICE_S:
+                        if not ps_ck.idle_no_progress_notified:
+                            _log_event(
+                                "pane_idle_no_progress",
+                                role=role,
+                                project=project_name,
+                                no_progress_for_s=int(idle_no_progress_for),
+                                threshold_s=int(IDLE_NO_PROGRESS_NOTICE_S),
+                            )
+                            self._notify_lead(
+                                project_name,
+                                f"⏳ [system] {role} จอยังขยับอยู่แต่ไม่มี tool call / "
+                                f"file change / `takkub progress` มาเกิน "
+                                f"{int(IDLE_NO_PROGRESS_MIN)} นาที — อาจติดอยู่ใน marquee/"
+                                "loop ที่ไม่ใช่งานจริง (#570) แนะนำเปิด pane ดูตรงๆ",
+                                from_role=role,
+                                note="pane_idle_no_progress",
+                                kind="idle-no-progress",
+                            )
+                            ps_ck.idle_no_progress_notified = True
+                    else:
+                        ps_ck.idle_no_progress_notified = False
+                    content_stale = (now - last_content_ts) >= STUCK_THRESHOLD_S
+                    idle_no_progress_escalate = idle_no_progress_for >= IDLE_NO_PROGRESS_ESCALATE_S
+                    if not content_stale and not idle_no_progress_escalate:
                         continue
                     if ps_ck.stuck_recover_gave_up:
                         # Already hit STUCK_RECOVER_MAX for this pane and handed it
@@ -10896,7 +11018,9 @@ class Orchestrator(
                     # the pane was busy was collected on the way out, one step
                     # too late to change the decision. Re-using it here is
                     # cheap because nothing reaches this line until a pane has
-                    # already been content-static for STUCK_THRESHOLD_S.
+                    # already been content-static for STUCK_THRESHOLD_S — or,
+                    # per #570, gone IDLE_NO_PROGRESS_ESCALATE_S with no real
+                    # progress signal despite content still "changing".
                     #
                     # Respawning a live QA pane is worse than leaving it alone:
                     # the respawn is `resumed: false`, so it restarts the task
@@ -10906,7 +11030,13 @@ class Orchestrator(
                         role, project_name, pane, ps_ck, now
                     ):
                         continue
-                    self._auto_recover_stuck(role, project_name, pane, now)
+                    self._auto_recover_stuck(
+                        role,
+                        project_name,
+                        pane,
+                        now,
+                        idle_no_progress=(not content_stale and idle_no_progress_escalate),
+                    )
                 except Exception:
                     _log_event("stuck_watchdog_pane_error", role=role, project=project_name)
 
@@ -11126,7 +11256,15 @@ class Orchestrator(
             return live
         return getattr(self, "_last_session_uuid", {}).get(key)
 
-    def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
+    def _auto_recover_stuck(
+        self,
+        role: str,
+        project: str,
+        pane: AgentPane,
+        now: float,
+        *,
+        idle_no_progress: bool = False,
+    ) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The
         spawn uses the pane's last-known cwd so claude rejoins the same
         project directory.
@@ -11136,7 +11274,13 @@ class Orchestrator(
         starts blank (no --resume despite the docstring), drops the verify hop
         from auto-chain, and silently loses the commit gate.  We snapshot those
         four fields before teardown and restore them in the respawn callback so
-        spawn() can_resume logic finds the UUID and the task/flags survive."""
+        spawn() can_resume logic finds the UUID and the task/flags survive.
+
+        `idle_no_progress` (#570): True when the caller reached this call via
+        the IDLE_NO_PROGRESS_ESCALATE_S path (content kept "changing" but no
+        real progress signal landed) rather than genuine content-static —
+        passed straight through to `classify_stuck_reason` so the resulting
+        `stuck_pane_recover` event's `reason` tells the two apart."""
         cwd = pane._session_cwd
         key = f"{project}::{role}"
 
@@ -11189,6 +11333,7 @@ class Orchestrator(
             live_child_defer_since=(
                 _ps_snap.live_child_defer_since if _ps_snap is not None else 0.0
             ),
+            idle_no_progress=idle_no_progress,
         )
         try:
             _children = self._live_non_scaffolding_children(project, role, pane.session)
