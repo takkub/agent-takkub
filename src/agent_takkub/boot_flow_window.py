@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, QPointF, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -1088,6 +1088,7 @@ class BootFlowWindow(QDialog):
         note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         note.setFont(_font(self._sans, 12))
+        _apply_line_height(note, 12)
         note.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
         note_lay.addWidget(note, 1)
         body_lay.addWidget(note_row)
@@ -1272,6 +1273,7 @@ class BootFlowWindow(QDialog):
         warn_lay.addWidget(warn_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         warn_lbl = QLabel("อย่าปิดโปรแกรมระหว่างนี้ — ถ้าปิด ระบบจะกู้คืนให้เองตอนเปิดครั้งถัดไป")
         warn_lbl.setFont(_font(self._sans, 12))
+        _apply_line_height(warn_lbl, 12)
         warn_lbl.setStyleSheet(f"color: {theme.STATE_WARN}; background: transparent; border: none;")
         # Fixed to ~60% of the footer's usable width (mockup: wraps to 2
         # lines) — without wordWrap, this sentence's single-line sizeHint
@@ -1306,14 +1308,35 @@ class BootFlowWindow(QDialog):
         footer_widget.layout().addWidget(
             self._migrate_footer_right, 0, Qt.AlignmentFlag.AlignVCenter
         )
+        # R3-B1: every other page's footer lands on exactly 68px (14+18
+        # margins around a 36px button row); C has no buttons, so nothing
+        # else anchors its height — pin it explicitly rather than trusting
+        # `warn_wrap`'s own wrapped height to land there by coincidence.
+        # `_set_footer_right_elided` keeps the right-hand text inside this
+        # same budget defensively (a `backup_dir` that fails to relativize
+        # under `config.DATA_HOME` — a different drive, say — can still be
+        # long even as a forward-slashed `_path_str` result).
+        footer_widget.setFixedHeight(68)
+        self._migrate_footer_widget = footer_widget
         return page
 
     def _set_footer_right_elided(self, text: str) -> None:
-        """Wraps rather than elides (the mockup has no ellipsis rule here) —
-        the full backup path stays readable across up to a couple of lines
-        instead of losing its `สำรองไว้ที่` prefix or its timestamped
-        directory name to a fixed-width single-line clip. Name kept for
-        callers/tests; behavior is "wrap", not "elide"."""
+        """Wraps up to ~2 lines inside the footer's fixed 68px height,
+        middle-eliding first if the full text would need more than that
+        (R3-B1: the footer must stay the same 68px every other page uses,
+        never grow to fit a long path). The mockup itself has no ellipsis
+        rule for a path short enough to fit — eliding only kicks in past
+        that budget, so the common case (a short relative `_path_str`
+        result) still renders in full, wrapped, exactly as before. Name
+        kept for callers/tests; behavior is "wrap, elide only if needed"."""
+        fm = QFontMetrics(self._migrate_footer_right.font())
+        max_width = self._migrate_footer_right.maximumWidth()
+        # ~2 wrapped lines' worth of pixels, the same budget the fixed-68px
+        # footer actually has room for (see `_footer_widget.setFixedHeight`
+        # above) — elide to fit within it rather than growing the widget.
+        budget = max_width * 2
+        if fm.horizontalAdvance(text) > budget:
+            text = fm.elidedText(text, Qt.TextElideMode.ElideMiddle, budget)
         self._migrate_footer_right.setText(text)
 
     def _set_phase_row_kind(self, key: str, kind: str) -> None:
@@ -1468,7 +1491,16 @@ class BootFlowWindow(QDialog):
             # window's own interface was first documented.
             files_done = getattr(event, "files_done", None)
             files_total = getattr(event, "files_total", None)
-            if files_done is not None and files_total:
+            # Skip the segment when it would just repeat `done`/`total`
+            # verbatim (the last `on_file_progress` tick of an entry that
+            # IS the whole phase's count, e.g. a single huge directory —
+            # "15,762 / 15,762 ไฟล์ (15,762/15,762 ไฟล์)" tells the reader
+            # nothing a plain "15,762 / 15,762 ไฟล์" doesn't already).
+            if (
+                files_done is not None
+                and files_total
+                and (files_done, files_total) != (done, total)
+            ):
                 count_text += f" ({files_done:,}/{files_total:,} ไฟล์)"
             # `current_path` — optional, not in the documented interface yet
             # (see module docstring): the mockup only appends the "· providers/…"
@@ -1477,12 +1509,34 @@ class BootFlowWindow(QDialog):
             if current_path:
                 count_text += f" · {_shorten_current_path(str(current_path))}"
             self._phase_count_labels[phase_key].setText(count_text)
-        log_line = getattr(event, "log_line", None)
-        if log_line:
-            current_path_for_log = getattr(event, "current_path", None)
-            timestamp, operation, path, detail = _parse_log_line(
-                str(log_line), current_path_for_log
-            )
+        # #574 round12 (interface doc "log structure", R3-M5): the backend
+        # now carries the 4 log runs as their own fields — `log_line` is
+        # documented as legacy-only and must NOT be re-parsed (a prior
+        # review found that fragile: "two NBSPs measuring 14px", "parser
+        # requires double spaces while backend emits `step_id: name`", and
+        # an unstructured `on_text` line used to land entirely in the dim
+        # FAINT timestamp slot). Structured fields win whenever present;
+        # `_parse_log_line` on the raw `log_line` stays only as a fallback
+        # for a backend/fixture that predates them (getattr-defensive, same
+        # reasoning as every other optional field here).
+        current_path_for_log = getattr(event, "current_path", None)
+        log_timestamp = getattr(event, "log_timestamp", None)
+        log_operation = getattr(event, "log_operation", None)
+        log_detail = getattr(event, "log_detail", None)
+        if log_timestamp is not None or log_operation is not None or log_detail:
+            timestamp = str(log_timestamp or "")
+            operation = str(log_operation or "")
+            path = str(current_path_for_log or "")
+            detail = str(log_detail or "")
+        else:
+            log_line = getattr(event, "log_line", None)
+            if log_line:
+                timestamp, operation, path, detail = _parse_log_line(
+                    str(log_line), current_path_for_log
+                )
+            else:
+                timestamp = operation = path = detail = ""
+        if timestamp or operation or path or detail:
             spans = [
                 (timestamp, theme.TEXT_FAINT),
                 (operation, theme.TEXT_MUTED),

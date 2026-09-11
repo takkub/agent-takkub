@@ -363,10 +363,28 @@ class TestMigratingFooterWrap:
     def test_backup_path_is_shown_in_full_not_elided(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan())
         w = bfw.BootFlowWindow(flow=flow)
-        full_text = "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832-some-very-long-directory-suffix/"
+        full_text = "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832-nested/"
         w._set_footer_right_elided(full_text)
         assert w._migrate_footer_right.text() == full_text
         assert "…" not in w._migrate_footer_right.text()
+
+    def test_very_long_backup_path_is_middle_elided_and_footer_stays_68px(self) -> None:
+        """#574 round-3 audit R3-B1 (residual): C's footer must stay the
+        same fixed 68px height every other page uses even when a real
+        machine's `backup_dir` can't relativize under `config.DATA_HOME`
+        (a different drive, say) and `_path_str` falls back to the full
+        absolute path — wrapping alone (the round-4/5 fix) isn't enough
+        once that absolute path is long enough to need 3+ lines; past
+        that budget it must middle-elide instead of growing the footer."""
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        full_text = (
+            "สำรองไว้ที่ C:/Users/example/AppData/Local/Takkub/backups/"
+            "pre-migrate-2026-09-11-083245-abcdef/"
+        )
+        w._set_footer_right_elided(full_text)
+        assert "…" in w._migrate_footer_right.text()
+        assert w._migrate_footer_widget.height() == 68
 
     def test_footer_right_label_wraps_rather_than_clips(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan())
@@ -406,6 +424,36 @@ class TestMigratingFooterWrap:
             )
             w._apply_pending_event()
             assert w._migrate_footer_right.text() == "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832/"
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_footer_stays_68px_with_a_real_unrelativizable_absolute_backup_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#574 round-3 audit R3-B1 (residual): a `backup_dir` that lives
+        OUTSIDE `config.DATA_HOME` (a different drive/mount — `_path_str`'s
+        `relative_to` raises `ValueError` and it falls back to the full
+        absolute path) must still leave the footer at the same fixed 68px
+        every other page uses, not just a short/relativizable one."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "data-home")
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        outside_backup_dir = (
+            tmp_path / "elsewhere" / "backups" / "pre-migrate-2026-09-11-083245-abcdef"
+        )
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="backup",
+                    percent_overall=20,
+                    backup_dir=outside_backup_dir,
+                )
+            )
+            w._apply_pending_event()
+            assert w._migrate_footer_widget.height() == 68
         finally:
             w._migrate_throttle.stop()
 
