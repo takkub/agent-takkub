@@ -401,6 +401,7 @@ def _run_apply_pending(
     on_entry: Callable[[str, str], None] | None = None,
     on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
     on_step: Callable[[str, str], None] | None = None,
+    on_validate_step: Callable[[str, bool], None] | None = None,
 ) -> BootMigrationResult:
     """Every boot after a successful full apply (`layout_state() ==
     "mixed"`) — run only the ladder steps this machine still needs (#362):
@@ -449,7 +450,12 @@ def _run_apply_pending(
         return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
-    engine = MigrationEngine(on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step)
+    engine = MigrationEngine(
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
+        on_validate_step=on_validate_step,
+    )
     applied_before = set(engine.applied_step_ids())
     guard = load_state().get("rolled_back_steps", {})
     guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
@@ -459,15 +465,18 @@ def _run_apply_pending(
         _report("ไม่มี step ที่ต้องรัน")
         return BootMigrationResult("pending_applied", messages=messages)
 
-    # #504/#574 R8-M2: `apply_pending()` has no whole-ladder `validate()`
-    # pass the way the "v1" first-apply branch below does, so
-    # `validate_reports` used to stay permanently empty here —
-    # `MigrationOutcome.validated_steps` read 0 on every promoted machine
-    # even while `boot_flow.py`'s phase-3 UI claimed each domain step had
-    # been validated. Real validate() for just the steps THIS pass applied
-    # successfully — never truncated by an unrelated step elsewhere in the
-    # ladder, and never claiming a step that FAILED apply was validated.
-    validate_reports = engine.validate_ok_steps(r.step_id for r in reports if r.ok)
+    # #504/#574 R8-M2 (round14b): `apply_pending()` itself now validates
+    # every step it applies successfully, immediately after that step's own
+    # apply, in ladder order — so `MigrationOutcome.validated_steps` is
+    # never permanently 0 the way it was before this pass had any real
+    # validate() call at all. `last_validate_reports` is read here rather
+    # than calling `validate_ok_steps()` again: that separate call used to
+    # fire `on_validate_step` for every domain step AFTER
+    # `archive-v1-legacy`'s own copy phase had already run (this method
+    # runs the whole ladder, `archive-v1-legacy` included, in one
+    # per-step loop) — always too late for `boot_flow.py`'s phase-3 UI,
+    # which had already advanced to phase 4 by then.
+    validate_reports = engine.last_validate_reports
 
     stale = [r for r in reports if not r.ok and r.step_id in applied_before]
     new_failures = [r for r in reports if not r.ok and r.step_id not in applied_before]
@@ -549,6 +558,7 @@ def run_boot_stage(
     on_entry: Callable[[str, str], None] | None = None,
     on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
     on_step: Callable[[str, str], None] | None = None,
+    on_validate_step: Callable[[str, bool], None] | None = None,
 ) -> BootMigrationResult:
     """The whole boot-time gate, in order (#361 design §2-4):
 
@@ -611,7 +621,11 @@ def run_boot_stage(
         # apply()/validate() being cheap existence-ish checks is what makes
         # calling this every boot fine even when truly nothing is pending.
         return _run_apply_pending(
-            progress_cb, on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step
+            progress_cb,
+            on_entry=on_entry,
+            on_file_progress=on_file_progress,
+            on_step=on_step,
+            on_validate_step=on_validate_step,
         )
 
     # state == "v1" from here — the only state a first-run apply is allowed on.
@@ -624,7 +638,12 @@ def run_boot_stage(
     _report("กำลังตั้งค่า storage layout ใหม่ (ครั้งแรกหลังอัป)…")
     from .core.migration.engine import MigrationEngine
 
-    engine = MigrationEngine(on_entry=on_entry, on_file_progress=on_file_progress, on_step=on_step)
+    engine = MigrationEngine(
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
+        on_validate_step=on_validate_step,
+    )
     apply_reports = engine.apply()
     validate_reports: list[StepReport] = []
     failing = next((r for r in apply_reports if not r.ok), None)

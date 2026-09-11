@@ -393,29 +393,62 @@ def test_restore_v1_brings_back_item_5_junk_from_the_pre_migrate_backup(capsys):
     rc = cli.main(["migrate", "restore-v1", "--json"])
     assert rc == 0
     out = _json_body(capsys.readouterr().out)
-    junk_report = next(
-        r for r in out if r["stage"] == "restore" and "deleted-outright" in r["summary"]
+    # #574 round14 R9-H1: this report now restores the WHOLE pre-migrate
+    # manifest (never just the junk names) — still the one restore-v1
+    # call whose step_id is the backup step's own.
+    backed_up_report = next(
+        r for r in out if r["step_id"] == "pre-migrate-backup" and r["stage"] == "restore"
     )
-    assert junk_report["ok"], junk_report["summary"]
+    assert backed_up_report["ok"], backed_up_report["summary"]
     assert (config.DATA_HOME / "openviking").read_text(encoding="utf-8") == "junk-content"
 
 
+def test_restore_v1_restores_a_domain_steps_overwritten_v1_file(capsys):
+    """#574 round14 R9-H1 (= #568 item 1): the normal restore-v1 path
+    (archive/promote rollback only) had no way to bring back a pre-
+    existing V1 file a DOMAIN step overwrote in place —
+    `readonly-registries` writing its own V2 envelope straight over an
+    existing `models/registry.json`. The V1 bytes were always intact in
+    `pre_migrate_backup`'s own manifest; restore-v1 just never asked for
+    them (item 13's fix filtered that manifest down to junk names only).
+    A real apply-then-restore round trip must put the ORIGINAL V1 content
+    back, byte-identical — not the V2 envelope that overwrote it."""
+    from agent_takkub import config
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "models").mkdir(parents=True)
+    v1_content = '{"v1": "models-registry"}'
+    (config.DATA_HOME / "models" / "registry.json").write_text(v1_content, encoding="utf-8")
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    # readonly-registries overwrote it with its own V2 envelope.
+    assert (config.DATA_HOME / "models" / "registry.json").read_text(encoding="utf-8") != v1_content
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    assert (config.DATA_HOME / "models" / "registry.json").read_text(encoding="utf-8") == v1_content
+
+
 def test_restore_v1_mirrors_the_reapplied_version_marker_to_the_legacy_location(capsys):
-    """#504/#574 item 14: `version_marker_step.apply()` after
-    `promote_step.rollback()` writes only wherever `core_home()` currently
-    resolves (`RUNTIME_DIR/core/version.json`, since the rollback just
-    un-flipped it away from the top-level `system/` it removed) — the
-    legacy mirror `promote_step.rollback()` itself just recreated at
-    `data_home/v2/system/version.json` was left holding a stale, different
-    stamp. A real byte rehearsal caught this as the one unexpected changed
-    file after an apply-then-restore round trip; both copies of "the
-    running build's version" must agree afterward."""
+    """#504/#574 item 14, corrected round14 (Lead item 7a): `version_marker
+    _step.apply()` writes wherever `core_home()` CURRENTLY resolves — which
+    can still be the top-level `system/` `core-internal-store` created
+    (restore-v1 has no rollback for domain steps, so that directory can
+    outlive this whole command), NOT the fixed `RUNTIME_DIR/core` a
+    downgraded (pre-#504) build actually reads. Restore-v1 must re-stamp
+    THAT fixed legacy location directly and mirror its exact bytes into
+    `v2/system/version.json` — a real byte rehearsal caught the two
+    disagreeing as the one unexpected changed file after an
+    apply-then-restore round trip."""
     from argparse import Namespace
 
     from agent_takkub import config
     from agent_takkub.cli import _cmd_migrate_restore_v1
     from agent_takkub.core.migration.engine import MigrationEngine
-    from agent_takkub.core.versioning.store import version_doc_path
+    from agent_takkub.core.storage.paths import migration_home
 
     # A legacy nested `v2/system/` — pre-#504's own `CoreInternalStoreStep`
     # location, complete with its own prior `version.json` (a real 2.0.x
@@ -437,7 +470,77 @@ def test_restore_v1_mirrors_the_reapplied_version_marker_to_the_legacy_location(
 
     legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
     assert legacy_mirror.is_file()
-    assert legacy_mirror.read_bytes() == version_doc_path().read_bytes()
+    assert legacy_mirror.read_bytes() == (migration_home() / "version.json").read_bytes()
+
+
+def test_restore_v1_legacy_mirror_is_byte_identical_to_the_real_marker(capsys):
+    """#574 round14b (item 14 regression): round14's own fix re-derived the
+    legacy mirror via a SECOND `record_component()` call, which stamps its
+    own fresh `released_at`/`updated_at` — so the mirror it wrote never
+    actually matched `version_doc_path()`'s own file byte-for-byte, only
+    the (also freshly re-derived, so trivially self-consistent) other copy
+    it wrote in the same breath. A straight byte copy of the ONE real
+    `version_marker_step.apply()` write is the only way all three
+    locations (`version_doc_path()`, the fixed legacy `migration_home()`
+    spot, and `v2/system/version.json`) can ever agree."""
+    from argparse import Namespace
+
+    from agent_takkub import config
+    from agent_takkub.cli import _cmd_migrate_restore_v1
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.versioning.store import version_doc_path
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "v2" / "system").mkdir(parents=True)
+    (config.DATA_HOME / "v2" / "system" / "version.json").write_text(
+        '{"version": "2.0.8"}', encoding="utf-8"
+    )
+
+    engine = MigrationEngine()
+    assert engine.get_step("promote-v2-root").apply().ok
+
+    reports = _cmd_migrate_restore_v1(engine, Namespace(archive_ts=None, json=True))
+    assert all(r.ok for r in reports), [(r.step_id, r.summary) for r in reports]
+
+    marker_bytes = version_doc_path().read_bytes()
+    legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
+    assert legacy_mirror.read_bytes() == marker_bytes
+
+
+def test_restore_v1_mirrors_domain_step_targets_into_legacy_nested_v2(capsys):
+    """#574 round14b (downgrade_2_0_8_validate, R9-H1 follow-up): the
+    flat-copy domain steps (readonly-registries here) write their own V2
+    target at data_home's TOP LEVEL (#504's flip) — restore-v1 has no
+    rollback for domain steps, so that content is exactly right and meant
+    to stay, but a downgraded pre-#504 build's own IDENTICAL
+    `RegistryCopyStep.validate()` looks for it under the legacy nested
+    `v2/<same-relative-path>` instead. A real apply-then-restore round
+    trip must leave a byte-identical mirror there too."""
+    from agent_takkub import config
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "models").mkdir(parents=True)
+    (config.DATA_HOME / "models" / "registry.json").write_text(
+        '{"v1": "models-registry"}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+    top_level = (config.DATA_HOME / "models" / "registry.json").read_bytes()
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    # restore-v1 puts `models/registry.json` back to its raw V1 shape —
+    # the mirror must hold the WRAPPED V2 envelope readonly-registries
+    # actually wrote (captured BEFORE that restore ran), not the restored
+    # raw V1 bytes.
+    nested_mirror = config.DATA_HOME / "v2" / "models" / "registry.json"
+    assert nested_mirror.is_file()
+    assert nested_mirror.read_bytes() == top_level
+    assert (config.DATA_HOME / "models" / "registry.json").read_bytes() != top_level
 
 
 # ---------------------------------------------------------------------------

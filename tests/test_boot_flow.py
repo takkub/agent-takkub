@@ -393,7 +393,12 @@ class TestRunMigrationOutcome:
         captured = {}
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             captured["on_entry"] = on_entry
             on_entry("promote-v2-root", "models")
@@ -427,7 +432,12 @@ class TestRunMigrationOutcome:
         (config.DATA_HOME / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("promote-v2-root", "models")
             progress_cb("x")
@@ -462,7 +472,12 @@ class TestRunMigrationOutcome:
         (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("promote-v2-root", "models")  # copy phase
             on_entry("promote-v2-root", "models")  # deferred prune phase, same entry
@@ -478,12 +493,13 @@ class TestRunMigrationOutcome:
         assert all(e.done <= e.total for e in events if e.done is not None and e.total)
         assert all(0.0 <= e.percent_overall <= 100.0 for e in events)
 
-    def test_domain_step_on_step_emits_phase_3_start_and_done(self, monkeypatch):
-        """#574 round12 item 3: the 8 domain steps produced ZERO progress
-        events before this fix — `MigrationEngine`'s new `on_step` observer
-        gives each a start/done pair, positioned by its fixed ladder index
-        out of the real ladder length (`plan.verify_steps`), so a wizard
-        watching for phase 3 no longer jumps straight from 2 to 4."""
+    def test_domain_step_on_validate_step_emits_phase_3_progress(self, monkeypatch):
+        """#574 round14 (R5-M3, R8-M2 remainder): phase 3's row/log must
+        come from each domain step's REAL `validate()` result — fired by
+        `MigrationEngine` AFTER that step's apply via `on_validate_step`
+        — never from `on_step` (apply-time only, no pass/fail of its own,
+        which R8-M2 found could claim "validated" for a step that was
+        never actually checked)."""
         import agent_takkub.core.storage.layout as layout_mod
         from agent_takkub import auto_migrate_boot
 
@@ -493,14 +509,16 @@ class TestRunMigrationOutcome:
         (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
-            on_step("readonly-registries", "start")
-            on_step("readonly-registries", "done")
-            on_step("role-agent", "start")
-            on_step("role-agent", "done")
-            on_step("promote-v2-root", "start")  # not a domain step -> ignored
-            on_step("promote-v2-root", "done")
+            on_validate_step("readonly-registries", True)
+            on_validate_step("role-agent", True)
+            on_validate_step("promote-v2-root", True)  # not a domain step -> ignored
             return auto_migrate_boot.BootMigrationResult("applied", messages=[])
 
         monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
@@ -510,16 +528,129 @@ class TestRunMigrationOutcome:
         phase3 = [e for e in events if e.phase == 3]
         # readonly-registries is ladder position 4, role-agent is position 5
         # (pre-migrate-backup, version-marker, promote-v2-root come first).
-        assert [e.done for e in phase3] == [3, 4, 4, 5]
+        assert [e.done for e in phase3] == [4, 5]
         assert all(e.total == 12 for e in phase3)  # plan.verify_steps, full default ladder
         assert all(e.unit == "ขั้น" for e in phase3)
-        assert [e.log_operation for e in phase3] == [
-            "readonly-registries",
-            "readonly-registries",
-            "role-agent",
-            "role-agent",
-        ]
+        assert [e.log_operation for e in phase3] == ["readonly-registries", "role-agent"]
+        assert all(e.log_detail == "ตรวจสอบแล้ว" for e in phase3)
         assert outcome.ok
+
+    def test_domain_step_validate_failure_is_labeled_truthfully(self, monkeypatch):
+        """#574 round14 R5-M3: a domain step whose validate() genuinely
+        failed must never say "ตรวจสอบแล้ว" (validated) — the row and its
+        own log line must never disagree about what happened."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+
+        def fake_run_boot_stage(
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
+        ):
+            on_validate_step("readonly-registries", False)
+            return auto_migrate_boot.BootMigrationResult("applied", messages=[])
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
+
+        events = []
+        boot_flow.run_migration(progress_cb=events.append)
+        phase3 = [e for e in events if e.phase == 3]
+        assert phase3 and phase3[0].log_detail == "ตรวจสอบไม่ผ่าน"
+        assert "ตรวจสอบแล้ว" not in phase3[0].log_line
+
+    def test_domain_step_validate_lands_in_phase_3_on_a_real_mixed_apply_pending_run(self):
+        """#574 round14b (round8 `progress_schema` / round9
+        `progress_unit_stable`/`progress_file_counter_monotonic`
+        regression): on a REAL (not mocked run_boot_stage) apply_pending()
+        run — genuinely `mixed` `layout_state()`, no monkeypatching — a
+        domain step's real `validate()` result must be notified BEFORE
+        `archive-v1-legacy`'s own copy phase starts, so it lands at phase
+        3, never re-labeled phase 4 by `emit()`'s own monotonic max-phase
+        clamp (the bug: `apply_pending()` used to batch every domain
+        step's validate into ONE call made after the whole pass —
+        including `archive-v1-legacy`'s real copy work — had already
+        run)."""
+        from agent_takkub.core.storage.layout import layout_state
+
+        data_home = config.DATA_HOME
+        _seed_v1_leftover(data_home)
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+        assert layout_state() == "mixed"
+
+        events = []
+        outcome = boot_flow.run_migration(progress_cb=events.append)
+        assert outcome.ok
+        phase3 = [e for e in events if e.phase == 3]
+        assert phase3, "expected at least one real phase-3 (validate) event"
+        assert all(e.unit == "ขั้น" for e in phase3)
+        phase4_units = {e.unit for e in events if e.phase == 4}
+        assert "ขั้น" not in phase4_units, (
+            f"a validate-step event leaked into phase 4: {phase4_units}"
+        )
+
+    def test_phase_1_backup_counter_is_files_not_entries(self, monkeypatch):
+        """#574 round14 (R5-M1): phase 1's counter must read the real FILE
+        total the approved mockup shows ("15,762 / 15,762 ไฟล์"), from the
+        plan's own real `backup_items`, not a count of top-level entries
+        that can sit on "1 / 4" for minutes while each entry is itself
+        thousands of files. Built off a REAL `plan_migration()` (not a
+        hand-built fixture), so the total genuinely matches what screen B
+        shows for the same entries, and no plan/runtime mismatch fires
+        when the runtime touches exactly the entries the plan predicted."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+        # A genuine MERGE collision (same fixture as TestPlanMigration's own
+        # "models" case) — the one shape `_input_entries()` backs up.
+        (data_home / "models").mkdir(parents=True)
+        (data_home / "models" / "registry.json").write_text(
+            '{"pre_existing": true}', encoding="utf-8"
+        )
+
+        plan = boot_flow.plan_migration()
+        assert plan is not None and plan.backup_items
+        expected_total = sum(count for _, count, _, _ in plan.backup_items)
+
+        logged = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda event, **details: logged.append((event, details)),
+        )
+
+        def fake_run_boot_stage(
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
+        ):
+            for name, _count, _bytes, _unit in plan.backup_items:
+                on_entry("pre-migrate-backup", name)
+            return auto_migrate_boot.BootMigrationResult("applied", messages=[])
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
+
+        events = []
+        boot_flow.run_migration(progress_cb=events.append)
+        phase1 = [e for e in events if e.phase == 1 and e.log_operation == "pre-migrate-backup"]
+        assert phase1 and all(e.unit == "ไฟล์" for e in phase1)
+        assert all(e.total == expected_total for e in phase1)
+        assert phase1[-1].done == expected_total
+        assert logged == []  # plan and runtime agree — no undercount to log
 
     def test_eta_s_stays_none_until_enough_signal_in_the_current_phase(self, monkeypatch):
         """#574 round12 item 4 (R3-M3): eta is computed from the CURRENT
@@ -539,7 +670,12 @@ class TestRunMigrationOutcome:
         monkeypatch.setattr(boot_flow.time, "monotonic", lambda: clock["t"])
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("promote-v2-root", "a")  # phase 1->2 transition resets the phase clock
             clock["t"] += 0.5
@@ -576,7 +712,12 @@ class TestRunMigrationOutcome:
         (data_home / "legacyfile.json").write_text("legacy", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("archive-v1-legacy", "legacyfile.json")  # advances the stream to phase 4
             on_entry("promote-v2-root", "models")  # late, out-of-order deferred-prune repeat
@@ -601,7 +742,10 @@ class TestRunMigrationOutcome:
         notify a dedup already handles) used to be silently clamped down
         to the plan's own total, permanently sticking the counter at
         100% instead of surfacing the gap. The total must grow to match
-        what actually ran, and the mismatch must be noted in `log_detail`."""
+        what actually ran. #574 round14 R5-M5: the mismatch itself must
+        NEVER reach the user-facing `log_detail` (an English developer
+        diagnostic verbatim in the wizard's own log) — it goes to the
+        audit log (`orchestrator_text._log_event`) instead."""
         import agent_takkub.core.storage.layout as layout_mod
         from agent_takkub import auto_migrate_boot
 
@@ -609,8 +753,19 @@ class TestRunMigrationOutcome:
         data_home = config.DATA_HOME
         (data_home / "legacyfile.json").write_text("legacy", encoding="utf-8")  # plan sees 1
 
+        logged = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda event, **details: logged.append((event, details)),
+        )
+
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("archive-v1-legacy", "legacyfile.json")
             on_entry("archive-v1-legacy", "another-leftover.json")  # 2nd distinct name > plan's 1
@@ -624,7 +779,13 @@ class TestRunMigrationOutcome:
         assert [e.done for e in phase4] == [1, 2]
         # total grew to match the 2nd, real event instead of clamping it to 1
         assert phase4[1].total == 2
-        assert "undercounted" in phase4[1].log_detail
+        # the mismatch never leaks into the user-facing log, in English or otherwise
+        assert all("undercounted" not in e.log_detail for e in events)
+        assert all("undercounted" not in e.log_line for e in events)
+        # ...it lands in the audit log instead
+        assert logged == [
+            ("migration_plan_undercounted", {"phase": 4, "done": 2, "planned_total": 1})
+        ]
 
     def test_the_opening_and_closing_info_events_carry_log_detail(self, monkeypatch):
         """#504/#574 R4-H2: the interface contract (docs/v2/574-boot-flow-
@@ -655,10 +816,11 @@ class TestRunMigrationOutcome:
         content-type — one row's noun flipped mid-phase as different-typed
         entries streamed through ("1/4 ไฟล์" -> "2/4 โปรเจค") with no change
         in what the number itself meant. `unit` must describe `done`/
-        `total` themselves: always "รายการ" for the entry-level counter
-        (phase 1/2/4, both `on_entry` and `on_file_progress`), matching the
-        mockup's own wording (V9). Phase 3's `on_step` counter still uses
-        its own distinct "ขั้น" (a step count, never entry-typed)."""
+        `total` themselves: "รายการ" for the entry-level counter (phase
+        2/4, both `on_entry` and `on_file_progress`; phase 1 uses "ไฟล์"
+        instead — #574 round14 R5-M1), matching the mockup's own wording
+        (V9). Phase 3's `on_validate_step` counter still uses its own
+        distinct "ขั้น" (a step count, never entry-typed)."""
         import agent_takkub.core.storage.layout as layout_mod
         from agent_takkub import auto_migrate_boot
 
@@ -668,12 +830,17 @@ class TestRunMigrationOutcome:
         (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("promote-v2-root", "projects")
             on_entry("promote-v2-root", "models")
             on_file_progress("promote-v2-root", "models", 1, 2, "registry.json")
-            on_step("readonly-registries", "start")
+            on_validate_step("readonly-registries", True)
             return auto_migrate_boot.BootMigrationResult("applied", messages=[])
 
         monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
@@ -703,7 +870,12 @@ class TestRunMigrationOutcome:
         (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
         def fake_run_boot_stage(
-            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+            *,
+            progress_cb=None,
+            on_entry=None,
+            on_file_progress=None,
+            on_step=None,
+            on_validate_step=None,
         ):
             on_entry("promote-v2-root", "models")
             progress_cb("apply สำเร็จ — กำลัง validate…")
@@ -789,3 +961,41 @@ class TestRunMigrationOutcome:
         assert any(
             e.files_done == e.files_total == 1000 for e in files_events
         )  # guaranteed final call
+        # #574 round14 R9-M1: the copy-to-verify boundary check-in used to
+        # reset `files_done` to 0 once per entry — never a false "0 done"
+        # once real progress has started (the verify pass's own throttle
+        # restarting its OWN count from a small number, e.g. 200 after
+        # copy reached 1000, is separate, expected round11 behavior, not
+        # what this regression is about).
+        assert min(e.files_done for e in files_events) > 0
+
+    def test_files_progress_never_decreases_within_one_step(self, monkeypatch):
+        """#574 round14b: `verify_copy.copy_verified()`'s own copy-phase
+        throttle and verify-phase throttle each legitimately restart
+        counting 1..N independently for the SAME entry (round11's own
+        expected behavior, per the test right above) — a caller forwarding
+        the raw per-call numbers straight through saw `files_done` fall
+        from N back down to a small throttled count the instant the verify
+        pass began, a real regression on a 1,000-file real (not mocked)
+        migration run. `boot_flow.py`'s `on_file_progress` must bank the
+        previous peak so the combined count for the WHOLE step only ever
+        climbs."""
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        big_dir = data_home / "v2" / "providers"
+        big_dir.mkdir(parents=True)
+        for i in range(1000):
+            (big_dir / f"file-{i}.json").write_text("{}", encoding="utf-8")
+
+        events = []
+        outcome = boot_flow.run_migration(progress_cb=events.append)
+        assert outcome.ok
+        files_events = [e for e in events if e.files_done is not None]
+        assert files_events
+        seen = [e.files_done for e in files_events]
+        assert seen == sorted(seen), f"files_done went backwards within one step: {seen}"
+        # `files_total` must climb in lockstep with the same banked offset,
+        # so `files_done <= files_total` still holds throughout.
+        assert all(e.files_done <= e.files_total for e in files_events)

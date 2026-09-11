@@ -317,6 +317,7 @@
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.v2_target",
         "agent_takkub.core.versioning.store",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_update"
       ],
@@ -325,7 +326,7 @@
         "agent_takkub.boot_flow_window"
       ],
       "fan_in": 2,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.boot_flow_terminal",
@@ -438,6 +439,7 @@
         "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.report",
         "agent_takkub.core.secrets.manager",
+        "agent_takkub.core.storage.paths",
         "agent_takkub.core.versioning.store",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
@@ -472,7 +474,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 45
+      "fan_out": 46
     },
     {
       "module": "agent_takkub.cli_server",
@@ -2373,6 +2375,7 @@
         "agent_takkub.core.storage.layout"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.switch_log",
         "agent_takkub.core.brain.store",
@@ -2386,7 +2389,7 @@
         "agent_takkub.core.versioning.store",
         "agent_takkub.obsidian_dedup"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 2
     },
     {
@@ -3278,6 +3281,7 @@
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_context",
+        "agent_takkub.boot_flow",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.migration.pre_migrate_backup",
@@ -3291,7 +3295,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 14,
+      "fan_in": 15,
       "fan_out": 8
     },
     {
