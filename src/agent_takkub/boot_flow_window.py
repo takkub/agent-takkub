@@ -1296,7 +1296,16 @@ class BootFlowWindow(QDialog):
             f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
         )
         self._migrate_footer_right.setWordWrap(True)
-        self._migrate_footer_right.setMaximumWidth(220)
+        # R4-M1: a mere `setMaximumWidth` only caps the width — Qt's own
+        # word-wrap sizing then picks whatever narrower box it likes for
+        # a string with almost no space characters to break at (a path is
+        # nearly one unbreakable "word"), so the REAL allocated width
+        # measured as little as 104px for a `backup_dir` outside
+        # `config.DATA_HOME`, well under what `_set_footer_right_elided`
+        # budgeted against. A genuinely fixed width removes that
+        # feedback loop: the column is always exactly this wide, so the
+        # elide budget computed off it is always the real one.
+        self._migrate_footer_right.setFixedWidth(220)
         self._migrate_footer_right.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -1328,16 +1337,60 @@ class BootFlowWindow(QDialog):
         rule for a path short enough to fit — eliding only kicks in past
         that budget, so the common case (a short relative `_path_str`
         result) still renders in full, wrapped, exactly as before. Name
-        kept for callers/tests; behavior is "wrap, elide only if needed"."""
+        kept for callers/tests; behavior is "wrap, elide only if needed".
+
+        Round-4 audit R4-M1: the elide budget used to come from
+        `maximumWidth()` (220px) — the design width — but that is only a
+        CEILING; the label's actual allocated width in the footer row,
+        once real siblings and real content have been laid out, measured
+        as little as 104px for a `backup_dir` outside `config.DATA_HOME`.
+        Budgeting against the wrong (wider) width elided too little text,
+        and Qt's own word-wrap can't be trusted to land the surviving
+        text in exactly 2 lines either: a path is nearly one unbreakable
+        "word" (its only whitespace is right after "สำรองไว้ที่"), so
+        letting Qt wrap it naturally can still overflow the 68px footer
+        even once the text itself is short enough. Past budget, the 2
+        lines are now built directly: line 2 fills greedily from the END
+        of the text so the path's tail always survives complete, then
+        line 1 fills from the start (reserving room for the "…") up to
+        wherever line 2 already begins — the mockup's own path note has
+        no ellipsis rule short of this, so this only ever engages once
+        eliding is unavoidable."""
         fm = QFontMetrics(self._migrate_footer_right.font())
-        max_width = self._migrate_footer_right.maximumWidth()
-        # ~2 wrapped lines' worth of pixels, the same budget the fixed-68px
-        # footer actually has room for (see `_footer_widget.setFixedHeight`
-        # above) — elide to fit within it rather than growing the widget.
-        budget = max_width * 2
-        if fm.horizontalAdvance(text) > budget:
-            text = fm.elidedText(text, Qt.TextElideMode.ElideMiddle, budget)
-        self._migrate_footer_right.setText(text)
+        line_width = self._migrate_footer_right.width()
+        if line_width <= 0:
+            line_width = self._migrate_footer_right.maximumWidth()
+        budget = line_width * 2
+        if fm.horizontalAdvance(text) <= budget:
+            self._migrate_footer_right.setTextFormat(Qt.TextFormat.PlainText)
+            self._migrate_footer_right.setText(text)
+            return
+        ellipsis = "…"
+        ellipsis_w = fm.horizontalAdvance(ellipsis)
+        tail = ""
+        idx = len(text)
+        while idx > 0:
+            candidate = text[idx - 1] + tail
+            if fm.horizontalAdvance(candidate) > line_width:
+                break
+            tail = candidate
+            idx -= 1
+        head = ""
+        j = 0
+        while j < idx:
+            candidate = head + text[j]
+            if fm.horizontalAdvance(candidate) + ellipsis_w > line_width:
+                break
+            head = candidate
+            j += 1
+        if j >= idx:
+            # Head absorbed everything up to where tail begins — the
+            # whole text fits across the 2 lines with no loss at all.
+            lines = [head, tail] if tail else [head]
+        else:
+            lines = [head + ellipsis, tail]
+        self._migrate_footer_right.setTextFormat(Qt.TextFormat.RichText)
+        self._migrate_footer_right.setText("<br>".join(html.escape(line) for line in lines))
 
     def _set_phase_row_kind(self, key: str, kind: str) -> None:
         """Matches the mockup: the active row's label AND its right-hand
@@ -1424,9 +1477,6 @@ class BootFlowWindow(QDialog):
             self._last_percent = int(percent)
             self._pct_label.setText(f"{int(percent)}%")
             self._migrate_bar.setValue(int(percent))
-        eta = _fmt_eta(getattr(event, "eta_s", None))
-        if eta:
-            self._eta_label.setText(eta)
         order = [k for k, _ in _PHASE_ORDER]
         raw_phase = getattr(event, "phase", None)
         # The real backend sends `phase` as an `int` (1..5, matching
@@ -1447,6 +1497,19 @@ class BootFlowWindow(QDialog):
             else:
                 idx = min(self._next_phase_slot, len(order) - 1)
                 phase_key = order[idx]
+        # R4-M2: `_fmt_eta` is write-only otherwise — once it returns a
+        # value the label keeps showing it forever, including next to the
+        # final 100% frame (measured: the round-4 recording holds
+        # "เหลืออีกประมาณ 1 นาที" from event 4 through event 39). Clear it
+        # whenever there is nothing left to estimate: this event carries
+        # no `eta_s`, the aggregate has reached 100%, or this is the
+        # terminal "done" phase row.
+        eta_s = getattr(event, "eta_s", None)
+        is_final_frame = (percent is not None and int(percent) >= 100) or idx == len(order) - 1
+        if eta_s is None or is_final_frame:
+            self._eta_label.setText("")
+        else:
+            self._eta_label.setText(_fmt_eta(eta_s))
         for i, (key, _) in enumerate(_PHASE_ORDER):
             if i < idx:
                 self._phase_rows[key].set_state("done")
@@ -1523,13 +1586,44 @@ class BootFlowWindow(QDialog):
         log_timestamp = getattr(event, "log_timestamp", None)
         log_operation = getattr(event, "log_operation", None)
         log_detail = getattr(event, "log_detail", None)
+        log_line = getattr(event, "log_line", None)
+        # R4-M3: the production backend's file-progress detail is a bare
+        # "<files_done>/<files_total>" digit pair (`boot_flow.py:698`) —
+        # reformat it with the same thousands-separator + unit-word
+        # treatment the phase row's own count already got above
+        # (`count_text`), rather than showing the raw numbers the mockup
+        # never does. Only touches a detail that IS exactly that raw pair
+        # (a real human `log_detail` like "คัดลอกแล้ว" is untouched).
+        # Fetched independently of `count_text`'s own `files_done`/
+        # `files_total` above, which are only ever assigned inside that
+        # block's `done is not None and total is not None` guard.
+        raw_files_done = getattr(event, "files_done", None)
+        raw_files_total = getattr(event, "files_total", None)
+        if (
+            log_detail is not None
+            and raw_files_done is not None
+            and raw_files_total is not None
+            and str(log_detail).strip() == f"{raw_files_done}/{raw_files_total}"
+        ):
+            log_detail = f"{raw_files_done:,}/{raw_files_total:,} {unit or 'ไฟล์'}".strip()
         if log_timestamp is not None or log_operation is not None or log_detail:
             timestamp = str(log_timestamp or "")
             operation = str(log_operation or "")
             path = str(current_path_for_log or "")
             detail = str(log_detail or "")
+            # R4-H2: the migration-open/close `info` events set
+            # `log_operation` but no `log_detail` and no `current_path` —
+            # taking the structured branch above (right, since a
+            # timestamp IS present) then left `detail` empty, so their
+            # actual message ("เริ่มย้ายข้อมูล" / "เสร็จ") never reached the
+            # screen at all, a real regression from round 3's fallback
+            # parser. `log_line` still carries that message even when the
+            # structured fields don't, so it's the fallback for the ONE
+            # slot they leave empty — rendered as a normal MUTED "detail"
+            # run, not the dim FAINT timestamp color R3-M5 already fixed.
+            if not detail and log_line:
+                detail = str(log_line)
         else:
-            log_line = getattr(event, "log_line", None)
             if log_line:
                 timestamp, operation, path, detail = _parse_log_line(
                     str(log_line), current_path_for_log
@@ -1565,6 +1659,9 @@ class BootFlowWindow(QDialog):
 
     def _on_migration_done(self, outcome: Any) -> None:
         self._migrate_throttle.stop()
+        # R4-M2: the outcome always leaves page C, but belt-and-braces —
+        # nothing left to estimate once migration has actually finished.
+        self._eta_label.setText("")
         if isinstance(outcome, _WorkerError):
             self._outcome = None
             self._show_failed(error=str(outcome.exc), rolled_back=False, data_intact=False)
