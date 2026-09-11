@@ -1323,3 +1323,238 @@ pointed at it — no branch switch, no worktree mutation. I did not touch
 Evidence: `runtime/exports/2026-09-11/agent-takkub/504-round7-faults.py` and
 `runtime/exports/2026-09-11/agent-takkub/r7b-evidence/` (seven suite logs plus
 `fixtures-path.txt`). `runtime/` is gitignored, so those live outside git.
+
+## Round 8 — fceead0f
+
+Reviewed: `64e1bc53` + `8d41be39` (#504 round 11/11b — backup-scope reduction,
+`verify_copy` single-hash, `on_file` throttle, prune-batch WAL safety,
+restore-v1 version-marker, CLI `--providers`/`--remember`/`--json`) and
+`57d3db04` (#574 round 12 — `migrate run --json` progress stream, 5 bugs plus
+the three round-3 interface gaps). Working tree `wt/reviewer-1789113910` at
+`fceead0f`.
+
+**Verdict: 2.1.0 migration releasable: no.** Round 11/11b/12 close ten of the
+eleven round-7 findings and introduce **no regression** — every failure below
+reproduces byte-for-byte on a `git archive` of `6203e57b`. What stops the
+release is that the pre-existing defects now left exposed include one that makes
+the documented recovery verb a silent no-op, and two that let the ladder mutate
+a home with no usable pre-migrate backup.
+
+### 1. Findings
+
+| ID | Sev | Where | What | Regression? |
+|----|-----|-------|------|-------------|
+| R8-B1 | BLOCKER | `cli.py:3221-3222` | `takkub migrate restore-v1` returns **ok having done nothing** whenever no `v1-archive-*` generation exists — it returns before ever rolling back `promote-v2-root`. A store promoted but not archived (any ladder stop between the two steps, or a store that had no V1 leftovers to archive) gets "no v1-archive found — nothing to restore", exit 0, while `v2/` stays empty and every promoted entry stays at top level. The documented "put V1 back" escape hatch does nothing and reports success. | No — identical on `6203e57b` |
+| R8-H1 | HIGH | `engine.py:225-226`, `pre_migrate_backup.py:3-7` vs `engine.py:332-335` | Two places claim "a failed backup aborts the whole ladder before anything else is touched, because `apply()`/`apply_pending()` already stop at the first non-ok step". `apply_pending()` explicitly does **not** stop — "No stop-the-line", its own docstring, with one exception for `promote-v2-root`. With `pre-migrate-backup` forced to fail, `apply_pending()` ran the remaining 12 steps, created 30 files and overwrote `models/registry.json` and `runtime/core/version.json` with no pre-migrate backup in existence. Reachable on every already-promoted machine: `run_boot_stage` routes layout state `v2`/`mixed` straight into `_run_apply_pending`, which is also the only path that ever picks up a ladder step added by a later release — exactly how `pre-migrate-backup` arrives on a machine upgrading into 2.1.0. | No — identical on `6203e57b` |
+| R8-H2 | HIGH | `pre_migrate_backup.py:356-372` | `_already_backed_up()` matches manifest **names** only. Delete one recorded payload and `apply()` returns ok, "already backed up … (resumed)", without re-copying it; the ladder then walks on and mutates the home. `validate()` does catch it, but only after the whole copy pass has run. | No — identical on `6203e57b` |
+| R8-H3 | HIGH | `promote_v1.py:2278-2287` | `archive-v1-legacy` archives any top-level name outside `_V2_TOP_LEVEL_NAMES` — **including one `promote-v2-root` created in the same pass**. End-to-end on a 1,000-file fixture, `migrate run --json` exits 0 with `ok:true, data_intact:true`, and `migrate validate` then reports `promote-v2-root: promoted file missing` — permanently, on every later `migrate validate` and `doctor`. Content survives inside `backups/v1-archive-*`, so this is not data loss, but apply and validate flatly contradict each other. | No — identical on `6203e57b` |
+| R8-H4 | HIGH (carried) | `promote_v1.py:1086` | R7-H2 unchanged: after a prune removal failure plus rollback, five of seven promoted copies stay at top level with no ownership record and nothing cleans them up. The only round-7 finding still open. | No — pre-existing, re-confirmed |
+| R8-M1 | MED | `boot_flow.py:593-599` | `percent_overall` goes **backwards** twice in a real run: 99.0 to 72.73 when `promote-v2-root`'s deferred prune fires `on_entry` after `archive-v1-legacy` has already advanced the stream to phase 4, and again on the next `done=None` text event, which recomputes the bar at its phase's floor. The phase number itself regresses 4 to 2. Round 12 fixed the `done > total` half of this same deferred-prune double-notify and left the percent/phase half. | No — identical on `6203e57b` |
+| R8-M2 | MED | `boot_flow.py:701-731` and `:364-370` | Phase 3 is labelled `ตรวจสอบ` and every event says `กำลังตรวจสอบ` / `ตรวจสอบแล้ว`, but `MigrationEngine._notify_step` fires around `_copy_only_apply` — the step's **apply**, not its validate. On the `apply_pending` path (every promoted machine) no `validate()` ever runs: the run reported phase 3 at 11/12 "verified" while `MigrationOutcome.validated_steps` stayed `0`. | New in `57d3db04` |
+| R8-M3 | MED | `verify_copy.py` `_source_files`, via `_FileProgressThrottle` | The `on_file` throttle holds its 2 s ceiling inside a pass, but the copy-to-verify turnover re-enumerates the whole entry with no progress call. Measured on 5,000 files: worst gap 2.17 s on an idle box and 2.94 s under load, `worst_is_pass_boundary: true` both times, with the enumeration itself costing 0.92 s. Linear at prod scale that is roughly 45 s of a frozen bar on a 244k-file entry. | New in round 11 |
+| R8-M4 | MED | `boot_flow.py:585-591` | The `done = min(done, total_for_phase)` clamp hides a real plan/runtime mismatch instead of surfacing it. In the 1,000-file run `archive-v1-legacy` genuinely processed 4 entries (`bulk`, `legacyfile.json`, `projects.json`, `agents`) against a planned total of 3; the counter simply stuck at 3/3. | New in `57d3db04` |
+| R8-L1 | LOW | `tests/test_boot_flow.py:141-149` | `TestProviderChoice` has an order dependency: the round-trip test writes `_choice_path()` and `test_no_choice_yet_returns_none` never clears it, so the file fails on a plain `pytest tests/test_boot_flow.py` and passes in isolation. Makes the gate order-sensitive. | No — present since `8b1faa8b` |
+
+### 2. Round-7 findings, one row at a time
+
+| Round-7 ID | Verdict | Evidence |
+|------------|---------|----------|
+| R7-B1 — backup copied the whole home, prod apply killed at 1806 s | **CLOSED** | Lead's rehearsal on the same 244,659-file copy: `migrate plan` now says "4 item(s) (25 file(s), 0.1 MB)", apply **exit 0 in 772 s**, validate 12/12 green (`final/final.txt`). Harness `scope_shape` and `scope_plan_estimate` PASS — only the merge collision, existing domain targets, the version marker and item-5 junk are copied; `agents/dev.md`, `legacyfile.json`, `projects.json` and `v2/system` are skipped as move-only. |
+| R7-H1 — batch removal failure stranded siblings as PRUNED | **CLOSED, with control** | `prune_strand_fsync3` and `prune_strand_fsync1` both PASS with `stranded: []`. Same injected fault, same 7 entries, both batch sizes: the batched run is no longer worse than its `fsync_every=1` control. |
+| R7-H2 — orphaned top-level copies after prune failure plus rollback | **OPEN** | `prune_orphans_after_rollback` FAILs with `['d2/f002.json', 'd3/f003.json', 'd4/f004.json', 'd5/f005.json', 'd6/f006.json']`, identical on `6203e57b`. Carried as R8-H4. |
+| R7-H3 — manifest write failure reported green | **CLOSED** | `backup_manifest_failure` PASS (the ladder stops at one failed report and `validate()` is red), `backup_content_without_manifest` PASS, `backup_stale_item` PASS. |
+| R7-M1 — `--no-backup` printed a non-JSON warning into the JSON stream | **CLOSED** | Flag removed; `cli_no_backup_removed` PASS, argparse rejects it outright. |
+| R7-M2 — `--no-backup` did not actually skip | **CLOSED** | Same removal. |
+| R7-M3 — `--providers ask` never prompted | **CLOSED** | `cli_ask_tty`, `cli_ask_all_none`, `cli_ask_non_tty` PASS: y/n/all/none on a tty, `none` plus a `provider_prompt_skipped` event off one. |
+| R7-M4 — `--remember` persisted nothing | **CLOSED** | `cli_remember_modes` and `cli_remember_readback` PASS: every mode persists and the remembered value is read back before asking. |
+| R7-M5 — `batch[0]` blamed DUPLICATE | **CLOSED** | `prune_batch_level_failure` PASS: `unknown_batch: true`, `failed_name: "d0 (+2 more in the same batch)"`, `manifest_duplicates: []`. |
+| R7-L1 — `--json` silently implied `--yes` | **CLOSED** | `cli_auto_confirmed` PASS, an `auto_confirmed` event is on the stream. |
+| R7-L2 — `version-marker` red on both rehearsal legs | **CLOSED** | Rehearsal setup, as suspected. `final/final.txt` now shows `version-marker: app component matches running build`. |
+
+### 3. New cases this round
+
+**(a) Backup scope — is everything the ladder destroys actually backed up?**
+`scope_conservation` walks the whole ladder and reports `lost: []` with 47 files
+after. `scope_restore_roundtrip` restores all 5 recorded items with
+`mismatched: []`. Ten `scope_fault_<step>` cases inject a failure at every step
+after the backup, from `version-marker` through `archive-v1-legacy`; each one
+reports `lost: []` and `restore_ok: true`. Nothing move-only is copied. All 14
+PASS.
+
+**(b) Cross-version resume.** `resume_cross_version` seeds a
+`backups/pre-migrate-<ts>` written under the old, wider scope and re-applies:
+`recopied: []`, the two now-out-of-scope names are flagged `out_of_scope`,
+nothing is copied twice and nothing on disk is dropped. PASS, together with
+`resume_partial_payload`. The `_already_backed_up()` hole is R8-H2, a separate
+case.
+
+**(c) Throttle and stream schema.** `throttle_gap_5000` measures 72 calls over a
+5,000-file entry; the single worst gap is always the copy-to-verify pass
+boundary. It passed at 2.17 s on an idle box and failed at 2.94 s while the box
+was running the rest of the suite — R8-M3. `progress_schema` PASS: 57 events,
+phases 1 through 5, 22 events with file counts, 28 with `eta_s`,
+`done_over_total: []`, `non_json_lines: []`. `progress_monotonic`, new this
+round, FAILs — R8-M1.
+
+**(d) `verify_copy` after the double-read was removed.** `verify_bitflip`,
+`verify_truncated`, `verify_missing`, `verify_lying_copier` and
+`verify_digest_identity` all PASS: every corruption shape is still caught and
+the manifest digests still match their sources.
+
+### 4. Round 12 end-to-end on a real 1,000-file store
+
+`AGENT_TAKKUB_HOME=<fixture> … migrate run --providers none --yes --json`, over
+1,010 seeded files with one 1,000-file promote entry. Exit 0 in 68.7 s.
+
+| Round-12 claim | Result |
+|----------------|--------|
+| 1. every `--json` stdout line parses | **PASS** — 92 lines, 0 non-JSON. Lead's prod stream on `7b48de93` carries one bare `ok: migrate run finished`. |
+| 2. `done <= total` everywhere | **PASS** — 0 violations across 84 progress events. The prod `7b48de93` stream has 36. |
+| 2b. dedup drops no genuine entry | **PASS** — `promote-v2-root` emitted exactly its 3 planned entries. Dedup is keyed on step id plus name, and top-level directory entries are unique within a step, so a real duplicate cannot arise; the repeat it suppresses is the deferred-prune re-notify. |
+| 3. phase 3 emits | **PASS** for existence, 16 events. **FAIL for truthfulness** — R8-M2. Prod on `7b48de93` showed phases 1, 2, 4, 5 only. |
+| 4. `eta_s` after 2 s | **PASS** — 38 of 84 events carry it, first at 0.69 s into phase 1. |
+| 5. `files_done`/`files_total` reach phases 2 and 4 | **PASS** — 45 events, peaking at 1000/1000. |
+| R3-M4 per-phase `unit` | **PASS** — all three unit words observed. |
+| R3-M5 structured log parts | **PASS** — `log_operation`, `log_detail`, `log_timestamp` on every event. |
+| R3-M6 `previous_version` | **PASS** — reported as `2.0.8`. |
+
+Left wrong by round 12: `percent_overall` monotonicity (R8-M1), the phase-3
+label (R8-M2), and the clamp masking a short plan (R8-M4).
+
+### 5. Prod rehearsal cross-check
+
+Lead's `home3`, 244,659 files. Read-only on my side; I did not touch `home2` or
+`home3`.
+
+| Check | Result |
+|-------|--------|
+| apply elapsed | **772 s**, exit 0 — was exit 124 at 1806 s in round 7 |
+| validate after apply | **12 steps, all green** |
+| `load_projects` | active `tak-ea`, 29 projects, before and after restore |
+| restore-v1 | exit 0, **448 s** |
+| restore / apply ratio | **0.58**, well inside the 3.0 ceiling |
+| copies >= 1 | **not measured** — `final-resume.sh` compares against `manifest-after-apply-3.json`, which the first leg never wrote, so `compare.py` exits 1 with `FileNotFoundError`. A rehearsal-script gap, not a product one |
+| byte-identical | **not yet available** — the post-restore hash was still running when this report was written |
+| validate after restore | reports `promote-v2-root: legacy v2/ root still present`. **Correct, not a defect**: a successful restore-v1 puts `v2/` back, so the forward-migration validate is expected to be red there |
+
+On the `runtime/core/version.json` question: restore-v1 deliberately re-applies
+`version-marker` instead of byte-reverting it (`cli.py:3315-3330`), so a single
+changed file at that path after a restore is **the intended outcome and is
+acceptable** — resurrecting a 2.0.8 stamp on a machine running the current build
+would be worse. It should still be named in the release note so nobody reads it
+as a failed round-trip.
+
+### 6. Harness results
+
+**The six existing suites — all green, but only with the right recipe.**
+
+```
+env -u TAKKUB_STORAGE_ROOT -u TAKKUB_PORT_FILE \
+PYTHONPATH=src TAKKUB_ARTIFACTS_DIR=<an empty scratch dir per suite> \
+timeout 900 python runtime/exports/2026-09-11/agent-takkub/<suite>.py
+```
+
+`504-round2-extra.py` and `504-round3-faults.py` additionally need
+`504-review-repro.py` sitting beside them — they read it as text and patch it.
+
+| Suite | Result |
+|-------|--------|
+| `504-round2-repro.py` | `failures: []` |
+| `504-round2-extra.py` | `failures: []` |
+| `504-round3-faults.py` | `failures: []` |
+| `504-round4-faults.py` | 56/56 |
+| `504-round5-faults.py` | 12/12 |
+| `504-round6-faults.py` | 12/12 |
+
+Dropping `env -u TAKKUB_STORAGE_ROOT` makes `504-round2-repro.py` fail
+`dev_worktree` every time. A takkub pane's environment stamps
+`TAKKUB_STORAGE_ROOT` with the main checkout's own storage root, that suite's
+`fixture()` clears only `TAKKUB_PORT_FILE`, and `_primary_data_home()` then
+resolves the pane leg to the real repository instead of the fixture. Harness
+leak, not product: the round-7 and round-8 suites clear the variable themselves
+and are unaffected.
+
+**`504-round7-faults.py` — superseded, do not gate on it.** Run as committed on
+`fceead0f` it reports **97 cases, 17 PASS, 80 FAIL**, close to the 90 and 86
+Lead measured. That does not match the "29 cases, 18 pass" written in the
+round-7 report: the file on disk enumerates far more cases than the run that
+report was written from, so those numbers do not reproduce and must not be
+treated as a baseline. 71 of the 80 failures are one observation, not 71.
+`fault_case` ends by calling `_cmd_migrate_restore_v1` on an engine where only
+`promote-v2-root` ever applied, then asserts the `v2/` tree is byte-identical
+(`504-round7-faults.py:174` and `:181`). No archive generation exists, so
+restore-v1 no-ops — which is R8-B1, a genuine finding, better reported once than
+71 times. The unguarded `:181` variant raises `FileNotFoundError` (33 cases) and
+the guarded `:174` variant raises `restore-v1 not byte-identical` (38 cases);
+same defect, two spellings. Rather than re-fixture round 7 against the round-11
+backup scope, round 8's suite supersedes it: `backup_*` and `scope_*` cover the
+same ground against the current scope, and `cli_no_backup_removed` replaces
+`cli_no_backup`.
+
+**`504-round8-faults.py` on `fceead0f` — 45 cases, 40 PASS, 5 FAIL.**
+
+| Fixture | Verdict | Control on `6203e57b` |
+|---------|---------|------------------------|
+| `backup_failure_aborts_apply_pending` | FAIL — R8-H1 | FAIL, identical |
+| `backup_resumed_missing_payload_aborts` | FAIL — R8-H2 | FAIL, identical |
+| `prune_orphans_after_rollback` | FAIL — R8-H4 | FAIL, identical |
+| `progress_monotonic` | FAIL — R8-M1 | FAIL, identical |
+| `throttle_gap_5000` | FAIL under load, PASS idle — R8-M3 | n/a, round-11 code |
+| the other 40 | PASS | — |
+
+Before and after, against the previous pane's run on `7b48de93`:
+`progress_schema` and `cli_outer_json_pure` were FAIL there and are PASS here,
+so round 12's items 1 and 3 land. Nothing that passed on `7b48de93` fails on
+`fceead0f`. R8-B1 and R8-H3 were found by the round-12 end-to-end probe rather
+than by a fixture and are not yet in the suite.
+
+**Targeted tests.** 119 tests across `test_boot_flow.py`, `test_cli_migrate.py`,
+`test_core_migration.py`, `test_boot_flow_terminal.py` and
+`test_core_migration_pre_migrate_backup.py`: 118 pass, 1 fails —
+`TestProviderChoice::test_no_choice_yet_returns_none`, the order dependency of
+R8-L1, which passes when run alone.
+
+### 7. What has to happen before 2.1.0 ships
+
+- [ ] **R8-B1**: make `restore-v1` roll back `promote-v2-root` even with no
+      archive generation, or refuse with a clear error instead of reporting ok.
+- [ ] **R8-H1**: either give `apply_pending()` a real stop-the-line for
+      `pre-migrate-backup` — the `promote-v2-root` exception already shows the
+      shape — or delete the false claim from `engine.py:225-226` and
+      `pre_migrate_backup.py:3-7` and state what actually protects that path.
+- [ ] **R8-H2**: have `_already_backed_up()` check payload presence, not just
+      manifest names.
+- [ ] **R8-H3**: exclude names `promote-v2-root` promoted in this pass from
+      `_archive_candidates()`, or teach `promote-v2-root.validate()` to accept an
+      archived target.
+- [ ] **R8-H4**, still R7-H2: clean up or record the orphaned top-level copies.
+- [ ] **R8-M1**: clamp `percent_overall` and `phase` so neither can decrease.
+- [ ] **R8-M2**: fire phase 3 around real validation, or relabel it.
+- [ ] **R8-M3**: emit one progress call across the copy-to-verify enumeration.
+- [ ] Read the byte-identical exit from `final/final.txt` once the post-restore
+      hash finishes, and fix `final-resume.sh`'s missing
+      `manifest-after-apply-3.json` so `copies >= 1` is actually measured.
+- [ ] Still open from round 6: the #568 item-1 hash deviation, the per-provider
+      authenticated login check, the old-wheel downgrade rehearsal, and CI green
+      on both `windows-latest` and `macos-latest`.
+
+### 8. Working notes
+
+`504-round8-faults.py` was carried over from the pane the cockpit restart
+interrupted, with one new `progress_monotonic` fixture added. It never edits
+repository source and never touches a real home: every fixture is its own
+directory under `TAKKUB_ARTIFACTS_DIR`, with `config.DATA_HOME`,
+`SETTINGS_HOME`, `RUNTIME_DIR` and `migration_home()` all redirected there.
+Batch sizes are forced through the real production callers by patching
+`promote_v1._prune_phase` and `_copy_phase`, so the code under test is the
+shipped path. The round-12 end-to-end probe drives the real CLI with
+`AGENT_TAKKUB_HOME` pointed at a scratch store, the same way Lead's rehearsal
+does. Every parent-commit control used `git archive 6203e57b | tar -x` into a
+scratch tree with `PYTHONPATH` pointed at it — no branch switch, no worktree
+mutation. `home2` and `home3` were read-only throughout.
+
+Evidence, all under `runtime/exports/2026-09-11/agent-takkub/`, which is
+gitignored: `504-round8-faults.py`, the six copied legacy suites plus
+`504-review-repro.py`, `r8c-restore-probe.py`, `r8c-round12-seed.py`, and
+`r8c-evidence/` holding every suite log and stderr, `r12-apply.stdout.json` and
+`r12-ctl-apply.json`.
