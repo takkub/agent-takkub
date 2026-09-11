@@ -950,6 +950,7 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
             force=bool(args.force),
             live_paths=live_paths,
             branch=getattr(args, "branch", None) or None,
+            discard=bool(getattr(args, "discard", False)),
         )
         # #411 — `.trash-*` staging dirs `remove_worktree_tree` leaves behind
         # after a partial/failed delete are our own already-vetted trash
@@ -4342,13 +4343,21 @@ def main(argv: list[str] | None = None) -> int:
     swm.add_argument("--cwd", default=None, help="project dir (default: current dir)")
     swc = swt_sub.add_parser(
         "clean",
-        help="remove leftover wt/* worktrees (safe ones only; --force drops dirty/unmerged too) "
-        "and report on-disk dirs git no longer knows about at all (#355)",
+        help="remove leftover wt/* worktrees (safe ones only; --force drops unmerged, "
+        "--discard drops dirty too) and report on-disk dirs git no longer knows about (#355)",
     )
     swc.add_argument(
         "--force",
         action="store_true",
-        help="also remove dirty / unmerged worktrees (their work is LOST)",
+        help="also remove unmerged worktrees (commits not yet merged are LOST, "
+        "recoverable from the branch's own reflog for a while) — never bypasses "
+        "a dirty (uncommitted-changes) worktree on its own; that needs --discard",
+    )
+    swc.add_argument(
+        "--discard",
+        action="store_true",
+        help="also remove DIRTY worktrees (uncommitted changes are LOST, unrecoverable) — "
+        "#573: the reported line always shows the discarded diff stat first",
     )
     swc.add_argument(
         "--branch",

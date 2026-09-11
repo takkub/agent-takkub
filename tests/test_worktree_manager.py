@@ -578,6 +578,128 @@ class TestAutoCommitSnapshot:
         assert len(message) < len("wip: backend: ") + 100
 
 
+# ── snapshot_dirty_worktree (#573) — abnormal-exit safety net ───────────────
+#
+# Unlike auto_commit_snapshot (#525, gated on commit_count == 0), this fires
+# on ANY dirty worktree regardless of prior commits, from stuck-recover
+# give-up / close() / done-typed-as-text — none of which ever gave the pane's
+# own `takkub done` a chance to commit fresh work sitting on top of earlier
+# commits.
+
+
+class TestSnapshotDirtyWorktree:
+    def _info(self) -> WorktreeInfo:
+        return WorktreeInfo(path="/wt/x-1", branch="wt/x-1", base_sha="abc", git_root="/repo")
+
+    def test_commits_normally_on_branch_when_hook_passes(self):
+        r = FakeRunner(
+            [
+                (["add", "-A"], _ok()),
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
+                (["commit", "-m"], _ok()),
+            ]
+        )
+        committed, wip_ref = WorktreeManager(r).snapshot_dirty_worktree(
+            self._info(), "backend", "stuck_recover_capped"
+        )
+        assert committed is True
+        assert wip_ref is None
+        commit_call = next(c for c in r.calls if "commit" in c)
+        assert (
+            commit_call[commit_call.index("-m") + 1]
+            == "wip(backend): snapshot on stuck_recover_capped"
+        )
+        assert not r.ran("write-tree")
+        assert not r.ran("update-ref")
+
+    def test_falls_back_to_side_ref_when_hook_rejects_commit(self):
+        r = FakeRunner(
+            [
+                (["add", "-A"], _ok()),
+                # HEAD never moves — the `git commit` below fails.
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("before\n")]),
+                (["commit", "-m"], _fail("pre-commit hook failed", 1)),
+                (["write-tree"], _ok("treesha000\n")),
+                (["commit-tree"], _ok("commitsha111\n")),
+                (["update-ref"], _ok()),
+            ]
+        )
+        committed, wip_ref = WorktreeManager(r).snapshot_dirty_worktree(
+            self._info(), "backend", "close"
+        )
+        assert committed is False
+        assert wip_ref is not None
+        assert wip_ref.startswith("refs/wip/wt/x-1-")
+        # the side commit is parented on the branch's pre-attempt tip — the
+        # branch ref itself is never moved, only `update-ref` targets the
+        # side ref.
+        commit_tree_call = next(c for c in r.calls if "commit-tree" in c)
+        assert "treesha000" in commit_tree_call
+        assert "before" in commit_tree_call  # -p <before>
+        update_ref_call = next(c for c in r.calls if "update-ref" in c)
+        assert wip_ref in update_ref_call
+        assert "commitsha111" in update_ref_call
+        assert not r.ran("branch", "-D")  # branch itself untouched
+
+    def test_returns_false_when_nothing_to_add(self):
+        r = FakeRunner([(["add", "-A"], _fail("boom", 128))])
+        committed, wip_ref = WorktreeManager(r).snapshot_dirty_worktree(
+            self._info(), "backend", "close"
+        )
+        assert committed is False
+        assert wip_ref is None
+        assert not r.ran("commit")
+
+    def test_returns_false_when_fallback_plumbing_fails(self):
+        r = FakeRunner(
+            [
+                (["add", "-A"], _ok()),
+                (["rev-parse", "HEAD"], [_ok("before\n"), _ok("before\n")]),
+                (["commit", "-m"], _fail("pre-commit hook failed", 1)),
+                (["write-tree"], _fail("fatal: cannot write tree", 128)),
+            ]
+        )
+        committed, wip_ref = WorktreeManager(r).snapshot_dirty_worktree(
+            self._info(), "backend", "close"
+        )
+        assert committed is False
+        assert wip_ref is None
+        assert not r.ran("commit-tree")
+        assert not r.ran("update-ref")
+
+
+class TestDirtyDiffstat:
+    def test_empty_when_nothing_uncommitted(self):
+        r = FakeRunner(
+            [
+                (["diff", "HEAD", "--shortstat"], _ok("")),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+        assert WorktreeManager(r).dirty_diffstat_at("/wt/x-1") == ""
+
+    def test_formats_tracked_changes(self):
+        r = FakeRunner(
+            [
+                (
+                    ["diff", "HEAD", "--shortstat"],
+                    _ok("2 files changed, 10 insertions(+), 4 deletions(-)\n"),
+                ),
+                (["status", "--porcelain"], _ok(" M a.py\n M b.py\n")),
+            ]
+        )
+        assert WorktreeManager(r).dirty_diffstat_at("/wt/x-1") == "2 files, +10/-4"
+
+    def test_folds_in_untracked_file_count(self):
+        r = FakeRunner(
+            [
+                (["diff", "HEAD", "--shortstat"], _ok("1 file changed, 1 insertion(+)\n")),
+                (["status", "--porcelain"], _ok(" M a.py\n?? new.py\n")),
+            ]
+        )
+        assert WorktreeManager(r).dirty_diffstat_at("/wt/x-1") == "2 files, +1/-0"
+
+
 # ── Generic (cwd-based) probes — #245 shared-tree digest facts ──────────────
 #
 # `commit_count`/`diffstat`/`uncommitted_count` above are now thin wrappers
@@ -2167,7 +2289,11 @@ class TestCleanIsolated:
         assert r.ran("worktree", "remove")
         assert r.ran("branch", "-D")
 
-    def test_force_removes_everything(self, monkeypatch):
+    def test_force_alone_keeps_dirty(self, monkeypatch):
+        """#573: `--force` bypasses the unmerged-commits (ahead) guard only —
+        a DIRTY worktree (uncommitted changes) is never dropped by `force`
+        alone, only `discard` may do that. This is the hardened default the
+        old (pre-#573) `--force` was replaced with."""
         from agent_takkub import worktree_manager as wm
 
         monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
@@ -2176,10 +2302,39 @@ class TestCleanIsolated:
                 (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
                 (["rev-list", "--count"], _ok("5\n")),
                 (["status", "--porcelain"], _ok(" M x\n")),  # dirty!
+                # non-zero exit = a REAL (non-CRLF-phantom) diff (#496).
+                (["diff", "HEAD", "--quiet"], _fail("", 1)),
             ]
         )
         lines = WorktreeManager(r).clean_isolated("/repo", force=True)
-        assert all(line.startswith("REMOVED") for line in lines)
+        assert all(line.startswith("KEEP") for line in lines), lines
+        assert all("--discard" in line for line in lines), lines
+        assert not r.ran("worktree", "remove")
+
+    def test_discard_removes_dirty_and_reports_stat(self, monkeypatch):
+        """#573: `--discard` is the one flag allowed to drop a dirty worktree
+        — and the reported line must show what was thrown away (diff stat),
+        never a bare "REMOVED"."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("5\n")),
+                (["status", "--porcelain"], _ok(" M x\n")),  # dirty!
+                # non-zero exit = a REAL (non-CRLF-phantom) diff (#496).
+                (["diff", "HEAD", "--quiet"], _fail("", 1)),
+                (
+                    ["diff", "HEAD", "--shortstat"],
+                    _ok("1 file changed, 3 insertions(+), 1 deletion(-)\n"),
+                ),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo", discard=True)
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert all("discarded uncommitted" in line for line in lines), lines
+        assert all("1 files, +3/-1" in line for line in lines), lines
         assert r.ran("worktree", "remove", "--force")
 
     def test_remove_failure_does_not_delete_branch(self, monkeypatch):

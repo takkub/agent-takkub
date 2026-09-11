@@ -282,6 +282,12 @@ def _default_runner(args: list[str], cwd: str | None) -> GitResult:
 
 # ── Pure helpers (no I/O — unit-tested directly) ────────────────────────────
 
+_SHORTSTAT_RE = re.compile(
+    r"(?P<files>\d+) files? changed"
+    r"(?:, (?P<ins>\d+) insertions?\(\+\))?"
+    r"(?:, (?P<del>\d+) deletions?\(-\))?"
+)
+
 
 def sanitize_ref_component(name: str) -> str:
     """Turn a role/project label into a git-ref-safe, filesystem-safe slug.
@@ -1304,6 +1310,32 @@ class WorktreeManager:
         merge proposal). Empty string if it can't be computed."""
         return self.diffstat_since(info.path, info.base_sha)
 
+    def dirty_diffstat_at(self, cwd: str) -> str:
+        """``N files, +A/-D`` summary of *cwd*'s CURRENT uncommitted state —
+        tracked changes vs HEAD (staged + unstaged) plus a count of untracked
+        paths folded into the same file total (#573). Used wherever a caller
+        is about to report or discard uncommitted work and needs to say how
+        much, not just that some exists. Empty string when there is nothing
+        uncommitted or the probe itself fails (never a fabricated "0 files")."""
+        res = self._run(["-C", cwd, "diff", "HEAD", "--shortstat"], None)
+        files = ins = dele = 0
+        if res.ok and res.stdout.strip():
+            m = _SHORTSTAT_RE.search(res.stdout)
+            if m:
+                files = int(m.group("files") or 0)
+                ins = int(m.group("ins") or 0)
+                dele = int(m.group("del") or 0)
+        untracked = len(
+            [ln for ln in self.status_porcelain(cwd).splitlines() if ln.startswith("??")]
+        )
+        total_files = files + untracked
+        if total_files == 0:
+            return ""
+        return f"{total_files} files, +{ins}/-{dele}"
+
+    def dirty_diffstat(self, info: WorktreeInfo) -> str:
+        return self.dirty_diffstat_at(info.path)
+
     def uncommitted_count_at(self, cwd: str) -> int:
         """Generic form of :meth:`uncommitted_count` for a plain checkout path
         (#245 — shared-tree panes have no :class:`WorktreeInfo` to wrap)."""
@@ -1549,6 +1581,61 @@ class WorktreeManager:
         commit = self._run(["-C", info.path, "commit", "-m", message], None)
         after = self.head_sha(info.path)
         return bool(commit.ok and after and after != before)
+
+    def snapshot_dirty_worktree(
+        self, info: WorktreeInfo, role: str, reason: str
+    ) -> tuple[bool, str | None]:
+        """Best-effort safety-net commit for *info*'s worktree when a pane
+        goes away outside the normal done() flow — stuck-recover give-up,
+        `close()`, or the done-typed-as-text notice (#573).
+
+        Unlike :meth:`auto_commit_snapshot` (#525, gated on
+        ``commit_count == 0``), this fires on ANY dirty worktree regardless
+        of commits already on the branch — those abnormal-exit paths never
+        gave the pane's own `takkub done` a chance to commit fresh work sitting
+        on top of earlier commits.
+
+        Tries one normal, hook-checked ``git commit`` on the branch itself
+        first — same as any other commit that lands there. Only when that is
+        REJECTED (pre-commit hook failure) does it fall back to a hook-free
+        plumbing commit (``write-tree`` + ``commit-tree``, neither of which
+        ever invokes hooks) parented on the branch's current tip, parked on
+        its own ``refs/wip/<branch>-<ts>`` ref instead of moving the branch —
+        the branch itself must never carry a commit that skipped its hooks,
+        only this disposable recovery ref may.
+
+        Returns ``(committed, wip_ref)``: ``(True, None)`` when the commit
+        landed on the branch normally, ``(False, "refs/wip/...")`` when the
+        hook-fail fallback captured it on a side ref instead, or
+        ``(False, None)`` when neither could be done (nothing to add, or the
+        fallback itself failed) — the working tree is left untouched in
+        every case that isn't a plain successful branch commit.
+        """
+        message = f"wip({role}): snapshot on {reason}"
+        add = self._run(["-C", info.path, "add", "-A"], None)
+        if not add.ok:
+            return False, None
+        before = self.head_sha(info.path)
+        commit = self._run(["-C", info.path, "commit", "-m", message], None)
+        after = self.head_sha(info.path)
+        if commit.ok and after and after != before:
+            return True, None
+        write_tree = self._run(["-C", info.path, "write-tree"], None)
+        tree_sha = write_tree.stdout.strip() if write_tree.ok else ""
+        if not tree_sha:
+            return False, None
+        parent_args = ["-p", before] if before else []
+        commit_tree = self._run(
+            ["-C", info.path, "commit-tree", tree_sha, *parent_args, "-m", message], None
+        )
+        wip_sha = commit_tree.stdout.strip() if commit_tree.ok else ""
+        if not wip_sha:
+            return False, None
+        ref_name = f"refs/wip/{info.branch}-{int(time.time())}"
+        update_ref = self._run(["-C", info.path, "update-ref", ref_name, wip_sha], None)
+        if not update_ref.ok:
+            return False, None
+        return False, ref_name
 
     def branch_merged_into_base(self, git_root: str, branch: str) -> bool | None:
         """True when *branch*'s tip is already an ancestor of *git_root*'s
@@ -1963,6 +2050,7 @@ class WorktreeManager:
         force: bool = False,
         live_paths: frozenset[str] | set[str] = frozenset(),
         branch: str | None = None,
+        discard: bool = False,
     ) -> list[str]:
         """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
 
@@ -1972,9 +2060,15 @@ class WorktreeManager:
         worktree yields a single ``NOT FOUND`` line.
 
         Default: remove only SAFE leftovers — clean tree AND no commits ahead
-        (nothing of value can be lost). ``force=True`` removes every wt/*
-        worktree + branch regardless of dirty/unmerged status (that work is
-        dropped — the CLI makes the caller opt in explicitly). Returns
+        (nothing of value can be lost). ``force=True`` removes a worktree with
+        unmerged commits (ahead > 0) regardless of that status. A DIRTY
+        worktree (uncommitted changes) is never removed by ``force`` alone —
+        only ``discard=True`` (#573) may drop that, and even then the reported
+        line always carries the discarded diff stat (files / +N/-M) so the
+        caller sees what was thrown away, never a bare "REMOVED". This is
+        deliberately a separate, higher-bar flag from ``force``: losing
+        unmerged-but-committed work is recoverable from the branch's own
+        reflog for a while, losing uncommitted work is not. Returns
         human-readable result lines.
 
         Two safety rules, both unconditional (#187 — a real incident where
@@ -1985,10 +2079,11 @@ class WorktreeManager:
         * **Live-pane guard** — a path present in *live_paths* (worktrees a
           currently-alive pane is sitting in, see
           :meth:`Orchestrator.live_worktree_paths`) is ALWAYS skipped, dirty
-          or not, ``force`` or not. There is no bypass flag: yanking the
-          checkout out from under a running pane corrupts its cwd and can
-          orphan uncommitted work with zero chance to recover it — the only
-          safe sequence is ``takkub close --role <r>`` first, then clean.
+          or not, ``force``/``discard`` or not. There is no bypass flag:
+          yanking the checkout out from under a running pane corrupts its cwd
+          and can orphan uncommitted work with zero chance to recover it —
+          the only safe sequence is ``takkub close --role <r>`` first, then
+          clean.
         * **Atomicity** — the branch is deleted only when ``git worktree
           remove`` actually succeeded. A failed removal (permission denied,
           the directory still locked, ...) now leaves BOTH the worktree
@@ -2012,18 +2107,20 @@ class WorktreeManager:
                 continue
             cherry_picked = False
             keep_reason = ""
-            if not force:
-                if row["dirty"]:
-                    keep_reason = "dirty (มี uncommitted changes)"
-                elif row["ahead"]:
-                    # #495: raw SHA-based "ahead" still counts commits whose
-                    # patch already landed on HEAD via cherry-pick — check
-                    # patch-id equivalence before keeping it around forever.
-                    cherry_picked = self._all_commits_landed_via_cherry_pick(
-                        git_root, row["branch"]
-                    )
-                    if not cherry_picked:
-                        keep_reason = f"{row['ahead']} commit ยังไม่ merge"
+            discard_stat = ""
+            if row["dirty"] and not discard:
+                keep_reason = (
+                    "dirty (มี uncommitted changes) — ต้องใช้ --discard เพื่อยืนยันทิ้งงานที่ยังไม่ commit"
+                )
+            elif row["dirty"]:
+                discard_stat = self.dirty_diffstat_at(row["path"])
+            elif not force and row["ahead"]:
+                # #495: raw SHA-based "ahead" still counts commits whose
+                # patch already landed on HEAD via cherry-pick — check
+                # patch-id equivalence before keeping it around forever.
+                cherry_picked = self._all_commits_landed_via_cherry_pick(git_root, row["branch"])
+                if not cherry_picked:
+                    keep_reason = f"{row['ahead']} commit ยังไม่ merge"
             if keep_reason:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
                 continue
@@ -2059,6 +2156,8 @@ class WorktreeManager:
             )
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
+            if discard_stat:
+                note += f" (⚠ discarded uncommitted: {discard_stat})"
             if cherry_picked:
                 note += f" ({row['ahead']} commit cherry-pick เข้า HEAD แล้ว — ตรวจด้วย patch-id)"
             if leftover:
