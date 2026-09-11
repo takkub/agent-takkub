@@ -465,15 +465,18 @@ def _run_apply_pending(
         _report("ไม่มี step ที่ต้องรัน")
         return BootMigrationResult("pending_applied", messages=messages)
 
-    # #504/#574 R8-M2: `apply_pending()` has no whole-ladder `validate()`
-    # pass the way the "v1" first-apply branch below does, so
-    # `validate_reports` used to stay permanently empty here —
-    # `MigrationOutcome.validated_steps` read 0 on every promoted machine
-    # even while `boot_flow.py`'s phase-3 UI claimed each domain step had
-    # been validated. Real validate() for just the steps THIS pass applied
-    # successfully — never truncated by an unrelated step elsewhere in the
-    # ladder, and never claiming a step that FAILED apply was validated.
-    validate_reports = engine.validate_ok_steps(r.step_id for r in reports if r.ok)
+    # #504/#574 R8-M2 (round14b): `apply_pending()` itself now validates
+    # every step it applies successfully, immediately after that step's own
+    # apply, in ladder order — so `MigrationOutcome.validated_steps` is
+    # never permanently 0 the way it was before this pass had any real
+    # validate() call at all. `last_validate_reports` is read here rather
+    # than calling `validate_ok_steps()` again: that separate call used to
+    # fire `on_validate_step` for every domain step AFTER
+    # `archive-v1-legacy`'s own copy phase had already run (this method
+    # runs the whole ladder, `archive-v1-legacy` included, in one
+    # per-step loop) — always too late for `boot_flow.py`'s phase-3 UI,
+    # which had already advanced to phase 4 by then.
+    validate_reports = engine.last_validate_reports
 
     stale = [r for r in reports if not r.ok and r.step_id in applied_before]
     new_failures = [r for r in reports if not r.ok and r.step_id not in applied_before]

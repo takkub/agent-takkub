@@ -697,6 +697,22 @@ def run_migration(
 
     step_done: dict[str, int] = {}
     step_seen: dict[str, set[str]] = {}
+    # #574 round14b: `files_done`/`files_total` climb across the WHOLE
+    # step, never reset — `verify_copy.copy_verified()`'s own copy-phase
+    # throttle and verify-phase throttle each legitimately count 1..N
+    # independently for one entry (the verify pass restarting its own
+    # count after the copy pass reached N is expected, round11 behavior),
+    # and a step like `pre-migrate-backup` backs up several separate small
+    # entries whose own raw counts each start back at 1 too (`models` the
+    # whole directory, then `models/registry.json` as its own domain-target
+    # entry). A caller forwarding the raw per-call numbers straight through
+    # saw `files_done` fall mid-step every time either happened. `_last`
+    # holds the last RAW (done, total) reported for this step; the instant
+    # a lower `done` arrives (a genuine restart, never a caller bug), the
+    # previous peak is banked into `_base` so the combined count for this
+    # whole step only ever climbs.
+    file_progress_last: dict[str, tuple[int, int]] = {}
+    file_progress_base: dict[str, int] = {}
 
     def on_entry(step_id: str, name: str) -> None:
         phase = _phase_of_step(step_id)
@@ -754,14 +770,19 @@ def run_migration(
         phase = _phase_of_step(step_id)
         if phase not in (1, 2, 4):
             return
+        last_done, last_total = file_progress_last.get(step_id, (0, 0))
+        if files_done < last_done:
+            file_progress_base[step_id] = file_progress_base.get(step_id, 0) + last_total
+        file_progress_last[step_id] = (files_done, files_total)
+        base = file_progress_base.get(step_id, 0)
         emit(
             phase,
             done=step_done.get(step_id, 0),
             total=totals[phase],
             log_line=f"{step_id}: {name} ({files_done}/{files_total})",
             current_path=f"{name}/{current_path}",
-            files_done=files_done,
-            files_total=files_total,
+            files_done=base + files_done,
+            files_total=base + files_total,
             unit="ไฟล์" if phase == 1 else "รายการ",
             operation=step_id,
             detail=f"{files_done}/{files_total}",

@@ -10,13 +10,12 @@
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_flow_window",
-        "agent_takkub.cli",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
         "agent_takkub.ram_report",
         "agent_takkub.remote.api"
       ],
-      "fan_in": 9,
+      "fan_in": 8,
       "fan_out": 0
     },
     {
@@ -426,7 +425,6 @@
     {
       "module": "agent_takkub.cli",
       "imports": [
-        "agent_takkub",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.bm25_search",
         "agent_takkub.boot_flow_terminal",
@@ -476,7 +474,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 47
+      "fan_out": 46
     },
     {
       "module": "agent_takkub.cli_server",

@@ -3411,7 +3411,7 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
         version_marker_ran = True
     reports.append(version_marker_report)
 
-    # #504/#574 item 14, corrected round14 (Lead item 7a): `version_marker
+    # #504/#574 item 14, corrected round14b (Lead item 7a): `version_marker
     # _step.apply()` above writes wherever `core.versioning.store
     # .version_doc_path()` CURRENTLY resolves — `core_home()`, which flips
     # to the top-level `system/` `core-internal-store` created the moment
@@ -3421,30 +3421,85 @@ def _cmd_migrate_restore_v1(engine, args: argparse.Namespace) -> list:
     # step's own write lands there, NOT at `RUNTIME_DIR/core/version.json`,
     # the fixed pre-#504 location a downgraded (pre-#504) build's own
     # `core-internal-store` actually reads and compares against
-    # `v2/system/version.json`. Re-stamp that FIXED location directly
-    # (same read-modify-write `record_component` the step itself uses,
-    # same app version — a re-apply of the identical fact just written
-    # above, never an independently generated second value) and mirror
-    # THOSE exact bytes into `v2/system/version.json` too, so a downgraded
-    # build's own mirror check agrees. Best-effort, never escalated over a
+    # `v2/system/version.json`. Copy the EXACT bytes `version_doc_path()`
+    # just got from `version_marker_step.apply()` into both fixed
+    # locations — round14's own fix called `record_component()` a SECOND
+    # time instead, which stamps its own fresh `released_at`/`updated_at`
+    # (`time.time()` called again) and so never actually produced the
+    # "identical fact" its comment claimed: the legacy mirror it wrote
+    # byte-for-byte disagreed with `version_doc_path()`'s own file on every
+    # restore-v1 (item 14 R9 regression). A straight byte copy of the ONE
+    # real write can never drift. Best-effort, never escalated over a
     # restore that otherwise succeeded. Only when a real version-marker
     # step actually ran (never the "skipped: no such step" harness path
     # above) — a reduced-engine test fixture with no version-marker step
     # has nothing to re-stamp.
     if version_marker_ran and version_marker_report.ok:
         try:
-            from . import __version__ as _app_version
             from .core.storage.paths import migration_home
-            from .core.versioning.store import record_component
+            from .core.versioning.store import version_doc_path
 
-            legacy_marker_path = migration_home() / "version.json"
-            record_component("app", _app_version, path=legacy_marker_path)
-            legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
-            if legacy_marker_path.is_file() and legacy_mirror.parent.is_dir():
-                legacy_mirror.write_bytes(legacy_marker_path.read_bytes())
+            current_marker_path = version_doc_path()
+            if current_marker_path.is_file():
+                marker_bytes = current_marker_path.read_bytes()
+                legacy_marker_path = migration_home() / "version.json"
+                if legacy_marker_path != current_marker_path:
+                    legacy_marker_path.parent.mkdir(parents=True, exist_ok=True)
+                    legacy_marker_path.write_bytes(marker_bytes)
+                legacy_mirror = config.DATA_HOME / "v2" / "system" / "version.json"
+                if legacy_mirror.parent.is_dir():
+                    legacy_mirror.write_bytes(marker_bytes)
         except OSError as e:
             if not json_mode:
                 _utf8_print(f"  (warn) could not mirror version-marker to legacy v2/system/: {e}")
+
+    # #574 round14b (downgrade_2_0_8_validate, R9-H1 follow-up): EVERY
+    # domain step (readonly-registries, role-agent, capability, project,
+    # state, credential-reference — `runtime-triage`/`core-internal-store`
+    # excluded, they live under `RUNTIME_DIR`/`system/`, already covered
+    # by the version-marker mirror above and the documented `system/`
+    # limitation) writes its own V2 target at data_home's TOP LEVEL
+    # (#504's flip). Restore-v1 has no rollback for domain steps
+    # (documented limitation, migration guide's "system/ directory left
+    # behind" section) so that content is exactly right and meant to
+    # stay, but a downgraded pre-#504 build's OWN identical step
+    # `validate()` looks for it under the legacy NESTED
+    # `v2/<same-relative-path>` instead (`storage_layout_v2()`'s own
+    # pre-#504 shape) and finds nothing there at all. Mirror each
+    # directory's current top-level content into that nested spot too —
+    # same pattern as the version-marker mirror just above, but per
+    # top-level directory (never per-mapping/per-accessor: `project`'s own
+    # per-project `project.json` files and `credential-reference`'s own
+    # per-provider records are keyed dynamically, not through a fixed
+    # accessor list, so naming every one of them here would only drift
+    # out of sync the next time a domain step's own shape changes) — a
+    # whole-directory copy naturally covers every file any of them wrote,
+    # present or future. Read BEFORE `restore_backed_up_items()` below,
+    # which overwrites a pre-existing target (`models/registry.json`)
+    # back to its raw V1 shape — this mirror needs the WRAPPED V2
+    # envelope these steps actually wrote, not what a later step in this
+    # same command is about to restore over it. Best-effort, never
+    # escalated over a restore that otherwise succeeded.
+    import shutil as _shutil
+
+    for _dirname in (
+        "models",
+        "providers",
+        "accounts",
+        "capabilities",
+        "agents",
+        "config",
+        "state",
+        "projects",
+    ):
+        _top = config.DATA_HOME / _dirname
+        if not _top.is_dir():
+            continue
+        try:
+            _shutil.copytree(_top, config.DATA_HOME / "v2" / _dirname, dirs_exist_ok=True)
+        except OSError as e:
+            if not json_mode:
+                _utf8_print(f"  (warn) could not mirror {_dirname}/ to legacy v2/: {e}")
 
     # #504/#574 item 13, generalized round14 (R9-H1): the normal archive/
     # promote rollback above only reverses what THOSE two steps themselves

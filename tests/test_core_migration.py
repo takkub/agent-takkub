@@ -475,13 +475,18 @@ class TestApplyPending:
     needs — closing the gap where boot's old step-1-only fast path never
     walked a ladder step added after this machine's first full apply."""
 
-    def test_never_applied_step_runs_without_probing_validate(self, tmp_path):
+    def test_never_applied_step_runs_and_is_validated_right_after(self, tmp_path):
+        """#574 round14b: a freshly-applied step is now validated IMMEDIATELY
+        after its own apply, in the SAME `apply_pending()` call — see that
+        method's own note for why (phase-3 UI timing)."""
         journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
         a = _FakeStep("a", ok=True)
         engine = MigrationEngine([a], data_home=tmp_path, journal=journal)
         reports = engine.apply_pending()
-        assert a.calls == ["apply"]  # no journal entry -> straight to apply(), no validate probe
+        assert a.calls == ["apply", "validate"]
         assert [r.step_id for r in reports] == ["a"]
+        assert [r.step_id for r in engine.last_validate_reports] == ["a"]
+        assert engine.last_validate_reports[0].ok is True
 
     def test_applied_and_still_valid_step_is_skipped_entirely(self, tmp_path):
         journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
@@ -508,7 +513,11 @@ class TestApplyPending:
         a = _Stale("a", ok=True)
         engine = MigrationEngine([a], data_home=tmp_path, journal=journal)
         reports = engine.apply_pending()
-        assert a.calls == ["validate", "apply"]
+        # #574 round14b: the FIRST "validate" is the staleness probe above
+        # (`applied_before` check); the SECOND is the immediate post-apply
+        # validate `apply_pending()` now does for every step it just
+        # applied.
+        assert a.calls == ["validate", "apply", "validate"]
         assert [r.step_id for r in reports] == ["a"]
         assert reports[0].ok is True
 
@@ -615,7 +624,8 @@ class TestApplyPending:
 
         assert [r.step_id for r in reports] == ["core-internal-store"]
         assert all(s.calls == ["validate"] for s in old_steps)
-        assert new_step.calls == ["apply"]
+        # #574 round14b: freshly-applied steps are validated immediately.
+        assert new_step.calls == ["apply", "validate"]
 
 
 class TestValidateOkSteps:
@@ -717,6 +727,114 @@ class TestOnValidateStep:
         )
         engine.validate_ok_steps(["a", "c"])
         assert events == [("a", True), ("c", False)]  # ladder order, b never asked
+
+
+class TestApplyPendingInlineValidateTiming:
+    """#574 round14b: `apply_pending()` validates a freshly-applied step
+    immediately after its own apply, in ladder order — never batched into
+    a separate call after the whole pass (including a real
+    `archive-v1-legacy`'s own copy phase) has already run. This is what
+    keeps `boot_flow.py`'s phase-3 UI notification for a domain step from
+    landing after phase 4 has already started (the round8/9 acceptance
+    harnesses' `progress_schema`/`progress_unit_stable`/
+    `progress_file_counter_monotonic` regression)."""
+
+    def test_notifies_a_domain_step_before_a_prune_deferred_steps_own_start(self, tmp_path):
+        class _PruneDeferredLike(_FakeStep):
+            def prune(self) -> StepReport:
+                self.calls.append("prune")
+                return StepReport(self.step_id, "prune", True, "pruned")
+
+            def _health_problems(self) -> list[str]:
+                return []
+
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        domain = _FakeStep("readonly-registries", ok=True)
+        archive = _PruneDeferredLike("archive-v1-legacy", ok=True)
+        events: list[tuple] = []
+        engine = MigrationEngine(
+            [domain, archive],
+            data_home=tmp_path,
+            journal=journal,
+            on_step=lambda step_id, kind: events.append(("step", step_id, kind)),
+            on_validate_step=lambda step_id, ok: events.append(("validate", step_id, ok)),
+        )
+        engine.apply_pending()
+        assert events.index(("validate", "readonly-registries", True)) < events.index(
+            ("step", "archive-v1-legacy", "start")
+        )
+
+    def test_suppresses_live_notify_but_still_counts_when_promote_has_nothing_pending(
+        self, tmp_path
+    ):
+        """The R8-M2 residual-catch-up case: a domain step with genuinely
+        new work still gets a real `validate()` (`last_validate_reports`
+        must include it, so `MigrationOutcome.validated_steps` is never
+        falsely 0), but phase 3 is part of the migration WIZARD's own
+        screen sequence — with nothing left to promote this pass, there is
+        no active migration screen for a residual catch-up to appear in."""
+
+        class _PromoteLike(_FakeStep):
+            def __init__(self, *a, candidates=(), **kw):
+                super().__init__(*a, **kw)
+                self._candidates = list(candidates)
+
+            def _promote_candidates(self) -> list[str]:
+                return list(self._candidates)
+
+            def prune(self) -> StepReport:
+                self.calls.append("prune")
+                return StepReport(self.step_id, "prune", True, "pruned")
+
+            def _health_problems(self) -> list[str]:
+                return []
+
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        promote = _PromoteLike("promote-v2-root", ok=True, candidates=[])
+        domain = _FakeStep("readonly-registries", ok=True)
+        events: list[tuple[str, bool]] = []
+        engine = MigrationEngine(
+            [promote, domain],
+            data_home=tmp_path,
+            journal=journal,
+            on_validate_step=lambda step_id, ok: events.append((step_id, ok)),
+        )
+        engine.apply_pending()
+        assert ("readonly-registries", True) not in events
+        assert [r.step_id for r in engine.last_validate_reports] == [
+            "readonly-registries",
+            "promote-v2-root",
+        ]
+        assert all(r.ok for r in engine.last_validate_reports)
+
+    def test_notifies_normally_when_promote_has_real_pending_work(self, tmp_path):
+        class _PromoteLike(_FakeStep):
+            def __init__(self, *a, candidates=(), **kw):
+                super().__init__(*a, **kw)
+                self._candidates = list(candidates)
+
+            def _promote_candidates(self) -> list[str]:
+                return list(self._candidates)
+
+            def prune(self) -> StepReport:
+                self.calls.append("prune")
+                return StepReport(self.step_id, "prune", True, "pruned")
+
+            def _health_problems(self) -> list[str]:
+                return []
+
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        promote = _PromoteLike("promote-v2-root", ok=True, candidates=["models"])
+        domain = _FakeStep("readonly-registries", ok=True)
+        events: list[tuple[str, bool]] = []
+        engine = MigrationEngine(
+            [promote, domain],
+            data_home=tmp_path,
+            journal=journal,
+            on_validate_step=lambda step_id, ok: events.append((step_id, ok)),
+        )
+        engine.apply_pending()
+        assert ("readonly-registries", True) in events
 
 
 class TestRollbackStep:

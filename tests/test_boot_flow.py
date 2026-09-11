@@ -566,6 +566,37 @@ class TestRunMigrationOutcome:
         assert phase3 and phase3[0].log_detail == "ตรวจสอบไม่ผ่าน"
         assert "ตรวจสอบแล้ว" not in phase3[0].log_line
 
+    def test_domain_step_validate_lands_in_phase_3_on_a_real_mixed_apply_pending_run(self):
+        """#574 round14b (round8 `progress_schema` / round9
+        `progress_unit_stable`/`progress_file_counter_monotonic`
+        regression): on a REAL (not mocked run_boot_stage) apply_pending()
+        run — genuinely `mixed` `layout_state()`, no monkeypatching — a
+        domain step's real `validate()` result must be notified BEFORE
+        `archive-v1-legacy`'s own copy phase starts, so it lands at phase
+        3, never re-labeled phase 4 by `emit()`'s own monotonic max-phase
+        clamp (the bug: `apply_pending()` used to batch every domain
+        step's validate into ONE call made after the whole pass —
+        including `archive-v1-legacy`'s real copy work — had already
+        run)."""
+        from agent_takkub.core.storage.layout import layout_state
+
+        data_home = config.DATA_HOME
+        _seed_v1_leftover(data_home)
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+        assert layout_state() == "mixed"
+
+        events = []
+        outcome = boot_flow.run_migration(progress_cb=events.append)
+        assert outcome.ok
+        phase3 = [e for e in events if e.phase == 3]
+        assert phase3, "expected at least one real phase-3 (validate) event"
+        assert all(e.unit == "ขั้น" for e in phase3)
+        phase4_units = {e.unit for e in events if e.phase == 4}
+        assert "ขั้น" not in phase4_units, (
+            f"a validate-step event leaked into phase 4: {phase4_units}"
+        )
+
     def test_phase_1_backup_counter_is_files_not_entries(self, monkeypatch):
         """#574 round14 (R5-M1): phase 1's counter must read the real FILE
         total the approved mockup shows ("15,762 / 15,762 ไฟล์"), from the
@@ -937,3 +968,34 @@ class TestRunMigrationOutcome:
         # copy reached 1000, is separate, expected round11 behavior, not
         # what this regression is about).
         assert min(e.files_done for e in files_events) > 0
+
+    def test_files_progress_never_decreases_within_one_step(self, monkeypatch):
+        """#574 round14b: `verify_copy.copy_verified()`'s own copy-phase
+        throttle and verify-phase throttle each legitimately restart
+        counting 1..N independently for the SAME entry (round11's own
+        expected behavior, per the test right above) — a caller forwarding
+        the raw per-call numbers straight through saw `files_done` fall
+        from N back down to a small throttled count the instant the verify
+        pass began, a real regression on a 1,000-file real (not mocked)
+        migration run. `boot_flow.py`'s `on_file_progress` must bank the
+        previous peak so the combined count for the WHOLE step only ever
+        climbs."""
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        big_dir = data_home / "v2" / "providers"
+        big_dir.mkdir(parents=True)
+        for i in range(1000):
+            (big_dir / f"file-{i}.json").write_text("{}", encoding="utf-8")
+
+        events = []
+        outcome = boot_flow.run_migration(progress_cb=events.append)
+        assert outcome.ok
+        files_events = [e for e in events if e.files_done is not None]
+        assert files_events
+        seen = [e.files_done for e in files_events]
+        assert seen == sorted(seen), f"files_done went backwards within one step: {seen}"
+        # `files_total` must climb in lockstep with the same banked offset,
+        # so `files_done <= files_total` still holds throughout.
+        assert all(e.files_done <= e.files_total for e in files_events)
