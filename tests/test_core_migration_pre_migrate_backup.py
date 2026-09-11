@@ -177,6 +177,34 @@ def test_resumed_apply_skips_real_copy_once_manifest_is_already_complete(
     assert "resumed" in report.summary
 
 
+def test_resumed_apply_recopies_a_payload_deleted_out_from_under_the_manifest(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504/#574 R8-H2: `_already_backed_up()` used to match manifest NAMES
+    only — delete one recorded payload and `apply()` still reported
+    "already backed up (resumed)" without ever re-copying it, the ladder
+    then walking on with one fewer file actually protected than the
+    manifest claimed."""
+    journal, backups = journal_backups
+    monkeypatch.setattr(
+        "agent_takkub.core.migration.pre_migrate_backup.migration_home", lambda: tmp_path / "mh"
+    )
+    data_home = _seeded_data_home(tmp_path)
+    step = PreMigrateBackupStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+
+    backup_dir = step._backup_dir()
+    payload = backup_dir / "openviking"
+    assert payload.is_file()
+    payload.unlink()
+
+    retry = PreMigrateBackupStep(journal=journal, backups=backups, data_home=data_home)
+    report = retry.apply()
+    assert report.ok, report.summary
+    assert "already backed up" not in report.summary
+    assert payload.is_file()  # actually re-copied, not just claimed
+
+
 def test_rollback_never_deletes_the_backup(tmp_path, journal_backups, monkeypatch):
     journal, backups = journal_backups
     monkeypatch.setattr(

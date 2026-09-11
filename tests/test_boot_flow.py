@@ -139,6 +139,25 @@ class TestCheckProviderUpdates:
 
 
 class TestProviderChoice:
+    # #504/#574 R8-L1 (= R4-M4): `_choice_path()` resolves via
+    # `effective_data_home(None, prefer_primary=True)` -> `_primary_data_home()`
+    # — deliberately NOT `config.DATA_HOME` (see `effective_data_home`'s own
+    # docstring: resolving `None` there would silently bypass a test's
+    # `config.DATA_HOME` patch) — so the module-level `_isolate_paths`
+    # autouse fixture above does not reach it. Without this, these tests
+    # read/write the REAL primary cockpit's `v2/config/boot-provider-
+    # choice.json` — across every worktree pane on the machine, not just
+    # this test process — making `test_no_choice_yet_returns_none` fail
+    # whenever an earlier test/pane already wrote a real choice there and
+    # pass only in isolation. Patch `_choice_path` itself, straight to a
+    # `tmp_path` file, so every test here is fully isolated regardless of
+    # real machine state.
+    @pytest.fixture(autouse=True)
+    def _isolate_choice_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            boot_flow, "_choice_path", lambda: tmp_path / "boot-provider-choice.json"
+        )
+
     def test_remember_then_recall_round_trip(self):
         choice = {"mode": "selected", "selected": ["claude", "codex"]}
         boot_flow.remember_provider_choice(choice)
@@ -539,10 +558,107 @@ class TestRunMigrationOutcome:
         assert phase2[1].eta_s is None  # 0.5s elapsed, still under the 2s/5-event gate
         assert phase2[2].eta_s is not None and phase2[2].eta_s > 0  # 3.5s elapsed -> populated
 
-    def test_unit_field_reflects_the_entry_being_moved_not_a_hardcoded_word(self, monkeypatch):
-        """#574 round12 item 6 (R3-M4): `unit` used to be hardcoded
-        `"รายการ"` for every event — the plan table's own B-screen units
-        (`"ไฟล์"`/`"โปรเจค"`) never matched what progress reported."""
+    def test_percent_and_phase_never_regress_on_a_late_out_of_order_notify(self, monkeypatch):
+        """#504/#574 R8-M1: `promote-v2-root`'s deferred prune fires its own
+        `on_entry` again (see the round12-item-2 test above) — sometimes
+        AFTER `archive-v1-legacy` has already advanced the stream to phase
+        4 (a real prod rehearsal observed `percent_overall` fall from 99.0
+        to 72.73 and `phase` fall from 4 to 2 at exactly this point). Both
+        must hold to their highest value ever reached, never walk
+        backwards for a late notify belonging to an earlier phase."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+        (data_home / "legacyfile.json").write_text("legacy", encoding="utf-8")
+
+        def fake_run_boot_stage(
+            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+        ):
+            on_entry("archive-v1-legacy", "legacyfile.json")  # advances the stream to phase 4
+            on_entry("promote-v2-root", "models")  # late, out-of-order deferred-prune repeat
+            return auto_migrate_boot.BootMigrationResult("applied", messages=[])
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
+
+        events = []
+        boot_flow.run_migration(progress_cb=events.append)
+        phases = [e.phase for e in events]
+        percents = [e.percent_overall for e in events]
+        assert phases == sorted(phases)  # never decreases across the whole stream
+        assert percents == sorted(percents)  # ditto for percent_overall
+        assert phases[-1] >= 4  # the late phase-2 notify never dragged it back down
+
+    def test_a_real_done_past_the_plans_own_total_grows_the_total_instead_of_clamping(
+        self, monkeypatch
+    ):
+        """#504/#574 R8-M4: `archive-v1-legacy` genuinely processing more
+        top-level entries than `plan.archive_items` estimated (a real
+        plan/runtime mismatch, distinct from the round12-item-2 double-
+        notify a dedup already handles) used to be silently clamped down
+        to the plan's own total, permanently sticking the counter at
+        100% instead of surfacing the gap. The total must grow to match
+        what actually ran, and the mismatch must be noted in `log_detail`."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        (data_home / "legacyfile.json").write_text("legacy", encoding="utf-8")  # plan sees 1
+
+        def fake_run_boot_stage(
+            *, progress_cb=None, on_entry=None, on_file_progress=None, on_step=None
+        ):
+            on_entry("archive-v1-legacy", "legacyfile.json")
+            on_entry("archive-v1-legacy", "another-leftover.json")  # 2nd distinct name > plan's 1
+            return auto_migrate_boot.BootMigrationResult("applied", messages=[])
+
+        monkeypatch.setattr(auto_migrate_boot, "run_boot_stage", fake_run_boot_stage)
+
+        events = []
+        boot_flow.run_migration(progress_cb=events.append)
+        phase4 = [e for e in events if e.phase == 4 and e.log_operation == "archive-v1-legacy"]
+        assert [e.done for e in phase4] == [1, 2]
+        # total grew to match the 2nd, real event instead of clamping it to 1
+        assert phase4[1].total == 2
+        assert "undercounted" in phase4[1].log_detail
+
+    def test_the_opening_and_closing_info_events_carry_log_detail(self, monkeypatch):
+        """#504/#574 R4-H2: the interface contract (docs/v2/574-boot-flow-
+        interface.md "log structure") requires `log_detail` to carry the
+        full message text for every "info"/"validate" event — the two
+        events that bracket the whole migration used to leave it empty, so
+        a window reading the structured fields (never re-parsing
+        `log_line`) rendered only "HH:MM:SS  info" with the message lost."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "run_boot_stage",
+            lambda *a, **k: auto_migrate_boot.BootMigrationResult("applied", messages=[]),
+        )
+        events = []
+        boot_flow.run_migration(progress_cb=events.append)
+        info_events = [e for e in events if e.log_operation == "info"]
+        assert len(info_events) == 2  # opening (phase 1) + closing (phase 5)
+        assert all(e.log_line and e.log_detail == e.log_line for e in info_events)
+
+    def test_entry_counter_unit_stays_constant_within_a_phase(self, monkeypatch):
+        """#504/#574 R4-H1 (supersedes round12 item 6/R3-M4): `unit` used to
+        be derived from the CURRENT entry's own name (`_entry_unit`) even
+        though `done`/`total` count TOP-LEVEL ENTRIES, not that entry's
+        content-type — one row's noun flipped mid-phase as different-typed
+        entries streamed through ("1/4 ไฟล์" -> "2/4 โปรเจค") with no change
+        in what the number itself meant. `unit` must describe `done`/
+        `total` themselves: always "รายการ" for the entry-level counter
+        (phase 1/2/4, both `on_entry` and `on_file_progress`), matching the
+        mockup's own wording (V9). Phase 3's `on_step` counter still uses
+        its own distinct "ขั้น" (a step count, never entry-typed)."""
         import agent_takkub.core.storage.layout as layout_mod
         from agent_takkub import auto_migrate_boot
 
@@ -556,6 +672,7 @@ class TestRunMigrationOutcome:
         ):
             on_entry("promote-v2-root", "projects")
             on_entry("promote-v2-root", "models")
+            on_file_progress("promote-v2-root", "models", 1, 2, "registry.json")
             on_step("readonly-registries", "start")
             return auto_migrate_boot.BootMigrationResult("applied", messages=[])
 
@@ -563,10 +680,9 @@ class TestRunMigrationOutcome:
 
         events = []
         boot_flow.run_migration(progress_cb=events.append)
-        projects_events = [e for e in events if e.current_path == "projects"]
-        assert projects_events and all(e.unit == "โปรเจค" for e in projects_events)
-        models_events = [e for e in events if e.current_path == "models"]
-        assert models_events and all(e.unit == "ไฟล์" for e in models_events)
+        entry_counter_events = [e for e in events if e.log_operation == "promote-v2-root"]
+        assert len(entry_counter_events) == 3  # 2 on_entry + 1 on_file_progress
+        assert all(e.unit == "รายการ" for e in entry_counter_events)
         phase3_events = [e for e in events if e.phase == 3]
         assert phase3_events and all(e.unit == "ขั้น" for e in phase3_events)
 

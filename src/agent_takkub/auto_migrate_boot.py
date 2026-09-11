@@ -459,6 +459,16 @@ def _run_apply_pending(
         _report("ไม่มี step ที่ต้องรัน")
         return BootMigrationResult("pending_applied", messages=messages)
 
+    # #504/#574 R8-M2: `apply_pending()` has no whole-ladder `validate()`
+    # pass the way the "v1" first-apply branch below does, so
+    # `validate_reports` used to stay permanently empty here —
+    # `MigrationOutcome.validated_steps` read 0 on every promoted machine
+    # even while `boot_flow.py`'s phase-3 UI claimed each domain step had
+    # been validated. Real validate() for just the steps THIS pass applied
+    # successfully — never truncated by an unrelated step elsewhere in the
+    # ladder, and never claiming a step that FAILED apply was validated.
+    validate_reports = engine.validate_ok_steps(r.step_id for r in reports if r.ok)
+
     stale = [r for r in reports if not r.ok and r.step_id in applied_before]
     new_failures = [r for r in reports if not r.ok and r.step_id not in applied_before]
 
@@ -524,10 +534,13 @@ def _run_apply_pending(
             "; ".join(f"{r.step_id}: {r.summary}" for r in new_failures),
             messages,
             reports=reports,
+            validate_reports=validate_reports,
         )
 
     _report("pending step(s) apply สำเร็จ")
-    return BootMigrationResult("pending_applied", messages=messages, reports=reports)
+    return BootMigrationResult(
+        "pending_applied", messages=messages, reports=reports, validate_reports=validate_reports
+    )
 
 
 def run_boot_stage(

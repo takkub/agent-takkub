@@ -47,6 +47,7 @@ from .steps_v1 import (
 _ARCHIVE_V1_STEP_ID = "archive-v1-legacy"
 _PROMOTE_V2_ROOT_STEP_ID = "promote-v2-root"
 _VERSION_MARKER_STEP_ID = "version-marker"
+_PRE_MIGRATE_BACKUP_STEP_ID = "pre-migrate-backup"
 
 
 def _remove_if_empty_dir(path: Path) -> None:
@@ -222,9 +223,11 @@ class MigrationEngine:
             self._steps = [
                 # #574: first, ahead of even version-marker — a failed
                 # backup must abort the whole ladder before anything else
-                # is touched, and `apply()`/`apply_pending()` already stop
-                # at the first non-ok step, so ladder POSITION alone gives
-                # that guarantee for free.
+                # is touched. `apply()` already stops at the first non-ok
+                # step from ladder POSITION alone; `apply_pending()` does
+                # NOT (its own "No stop-the-line" contract, #504/#574
+                # R8-H1) — see its own explicit `_PRE_MIGRATE_BACKUP_STEP_ID`
+                # check below for the guarantee on THAT path.
                 PreMigrateBackupStep(
                     journal=journal,
                     backups=backups,
@@ -401,6 +404,17 @@ class MigrationEngine:
             self._notify_step(step_id, "done")
             steps_run.append(s)
             reports.append(r)
+            if step_id == _PRE_MIGRATE_BACKUP_STEP_ID and not r.ok:
+                # #504/#574 R8-H1: a failed `pre-migrate-backup` must abort
+                # the whole ladder before anything else is touched — true
+                # for free on `apply()` (ladder position 0 + its own
+                # stop-the-line), but `apply_pending()` has no stop-the-line
+                # of its own by design (see this method's docstring) and
+                # would otherwise walk every remaining step, mutating
+                # `data_home` with no usable pre-migrate backup in
+                # existence. This is the one explicit exception, mirroring
+                # `_PROMOTE_V2_ROOT_STEP_ID`'s own below.
+                break
             if step_id == _PROMOTE_V2_ROOT_STEP_ID:
                 promote_idx = len(steps_run) - 1
                 if not r.ok:
@@ -600,40 +614,66 @@ class MigrationEngine:
         v1_retired = archive_step is not None and archive_step.validate().ok
         reports: list[StepReport] = []
         for s in self._steps:
-            step_id = getattr(s, "step_id", "")
-            if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
-                # #504 R2-H9 `domain_integrity`: "nothing left to cross-check
-                # against" used to be an unconditional True — corrupting or
-                # deleting the V2 target itself (`projects/registry.json`
-                # turning into invalid JSON, say) still validated green
-                # forever. Check the target's own basic health instead of
-                # skipping straight to success.
-                problems = _domain_target_problems(_domain_target_specs(s))
-                if problems:
-                    reports.append(
-                        StepReport(
-                            step_id,
-                            "validate",
-                            False,
-                            f"V1 source archived (#504) but V2 target unhealthy: {problems[0]}",
-                            detail={"problems": problems},
-                        )
-                    )
-                    break
-                reports.append(
-                    StepReport(
-                        step_id,
-                        "validate",
-                        True,
-                        "V1 source archived (#504) — target present, readable, correctly shaped",
-                    )
-                )
-                continue
-            r = s.validate()
+            r = self._validate_one(s, v1_retired=v1_retired)
             reports.append(r)
             if not r.ok:
                 break
         return reports
+
+    def _validate_one(self, s: MigrationStep, *, v1_retired: bool) -> StepReport:
+        """One step's own `validate()`, v1-retired-aware — factored out of
+        `validate()` above so `validate_ok_steps()` below (#504/#574 R8-M2)
+        can reuse the exact same "V1 source archived" special case instead
+        of re-deriving it."""
+        step_id = getattr(s, "step_id", "")
+        if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+            # #504 R2-H9 `domain_integrity`: "nothing left to cross-check
+            # against" used to be an unconditional True — corrupting or
+            # deleting the V2 target itself (`projects/registry.json`
+            # turning into invalid JSON, say) still validated green
+            # forever. Check the target's own basic health instead of
+            # skipping straight to success.
+            problems = _domain_target_problems(_domain_target_specs(s))
+            if problems:
+                return StepReport(
+                    step_id,
+                    "validate",
+                    False,
+                    f"V1 source archived (#504) but V2 target unhealthy: {problems[0]}",
+                    detail={"problems": problems},
+                )
+            return StepReport(
+                step_id,
+                "validate",
+                True,
+                "V1 source archived (#504) — target present, readable, correctly shaped",
+            )
+        return s.validate()
+
+    def validate_ok_steps(self, step_ids: Iterable[str]) -> list[StepReport]:
+        """Real, v1_retired-aware `validate()` for just *step_ids* — #504/
+        #574 R8-M2: `apply_pending()` has no whole-ladder `validate()` pass
+        the way `apply()` does (its own per-step failure handling already
+        isolates one step from the rest, so a single stop-on-first-failure
+        walk would be wrong here), which used to leave
+        `MigrationOutcome.validated_steps` permanently 0 on every promoted
+        machine even though `boot_flow.py`'s phase-3 UI claimed each domain
+        step had been "ตรวจสอบแล้ว" (validated). A caller
+        (`auto_migrate_boot._run_apply_pending`) passes the step ids
+        `apply_pending()` just applied successfully, and gets back their
+        REAL validate() verdicts — never truncated by an unrelated step
+        elsewhere in the ladder, and always in ladder order regardless of
+        *step_ids*' own order."""
+        archive_step = next(
+            (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
+        )
+        v1_retired = archive_step is not None and archive_step.validate().ok
+        wanted = set(step_ids)
+        return [
+            self._validate_one(s, v1_retired=v1_retired)
+            for s in self._steps
+            if getattr(s, "step_id", "") in wanted
+        ]
 
     def rollback(self) -> list[StepReport]:
         reports: list[StepReport] = []

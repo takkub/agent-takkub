@@ -550,6 +550,26 @@ class TestApplyPending:
         assert reports[0].ok is False
         assert reports[1].ok is True
 
+    def test_pre_migrate_backup_failure_stops_the_pass_before_anything_else_runs(self, tmp_path):
+        """#504/#574 R8-H1: `apply_pending()`'s own "No stop-the-line"
+        contract (see the test right above) does NOT apply to
+        `pre-migrate-backup` — a failed backup must abort the whole ladder
+        before anything else is touched, matching `apply()`'s own free
+        stop-the-line for this step. Without this, the reviewed
+        `backup_failure_aborts_apply_pending` repro had the pass walk 12
+        more steps, overwriting `models/registry.json` and `runtime/core/
+        version.json` with no usable pre-migrate backup in existence."""
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("pre-migrate-backup", ok=False)
+        b = _FakeStep("version-marker", ok=True)
+        c = _FakeStep("readonly-registries", ok=True)
+        engine = MigrationEngine([a, b, c], data_home=tmp_path, journal=journal)
+        reports = engine.apply_pending()
+        assert [r.step_id for r in reports] == ["pre-migrate-backup"]
+        assert reports[0].ok is False
+        assert b.calls == []
+        assert c.calls == []
+
     def test_promote_v2_root_failure_stops_the_pass_before_archive_runs(self, tmp_path):
         """#504 B2 (acceptance review): `archive-v1-legacy` treats a
         non-empty legacy `v2/` as safe to remove the instant it exists — a
@@ -596,6 +616,56 @@ class TestApplyPending:
         assert [r.step_id for r in reports] == ["core-internal-store"]
         assert all(s.calls == ["validate"] for s in old_steps)
         assert new_step.calls == ["apply"]
+
+
+class TestValidateOkSteps:
+    """#504/#574 R8-M2: `apply_pending()` has no whole-ladder `validate()`
+    pass the way `apply()` does — `validate_ok_steps()` is what
+    `auto_migrate_boot._run_apply_pending` calls afterward for just the
+    step ids it applied successfully, so `MigrationOutcome.validated_steps`
+    stops being permanently 0 on every promoted machine."""
+
+    def test_returns_real_validate_reports_for_only_the_named_steps(self, tmp_path):
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("a", ok=True)
+        b = _FakeStep("b", ok=False)
+        c = _FakeStep("c", ok=True)
+        engine = MigrationEngine([a, b, c], data_home=tmp_path, journal=journal)
+
+        reports = engine.validate_ok_steps(["a", "c"])
+
+        assert [r.step_id for r in reports] == ["a", "c"]
+        assert all(r.ok for r in reports)
+        assert a.calls == ["validate"]
+        assert b.calls == []  # never asked — not in the requested set
+        assert c.calls == ["validate"]
+
+    def test_never_truncated_by_an_unrelated_steps_own_failure(self, tmp_path):
+        """Unlike the whole-ladder `validate()`, which stops at the first
+        `ok=False` report, this must keep going — a caller asking about
+        steps THIS pass applied successfully must not have that answer cut
+        short by some other, unrelated step failing its own validate()."""
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("a", ok=True)
+        broken = _FakeStep("broken", ok=False)
+        c = _FakeStep("c", ok=True)
+        engine = MigrationEngine([a, broken, c], data_home=tmp_path, journal=journal)
+
+        reports = engine.validate_ok_steps(["a", "c"])
+
+        assert [r.step_id for r in reports] == ["a", "c"]
+        assert all(r.ok for r in reports)
+        assert broken.calls == []
+
+    def test_ladder_order_regardless_of_requested_order(self, tmp_path):
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        a = _FakeStep("a", ok=True)
+        b = _FakeStep("b", ok=True)
+        engine = MigrationEngine([a, b], data_home=tmp_path, journal=journal)
+
+        reports = engine.validate_ok_steps(["b", "a"])
+
+        assert [r.step_id for r in reports] == ["a", "b"]
 
 
 class TestRollbackStep:

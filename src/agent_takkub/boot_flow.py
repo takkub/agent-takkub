@@ -403,18 +403,6 @@ _DOMAIN_STEP_IDS = frozenset(_LADDER_STEP_ORDER) - {
 }
 
 
-def _entry_unit(name: str | None) -> str:
-    """Unit word for one top-level entry's own done/total counter — mirrors
-    `_backup_item_row`'s per-name convention (#574 R3-M4: `emit()` used to
-    hardcode `unit="รายการ"` for every phase, so a promote/archive/backup
-    row never matched the plan table's own `"ไฟล์"`/`"โปรเจค"` wording)."""
-    if name == "projects":
-        return "โปรเจค"
-    if name == "runtime/core":
-        return "รายการ"
-    return "ไฟล์"
-
-
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
     phase: int
@@ -552,7 +540,10 @@ def run_migration(
     # clock/count per phase, never one running total since the whole
     # migration started (an early slow phase 1 must never poison phase 2's
     # own, unrelated rate).
-    state = {"phase": 0, "phase_started": started, "phase_events": 0}
+    state = {"phase": 0, "phase_started": started, "phase_events": 0, "max_phase": 0}
+    # #504/#574 R8-M1: the running high-water percent — `percent_overall`
+    # must never decrease (see `emit()`'s own clamp below).
+    max_percent = 0.0
 
     def emit(
         phase: int,
@@ -567,8 +558,17 @@ def run_migration(
         operation: str | None = None,
         detail: str = "",
     ) -> None:
+        nonlocal grand_total, max_percent
         if progress_cb is None:
             return
+        # #504/#574 R8-M1: hold to the highest phase ever reached — a late
+        # notify for an earlier-phase step (`promote-v2-root`'s deferred
+        # prune firing its own `on_entry` again AFTER `archive-v1-legacy`
+        # has already advanced the stream to phase 4) must never walk the
+        # reported phase backwards, and must never reset `phase_started`/
+        # `phase_events` for a phase this stream has already finished.
+        phase = max(phase, state["max_phase"])
+        state["max_phase"] = phase
         if state["phase"] != phase:
             state["phase"] = phase
             state["phase_started"] = time.monotonic()
@@ -580,16 +580,25 @@ def run_migration(
         # over a full apply — once from their own copy phase, once from
         # their deferred prune phase (`_copy_phase`/`_prune_phase` in
         # `promote_v1.py` both call the SAME bound `on_entry`) — while
-        # `totals[phase]` only ever counted entries once. A real prod
-        # rehearsal observed `done` climb to exactly 2x `total` by the end
-        # of each such phase (9->18, 27->54). `on_entry` below also dedupes
-        # by name so `done` climbs meaningfully instead of sticking at
-        # `total` for the whole prune half; this clamp is the second,
-        # unconditional guarantee — `done` (and therefore `percent_overall`)
-        # can never exceed `total`/100 even if some OTHER caller passes an
-        # inflated `done` by mistake.
-        if done is not None and total_for_phase:
-            done = min(done, total_for_phase)
+        # `totals[phase]` only ever counted entries once. `on_entry` below
+        # also dedupes by name so `done` climbs meaningfully instead of
+        # sticking at `total` for the whole prune half.
+        #
+        # #504/#574 R8-M4: a real `done` that STILL exceeds the plan's own
+        # estimate once past that dedup (`archive-v1-legacy` genuinely
+        # processing 4 entries against a planned 3, say) is a real plan/
+        # runtime mismatch, not a duplicate-notify artifact — silently
+        # clamping it down to `total_for_phase` hid that gap behind a
+        # counter permanently stuck at 100%. Grow the total to match reality
+        # instead (and note the mismatch in `log_detail`), never clamp it
+        # away quietly.
+        if done is not None and total_for_phase and done > total_for_phase:
+            mismatch = f"plan undercounted phase {phase}: {done} > {total_for_phase}"
+            detail = f"{detail}; {mismatch}" if detail else mismatch
+            if phase in totals:
+                grand_total += done - totals[phase]
+                totals[phase] = done
+            total_for_phase = done
         overall_done = 0
         for p in (1, 2, 4):
             if p < phase:
@@ -597,6 +606,13 @@ def run_migration(
             elif p == phase and done is not None:
                 overall_done += min(done, totals[p])
         percent = 100.0 if phase >= 5 else min(99.0, 100.0 * overall_done / grand_total)
+        # #504/#574 R8-M1: never let `percent_overall` decrease either — a
+        # late out-of-order event recomputed against the (now-clamped-
+        # forward) `phase` above can still land below what was already
+        # reported, since `done` for that stale call was never meant for
+        # this later phase's own totals.
+        percent = max(percent, max_percent)
+        max_percent = percent
         # #574 round12 item 4 (R3-M3): eta from the CURRENT phase's own
         # done/elapsed rate, once there's enough signal to trust it (>= 2s
         # of this phase, or >= 5 events in it) — before that, an early
@@ -664,7 +680,13 @@ def run_migration(
             total=totals[phase],
             log_line=f"{step_id}: {name}",
             current_path=name,
-            unit=_entry_unit(name),
+            # #504/#574 R4-H1: `unit` describes what `done`/`total`
+            # THEMSELVES count — top-level entries, always "รายการ" (the
+            # mockup's own wording, V9) — never the content-type of
+            # whichever entry currently happens to be streaming through,
+            # which flipped the noun mid-phase ("1/4 ไฟล์" -> "2/4 โปรเจค")
+            # with no change in what the number meant. `emit()`'s own
+            # default already is "รายการ"; left unset here on purpose.
             operation=step_id,
         )
 
@@ -693,7 +715,10 @@ def run_migration(
             current_path=f"{name}/{current_path}",
             files_done=files_done,
             files_total=files_total,
-            unit=_entry_unit(name),
+            # #504/#574 R4-H1: same "รายการ" default as `on_entry` above —
+            # `unit` still describes the entry-level `done`/`total`, not
+            # `files_done`/`files_total` (those have no unit field of
+            # their own; the window renders them as a bare fraction).
             operation=step_id,
             detail=f"{files_done}/{files_total}",
         )
@@ -719,7 +744,17 @@ def run_migration(
             return
         verify_total = plan.verify_steps or len(_LADDER_STEP_ORDER)
         done = position if kind == "done" else max(0, position - 1)
-        detail = "ตรวจสอบแล้ว" if kind == "done" else "กำลังตรวจสอบ"
+        # #504/#574 R8-M2: this fires around the step's own APPLY (engine's
+        # `on_step`, wired in `MigrationEngine.apply()`/`apply_pending()`
+        # loops around `_copy_only_apply`) — never around a real
+        # `validate()` call. Labeling it "ตรวจสอบแล้ว"/"กำลังตรวจสอบ"
+        # ("validated"/"validating") claimed a verification that, on the
+        # `apply_pending()` path, never ran at all (`validated_steps`
+        # stayed 0 the whole time) — worded here for what actually
+        # happened instead; `MigrationOutcome.validated_steps` (see
+        # `auto_migrate_boot._run_apply_pending`'s own
+        # `engine.validate_ok_steps()` call) is the real, truthful count.
+        detail = "ย้ายข้อมูลแล้ว" if kind == "done" else "กำลังย้ายข้อมูล"
         emit(
             3,
             done=done,
@@ -730,18 +765,22 @@ def run_migration(
             detail=detail,
         )
 
-    emit(1, done=0, total=totals[1], log_line="เริ่มย้ายข้อมูล", operation="info")
+    _start_msg = "เริ่มย้ายข้อมูล"
+    emit(1, done=0, total=totals[1], log_line=_start_msg, operation="info", detail=_start_msg)
     result = auto_migrate_boot.run_boot_stage(
         progress_cb=on_text,
         on_entry=on_entry,
         on_file_progress=on_file_progress,
         on_step=on_step,
     )
-    emit(
-        5,
-        log_line="เสร็จ" if result.action in ("applied", "pending_applied") else "จบการทำงาน",
-        operation="info",
-    )
+    # #504/#574 R4-H2: the interface contract (docs/v2/574-boot-flow-
+    # interface.md "log structure") requires `log_detail` to carry the
+    # full message text for every "info"/"validate" event — these two
+    # bracket the whole migration and used to leave it empty, so a window
+    # reading the structured fields (not re-parsing `log_line`) rendered
+    # only "HH:MM:SS  info" with the actual message lost.
+    _end_msg = "เสร็จ" if result.action in ("applied", "pending_applied") else "จบการทำงาน"
+    emit(5, log_line=_end_msg, operation="info", detail=_end_msg)
     return _outcome_from_result(result, plan, started, previous_version=previous_version)
 
 
