@@ -11,14 +11,16 @@ and instant — no real background thread, no timing races.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtCore import QThread
-from PyQt6.QtWidgets import QLabel
+from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtWidgets import QApplication, QLabel
 
 import agent_takkub.boot_flow_window as bfw
+from agent_takkub import cockpit_theme as theme
 from agent_takkub.core.models.version import ComponentVersion
 
 
@@ -333,32 +335,41 @@ class TestLabelsInsideCardsAreBorderless:
             assert "background: transparent" in label.styleSheet()
             assert "border: none" in label.styleSheet()
 
-    def test_kv_key_label_is_borderless_and_wraps_at_170(self) -> None:
+    def test_kv_key_label_is_borderless_and_wraps_at_150(self) -> None:
+        # #574 fix-loop round 3 (V4): mockup key column is 150px, not 170 —
+        # the old 170 pushed every info-box value 20px right of spec.
         key_label = bfw._kv_key_label("ถ้าต้องกลับเวอร์ชันเดิม", "Sans")
         assert "background: transparent" in key_label.styleSheet()
         assert "border: none" in key_label.styleSheet()
         assert key_label.wordWrap() is True
-        assert key_label.minimumWidth() == 170
-        assert key_label.maximumWidth() == 170
+        assert key_label.minimumWidth() == 150
+        assert key_label.maximumWidth() == 150
 
 
-class TestMigratingFooterWrapAndElide:
+class TestMigratingFooterWrap:
+    """#574 fix-loop round 3 (V11): the mockup has no ellipsis rule for the
+    backup-path footer note — it wraps instead, so the full path (including
+    the `สำรองไว้ที่` prefix) stays visible rather than losing its head to
+    a fixed-width left-elide."""
+
     def test_warning_label_wraps_within_a_fixed_width(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan())
         w = bfw.BootFlowWindow(flow=flow)
         assert w._migrate_warn_label.wordWrap() is True
         assert w._migrate_warn_label.maximumWidth() == 340
 
-    def test_backup_path_elides_from_the_left_and_keeps_full_text_as_tooltip(self) -> None:
+    def test_backup_path_is_shown_in_full_not_elided(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan())
         w = bfw.BootFlowWindow(flow=flow)
         full_text = "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832-some-very-long-directory-suffix/"
         w._set_footer_right_elided(full_text)
-        shown = w._migrate_footer_right.text()
-        assert shown != full_text
-        assert "…" in shown
-        assert shown.endswith("suffix/")
-        assert w._migrate_footer_right.toolTip() == full_text
+        assert w._migrate_footer_right.text() == full_text
+        assert "…" not in w._migrate_footer_right.text()
+
+    def test_footer_right_label_wraps_rather_than_clips(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        assert w._migrate_footer_right.wordWrap() is True
 
     def test_short_backup_path_is_shown_in_full(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan())
@@ -460,15 +471,17 @@ class TestOptionalBackendFields:
     documented yet, so every real `_outcome()` today omits them; both must
     stay fully optional (`getattr(..., None)`), never required."""
 
-    def test_validated_steps_row_shown_when_present(self) -> None:
+    def test_validated_steps_shown_in_heading_not_a_fourth_row(self) -> None:
+        # #574 fix-loop round 3 (V12): mockup heading is
+        # "ตรวจสอบครบ 11 ขั้น — ..." — the count folds into the heading
+        # itself, it does NOT add a 4th summary row.
         outcome = _outcome(validated_steps=11)
         flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
         w = bfw.BootFlowWindow(flow=flow)
         w.start()
         w._premigrate_start_btn.click()
-        assert w._done_summary_lay.count() == 4
-        texts = [lbl.text() for lbl in w._done_summary_box.findChildren(QLabel)]
-        assert any("11 ขั้น" in t for t in texts)
+        assert w._done_summary_lay.count() == 3
+        assert w._done_heading.text() == "ตรวจสอบครบ 11 ขั้น — ไม่มีข้อมูลหาย"
 
     def test_validated_steps_row_absent_by_default(self) -> None:
         flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
@@ -476,6 +489,7 @@ class TestOptionalBackendFields:
         w.start()
         w._premigrate_start_btn.click()
         assert w._done_summary_lay.count() == 3
+        assert w._done_heading.text() == "ตรวจสอบครบทุกขั้น — ไม่มีข้อมูลหาย"
 
     def test_failed_heading_includes_phase_number_and_step_progress_when_present(self) -> None:
         outcome = _outcome(
@@ -499,3 +513,356 @@ class TestOptionalBackendFields:
         w.start()
         w._premigrate_start_btn.click()
         assert w._failed_heading.text() == "ขั้นตอน ตรวจสอบ ไม่ผ่าน"
+
+
+class TestPixelSizedFonts:
+    """#574 fix-loop round 3 (V1): `_font()` must use CSS pixel sizes, not
+    Qt's point-size constructor overload — at 96 DPI the old `QFont(family,
+    size)` rendered ~33% larger than every mockup value it was handed."""
+
+    def test_font_pixel_size_matches_the_requested_value(self) -> None:
+        f = bfw._font("Sans", 16, 700)
+        assert f.pixelSize() == 16
+        assert f.pointSize() == -1  # pixel-size fonts report no point size
+
+    def test_phase_dot_number_uses_pixel_size(self) -> None:
+        dot = bfw._PhaseDot()
+        dot.set_state("active", "2")
+        # paintEvent builds its own QFont from self.font(); exercise the
+        # same construction path without requiring an actual paint.
+        font = dot.font()
+        font.setPixelSize(11)
+        assert font.pixelSize() == 11
+
+
+class TestAggregateTrackAlwaysVisible:
+    """#574 fix-loop round 3 (V2/V3): the 4px aggregate track shows on every
+    page, empty or filled — round 2 hid it entirely whenever `percent` was
+    `None` (pages A/B) and never re-showed it on the real B->C transition."""
+
+    def test_visible_on_page_a(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN
+        assert w._agg_bar.isVisibleTo(w) is True
+
+    def test_visible_on_page_b(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._stack.currentIndex() == bfw.PAGE_PREMIGRATE
+        assert w._agg_bar.isVisibleTo(w) is True
+
+
+class TestMigratingHeaderSubtitle:
+    """#574 fix-loop round 3 (V3): the migrating page's own subtitle
+    ("...— ขั้นตอน N จาก 5") must replace page B's leftover subtitle and
+    advance with the active phase — round 2 only ever changed the stack
+    index, never the header."""
+
+    def test_initial_subtitle_shows_step_one_of_five(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No-op the worker so the (synchronously-completing) fake flow can't
+        # race this assertion by finishing before we read the subtitle.
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            assert "ขั้นตอน 1 จาก 5" in w._subtitle_label.text()
+            assert w._agg_bar.isVisibleTo(w) is True
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_subtitle_advances_with_the_active_phase(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="promote", percent_overall=34))
+            w._apply_pending_event()
+            assert "ขั้นตอน 2 จาก 5" in w._subtitle_label.text()
+            assert w._agg_bar.value() == 34
+        finally:
+            w._migrate_throttle.stop()
+
+
+class TestKeyColumnMatchesMockup:
+    """#574 fix-loop round 3 (V4): key column is 150px, not 170 — the old
+    width pushed every info-box value 20px right of the mockup's x=196."""
+
+    def test_kv_row_key_label_is_150_wide(self) -> None:
+        row = bfw._kv_row("key", "value", "Sans")
+        key_label = row.findChildren(QLabel)[0]
+        assert key_label.minimumWidth() == 150
+
+
+class TestBackupRowUnits:
+    """#574 fix-loop round 3 (V6): each backup category has its own unit
+    word (ไฟล์/โปรเจค/รายการ) — round 2 hardcoded "รายการ" for every row."""
+
+    def test_unit_comes_from_the_third_tuple_element(self) -> None:
+        plan = _plan(
+            backup_items=[
+                ("v2/ (ข้อมูลระบบ V2)", 15747, "ไฟล์"),
+                ("โปรเจค", 29, "โปรเจค"),
+                ("ตั้งค่า (json ชั้นบน)", 15, "ไฟล์"),
+                ("runtime/core (ประวัติ, cursor)", 4, "รายการ"),
+            ]
+        )
+        flow = _FakeFlow(items=[], plan=plan)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        texts = {lbl.text() for lbl in w._backup_card.findChildren(QLabel)}
+        assert {"15,747 ไฟล์", "29 โปรเจค", "15 ไฟล์", "4 รายการ"} <= texts
+
+    def test_two_tuple_entries_fall_back_to_the_generic_unit(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())  # default fixture: 2-tuples
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        texts = {lbl.text() for lbl in w._backup_card.findChildren(QLabel)}
+        assert "15,747 รายการ" in texts
+
+
+class TestPremigrateNoteRichText:
+    """#574 fix-loop round 3 (V7): "คัดลอกก่อนเสมอ" must render bold and
+    `TEXT_PRIMARY` inside the otherwise-muted explanatory note."""
+
+    def test_note_bolds_the_copy_first_phrase(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        note = next(
+            lbl for lbl in w._page_premigrate.findChildren(QLabel) if "คัดลอกก่อนเสมอ" in lbl.text()
+        )
+        assert "<b" in note.text()
+        assert theme.TEXT_PRIMARY in note.text()
+        assert "background: transparent" in note.styleSheet()
+        assert "border: none" in note.styleSheet()
+
+
+class TestFuturePhaseDotNumbers:
+    """#574 fix-loop round 3 (V8): not-yet-reached phase dots show their
+    position number (3/4/5) — `_PhaseDot.set_state` cleared it by default
+    and callers never passed one for the "todo" state."""
+
+    def test_todo_dots_show_their_position_number(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._phase_rows["verify"]._number == "3"
+        assert w._phase_rows["archive"]._number == "4"
+        assert w._phase_rows["done"]._number == "5"
+
+
+class TestVerifyStepsCount:
+    """#574 fix-loop round 3 (V9): the verify row's count is the true
+    validation-step count (`plan.verify_steps`), a different number from
+    `len(plan.promote_items)` (9 promoted categories vs. 11 validation
+    steps in the mockup) — round 2 conflated the two."""
+
+    def test_verify_count_uses_the_verify_steps_field(self) -> None:
+        plan = _plan(promote_items=list(range(9)), verify_steps=11)
+        flow = _FakeFlow(items=[], plan=plan, outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._phase_count_labels["verify"].text() == "11 ขั้น"
+
+    def test_verify_count_falls_back_to_promote_item_count(self) -> None:
+        plan = _plan(promote_items=list(range(9)))
+        flow = _FakeFlow(items=[], plan=plan, outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._phase_count_labels["verify"].text() == "9 ขั้น"
+
+
+class TestActiveCounterPathAndColor:
+    """#574 fix-loop round 3 (V9): the active row's counter appends a
+    shortened current-item path and turns `TEXT_PRIMARY` — round 2 only
+    ever rendered "done / total unit" in a permanently-`TEXT_FAINT` label."""
+
+    def test_active_row_shows_current_path_in_primary_color(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="promote",
+                    done=3,
+                    total=9,
+                    unit="รายการ",
+                    percent_overall=34,
+                    current_path="providers/codex/default",
+                )
+            )
+            w._apply_pending_event()
+            label = w._phase_count_labels["promote"]
+            assert label.text() == "3 / 9 รายการ · providers/…"
+            assert theme.TEXT_PRIMARY in label.styleSheet()
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_todo_row_counter_stays_faint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="backup", percent_overall=10))
+            w._apply_pending_event()
+            assert theme.TEXT_FAINT in w._phase_count_labels["verify"].styleSheet()
+        finally:
+            w._migrate_throttle.stop()
+
+
+class TestShortenCurrentPath:
+    def test_truncates_to_first_segment(self) -> None:
+        assert bfw._shorten_current_path("providers/codex/default") == "providers/…"
+
+    def test_leaves_a_single_segment_untouched(self) -> None:
+        assert bfw._shorten_current_path("providers") == "providers"
+
+
+class TestParseLogLine:
+    def test_splits_four_double_space_separated_parts(self) -> None:
+        ts, op, path, detail = bfw._parse_log_line(
+            "08:31:12  promote  providers/codex/default  คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง"
+        )
+        assert ts == "08:31:12"
+        assert op == "promote"
+        assert path == "providers/codex/default"
+        assert detail == "คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง"
+
+    def test_degrades_gracefully_on_a_short_line(self) -> None:
+        ts, op, path, detail = bfw._parse_log_line("just one part")
+        assert ts == "just one part"
+        assert (op, path, detail) == ("", "", "")
+
+
+class TestMigratingLogColors:
+    """#574 fix-loop round 3 (V10): the log line's timestamp/operation/path/
+    detail each get their own mockup color — round 2 rendered the whole
+    composed string as one uniformly `TEXT_MUTED` label."""
+
+    def test_log_line_colors_each_segment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="promote",
+                    log_line="08:31:12  promote  providers/codex/default  คัดลอก 1,204 ไฟล์",
+                )
+            )
+            w._apply_pending_event()
+            html_text = w._log_box.text()
+            assert theme.TEXT_FAINT in html_text
+            assert theme.TEXT_MUTED in html_text
+            assert theme.TEXT_PRIMARY in html_text
+            assert "08:31:12" in html_text
+            assert "providers/codex/default" in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+
+class TestDoneHeadingAndRestoreCommand:
+    """#574 fix-loop round 3 (V12/V13): the count folds into the heading
+    text itself (not a 4th summary row), and the restore command keeps its
+    mono font inline within an otherwise-muted sentence."""
+
+    def test_restore_command_keeps_mono_font_inline(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        texts = [lbl.text() for lbl in w._done_paths_box.findChildren(QLabel)]
+        restore_text = next(t for t in texts if "restore-v1" in t)
+        assert w._mono in restore_text
+        assert "font-family" in restore_text
+
+
+class TestDoneFooterHintRichText:
+    """#574 fix-loop round 3 (V14): "Settings → Storage" is `TEXT_MUTED`
+    inside an otherwise `TEXT_FAINT` hint — round 2 rendered the whole
+    sentence in one uniform faint tone."""
+
+    def test_settings_path_span_is_muted(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        hint = next(lbl for lbl in w._page_done.findChildren(QLabel) if "Settings" in lbl.text())
+        assert theme.TEXT_MUTED in hint.text()
+        assert "background: transparent" in hint.styleSheet()
+
+
+class TestEscapeGuardDuringRealMigration:
+    """#574 fix-loop round 3, B1: `reject()` (QDialog's Escape-key path) must
+    be guarded the same as `closeEvent` (the window-chrome close path) — a
+    real QThread is required to prove it, since every other test in this
+    file relies on the module's synchronous `QThread.start` patch, which
+    can't represent "worker still running" at all."""
+
+    def test_escape_is_swallowed_while_a_real_worker_is_migrating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        from PyQt6.QtTest import QTest
+
+        # Removes the autouse fixture's synchronous shadow so QThread.start
+        # resolves back to the real (C++) implementation for this test only.
+        monkeypatch.delattr(QThread, "start", raising=False)
+        app = QApplication.instance()
+        assert app is not None
+
+        release = threading.Event()
+        flow = _FakeFlow(items=[], plan=_plan())
+        flow.run_migration = lambda cb: (release.wait(5), _outcome())[1]
+        w = bfw.BootFlowWindow(flow=flow)
+        try:
+            w.show()
+            w._on_plan_ready(_plan())
+            app.processEvents()
+            w._on_premigrate_start_clicked()
+
+            deadline = time.monotonic() + 3
+            while not any(t.isRunning() for t in w._workers) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.001)
+            assert any(t.isRunning() for t in w._workers), "worker never started"
+
+            finished: list[bool] = []
+            w.flowFinished.connect(finished.append)
+            QTest.keyClick(w, Qt.Key.Key_Escape)
+            app.processEvents()
+
+            assert w.isVisible() is True
+            assert finished == []
+            assert any(t.isRunning() for t in w._workers)
+        finally:
+            release.set()
+            deadline = time.monotonic() + 3
+            while any(t.isRunning() for t in w._workers) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.001)
+            for worker in w._workers:
+                worker.wait(3000)
+            app.processEvents()  # flush the queued resultReady -> stops _migrate_throttle
+            w.close()
+            app.processEvents()
