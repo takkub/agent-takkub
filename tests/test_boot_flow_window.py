@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,8 @@ from PyQt6.QtWidgets import QApplication, QLabel
 
 import agent_takkub.boot_flow_window as bfw
 from agent_takkub import cockpit_theme as theme
+from agent_takkub import config
+from agent_takkub.boot_flow import MigrationOutcome, MigrationPlanSummary, ProgressEvent
 from agent_takkub.core.models.version import ComponentVersion
 
 
@@ -866,3 +869,243 @@ class TestEscapeGuardDuringRealMigration:
             app.processEvents()  # flush the queued resultReady -> stops _migrate_throttle
             w.close()
             app.processEvents()
+
+
+class TestRealBackendDataclasses:
+    """#574 fix-loop round 4 — built from the *actual* `boot_flow.py`
+    dataclasses, not the `SimpleNamespace`/plain-tuple stand-ins the rest
+    of this file uses. A round-2 real-contract audit found crashes and
+    behavior regressions those stand-ins could never catch: `Path` fields
+    (`backup_dir`/`archive_dir`/`log_paths`) where a bare `str` was
+    assumed, and `int` phase/`failed_phase` values where a string phase
+    key ("promote"/"verify") was assumed."""
+
+    @staticmethod
+    def _real_plan(tmp_path) -> MigrationPlanSummary:
+        return MigrationPlanSummary(
+            backup_items=[
+                ("v2/ (ข้อมูลระบบ V2)", 15747, 1_200_000_000, "ไฟล์"),
+                ("โปรเจค", 29, 29_000_000, "โปรเจค"),
+            ],
+            estimated_bytes=1.2e9,
+            free_bytes=123e9,
+            backup_dir=tmp_path / "backups" / "pre-migrate-test",
+            promote_items=["a", "b"],
+            archive_items=list(range(27)),
+            junk_items=[],
+        )
+
+    @staticmethod
+    def _real_outcome(tmp_path, **overrides) -> MigrationOutcome:
+        base = dict(
+            ok=True,
+            duration_s=192.0,
+            promoted=["accounts", "projects"],
+            archived=list(range(27)),
+            junk_deleted=3,
+            projects_count=29,
+            backup_dir=tmp_path / "backups" / "pre-migrate-test",
+            archive_dir=tmp_path / "backups" / "v1-archive-test",
+            failed_phase=None,
+            failed_step=None,
+            error=None,
+            rolled_back=False,
+            data_intact=True,
+            log_paths=[tmp_path / "runtime" / "boot.log"],
+        )
+        base.update(overrides)
+        return MigrationOutcome(**base)
+
+    def test_premigrate_page_renders_with_path_backup_dir_and_4tuple_rows(self, tmp_path) -> None:
+        flow = _FakeFlow(items=[], plan=self._real_plan(tmp_path))
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()  # must not raise — round-2 audit: aborted the whole process here
+        assert w._stack.currentIndex() == bfw.PAGE_PREMIGRATE
+        texts = {lbl.text() for lbl in w._backup_card.findChildren(QLabel)}
+        # 4-tuple (label, count, bytes, unit): unit must come from index 3,
+        # not the byte count at index 2 (round-4 V6 bug).
+        assert any(t.startswith("15,747 ไฟล์") for t in texts)
+        info_texts = [lbl.text() for lbl in w._backup_info_box.findChildren(QLabel)]
+        assert any("pre-migrate-test" in t for t in info_texts)
+
+    def test_done_page_renders_with_path_backup_and_archive_dirs(self, tmp_path) -> None:
+        flow = _FakeFlow(
+            items=[], plan=self._real_plan(tmp_path), outcome=self._real_outcome(tmp_path)
+        )
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()  # must not raise
+        assert w._stack.currentIndex() == bfw.PAGE_DONE
+        texts = [lbl.text() for lbl in w._done_paths_box.findChildren(QLabel)]
+        assert any("pre-migrate-test" in t for t in texts)
+        assert any("v1-archive-test" in t for t in texts)
+
+    def test_failed_page_renders_with_integer_phase_and_path_log_list(self, tmp_path) -> None:
+        outcome = self._real_outcome(
+            tmp_path,
+            ok=False,
+            failed_phase=3,
+            failed_step="validate:projects/registry.json",
+            failed_step_index=7,
+            failed_step_total=11,
+            rolled_back=True,
+            error="checksum mismatch",
+        )
+        flow = _FakeFlow(items=[], plan=self._real_plan(tmp_path), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()  # must not raise on list[Path] log_paths join
+        assert w._stack.currentIndex() == bfw.PAGE_FAILED
+        assert w._failed_heading.text() == "ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน"
+        info_texts = [lbl.text() for lbl in w._failed_info_box.findChildren(QLabel)]
+        assert any("boot.log" in t for t in info_texts)
+
+    def test_repeated_integer_phase_event_stays_on_the_same_row(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=self._real_plan(tmp_path))
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = self._real_plan(tmp_path)
+        try:
+            w._start_migration()
+            first = ProgressEvent(
+                phase=2,
+                phase_label="คัดลอกขึ้นโครงใหม่",
+                phases_total=5,
+                done=1,
+                total=9,
+                unit="รายการ",
+                percent_overall=20.0,
+                eta_s=None,
+                log_line="promote-v2-root: providers/claude/default",
+                backup_dir=None,
+            )
+            w._on_progress(first)
+            w._apply_pending_event()
+            assert w._phase_rows["promote"]._kind == "active"
+            second = ProgressEvent(
+                phase=2,
+                phase_label="คัดลอกขึ้นโครงใหม่",
+                phases_total=5,
+                done=4,
+                total=9,
+                unit="รายการ",
+                percent_overall=40.0,
+                eta_s=None,
+                log_line="promote-v2-root: providers/codex/default",
+                backup_dir=None,
+            )
+            w._on_progress(second)
+            w._apply_pending_event()
+            # Round-4 bug: a 2nd event for the SAME int phase used to fall
+            # through to "next never-seen slot" and silently advance to verify.
+            assert w._phase_rows["promote"]._kind == "active"
+            assert w._phase_rows["verify"]._kind == "todo"
+            assert "ขั้นตอน 2 จาก 5" in w._subtitle_label.text()
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_real_step_colon_log_line_colors_operation_and_path_separately(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=self._real_plan(tmp_path))
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = self._real_plan(tmp_path)
+        try:
+            w._start_migration()
+            event = ProgressEvent(
+                phase=2,
+                phase_label="คัดลอกขึ้นโครงใหม่",
+                phases_total=5,
+                done=1,
+                total=9,
+                unit="รายการ",
+                percent_overall=20.0,
+                eta_s=None,
+                log_line="promote-v2-root: providers/codex/default",
+                backup_dir=None,
+            )
+            w._on_progress(event)
+            w._apply_pending_event()
+            html_text = w._log_box.text()
+            assert "promote-v2-root" in html_text
+            assert "providers/codex/default" in html_text
+            assert theme.TEXT_MUTED in html_text
+            assert theme.TEXT_PRIMARY in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+
+class TestDoneGuardOnMigratingPage:
+    """#574 fix-loop round 4, B1 residual: the round-2 audit's direct
+    `w.done(0)` probe still dismissed the dialog and emitted
+    `flowFinished(True)` while a real worker was migrating — `reject()`/
+    `accept()`/`closeEvent` were already guarded, `done()` itself was not."""
+
+    def test_direct_done_call_is_swallowed_while_migrating(self) -> None:
+        flow = _FakeFlow(items=[], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        w._stack.setCurrentIndex(bfw.PAGE_MIGRATING)
+        finished: list[bool] = []
+        w.flowFinished.connect(finished.append)
+        w.done(0)
+        assert finished == []
+
+    def test_direct_done_call_still_works_outside_migrating_page(self) -> None:
+        flow = _FakeFlow(items=[], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        finished: list[bool] = []
+        w.flowFinished.connect(finished.append)
+        w.done(1)
+        assert finished == [True]
+
+
+class TestPathStrHelper:
+    def test_relative_to_data_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        p = tmp_path / "backups" / "pre-migrate-test"
+        assert bfw._path_str(p) == str(Path("backups") / "pre-migrate-test")
+
+    def test_outside_data_home_falls_back_to_absolute(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "elsewhere")
+        p = tmp_path / "backups"
+        assert bfw._path_str(p) == str(p)
+
+    def test_none_and_empty_string(self) -> None:
+        assert bfw._path_str(None) == ""
+        assert bfw._path_str("") == ""
+
+    def test_plain_string_passthrough(self) -> None:
+        assert bfw._path_str("backups/pre-migrate-test/") == "backups/pre-migrate-test/"
+
+
+class TestUnpackBackupRow:
+    def test_four_tuple_uses_index_3_as_unit(self) -> None:
+        label, count, size_bytes, unit = bfw._unpack_backup_row(
+            ("v2/", 15747, 1_200_000_000, "ไฟล์")
+        )
+        assert (label, count, size_bytes, unit) == ("v2/", 15747, 1_200_000_000, "ไฟล์")
+
+    def test_three_tuple_has_no_size(self) -> None:
+        assert bfw._unpack_backup_row(("v2/", 15747, "ไฟล์")) == ("v2/", 15747, None, "ไฟล์")
+
+    def test_two_tuple_falls_back_to_generic_unit(self) -> None:
+        assert bfw._unpack_backup_row(("v2/", 15747)) == ("v2/", 15747, None, "รายการ")
+
+
+class TestPhaseLabelAndNumber:
+    def test_integer_phase_resolves_label_and_number(self) -> None:
+        assert bfw._phase_label_and_number(3) == ("ตรวจสอบ", 3)
+
+    def test_string_phase_key_still_resolves(self) -> None:
+        assert bfw._phase_label_and_number("verify") == ("ตรวจสอบ", 3)
+
+    def test_out_of_range_integer_is_unknown(self) -> None:
+        assert bfw._phase_label_and_number(99) == ("ไม่ทราบขั้นตอน", None)
+
+    def test_none_is_unknown(self) -> None:
+        assert bfw._phase_label_and_number(None) == ("ไม่ทราบขั้นตอน", None)

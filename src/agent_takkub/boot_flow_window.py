@@ -35,9 +35,11 @@ the migrating page's active-row counter).
 from __future__ import annotations
 
 import html
+import logging
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, QPointF, Qt, QThread, QTimer, QUrl, pyqtSignal
@@ -55,6 +57,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme as theme
+
+_LOG = logging.getLogger(__name__)
 
 PAGE_MAIN = 0
 PAGE_PREMIGRATE = 1
@@ -249,21 +253,121 @@ def _shorten_current_path(path: str) -> str:
     return f"{head}/…" if sep and rest else path
 
 
-def _parse_log_line(text: str) -> tuple[str, str, str, str]:
-    """Splits a composed `log_line` string (`"08:31:12  promote  providers/
-    codex/default  คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง"`, double-space
-    separated — the shape #574's backend interface produces; there's no
-    structured per-field alternative yet, see module docstring) into the
-    mockup's 4 differently-colored runs: timestamp, operation, current
-    path, explanation. Pads with empty strings on a short/malformed line
-    rather than raising — a log line failing to parse should render as a
-    plain (if under-colored) line, never crash the migration page."""
-    parts = [p for p in text.strip().split("  ") if p]
-    timestamp = parts[0] if len(parts) > 0 else ""
-    operation = parts[1] if len(parts) > 1 else ""
-    path = parts[2] if len(parts) > 2 else ""
-    detail = "  ".join(parts[3:]) if len(parts) > 3 else ""
+def _parse_log_line(text: str, current_path: str | None = None) -> tuple[str, str, str, str]:
+    """Splits a `ProgressEvent.log_line` into the mockup's 4 differently-
+    colored runs: timestamp, operation, current path, explanation.
+
+    Two shapes reach here: the mockup's own double-space-separated 4-part
+    text (`"08:31:12  promote  providers/codex/default  คัดลอก 1,204
+    ไฟล์"`), and the *real* `boot_flow.py` backend's shape — `on_entry`
+    emits a bare `"<step_id>: <name>"` pair, no timestamp, no detail at
+    all (round 4 bug: the old parser only recognized the double-space
+    shape, so a real log line landed entirely, uncolored, in the FAINT
+    timestamp slot). `current_path` (from `ProgressEvent.current_path`,
+    once that field lands — see module docstring) always wins over
+    whatever path the text itself carries. Pads with empty strings on a
+    short/malformed line rather than raising."""
+    text = text.strip()
+    if not text:
+        return "", "", "", ""
+    double_space_parts = [p for p in text.split("  ") if p]
+    if len(double_space_parts) >= 3:
+        timestamp = double_space_parts[0]
+        operation = double_space_parts[1]
+        path = double_space_parts[2]
+        detail = "  ".join(double_space_parts[3:])
+    elif ":" in text:
+        operation, _sep, rest = text.partition(":")
+        timestamp, operation, path, detail = "", operation.strip(), rest.strip(), ""
+    else:
+        # Unstructured — degrade to the whole line in the timestamp slot
+        # rather than guessing at fields that aren't there.
+        timestamp, operation, path, detail = text, "", "", ""
+    if current_path:
+        path = str(current_path)
     return timestamp, operation, path, detail
+
+
+def _path_str(value: Any) -> str:
+    """`pathlib.Path` (or path-like) -> display string, relative to
+    `config.DATA_HOME` when the path lives under it (mockup shows short
+    paths, never a full absolute one) — `boot_flow.py`'s real dataclasses
+    carry `Path` for `backup_dir`/`archive_dir`/`log_paths`, but `QLabel`/
+    `str.join` both need a plain `str` (round 4 crash: passing a `Path`
+    straight through raised `TypeError` and took the whole boot process
+    down with it)."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, Path):
+        from . import config
+
+        try:
+            return str(value.relative_to(config.DATA_HOME))
+        except ValueError:
+            return str(value)
+    return str(value)
+
+
+def _clear_layout(layout: Any) -> None:
+    while layout.count():
+        child = layout.takeAt(0)
+        w = child.widget()
+        if w is not None:
+            w.deleteLater()
+
+
+def _unpack_backup_row(entry: Any) -> tuple[str, int, int | None, str]:
+    """`(label, count, size_bytes_or_None, unit)` from one `plan.
+    backup_items` entry. The real interface is a 4-tuple `(label, count,
+    bytes, unit)`; a 3-tuple `(label, count, unit)` (no byte total) and a
+    bare 2-tuple `(label, count)` (unit defaults to "รายการ") both still
+    work. Round 4 bug: reading a 4-tuple's index 2 (bytes) as the unit
+    string rendered the byte count itself as the unit word."""
+    if isinstance(entry, (list, tuple)):
+        if len(entry) >= 4:
+            return str(entry[0]), int(entry[1]), entry[2], str(entry[3])
+        if len(entry) == 3:
+            return str(entry[0]), int(entry[1]), None, str(entry[2])
+        if len(entry) == 2:
+            return str(entry[0]), int(entry[1]), None, "รายการ"
+    return str(entry), 0, None, "รายการ"
+
+
+def _phase_label_and_number(failed_phase: Any) -> tuple[str, int | None]:
+    """`(label, 1-based phase number)` for a `MigrationOutcome.
+    failed_phase` value — the real interface sends an `int` (`_phase_of_
+    step`'s 1..4 output); a string phase key (older/test fixtures, e.g.
+    "verify") still works too. Round 4 bug: `str(3).lower()` is `"3"`,
+    never a key in `_PHASE_ORDER`, so an int `failed_phase` always fell
+    through to "ไม่ทราบขั้นตอน" and lost the "(7/11)" step-position suffix
+    entirely."""
+    order = [k for k, _ in _PHASE_ORDER]
+    labels = dict(_PHASE_ORDER)
+    if isinstance(failed_phase, int):
+        if 1 <= failed_phase <= len(order):
+            key = order[failed_phase - 1]
+            return labels[key], failed_phase
+        return "ไม่ทราบขั้นตอน", None
+    key = str(failed_phase or "").lower()
+    if key in labels:
+        return labels[key], order.index(key) + 1
+    return (str(failed_phase) if failed_phase else "ไม่ทราบขั้นตอน"), None
+
+
+def _apply_line_height(label: QLabel, px_size: float, line_height: float = 1.45) -> None:
+    """Approximates the mockup's CSS `line-height: 1.45` for a native
+    QLabel — Qt sizes a plain label's height off font-metrics ascent +
+    descent alone, with no equivalent of a CSS line box's extra leading,
+    so a stack of these labels renders visibly tighter/shifted-up versus
+    the mockup (round 4 audit V1: 16px title should occupy a ~23px line
+    box; a bare QLabel measured ~20px, shifting every label below it up
+    and compounding down the whole header). `setMinimumHeight` (not
+    `setFixedHeight`) so a label that actually wraps to multiple lines
+    (long provider-update subtitles) still grows past this floor instead
+    of being clipped — only the common single-line case is pinned to the
+    exact target height, with Qt's default vertical-center alignment
+    distributing the extra space as leading above/below the text."""
+    label.setMinimumHeight(round(px_size * line_height))
 
 
 class _CheckSquare(QWidget):
@@ -651,9 +755,11 @@ class BootFlowWindow(QDialog):
         self._title_label = QLabel("Takkub Cockpit")
         self._title_label.setFont(_font(self._sans, 16, 700))
         self._title_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY_ALT};")
+        _apply_line_height(self._title_label, 16)
         self._subtitle_label = QLabel("")
         self._subtitle_label.setFont(_font(self._sans, 12))
         self._subtitle_label.setWordWrap(True)
+        _apply_line_height(self._subtitle_label, 12)
         header.addWidget(self._title_label)
         header.addWidget(self._subtitle_label)
         outer.addLayout(header)
@@ -701,6 +807,26 @@ class BootFlowWindow(QDialog):
         self._agg_bar.setVisible(True)
         if percent is not None:
             self._agg_bar.setValue(max(0, min(100, percent)))
+
+    def _render_safely(
+        self, label: str, render: Callable[[], None], fallback: Callable[[], None]
+    ) -> None:
+        """Runs *render* (one page's widget-population step, built off
+        fields read straight from the backend's `flow` object); on any
+        exception, logs it and falls back to *fallback* instead of letting
+        it propagate — every field this module reads off a backend object
+        is `getattr(..., default)`-defensive against a *missing* field
+        already, but a field that's present with an unexpected *type*
+        (round 4: `pathlib.Path` where a `str` was assumed) must still
+        never crash the whole boot wizard process."""
+        try:
+            render()
+        except Exception:
+            _LOG.exception("boot_flow_window: %s render failed", label)
+            try:
+                fallback()
+            except Exception:
+                _LOG.exception("boot_flow_window: %s fallback render also failed", label)
 
     # ── page A: provider updates ───────────────────────────────
     def _build_page_main(self) -> QWidget:
@@ -875,7 +1001,15 @@ class BootFlowWindow(QDialog):
         note_lay.setContentsMargins(0, 0, 0, 0)
         note_lay.setSpacing(8)
         note_icon = _InfoCircle(theme.TEXT_MUTED)
-        note_lay.addWidget(note_icon, 0, Qt.AlignmentFlag.AlignTop)
+        # Mockup: icon has its own `margin-top: 1px`, offset 1px below the
+        # note text's own top — a bare `AlignTop` on the icon lines it up
+        # flush with the label instead (round 4 audit V7).
+        note_icon_wrap = QWidget()
+        note_icon_wrap_lay = QVBoxLayout(note_icon_wrap)
+        note_icon_wrap_lay.setContentsMargins(0, 1, 0, 0)
+        note_icon_wrap_lay.setSpacing(0)
+        note_icon_wrap_lay.addWidget(note_icon)
+        note_lay.addWidget(note_icon_wrap, 0, Qt.AlignmentFlag.AlignTop)
         # RichText for the bold "คัดลอกก่อนเสมอ" mid-sentence run. Round-2
         # dropped this to plain text over a (never actually verified against
         # RichText) worry that the ancestor-`grab()` stray-box artifact
@@ -912,22 +1046,17 @@ class BootFlowWindow(QDialog):
         return page
 
     def _populate_premigrate(self, plan: Any) -> None:
-        while self._backup_card_lay.count():
-            child = self._backup_card_lay.takeAt(0)
-            w = child.widget()
-            if w is not None:
-                w.deleteLater()
+        self._render_safely(
+            "pre-migrate page",
+            lambda: self._populate_premigrate_unsafe(plan),
+            self._populate_premigrate_fallback,
+        )
+
+    def _populate_premigrate_unsafe(self, plan: Any) -> None:
+        _clear_layout(self._backup_card_lay)
         backup_items = list(getattr(plan, "backup_items", []) or [])
         for i, entry in enumerate(backup_items):
-            # `entry[2]` is the mockup's per-row unit (ไฟล์/โปรเจค/รายการ —
-            # not one blanket "รายการ" for every row); optional 3rd tuple
-            # element so older 2-tuple fixtures/backends still work.
-            if len(entry) >= 3:
-                label, count, unit = entry[0], entry[1], entry[2]
-            elif len(entry) == 2:
-                label, count, unit = entry[0], entry[1], "รายการ"
-            else:
-                label, count, unit = str(entry), 0, "รายการ"
+            label, count, size_bytes, unit = _unpack_backup_row(entry)
             row = QWidget()
             row_lay = QHBoxLayout(row)
             row_lay.setContentsMargins(14, 8, 14, 8)
@@ -940,7 +1069,11 @@ class BootFlowWindow(QDialog):
             )
             row_lay.addWidget(key_lbl)
             row_lay.addStretch(1)
-            val_lbl = QLabel(f"{count:,} {unit}")
+            value_text = f"{count:,} {unit}"
+            size_text = _fmt_gb(size_bytes)
+            if size_text:
+                value_text += f" · {size_text}"
+            val_lbl = QLabel(value_text)
             val_lbl.setFont(_font(self._mono, 12))
             val_lbl.setStyleSheet(
                 f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
@@ -948,12 +1081,8 @@ class BootFlowWindow(QDialog):
             row_lay.addWidget(val_lbl)
             self._backup_card_lay.addWidget(row)
 
-        while self._backup_info_lay.count():
-            child = self._backup_info_lay.takeAt(0)
-            w = child.widget()
-            if w is not None:
-                w.deleteLater()
-        backup_dir = getattr(plan, "backup_dir", "") or ""
+        _clear_layout(self._backup_info_lay)
+        backup_dir = _path_str(getattr(plan, "backup_dir", None))
         self._backup_info_lay.addWidget(_kv_row("ที่เก็บสำรอง", backup_dir, self._sans, mono=True))
         est = _fmt_gb(getattr(plan, "estimated_bytes", None))
         free = _fmt_gb(getattr(plan, "free_bytes", None))
@@ -967,6 +1096,18 @@ class BootFlowWindow(QDialog):
         self._backup_info_lay.addWidget(
             _kv_row_mixed(
                 "ย้อนกลับ", self._sans, ("ได้ทุกเมื่อ — ", False), ("takkub migrate restore-v1", True)
+            )
+        )
+
+    def _populate_premigrate_fallback(self) -> None:
+        _clear_layout(self._backup_card_lay)
+        _clear_layout(self._backup_info_lay)
+        self._backup_info_lay.addWidget(
+            _kv_row(
+                "สถานะ",
+                "ไม่สามารถแสดงรายละเอียดแผนย้ายข้อมูลได้ — ดู log",
+                self._sans,
+                color=theme.STATE_WARN,
             )
         )
 
@@ -1181,6 +1322,12 @@ class BootFlowWindow(QDialog):
         if event is None:
             return
         self._migrate_pending_event = None
+        try:
+            self._render_progress_event(event)
+        except Exception:
+            _LOG.exception("boot_flow_window: progress event render failed")
+
+    def _render_progress_event(self, event: Any) -> None:
         percent = getattr(event, "percent_overall", None)
         if percent is not None:
             self._last_percent = int(percent)
@@ -1189,11 +1336,26 @@ class BootFlowWindow(QDialog):
         eta = _fmt_eta(getattr(event, "eta_s", None))
         if eta:
             self._eta_label.setText(eta)
-        phase_key = str(getattr(event, "phase", "") or "").lower()
-        if phase_key not in self._phase_rows:
-            order = [k for k, _ in _PHASE_ORDER]
-            phase_key = order[min(self._next_phase_slot, len(order) - 1)]
-        idx = [k for k, _ in _PHASE_ORDER].index(phase_key)
+        order = [k for k, _ in _PHASE_ORDER]
+        raw_phase = getattr(event, "phase", None)
+        # The real backend sends `phase` as an `int` (1..5, matching
+        # `boot_flow._PHASE_LABELS`) — index straight off it so a REPEATED
+        # phase number stays on the same row. Round 4 bug: this used to
+        # stringify+lowercase first (`str(2)` -> `"2"`, never a key in
+        # `_phase_rows`), so every event — including a second event for the
+        # SAME phase — fell through to "next never-seen slot", silently
+        # advancing to the next phase on every repeat. A string phase key
+        # (older/test fixtures, e.g. "promote") still resolves directly too.
+        if isinstance(raw_phase, int) and 1 <= raw_phase <= len(order):
+            idx = raw_phase - 1
+            phase_key = order[idx]
+        else:
+            phase_key = str(raw_phase or "").lower()
+            if phase_key in order:
+                idx = order.index(phase_key)
+            else:
+                idx = min(self._next_phase_slot, len(order) - 1)
+                phase_key = order[idx]
         for i, (key, _) in enumerate(_PHASE_ORDER):
             if i < idx:
                 self._phase_rows[key].set_state("done")
@@ -1224,19 +1386,31 @@ class BootFlowWindow(QDialog):
             self._phase_count_labels[phase_key].setText(count_text)
         log_line = getattr(event, "log_line", None)
         if log_line:
-            timestamp, operation, path, detail = _parse_log_line(str(log_line))
+            current_path_for_log = getattr(event, "current_path", None)
+            timestamp, operation, path, detail = _parse_log_line(
+                str(log_line), current_path_for_log
+            )
             spans = [
                 (timestamp, theme.TEXT_FAINT),
                 (operation, theme.TEXT_MUTED),
                 (path, theme.TEXT_PRIMARY),
                 (detail, theme.TEXT_MUTED),
             ]
+            rendered = [(text, color) for text, color in spans if text]
+            # A single-row, borderless `<table>` — NOT `&nbsp;`-joined
+            # spans — is the only way Qt's rich-text engine gives an exact
+            # px gap here: `margin`/`padding` on an inline `<span>` is
+            # silently ignored (confirmed empirically), but the same
+            # `padding-left` on a `<td>` renders 1:1. Round 4 audit V10:
+            # 2 literal `&nbsp;` measured ~14px at this font, not the
+            # mockup's 8px, and couldn't be tuned to an exact value at all.
+            cells = "".join(
+                f'<td{td_style}><span style="color: {color};">{html.escape(text)}</span></td>'
+                for i, (text, color) in enumerate(rendered)
+                for td_style in (' style="padding-left: 8px;"' if i > 0 else "",)
+            )
             self._log_box.setText(
-                "&nbsp;&nbsp;".join(
-                    f'<span style="color: {color};">{html.escape(text)}</span>'
-                    for text, color in spans
-                    if text
-                )
+                f'<table cellspacing="0" cellpadding="0" border="0"><tr>{cells}</tr></table>'
             )
         backup_dir = getattr(event, "backup_dir", None)
         if backup_dir:
@@ -1319,6 +1493,28 @@ class BootFlowWindow(QDialog):
 
     def _show_done(self, outcome: Any) -> None:
         self._set_header(f"ย้ายข้อมูลเสร็จแล้ว — พร้อมเปิดใช้งาน {_app_version()}", theme.STATE_OK, 100)
+        self._render_safely(
+            "done page",
+            lambda: self._populate_done_unsafe(outcome),
+            self._populate_done_fallback,
+        )
+        self._show_page(PAGE_DONE, subtitle_only=True)
+
+    def _populate_done_fallback(self) -> None:
+        self._done_heading.setText("ย้ายข้อมูลเสร็จแล้ว")
+        self._done_sub.setText("")
+        _clear_layout(self._done_summary_lay)
+        _clear_layout(self._done_paths_lay)
+        self._done_summary_lay.addWidget(
+            _kv_row(
+                "สถานะ",
+                "ไม่สามารถแสดงรายละเอียดผลลัพธ์ได้ — ดู log",
+                self._sans,
+                color=theme.STATE_WARN,
+            )
+        )
+
+    def _populate_done_unsafe(self, outcome: Any) -> None:
         # `validated_steps` — optional, not in the documented interface yet
         # (see module docstring's backend-assumptions note): the mockup
         # folds the count straight into this heading, not a separate
@@ -1333,11 +1529,7 @@ class BootFlowWindow(QDialog):
         duration = _fmt_duration(getattr(outcome, "duration_s", None))
         self._done_sub.setText(f"ใช้เวลา {duration}" if duration else "")
 
-        while self._done_summary_lay.count():
-            child = self._done_summary_lay.takeAt(0)
-            w = child.widget()
-            if w is not None:
-                w.deleteLater()
+        _clear_layout(self._done_summary_lay)
         promoted = getattr(outcome, "promoted", None)
         promoted_n = len(promoted) if isinstance(promoted, (list, tuple)) else promoted
         if promoted_n is not None:
@@ -1363,17 +1555,13 @@ class BootFlowWindow(QDialog):
                     color=theme.STATE_OK,
                 )
             )
-        while self._done_paths_lay.count():
-            child = self._done_paths_lay.takeAt(0)
-            w = child.widget()
-            if w is not None:
-                w.deleteLater()
-        backup_dir = getattr(outcome, "backup_dir", None)
+        _clear_layout(self._done_paths_lay)
+        backup_dir = _path_str(getattr(outcome, "backup_dir", None))
         if backup_dir:
             self._done_paths_lay.addWidget(
                 _kv_row("สำรองก่อนย้าย", backup_dir, self._sans, mono=True)
             )
-        archive_dir = getattr(outcome, "archive_dir", None)
+        archive_dir = _path_str(getattr(outcome, "archive_dir", None))
         if archive_dir:
             self._done_paths_lay.addWidget(
                 _kv_row("archive ของเก่า", archive_dir, self._sans, mono=True)
@@ -1394,8 +1582,6 @@ class BootFlowWindow(QDialog):
         self._done_paths_lay.addWidget(
             _kv_row_rich("ถ้าต้องกลับเวอร์ชันเดิม", self._sans, restore_html, theme.TEXT_MUTED)
         )
-
-        self._show_page(PAGE_DONE, subtitle_only=True)
 
     def _on_done_open_clicked(self) -> None:
         self._proceed = True
@@ -1471,8 +1657,7 @@ class BootFlowWindow(QDialog):
         return page
 
     def _show_failed_outcome(self, outcome: Any) -> None:
-        failed_phase = str(getattr(outcome, "failed_phase", "") or "")
-        phase_label = dict(_PHASE_ORDER).get(failed_phase.lower(), failed_phase or "ไม่ทราบขั้นตอน")
+        phase_label, phase_number = _phase_label_and_number(getattr(outcome, "failed_phase", None))
         failed_step = getattr(outcome, "failed_step", "") or ""
         error = getattr(outcome, "error", "") or ""
         rolled_back = bool(getattr(outcome, "rolled_back", True))
@@ -1482,12 +1667,6 @@ class BootFlowWindow(QDialog):
         # names which phase-ordinal and which sub-step within it failed
         # (e.g. "ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน"); falls back to the plain
         # phase-only heading otherwise.
-        phase_keys = [k for k, _ in _PHASE_ORDER]
-        phase_number = (
-            phase_keys.index(failed_phase.lower()) + 1
-            if failed_phase.lower() in phase_keys
-            else None
-        )
         step_index = getattr(outcome, "failed_step_index", None)
         step_total = getattr(outcome, "failed_step_total", None)
         if phase_number is not None and step_index is not None and step_total is not None:
@@ -1523,30 +1702,11 @@ class BootFlowWindow(QDialog):
             sub_text += " — ระบบคัดลอกทุกอย่างกลับที่เดิมจากสำเนาแล้ว"
         self._failed_sub.setText(sub_text)
 
-        while self._failed_info_lay.count():
-            child = self._failed_info_lay.takeAt(0)
-            w = child.widget()
-            if w is not None:
-                w.deleteLater()
-        status_color = theme.STATE_OK if data_intact else theme.STATE_ERROR_BRIGHT
-        status_text = (
-            "เหมือนก่อนเริ่มทุกไบต์ (ตรวจ sha256 แล้ว)"
-            if data_intact
-            else "ตรวจสอบไม่ผ่าน — ดู log ก่อนดำเนินการต่อ"
+        self._render_safely(
+            "failed page info box",
+            lambda: self._populate_failed_info(data_intact, outcome),
+            self._populate_failed_info_fallback,
         )
-        self._failed_info_lay.addWidget(
-            _kv_row("สถานะข้อมูล", status_text, self._sans, color=status_color)
-        )
-        backup_dir = getattr(outcome, "backup_dir", None) if outcome is not None else None
-        if backup_dir:
-            self._failed_info_lay.addWidget(
-                _kv_row("สำรองก่อนย้าย", backup_dir, self._sans, mono=True)
-            )
-        log_paths = list(getattr(outcome, "log_paths", []) or []) if outcome is not None else []
-        if log_paths:
-            self._failed_info_lay.addWidget(
-                _kv_row("log", " · ".join(log_paths), self._sans, mono=True)
-            )
 
         prev = getattr(outcome, "previous_version", None) if outcome is not None else None
         prev = prev or _previous_app_version()
@@ -1557,6 +1717,39 @@ class BootFlowWindow(QDialog):
         )
 
         self._show_page(PAGE_FAILED, subtitle_only=True)
+
+    def _populate_failed_info(self, data_intact: bool, outcome: Any) -> None:
+        _clear_layout(self._failed_info_lay)
+        status_color = theme.STATE_OK if data_intact else theme.STATE_ERROR_BRIGHT
+        status_text = (
+            "เหมือนก่อนเริ่มทุกไบต์ (ตรวจ sha256 แล้ว)"
+            if data_intact
+            else "ตรวจสอบไม่ผ่าน — ดู log ก่อนดำเนินการต่อ"
+        )
+        self._failed_info_lay.addWidget(
+            _kv_row("สถานะข้อมูล", status_text, self._sans, color=status_color)
+        )
+        backup_dir = _path_str(getattr(outcome, "backup_dir", None)) if outcome is not None else ""
+        if backup_dir:
+            self._failed_info_lay.addWidget(
+                _kv_row("สำรองก่อนย้าย", backup_dir, self._sans, mono=True)
+            )
+        log_paths = (
+            [_path_str(p) for p in (getattr(outcome, "log_paths", []) or [])]
+            if outcome is not None
+            else []
+        )
+        log_paths = [p for p in log_paths if p]
+        if log_paths:
+            self._failed_info_lay.addWidget(
+                _kv_row("log", " · ".join(log_paths), self._sans, mono=True)
+            )
+
+    def _populate_failed_info_fallback(self) -> None:
+        _clear_layout(self._failed_info_lay)
+        self._failed_info_lay.addWidget(
+            _kv_row("สถานะ", "ไม่สามารถแสดงรายละเอียดได้ — ดู log", self._sans, color=theme.STATE_WARN)
+        )
 
     def _on_failed_retry_clicked(self) -> None:
         self._show_page(PAGE_MIGRATING, subtitle_only=False)
@@ -1571,7 +1764,7 @@ class BootFlowWindow(QDialog):
         paths = list(getattr(outcome, "log_paths", []) or []) if outcome is not None else []
         if not paths:
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(paths[0]))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0])))
 
     # ── shared page-switch helper ──────────────────────────────
     def _show_page(self, index: int, subtitle_only: bool) -> None:
@@ -1712,6 +1905,14 @@ class BootFlowWindow(QDialog):
         super().accept()
 
     def done(self, result: int) -> None:
+        """Same migrating-page guard as `reject()`/`accept()`/`closeEvent`
+        — `accept()`/`reject()` already check this before ever reaching
+        here, but `done()` is itself a public `QDialog` API a caller can
+        invoke directly, bypassing both (round 4 audit B1 residual: a
+        direct `done(0)` call while a real worker was still migrating
+        still dismissed the dialog and emitted `flowFinished(True)`)."""
+        if self._stack.currentIndex() == PAGE_MIGRATING:
+            return
         super().done(result)
         self.flowFinished.emit(self._proceed)
 
