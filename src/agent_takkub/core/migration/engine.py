@@ -229,6 +229,14 @@ class MigrationEngine:
                 ),
             ]
 
+    def step_count(self) -> int:
+        """Ladder length — the same step list `validate()` below walks, so
+        a caller previewing "step X/N" (#574's `MigrationPlanSummary
+        .verify_steps`) before anything has run can never drift from what
+        an actual `validate()` pass would later report `failed_step_total`
+        as."""
+        return len(self._steps)
+
     def inspect(self) -> list[StepReport]:
         return [s.inspect() for s in self._steps]
 

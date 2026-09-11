@@ -266,6 +266,12 @@ class MigrationPlanSummary:
     promote_items: list[str]
     archive_items: list[str]
     junk_items: list[str]
+    # Real ladder length (`MigrationEngine.step_count()`) — NOT
+    # `len(promote_items)` (that's only ONE step's own candidate count).
+    # Matches what `MigrationOutcome.failed_step_total` reports once a
+    # validate() pass actually runs, so the wizard's "step X/N" preview
+    # never drifts from the real thing.
+    verify_steps: int = 0
 
 
 def _free_bytes(data_home: Path) -> int:
@@ -347,6 +353,7 @@ def plan_migration() -> MigrationPlanSummary | None:
         promote_items=promote_items,
         archive_items=archive_items,
         junk_items=junk_items,
+        verify_steps=engine.step_count(),
     )
 
 
@@ -376,6 +383,11 @@ class ProgressEvent:
     eta_s: float | None
     log_line: str
     backup_dir: Path | None
+    # Short path (relative to DATA_HOME) of the entry/file currently being
+    # moved — the same `name` `on_entry(step_id, name)` was fired with.
+    # `None` for every event with no single item behind it (phases 3/5,
+    # and the very first phase-1 kickoff before any entry has fired yet).
+    current_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,7 +476,12 @@ def run_migration(
     state = {"phase": 1}
 
     def emit(
-        phase: int, *, done: int | None = None, total: int | None = None, log_line: str = ""
+        phase: int,
+        *,
+        done: int | None = None,
+        total: int | None = None,
+        log_line: str = "",
+        current_path: str | None = None,
     ) -> None:
         if progress_cb is None:
             return
@@ -489,6 +506,7 @@ def run_migration(
                     eta_s=None,
                     log_line=log_line,
                     backup_dir=plan.backup_dir if plan else None,
+                    current_path=current_path,
                 )
             )
         except Exception:
@@ -505,7 +523,13 @@ def run_migration(
         if phase not in (1, 2, 4):
             return
         step_done[step_id] = step_done.get(step_id, 0) + 1
-        emit(phase, done=step_done[step_id], total=totals[phase], log_line=f"{step_id}: {name}")
+        emit(
+            phase,
+            done=step_done[step_id],
+            total=totals[phase],
+            log_line=f"{step_id}: {name}",
+            current_path=name,
+        )
 
     def on_text(msg: str) -> None:
         if "validate" in msg or "ตรวจสอบ" in msg:

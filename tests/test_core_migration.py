@@ -217,6 +217,7 @@ def test_engine_default_steps_starts_with_version_marker(tmp_path, monkeypatch):
     engine = MigrationEngine()
     reports = engine.inspect()
     assert len(reports) == 12
+    assert engine.step_count() == 12  # #504/#574 round10: boot_flow's own preview reads this
     assert reports[0].step_id == "pre-migrate-backup"
     assert reports[1].step_id == "version-marker"
     assert [r.step_id for r in reports[2:]] == [

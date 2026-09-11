@@ -239,6 +239,27 @@ class TestPlanMigration:
         assert plan.estimated_bytes >= 0
         assert plan.free_bytes >= 0
 
+    def test_verify_steps_is_the_real_ladder_length_not_promote_items(self, monkeypatch):
+        """#504/#574 round10: `verify_steps` must track the actual ladder
+        (`MigrationEngine.step_count()`) — the same count a later
+        `validate()` pass reports as `MigrationOutcome.failed_step_total` —
+        never `len(promote_items)`, which is only ONE step's own
+        candidate count and would drift the moment either number changes
+        independently of the other."""
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub.core.migration.engine import MigrationEngine
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        data_home = config.DATA_HOME
+        _seed_v1_leftover(data_home)
+        (data_home / "v2" / "models").mkdir(parents=True)
+        (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+
+        plan = boot_flow.plan_migration()
+        assert plan is not None
+        assert plan.verify_steps == MigrationEngine().step_count()
+        assert plan.verify_steps != len(plan.promote_items)
+
 
 # ---------------------------------------------------------------------------
 # run_migration() / MigrationOutcome
@@ -359,6 +380,13 @@ class TestRunMigrationOutcome:
         assert {1, 2, 3, 5} <= phases_seen
         assert all(0.0 <= e.percent_overall <= 100.0 for e in events)
         assert events[-1].percent_overall == 100.0
+        # #504/#574 round10: the per-entry event fired via on_entry carries
+        # the entry's own name as `current_path` (short, relative to
+        # DATA_HOME) — every other event (no single item behind it) is None.
+        entry_events = [e for e in events if e.log_line == "promote-v2-root: models"]
+        assert entry_events and all(e.current_path == "models" for e in entry_events)
+        other_events = [e for e in events if e.log_line != "promote-v2-root: models"]
+        assert all(e.current_path is None for e in other_events)
 
     def test_a_broken_progress_cb_never_breaks_the_run(self, monkeypatch):
         import agent_takkub.core.storage.layout as layout_mod

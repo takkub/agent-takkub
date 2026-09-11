@@ -911,6 +911,7 @@ def _prune_phase(
     ledger: TransferLedger,
     *,
     on_entry: Callable[[str], None] | None = None,
+    fsync_every: int = 1,
 ) -> PruneOutcome:
     """Remove each entry's `src`, one at a time — but only ever AFTER
     `write_committed` (the step's own FINAL manifest, merged with whatever
@@ -947,7 +948,33 @@ def _prune_phase(
     `TransferEntry.restore_source_from_dest()` is still used, but scoped
     ONLY to that one failed entry's own partially-completed removal (a
     directory removal that deleted SOME of its files before raising) —
-    never to a sibling that already fully succeeded."""
+    never to a sibling that already fully succeeded.
+
+    *fsync_every* (#504 round10, mirroring `_copy_phase`'s own #574
+    round8 fix): the per-entry `write_committed` + `ledger.write` calls
+    below are each a full-payload rewrite of the whole (growing) manifest
+    / WAL — cheap at the default of 1 for a normal apply()/prune()'s
+    handful of per-domain entries (unchanged behavior), but the identical
+    O(n^2)-bytes-written shape `_copy_phase` had for `PromoteV2RootStep
+    .rollback()`'s per-FILE entries: a 244k-file production rehearsal
+    measured this side at ~3.5 files/s even after `_copy_phase`'s own
+    copy side was fixed (#574 round8/#504 R8-P2). Raising it durably
+    records up to N entries' `SOURCE_PRUNED` state — manifest AND WAL,
+    together, in ONE call each — BEFORE removing any of that batch's
+    sources: the T1 "record before delete" contract still holds, just at
+    BATCH granularity instead of per-entry. A crash between a batch's
+    durable record and finishing every file's removal in it is safe to
+    resume: every name in that batch is already `SOURCE_PRUNED` on disk,
+    so the `baseline` resume-retry loop above picks up removing whatever
+    of `src` still remains next call — exactly the single-entry case, one
+    call later (same as an in-flight WAL from before this fix). A batch
+    whose OWN `write_committed`/`ledger.write` call itself fails has
+    committed NOTHING for it — none of its entries are marked
+    `SOURCE_PRUNED`, none are touched at `src`; they're exactly as if
+    this call never reached them, safe to retry via a fresh prune()
+    call (only the batch's first entry is named `failed`/DUPLICATE below,
+    matching the single-entry contract — the rest are simply unattempted,
+    never falsely reported pruned or duplicate)."""
     ledger_states = ledger.read()
     baseline = [
         e for e in entries if ledger_states.get(e.name, {}).get("state") == STATE_SOURCE_PRUNED
@@ -974,42 +1001,68 @@ def _prune_phase(
     newly: list[TransferEntry] = []
     failed: TransferEntry | None = None
     error = ""
-    for entry in entries:
-        if entry.name in baseline_names:
+    remaining = [e for e in entries if e.name not in baseline_names]
+    last_index = len(remaining) - 1
+    batch: list[TransferEntry] = []
+    for index, entry in enumerate(remaining):
+        batch.append(entry)
+        at_boundary = fsync_every <= 1 or len(batch) >= fsync_every or index == last_index
+        if not at_boundary:
             continue
-        if failed is not None:
-            break
         try:
-            write_committed([*baseline, *newly, entry], None)
+            write_committed([*baseline, *newly, *batch], None)
         except OSError as e:
-            failed, error = entry, f"could not record removal of {entry.name}: {e}"
+            failed = batch[0]
+            error = f"could not record removal of {failed.name}: {e}"
+            batch = []
             break
-        sha256 = dict(ledger_states.get(entry.name, {}).get("sha256", {}))
-        ledger_states[entry.name] = _entry_to_wal(entry, STATE_SOURCE_PRUNED, sha256)
+        # Mutate a COPY first, never `ledger_states` itself, until
+        # `ledger.write` below actually durably succeeds — otherwise a
+        # failed write here would still leave this batch looking
+        # `SOURCE_PRUNED` in memory, and the failure-path write further
+        # down (which reuses `ledger_states`) could then durably persist
+        # that false claim for files whose removal was never attempted.
+        candidate_states = dict(ledger_states)
+        batch_sha: dict[str, dict[str, str]] = {}
+        for e2 in batch:
+            sha256 = dict(ledger_states.get(e2.name, {}).get("sha256", {}))
+            candidate_states[e2.name] = _entry_to_wal(e2, STATE_SOURCE_PRUNED, sha256)
+            batch_sha[e2.name] = sha256
         try:
-            ledger.write(ledger_states)
+            ledger.write(candidate_states)
         except OSError as e:
-            failed, error = entry, f"could not record WAL removal state for {entry.name}: {e}"
+            failed = batch[0]
+            error = f"could not record WAL removal state for {failed.name}: {e}"
+            batch = []
             break
-        try:
-            _removed, kept = _remove_entry_source(entry, sha256)
-        except OSError as e:
-            failed, error = entry, str(e)
-            # Self-heal ONLY this entry's own partially-completed removal
-            # (some of its files really gone, others untouched) — never a
-            # sibling's, and never a full reconstruction of an entry that
-            # was simply denied outright with nothing touched yet.
-            heal_errors = entry.restore_source_from_dest()
-            if heal_errors:
-                error += "; some file(s) could not be restored to their original location: " + (
-                    "; ".join(heal_errors)
-                )
+        ledger_states = candidate_states
+        removal_failed = False
+        for e2 in batch:
+            sha256 = batch_sha[e2.name]
+            try:
+                _removed, kept = _remove_entry_source(e2, sha256)
+            except OSError as e:
+                failed, error = e2, str(e)
+                # Self-heal ONLY this entry's own partially-completed removal
+                # (some of its files really gone, others untouched) — never a
+                # sibling's, and never a full reconstruction of an entry that
+                # was simply denied outright with nothing touched yet.
+                heal_errors = e2.restore_source_from_dest()
+                if heal_errors:
+                    error += (
+                        "; some file(s) could not be restored to their original "
+                        "location: " + "; ".join(heal_errors)
+                    )
+                removal_failed = True
+                break
+            if kept:
+                late_write_kept[e2.name] = kept
+            ledger_states[e2.name]["sha256"] = sha256
+            newly.append(e2)
+            _notify_entry(on_entry, e2.name)
+        batch = []
+        if removal_failed:
             break
-        if kept:
-            late_write_kept[entry.name] = kept
-        ledger_states[entry.name]["sha256"] = sha256
-        newly.append(entry)
-        _notify_entry(on_entry, entry.name)
 
     digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
     if failed is None:
@@ -1967,7 +2020,13 @@ class PromoteV2RootStep:
             self.journal.record(self.step_id, "rollback", False, copied.error)
             return StepReport(self.step_id, "rollback", False, f"restore failed: {copied.error}")
 
-        prune = _prune_phase(entries, write_committed, ledger, on_entry=self.on_entry)
+        prune = _prune_phase(
+            entries,
+            write_committed,
+            ledger,
+            on_entry=self.on_entry,
+            fsync_every=_restore_fsync_batch(len(entries)),
+        )
         if not prune.ok:
             self.journal.record(self.step_id, "rollback", False, f"cleanup-pending: {prune.error}")
             return StepReport(
