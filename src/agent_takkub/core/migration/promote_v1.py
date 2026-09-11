@@ -515,6 +515,16 @@ class PruneOutcome:
     # True with entries here; the kept file(s) simply remain at `src` for
     # this step's own NEXT candidate scan to pick up and re-copy.
     late_write_kept: dict[str, list[str]] = field(default_factory=dict)
+    # name -> its `sha256` dict, captured from the WAL BEFORE this call may
+    # have cleared it (#504 round4: a caller building its OWN final
+    # manifest after `_prune_phase` returns must read digests from HERE,
+    # never re-read the ledger itself — a successful, no-late-write prune
+    # clears that ledger as part of ITS OWN return, so a caller re-reading
+    # it afterward silently got back `{}` for every entry's checksum,
+    # e.g. `restore_corrupt`/`older_archive_integrity`: `validate()` then
+    # skipped ALL integrity checking because every recorded digest map was
+    # empty).
+    digests: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
@@ -753,6 +763,7 @@ def _prune_phase(
         ledger_states[entry.name]["sha256"] = sha256
         newly.append(entry)
 
+    digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
     if failed is None:
         try:
             ledger.write(ledger_states)
@@ -763,7 +774,9 @@ def _prune_phase(
             _log_event("migration_wal_digest_refresh_failed", error=str(e))
         if not late_write_kept:
             ledger.clear()
-        return PruneOutcome(pruned=[*baseline, *newly], ok=True, late_write_kept=late_write_kept)
+        return PruneOutcome(
+            pruned=[*baseline, *newly], ok=True, late_write_kept=late_write_kept, digests=digests
+        )
 
     ledger_states[failed.name] = _entry_to_wal(
         failed, STATE_PRUNE_FAILED, dict(ledger_states.get(failed.name, {}).get("sha256", {}))
@@ -786,6 +799,7 @@ def _prune_phase(
         failed_name=failed.name,
         error=error,
         late_write_kept=late_write_kept,
+        digests=digests,
     )
 
 
@@ -1097,7 +1111,7 @@ def _stage_preimage(source: Path, staged: Path) -> str | None:
 
 
 def _command_snapshot_backup_fallback(
-    backups: BackupManager, step_id: str, name: str
+    backups: BackupManager, step_id: str, name: str, since_ts: float = 0.0
 ) -> Path | None:
     """#504 round4 `snapshot_revert_middle`: when the command-level
     snapshot's OWN preimage for *name* can't be used (unreadable, or a
@@ -1109,6 +1123,15 @@ def _command_snapshot_backup_fallback(
     it exists AND is readable (a fresh sha256 computes without raising) —
     never a path this caller would then also fail to read from.
 
+    *since_ts* MUST be the command snapshot's own timestamp
+    (`CommandSnapshot.root.name`, i.e. its `created_at`). A multi-
+    generation `restore-v1` calls `BackupManager.backup()` once per
+    generation it touches, so the NEWEST slot only ever holds whichever
+    generation was applied last before a later one failed — not the true
+    pre-command state. The OLDEST slot at-or-after *since_ts* is the one
+    taken the moment this command's own walk first overwrote *name*,
+    i.e. the pre-command preimage this fallback exists to find.
+
     Keyed by bare basename, same limitation `_begin_command_snapshot`'s own
     docstring already calls out for `BackupManager` — a last-resort
     fallback, never the primary mechanism, so a *name* nested under a
@@ -1117,7 +1140,7 @@ def _command_snapshot_backup_fallback(
     primary command-snapshot path already handles the general case."""
     if not name:
         return None
-    candidate = backups.latest_backup(step_id, Path(name).name)
+    candidate = backups.earliest_backup_since(step_id, Path(name).name, since_ts)
     if candidate is None or not candidate.exists():
         return None
     try:
@@ -1127,7 +1150,10 @@ def _command_snapshot_backup_fallback(
         else:
             _sha256(candidate)
     except OSError:
-        return None
+        return None  # swallow-ok: read-only readability probe on a
+        # last-resort fallback candidate — an unreadable candidate is
+        # simply not usable; the caller falls back further or reports
+        # "unverifiable", never touches `candidate` itself.
     return candidate
 
 
@@ -1170,6 +1196,12 @@ def _revert_to_command_snapshot(
         _log_event("migration_command_snapshot_manifest_unreadable", error=str(e))
         return [f"snapshot manifest unreadable at {manifest_path} — every name left untouched: {e}"]
 
+    # The `BackupManager` fallback below must only ever consider backup
+    # slots taken AT OR AFTER this command's own snapshot — never an older
+    # one left over from a previous, unrelated restore-v1 (#504 round4
+    # `snapshot_revert_middle`).
+    since_ts = manifest.get("created_at", 0.0)
+
     errors: list[str] = []
     for name in snapshot.names:
         current = data_home / name
@@ -1193,7 +1225,7 @@ def _revert_to_command_snapshot(
         problems = _snapshot_entry_problems(saved, entry)
         source = None if problems else saved
         if source is None and backups is not None:
-            source = _command_snapshot_backup_fallback(backups, backup_step_id, name)
+            source = _command_snapshot_backup_fallback(backups, backup_step_id, name, since_ts)
         if source is None:
             errors.append(f"{name}: preimage unverifiable ({'; '.join(problems)}) — left untouched")
             continue
@@ -1208,7 +1240,7 @@ def _revert_to_command_snapshot(
         staged = current.with_name(f"{current.name}.revert-tmp")
         stage_error = _stage_preimage(source, staged)
         if stage_error is not None and source is saved and backups is not None:
-            fallback = _command_snapshot_backup_fallback(backups, backup_step_id, name)
+            fallback = _command_snapshot_backup_fallback(backups, backup_step_id, name, since_ts)
             if fallback is not None:
                 stage_error = _stage_preimage(fallback, staged)
         if stage_error is not None:
@@ -1850,7 +1882,10 @@ class ArchiveV1LegacyStep:
         try:
             return Path(ledger.read_meta()["archive_root"])
         except (KeyError, OSError, ValueError):
-            return None
+            return None  # swallow-ok: read-only WAL meta probe — an
+            # unreadable/malformed WAL just means "no pending generation
+            # known", never touches anything; `_stale_generation_problems`
+            # below still independently validates every generation on disk.
 
     def _stale_generation_problems(self) -> list[str]:
         """Every integrity problem found in archive generations OTHER than
@@ -2106,10 +2141,15 @@ class ArchiveV1LegacyStep:
             )
 
         done = prune.pruned
-        final_digests = ledger.read()
+        # #504 round4: NEVER re-read `ledger` here — a successful prune with
+        # no late writes already cleared it (`_prune_phase`'s own return),
+        # so a fresh read back would silently see `{}` and every checksum
+        # below would go missing. `prune.digests` is the same WAL state,
+        # captured before that clear.
+        final_digests = prune.digests
 
         def digest_for(name: str) -> dict[str, str]:
-            return final_digests.get(name, {}).get("sha256", {})
+            return final_digests.get(name, {})
 
         archived_legacy_marker = False
         if legacy_root.is_dir():

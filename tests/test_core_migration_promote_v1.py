@@ -677,14 +677,17 @@ def _every_copy(data_home: Path, name: str) -> list[Path]:
     return [p for p in data_home.parent.rglob(name) if p.is_file()]
 
 
-def test_promote_delete_phase_failure_restores_every_source_no_data_lost(
+def test_promote_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     tmp_path, journal_backups, monkeypatch
 ):
-    """#504 R2-B1: a source-removal failure on the SECOND candidate used to
-    trigger `_undo_moved_entries`, which deletes the (only remaining) target
-    for the FIRST candidate whose source had already been removed —
-    reproducibly dropping it to zero copies. The fix restores every source
-    Phase B already removed instead of ever touching a target."""
+    """#504 round4 B1 (Gemini cross-check (B)(1)/(4), superseding the older
+    R2-B1 fix this test used to cover): a denied removal is NEVER
+    "restore-then-revert" — copying the target back over an entry whose OWN
+    removal already succeeded is exactly the fragile second mutation R3-B1
+    found unsafe, and it can silently touch files nobody asked to touch. The
+    entry whose removal succeeded (`only-a.json`) stays pruned; only the ONE
+    entry whose removal was denied (`only-b.json`) is left as a DUPLICATE —
+    both source and target intact, fully recoverable."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     (data_home / "v2" / "models" / "only-a.json").parent.mkdir(parents=True)
@@ -710,10 +713,12 @@ def test_promote_delete_phase_failure_restores_every_source_no_data_lost(
     report = step.apply()
 
     assert not report.ok
-    # Both original nested sources are back (the one whose removal
-    # succeeded was re-materialized from its already-verified target).
-    assert (data_home / "v2" / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    # `only-a.json`'s own removal succeeded — stays pruned, source gone.
+    assert not (data_home / "v2" / "models" / "only-a.json").exists()
+    assert (data_home / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    # `only-b.json`'s removal was denied — DUPLICATE: both copies intact.
     assert (data_home / "v2" / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
+    assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
     assert len(_every_copy(data_home, "only-a.json")) >= 1
     assert len(_every_copy(data_home, "only-b.json")) >= 1
     # Retry succeeds cleanly once the injected failure is gone.
@@ -722,11 +727,13 @@ def test_promote_delete_phase_failure_restores_every_source_no_data_lost(
     assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
 
 
-def test_archive_delete_phase_failure_restores_every_source_no_data_lost(
+def test_archive_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     tmp_path, journal_backups, monkeypatch
 ):
-    """#504 R2-B1, archive side: same failure class, reproduced through
-    `ArchiveV1LegacyStep.apply()` instead of promote."""
+    """#504 round4 B1, archive side (superseding the older R2-B1 fix this
+    test used to cover) — same failure class, reproduced through
+    `ArchiveV1LegacyStep.apply()` instead of promote; see the promote-side
+    twin test's docstring for the new contract's rationale."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     data_home.mkdir()
@@ -746,18 +753,21 @@ def test_archive_delete_phase_failure_restores_every_source_no_data_lost(
     report = step.apply()
 
     assert not report.ok
-    assert (data_home / "a.json").read_text(encoding="utf-8") == "unique-a"
+    # `a.json`'s own removal succeeded — stays pruned, source gone.
+    assert not (data_home / "a.json").exists()
+    # `b.json`'s removal was denied — DUPLICATE: both copies intact.
     assert (data_home / "b.json").read_text(encoding="utf-8") == "unique-b"
     assert len(_every_copy(data_home, "a.json")) >= 1
     assert len(_every_copy(data_home, "b.json")) >= 1
 
 
-def test_promote_rollback_delete_phase_failure_restores_every_source(
+def test_promote_rollback_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     tmp_path, journal_backups, monkeypatch
 ):
-    """#504 R2-B1, promote-rollback side: the third reproduction the
-    reviewer named — `PromoteV2RootStep.rollback()` shares the same
-    `_two_phase_move` helper as `apply()`."""
+    """#504 round4 B1, promote-rollback side (superseding the older R2-B1
+    fix this test used to cover) — `PromoteV2RootStep.rollback()` shares
+    the same `_prune_phase` helper as `apply()`; see the promote-apply-side
+    twin test's docstring for the new contract's rationale."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     (data_home / "v2" / "models" / "only-a.json").parent.mkdir(parents=True)
@@ -783,7 +793,9 @@ def test_promote_rollback_delete_phase_failure_restores_every_source(
     assert not report.ok
     assert len(_every_copy(data_home, "only-a.json")) >= 1
     assert len(_every_copy(data_home, "only-b.json")) >= 1
-    assert (data_home / "models" / "only-a.json").read_text(encoding="utf-8") == "unique-a"
+    # `only-a.json`'s own removal succeeded — stays pruned, source gone.
+    assert not (data_home / "models" / "only-a.json").exists()
+    # `only-b.json`'s removal was denied — DUPLICATE: both copies intact.
     assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
 
 
@@ -1336,10 +1348,14 @@ def test_restore_source_from_dest_reports_a_dir_kind_failure_per_file(tmp_path, 
     assert not (src / "b.json").exists()
 
 
-def test_prune_phase_reports_a_restore_failure_via_apply(tmp_path, journal_backups, monkeypatch):
-    """The `restore_source_from_dest` failure above must also reach the
-    `StepReport` from a real `apply()`/`_prune_phase` call, not just the
-    direct `TransferEntry` unit."""
+def test_prune_phase_reports_a_denied_removal_as_duplicate_via_apply(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#504 round4 B1 (superseding the older R2-B1-era "restore incomplete"
+    contract this test used to cover): a denied removal must reach the
+    `StepReport` from a real `apply()`/`_prune_phase` call as a DUPLICATE,
+    never a "restore-then-revert" that also tries (and could independently
+    fail) to reconstruct sources this call never touched."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     (data_home / "v2" / "models" / "a.json").parent.mkdir(parents=True)
@@ -1359,21 +1375,18 @@ def test_prune_phase_reports_a_restore_failure_via_apply(tmp_path, journal_backu
 
     monkeypatch.setattr(promote_mod.shutil, "rmtree", fail_removing_state)
 
-    real_copy2 = promote_mod.shutil.copy2
-
-    def fail_restoring_models(s, d, *a, **k):
-        if Path(d).name == "a.json":
-            raise OSError("injected restore-back failure")
-        return real_copy2(s, d, *a, **k)
-
-    monkeypatch.setattr(promote_mod.shutil, "copy2", fail_restoring_models)
-
     step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
     report = step.apply()
 
     assert not report.ok
-    assert "restore incomplete" in report.summary
-    assert "injected restore-back failure" in report.summary
+    assert "DUPLICATE" in report.summary
+    assert "last remove blocked" in report.summary
+    # `a.json`'s own removal succeeded — stays pruned, source gone.
+    assert not (data_home / "v2" / "models" / "a.json").exists()
+    assert (data_home / "models" / "a.json").read_text(encoding="utf-8") == "a"
+    # `b.json`'s removal was denied — DUPLICATE: both copies intact.
+    assert (data_home / "v2" / "state" / "b.json").read_text(encoding="utf-8") == "b"
+    assert (data_home / "state" / "b.json").read_text(encoding="utf-8") == "b"
 
 
 def test_list_v1_archives_reports_a_listing_failure_instead_of_vanishing(tmp_path, monkeypatch):
