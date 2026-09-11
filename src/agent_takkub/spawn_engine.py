@@ -797,6 +797,21 @@ class PaneState:
     # _last_content_hash + _last_content_change_ts: content-delta stuck detection
     last_content_hash: str | None = None
     last_content_change_ts: float | None = None
+    # #570: one-shot latch for the `pane_idle_no_progress` Lead notice — set
+    # once IDLE_NO_PROGRESS_NOTICE_S is crossed with no real progress signal,
+    # cleared as soon as progress resumes so the NEXT stale episode notices
+    # again instead of staying silently latched forever.
+    idle_no_progress_notified: bool = False
+    # #570: wall-clock of the last tick `PtySession.tool_running_marker` saw
+    # this pane actually running a tool. Deliberately NOT folded into
+    # `_compute_last_progress_ts` (that method's content-hash signal is
+    # exactly what a rotating status-word/marquee animation games — content
+    # keeps "changing" every tick with nothing real happening, so a max()
+    # over that signal would always read as fresh). Combined with
+    # `last_send_ts` (a genuine Lead dispatch or `takkub progress()` call)
+    # as the narrower, harder-to-fake evidence the idle-no-progress watchdog
+    # (`_check_stuck_panes`) needs.
+    last_tool_marker_seen_ts: float = 0.0
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
     # throughput watchdog (issue #35) — snapshot of pane._tp_total_bytes taken

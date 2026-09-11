@@ -12,12 +12,13 @@ Covers:
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import Orchestrator, PaneState
 from agent_takkub.task_delivery import DeliveryManager
 
 
@@ -295,13 +296,23 @@ class TestReapStaleDeliveries:
     def test_suppressed_when_pane_is_working_with_recent_output(self, orch: Orchestrator) -> None:
         """#359: a long task paste can outlast the fixed delivery TTL to
         ingest even though it genuinely landed — if the pane is visibly
-        working with recent output, don't tell Lead to reassign it."""
+        working with recent output, don't tell Lead to reassign it.
+
+        (#570) The primary tier used to be raw `seconds_since_output()` —
+        ANY PTY byte counted, spinner/marquee included. Now it's
+        `_compute_last_progress_ts`'s content-hash clock
+        (`PaneState.last_content_change_ts`), so "recent output" here is
+        simulated the same way `_check_stuck_panes` populates that field,
+        not via the now-irrelevant `seconds_since_output` mock. That clock
+        is wall-clock (`time.time()`), independent of the delivery
+        manager's own injected fake clock (`now[0]`) used below for TTL
+        expiry — the two are unrelated axes."""
         now = [100.0]
         lead = _pane(_live_session())
         backend = _pane(_live_session(), generation=1)
         backend.state = "working"
-        backend.session.seconds_since_output.return_value = 2.0
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        orch._pane_state = {"P::backend": PaneState(last_content_change_ts=time.time() - 2.0)}
         manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
         manager.create(
             task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
@@ -316,6 +327,48 @@ class TestReapStaleDeliveries:
         assert any(
             c.args and c.args[0] == "delivery_stale_reap_suppressed" for c in log_event.mock_calls
         )
+
+    def test_not_suppressed_by_spinner_only_output(self, orch: Orchestrator) -> None:
+        """(#570) Regression for the field incident: raw PTY bytes (an
+        animated spinner/marquee) alone must NOT count as "recent output"
+        for the suppression check — only a genuine content-hash change
+        does. A pane whose `last_content_change_ts` is stale (well past
+        `_PROGRESS_QUIET_THRESHOLD_S`) despite `seconds_since_output`
+        reading as fresh (mimicking spinner bytes still arriving) must
+        still reach the second-tier check, and — with no independent
+        liveness evidence either — still reach Lead."""
+        monkeypatch_target = "agent_takkub.orchestrator.Orchestrator._stale_marker_liveness"
+        with patch(monkeypatch_target, lambda self, *a, **k: (False, "no_signal", None, [])):
+            now = [100.0]
+            lead = _pane(_live_session())
+            backend = _pane(_live_session(), generation=1)
+            backend.state = "working"
+            # Spinner bytes still arriving (raw PTY recency high) but the
+            # content-hash clock has been stale for a long time — the exact
+            # shape of the #570 field incident (marquee/braille spinner).
+            backend.session.seconds_since_output.return_value = 1.0
+            orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+            orch._pane_state = {
+                "P::backend": PaneState(last_content_change_ts=time.time() - 3600.0)
+            }
+            manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+            manager.create(
+                task_id="t1",
+                project_id="P",
+                pane_id="backend",
+                session_generation=1,
+                payload="do X",
+            )
+            orch._delivery_manager = manager
+            now[0] = 200.0
+
+            with patch("agent_takkub.lead_inbox._log_event"):
+                orch._reap_stale_deliveries()
+
+            notices = _written_strings(lead.session)
+            assert any("[delivery-stale-reap]" in m and "backend" in m for m in notices), (
+                "spinner-only PTY bytes must not suppress the stale-reap notice"
+            )
 
     def test_still_reaps_when_pane_quiet_a_while(self, orch: Orchestrator, monkeypatch) -> None:
         """'working' state alone isn't enough — recent output is required,
