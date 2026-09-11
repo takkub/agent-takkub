@@ -40,32 +40,8 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture
-def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """projects.json with two independent projects."""
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "proj_a",
-                "projects": {
-                    "proj_a": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_a" / "api"),
-                            "web": str(tmp_path / "proj_a" / "web"),
-                        }
-                    },
-                    "proj_b": {
-                        "paths": {
-                            "api": str(tmp_path / "proj_b" / "api"),
-                        }
-                    },
-                    "empty_proj": {"paths": {}},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
+    """V2 project registry (#566) with two independent projects."""
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
@@ -80,7 +56,24 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(lc_mod, "REPO_ROOT", cockpit)
     monkeypatch.setattr(lc_mod, "ASSETS_ROOT", cockpit)
-    return pj
+    return seed_projects(
+        tmp_path,
+        {
+            "proj_a": {
+                "paths": {
+                    "api": str(tmp_path / "proj_a" / "api"),
+                    "web": str(tmp_path / "proj_a" / "web"),
+                }
+            },
+            "proj_b": {
+                "paths": {
+                    "api": str(tmp_path / "proj_b" / "api"),
+                }
+            },
+            "empty_proj": {"paths": {}},
+        },
+        active="proj_a",
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -249,18 +242,18 @@ class TestRenderLeadSettingsIdempotency:
 
     def test_file_reflects_path_changes_on_regenerate(
         self,
-        two_project_json: pathlib.Path,
+        two_project_json,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """If projects.json paths change, render_lead_settings picks them up."""
+        """If the project registry's paths change, render_lead_settings picks
+        them up."""
         render_lead_settings("proj_a")
 
-        # Modify projects.json with a new path
-        new_pj = tmp_path / "projects.json"
-        new_data = json.loads(new_pj.read_text(encoding="utf-8"))
+        # Modify the project registry with a new path
+        new_data = two_project_json.read()
         new_data["projects"]["proj_a"]["paths"]["extra"] = str(tmp_path / "proj_a" / "extra")
-        new_pj.write_text(json.dumps(new_data), encoding="utf-8")
+        two_project_json.write(new_data)
 
         result = render_lead_settings("proj_a")
         data = json.loads(result.read_text(encoding="utf-8"))

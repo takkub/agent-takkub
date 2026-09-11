@@ -13,7 +13,6 @@ Layer 2 — cli.py:
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import MagicMock
 
@@ -38,32 +37,25 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture
-def minimal_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "proj",
-                "projects": {
-                    "proj": {
-                        "paths": {
-                            "api": str(tmp_path / "proj" / "api"),
-                            "web": str(tmp_path / "proj" / "web"),
-                        }
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def minimal_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
-    return pj
+    return seed_projects(
+        tmp_path,
+        {
+            "proj": {
+                "paths": {
+                    "api": str(tmp_path / "proj" / "api"),
+                    "web": str(tmp_path / "proj" / "web"),
+                }
+            }
+        },
+        active="proj",
+    )
 
 
 # ─────────────────────────────────────────────────────────────

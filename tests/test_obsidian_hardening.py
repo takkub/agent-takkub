@@ -9,7 +9,7 @@ from datetime import datetime
 
 import pytest
 
-from agent_takkub import config, doctor, obsidian_dedup
+from agent_takkub import doctor, obsidian_dedup
 from agent_takkub.vault_graph import _parse_frontmatter
 from agent_takkub.vault_mirror import (
     _MOC_TEMPLATES,
@@ -24,15 +24,12 @@ _NOW = datetime(2026, 8, 23, 12, 0, 0)
 
 
 @pytest.fixture(autouse=True)
-def _v1_registry(tmp_path, monkeypatch):
+def _empty_project_registry(tmp_path, monkeypatch, seed_projects):
     """Every writer under test resolves project_id through
-    `config.load_projects()` — give it a real (empty) V1 file so
-    resolution falls through to the deterministic slug fallback without
-    touching this checkout's real projects.json."""
-    pj = tmp_path / "projects.json"
-    pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
-    monkeypatch.delenv("TAKKUB_V2_AUTHORITY", raising=False)
+    `config.load_projects()` — give it a real (empty) V2 project registry
+    (#566) so resolution falls through to the deterministic slug fallback
+    without touching this checkout's real project list."""
+    seed_projects(tmp_path, {})
 
 
 def _make_vault(tmp_path: pathlib.Path) -> pathlib.Path:

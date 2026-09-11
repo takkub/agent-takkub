@@ -299,24 +299,18 @@ class TestSetTeamPresetBroadcast:
 
 
 class TestRenderLeadSettingsPresetAware:
-    def test_lead_may_implement_lifts_deny_list(self, tmp_path, monkeypatch):
-        import agent_takkub.config as config
+    def test_lead_may_implement_lifts_deny_list(self, tmp_path, monkeypatch, seed_projects):
+        from agent_takkub import config
         from agent_takkub import lead_context as lc_mod
 
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": TEST_PROJECT,
-                    "projects": {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
         runtime = tmp_path / "runtime"
         monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
         monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
+        seed_projects(
+            tmp_path,
+            {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
+            active=TEST_PROJECT,
+        )
 
         team_preset.set_current("solo-lead", TEST_PROJECT)
         result = lc_mod.render_lead_settings(TEST_PROJECT)
@@ -324,24 +318,18 @@ class TestRenderLeadSettingsPresetAware:
         assert data["permissions"]["deny"] == []
         assert "Edit" in data["permissions"]["allow"]
 
-    def test_full_preset_keeps_deny_list(self, tmp_path, monkeypatch):
-        import agent_takkub.config as config
+    def test_full_preset_keeps_deny_list(self, tmp_path, monkeypatch, seed_projects):
+        from agent_takkub import config
         from agent_takkub import lead_context as lc_mod
 
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": TEST_PROJECT,
-                    "projects": {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
         runtime = tmp_path / "runtime"
         monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
         monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
+        seed_projects(
+            tmp_path,
+            {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
+            active=TEST_PROJECT,
+        )
 
         team_preset.set_current("full", TEST_PROJECT)
         result = lc_mod.render_lead_settings(TEST_PROJECT)

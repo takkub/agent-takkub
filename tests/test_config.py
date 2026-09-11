@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -14,91 +13,92 @@ from agent_takkub import config
 
 
 @pytest.fixture
-def projects_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect config.* paths to a tmp dir with a minimal projects.json."""
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": "demo",
-                "projects": {
-                    "demo": {
-                        "paths": {
-                            "web": "/tmp/demo/web",
-                            "api": "/tmp/demo/api",
-                            "mobile": "/tmp/demo/mobile",
-                        },
-                        "presets": ["frontend", "backend"],
-                    },
-                    "empty": {"paths": {}},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def projects_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects):
+    """Redirect config.* paths to a tmp dir with a minimal (V2-registry-
+    backed, #566) project list. Returns a `ProjectRegistryHandle`
+    (tests/conftest.py)."""
+    # REPO_ROOT must be pinned to tmp_path BEFORE `seed_projects` writes the
+    # registry: `storage_layout_v2` nests under a `v2/` root iff `data_home
+    # == config.REPO_ROOT` (the dev-checkout branch), so writing the fixture
+    # before this monkeypatch would target a different path than every
+    # later `config.load_projects()`/`save_projects_json()` call resolves to.
     monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / ".claude" / "agents")
     monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / ".takkub-agents")
     monkeypatch.setattr(config, "EVENTS_LOG", tmp_path / "runtime" / "events.log")
     monkeypatch.setattr(config, "PORT_FILE", tmp_path / "runtime" / "port")
-    return pj
+    handle = seed_projects(
+        tmp_path,
+        {
+            "demo": {
+                "paths": {
+                    "web": "/tmp/demo/web",
+                    "api": "/tmp/demo/api",
+                    "mobile": "/tmp/demo/mobile",
+                },
+                "presets": ["frontend", "backend"],
+            },
+            "empty": {"paths": {}},
+        },
+        active="demo",
+    )
+    return handle
 
 
 class TestActiveProject:
-    def test_returns_name_and_dict(self, projects_file: Path) -> None:
+    def test_returns_name_and_dict(self, projects_file) -> None:
         name, proj = config.active_project()
         assert name == "demo"
         assert proj["paths"]["web"] == "/tmp/demo/web"
 
-    def test_no_active_returns_none(
-        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        projects_file.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+    def test_no_active_returns_none(self, projects_file, monkeypatch: pytest.MonkeyPatch) -> None:
+        projects_file.write({"projects": {}})
         name, proj = config.active_project()
         assert name is None
         assert proj == {}
 
-    def test_missing_projects_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "nope.json")
+    def test_missing_projects_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        seed_projects(tmp_path, {})
         name, proj = config.active_project()
         assert name is None
         assert proj == {}
 
 
 class TestListProjectNames:
-    def test_lists_all(self, projects_file: Path) -> None:
+    def test_lists_all(self, projects_file) -> None:
         assert set(config.list_project_names()) == {"demo", "empty"}
 
 
 class TestSetActiveProject:
-    def test_valid_name_persists(self, projects_file: Path) -> None:
+    def test_valid_name_persists(self, projects_file) -> None:
         assert config.set_active_project("empty") is True
-        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        data = projects_file.read()
         assert data["active"] == "empty"
 
-    def test_invalid_name_returns_false(self, projects_file: Path) -> None:
+    def test_invalid_name_returns_false(self, projects_file) -> None:
         assert config.set_active_project("nope") is False
-        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        data = projects_file.read()
         assert data["active"] == "demo"  # unchanged
 
 
 class TestClearActiveProject:
-    def test_clears_active(self, projects_file: Path) -> None:
+    def test_clears_active(self, projects_file) -> None:
         config.clear_active_project()
-        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        data = projects_file.read()
         assert data["active"] is None
 
-    def test_active_project_after_clear_returns_none(self, projects_file: Path) -> None:
+    def test_active_project_after_clear_returns_none(self, projects_file) -> None:
         config.clear_active_project()
         name, proj = config.active_project()
         assert name is None
         assert proj == {}
 
-    def test_projects_dict_untouched(self, projects_file: Path) -> None:
+    def test_projects_dict_untouched(self, projects_file) -> None:
         config.clear_active_project()
-        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        data = projects_file.read()
         assert set(data["projects"]) == {"demo", "empty"}
 
 
@@ -171,9 +171,9 @@ class TestPresetRoles:
     def test_lowercases_and_trims(
         self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        data = projects_file.read()
         data["projects"]["demo"]["presets"] = ["  FRONTEND ", "Backend", ""]
-        projects_file.write_text(json.dumps(data), encoding="utf-8")
+        projects_file.write(data)
         assert config.preset_roles_for_active() == ["frontend", "backend"]
 
     def test_no_presets_returns_empty(
@@ -337,9 +337,9 @@ class TestAgentRoleDir:
         d = config.agent_role_dir("frontend")
         assert not (d / "CLAUDE.md").exists()
 
-    def test_dev_server_hygiene_appended(self, projects_file: Path) -> None:
+    def test_dev_server_hygiene_appended(self, projects_file, tmp_path: Path) -> None:
         # Write a minimal source agent file.
-        agents_dir = projects_file.parent / ".claude" / "agents"
+        agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "backend.md").write_text("# Backend role\nDo stuff.\n", encoding="utf-8")
         monkeypatch_config_agents_dir = config.AGENTS_DIR
@@ -352,9 +352,9 @@ class TestAgentRoleDir:
         finally:
             config.AGENTS_DIR = monkeypatch_config_agents_dir
 
-    def test_non_interactive_hygiene_appended(self, projects_file: Path) -> None:
+    def test_non_interactive_hygiene_appended(self, projects_file, tmp_path: Path) -> None:
         # Issue #52 Layer 4: the non-interactive shell rules must be present.
-        agents_dir = projects_file.parent / ".claude" / "agents"
+        agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         (agents_dir / "frontend.md").write_text("# Frontend role\n", encoding="utf-8")
         old_agents_dir = config.AGENTS_DIR
@@ -368,8 +368,8 @@ class TestAgentRoleDir:
         finally:
             config.AGENTS_DIR = old_agents_dir
 
-    def test_frontmatter_stripped(self, projects_file: Path) -> None:
-        agents_dir = projects_file.parent / ".claude" / "agents"
+    def test_frontmatter_stripped(self, projects_file, tmp_path: Path) -> None:
+        agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         source = "---\ntitle: QA\n---\n# QA role body\n"
         (agents_dir / "qa.md").write_text(source, encoding="utf-8")
@@ -442,8 +442,8 @@ class TestRoleGuardCapability:
             assert config.role_needs_dev_server_guard(name) is True
             assert config.role_needs_stale_file_guard(name) is True
 
-    def test_dev_server_hygiene_omitted_for_reviewer(self, projects_file: Path) -> None:
-        agents_dir = projects_file.parent / ".claude" / "agents"
+    def test_dev_server_hygiene_omitted_for_reviewer(self, projects_file, tmp_path: Path) -> None:
+        agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         (agents_dir / "reviewer.md").write_text("# Reviewer role\n", encoding="utf-8")
         old_agents_dir = config.AGENTS_DIR
@@ -458,8 +458,8 @@ class TestRoleGuardCapability:
         finally:
             config.AGENTS_DIR = old_agents_dir
 
-    def test_dev_server_hygiene_kept_for_backend(self, projects_file: Path) -> None:
-        agents_dir = projects_file.parent / ".claude" / "agents"
+    def test_dev_server_hygiene_kept_for_backend(self, projects_file, tmp_path: Path) -> None:
+        agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         (agents_dir / "backend.md").write_text("# Backend role\n", encoding="utf-8")
         old_agents_dir = config.AGENTS_DIR
@@ -735,21 +735,15 @@ class TestLeadCwd:
     own cwd)."""
 
     def test_explicit_lead_key_absolutized(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
         web = tmp_path / "web"
         web.mkdir()
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": "demo",
-                    "projects": {"demo": {"paths": {"web": "web"}, "lead": "web"}},
-                }
-            ),
-            encoding="utf-8",
+        seed_projects(
+            tmp_path,
+            {"demo": {"paths": {"web": "web"}, "lead": "web"}},
+            active="demo",
         )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
         monkeypatch.chdir(tmp_path)
 
         result = config.lead_cwd("demo")
@@ -757,37 +751,26 @@ class TestLeadCwd:
         assert Path(result).is_absolute()
 
     def test_already_absolute_path_returned_resolved(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
         web = tmp_path / "web"
         web.mkdir()
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": "demo",
-                    "projects": {"demo": {"paths": {"web": str(web)}, "lead": "web"}},
-                }
-            ),
-            encoding="utf-8",
+        seed_projects(
+            tmp_path,
+            {"demo": {"paths": {"web": str(web)}, "lead": "web"}},
+            active="demo",
         )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
 
         assert config.lead_cwd("demo") == str(web.resolve())
 
     def test_first_listed_path_absolutized(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
         # No `lead` key and no shared existing parent → falls through to
         # branch 3 (first listed path), which must also come back absolute.
         web = tmp_path / "sub" / "web"
         web.mkdir(parents=True)
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "sub/web"}}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        seed_projects(tmp_path, {"demo": {"paths": {"web": "sub/web"}}}, active="demo")
         monkeypatch.chdir(tmp_path)
 
         result = config.lead_cwd("demo")
@@ -795,31 +778,25 @@ class TestLeadCwd:
         assert Path(result).is_absolute()
 
     def test_common_parent_branch_absolutized(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
     ) -> None:
         root = tmp_path / "app"
         (root / "web").mkdir(parents=True)
         (root / "api").mkdir(parents=True)
-        pj = tmp_path / "projects.json"
-        pj.write_text(
-            json.dumps(
-                {
-                    "active": "demo",
-                    "projects": {
-                        "demo": {"paths": {"web": str(root / "web"), "api": str(root / "api")}}
-                    },
-                }
-            ),
-            encoding="utf-8",
+        seed_projects(
+            tmp_path,
+            {"demo": {"paths": {"web": str(root / "web"), "api": str(root / "api")}}},
+            active="demo",
         )
-        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
 
         result = config.lead_cwd("demo")
         assert result == str(root.resolve())
         assert Path(result).is_absolute()
 
-    def test_no_project_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "nope.json")
+    def test_no_project_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        seed_projects(tmp_path, {})
         assert config.lead_cwd("ghost") is None
 
 
@@ -902,3 +879,39 @@ class TestArchiveSettingsFile:
         backups_dir = tmp_path / "backups"
         contents = {p.read_text(encoding="utf-8") for p in backups_dir.glob("role-providers*")}
         assert contents == {'{"first": "codex"}', '{"second": "gemini"}'}
+
+
+class TestSeedProjectsFixtureTargetsV2RegistryNotV1:
+    """#566 round 5 guard: `tests/conftest.py`'s `seed_projects` — now used
+    by every project-list fixture across the suite instead of writing a bare
+    `projects.json` — must always land in the V2 registry
+    (`storage_layout_v2(...).projects_root/registry.json`), never resurrect
+    the legacy top-level file. A fresh `DATA_HOME` only ever has that file
+    pre-migration or on a dev checkout (`DATA_HOME == REPO_ROOT`,
+    `auto_migrate_boot.is_dev_checkout()`) — an old machine's copy is moved
+    into `backups/v1-archive-<ts>/` by `ArchiveV1LegacyStep`, never left at
+    the root (see `test_config_project_registry_v2.py`, which owns that
+    migration-ladder behaviour end-to-end)."""
+
+    def test_seed_then_load_never_creates_a_root_projects_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        # REPO_ROOT deliberately != tmp_path (DATA_HOME) — models a migrated,
+        # non-dev-checkout machine, where storage_layout_v2 does NOT nest
+        # under `v2/` (see its own docstring's dev-checkout branch).
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "cockpit")
+        seed_projects(tmp_path, {"demo": {"paths": {}}}, active="demo")
+
+        assert not (tmp_path / "projects.json").exists()
+        assert config.load_projects() == {"active": "demo", "projects": {"demo": {"paths": {}}}}
+
+    def test_save_projects_json_after_seed_stays_in_the_v2_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_projects
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "cockpit")
+        handle = seed_projects(tmp_path, {"demo": {"paths": {}}}, active="demo")
+
+        assert config.set_active_project("demo") is True
+
+        assert not (tmp_path / "projects.json").exists()
+        assert handle.read()["active"] == "demo"

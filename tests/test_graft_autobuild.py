@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config
 from agent_takkub import graft_autobuild as gab
 from agent_takkub.graft_autobuild import (
     build_all_projects_async as _real_build_all_projects_async,
@@ -46,14 +45,12 @@ def qapp() -> QCoreApplication:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_projects(tmp_path, monkeypatch):
-    pj = tmp_path / "projects.json"
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
-    return pj
+def _isolated_projects(tmp_path, seed_projects):
+    return seed_projects(tmp_path, {})
 
 
-def _write_projects(pj, projects: dict) -> None:
-    pj.write_text(json.dumps({"active": None, "projects": projects}), encoding="utf-8")
+def _write_projects(handle, projects: dict) -> None:
+    handle.write({"active": None, "projects": projects})
 
 
 class _SyncThread:

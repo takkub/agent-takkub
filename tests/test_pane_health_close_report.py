@@ -14,7 +14,6 @@ exercises the actual teardown path.
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import MagicMock, patch
 
@@ -51,21 +50,15 @@ def _stub_verify_chain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pj = tmp_path / "projects.json"
-    pj.write_text(
-        json.dumps(
-            {
-                "active": PROJECT,
-                "projects": {PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+def project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, seed_projects) -> None:
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+    seed_projects(
+        tmp_path,
+        {PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
+        active=PROJECT,
+    )
 
 
 def _orch(roles: list[str]) -> tuple[Orchestrator, dict[str, MagicMock]]:
