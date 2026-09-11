@@ -194,6 +194,13 @@ _SHARED_DIR_LEGACY_GLOBS: tuple[str, ...] = (
 )
 
 
+def _promote_v2_root_wal_path(data_home: Path) -> Path:
+    # A fixed, stable location `ArchiveV1LegacyStep.apply_copy_only()` also
+    # reads directly (#504 round4 B1) — see its own leftover-check
+    # docstring — since the two steps hold no reference to each other.
+    return data_home / _ARCHIVE_DIR_NAME / "promote-v2-root-wal.json"
+
+
 def _rel_files(root: Path) -> list[Path]:
     if root.is_file():
         return [Path(".")]
@@ -317,18 +324,23 @@ class TransferEntry:
         }
 
     def restore_source_from_dest(self) -> list[str]:
-        """Per-file reconstruction of `src` from the already-verified
-        `dest` — copies EXACTLY the files `paths` recorded before this
-        entry's own copy ever ran, one at a time, never a directory-level
-        sweep of whatever else happens to live under `dest` (#504 R3-B1:
-        the old recovery path did ``shutil.copytree(dest, src,
-        dirs_exist_ok=True)``, which pulled in unrelated sibling content —
-        e.g. a live provider home merged into the same destination
-        directory by an earlier, unrelated promotion — as if it had always
-        belonged to THIS entry). Safe to call unconditionally regardless of
-        how much of `src` a failed removal actually managed to delete
-        before raising — every recorded file is simply (re)written from
-        `dest`.
+        """Self-heal ONLY the files `paths` recorded that are no longer at
+        `src` — never a sibling entry's files, and never a file still
+        correctly in place (#504 round4 B1, Gemini cross-check (B)(1)): a
+        removal denied outright (nothing physically touched yet) is
+        therefore a no-op here, while a removal that got PARTWAY through
+        before raising (some files really gone, others untouched) has
+        exactly the gone ones reconstructed from this entry's own already-
+        verified `dest` — one at a time, never a directory-level sweep of
+        whatever else happens to live under `dest` (#504 R3-B1: the old
+        recovery path did ``shutil.copytree(dest, src, dirs_exist_ok=True)``,
+        which pulled in unrelated sibling content — e.g. a live provider
+        home merged into the same destination directory by an earlier,
+        unrelated promotion — as if it had always belonged to THIS entry).
+        This entry's OWN `src` is the only thing ever touched — a SIBLING
+        entry that already finished removal this same call is never undone
+        (#504 round4 `prune_duplicate_only_contract`: a denied removal is
+        recorded DUPLICATE, never "restore-then-revert" of everything else).
 
         Returns every per-file error message encountered (empty on full
         success) — best-effort per file (one failing file must not stop the
@@ -337,6 +349,8 @@ class TransferEntry:
         say so (#504 spec item 5), not report the batch as cleanly reverted."""
         errors: list[str] = []
         if self.kind == "file":
+            if self.src.exists():
+                return errors
             try:
                 self.src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.dest, self.src)
@@ -352,6 +366,8 @@ class TransferEntry:
             return errors
         for rel in self.paths:
             s = self.src / rel
+            if s.exists():
+                continue
             d = self.dest / rel
             try:
                 s.parent.mkdir(parents=True, exist_ok=True)
@@ -499,23 +515,28 @@ class PruneOutcome:
     # True with entries here; the kept file(s) simply remain at `src` for
     # this step's own NEXT candidate scan to pick up and re-copy.
     late_write_kept: dict[str, list[str]] = field(default_factory=dict)
+    # name -> its `sha256` dict, captured from the WAL BEFORE this call may
+    # have cleared it (#504 round4: a caller building its OWN final
+    # manifest after `_prune_phase` returns must read digests from HERE,
+    # never re-read the ledger itself — a successful, no-late-write prune
+    # clears that ledger as part of ITS OWN return, so a caller re-reading
+    # it afterward silently got back `{}` for every entry's checksum,
+    # e.g. `restore_corrupt`/`older_archive_integrity`: `validate()` then
+    # skipped ALL integrity checking because every recorded digest map was
+    # empty).
+    digests: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
-    """#504 round4 R4-L1: never claim "nothing lost" in the same summary
-    that reports a restore-back failure — `prune.error` says so via
-    "restore incomplete" whenever `_prune_phase`'s own reconstruction
-    attempt didn't fully succeed, and the two claims directly contradict
-    each other."""
-    if "restore incomplete" in prune.error:
-        return (
-            f"{action} copy-verified {count} item(s) but a source could not be removed, AND "
-            f"restoring it back failed too — data may only be safely present at the copy "
-            f"target now, not at its original location: {prune.error}"
-        )
+    """#504 round4 B1 (Gemini cross-check (B)(1)/(4)): a denied removal is
+    never "restore-then-revert" — `prune.failed_name`'s source and target
+    both simply remain (recorded DUPLICATE), and every OTHER entry this
+    call already pruned stays pruned, never undone alongside it."""
     return (
-        f"{action} copy-verified {count} item(s) but a source could not be removed — every "
-        f"source has been restored, nothing lost, retry {action}: {prune.error}"
+        f"{action} copy-verified {count} item(s) but {prune.failed_name!r}'s source could not "
+        f"be removed — recorded DUPLICATE (both source and target copies intact, needs manual "
+        f"cleanup, `takkub doctor --storage-layout` surfaces it), never reconstructed: "
+        f"{prune.error}"
     )
 
 
@@ -642,7 +663,7 @@ def _remove_entry_source(
 
 def _prune_phase(
     entries: list[TransferEntry],
-    write_committed: Callable[[list[TransferEntry]], None],
+    write_committed: Callable[[list[TransferEntry], TransferEntry | None], None],
     ledger: TransferLedger,
 ) -> PruneOutcome:
     """Remove each entry's `src`, one at a time — but only ever AFTER
@@ -652,10 +673,11 @@ def _prune_phase(
     old code called its "record ownership" callback BEFORE removal too,
     but swallowed the callback's own failure and removed the source
     anyway — a failed record must instead refuse the removal it was meant
-    to precede). `write_committed` is called with the CUMULATIVE list of
-    entries committed so far each time, so a real process death between
-    that write returning and the following removal still leaves an
-    accurate, durable record.
+    to precede). `write_committed(committed_now, failed)` is called with
+    the CUMULATIVE list of entries committed so far each time and, once
+    known, the ONE entry (or `None`) whose own removal this call denied —
+    every entry in `committed_now` other than `failed` is durably PRUNED;
+    `failed` itself is DUPLICATE (source and target both still exist).
 
     #504 round4 T6: an entry the WAL already recorded `SOURCE_PRUNED` by an
     EARLIER, interrupted call (its removal itself didn't finish — e.g.
@@ -664,19 +686,22 @@ def _prune_phase(
     that already happened, durably, before this process ever died, and
     doing it again from a FRESH, rescanned (and therefore possibly
     SHRUNK) file list would silently drop the files that removal already
-    finished from ownership. Only entries newly attempted BY THIS CALL are
-    ever candidates for the atomic-revert-on-failure below.
+    finished from ownership.
 
-    A whole batch's NEWLY-attempted removals are atomic: if the ledger
-    write OR a removal ITSELF RAISES (an actual `OSError`, never a
-    late-write skip — see `_remove_entry_source`) fails for any one
-    entry, every entry this call itself newly removed (plus the one that
-    just failed) is reconstructed file-by-file from its own already-
-    verified `dest`. #504 round4 R4-H3: an entry whose reconstruction
-    ITSELF then fails keeps its ONLY safe copy at `dest` — it is never
-    dropped from the final manifest by the revert (`write_committed`
-    below always includes it), and its WAL state becomes `PRUNE_FAILED`
-    rather than being erased, so it stays visible as needing attention."""
+    #504 round4 B1 (Gemini cross-check (B)(1)/(4), `prune_duplicate_only_
+    contract`): a denied removal is NEVER "restore-then-revert" — copying
+    `dest` back over every entry this SAME call already pruned is exactly
+    the fragile second mutation R3-B1 already found unsafe once, and it
+    also means a batch's later failure could silently touch files nobody
+    asked to touch. Every entry pruned before the failure STAYS pruned
+    (its only safe copy already durably verified at `dest`); the ONE
+    entry whose own removal was denied keeps BOTH copies and is recorded
+    DUPLICATE — fully recoverable, needs an operator's attention
+    (`takkub doctor --storage-layout` surfaces it), never silently lost.
+    `TransferEntry.restore_source_from_dest()` is still used, but scoped
+    ONLY to that one failed entry's own partially-completed removal (a
+    directory removal that deleted SOME of its files before raising) —
+    never to a sibling that already fully succeeded."""
     ledger_states = ledger.read()
     baseline = [
         e for e in entries if ledger_states.get(e.name, {}).get("state") == STATE_SOURCE_PRUNED
@@ -684,46 +709,61 @@ def _prune_phase(
     baseline_names = {e.name for e in baseline}
     late_write_kept: dict[str, list[str]] = {}
 
-    failed: TransferEntry | None = None
-    error = ""
     for entry in baseline:
         sha256 = ledger_states.get(entry.name, {}).get("sha256", {})
         try:
             _removed, kept = _remove_entry_source(entry, sha256)
         except OSError as e:
-            failed, error = entry, str(e)
-            break
+            # Already durably committed SOURCE_PRUNED by an earlier call —
+            # a resume retry failing again leaves it exactly as-is, still
+            # SOURCE_PRUNED and safely retryable, never demoted to a new
+            # DUPLICATE over work this call didn't even attempt fresh.
+            _log_event("migration_prune_resume_retry_failed", name=entry.name, error=str(e))
+            continue
         if kept:
             late_write_kept[entry.name] = kept
         ledger_states.setdefault(entry.name, {})["sha256"] = sha256
 
     newly: list[TransferEntry] = []
-    if failed is None:
-        for entry in entries:
-            if entry.name in baseline_names:
-                continue
-            try:
-                write_committed([*baseline, *newly, entry])
-            except OSError as e:
-                failed, error = entry, f"could not record removal of {entry.name}: {e}"
-                break
-            sha256 = dict(ledger_states.get(entry.name, {}).get("sha256", {}))
-            ledger_states[entry.name] = _entry_to_wal(entry, STATE_SOURCE_PRUNED, sha256)
-            try:
-                ledger.write(ledger_states)
-            except OSError as e:
-                failed, error = entry, f"could not record WAL removal state for {entry.name}: {e}"
-                break
-            try:
-                _removed, kept = _remove_entry_source(entry, sha256)
-            except OSError as e:
-                failed, error = entry, str(e)
-                break
-            if kept:
-                late_write_kept[entry.name] = kept
-            ledger_states[entry.name]["sha256"] = sha256
-            newly.append(entry)
+    failed: TransferEntry | None = None
+    error = ""
+    for entry in entries:
+        if entry.name in baseline_names:
+            continue
+        if failed is not None:
+            break
+        try:
+            write_committed([*baseline, *newly, entry], None)
+        except OSError as e:
+            failed, error = entry, f"could not record removal of {entry.name}: {e}"
+            break
+        sha256 = dict(ledger_states.get(entry.name, {}).get("sha256", {}))
+        ledger_states[entry.name] = _entry_to_wal(entry, STATE_SOURCE_PRUNED, sha256)
+        try:
+            ledger.write(ledger_states)
+        except OSError as e:
+            failed, error = entry, f"could not record WAL removal state for {entry.name}: {e}"
+            break
+        try:
+            _removed, kept = _remove_entry_source(entry, sha256)
+        except OSError as e:
+            failed, error = entry, str(e)
+            # Self-heal ONLY this entry's own partially-completed removal
+            # (some of its files really gone, others untouched) — never a
+            # sibling's, and never a full reconstruction of an entry that
+            # was simply denied outright with nothing touched yet.
+            heal_errors = entry.restore_source_from_dest()
+            if heal_errors:
+                error += "; some file(s) could not be restored to their original location: " + (
+                    "; ".join(heal_errors)
+                )
+            break
+        if kept:
+            late_write_kept[entry.name] = kept
+        ledger_states[entry.name]["sha256"] = sha256
+        newly.append(entry)
 
+    digests = {name: dict(rec.get("sha256", {})) for name, rec in ledger_states.items()}
     if failed is None:
         try:
             ledger.write(ledger_states)
@@ -734,60 +774,32 @@ def _prune_phase(
             _log_event("migration_wal_digest_refresh_failed", error=str(e))
         if not late_write_kept:
             ledger.clear()
-        return PruneOutcome(pruned=[*baseline, *newly], ok=True, late_write_kept=late_write_kept)
+        return PruneOutcome(
+            pruned=[*baseline, *newly], ok=True, late_write_kept=late_write_kept, digests=digests
+        )
 
-    # Recovery only ever touches entries newly attempted THIS call (plus
-    # the one that just failed, unless IT was already-committed baseline
-    # work whose retry simply failed again — that must be left alone,
-    # still SOURCE_PRUNED, safely retryable, never "restored" as if it had
-    # never been removed).
-    restore_targets = list(newly)
-    if failed.name not in baseline_names:
-        restore_targets.append(failed)
-    fully_restored: list[TransferEntry] = []
-    broken: list[TransferEntry] = []
-    restore_errors: list[str] = []
-    for e in restore_targets:
-        errs = e.restore_source_from_dest()
-        if errs:
-            restore_errors.extend(errs)
-            broken.append(e)
-        else:
-            fully_restored.append(e)
-    if restore_errors:
-        error += "; restore incomplete: " + "; ".join(restore_errors)
-    # #504 round4 R4-H3: an entry whose source could not be reconstructed
-    # keeps its dest-only copy recorded — never dropped by this revert.
+    ledger_states[failed.name] = _entry_to_wal(
+        failed, STATE_PRUNE_FAILED, dict(ledger_states.get(failed.name, {}).get("sha256", {}))
+    )
     try:
-        write_committed([*baseline, *broken])
+        write_committed([*baseline, *newly, failed], failed)
     except OSError as e:
-        error += f"; could not revert ledger to prior state: {e}"
-        _log_event("migration_ledger_revert_failed", error=str(e))
-    for e in fully_restored:
-        ledger_states.pop(e.name, None)
-    for e in broken:
-        sha256 = ledger_states.get(e.name, {}).get("sha256", {})
-        ledger_states[e.name] = _entry_to_wal(e, STATE_PRUNE_FAILED, sha256)
+        error += f"; could not record DUPLICATE state for {failed.name}: {e}"
+        _log_event("migration_prune_duplicate_record_failed", name=failed.name, error=str(e))
     try:
-        if ledger_states:
-            ledger.write(ledger_states)
-        else:
-            # Nothing left worth resuming from (no PRUNE_FAILED entries,
-            # no still-baseline-committed ones either) — clear the WAL
-            # file entirely rather than leaving an empty-but-EXISTING one
-            # behind: `ledger.exists()` gates whether a later apply() call
-            # resumes from it instead of doing a fresh candidate scan, so
-            # a stray empty file here would make that retry vacuously
-            # "succeed" without ever actually promoting/archiving anything
-            # (#504 round4 regression found via `ledger_damage`).
-            ledger.clear()
+        ledger.write(ledger_states)
     except OSError as e:
-        # Best-effort WAL cleanup after a failure this call already
+        # Best-effort WAL persistence after a failure this call already
         # reports through `error` above — the final manifest
         # `write_committed` call just above is the authoritative record.
-        _log_event("migration_wal_cleanup_after_failure_failed", error=str(e))
+        _log_event("migration_wal_write_after_failure_failed", error=str(e))
     return PruneOutcome(
-        pruned=[], ok=False, failed_name=failed.name, error=error, late_write_kept=late_write_kept
+        pruned=[*baseline, *newly],
+        ok=False,
+        failed_name=failed.name,
+        error=error,
+        late_write_kept=late_write_kept,
+        digests=digests,
     )
 
 
@@ -1067,7 +1079,90 @@ def _snapshot_entry_problems(saved: Path, entry: dict) -> list[str]:
     return problems
 
 
-def _revert_to_command_snapshot(data_home: Path, snapshot: CommandSnapshot) -> list[str]:
+def _stage_preimage(source: Path, staged: Path) -> str | None:
+    """Copy *source* (file or dir) into *staged*, returning an error
+    message on failure (never raising) — *staged* is cleaned up both
+    before (a leftover from a previous failed attempt) and after a failed
+    copy, so it never confuses a later retry or a later candidate
+    source."""
+    try:
+        if staged.is_dir():
+            shutil.rmtree(staged)
+        elif staged.exists():
+            staged.unlink()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, staged)
+        else:
+            shutil.copy2(source, staged)
+        return None
+    except OSError as e:
+        try:
+            if staged.is_dir():
+                shutil.rmtree(staged, ignore_errors=True)
+            elif staged.exists():
+                staged.unlink()
+        except OSError as e2:
+            # Best-effort cleanup of a staging scratch file that was never
+            # the real revert target — never mutates it. Logged, never a
+            # bare swallow.
+            _log_event("migration_revert_stage_cleanup_failed", path=str(staged), error=str(e2))
+        return str(e)
+
+
+def _command_snapshot_backup_fallback(
+    backups: BackupManager, step_id: str, name: str, since_ts: float = 0.0
+) -> Path | None:
+    """#504 round4 `snapshot_revert_middle`: when the command-level
+    snapshot's OWN preimage for *name* can't be used (unreadable, or a
+    SECOND, independent fault when actually copying from it — a fault
+    the sha256 pre-check above it can't foresee), fall back to *step_id*'s
+    own per-step `BackupManager` preimage for the SAME name — taken
+    automatically the moment this restore-v1 command's own generation
+    walk first overwrote it (#504 B3). Returns the backup path only once
+    it exists AND is readable (a fresh sha256 computes without raising) —
+    never a path this caller would then also fail to read from.
+
+    *since_ts* MUST be the command snapshot's own timestamp
+    (`CommandSnapshot.root.name`, i.e. its `created_at`). A multi-
+    generation `restore-v1` calls `BackupManager.backup()` once per
+    generation it touches, so the NEWEST slot only ever holds whichever
+    generation was applied last before a later one failed — not the true
+    pre-command state. The OLDEST slot at-or-after *since_ts* is the one
+    taken the moment this command's own walk first overwrote *name*,
+    i.e. the pre-command preimage this fallback exists to find.
+
+    Keyed by bare basename, same limitation `_begin_command_snapshot`'s own
+    docstring already calls out for `BackupManager` — a last-resort
+    fallback, never the primary mechanism, so a *name* nested under a
+    directory could in principle collide with an unrelated backup sharing
+    the same leaf name. Accepted here rather than engineered around: the
+    primary command-snapshot path already handles the general case."""
+    if not name:
+        return None
+    candidate = backups.earliest_backup_since(step_id, Path(name).name, since_ts)
+    if candidate is None or not candidate.exists():
+        return None
+    try:
+        if candidate.is_dir():
+            for rel in _rel_files(candidate):
+                _sha256(candidate / rel)
+        else:
+            _sha256(candidate)
+    except OSError:
+        return None  # swallow-ok: read-only readability probe on a
+        # last-resort fallback candidate — an unreadable candidate is
+        # simply not usable; the caller falls back further or reports
+        # "unverifiable", never touches `candidate` itself.
+    return candidate
+
+
+def _revert_to_command_snapshot(
+    data_home: Path,
+    snapshot: CommandSnapshot,
+    backups: BackupManager | None = None,
+    backup_step_id: str = "archive-v1-legacy",
+) -> list[str]:
     """Undo a whole `restore-v1` command by putting every snapshotted name
     back exactly as `_begin_command_snapshot` found it — present names
     copied back, names that were absent before the command removed again.
@@ -1079,8 +1174,15 @@ def _revert_to_command_snapshot(data_home: Path, snapshot: CommandSnapshot) -> l
     ran first, unconditionally, and only THEN best-effort tried to copy a
     preimage back — so a corrupt/missing snapshot manifest, or a preimage
     that failed to verify, lost the current content with nothing to put
-    back, "0 copies"). A name whose preimage can't be verified is left
-    UNTOUCHED at *data_home* and reported as an error instead.
+    back, "0 copies").
+
+    #504 round4 B3 (Gemini cross-check): when *backups* is given, a name
+    whose OWN command-snapshot preimage can't be used at all (unreadable,
+    or fails independently while actually being staged) falls back to
+    `backup_step_id`'s per-step `BackupManager` preimage for that same
+    name before giving up. A name whose preimage can't be verified via
+    EITHER source is left UNTOUCHED at *data_home* and reported as an
+    error instead — never removed with nothing safe to put back.
 
     Returns every error message encountered (empty means every name was
     fully reverted) — never silent, per this module's own "ห้ามกลืน error"
@@ -1093,6 +1195,12 @@ def _revert_to_command_snapshot(data_home: Path, snapshot: CommandSnapshot) -> l
     except (OSError, ValueError) as e:
         _log_event("migration_command_snapshot_manifest_unreadable", error=str(e))
         return [f"snapshot manifest unreadable at {manifest_path} — every name left untouched: {e}"]
+
+    # The `BackupManager` fallback below must only ever consider backup
+    # slots taken AT OR AFTER this command's own snapshot — never an older
+    # one left over from a previous, unrelated restore-v1 (#504 round4
+    # `snapshot_revert_middle`).
+    since_ts = manifest.get("created_at", 0.0)
 
     errors: list[str] = []
     for name in snapshot.names:
@@ -1112,12 +1220,17 @@ def _revert_to_command_snapshot(data_home: Path, snapshot: CommandSnapshot) -> l
             except OSError as e:
                 errors.append(f"{name}: could not remove: {e}")
             continue
+
         saved = snapshot.root / name
         problems = _snapshot_entry_problems(saved, entry)
-        if problems:
+        source = None if problems else saved
+        if source is None and backups is not None:
+            source = _command_snapshot_backup_fallback(backups, backup_step_id, name, since_ts)
+        if source is None:
             errors.append(f"{name}: preimage unverifiable ({'; '.join(problems)}) — left untouched")
             continue
-        # #504 round4 `snapshot_revert_middle`: `saved` passing the
+
+        # #504 round4 `snapshot_revert_middle`: a source passing the
         # digest check above only proves it's readable AT THIS MOMENT —
         # the actual copy call right below can STILL independently fail
         # (a second, later fault). Stage the restore into a TEMP sibling
@@ -1125,29 +1238,15 @@ def _revert_to_command_snapshot(data_home: Path, snapshot: CommandSnapshot) -> l
         # fully landed — never before, so a failure here leaves `current`
         # exactly as it was, never a "0 copies" gap.
         staged = current.with_name(f"{current.name}.revert-tmp")
-        try:
-            if staged.is_dir():
-                shutil.rmtree(staged)
-            elif staged.exists():
-                staged.unlink()
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            if saved.is_dir():
-                shutil.copytree(saved, staged)
-            else:
-                shutil.copy2(saved, staged)
-        except OSError as e:
-            errors.append(f"{name}: could not stage preimage for revert: {e}")
-            try:
-                if staged.is_dir():
-                    shutil.rmtree(staged, ignore_errors=True)
-                elif staged.exists():
-                    staged.unlink()
-            except OSError as e2:
-                # Best-effort cleanup of a staging scratch file that was
-                # never `current` — never mutates the actual revert
-                # target. Logged, never a bare swallow.
-                _log_event("migration_revert_stage_cleanup_failed", path=str(staged), error=str(e2))
+        stage_error = _stage_preimage(source, staged)
+        if stage_error is not None and source is saved and backups is not None:
+            fallback = _command_snapshot_backup_fallback(backups, backup_step_id, name, since_ts)
+            if fallback is not None:
+                stage_error = _stage_preimage(fallback, staged)
+        if stage_error is not None:
+            errors.append(f"{name}: could not stage preimage for revert: {stage_error}")
             continue
+
         try:
             if current.is_dir():
                 shutil.rmtree(current)
@@ -1278,12 +1377,30 @@ class PromoteV2RootStep:
         return problems
 
     def _wal_path(self) -> Path:
-        return self.data_home / _ARCHIVE_DIR_NAME / "promote-v2-root-wal.json"
+        return _promote_v2_root_wal_path(self.data_home)
 
     def _rollback_wal_path(self) -> Path:
         return self.data_home / _ARCHIVE_DIR_NAME / "promote-v2-root-rollback-wal.json"
 
     def apply(self) -> StepReport:
+        """Copy-verify (`apply_copy_only()`), then finish with `prune()` in
+        the SAME call — the contract every existing direct caller (CLI,
+        other ladder steps, the round4 fault harness) already relies on.
+        `MigrationEngine`'s own 2-pass ladder barrier (#504 round4 B1/B3)
+        instead calls `apply_copy_only()` and `prune()` separately, with a
+        whole-ladder validation gate in between — see `engine.py`."""
+        report = self.apply_copy_only()
+        if not report.ok or report.detail.get("nothing_pending"):
+            return report
+        return self.prune()
+
+    def apply_copy_only(self) -> StepReport:
+        """Copy-verify every legacy `v2/` candidate into its top-level spot
+        — durably, via `_copy_phase`'s WAL — WITHOUT touching any V1
+        source. Every entry lands `VERIFIED` in the WAL, ready for
+        `prune()` to finish later (same call, via `apply()`, or a
+        separate one once a caller has independently confirmed the whole
+        migration ladder validates clean, #504 round4 B1)."""
         ledger = TransferLedger(self._wal_path(), list_key="promoted", write_fn=write_json_atomic)
         if not self._pending():
             ledger.clear()  # orphaned WAL from a run that finished draining
@@ -1292,18 +1409,12 @@ class PromoteV2RootStep:
             # no-op on real state either way.
             self.journal.record(self.step_id, "apply", True, "nothing pending")
             return StepReport(
-                self.step_id, "apply", True, "no legacy v2/ root — nothing to promote"
+                self.step_id,
+                "apply",
+                True,
+                "no legacy v2/ root — nothing to promote",
+                detail={"nothing_pending": True},
             )
-
-        try:
-            existing = _read_committed_entries(self._manifest_path(), "promoted")
-        except (OSError, ValueError) as e:
-            msg = (
-                f"existing promote record at {self._manifest_path()} is unreadable — "
-                f"refusing to touch V1 data: {e}"
-            )
-            self.journal.record(self.step_id, "apply", False, msg)
-            return StepReport(self.step_id, "apply", False, msg)
 
         # #504 round4 T6: resume from a crashed attempt's OWN WAL — never a
         # fresh scan of `_promote_candidates()` — once one exists, so a
@@ -1321,20 +1432,59 @@ class PromoteV2RootStep:
                     new_entries.append(TransferEntry(src.name, "dir", src, dest, paths))
                 else:
                     new_entries.append(TransferEntry(src.name, "file", src, dest))
-        new_names = {e.name for e in new_entries}
-
-        def write_committed(committed_now: list[TransferEntry]) -> None:
-            merged = [e for e in existing if e["name"] not in new_names]
-            merged += [e.to_ledger(copied.digests.get(e.name)) for e in committed_now]
-            write_json_atomic(
-                self._manifest_path(), {"schema": 3, "created_at": time.time(), "promoted": merged}
-            )
 
         copied = _copy_phase(new_entries, self.backups, self.step_id, ledger)
         if not copied.ok:
             self.journal.record(self.step_id, "apply", False, copied.error)
             return StepReport(
                 self.step_id, "apply", False, f"promote failed, rolled back: {copied.error}"
+            )
+        return StepReport(
+            self.step_id,
+            "apply",
+            True,
+            f"copy-verified {len(new_entries)} item(s) from {self._legacy_root()}; prune pending",
+            detail={"items": [e.name for e in new_entries]},
+        )
+
+    def prune(self) -> StepReport:
+        """Finish `apply_copy_only()` by removing every already-copy-
+        verified entry's V1 source — reads the WAL it left behind, so this
+        is safe to call standalone (from `apply()`, same call) or later,
+        once a caller has independently validated the whole ladder (#504
+        round4 B1: `MigrationEngine` never lets this run until every step
+        in the SAME pass — including domain steps and every OTHER archive
+        generation — has itself validated clean)."""
+        ledger = TransferLedger(self._wal_path(), list_key="promoted", write_fn=write_json_atomic)
+        if not ledger.exists():
+            return StepReport(self.step_id, "apply", True, "nothing pending prune")
+
+        new_entries = [_entry_from_wal(rec) for rec in ledger.read().values()]
+        try:
+            existing = _read_committed_entries(self._manifest_path(), "promoted")
+        except (OSError, ValueError) as e:
+            msg = (
+                f"existing promote record at {self._manifest_path()} is unreadable — "
+                f"refusing to prune V1 data: {e}"
+            )
+            self.journal.record(self.step_id, "apply", False, msg)
+            return StepReport(self.step_id, "apply", False, msg)
+        new_names = {e.name for e in new_entries}
+
+        def write_committed(
+            committed_now: list[TransferEntry], failed: TransferEntry | None
+        ) -> None:
+            digests = ledger.read()
+            merged = [e for e in existing if e["name"] not in new_names]
+            merged += [
+                e.to_ledger(
+                    digests.get(e.name, {}).get("sha256", {}),
+                    state="DUPLICATE" if failed is not None and e.name == failed.name else "PRUNED",
+                )
+                for e in committed_now
+            ]
+            write_json_atomic(
+                self._manifest_path(), {"schema": 3, "created_at": time.time(), "promoted": merged}
             )
 
         prune = _prune_phase(new_entries, write_committed, ledger)
@@ -1356,6 +1506,32 @@ class PromoteV2RootStep:
             f"promoted {len(prune.pruned)} item(s) from {self._legacy_root()} to {self.data_home}",
             detail={"items": [e.name for e in prune.pruned]},
         )
+
+    def _health_problems(self) -> list[str]:
+        """Copy-target health for whatever THIS pass's own WAL currently
+        names (from `apply_copy_only()`) — NOT `_promoted_member_problems()`
+        (validate()'s own check): that one reads the FINAL, committed
+        manifest, which legitimately does not exist yet the instant right
+        after a copy-only pass — `prune()` is the one that writes it (#504
+        round4 B1: a still-present legacy `v2/` root with no manifest yet
+        is the NORMAL mid-pass state here, never a red flag). Falls back to
+        `_promoted_member_problems()` when there is no pending WAL at all
+        (nothing copied this pass — whatever the FINAL manifest already
+        says stands)."""
+        ledger = TransferLedger(self._wal_path(), list_key="promoted", write_fn=write_json_atomic)
+        if not ledger.exists():
+            return self._promoted_member_problems()
+        problems: list[str] = []
+        for rec in ledger.read().values():
+            entry = _entry_from_wal(rec)
+            if entry.kind == "file":
+                if not entry.dest.is_file():
+                    problems.append(f"missing: {entry.dest}")
+                continue
+            for rel in entry.paths:
+                if not (entry.dest / rel).is_file():
+                    problems.append(f"missing: {entry.dest / rel}")
+        return problems
 
     def validate(self) -> StepReport:
         if self._pending():
@@ -1464,7 +1640,9 @@ class PromoteV2RootStep:
             self.journal.record(self.step_id, "rollback", True, "nothing left to restore")
             return StepReport(self.step_id, "rollback", True, "nothing left to restore")
 
-        def write_committed(restored_now: list[TransferEntry]) -> None:
+        def write_committed(
+            restored_now: list[TransferEntry], _failed: TransferEntry | None
+        ) -> None:
             restored_names = {e.name for e in restored_now}
             new_promoted: list[dict] = []
             for entry in existing:
@@ -1681,17 +1859,134 @@ class ArchiveV1LegacyStep:
         return self._archive_base() / "archive-v1-legacy-wal.json"
 
     def apply(self) -> StepReport:
+        """Copy-verify (`apply_copy_only()`), then finish with `prune()` in
+        the SAME call — the contract every existing direct caller already
+        relies on. `MigrationEngine`'s own 2-pass ladder barrier (#504
+        round4 B1/B3) calls these two separately instead, gated by a
+        whole-ladder validation in between — see `engine.py`."""
+        report = self.apply_copy_only()
+        if not report.ok or report.detail.get("nothing_pending"):
+            return report
+        return self.prune()
+
+    def _pending_archive_root(self) -> Path | None:
+        """The `archive_root` THIS step's own (not-yet-pruned) WAL is
+        currently building, if any — `_stale_generation_problems()` below
+        must never judge this ONE generation against "is it COMPLETE yet",
+        since that only ever becomes true once `prune()` finishes it
+        (#504 round4 `barrier_old_generation`: only a generation with NO
+        live WAL pointing at it is genuinely stale/orphaned)."""
+        ledger = TransferLedger(self._wal_path(), list_key="archived", write_fn=write_json_atomic)
+        if not ledger.exists():
+            return None
+        try:
+            return Path(ledger.read_meta()["archive_root"])
+        except (KeyError, OSError, ValueError):
+            return None  # swallow-ok: read-only WAL meta probe — an
+            # unreadable/malformed WAL just means "no pending generation
+            # known", never touches anything; `_stale_generation_problems`
+            # below still independently validates every generation on disk.
+
+    def _stale_generation_problems(self) -> list[str]:
+        """Every integrity problem found in archive generations OTHER than
+        the one THIS step's own WAL is currently building (see
+        `_pending_archive_root()`) — `MigrationEngine`'s ladder barrier
+        (#504 round4 B1) calls this BEFORE any step's `prune()` runs, so a
+        pre-existing generation left corrupt/incomplete by a PRIOR,
+        unrelated run blocks every step's prune this pass, never the
+        generation THIS SAME pass just started (still legitimately
+        mid-flight until this step's own `prune()` finishes it)."""
+        active = self._pending_archive_root()
+        problems: list[str] = []
+        for gen in _all_archive_generation_dirs(self.data_home):
+            if active is not None and gen == active:
+                continue
+            manifest_path = gen / _MANIFEST_NAME
+            if not manifest_path.is_file():
+                problems.append(f"archive manifest missing for generation {gen.name}")
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                problems.append(f"archive manifest unreadable ({gen.name}): {e}")
+                continue
+            if not manifest.get("archived") and any(
+                p.name not in (_MANIFEST_NAME, _LEGACY_V2_NAME) for p in gen.iterdir()
+            ):
+                problems.append(
+                    f"archive manifest for generation {gen.name} has no ownership record for "
+                    "content actually present in its directory"
+                )
+                continue
+            if not _manifest_is_complete(manifest):
+                problems.append(
+                    f"archive generation {gen.name} is incomplete (crashed or in-progress)"
+                )
+                continue
+            problems.extend(_archive_entry_problems(gen, manifest))
+        return problems
+
+    def _health_problems(self) -> list[str]:
+        """Copy-target health, independent of whether `prune()` has run
+        yet — see `PromoteV2RootStep._health_problems()`'s twin docstring.
+        `MigrationEngine`'s ladder barrier calls THIS, never `validate()`,
+        to gate a pass's deferred prune."""
+        return self._stale_generation_problems()
+
+    def apply_copy_only(self) -> StepReport:
+        """Copy-verify every V1 leftover into a NEW archive generation —
+        durably, via `_copy_phase`'s WAL — WITHOUT removing any V1 source,
+        deleting #504 item 5's junk, or touching the (by-then-empty)
+        legacy `v2/` marker. `prune()` finishes all of that later (same
+        call, via `apply()`, or a separate one once a caller has
+        independently confirmed the whole migration ladder validates
+        clean, #504 round4 B1)."""
         ledger = TransferLedger(self._wal_path(), list_key="archived", write_fn=write_json_atomic)
         if not self._pending():
             ledger.clear()
             self.journal.record(self.step_id, "apply", True, "nothing pending")
             return StepReport(
-                self.step_id, "apply", True, "no V1 leftovers found — nothing to archive"
+                self.step_id,
+                "apply",
+                True,
+                "no V1 leftovers found — nothing to archive",
+                detail={"nothing_pending": True},
             )
 
         legacy_root = self._legacy_root()
         if legacy_root.is_dir():
-            leftover = next((p for p in legacy_root.rglob("*") if p.is_file()), None)
+            # #504 round4 B1: a file `promote-v2-root`'s OWN WAL already
+            # names VERIFIED (or SOURCE_PRUNED) is NOT "un-promoted" —
+            # `PromoteV2RootStep.apply_copy_only()` has already durably
+            # copy-verified it; only its PRUNE (deferred to the SAME
+            # ladder barrier this step's own prune is deferred to) is
+            # still pending. Without this, the 2-pass split deadlocks:
+            # promote can't prune until archive validates clean, but
+            # archive refuses to even copy while ANY un-pruned file sits
+            # under legacy_root — which, mid-pass, is every one of them.
+            promote_states = {}
+            promote_wal = _promote_v2_root_wal_path(self.data_home)
+            if promote_wal.is_file():
+                try:
+                    promote_states = TransferLedger(promote_wal, list_key="promoted").read()
+                except (OSError, ValueError):
+                    promote_states = {}
+
+            def _promoted_covers(rel: Path) -> bool:
+                rec = promote_states.get(rel.parts[0])
+                return rec is not None and rec.get("state") in (
+                    STATE_VERIFIED,
+                    STATE_SOURCE_PRUNED,
+                )
+
+            leftover = next(
+                (
+                    p
+                    for p in legacy_root.rglob("*")
+                    if p.is_file() and not _promoted_covers(p.relative_to(legacy_root))
+                ),
+                None,
+            )
             if leftover is not None:
                 # #504 B2: refuse the whole apply rather than delete a
                 # `promote-v2-root` that never finished (or was
@@ -1785,16 +2080,49 @@ class ArchiveV1LegacyStep:
             return StepReport(
                 self.step_id, "apply", False, f"archive failed, rolled back: {copied.error}"
             )
+        return StepReport(
+            self.step_id,
+            "apply",
+            True,
+            f"copy-verified {len(new_entries)} item(s) into {archive_root}; prune pending",
+            detail={"archive_root": str(archive_root)},
+        )
 
-        def write_committed(committed_now: list[TransferEntry]) -> None:
-            archived = [e.to_ledger(copied.digests.get(e.name)) for e in committed_now]
+    def prune(self) -> StepReport:
+        """Finish `apply_copy_only()` by removing every already-copy-
+        verified V1 source, retiring the (by-then-empty) legacy `v2/`
+        marker, and deleting #504 item 5's junk outright — reads the WAL
+        `apply_copy_only()` left behind, so this is safe to call standalone
+        (from `apply()`, same call) or later, once a caller has
+        independently validated the whole ladder (#504 round4 B1)."""
+        ledger = TransferLedger(self._wal_path(), list_key="archived", write_fn=write_json_atomic)
+        if not ledger.exists():
+            return StepReport(self.step_id, "apply", True, "nothing pending prune")
+
+        meta = ledger.read_meta()
+        archive_root = Path(meta["archive_root"])
+        new_entries = [_entry_from_wal(rec) for rec in ledger.read().values()]
+        manifest_path = archive_root / _MANIFEST_NAME
+        legacy_root = self._legacy_root()
+
+        def write_committed(
+            committed_now: list[TransferEntry], failed: TransferEntry | None
+        ) -> None:
+            digests = ledger.read()
+            archived = [
+                e.to_ledger(
+                    digests.get(e.name, {}).get("sha256", {}),
+                    state="DUPLICATE" if failed is not None and e.name == failed.name else "PRUNED",
+                )
+                for e in committed_now
+            ]
             write_json_atomic(
                 manifest_path,
                 {
                     "schema": 2,
                     "created_at": time.time(),
                     "state": "PENDING",  # #504 round4 R4-B3: only set COMPLETE
-                    # once this apply() has fully finished below.
+                    # once this prune() has fully finished below.
                     "archived": archived,
                     "legacy_v2_marker_archived": False,
                     "deleted": [],
@@ -1813,6 +2141,16 @@ class ArchiveV1LegacyStep:
             )
 
         done = prune.pruned
+        # #504 round4: NEVER re-read `ledger` here — a successful prune with
+        # no late writes already cleared it (`_prune_phase`'s own return),
+        # so a fresh read back would silently see `{}` and every checksum
+        # below would go missing. `prune.digests` is the same WAL state,
+        # captured before that clear.
+        final_digests = prune.digests
+
+        def digest_for(name: str) -> dict[str, str]:
+            return final_digests.get(name, {})
+
         archived_legacy_marker = False
         if legacy_root.is_dir():
             (archive_root / _LEGACY_V2_NAME).mkdir(parents=True, exist_ok=True)
@@ -1832,7 +2170,7 @@ class ArchiveV1LegacyStep:
                         "schema": 2,
                         "created_at": time.time(),
                         "state": "PENDING",  # legacy v2/ marker not archived yet
-                        "archived": [e.to_ledger(copied.digests.get(e.name)) for e in done],
+                        "archived": [e.to_ledger(digest_for(e.name)) for e in done],
                         "legacy_v2_marker_archived": False,
                         "deleted": [],
                     },
@@ -1852,7 +2190,7 @@ class ArchiveV1LegacyStep:
                 "schema": 2,
                 "created_at": time.time(),
                 "state": "COMPLETE",  # #504 round4 R4-B3
-                "archived": [e.to_ledger(copied.digests.get(e.name)) for e in done],
+                "archived": [e.to_ledger(digest_for(e.name)) for e in done],
                 "legacy_v2_marker_archived": archived_legacy_marker,
                 "deleted": [],
             },

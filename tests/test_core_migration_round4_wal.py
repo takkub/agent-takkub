@@ -683,9 +683,12 @@ def test_r4h3_entry_stays_committed_when_source_reconstruction_fails(tmp_path, j
 # ---------------------------------------------------------------------------
 
 
-def test_r4l1_summary_never_claims_nothing_lost_when_restore_is_incomplete(
-    tmp_path, journal_backups
-):
+def test_r4l1_summary_never_claims_nothing_lost_when_a_duplicate_is_left(tmp_path, journal_backups):
+    """#504 round4 B1 (superseding the older R2-B1-era "restore incomplete"
+    contract this test used to cover, see the `promote_v1.py` twin test's
+    docstring): a denied removal's summary must still be honest that
+    something needs an operator's attention — a DUPLICATE, not silently
+    "nothing lost"."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     (data_home / "v2" / "models" / "a.json").parent.mkdir(parents=True)
@@ -703,24 +706,16 @@ def test_r4l1_summary_never_claims_nothing_lost_when_restore_is_incomplete(
             raise OSError("last remove blocked")
         return real_rmtree(path, *a, **k)
 
-    real_copy2 = promote_mod.shutil.copy2
-
-    def fail_restore(s, d, *a, **k):
-        if Path(d).name == "a.json":
-            raise OSError("injected restore-back failure")
-        return real_copy2(s, d, *a, **k)
-
     monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(promote_mod.shutil, "rmtree", fail_second)
-        monkeypatch.setattr(promote_mod.shutil, "copy2", fail_restore)
         step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
         report = step.apply()
     finally:
         monkeypatch.undo()
 
     assert not report.ok
-    assert "restore incomplete" in report.summary
+    assert "DUPLICATE" in report.summary
     assert "nothing lost" not in report.summary
 
 

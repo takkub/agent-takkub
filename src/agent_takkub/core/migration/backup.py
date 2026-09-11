@@ -70,3 +70,34 @@ class BackupManager:
             if candidate.exists():
                 return candidate
         return None
+
+    def earliest_backup_since(self, step_id: str, name: str, since_ts: float) -> Path | None:
+        """Like `latest_backup`, but the OLDEST slot at or after *since_ts*
+        instead of the newest overall — #504 round4 `snapshot_revert_middle`:
+        a multi-generation `restore-v1` calls `backup()` once per generation
+        it touches, so by the time a LATER generation fails mid-walk, the
+        newest slot only holds the PREVIOUS generation's already-applied
+        state, not the true pre-command preimage. The oldest slot taken
+        since the command's own snapshot began (`since_ts` is that
+        snapshot's timestamp) is the one captured the moment this command's
+        walk FIRST overwrote *name* — i.e. the pre-command state."""
+        step_dir = self._root / step_id
+        if not step_dir.is_dir():
+            return None
+        try:
+            slots = sorted(p for p in step_dir.iterdir() if p.is_dir())
+        except OSError:
+            return None  # swallow-ok: same as `latest_backup` above.
+        for slot in slots:
+            try:
+                ts = float(slot.name)
+            except ValueError:
+                continue  # swallow-ok: not one of this manager's own
+                # timestamped slot dirs (foreign/unexpected name) — skip it,
+                # never touches anything.
+            if ts < since_ts:
+                continue
+            candidate = slot / name
+            if candidate.exists():
+                return candidate
+        return None
