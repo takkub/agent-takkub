@@ -123,6 +123,89 @@ def test_restore_v1_list_and_archive_select_after_a_real_archive(capsys):
     assert (config.DATA_HOME / "projects.json").exists()
 
 
+def test_restore_v1_reapplies_version_marker_so_validate_passes_after(capsys, monkeypatch):
+    """#574 round11 item 5: a real "resume restore" rehearsal ran
+    `restore-v1` successfully but left `runtime/core/version.json` (or
+    wherever `core_home()` resolves post-restore) stamped with whatever
+    build applied the ladder originally — `takkub migrate validate` then
+    failed `version-marker` ("app component missing/mismatched") the
+    moment the running build had moved on since. `restore-v1` must
+    re-stamp the marker with the CURRENTLY running build, not leave it
+    stale (never a byte-revert to the old build's value — that would
+    reintroduce the exact mismatch this fix removes on any machine that
+    hasn't also been downgraded)."""
+    from agent_takkub import config
+    from agent_takkub.core.migration import steps as steps_mod
+    from agent_takkub.core.migration.engine import MigrationEngine
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "projects.json").write_text(
+        '{"active": null, "projects": {}}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    # Simulate the app having been upgraded since the original apply.
+    monkeypatch.setattr(steps_mod, "APP_VERSION", "999.0.0")
+
+    rc = cli.main(["migrate", "restore-v1", "--json"])
+    assert rc == 0
+    out = _json_body(capsys.readouterr().out)
+    marker_report = next(r for r in out if r["step_id"] == "version-marker")
+    assert marker_report["ok"]
+    # Proves the real re-apply branch ran (not #504 round11b's skip path
+    # below) — the engine built by `MigrationEngine()` here has a real
+    # `version-marker` step, so `get_step` must succeed.
+    assert "skipped" not in marker_report["summary"]
+
+    engine = MigrationEngine()
+    validate_report = engine.get_step("version-marker").validate()
+    assert validate_report.ok, validate_report.summary
+
+
+def test_restore_v1_skips_version_marker_when_engine_has_no_such_step(capsys):
+    """#504 round11b: harness/test callers build a `MigrationEngine` with
+    only the two steps `restore-v1` actually undoes (`promote-v2-root`,
+    `archive-v1-legacy`) — e.g. `MigrationEngine([promote, archive], ...)`,
+    as several fault-injection harnesses do by calling
+    `_cmd_migrate_restore_v1` directly. `engine.get_step("version-marker")`
+    then raises `KeyError`, which used to propagate out of `restore-v1`
+    uncaught — even though the docstring above already says a stale marker
+    must never cascade into reporting the archive/promote restore itself
+    as failed. This must degrade to a skipped-but-ok report instead."""
+    from argparse import Namespace
+
+    from agent_takkub import config
+    from agent_takkub.cli import _cmd_migrate_restore_v1
+    from agent_takkub.core.migration.engine import MigrationEngine
+
+    config.DATA_HOME.mkdir(parents=True, exist_ok=True)
+    (config.DATA_HOME / "projects.json").write_text(
+        '{"active": null, "projects": {}}', encoding="utf-8"
+    )
+
+    rc = cli.main(["migrate", "apply", "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    full_engine = MigrationEngine()
+    reduced_engine = MigrationEngine(
+        [full_engine.get_step("promote-v2-root"), full_engine.get_step("archive-v1-legacy")]
+    )
+
+    with pytest.raises(KeyError):
+        reduced_engine.get_step("version-marker")
+
+    reports = _cmd_migrate_restore_v1(reduced_engine, Namespace(archive_ts=None, json=True))
+
+    marker_report = next(r for r in reports if r.step_id == "version-marker")
+    assert marker_report.ok
+    assert "skipped" in marker_report.summary
+    assert all(r.ok for r in reports)
+
+
 def test_restore_v1_never_runs_promote_rollback_after_a_failed_archive_rollback(capsys):
     """#504 H3: `cli.py` used to run `promote-v2-root`'s rollback even when
     `archive-v1-legacy`'s just failed, reconstructing only half of the

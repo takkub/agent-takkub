@@ -229,13 +229,22 @@ class TestPlanMigration:
         _seed_v1_leftover(data_home)
         (data_home / "v2" / "models").mkdir(parents=True)
         (data_home / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
+        # #574 round11 item 1: a genuine MERGE collision — a top-level
+        # `models/` already holding different content than what `v2/models`
+        # is about to be promoted into — is the one case still backed up
+        # here; a non-colliding promote candidate (the old, wider-scope
+        # assumption this test used to make) no longer is.
+        (data_home / "models").mkdir(parents=True)
+        (data_home / "models" / "registry.json").write_text(
+            '{"pre_existing": true}', encoding="utf-8"
+        )
 
         plan = boot_flow.plan_migration()
         assert plan is not None
         assert "models" in plan.promote_items
         assert "custom-roles.json" in plan.archive_items
         assert plan.backup_dir.parent.name == "backups"
-        assert any(label == "v2" for label, _count, _bytes, _unit in plan.backup_items)
+        assert any(label == "models" for label, _count, _bytes, _unit in plan.backup_items)
         assert plan.estimated_bytes >= 0
         assert plan.free_bytes >= 0
 
@@ -364,7 +373,7 @@ class TestRunMigrationOutcome:
 
         captured = {}
 
-        def fake_run_boot_stage(*, progress_cb=None, on_entry=None):
+        def fake_run_boot_stage(*, progress_cb=None, on_entry=None, on_file_progress=None):
             captured["on_entry"] = on_entry
             on_entry("promote-v2-root", "models")
             progress_cb("apply สำเร็จ — กำลัง validate…")
@@ -396,7 +405,7 @@ class TestRunMigrationOutcome:
         (config.DATA_HOME / "v2" / "models").mkdir(parents=True)
         (config.DATA_HOME / "v2" / "models" / "registry.json").write_text("{}", encoding="utf-8")
 
-        def fake_run_boot_stage(*, progress_cb=None, on_entry=None):
+        def fake_run_boot_stage(*, progress_cb=None, on_entry=None, on_file_progress=None):
             on_entry("promote-v2-root", "models")
             progress_cb("x")
             return auto_migrate_boot.BootMigrationResult("applied", messages=[])

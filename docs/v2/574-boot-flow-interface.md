@@ -72,9 +72,25 @@ a locally-computed guess (e.g. `len(promote_items)`, which is only `promote-v2-r
 count) could.
 
 `unit` in each `backup_items` row is one of `"ไฟล์"` (files), `"โปรเจค"`
-(projects — the `"projects"` row only), `"รายการ"` (generic items — the
-`"runtime/core"` row only, since it groups disparate things: journal,
-backups, version marker).
+(projects), `"รายการ"` (generic items).
+
+**#574 round11 item 1 (SCOPE)**: `backup_items` no longer lists every V1
+artifact the ladder is ABOUT TO TOUCH — only what a later step might
+OVERWRITE, MERGE INTO, or DELETE OUTRIGHT this same pass (a `v2/*` promote
+candidate whose top-level destination already exists, a domain step's own
+V2 target when it already holds pre-existing content, `version-marker`'s
+target, and #504 item 5's delete-outright junk). A pure MOVE — a genuine
+V1 top-level leftover `archive-v1-legacy` will archive, a non-colliding
+`v2/*` promote candidate, `runtime/core` wholesale — is already fully
+protected by that step's own copy-verify-then-prune WAL (+ `restore-v1`/
+`rollback()`), so it's never duplicated into this backup and never appears
+in `backup_items` at all; `PreMigrateBackupStep.skipped_move_only_items()`
+lists those skipped items with a reason string, for a UI that wants to show
+the full picture. This cut a real ~200k-file, multi-GB backup down to just
+the handful of items actually at risk. `PreMigrateBackupStep.plan()`'s
+`StepReport.detail` also carries `estimated_files`/`estimated_bytes` and,
+above 500 MB or 20,000 files, a `warning` string — surface that in a
+PreMigrate screen the same way any other `StepReport.detail` key is read.
 
 `plan_migration()` returns `None` once this machine is fully on the V2
 layout with nothing left to migrate — screens B–E have nothing to show at
@@ -96,6 +112,8 @@ class ProgressEvent:
     log_line: str
     backup_dir: Path | None
     current_path: str | None = None  # short path, relative to DATA_HOME, of the entry/file currently being moved
+    files_done: int | None = None    # #574 round11 item 3 — progress WITHIN one large directory entry
+    files_total: int | None = None   # (added after this dataclass first shipped — read both defensively via getattr)
 
 PHASES = {1: "สำรองข้อมูล", 2: "คัดลอกขึ้นโครงใหม่", 3: "ตรวจสอบ", 4: "เก็บของเก่าเข้า archive", 5: "เสร็จ"}
 
@@ -116,6 +134,23 @@ with — set on EVERY event that has an item behind it (every phase 1/2/4
 event past the initial kickoff), `None` for every event that doesn't
 (phases 3/5, and the very first phase-1 event emitted before any entry has
 fired yet).
+
+**#574 round11 item 3**: `files_done`/`files_total` fill the ONE gap the
+ponytail above calls out — progress WITHIN one large directory entry's own
+copy+verify, from a NEW `on_file_progress` observer (`(step_id,
+entry_name, files_done, files_total, current_path)`, threaded through
+`MigrationEngine`/the copy/archive/backup steps/`_copy_phase`/
+`verify_copy.copy_verified`). Throttled to roughly every 200 files or every
+2 seconds, whichever comes first, plus always once more on the final file
+(`verify_copy._FileProgressThrottle`) — a real production rehearsal (real
+prod data, ~200k files) previously sat on ONE entry for 17+ minutes with
+zero signal on screen. `current_path` for these events is
+`"<entry_name>/<file-relative-path>"`; `files_done`/`files_total` are
+`None` for every event that isn't WITHIN a large directory entry (a
+`file`-kind entry, an `on_entry`-only event, phases 3/5). Both fields were
+added after this dataclass first shipped — a consumer must read them
+defensively (`getattr(event, "files_done", None)`), the same way
+`current_path` above already documents.
 
 ## 4. Outcome (screens D/E)
 
@@ -157,10 +192,30 @@ repeating a false positive.
 
 ## CLI
 
-- `takkub migrate run [--providers ask|all|none|<csv>] [--remember] [--yes]
-  [--no-backup] [--json]` — the whole flow (A→E) as text screens, or
-  `--json` for one JSON object per line (`type` in `provider`,
-  `provider_update`, `plan`, `progress`, `outcome`).
+- `takkub migrate run [--providers ask|all|none|<csv>] [--remember]
+  [--yes] [--json]` — the whole flow (A→E) as text screens, or `--json`
+  for one JSON object per line (`type` in `provider`, `provider_update`,
+  `provider_prompt_skipped`, `auto_confirmed`, `plan`, `progress`,
+  `outcome`).
+  - `--no-backup` was **removed** (#574 round11 R7-M2): it only ever
+    printed a warning and never actually skipped the backup step — a
+    flag that silently does nothing is worse than no flag at all.
+  - `--providers ask` (the default) now actually asks — one provider at
+    a time, `y`/`n`/`all`/`none` — on a real TTY. A non-interactive
+    caller (`--json`, or no TTY at all) resolves to "none" instead of
+    either hanging on a prompt or silently updating whatever
+    `check_provider_updates()` happened to pre-select (#574 round11
+    R7-M3); look for `type: "provider_prompt_skipped"` in `--json`
+    output to see that this happened.
+  - `--remember` now persists for EVERY resolved choice (`none` →
+    `"skip"`, `all` → `"update_all"`, an explicit csv or an interactive
+    "all"/per-item answer → `"selected"`), not only when something ended
+    up selected (#574 round11 R7-M4) — and the default `ask` path now
+    reads a remembered non-`"ask"` choice back via
+    `remembered_provider_choice()` before ever prompting.
+  - `--json` implies `--yes` (no human to answer the confirm prompt) —
+    look for `type: "auto_confirmed"` to see when that happened rather
+    than assuming it silently (#574 round11 R7-L1).
 - `takkub migrate restore-v1 --from-backup <dir>` — restore from a
   `pre-migrate-backup/` directory instead of the normal `v1-archive-<ts>`
   generation walk (an alternate recovery path).

@@ -170,7 +170,7 @@ def test_r6_m2_copy_only_keeps_a_colliding_live_file_as_a_duplicate_and_proceeds
     dest.mkdir()
     (dest / "a.json").write_text("LIVE-DIFFERENT-CONTENT", encoding="utf-8")
 
-    duplicated = copy_only(src, dest)
+    duplicated, _source_digests = copy_only(src, dest)
 
     assert duplicated == ["a.json"]
     assert (dest / "a.json").read_text(encoding="utf-8") == "real"  # this transaction's copy landed
@@ -193,10 +193,10 @@ def test_r6_m2_a_retry_after_a_collision_no_longer_hits_the_same_wall(tmp_path):
     dest.mkdir()
     (dest / "a.json").write_text("LIVE", encoding="utf-8")
 
-    first = copy_only(src, dest)
+    first, _first_digests = copy_only(src, dest)
     assert first == ["a.json"]
     # A second run against the now-clean dest finds no collision at all.
-    second = copy_only(src, dest)
+    second, _second_digests = copy_only(src, dest)
     assert second == []
 
 

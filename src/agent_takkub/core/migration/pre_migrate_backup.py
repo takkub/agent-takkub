@@ -1,17 +1,47 @@
 """`PreMigrateBackupStep` (#574) — a copy-only, copy-verified snapshot of
-every V1 artifact the rest of the ladder is about to touch, taken BEFORE any
-other step runs. Ladder position: first, ahead of even `version-marker` —
-`MigrationEngine.apply()`/`apply_pending()` already stop at the first
-failing step, so putting this step first is what makes "a failed backup
-aborts the whole ladder before anything else is touched" true for free,
-with no new stop-the-line logic needed here.
+every V1 artifact the rest of the ladder might OVERWRITE, MERGE INTO, or
+DELETE OUTRIGHT, taken BEFORE any other step runs. Ladder position: first,
+ahead of even `version-marker` — `MigrationEngine.apply()`/`apply_pending()`
+already stop at the first failing step, so putting this step first is what
+makes "a failed backup aborts the whole ladder before anything else is
+touched" true for free, with no new stop-the-line logic needed here.
 
-Backs up: the legacy nested `v2/` root (`PromoteV2RootStep`'s own input),
-every `ArchiveV1LegacyStep` archive/shared-dir-legacy candidate, and —
-separately, since `ArchiveV1LegacyStep` explicitly PROTECTS them —
-`projects/` and `agents/`, which the domain steps are about to WRITE into
-this same pass. `runtime/core` (`CoreInternalStoreStep`'s own source) is
-included too even though nothing prunes it, purely as an extra safety copy.
+#574 round11 item 1 (SCOPE): this used to ALSO back up every pure-move
+candidate (every `ArchiveV1LegacyStep` archive/shared-dir-legacy item, every
+non-colliding `v2/*` promote candidate, and `runtime/core` wholesale) —
+real cost on a production-sized store: a rehearsal on a ~200k-file copy of
+prod stalled 30 minutes into phase 1/5, having only reached ~2.1 GB of a
+store whose `claude-config`/`runtime` trees alone run into the tens of GB.
+None of that redundancy was buying real protection: a MOVE (copy-verify via
+`_copy_phase`'s own WAL, then prune only after that verify succeeds) is
+already fully recoverable through `restore-v1`/`rollback()` without this
+step's help — its cost scales with the WHOLE store instead of with what
+this pass can actually damage. This step now backs up only:
+
+1. a `v2/*` promote candidate whose top-level destination ALREADY holds
+   content (`PromoteV2RootStep` is about to MERGE into it, not move into
+   empty space — see `_promote_merge_entries()`);
+2. each of the 7 domain steps' (readonly-registries/role-agent/capability/
+   project/state/credential-reference/core-internal-store) own V2 targets,
+   but ONLY the ones that already exist (a target that doesn't exist yet is
+   a pure first write — nothing pre-existing to lose, see
+   `_domain_backup_targets()`) — each of those steps already takes its OWN
+   per-run `BackupManager` snapshot before writing, so this is a second,
+   independent, never-rotated-away copy of the state THIS ladder pass
+   actually started from, not the only copy;
+3. `version-marker`'s own target (`version_doc_path()`), for the same
+   belt-and-suspenders reason as 2 — `VersionMarkerStep.apply()` already
+   takes its own backup too;
+4. `ArchiveV1LegacyStep`'s `_delete_candidates()` — #504 item 5's named
+   junk, which gets DELETED OUTRIGHT with no archive copy anywhere else,
+   the one case in this whole ladder with no other recovery path at all.
+
+Everything else (genuine archive candidates, shared-dir-legacy files,
+non-colliding promote candidates, `runtime/core` wholesale) is a pure MOVE
+already protected by its own step's copy-verify-then-prune WAL — this
+step's own `_input_entries()` never touches them, and `plan()`/`inspect()`
+detail explains why each is skipped so the wizard's PreMigrate screen can
+show the full picture, not just what actually gets copied here.
 
 Never deletes anything, never expires its own output (user directive via
 #574's task brief) — `rollback()` is a no-op that reports ok without
@@ -20,7 +50,14 @@ resume-from-WAL for free; a `manifest.json` written on success additionally
 lets a repeated `apply()` (a fresh v1-state `MigrationEngine.apply()` run,
 which does not consult the journal that would otherwise skip an
 already-applied step) recognize a complete prior backup and skip real work.
-"""
+`_write_manifest()` merges with whatever a PRIOR run's manifest already
+recorded rather than replacing it outright (#574 round11 item 4): an item
+that was in scope under an OLDER version of this step but has since fallen
+OUT of scope (a code upgrade narrowed `_input_entries()`, same as this very
+round's own SCOPE change) is kept in the manifest flagged
+``"out_of_scope": true`` — its already-copied backup files are never
+deleted, and `_already_backed_up()` only ever requires the CURRENT
+`_input_entries()` to be present, never the historical full set."""
 
 from __future__ import annotations
 
@@ -36,17 +73,27 @@ from agent_takkub import config
 from ..storage.paths import migration_home
 from .backup import BackupManager
 from .journal import MigrationJournal
-from .promote_v1 import _LEGACY_V2_NAME, ArchiveV1LegacyStep, TransferEntry, _copy_phase, _rel_files
+from .promote_v1 import (
+    _LEGACY_V2_NAME,
+    ArchiveV1LegacyStep,
+    PromoteV2RootStep,
+    TransferEntry,
+    _copy_phase,
+    _rel_files,
+)
 from .registry_copy_step import write_json_atomic
 from .report import StepReport
 from .wal import TransferLedger
 
 STEP_ID = "pre-migrate-backup"
 
-# Extra top-level names to back up on top of whatever `ArchiveV1LegacyStep`
-# is about to touch — both are on `_ARCHIVE_SKIP_NAMES` (never archived) but
-# the domain steps running later THIS SAME pass write into them.
-_EXTRA_BACKUP_NAMES = ("projects", "agents")
+# #574 round11 item 1: bytes/files thresholds above which `plan()` surfaces
+# a warning (text summary + JSON `detail.warning`) rather than silently
+# proceeding — the wizard's PreMigrate screen and `takkub migrate plan
+# --json` both read this the same way every other `StepReport.detail` key
+# is read, no new plumbing needed.
+_WARN_BYTES_THRESHOLD = 500 * 1024 * 1024
+_WARN_FILES_THRESHOLD = 20_000
 
 _MARKER_NAME = "pre-migrate-backup-dir.txt"
 _WAL_NAME = "pre-migrate-backup-wal.json"
@@ -108,6 +155,79 @@ def resolve_backup_dir(data_home: Path) -> Path:
     return data_home / "backups" / name
 
 
+def _version_marker_path(data_home: Path) -> Path:
+    """Mirrors `core.versioning.store.version_doc_path()`'s own
+    `core_home()`-fallback logic, but rooted at *data_home* explicitly
+    rather than the global `config.DATA_HOME`/`config.RUNTIME_DIR` that
+    function actually reads. The two are always the SAME path in
+    production (`MigrationEngine()`'s default construction always passes
+    `data_home=config.DATA_HOME`) — this exists so a caller with an
+    explicit, decoupled `data_home` (every test in this package) gets a
+    path guaranteed to resolve UNDER that `data_home`, so its
+    `.relative_to(data_home)` (used as this entry's manifest `name`, see
+    `_input_entries()`) never raises and never points at the real
+    machine's own version.json."""
+    from ..storage.layout import storage_layout_v2
+
+    system = storage_layout_v2(data_home).system
+    if system.is_dir():
+        return system / "version.json"
+    return data_home / "runtime" / "core" / "version.json"
+
+
+def _domain_backup_targets(data_home: Path) -> list[Path]:
+    """Every V2-layout target path the 7 domain steps named in #574
+    round11 item 1 might overwrite or merge into — each one built from
+    `storage_layout_v2(data_home)` (directly, or via a throwaway step
+    instance's own `data_home=` field), so it's always resolvable relative
+    to *data_home* — the same relative path `_input_entries()` uses as
+    this entry's manifest `name`, which `restore_from_backup_dir()` later
+    reconstructs a destination from as `data_home / name`. The step
+    objects here are throwaway: constructed only to read a path-computing
+    accessor, never given a journal/backups instance, never `apply()`ed."""
+    from .steps_v1 import (
+        CoreInternalStoreStep,
+        CredentialReferenceStep,
+        ProjectMigrationStep,
+        RoleAgentMigrationStep,
+        build_capability_step,
+        build_readonly_registries_step,
+        build_state_step,
+    )
+
+    out: list[Path] = []
+    for builder in (build_readonly_registries_step, build_capability_step, build_state_step):
+        out.extend(m.target for m in builder(data_home=data_home).mappings)
+
+    role_agent = RoleAgentMigrationStep(data_home=data_home)
+    out.append(role_agent._custom_roles_target())
+    out.append(role_agent._routing_target())
+
+    project = ProjectMigrationStep(data_home=data_home)
+    out.append(project._registry_target())
+    for project_id in project._load().get("projects", {}):
+        out.append(project._project_target(project_id))
+
+    creds = CredentialReferenceStep(data_home=data_home)
+    for provider in creds._refs():
+        out.append(creds._provider_target(provider))
+        out.append(creds._account_target(provider))
+
+    out.append(CoreInternalStoreStep(data_home=data_home)._target())
+    return out
+
+
+def _entry_bytes(entry: TransferEntry) -> int:
+    try:
+        if entry.kind == "file":
+            return entry.src.stat().st_size
+        return sum(
+            (entry.src / rel).stat().st_size for rel in entry.paths if (entry.src / rel).is_file()
+        )
+    except OSError:
+        return 0
+
+
 @dataclass
 class PreMigrateBackupStep:
     step_id: str = STEP_ID
@@ -119,6 +239,12 @@ class PreMigrateBackupStep:
     # already-resumed-complete). Exceptions from it are swallowed; it can
     # never affect whether the backup itself succeeds.
     on_entry: Callable[[str], None] | None = None
+    # Best-effort WITHIN-entry progress observer (#574 round11 item 3) —
+    # `(entry_name, files_done, files_total, current_path)`, forwarded
+    # into `_copy_phase`'s own `on_file_progress` — the exact signal that
+    # was missing during the real ~200k-file rehearsal that sat silent on
+    # one entry for 17+ minutes.
+    on_file_progress: Callable[[str, int, int, str], None] | None = None
 
     def _backup_dir(self) -> Path:
         return resolve_backup_dir(self.data_home)
@@ -139,78 +265,149 @@ class PreMigrateBackupStep:
         return data if isinstance(data, dict) else None
 
     def _input_entries(self) -> list[TransferEntry]:
+        """#574 round11 item 1 (SCOPE): only what `ArchiveV1LegacyStep`/
+        `PromoteV2RootStep`/the 7 domain steps might OVERWRITE, MERGE INTO,
+        or DELETE OUTRIGHT this same pass — see this module's own docstring
+        for the full reasoning and `skipped_move_only_items()` for the
+        (much larger) set of pure-move items deliberately left OUT."""
         home = self.data_home
         backup_dir = self._backup_dir()
         entries: list[TransferEntry] = []
         seen: set[str] = set()
 
-        def add(label: str, src: Path, *, exclude_paths: frozenset[str] = frozenset()) -> None:
+        def add(label: str, src: Path) -> None:
             if label in seen or not src.exists():
                 return
             seen.add(label)
             if src.is_dir():
-                paths = tuple(
-                    p.as_posix() for p in _rel_files(src) if p.as_posix() not in exclude_paths
-                )
+                paths = tuple(p.as_posix() for p in _rel_files(src))
                 if not paths:
-                    # Nothing left worth backing up here (either genuinely
-                    # empty, or — `runtime/core` specifically — holding only
-                    # this step's OWN marker/WAL, which `resolve_backup_dir()`
-                    # creates as a side effect of merely being asked for a
-                    # path, even during a read-only inspect()/plan()).
-                    return
+                    return  # genuinely empty — nothing worth backing up
                 entries.append(TransferEntry(label, "dir", src, backup_dir / label, paths))
             else:
                 entries.append(TransferEntry(label, "file", src, backup_dir / label))
 
-        add(_LEGACY_V2_NAME, home / _LEGACY_V2_NAME)
+        # 1) promote-v2-root MERGE collisions only — a `v2/*` candidate
+        # whose top-level destination already exists (`PromoteV2RootStep`
+        # is about to merge into it). A NON-colliding candidate is a pure
+        # move into empty space, already protected by that step's own
+        # copy-verify-then-prune WAL. Labeled by its own bare top-level
+        # name (never a synthetic prefix) — `restore_from_backup_dir()`
+        # reconstructs `data_home / name` from this later, so it must be
+        # the item's real data_home-relative location.
+        promote = PromoteV2RootStep(data_home=home)
+        for p in promote._promote_candidates():
+            target = home / p.name
+            if target.exists():
+                add(p.name, target)
+
+        # 2) each of the 7 domain steps' own V2 targets — ONLY the ones
+        # that already hold pre-existing content (an absent target is a
+        # pure first write, nothing to lose). Every target from
+        # `_domain_backup_targets()` is built under `home`, so
+        # `.relative_to(home)` never raises.
+        for target in _domain_backup_targets(home):
+            add(target.relative_to(home).as_posix(), target)
+
+        # 3) version-marker's own target — small, cheap, belt-and-
+        # suspenders alongside `VersionMarkerStep`'s own per-run backup.
+        marker = _version_marker_path(home)
+        add(marker.relative_to(home).as_posix(), marker)
+
+        # 4) #504 item 5's named junk — deleted OUTRIGHT by
+        # `ArchiveV1LegacyStep` with no archive copy anywhere else, the one
+        # case in this whole ladder with no other recovery path.
+        archive = ArchiveV1LegacyStep(data_home=home)
+        for p in archive._delete_candidates():
+            add(p.name, p)
+
+        return entries
+
+    def skipped_move_only_items(self) -> list[tuple[str, str]]:
+        """``(label, reason)`` for every candidate `_input_entries()`
+        deliberately leaves OUT because it's a pure move already protected
+        by its own step's copy-verify-then-prune WAL (+ `restore-v1`/
+        `rollback()`) — surfaced in `inspect()`/`plan()` detail so the
+        wizard's PreMigrate screen can show the full picture instead of
+        silently doing less than a reader might expect from the old,
+        wider-scope backup."""
+        home = self.data_home
+        reason_moved = (
+            "moved (copy-verify then prune), not copied here — its own WAL + "
+            "restore-v1/rollback already protect it"
+        )
+        out: list[tuple[str, str]] = []
+        if (home / _LEGACY_V2_NAME).is_dir():
+            promote = PromoteV2RootStep(data_home=home)
+            for p in promote._promote_candidates():
+                if not (home / p.name).exists():
+                    out.append((f"v2/{p.name}", reason_moved))
         archive = ArchiveV1LegacyStep(data_home=home)
         for p in archive._archive_candidates():
-            add(p.name, p)
+            out.append((p.name, reason_moved))
         for p in archive._shared_dir_legacy_candidates():
-            add(p.relative_to(home).as_posix(), p)
-        for name in _EXTRA_BACKUP_NAMES:
-            add(name, home / name)
-        # Exclude THIS step's own marker/WAL files (see
-        # `OWN_BOOKKEEPING_NAMES`'s docstring) — never treat them as
-        # migration-worthy content just because they happen to live
-        # alongside it under `runtime/core`.
-        add(
-            "runtime/core",
-            config.RUNTIME_DIR / "core",
-            exclude_paths=OWN_BOOKKEEPING_NAMES,
-        )
-        return entries
+            out.append((p.relative_to(home).as_posix(), reason_moved))
+        return out
 
     def _pending(self) -> bool:
         entries = self._input_entries()
         return bool(entries) and not self._already_backed_up(entries)
 
     def _already_backed_up(self, entries: list[TransferEntry]) -> bool:
+        """#574 round11 item 4: `done` only ever counts an item the manifest
+        recorded as genuinely verified UNDER THE CURRENT `_input_entries()`
+        scope — never a name kept only because an OLDER manifest happened
+        to have it (`out_of_scope: true`, see `_write_manifest()`), and
+        never a requirement that `entries` match some historical full set.
+        A version upgrade that narrows or widens scope compares cleanly
+        either way: fewer/different names than a prior manifest still
+        resolves correctly here, no assumption of a stable entry set
+        across versions."""
         manifest = self._existing_manifest()
         if manifest is None:
             return False
-        done = {item.get("name") for item in manifest.get("items", [])}
+        done = {
+            item.get("name") for item in manifest.get("items", []) if not item.get("out_of_scope")
+        }
         return all(e.name in done for e in entries)
 
     def inspect(self) -> StepReport:
         entries = self._input_entries()
+        skipped = self.skipped_move_only_items()
         return StepReport(
             self.step_id,
             "inspect",
             True,
-            f"{len(entries)} item(s) would be backed up to {self._backup_dir()}",
-            detail={"items": [e.name for e in entries]},
+            f"{len(entries)} item(s) would be backed up to {self._backup_dir()}; "
+            f"{len(skipped)} move-only item(s) skipped (already protected elsewhere)",
+            detail={
+                "items": [e.name for e in entries],
+                "skipped_move_only": [{"name": n, "reason": r} for n, r in skipped],
+            },
         )
 
     def plan(self) -> StepReport:
-        return StepReport(
-            self.step_id,
-            "plan",
-            True,
-            f"will copy-verify every migration input into {self._backup_dir()} before "
-            "anything else in the ladder runs",
+        entries = self._input_entries()
+        total_files = sum(len(e.paths) if e.kind == "dir" else 1 for e in entries)
+        total_bytes = sum(_entry_bytes(e) for e in entries)
+        summary = (
+            f"will copy-verify {len(entries)} item(s) ({total_files} file(s), "
+            f"{total_bytes / (1024 * 1024):.1f} MB) into {self._backup_dir()} before "
+            "anything else in the ladder runs"
         )
+        detail: dict = {"estimated_files": total_files, "estimated_bytes": total_bytes}
+        # #574 round11 item 1: surface a warning above these thresholds
+        # rather than silently proceeding — in BOTH the text summary and
+        # `detail` (so `takkub migrate plan --json` and the wizard's
+        # PreMigrate screen see it the same way).
+        if total_bytes > _WARN_BYTES_THRESHOLD or total_files > _WARN_FILES_THRESHOLD:
+            warning = (
+                f"backup covers {total_files} file(s) / "
+                f"{total_bytes / (1024 * 1024):.0f} MB — this may take a while"
+            )
+            detail["warning"] = warning
+            summary += f" — WARNING: {warning}"
+        return StepReport(self.step_id, "plan", True, summary, detail=detail)
 
     def dry_run(self) -> StepReport:
         entries = self._input_entries()
@@ -236,6 +433,22 @@ class PreMigrateBackupStep:
             self.journal.record(self.step_id, "apply", True, "nothing to back up")
             return StepReport(self.step_id, "apply", True, "nothing needed backing up")
         if self._already_backed_up(entries):
+            # #574 round11 item 4: reconcile the manifest even on this
+            # fast path — a resumed run under a NARROWED scope (a code
+            # upgrade since the prior full apply) must still flag whatever
+            # fell out of scope, not just skip re-copying and leave the
+            # manifest exactly as the OLDER, wider-scope code left it. No
+            # `digests` for `entries` here (nothing was just copied) —
+            # `_write_manifest` falls back to each name's already-recorded
+            # digest from the existing manifest.
+            manifest_error = self._write_manifest(entries, {})
+            if manifest_error is not None:
+                msg = (
+                    f"already backed up at {self._backup_dir()} but manifest reconcile "
+                    f"failed: {manifest_error}"
+                )
+                self.journal.record(self.step_id, "apply", False, msg)
+                return StepReport(self.step_id, "apply", False, msg)
             self.journal.record(self.step_id, "apply", True, "already backed up (resumed)")
             for e in entries:
                 self._notify(e.name)
@@ -248,13 +461,35 @@ class PreMigrateBackupStep:
             )
 
         ledger = TransferLedger(self._wal_path(), write_fn=write_json_atomic)
-        outcome = _copy_phase(entries, self.backups, self.step_id, ledger, on_entry=self._notify)
+        outcome = _copy_phase(
+            entries,
+            self.backups,
+            self.step_id,
+            ledger,
+            on_entry=self._notify,
+            on_file_progress=self.on_file_progress,
+        )
         if not outcome.ok:
             self.journal.record(self.step_id, "apply", False, outcome.error)
             return StepReport(
                 self.step_id, "apply", False, f"pre-migrate backup failed: {outcome.error}"
             )
-        self._write_manifest(entries, outcome.digests)
+        manifest_error = self._write_manifest(entries, outcome.digests)
+        if manifest_error is not None:
+            # #574 round11 R7-H3: every file above is already durably
+            # copy-verified — the WAL is deliberately left UNCLEARED, so a
+            # retry finds the already-verified work and only needs to
+            # rewrite the manifest, never re-copy anything. But with no
+            # manifest, `validate()`/`restore_from_backup_dir()` have no
+            # ownership record to read back: report this as a real
+            # failure (stopping the ladder here) rather than `ok=True`
+            # over an escape hatch that silently doesn't work.
+            msg = (
+                f"backed up {len(entries)} item(s) to {self._backup_dir()} but manifest write "
+                f"failed, stopping: {manifest_error}"
+            )
+            self.journal.record(self.step_id, "apply", False, msg)
+            return StepReport(self.step_id, "apply", False, msg)
         ledger.clear()
         self.journal.record(
             self.step_id, "apply", True, f"backed up {len(entries)} item(s) to {self._backup_dir()}"
@@ -269,9 +504,35 @@ class PreMigrateBackupStep:
 
     def _write_manifest(
         self, entries: list[TransferEntry], digests: dict[str, dict[str, str]]
-    ) -> None:
+    ) -> str | None:
+        """Returns an error message on failure (never raises) — `None` on
+        success. #574 round11 item 4: merges with whatever a PRIOR run's
+        manifest already recorded rather than replacing it outright — an
+        item that WAS in scope under an older version of `_input_entries()`
+        but has since fallen out of scope is kept, flagged
+        ``out_of_scope: true``, never silently dropped from the record even
+        though its already-copied backup files are left exactly where they
+        are (never deleted, per this step's own "keep forever" contract).
+
+        *digests* need not cover every name in *entries* — the
+        already-backed-up (resumed) fast path in `apply()` calls this with
+        `{}` purely to reconcile out-of-scope flags, nothing just copied;
+        a name missing from *digests* falls back to whatever the PRIOR
+        manifest already recorded for it, never silently reset to `{}`."""
+        prior = self._existing_manifest() or {}
+        prior_by_name = {
+            item["name"]: item
+            for item in prior.get("items", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        new_names = {e.name for e in entries}
+        kept_out_of_scope = [
+            {**item, "out_of_scope": True}
+            for name, item in prior_by_name.items()
+            if name not in new_names
+        ]
         payload = {
-            "schema": 1,
+            "schema": 2,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "backup_dir": str(self._backup_dir()),
             "items": [
@@ -280,17 +541,20 @@ class PreMigrateBackupStep:
                     "kind": e.kind,
                     "src": str(e.src),
                     "paths": list(e.paths),
-                    "sha256": digests.get(e.name, {}),
+                    "sha256": digests.get(e.name)
+                    or prior_by_name.get(e.name, {}).get("sha256", {}),
                 }
                 for e in entries
-            ],
+            ]
+            + kept_out_of_scope,
         }
         path = self._manifest_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             write_json_atomic(path, payload)
         except OSError as e:
-            self.journal.record(self.step_id, "apply", False, f"manifest write failed: {e}")
+            return str(e)
+        return None
 
     def validate(self) -> StepReport:
         """Checks the manifest's OWN recorded item list, never a fresh
@@ -303,19 +567,28 @@ class PreMigrateBackupStep:
         report false failures the instant anything else in the ladder ran
         after it — the manifest, written once at backup time, is the only
         stable thing to check against."""
+        backup_dir = self._backup_dir()
         manifest = self._existing_manifest()
         if manifest is None:
-            # Never re-derive "should something have been backed up?" from
-            # LIVE disk state here — same drift problem this whole method
-            # exists to avoid. `apply()`'s own report is already the
-            # authority on whether backup was needed and succeeded; by the
-            # time validate() runs independently (`_downgrade_on_health`,
-            # `takkub migrate validate`, a later boot's `apply_pending`),
-            # trust that and treat "no manifest yet" as simply nothing to
-            # check here.
+            # #574 round11 R7-H3: a backup dir that already has CONTENT but
+            # no readable manifest is a real failure (the write that should
+            # have recorded ownership over it never landed) — never read as
+            # "nothing to check" just because apply() looks like it hasn't
+            # run yet. An empty/absent backup dir is the genuine "hasn't
+            # run yet" case this used to unconditionally assume.
+            try:
+                has_content = backup_dir.is_dir() and any(backup_dir.iterdir())
+            except OSError:
+                has_content = False
+            if has_content:
+                return StepReport(
+                    self.step_id,
+                    "validate",
+                    False,
+                    f"backup dir {backup_dir} has content but its manifest is missing or unreadable",
+                )
             return StepReport(self.step_id, "validate", True, "no pre-migrate backup manifest yet")
         items = manifest.get("items", [])
-        backup_dir = self._backup_dir()
         missing = [item["name"] for item in items if not (backup_dir / item["name"]).exists()]
         if missing:
             return StepReport(

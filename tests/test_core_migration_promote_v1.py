@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_takkub.core.migration import verify_copy
 from agent_takkub.core.migration.backup import BackupManager
 from agent_takkub.core.migration.journal import MigrationJournal
 from agent_takkub.core.migration.promote_v1 import (
@@ -68,6 +69,135 @@ def test_copy_verified_raises_on_missing_target(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "copy2", lambda *a, **k: None)  # simulate a silent no-op copy
     with pytest.raises(VerifyMismatchError):
         copy_verified(src, dest)
+
+
+def test_copy_verified_directory_never_rehashes_the_source(tmp_path, monkeypatch):
+    """#574 round11 (VERIFY COST): `verify_only` used to re-open and
+    re-read every SOURCE file a second time just to hash it again, even
+    though `copy_only` had already streamed those exact bytes once while
+    writing them to `dest`. A py-spy profile of a real, ~200k-file
+    pre-migrate-backup rehearsal found 85% of wall time here — half of it
+    this exact redundant read. Asserts no path under `src` is ever handed
+    to `_sha256` — the source-side hash comes ONLY from the single
+    streaming pass `copy_only`/`_copy_file_with_hash` already made."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        (src / f"f{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    from agent_takkub.core.migration import verify_copy
+
+    real_sha256 = verify_copy._sha256
+    source_side_calls: list[Path] = []
+
+    def spy(path: Path) -> str:
+        if path == src or src in path.parents:
+            source_side_calls.append(path)
+        return real_sha256(path)
+
+    monkeypatch.setattr(verify_copy, "_sha256", spy)
+    result = verify_copy.copy_verified(src, dest)
+
+    assert result.file_count == 5
+    assert source_side_calls == []
+    for i in range(5):
+        assert (dest / f"f{i}.txt").read_text(encoding="utf-8") == f"data-{i}"
+
+
+def test_copy_verified_directory_still_detects_target_corruption(tmp_path, monkeypatch):
+    """The precomputed source digest must still be compared against the
+    TARGET's real on-disk content — a write-time corruption (disk error,
+    concurrent writer) must still raise, not be masked by trusting the
+    source-side number alone."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("hello", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    from agent_takkub.core.migration import verify_copy
+
+    real_copy_file_with_hash = verify_copy._copy_file_with_hash
+
+    def corrupting_copy(s: Path, d: Path) -> str:
+        digest = real_copy_file_with_hash(s, d)
+        d.write_bytes(b"corrupted-on-disk")
+        return digest
+
+    monkeypatch.setattr(verify_copy, "_copy_file_with_hash", corrupting_copy)
+    with pytest.raises(VerifyMismatchError):
+        verify_copy.copy_verified(src, dest)
+
+
+def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path):
+    """#574 round11 item 3: a large directory entry's copy+verify must
+    surface progress WITHIN itself — not just one `on_entry` fire for the
+    whole thing. Default throttle is every 200 files; a 500-file entry
+    must fire at 200, 400, and a guaranteed final call at 500 (verify
+    phase, real target-file count doubling every count since copy AND
+    verify each throttle independently)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    n = 500
+    for i in range(n):
+        (src / f"f{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    calls: list[tuple[int, int]] = []
+    verify_copy.copy_verified(
+        src, dest, on_file=lambda done, total, path: calls.append((done, total))
+    )
+
+    # Copy-phase calls: 200, 400, 500 (final). Verify-phase: same shape.
+    copy_done_values = [d for d, t in calls if t == n]
+    assert 200 in copy_done_values
+    assert 400 in copy_done_values
+    assert copy_done_values.count(n) == 2  # once from copy_only, once from verify_only
+    assert max(copy_done_values) == n
+
+
+def test_copy_verified_on_file_fires_on_a_time_boundary_too(tmp_path, monkeypatch):
+    """#574 round11 item 3: even well under the 200-file count threshold,
+    a slow per-file operation must still surface progress at least every
+    ~2 seconds — the exact "no gap longer than 2s" requirement, verified
+    here via a controlled fake clock rather than a real, flaky sleep."""
+    src = tmp_path / "src"
+    src.mkdir()
+    n = 5
+    for i in range(n):
+        (src / f"f{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    from agent_takkub.core.migration import verify_copy as vc
+
+    fake_now = [0.0]
+
+    def fake_monotonic():
+        fake_now[0] += 2.5  # every file "takes" 2.5s — always past the 2s window
+        return fake_now[0]
+
+    monkeypatch.setattr(vc.time, "monotonic", fake_monotonic)
+    calls: list[int] = []
+    vc.copy_only(src, dest, on_file=lambda done, total, path: calls.append(done))
+
+    # Every single file crossed the time threshold — no file left silent.
+    assert calls == list(range(1, n + 1))
+
+
+def test_entry_to_wal_pending_default_sha256_is_empty(tmp_path):
+    """#574 round11: a fresh `STATE_PENDING` ledger record used to default
+    to a full re-hash of the entire source (`_source_digests`, now
+    removed) even though nothing ever reads it back before the real
+    copy overwrites it with the genuine post-copy digest — pure wasted
+    cost on every entry, every fresh apply. Locks in the fix: the default
+    is now `{}`, never a source read."""
+    from agent_takkub.core.migration.promote_v1 import TransferEntry, _entry_to_wal
+
+    src = tmp_path / "src.txt"
+    src.write_text("hello", encoding="utf-8")
+    entry = TransferEntry("x", "file", src, tmp_path / "dest.txt")
+    rec = _entry_to_wal(entry, "PENDING")
+    assert rec["sha256"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +960,71 @@ def test_promote_rollback_batches_prune_phase_for_a_large_per_file_restore(
     # (`_prune_empty_dirs`'s own contract — a live provider home could
     # share that basename) — only its files move back.
     assert list(promoted_dir.iterdir()) == []
+    for i in range(n):
+        assert not (promoted_dir / f"f{i}.txt").exists()
+        assert (v2_dir / f"f{i}.txt").read_text(encoding="utf-8") == f"content-{i}"
+
+
+def test_promote_rollback_tail_of_batch_survives_a_mid_batch_prune_failure(
+    tmp_path, journal_backups, monkeypatch
+):
+    """#574 round11 item 6/8 (R7-H1/R7-H2, acceptance review round 7):
+    rollback's own per-file restore-prune shares `_prune_phase` with
+    every other caller in this module — a mid-batch removal failure must
+    leave every UNTOUCHED sibling in that same batch safely resumable
+    (its already-promoted copy has ALSO already landed back under `v2/`
+    from this same call's own copy phase, so its top-level source being
+    left in place is a genuine, safe duplicate — never falsely marked
+    pruned in the WAL with nothing left to recover from). A later retry
+    must finish the job cleanly with no data loss."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    n = 70  # > 60 so `_restore_fsync_batch(n)` picks a real batch size (2)
+    v2_dir = data_home / "v2" / "bigmodels"
+    v2_dir.mkdir(parents=True)
+    for i in range(n):
+        (v2_dir / f"f{i}.txt").write_text(f"content-{i}", encoding="utf-8")
+
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    promoted_dir = data_home / "bigmodels"
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_remove_entry_source = promote_mod._remove_entry_source
+    call_count = {"n": 0}
+
+    def _fail_on_third_call(entry, digests):
+        call_count["n"] += 1
+        if call_count["n"] == 3:
+            raise OSError("injected mid-batch removal failure")
+        return real_remove_entry_source(entry, digests)
+
+    monkeypatch.setattr(promote_mod, "_remove_entry_source", _fail_on_third_call)
+    report = step.rollback()
+    assert not report.ok
+    monkeypatch.undo()
+
+    # Every file this call's own copy phase already landed back under
+    # v2/ — including the failed entry and its untouched sibling(s) —
+    # regardless of whether its top-level source was ever pruned.
+    for i in range(n):
+        assert (v2_dir / f"f{i}.txt").read_text(encoding="utf-8") == f"content-{i}"
+    # The first 2 (one full batch) were fully pruned from the top level;
+    # everything from the 3rd call onward (the failure itself, plus its
+    # never-attempted sibling and every later file the loop never even
+    # reached) is still there — safe, never silently orphaned.
+    for i in range(n):
+        if i < 2:
+            assert not (promoted_dir / f"f{i}.txt").exists()
+        else:
+            assert (promoted_dir / f"f{i}.txt").exists()
+
+    # A retry finishes the job cleanly — no data loss, no leftover
+    # duplicates at the top level.
+    retry = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    report2 = retry.rollback()
+    assert report2.ok, report2.summary
     for i in range(n):
         assert not (promoted_dir / f"f{i}.txt").exists()
         assert (v2_dir / f"f{i}.txt").read_text(encoding="utf-8") == f"content-{i}"
