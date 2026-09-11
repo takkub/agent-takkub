@@ -70,6 +70,16 @@ _FORCED_PROVIDER = {
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
 FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
+# #572: fixed priority order the quota-skip picker (below) and
+# `limit_autoresume.AutoResumeMixin._pick_reroute_provider` (mid-task reroute
+# after a pane has already hit its wall) both walk — claude first (the
+# cockpit's always-available baseline), then the rest in registry order.
+# Single source of truth so a fresh assign and a post-hit reroute agree on
+# where work lands; `limit_autoresume` imports this instead of keeping its
+# own copy. Whichever candidates are disabled/uninstalled/still quota-hit
+# get skipped.
+_REROUTE_PRIORITY: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
+
 
 def config_path(project: str | None = None) -> Path:
     """Where the role→provider mapping lives — the single V2 `routing.json`
@@ -418,6 +428,27 @@ def _provider_cli_installed_uncached(provider: str) -> bool:
     return True
 
 
+def _pick_quota_fallback(exclude: str) -> str | None:
+    """The next candidate in `_REROUTE_PRIORITY` (skipping `exclude`) that is
+    both available and not itself recorded quota-hit right now, or `None`
+    when nothing qualifies. Pure aside from the `_provider_available`/
+    `provider_state` reads — no logging, no notification; callers that need
+    those wrap this (`effective_provider_for` for the silent substitution,
+    `provider_quota_skip_info` for the one-shot log/notice detail)."""
+    from . import provider_state
+
+    now = time.time()
+    for candidate in _REROUTE_PRIORITY:
+        if candidate not in VALID_PROVIDERS or candidate == exclude:
+            continue
+        if not _provider_available(candidate):
+            continue
+        if not provider_state.is_quota_ready(candidate, now):
+            continue
+        return candidate
+    return None
+
+
 def effective_provider_for(role: str, project: str | None = None) -> str:
     """Resolve which CLI will *actually* back the role this spawn.
 
@@ -431,13 +462,63 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     `provider_for()` answers "which CLI is *configured* for this role"
     (static identity); this answers "which CLI is *usable* right now"
     (runtime). Spawn-time decisions should use this one.
+
+    #572: also degrades away from a provider that's currently recorded
+    quota-hit (`provider_state.is_quota_ready`) — the same signal
+    `limit_autoresume`'s post-hit reroute (#514) already uses, just
+    consulted BEFORE the spawn instead of after it burns a pane boot and
+    immediately re-hits the same wall. Walks `_REROUTE_PRIORITY` for a
+    ready substitute, same as the post-hit picker. A forced-identity role
+    (the role name itself IS the CLI — `FORCED_ROLES`) is exempt: its whole
+    point is that one provider, so it spawns onto it regardless and the
+    existing park-on-hit behaviour (unchanged) takes over if it's still
+    quota-hit when it actually runs.
     """
     # Pane shards (for example ``codex#2``) share their base role's provider.
     role = re.sub(r"#\d+$", "", role or "")
     desired = provider_for(role, project)
     if desired == CLAUDE:
         return CLAUDE
-    return desired if _provider_available(desired) else CLAUDE
+    if not _provider_available(desired):
+        return CLAUDE
+    if role.lower().strip() in FORCED_ROLES:
+        return desired
+    from . import provider_state
+
+    if provider_state.is_quota_ready(desired):
+        return desired
+    return _pick_quota_fallback(desired) or desired
+
+
+def provider_quota_skip_info(
+    role: str, project: str | None = None
+) -> tuple[str, str, float] | None:
+    """`(desired_provider, fallback_provider, reset_at)` when resolving
+    `role` right now would substitute away from its configured provider
+    because that provider is recorded quota-hit, else `None`.
+
+    Mirrors `effective_provider_for`'s quota branch exactly, but as a
+    side-effect-free query instead of the resolution itself — callers that
+    need to log/notify ONCE for an assign (`_assign_dispatch`, the single
+    chokepoint every spawn passes through) call this once there, rather than
+    `effective_provider_for` itself logging on every one of its many
+    per-assign call sites (codex task-rewrite check, file-read capability
+    lookup, model/effort validation, ...).
+    """
+    stripped = re.sub(r"#\d+$", "", role or "")
+    desired = provider_for(stripped, project)
+    if desired == CLAUDE or not _provider_available(desired):
+        return None
+    if stripped.lower().strip() in FORCED_ROLES:
+        return None
+    from . import provider_state
+
+    if provider_state.is_quota_ready(desired):
+        return None
+    fallback = _pick_quota_fallback(desired)
+    if fallback is None:
+        return None
+    return desired, fallback, provider_state.quota_reset_at(desired)
 
 
 # ── model-id family patterns (issue #127) ───────────────────────────────────
@@ -518,6 +599,49 @@ def assign_provider_override_error(
             "different provider"
         )
     return None
+
+
+def assign_provider_override_warning(provider: str | None) -> str | None:
+    """Return a non-blocking heads-up when an explicit ``--provider``
+    (validated already by :func:`assign_provider_override_error`) is
+    currently recorded quota-hit.
+
+    #572: an explicit ``--provider`` is a deliberate Lead choice — unlike
+    the automatic role→provider resolution (`effective_provider_for`), it is
+    always honoured, never silently substituted. This only warns that the
+    spawn will likely hit the same wall the pane is already recorded
+    against, so Lead can decide with the reset time in hand instead of
+    finding out from a burned pane boot.
+    """
+    normalized = str(provider or "").strip().lower()
+    if not normalized or normalized == CLAUDE or normalized not in VALID_PROVIDERS:
+        return None
+    from . import provider_state
+
+    if provider_state.is_quota_ready(normalized):
+        return None
+    reset_at = provider_state.quota_reset_at(normalized)
+    human = _short_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
+    return (
+        f"--provider '{normalized}' ยังไม่ reset (กลับ {human}) — จะ assign ไปที่ "
+        f"'{normalized}' ตามที่สั่งอยู่ดี แต่คาดว่าจะชนโควตาซ้ำ"
+    )
+
+
+def _short_duration(total_seconds: float) -> str:
+    """ "Xh Ym" / "Xm" / "Xs" — same coarse phrasing as `orchestrator_text.
+    _human_duration`, duplicated (not imported) so this pure config leaf
+    stays free of that module: `provider_config` sits under modules like
+    `worktree_manager` (via `user_profile`) that the `worktree-manager-leaf`
+    import-linter contract must keep free of `orchestrator_text`."""
+    secs = max(0, int(total_seconds))
+    hours, rem = divmod(secs, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
 
 
 def assign_model_override_error(

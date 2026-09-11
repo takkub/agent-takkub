@@ -52,15 +52,16 @@ from .config import RUNTIME_DIR
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _human_duration, _log_event
-from .provider_config import CLAUDE, CODEX, CURSOR, GEMINI, KIMI, OPENCODE, effective_provider_for
+from .provider_config import _REROUTE_PRIORITY, CLAUDE, effective_provider_for
 from .spawn_engine import PaneState
 
-# #514: fixed priority order the reroute picker walks — claude first (the
-# cockpit's always-available baseline), then the rest in registry order.
-# Whichever candidates are disabled/uninstalled/still quota-hit/the
+# #514/#572: fixed priority order the reroute picker walks — claude first
+# (the cockpit's always-available baseline), then the rest in registry
+# order. Whichever candidates are disabled/uninstalled/still quota-hit/the
 # --distinct-from counterpart's provider get skipped; see
-# AutoResumeMixin._pick_reroute_provider.
-_REROUTE_PRIORITY: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
+# AutoResumeMixin._pick_reroute_provider. Defined once in `provider_config`
+# (also used by `effective_provider_for`'s pre-spawn quota-skip picker) so
+# a fresh assign and a post-hit reroute agree on fallback order.
 
 
 def _usage_confirms_limit(

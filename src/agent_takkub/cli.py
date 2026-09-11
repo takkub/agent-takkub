@@ -626,11 +626,17 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             "msg": "--distinct-from cannot name the same role being assigned",
         }
     if provider:
-        from .provider_config import assign_provider_override_error
+        from .provider_config import (
+            assign_provider_override_error,
+            assign_provider_override_warning,
+        )
 
         provider_error = assign_provider_override_error(provider)
         if provider_error:
             return {"ok": False, "msg": provider_error}
+        provider_warning = assign_provider_override_warning(provider)
+        if provider_warning:
+            print(f"warn: {provider_warning}", file=sys.stderr)
     if model:
         from .provider_config import assign_model_override_error, assign_model_override_warning
 

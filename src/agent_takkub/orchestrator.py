@@ -2941,6 +2941,43 @@ class Orchestrator(
         effective_provider = ps_assign.provider_override or effective_provider_for(
             base_role_a, project=project_ns
         )
+        # #572: `effective_provider_for` above may have silently substituted
+        # away from base_role_a's configured provider because it's recorded
+        # quota-hit (provider_state, set by limit_autoresume's post-hit
+        # reroute #514) — this is the ONE place every spawn (normal + worktree,
+        # both route through `_assign_dispatch`) resolves that provider, so
+        # it's also the one place to log/notify once per assign instead of
+        # every one of `effective_provider_for`'s many per-assign call sites.
+        # Skipped when an explicit --provider (or a carried-over watchdog
+        # `provider_override`) already decided the provider above — that
+        # path is always honoured, never silently substituted (see
+        # `assign_provider_override_warning` for its own separate heads-up).
+        if not ps_assign.provider_override:
+            from .provider_config import provider_quota_skip_info
+
+            skip_info = provider_quota_skip_info(base_role_a, project=project_ns)
+            if skip_info is not None:
+                skip_from, skip_to, skip_reset_at = skip_info
+                skip_human = (
+                    _human_duration(max(0, skip_reset_at - time.time()))
+                    if skip_reset_at
+                    else "ไม่ทราบ"
+                )
+                _log_event(
+                    "provider_quota_skip",
+                    role=role_name,
+                    project=project_ns,
+                    from_provider=skip_from,
+                    to_provider=skip_to,
+                    reset_at=skip_reset_at,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"⏭️ [{role_name}] {skip_from} ยังไม่ reset (กลับ {skip_human}) → ใช้ {skip_to}",
+                    from_role=role_name,
+                    note="provider_quota_skip",
+                    kind="quota-skip",
+                )
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)

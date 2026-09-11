@@ -10,6 +10,7 @@ codex pane. Hard rules:
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -237,6 +238,164 @@ class TestEffectiveProviderFor:
         fake_now[0] += provider_config._PROVIDER_AVAILABLE_TTL_S + 1
         monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
         assert provider_config._provider_available("codex") is False
+
+
+class TestEffectiveProviderForQuotaSkip:
+    """#572: `effective_provider_for` must also skip a provider that's
+    recorded quota-hit (`provider_state.set_quota_reset_at`), not just an
+    unavailable one — otherwise `takkub assign` keeps resolving a
+    codex-mapped role onto codex even while codex is still mid-window,
+    burning a full pane boot only to immediately re-hit the same wall
+    (the #514 post-hit reroute only fires AFTER that boot)."""
+
+    def test_quota_hit_provider_falls_back_to_next_priority_candidate(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+
+        assert provider_config.provider_for("reviewer") == "codex"
+        assert provider_config.effective_provider_for("reviewer") == "claude"
+
+    def test_quota_ready_provider_is_unaffected(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() - 10)  # already reset
+
+        assert provider_config.effective_provider_for("reviewer") == "codex"
+
+    def test_falls_back_past_the_next_candidate_when_it_is_also_quota_hit(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        # _REROUTE_PRIORITY is (claude, codex, gemini, kimi, opencode, cursor)
+        # — codex is desired/excluded, so claude (first candidate) wins
+        # unless claude itself is also quota-hit.
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+        provider_state.set_quota_reset_at("claude", time.time() + 3600)
+
+        assert provider_config.effective_provider_for("reviewer") == "gemini"
+
+    def test_forced_identity_role_is_never_quota_rerouted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "codex" role's whole identity IS codex — #572 must not reroute
+        it to another CLI, matching `limit_autoresume._pick_reroute_provider`'s
+        existing "forced-identity roles never reroute" rule for the post-hit
+        path. It still spawns onto codex and parks if still quota-hit when
+        the pane actually runs — unchanged from before #572."""
+        import agent_takkub.provider_state as provider_state
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+
+        assert provider_config.effective_provider_for("codex") == "codex"
+
+    def test_unavailable_still_wins_over_quota_check(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        # Disabled/not-installed degrades straight to claude, same as
+        # before #572 — the quota branch is never even consulted.
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+
+        assert provider_config.effective_provider_for("reviewer") == "claude"
+
+    def test_no_fallback_available_keeps_desired(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        """Every candidate quota-hit or unavailable → nothing better to do
+        than resolve to the desired provider anyway (mirrors the post-hit
+        picker's "no fallback" case, which parks instead of failing)."""
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        now = time.time()
+        for prov in ("claude", "codex", "gemini", "kimi", "opencode", "cursor"):
+            provider_state.set_quota_reset_at(prov, now + 3600)
+
+        assert provider_config.effective_provider_for("reviewer") == "codex"
+
+
+class TestProviderQuotaSkipInfo:
+    def test_returns_none_when_ready(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.provider_quota_skip_info("reviewer") is None
+
+    def test_returns_from_to_and_reset_at_when_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        reset_at = time.time() + 3600
+        provider_state.set_quota_reset_at("codex", reset_at)
+
+        result = provider_config.provider_quota_skip_info("reviewer")
+        assert result == ("codex", "claude", reset_at)
+
+    def test_none_for_forced_identity_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+
+        assert provider_config.provider_quota_skip_info("codex") is None
+
+    def test_none_when_claude_is_the_desired_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert provider_config.provider_quota_skip_info("frontend") is None
+
+
+class TestAssignProviderOverrideWarning:
+    def test_none_for_claude(self) -> None:
+        assert provider_config.assign_provider_override_warning("claude") is None
+
+    def test_none_for_empty(self) -> None:
+        assert provider_config.assign_provider_override_warning("") is None
+        assert provider_config.assign_provider_override_warning(None) is None
+
+    def test_none_when_provider_quota_ready(self) -> None:
+        assert provider_config.assign_provider_override_warning("codex") is None
+
+    def test_warns_when_provider_quota_hit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.provider_state as provider_state
+
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+
+        warning = provider_config.assign_provider_override_warning("codex")
+        assert warning is not None
+        assert "codex" in warning
+
+    def test_respects_the_override_despite_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The whole point of an explicit --provider (#270) is that it's
+        always honoured — #572 only adds a heads-up, never a block."""
+        import agent_takkub.provider_state as provider_state
+
+        provider_state.set_quota_reset_at("codex", time.time() + 3600)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+
+        assert provider_config.assign_provider_override_error("codex") is None
+        assert provider_config.assign_provider_override_warning("codex") is not None
 
 
 class TestLoadProviders:
