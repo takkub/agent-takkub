@@ -857,3 +857,276 @@ subprocess: this is process-death testing, not a power-cut durability test. Each
 gets its own parent directory so the `copies()` helper cannot pick up a sibling fixture's
 files — the round-4 helper scans `h.parent`, which is shared there, and that produced one
 cross-fixture hit before the isolation fix.
+
+## Round 6 — fdd45604
+
+Reviewed commit: `fdd45604` (`main`) = round 5's `4eb5ec95` + backend#2's round 7
+(`b23f44f8`, the R5-B1/H1/H2/M1 fixes) + backend#3's `95f18ed8` (#566 scope 2 fixtures).
+Reviewed on `wt/reviewer-1789091375`, which is at that commit. Mode: code.
+`git merge-base --is-ancestor b23f44f8 HEAD` is true here, so the premise checks out this
+time.
+
+**Verdict: NOT RELEASABLE, and #568 still cannot close — but for the first time since
+round 2 the failing findings are not regressions.** Round 7 does close all four round-5
+findings, cleanly and with repository regression tests, and it introduces nothing new that
+fails. The two findings below are pre-existing defects in the same family as R5-B1, and I
+confirmed that by running the same reproduction against a `git archive` of `4eb5ec95`:
+byte-for-byte the same outcome there. **#566 can close.**
+
+### 1. The five existing harnesses, rerun by the reviewer on this commit
+
+Run from this worktree with `PYTHONPATH=<worktree>/src` and a session-scratchpad
+`TAKKUB_ARTIFACTS_DIR`. Every result below is mine, not a repeat of Lead's run.
+
+| Harness | Result | Evidence |
+| --- | --- | --- |
+| `504-round2-repro.py` | `failures: []` | `r6-round2-repro.jsonl` |
+| `504-round2-extra.py` | `failures: []` | `r6-round2-extra.jsonl` |
+| `504-round3-faults.py` | `failures: []` | `r6-round3-faults.jsonl` |
+| `504-round4-faults.py` | 56 passed / 56 | `r6-round4-faults.jsonl` |
+| `504-round5-faults.py` | **12 passed / 12** | `r6-round5-faults.jsonl` |
+
+Repository tests: `test_core_migration.py`, `test_core_migration_promote_v1.py`,
+`test_doctor.py`, `test_doctor_auto_migrate.py`, `test_auto_migrate_boot.py`,
+`test_config_project_registry_v2.py`, `test_project_identity.py` — 280 passed, 0 failed.
+
+All evidence under `runtime/exports/2026-09-11/agent-takkub/`.
+
+### 2. The round-7 fixes, traced one at a time
+
+| Round-5 finding | State at `fdd45604` | How I checked it |
+| --- | --- | --- |
+| R5-B1 (BLOCKER, latent) | **Closed** | `_verified_target_intact` (`promote_v1.py:454`) recomputes every file the WAL record's own `sha256` names and compares it against `dest`'s current content before the `VERIFIED` resume fast path is taken; `_demote_verified_before_undo` (`promote_v1.py:474`) durably writes the record back to `PENDING` before the undo touches anything. `copy_undo_crash_direct` is green. I also re-ran the crash worker with `_demote_verified_before_undo` monkeypatched out entirely (`undo_crash_without_demote`): the resume re-verify rescues it on its own, which is what its docstring claims. Repository regression test: `test_promote_resume_recopies_a_verified_target_an_earlier_crash_deleted`. |
+| R5-H1 (HIGH) | **Closed** | `_finish_deferred_prune` (`engine.py:401`) now carries a `stopped` flag and appends the untouched pass-1 report for every step at and after the first failing `prune()`. `prune_failure_stops_later_prunes` is green, and my own `h1_stop_then_next_pass_completes` goes further: after the denial is lifted, two more passes finish both prunes with no entry left duplicated and no source deleted. Repository test: `test_engine_apply_stops_pass2_prune_after_an_earlier_step_leaves_a_duplicate`. |
+| R5-H2 (HIGH, #568 item 1) | **Closed for what it implements; the "hash" half is deliberately not implemented** | `_committed_target_problems` (`promote_v1.py:1346`) adds JSON-readability on top of presence, gated by a per-file flag `TransferEntry._committed_json_shape()` records at manifest-commit time. `promoted_target_integrity` is green. The commit message states a permanent sha256 compare was rejected because a later domain step in the same ladder pass legitimately overwrites a just-promoted target. **That claim is true** — I verified it rather than taking the docstring's word: `build_readonly_registries_step` maps `provider-models.json` onto `layout.models / "registry.json"`, which is the exact path `promote-v2-root` moves up one step earlier, and my `promote_validate_survives_domain_overwrite` case watches a full `MigrationEngine.apply()` do it and still validate green. See §4 for what is still owed on item 1. |
+| R5-M1 (MEDIUM) | **Closed, and wider than asked** | `_pending_duplicate_findings` (`doctor.py:3505`) reads the promote manifest and every archive generation's manifest, and WARNs naming the entry and both surviving paths, independently of the dev-checkout downgrade. `duplicate_doctor_visibility` is green; my `doctor_duplicate_in_archive_generation` covers the archive half the round-5 harness never exercised. |
+
+### 3. New fault injection — `504-round6-faults.py`
+
+Twelve cases written against round 7's own new code
+(`_verified_target_intact`, `_demote_verified_before_undo`, `_committed_json_shape`,
+the `stopped` flag, `_pending_duplicate_findings`). Source at
+`runtime/exports/2026-09-11/agent-takkub/504-round6-faults.py`, results at
+`r6-round6-faults.jsonl`, supporting probes at `r6-probes.log`. **8 passed, 4 failed.**
+
+#### R6-B1 (BLOCKER class, latent) — `resume_source_pruned_target_gone`
+
+Round 7 taught `_copy_phase` that a resumed `VERIFIED` record is a claim, not proof. It
+left the record one state over alone. A `SOURCE_PRUNED` record is still skipped outright
+(`promote_v1.py:543`), target unchecked — and `PromoteV2RootStep.rollback()` is exactly
+what invalidates such a record, because it deletes the promoted target and puts the source
+back while the WAL keeps saying `PRUNED`.
+
+The sequence is the ordinary one the engine already performs on itself:
+
+1. `apply()` with one entry's prune denied — `models` reaches `PRUNED`, `state` becomes a
+   DUPLICATE, `apply()` reports not-ok.
+2. `rollback()` — this is literally what `MigrationEngine._downgrade_on_health` calls.
+   It returns ok. The WAL is now `{models: PRUNED, state: PRUNE_FAILED}` while
+   `models/a.json` is gone and `v2/models/a.json` is back.
+3. The denial clears. `apply()` again: `_copy_phase` skips `models` on the strength of
+   `PRUNED`, `_prune_phase` removes `v2/models` anyway.
+
+Observed (`source_pruned_resume_observed`): retry returns **`ok: true`, "promoted 2
+item(s)"**, `models/a.json` is `null`, `v2/models/a.json` is `null`, and a full-content
+scan of the fixture tree finds **zero copies of that file anywhere**, backups included.
+`validate()` afterwards does say `promoted file missing: …`, which is the only thing that
+notices.
+
+**Production reachability — the same shape as R5-B1, and I checked it the same way.** The
+loss needs `PromoteV2RootStep.apply()` called directly. No production path does: `cli.py`
+and `auto_migrate_boot.py` go through `MigrationEngine.apply`/`apply_pending`, and on that
+path the source survives (it becomes R6-H1 below instead). `r6-probes.log` has both runs
+side by side, `step_retry` versus `engine_retry`.
+
+**Not a round-7 regression.** I extracted `4eb5ec95` with `git archive` into a temporary
+tree and ran the identical probe against it: same WAL states, same zero copies, same
+`ok: true`. This defect predates round 7 and was simply never reached by an earlier
+harness.
+
+#### R6-H1 (HIGH) — `boot_completes_after_a_transient_prune_denial`
+
+The same stale `PRUNED` record wedges the production path permanently instead of losing
+the file. After a single transient prune denial (a locked file, a permission blip — both
+ordinary on Windows, where sibling panes hold files open):
+
+- boot 1 rolls the promote step back, as designed.
+- The WAL keeps `models: PRUNED`. Every later `MigrationEngine.apply()` skips that entry,
+  so its target is never recreated, so the post-ladder check fails with
+  `missing: …/models/a.json`. Forever. Five clean boots after the denial is gone leave
+  `v2/models/a.json` and `v2/state/b.json` exactly where they were, nothing at top level,
+  and `takkub migrate validate` red on `promote-v2-root`.
+- From the third boot on, `run_boot_stage()` reports **`pending_applied`** while that same
+  validate is failing — the rolled-back steps are parked until the version changes, so the
+  action string describes the steps that did run, not the ladder's real state.
+
+The operator is not blind: `doctor --storage-layout` raises
+`auto-migrate-pending-rollback` WARN naming both parked steps, plus the `legacy-leftover`
+WARN. But nothing self-heals, and the documented escape hatch ("จะลองใหม่เมื่อ version
+เปลี่ยน") walks straight into R6-B1's territory on the next release. Also reproduced
+identically at `4eb5ec95`.
+
+Fix direction for both: make `SOURCE_PRUNED` re-verify its target the way `VERIFIED` now
+does, or have `rollback()` clear the step's WAL as part of putting the sources back. The
+second is smaller and closes both.
+
+#### R6-M1 (MEDIUM) — `resume_verified_fastpath_archive`
+
+`_verified_target_intact`'s file branch looks the digest up as `expected.get(entry.name)`,
+but `verify_only` (`verify_copy.py:105`) keys a file entry's digest by `src.name`. For
+`ArchiveV1LegacyStep` those differ whenever an entry is nested: entry `agents/role.md`
+records its digest under `role.md`, so the lookup returns `None` and the guard returns
+`False` for every nested archive entry.
+
+Observed (`r6-probes.log`): `projects.json` → `intact= True`; `agents/role.md` →
+`intact= False` with `dest exists= True` and unchanged content, and the resume re-copies
+it. It fails safe — an unconditional re-copy is the conservative branch, and nothing is
+lost or corrupted — but round 7's central new safety check is silently inert for a whole
+class of entries, with no test that would notice if the default ever flipped. The promote
+step is unaffected (its entry names are single path segments).
+
+#### R6-M2 (MEDIUM) — `resume_verified_wrong_content`
+
+A promoted target that a live writer changed after a crashed copy phase can never be
+promoted again. `_verified_target_intact` correctly refuses to trust the stale `VERIFIED`
+record, falls through to a real copy, and `copy_only`'s collision guard then refuses to
+overwrite the live bytes. Three consecutive retries all return
+`promote failed, rolled back: collision: …`. Nothing is lost — the V1 source stays intact
+and validate stays honest — but as with R6-H1 there is no path back to a finished
+migration without a human deleting the WAL.
+
+#### R6-L1 — promoted non-`.json` payloads are presence-only forever
+
+`_committed_json_shape` only records files whose name ends in `.json`
+(`promote_v1.py:327`). `promoted_non_json_corruption` promotes a `runtime/events.jsonl`
+store, overwrites it with `CORRUPTED`, and `validate()` stays green. The manifest holds
+that file's sha256 the whole time. Same tradeoff as R5-H2, one file type wider.
+
+#### R6-L2 — doctor hardcodes the promote manifest path
+
+`_pending_duplicate_findings` (`doctor.py:3518`) builds
+`data_home / "backups" / "promote-v2-root-manifest.json"` as a literal rather than calling
+`promote_v1`'s own path helper, which is what `PromoteV2RootStep._manifest_path()` uses.
+Two places now have to agree about that filename.
+
+#### Cases that passed
+
+`resume_verified_fastpath_promote` (the guard is alive, not accidentally always-false, for
+both file- and dir-kind promote entries) · `undo_crash_without_demote` (the resume
+re-verify rescues a real `os._exit(91)` crash in the undo with the demote helper disabled)
+· `h1_stop_then_next_pass_completes` · `promote_validate_survives_domain_overwrite` ·
+`archive_member_hash_still_compared` (the new `json` key in `to_ledger()` did not displace
+the archive step's own sha256 comparison — a member tampered into different but valid JSON
+still fails validate) · `doctor_duplicate_in_archive_generation` ·
+`duplicate_visible_after_boot` (a boot-path prune denial leaves no DUPLICATE at all,
+because the health downgrade rolls the step back first; doctor still WARNs).
+
+### 4. The prod-copy rehearsal — how far it carries
+
+Lead's 2.1.0 rehearsal on a copy of the real `~/.agent-takkub` (2.0.8, 244,659 files,
+10.5 GB) is the strongest evidence produced in this whole review, and I am scoring it as
+such: full sha256 inventory before and after, 228,850 files unchanged in place, 15,806
+moved with identical content, three "lost" accounted for (two are #504 item-5 junk the
+spec deletes, one is the append-only journal itself). Zero user data lost, on real data,
+at real scale.
+
+**What it proves:** the happy path. Every promote/archive/junk decision the ladder makes
+on a real 29-project home is content-preserving, `validate` 11/11, `load_projects()` 29,
+provider homes intact, authority v2-only. That closes the whole "ย้ายจริง ไม่ลบ" question
+for a clean run, and it is a stronger result than any synthetic fixture in this document.
+
+**What it does not prove, and must not be read as proving:**
+
+- It is not an authenticated provider run. No credential was exercised against a live
+  provider endpoint — file-level identity of `accounts/*/account.json` and
+  `providers/*/provider.json` is necessary for a working login but not sufficient
+  (token-path references, per-provider home resolution and OS keychain state all sit
+  outside the sha256 comparison). A per-provider login check is still owed, and it is
+  cheap: one real call per provider on the migrated copy.
+- It exercises no failure. Every finding in rounds 3 to 6 lives on the failure path — a
+  denied removal, a crash between two durable writes, a rollback. A green clean run says
+  nothing about R6-B1 or R6-H1, both of which need exactly one prune denial to arm.
+- It is a single run on a single OS. The macOS half of the CI matrix is still owed for
+  this commit.
+
+Treat it as closing "does the ladder move real data correctly" and as closing nothing at
+all about "what happens when one step fails".
+
+### 5. Scoring
+
+| Item | Round 4 | Round 5 | Round 6 |
+| --- | --- | --- | --- |
+| BLOCKER | 3 | 1, latent | 1, latent — **pre-existing, not a regression** |
+| HIGH | 7 | 2 | 1 |
+| MEDIUM | 2 | 1 | 2 |
+| LOW | — | — | 2 |
+| Existing harness pass rate | 24/56 | 56/56 | **5 harnesses, all green** |
+| New harness | — | 8/12 | 8/12 |
+| Round-5 findings closed | — | — | **4 of 4** |
+
+**#568 — cannot close.**
+
+- Item 1 (per-domain target inventory): presence and JSON-readability are implemented and
+  tested, for domain targets and promoted targets both. The recorded sha256 is still never
+  compared for a promoted target at any moment, including the one moment it would be safe
+  — immediately after the copy phase, before the later domain step that motivated the
+  rejection has run. Either add that mid-transaction compare, or close item 1 with the
+  deviation written into the issue rather than only into a docstring. Do not close it
+  silently: the issue text says "presence + hash + JSON-readability" in so many words.
+- Item 2 (detect-and-resume an interrupted transaction): **open, and R6-B1/R6-H1 are
+  squarely inside it.** Item 2's own acceptance wording is "complete the remaining items
+  or undo from preimages, then log — never mixed". What actually happens after a denied
+  prune plus the engine's own rollback is permanently mixed, with no boot able to finish
+  or undo it, and the direct-step variant destroys the file outright.
+
+**#566 — can close.** Scope 1 was met in round 5. Scope 3 is green via `project_edit_reboot`.
+Scope 2 is now met: `tests/conftest.py` has the `seed_projects` fixture writing through the
+V2 registry, and only two test files still name `config.PROJECTS_JSON` — the dev-checkout
+test that asserts V1 behaviour is unchanged, and `TestResolveFromV1Fallback`, both of which
+are about the V1 file itself and should keep using it. 22 of 24 converted, 2 correctly
+exempt.
+
+### 6. If this is re-proposed as releasable
+
+Required — these are defects, not evidence gaps:
+
+- [ ] R6-B1 and R6-H1 fixed together: either `_copy_phase` re-verifies a `SOURCE_PRUNED`
+      record's target the way it now re-verifies `VERIFIED`, or `PromoteV2RootStep
+      .rollback()`/`ArchiveV1LegacyStep.rollback()` clear their own WAL as part of putting
+      the sources back. `resume_source_pruned_target_gone` and
+      `boot_completes_after_a_transient_prune_denial` green, plus repository regression
+      tests for both — the second one is the production path and must not ship untested.
+- [ ] R6-M1 fixed: `_verified_target_intact` looks the digest up by the same key
+      `verify_only` writes, with a nested archive entry (`agents/role.md`) in the test.
+- [ ] `504-round6-faults.py` 12/12 with all five earlier harnesses still green on one
+      commit.
+
+Evidence still owed, assuming the above lands:
+
+- [ ] The old-wheel downgrade rehearsal: 2.1.0 → 2.0.8 on the migrated copy, proving
+      `restore-v1` puts a real prod home back in a shape the previous release can boot.
+- [ ] `restore-v1` on the prod copy, re-hashed byte-for-byte against the pre-apply
+      manifest — Lead's stated next step. This is the one that matters most after R6-B1,
+      because restore is the escape hatch a wedged machine has to fall back on.
+- [ ] A per-provider authenticated login check on the migrated copy. The sha256 inventory
+      does not stand in for it (§4).
+- [ ] `gh run list --commit <candidate>` green on both `windows-latest` and
+      `macos-latest` for that exact commit.
+- [ ] #568 item 1's hash deviation written into the issue, or the mid-transaction compare
+      implemented.
+- [ ] The prod soak continued on the release-candidate commit rather than an ancestor.
+
+Carried forward from round 5 and now satisfied — recorded so nobody re-litigates them:
+the DUPLICATE prune contract (accepted, round 5 §2), all four round-5 findings closed with
+repository regression tests, and #566 scope 2.
+
+### 7. Working notes
+
+`504-round6-faults.py` never edits repository source; each fixture gets its own parent
+directory so the content scan cannot pick up a sibling's files. The `4eb5ec95` comparison
+runs were done by extracting that commit with `git archive` into a scratch tree and
+pointing `PYTHONPATH` at it — no branch switch, no worktree mutation. Two harness cases
+(`resume_verified_wrong_content`, `duplicate_visible_after_boot`) were rewritten mid-review
+once the first run showed my original premise was wrong: a boot-path prune denial does not
+leave a DUPLICATE at all, because the health downgrade rolls the step back before one can
+be recorded. Both now assert what the code actually guarantees.
