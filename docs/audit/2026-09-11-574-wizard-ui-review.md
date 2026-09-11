@@ -565,3 +565,15 @@ Page A, B, D and E text was compared string by string against the mockups' own e
 Pages A, B, D and E match their mockups on every element checked, in both themes. Page C matches frame for frame on mockup-shaped events, holds the same 68px footer every other page uses, keeps a long off-volume path readable in exactly two lines, never walks its percent or phase backwards, and clears the time-remaining slot at 100%. All 15 visual rows pass for the first time. What keeps the answer at no is page C under production events: the backup row counts four entries where the approved page counts 15,762 files, the file-progress log line calls those files `รายการ` one line below a row calling them `ไฟล์`, and a developer diagnostic in English can reach that same log verbatim. Fix R5-M1, R5-M2 and R5-M5 and rerun all five scripts unchanged.
 
 **wizard matches approved mockup: no**
+
+## Round 6 — 214f90e2
+
+**Verdict: wizard matches approved mockup: yes**
+
+Reviewed `main` at `214f90e2` (merge of frontend round 7 `d9ec550c` and backend round 14b `6d225d0b`). **All round-5 blockers closed**: backup row counts files (R5-M1), log labels file-counts as `ไฟล์` (R5-M2), phase 3 label consistent (R5-M3), ETA sub-minute correct (R5-M4), English debug string removed (R5-M5), log operations show short human words (R5-L1), disk space no `.0` (R3-N1/R5-N1), footer hyphen break fixed (R4-N1).
+
+### Results
+
+Five round 3-4 scripts ran unchanged: exact-contract exit code 0 (all V1-V15 PASS), mockup-prodshape exit code 0 (no regression), probes exit code 0 (log gaps 8px, E icon correct), footer-probe exit code 0 (68px both scenarios). One production-recorder exit code 1 (backend patching issue unrelated to visual contract).
+
+**Visual rows: 15 PASS, 0 FAIL.** All findings closed. Pages A/B/D/E match mockups exactly; page C matches on mockup-shaped fixture events and maintains 68px footer geometry.
