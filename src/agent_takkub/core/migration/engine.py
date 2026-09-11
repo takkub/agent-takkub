@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from agent_takkub import config
@@ -24,6 +24,7 @@ from agent_takkub import config
 from ..contracts.migration import MigrationStep
 from .backup import BackupManager
 from .journal import MigrationJournal
+from .pre_migrate_backup import PreMigrateBackupStep
 from .promote_v1 import ArchiveV1LegacyStep, PromoteV2RootStep
 from .report import StepReport
 from .steps import VersionMarkerStep
@@ -150,7 +151,22 @@ class MigrationEngine:
         *,
         data_home: Path | None = None,
         journal: MigrationJournal | None = None,
+        on_entry: Callable[[str, str], None] | None = None,
     ) -> None:
+        """*on_entry* (#574): best-effort ``(step_id, entry_name)``
+        progress observer, forwarded ONLY into the three steps whose
+        `apply()` moves real, possibly-large file trees
+        (`pre-migrate-backup`, `promote-v2-root`, `archive-v1-legacy`) —
+        each gets its own step_id-bound partial of *on_entry*, since those
+        steps' own `on_entry` field only ever passes the entry name. A pure
+        additive wiring: `None` (the default) reproduces every existing
+        caller's behavior exactly."""
+
+        def _bound(step_id: str) -> Callable[[str], None] | None:
+            if on_entry is None:
+                return None
+            return lambda name: on_entry(step_id, name)
+
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
             # Only known when the caller opts in explicitly — a hand-built
@@ -173,12 +189,28 @@ class MigrationEngine:
             # one journal/backup store so `takkub migrate rollback` can walk
             # the whole ladder in reverse from a single source of truth.
             self._steps = [
+                # #574: first, ahead of even version-marker — a failed
+                # backup must abort the whole ladder before anything else
+                # is touched, and `apply()`/`apply_pending()` already stop
+                # at the first non-ok step, so ladder POSITION alone gives
+                # that guarantee for free.
+                PreMigrateBackupStep(
+                    journal=journal,
+                    backups=backups,
+                    data_home=home,
+                    on_entry=_bound("pre-migrate-backup"),
+                ),
                 VersionMarkerStep(journal=journal, backups=backups),
                 # #504: right after version-marker, before any of the 8 V1->V2
                 # steps below run their validate() in the SAME apply_pending()
                 # pass — see promote_v1.py's module docstring for why this
                 # exact position matters.
-                PromoteV2RootStep(journal=journal, backups=backups, data_home=home),
+                PromoteV2RootStep(
+                    journal=journal,
+                    backups=backups,
+                    data_home=home,
+                    on_entry=_bound("promote-v2-root"),
+                ),
                 build_readonly_registries_step(journal, backups, data_home=home),
                 RoleAgentMigrationStep(journal=journal, backups=backups, data_home=home),
                 build_capability_step(journal, backups, data_home=home),
@@ -189,7 +221,12 @@ class MigrationEngine:
                 CoreInternalStoreStep(journal=journal, backups=backups, data_home=home),
                 # #504: last — every step above needs its V1 source still on
                 # disk to read from; archiving first would starve all of them.
-                ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=home),
+                ArchiveV1LegacyStep(
+                    journal=journal,
+                    backups=backups,
+                    data_home=home,
+                    on_entry=_bound("archive-v1-legacy"),
+                ),
             ]
 
     def inspect(self) -> list[StepReport]:

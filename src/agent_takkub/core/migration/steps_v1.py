@@ -887,8 +887,17 @@ class CoreInternalStoreStep:
         they currently resolve under `source`) is just belt-and-suspenders
         against a future caller passing a different `journal`/`backups`
         instance in — not a defense against a flip that can no longer
-        happen to the defaults."""
-        return frozenset({self.journal.store_path.name, self.backups.root.name})
+        happen to the defaults.
+
+        #574: `PreMigrateBackupStep`'s own marker/WAL files (`pre_migrate_
+        backup.OWN_BOOKKEEPING_NAMES`) live in this SAME `source` directory
+        for the identical reason — never copy that step's own in-progress
+        bookkeeping into `system/` as if it were real V1 core data."""
+        from .pre_migrate_backup import OWN_BOOKKEEPING_NAMES
+
+        return frozenset(
+            {self.journal.store_path.name, self.backups.root.name, *OWN_BOOKKEEPING_NAMES}
+        )
 
     # #486/#488: these entries stop being this step's to sync the instant
     # `target` already exists. Once a prior ladder run has materialized

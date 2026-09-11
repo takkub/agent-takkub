@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+from .core.migration.report import StepReport
 
 _STATE_FILE = "auto-migrate-state.json"
 
@@ -216,7 +217,28 @@ def _estimate_copy_bytes(data_home: Path) -> int:
             total += _path_size(src)
     except OSError:
         pass
+
+    # #574: `PreMigrateBackupStep` (ladder position 0) copies this SAME
+    # `total` worth of content a second time — once into the backup, once
+    # again as every domain step below promotes/archives it for real — plus
+    # `projects/`/`agents/` (protected from `_archive_candidates()` above
+    # since the domain steps below WRITE into them this same pass, but the
+    # backup copies them too, as an extra safety net). Doubling `total`
+    # rather than adding a third independent walk keeps this in sync with
+    # whatever the promote/archive walk above already counts.
+    extra_backup_only = 0
+    for name in ("projects", "agents"):
+        p = data_home / name
+        if p.is_dir():
+            extra_backup_only += _dir_size(p)
+    total = total * 2 + extra_backup_only
     return total
+
+
+# Public alias — `boot_flow.plan_migration()` (#574) reuses this exact
+# estimate for consistency with the disk gate below, rather than a second,
+# independently-drifting size computation.
+estimate_copy_bytes = _estimate_copy_bytes
 
 
 def _estimate_restore_bytes(data_home: Path) -> int:
@@ -351,9 +373,25 @@ class BootMigrationResult:
     action: str  # "skipped" | "applied" | "rolled_back" | "pending_applied" | "pending_rolled_back" | "error"
     reason: str = ""
     messages: list[str] = field(default_factory=list)
+    # #574: the ladder's own step reports for this call — apply_reports (or
+    # apply_pending's), validate_reports, or rollback_reports, whichever
+    # this stage's own branch actually produced. Additive: every existing
+    # caller (`boot_update_window.py`, tests) reads only `action`/`reason`/
+    # `messages` and is unaffected by this staying empty when unset.
+    reports: list[StepReport] = field(default_factory=list)
+    # #574: the full-ladder `validate()` pass specifically (v1-state first
+    # apply only — `apply_pending()` has no equivalent single pass, it
+    # calls `validate()` per-step internally instead) — additive, empty
+    # for every other action. Lets a caller report "step 7/11 ตรวจสอบ
+    # ไม่ผ่าน" (screen E) without re-running validate() a second time.
+    validate_reports: list[StepReport] = field(default_factory=list)
 
 
-def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrationResult:
+def _run_apply_pending(
+    progress_cb: Callable[[str], None] | None,
+    *,
+    on_entry: Callable[[str, str], None] | None = None,
+) -> BootMigrationResult:
     """Every boot after a successful full apply (`layout_state() ==
     "mixed"`) — run only the ladder steps this machine still needs (#362):
     `version-marker`'s re-pin every version bump (closes the prod incident
@@ -401,7 +439,7 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
         return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
-    engine = MigrationEngine()
+    engine = MigrationEngine(on_entry=on_entry)
     applied_before = set(engine.applied_step_ids())
     guard = load_state().get("rolled_back_steps", {})
     guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
@@ -449,14 +487,17 @@ def _run_apply_pending(progress_cb: Callable[[str], None] | None) -> BootMigrati
             "pending_rolled_back",
             "; ".join(f"{r.step_id}: {r.summary}" for r in new_failures),
             messages,
+            reports=reports,
         )
 
     _report("pending step(s) apply สำเร็จ")
-    return BootMigrationResult("pending_applied", messages=messages)
+    return BootMigrationResult("pending_applied", messages=messages, reports=reports)
 
 
 def run_boot_stage(
     progress_cb: Callable[[str], None] | None = None,
+    *,
+    on_entry: Callable[[str, str], None] | None = None,
 ) -> BootMigrationResult:
     """The whole boot-time gate, in order (#361 design §2-4):
 
@@ -486,8 +527,15 @@ def run_boot_stage(
             except Exception:
                 pass
 
-    def _done(action: str, reason: str = "") -> BootMigrationResult:
-        return BootMigrationResult(action, reason, messages)
+    def _done(
+        action: str,
+        reason: str = "",
+        reports: list[StepReport] = (),
+        validate_reports: list[StepReport] = (),
+    ) -> BootMigrationResult:
+        return BootMigrationResult(
+            action, reason, messages, reports=list(reports), validate_reports=list(validate_reports)
+        )
 
     if not auto_migrate_enabled():
         return _done("skipped", "disabled")
@@ -511,7 +559,7 @@ def run_boot_stage(
         # existed the boot it first reached "v2" — each step's own
         # apply()/validate() being cheap existence-ish checks is what makes
         # calling this every boot fine even when truly nothing is pending.
-        return _run_apply_pending(progress_cb)
+        return _run_apply_pending(progress_cb, on_entry=on_entry)
 
     # state == "v1" from here — the only state a first-run apply is allowed on.
     st = load_state()
@@ -523,8 +571,9 @@ def run_boot_stage(
     _report("กำลังตั้งค่า storage layout ใหม่ (ครั้งแรกหลังอัป)…")
     from .core.migration.engine import MigrationEngine
 
-    engine = MigrationEngine()
+    engine = MigrationEngine(on_entry=on_entry)
     apply_reports = engine.apply()
+    validate_reports: list[StepReport] = []
     failing = next((r for r in apply_reports if not r.ok), None)
     if failing is None:
         _report("apply สำเร็จ — กำลัง validate…")
@@ -543,12 +592,17 @@ def run_boot_stage(
             rollback_ok=rollback_ok,
         )
         _report("rollback " + ("สำเร็จ" if rollback_ok else "ไม่สำเร็จ — ต้องตรวจด้วยมือ"))
-        return _done("rolled_back", failing.summary)
+        return _done(
+            "rolled_back",
+            failing.summary,
+            reports=rollback_reports,
+            validate_reports=validate_reports,
+        )
 
     _save_state({"applied_version": app_version})
     _log_boot_event("auto_migrate_applied", steps=len(apply_reports))
     _report("apply + validate สำเร็จ")
-    return _done("applied")
+    return _done("applied", reports=apply_reports, validate_reports=validate_reports)
 
 
 __all__ = [
