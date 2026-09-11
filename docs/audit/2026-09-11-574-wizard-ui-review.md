@@ -455,3 +455,113 @@ Extra C frames against the same mockup: `C-files-*`, `C-backendlog-*`, `C-prod-e
 Page A matches its mockup on every element checked, unchanged from round 3. Pages B, D and E now match on every element checked, including both previous-version suffixes. Page C matches the mockup frame for frame when it is fed mockup-shaped events, and its footer finally holds the same 68px every other page uses. It still does not match when it is fed the events a real migration produces: the counter nouns wander, and the first and last log lines the user sees are the word `info`. Fix R4-H1 and R4-H2 and rerun all five scripts unchanged.
 
 **wizard matches approved mockup: no**
+
+## Round 5 — d46487b7
+
+**Verdict: FAIL. wizard matches approved mockup: no**
+
+Reviewed `main` at `d46487b7` (merge of frontend round 6 `634017a5` and backend round 13 `3ba889a6`) from worktree `wt/reviewer-2-1789119877`. Working tree clean throughout; no application source and no existing test was changed by this review.
+
+**Every round-4 blocker is genuinely closed, and for the first time all 15 visual rows pass.** R4-H1's wandering counter noun, R4-H2's dropped `info` message, R4-M1's footer elide budget and R4-M4's cross-worktree test pollution are all fixed and measured below; `percent_overall` and `phase` are monotonic across the whole recorded run, and the time-remaining slot clears at 100%. What still blocks acceptance is smaller and all on page C under production events: the backup counter counts top-level entries where the mockup counts files, the file-progress log run now labels a file count `รายการ` one line under a row that labels the same two numbers `ไฟล์`, and an English developer diagnostic can reach the user-facing log verbatim.
+
+### Method, evidence, and limits
+
+All five scripts from rounds 3 and 4 ran **unchanged** — md5-verified against the round-4 originals in `ART/574-round4-art/` (`574-round3-review.py` `e34447d2ced0a1670ba54c8238bf27a2`, `574-round3-prodshape.py` `9cf139d043b34de474c6d5ff5cb43efa`, `574-round3-probes.py` `717e019c50796dff830ccb3df3425ed7`, `574-round4-prodshape.py` `a886f0f4f93ed9c2a77936fa1ccffa55`, `574-round4-footer-probe.py` `e3fcff801441e81fbda49013292a6eac`) — so every round-3 and round-4 number is directly comparable. Their own shot directories were staged outside the repo and consolidated into `ART/574-round5-shots/` afterwards. `QThread.start` is never patched. Offscreen rendering, bundled fonts, 96 DPI, device pixel ratio 1 and 640 x 540 are unchanged from rounds 1-4.
+
+`574-round4-prodshape.py` patches only `plan_migration`, `_read_previous_app_version` and `auto_migrate_boot.run_boot_stage`; the **real** `boot_flow.run_migration()` builds all 40 `ProgressEvent`s and the `MigrationOutcome`, which are then replayed through the window's own progress callback one per 120ms throttle window so every event reaches `_render_progress_event`.
+
+**Limit worth stating plainly:** the fake `run_boot_stage` fires the engine's real observer callbacks but does not copy 1,000 real files, so the file counts are the plan's declared numbers, not an on-disk fixture. That is sufficient for the unit-stability question, which is a pure function of the arguments `emit()` receives and which this recording observes directly, but it means phase totals and the archive row's tail come from the fixture, not from a real apply.
+
+| Evidence | Path |
+| --- | --- |
+| Exact-contract renderer, A-E both themes, real `QThread`, Escape/close/accept/reject/`done(0)`, files-progress shift probe | `ART/574-round3-review.py`, `574-round5-review.log`, `574-round5-shots/widget-metrics.json`, `behavior.json` |
+| Round-3 prodshape renderer | `ART/574-round3-prodshape.py`, `574-round5-r3prodshape.log`, `574-round5-shots/prodshape.json` |
+| Round-3 probes (text advance, log gaps, E icon pixels, tokens) | `ART/574-round3-probes.py`, `574-round5-probes.log`, `574-round5-shots/probes.json` |
+| Production-shape recorder: 40 real events built by `run_migration()`, replayed frame by frame | `ART/574-round4-prodshape.py`, `574-round5-prodshape.log`, `574-round5-shots/round4-prodshape.json`, `C-r4-*.png`, `D-r4-*.png`, `E-r4-*.png` |
+| Page-C footer budget probe (`backup_dir` under vs outside DATA_HOME) | `ART/574-round4-footer-probe.py`, `574-round5-footer-probe.log`, `574-round5-shots/footer-probe.json`, `C-footer-*.png` |
+| Targeted test run | `ART/574-round5-pytest.txt`, `574-round5-pytest-collect.txt` |
+
+ART is `runtime/exports/2026-09-11/agent-takkub`. Reproduce from this worktree as cwd, every command deadline-bounded, with `TAKKUB_ARTIFACTS_DIR` pointed at a staging directory:
+
+```
+python <ART>/574-review-run.py 240 python <ART>/574-round3-review.py
+python <ART>/574-review-run.py 150 python <ART>/574-round3-prodshape.py
+python <ART>/574-review-run.py  90 python <ART>/574-round3-probes.py
+python <ART>/574-review-run.py 420 python <ART>/574-round4-prodshape.py
+python <ART>/574-review-run.py 180 python <ART>/574-round4-footer-probe.py
+```
+
+### Screenshots beside the approved mockup
+
+Mockup root, abbreviated **MOCK**: `C:/Users/monch/AppData/Local/Temp/claude/C--Users-monch-WebstormProjects-agent-takkub/8889290a-14a2-45e1-bfe3-59a89bf52d2f/scratchpad/boot-flow-design/`
+
+| Page | Approved mockup | Round-5 dark | Round-5 light | Production-event dark / light |
+| --- | --- | --- | --- | --- |
+| A Main | `MOCK/Main.dc.html` | `A-dark.png` | `A-light.png` | n/a |
+| B PreMigrate | `MOCK/PreMigrate.dc.html` | `B-dark.png` | `B-light.png` | n/a |
+| C Migrating | `MOCK/Migrating.dc.html` | `C-dark.png` | `C-light.png` | `C-r4-{backup,files,validate,final}-{dark,light}.png` |
+| D Done | `MOCK/Done.dc.html` | `D-dark.png` | `D-light.png` | `D-r4-{dark,light}.png` |
+| E Failed | `MOCK/Failed.dc.html` | `E-dark.png` | `E-light.png` | `E-r4-{dark,light}.png` |
+
+Extra C frames against the same mockup: `C-files-*`, `C-backendlog-*`, `C-prod-entry/files/validate-*`, `C-footer-under_data_home.png`, `C-footer-other_drive.png`. All 35 captures are 640 x 540, in `ART/574-round5-shots/`. Dark and light rectangle lists are byte-identical per page (52, 41, 38, 35, 26 visible widgets for A-E, and 38 for each extra C frame), so every geometry number below holds in both themes.
+
+Page A, B, D and E text was compared string by string against the mockups' own extracted text. A matches exactly. B matches except `ว่างในดิสก์ 123.0 GB` against `123 GB` (R3-N1, still open). D and E match exactly, including `ก่อนติดตั้ง 2.0.8` where the mockup writes the `2.0.x` placeholder, `ใช้เวอร์ชันเดิม (2.0.8) ต่อได้ทันที` and the button `ใช้เวอร์ชันเดิมต่อ (2.0.8)`.
+
+### V1-V15 remeasurement
+
+| ID / page / element | Expected from approved HTML | Round-5 actual measurement | Verdict |
+| --- | --- | --- | --- |
+| V1 - A-E typography | Title 16px/700, subtitle 12px/400, body/button 13px, chip/log 11px, percent 22px/700, line-height 1.45 | Unchanged from round 4, max residual 0.5px. B's note block y=373 against CSS 372.95, C's log box y=350 against 349.5, B's 13px key rows 19px against 18.85, the 22px percent label 32px against 31.9, title y=20 h=23 against 23.2, subtitle y=47 against 47.2, track y=77 against 76.6. | **PASS** |
+| V2 - A/B aggregate track | Always-visible 4px GROUND_INPUT track above the hairline, even at 0% | A and B both `(0,77,640,4)`, sampled `#0F172A` dark / `#F8FAFC` light. | **PASS** |
+| V3 - C header and aggregate | Subtitle phase 2 of 5, visible 4px accent aggregate at 34%, stable phase across repeated events | Subtitle reads `ขั้นตอน 2 จาก 5`; track pixel `#6366F1` dark / `#4F46E5` light; bar value 34, height 4. A second `phase=2` event keeps the promote row active and the header unchanged. | **PASS** |
+| V4 - B/D/E key/value grid | Key width 150px, gap 12px | Keys `(34,y,150,h)`, values start x=196 on all three pages. | **PASS** |
+| V5 - B section heading spacing | Heading-to-card gap 6px, letter-spacing 0.04em | Heading `(20,94,600,18)`, card top y=118, gap 6px, resolved letter spacing 0.46875px. | **PASS** |
+| V6 - B backup count units | `15,747 ไฟล์`, `29 โปรเจค`, `15 ไฟล์`, `4 รายการ` | Exactly those four strings, no byte suffix. | **PASS** |
+| V7 - B explanatory note | 16px circle-info icon, 8px gap, 1px top offset, bold primary phrase | Icon `(20,374,16,16)`, text `(44,373,576,36)`, bold `คัดลอกก่อนเสมอ` span in TEXT_PRIMARY. | **PASS** |
+| V8 - C future-phase dots | Numbers 3, 4, 5, diameter 22px, text 11px/600 | Dots carry 3, 4, 5; all five 22 x 22; the completed backup dot renders the check. | **PASS** |
+| V9 - C phase counters | Verify shows the real validation-step count, active counter `3 / 9 รายการ · providers/…`, and the noun must not change inside one phase | Verify reads `11 ขั้น` from the real `plan.verify_steps`. The active counter is exactly `3 / 9 รายการ · providers/…` on the mockup-shaped fixture and `3 / 9 รายการ · capabilities` / `7 / 9 รายการ · providers/…` on production events. **Across all 40 production events the noun is stable per phase**: phases 1, 2 and 4 stay `รายการ` end to end, phase 3 stays `ขั้น`. The only event carrying a different `unit` (event 33, the `on_text` validate line) has `done`/`total` of `None`, so `_phase_count_base_text` keeps the row at `11 / 11 ขั้น` and nothing changes on screen. R4-H1 is gone. | **PASS** |
+| V10 - C log colors and gaps | 11px mono, faint timestamp, muted operation, primary path, muted detail, 8px inline gaps | Unchanged from rounds 3-4: runs `#4B5563` / `#6B7280` / `#F3F4F6` / `#6B7280` dark and `#94A3B8` / `#64748B` / `#0F172A` / `#64748B` light; laid-out document ideal width 515.0 less its 8.0px margins leaves 507.0 against 483.0 of run advances, 24.0px over three gaps, exactly 8px each, inside the 576px slot. | **PASS** |
+| V11 - C footer | Padding 14/20/18, warning icon at x=20 with an 8px gap, complete backup note wrapping on the right | Footer `(0,472,640,68)`, the same 68px A, B, D and E use. Icon `(20,496,16,16)`, text `(44,495,340,18)`. The right note is now a fixed 220px column at `(400,487,220,33)` reading the relativized `สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832/`, complete, two lines. | **PASS** |
+| V12 - D validation result | Heading naming the validation-step count, exactly 3 summary rows | `ตรวจสอบครบ 11 ขั้น — ไม่มีข้อมูลหาย` from the real `validated_steps=11`; exactly 3 summary rows in both themes. | **PASS** |
+| V13 - D downgrade instructions | Muted Thai prose, the command inline in 12px IBM Plex Mono, naming the version to install before downgrading | `รัน takkub migrate restore-v1 ก่อนติดตั้ง 2.0.8`, command in a 12px mono span, row `(196,334,410,20)`. | **PASS** |
+| V14 - D footer hint | FAINT prose with a MUTED `Settings → Storage` span | Rich text, base FAINT, embedded span MUTED, 12px, both themes. | **PASS** |
+| V15 - E failure icon | 36px tinted disk holding a 20px outlined warning triangle plus an exclamation mark | Identical pixels to rounds 3-4: 54 exact-error pixels, bounding box 18 x 15 over 15 distinct rows, widest stroke row 18px. | **PASS** |
+
+**Visual rows: 15 PASS, 0 FAIL.** Round 4 was 14 PASS and 1 FAIL; round 3 was 12 and 3.
+
+### Round-4 findings, one by one
+
+| Round-4 finding | Round-5 result | Evidence |
+| --- | --- | --- |
+| R4-H1 - the phase row names its unit after the entry it is copying, so one row's noun changes mid-phase | **PASS, closed.** `boot_flow.py` `on_entry` and `on_file_progress` no longer pass a per-entry unit; `emit()`'s `"รายการ"` default describes what `done`/`total` actually count, and `on_step` passes `"ขั้น"` for phase 3. Across the recorded 40 events `units_seen` is exactly `["ขั้น", "รายการ"]` and no row changes noun while it is active. | V9, `round4-prodshape.json` `units_seen`, `render.dark.frames` |
+| R4-H2 - the `info` events that open and close a migration lose their message text | **PASS, closed.** Both now pass `detail=log_line`, and the window also falls back to `log_line` for the one slot the structured fields leave empty. Frame 0 reads `16:46:28  info  เริ่มย้ายข้อมูล` and the final frame `16:46:32  info  เสร็จ`, both themes. | `round4-prodshape.json` `render.*.frames[0]`, `final_frame`, `C-r4-final-dark.png` |
+| R4-M1 - the footer elide budget comes from `maximumWidth()` (220px) while the real allocated width is 104px, so a `backup_dir` outside DATA_HOME is cut off at the window edge | **PASS, closed.** `setFixedWidth(220)` removes the wrap-sizing feedback loop, and past budget the two lines are built directly. Probed with `backup_dir` on `D:`: label rect `(400,487,220,33)` in both cases (round 4: 104px wide), footer 68px, and a pixel scan of `C-footer-other_drive.png` finds exactly two ink row groups (y 487-501 and y 508-518), both ending at x<=619 inside the 620px content edge, with zero ink on the window's last two rows. Line advances measure 218.0px and 215.0px against the 220px column. | `footer-probe.json`, `C-footer-other_drive.png`, `C-footer-under_data_home.png` |
+| R4-M2 - the time-remaining slot is write-only and never withdrawn | **Mostly closed, one half open.** `_render_progress_event` now clears the label when the event carries no `eta_s`, when the aggregate reaches 100%, or on the terminal phase row. Measured: the label clears at events 6 and 17-39 and is empty next to `100%` in the final frame, both themes. Still open: `_fmt_eta`'s `max(1, round(s/60))` reports `เหลืออีกประมาณ 1 นาที` for an `eta_s` of `0.0` (events 4, 5 and 16 of the recording). See R5-M4. | `round4-prodshape.json` `frames`, `final_frame.eta`, `C-r4-final-dark.png` |
+| R4-M3 - the file-progress log detail is a bare `1204/15747` | **Partly closed, wrong noun.** Thousands separators and a unit word are now added, but the word comes from the row's `unit` field, which describes entries, not files. See R5-M2. | R5-M2 |
+| R4-M4 - `TestProviderChoice` writes the shared checkout's `v2/config/boot-provider-choice.json`, breaking `test_no_choice_yet_returns_none` for every later session in every worktree | **PASS, closed.** An autouse fixture now patches `_choice_path` itself to a `tmp_path` file. The full targeted suite passes with the polluted file still present on disk from the previous round. | `574-round5-pytest.txt` |
+| R4-N1 - the footer note breaks mid-token at a hyphen | **Open, unchanged.** Measured split is `สำรองไว้ที่ backups/pre-` at 124.0px then `migrate-2026-09-11-0832/` at 149.0px, matching the 123px and 148px ink widths in `C-dark.png`. | `C-dark.png`, footer metrics |
+| R3-N1 - free disk space renders one decimal | **Open, unchanged.** Still `ว่างในดิสก์ 123.0 GB` against the mockup's `123 GB`. | `B-dark.png` |
+| R8-M1 - `percent_overall` and `phase` walk backwards | **PASS, closed.** Across the recorded 40 events percent runs 0.0, 2.5, 5.0, 7.5, 10.0, 12.2 ... 46.34, 100.0 with no decrease, and phase runs 1, 1, 1, 1, 1, 1, 1, 2 ... 4, 5 with no decrease. `emit()` holds both to a high-water mark. | `round4-prodshape.json` `recorded_events` |
+| R8-M2 - phase 3 claims validation for events fired around apply | **Partly closed.** The log text no longer claims it: the detail reads `กำลังย้ายข้อมูล` / `ย้ายข้อมูลแล้ว` instead of `กำลังตรวจสอบ` / `ตรวจสอบแล้ว`, and `MigrationOutcome.validated_steps` stays the separate truthful count. The phase row is still named `ตรวจสอบ` and its counter still advances only on apply-side `on_step` calls, so the row heading and its own log lines now say different things. See R5-M3. | `round4-prodshape.json` `frames[17..32]`, `boot_flow.py` `on_step` |
+| B1 residual - dismissal during migration | **PASS, still closed.** With a real `QThread` inside the patched `run_migration` and page C showing: `QTest.keyClick(Escape)`, `close()` (returns `false`), `accept()`, `reject()` and a direct `done(0)` each leave the window visible, the worker running and `flowFinished` unemitted, in both themes. | `behavior.json` `escape`, `close_return`, `accept_reject`, `direct_done0` |
+| `files_done` / `files_total` costs no geometry | **PASS, still closed.** 0 widgets moved, 0 added, 0 removed, dialog 640 x 540 before and after; counter advance 307.0px inside its 364px slot. | `behavior.json` `files_progress`, `probes.json` |
+
+### Remaining MUST-FIX
+
+| ID / severity | Element / expected | Actual / cause |
+| --- | --- | --- |
+| **R5-M1 - medium** | Page C's backup row reads the file total the approved HTML shows: `15,762 / 15,762 ไฟล์` | The row counts top-level backup entries and calls them `รายการ`: the recording runs `0 / 4 รายการ`, `1 / 4`, `2 / 4`, `3 / 4`, `4 / 4`, then `5 / 5 รายการ`. R4-H1 offered two ways out — one stable unit per phase, or a counter that counts what its noun says — and named the plan's own file total for backup as the fix for this row specifically. Only the first half was taken, so the noun is now honest but page C's longest-running row still shows a 4-item counter where the mockup shows a 15,762-file one. On a real home the practical cost is that the row sits on `1 / 4` for minutes at a time; `plan.backup_items` already carries per-item counts and units, so the file total is available where the row is built. `on_file_progress` is bound for `pre-migrate-backup` (`engine.py:236`), so a per-entry file fraction does appear alongside it, but as that entry's own total, not the phase's. |
+| **R5-M2 - medium** | The log's fourth run describes the file count the way the mockup does (`คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง`) | `boot_flow_window.py:1608` rewrites the raw `1204/15747` detail as `f"{raw_files_done:,}/{raw_files_total:,} {unit or 'ไฟล์'}"`, and `unit` is the **row's** unit, now always `รายการ`. The `ไฟล์` fallback only fires when `unit` is empty, which it never is. So the production frame reads `1,204/15,747 รายการ` in the log, one line under a phase row reading `7 / 9 รายการ (1,204/15,747 ไฟล์)` — the same two numbers, labelled with two different nouns, in the same frame, and the log's is the wrong one. Visible in `C-r4-files-dark.png` and `C-r4-files-light.png`. Use the literal `ไฟล์` here; these counts are always files. |
+| **R5-M3 - medium** | The phase-3 row and its own log lines agree about what is happening | `boot_flow.py` `_PHASE_LABELS[3]` is `ตรวจสอบ` (verify) and the row's counter is driven entirely by `on_step`, which the code's own comment states fires around each ladder step's **apply**, never around a real `validate()`. R8-M2's fix reworded the log detail truthfully to `ย้ายข้อมูลแล้ว` (moved), which leaves the screen reading `ตรวจสอบ  8 / 11 ขั้น` beside a log line that says the data was moved. Measured across events 17-32. Either the row needs a name that covers what it reports, or phase 3 needs to be fed the real validation pass. |
+| **R5-M4 - medium** | An estimate under a minute reads as less than a minute, or not at all | `boot_flow_window.py:241-245` `_fmt_eta` floors every non-`None` estimate to `max(1, round(seconds / 60))` minutes. In the recording, events 4, 5 and 16 carry `eta_s = 0.0` and still render `เหลืออีกประมาณ 1 นาที`. The clearing half of R4-M2 is fixed; this half is not. |
+| **R5-M5 - medium** | Everything in the user-facing log is finished Thai prose, as the mockup's log is | `boot_flow.py:596` builds a `plan undercounted phase {phase}: {done} > {total}` string and appends it to `detail`, which is `ProgressEvent.log_detail` — the log's own fourth run. It is reachable whenever the runtime processes more distinct top-level entries than the plan enumerated, which the surrounding comment itself describes as a real plan/runtime mismatch worth surfacing rather than clamping. Measured at event 5, which renders `16:46:30  pre-migrate-backup  state  plan undercounted phase 1: 5 > 4` to the user. The signal is worth keeping; put it in the journal or in a Thai sentence, not in the wizard's log verbatim. The same event also grows the row's denominator from `4 / 4` to `5 / 5` in place, which the mockup's fixed totals never do. |
+| **R5-L1 - low** | The log's operation run is a short human word, as the mockup's `promote` is | Production sends the raw ladder step id, so the column reads `pre-migrate-backup`, `promote-v2-root`, `readonly-registries`, `core-internal-store`, `archive-v1-legacy`, and twice per migration the literal token `info`. Unchanged since round 3 and not a regression; noted because it is the last systematic text difference from the approved page C. |
+| **R5-N1 - nit** | A phase row marked done shows a completed count | At the final frame the archive row carries a green check beside `5 / 27 รายการ`. In this recording that is a fixture artifact — the fake `run_boot_stage` fires 5 of 27 archive entries — but it does show that the done state is driven purely by the phase index, never cross-checked against the row's own counter. |
+
+### Verification result
+
+`tests/test_boot_flow_window.py`, `tests/test_boot_main_window_gate.py`, `tests/test_boot_flow.py` and `tests/test_boot_flow_terminal.py`, `PYTHONPATH` pinned to this worktree's `src/` so the shared editable install cannot shadow it: **143 passed, 0 failed**, up from round 4's 133 passed and 1 failed. The round-4 failure is gone and the polluted `v2/config/boot-provider-choice.json` left behind by earlier rounds is still on disk, so the fix is isolation, not cleanup. No `qa-gate` was run, per the test-tier policy.
+
+Pages A, B, D and E match their mockups on every element checked, in both themes. Page C matches frame for frame on mockup-shaped events, holds the same 68px footer every other page uses, keeps a long off-volume path readable in exactly two lines, never walks its percent or phase backwards, and clears the time-remaining slot at 100%. All 15 visual rows pass for the first time. What keeps the answer at no is page C under production events: the backup row counts four entries where the approved page counts 15,762 files, the file-progress log line calls those files `รายการ` one line below a row calling them `ไฟล์`, and a developer diagnostic in English can reach that same log verbatim. Fix R5-M1, R5-M2 and R5-M5 and rerun all five scripts unchanged.
+
+**wizard matches approved mockup: no**
