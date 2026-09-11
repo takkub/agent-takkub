@@ -2,9 +2,17 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [2.1.0] - Unreleased
+## [vNEXT]
 
-Release candidate notes. **Release held:** the [Round 2 acceptance review](docs/audit/2026-09-10-504-acceptance-review.md#round-2--60abb771) found migration data loss and incomplete restore handling at `60abb771`. These notes do not announce a released or approved build.
+## [v2.1.0] - 2026-09-11
+
+The 2.1.0 storage migration (#504) passed ten acceptance-review rounds (`docs/audit/2026-09-10-504-acceptance-review.md`, round 10: "releasable: yes") and three full rehearsals on a copy of a production data home (244,659 files): apply 4.5–13 min, `restore-v1` 4–7 min, no user file lost, and a git-archived 2.0.8 boots on the restored store. The boot flow and migration wizard (#574) passed six UI review rounds against the approved mockup.
+
+### Added (เพิ่ม)
+
+- Boot flow after an update (#574): a provider-update screen lists every CLI provider with its installed and latest version and lets you choose per provider (update / keep current; the answer can be remembered), an automatic pre-migrate backup runs before any migration step, and a five-screen migration wizard shows the phase, per-file progress, ETA and a structured log. Headless / npm users get the same flow as `takkub migrate run --providers ask|all|none|<csv> [--remember] [--yes] [--json]` (one JSON object per line with `--json`).
+- Pre-migrate backup (`backups/pre-migrate-<timestamp>/`) copies only the entries the ladder can overwrite, merge or delete (moves are protected by the write-ahead log); `takkub migrate plan` reports the estimated size and warns above 500 MB / 20,000 files.
+- `takkub migrate restore-v1` restores every item recorded in the pre-migrate backup as well, re-stamps the version marker and mirrors domain targets back so a 2.0.x build validates on the restored store.
 
 ### Changed (เปลี่ยน)
 
@@ -17,7 +25,8 @@ Release candidate notes. **Release held:** the [Round 2 acceptance review](docs/
 
 - **Upgrade 1.x through a supported 2.0.x release first.** Boot and validate 2.0.x before installing the approved 2.1.0 release. Direct 1.x → 2.1.0 is not the supported route in this guide.
 - **Downgrading below 2.1.0 requires `restore-v1` before installing the older version.** Close all instances and panes using the data home, back up the current data separately, and use the still-installed 2.1.0 CLI to restore and verify the intended archives before installing 2.0.x.
-- Read the [2.1.0 migration guide](docs/v2/2.1.0-migration-guide.md) for generation selection, relocation, collision backups and verification limits. At this candidate, a successful restore exit alone does not prove archive completeness; crash recovery and target integrity also remain release review findings.
+- Read the [2.1.0 migration guide](docs/v2/2.1.0-migration-guide.md) for generation selection, relocation, collision backups and verification limits.
+- Known limitations carried to 2.1.1: after a `restore-v1`, a second 2.1.0 apply on the same store does not emit the phase-3 (validate) progress events (#576); `restore-v1` is 3–5× slower than apply on macOS/Linux because of its fsync policy (#577); on a restored store the 2.0.x mirror of `version.json` and the 2.1.0 bookkeeping file under `runtime/core` are re-synced by the 2.0.x boot ladder itself.
 
 ## [2.0.8] - 2026-09-10
 
