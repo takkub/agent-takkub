@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 340,
+  "module_count": 339,
   "modules": [
     {
       "module": "agent_takkub",
@@ -237,11 +237,10 @@
       "imported_by": [
         "agent_takkub.app",
         "agent_takkub.boot_flow",
-        "agent_takkub.boot_update_window",
         "agent_takkub.cli",
         "agent_takkub.doctor"
       ],
-      "fan_in": 5,
+      "fan_in": 4,
       "fan_out": 8
     },
     {
@@ -351,20 +350,6 @@
       ],
       "fan_in": 1,
       "fan_out": 4
-    },
-    {
-      "module": "agent_takkub.boot_update_window",
-      "imports": [
-        "agent_takkub.auto_migrate_boot",
-        "agent_takkub.cockpit_theme",
-        "agent_takkub.orchestrator_text",
-        "agent_takkub.provider_model_refresh",
-        "agent_takkub.provider_spec",
-        "agent_takkub.provider_update"
-      ],
-      "imported_by": [],
-      "fan_in": 0,
-      "fan_out": 6
     },
     {
       "module": "agent_takkub.browser_chrome",
@@ -516,7 +501,6 @@
         "agent_takkub.agent_pane",
         "agent_takkub.app",
         "agent_takkub.boot_flow_window",
-        "agent_takkub.boot_update_window",
         "agent_takkub.headless_window",
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
@@ -550,7 +534,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 36,
+      "fan_in": 35,
       "fan_out": 0
     },
     {
@@ -3284,7 +3268,6 @@
       "imported_by": [
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_context",
-        "agent_takkub.boot_update_window",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.migration.pre_migrate_backup",
@@ -3298,7 +3281,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 15,
+      "fan_in": 14,
       "fan_out": 8
     },
     {
@@ -3732,10 +3715,9 @@
         "agent_takkub.role_models"
       ],
       "imported_by": [
-        "agent_takkub.boot_update_window",
         "agent_takkub.provider_model_catalog"
       ],
-      "fan_in": 2,
+      "fan_in": 1,
       "fan_out": 4
     },
     {
@@ -3781,7 +3763,6 @@
         "agent_takkub.agent_pane",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
-        "agent_takkub.boot_update_window",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.model_catalog.legacy",
@@ -3807,7 +3788,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 29,
+      "fan_in": 28,
       "fan_out": 4
     },
     {
@@ -3843,10 +3824,9 @@
       ],
       "imported_by": [
         "agent_takkub.boot_flow",
-        "agent_takkub.boot_update_window",
         "agent_takkub.provider_model_catalog"
       ],
-      "fan_in": 3,
+      "fan_in": 2,
       "fan_out": 6
     },
     {
