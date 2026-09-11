@@ -225,3 +225,128 @@ Existing tests **90 passed**, exit 0: `tests/test_boot_flow_window.py`, `tests/t
 All ten diagnostic renders and requested real-key Escape probes completed. Exact production-type integration was tested and fails before B can render; no claim of end-to-end migration success is made. Fix the remaining contract and visual differences, then rerun the exact-contract renderer without any path normalization.
 
 **wizard matches approved mockup: no**
+
+## Round 3 — 7b48de93
+
+**Verdict: FAIL. wizard matches approved mockup: no**
+
+Reviewed main / worktree HEAD `7b48de93` (frontend round 4 `5b0a5e4b`, backend round 10/11 `4ee48c24` + `64e1bc53` + `8d41be39`). Working tree clean, no application source or existing test changed. Confirmed both reviewed modules resolve out of this worktree, not the shared editable install: `.../reviewer-2-1789110706/src/agent_takkub/boot_flow_window.py` and `.../boot_flow.py`.
+
+**Every round-2 blocker is closed.** The exact production contract now renders all five pages, the int-phase vocabulary is understood, and the direct completion API is guarded. What remains is one new high-severity layout defect on page C, one page-B content defect, and a set of interface gaps that only appear when the events come from `run_migration()` itself rather than from mockup-shaped fixtures.
+
+### Method, evidence, and limits
+
+**No path normalization anywhere this round.** Every object handed to `BootFlowWindow` is a real frozen `boot_flow` dataclass with its real field types: `MigrationPlanSummary` with 4-tuple `backup_items` (`label, count, bytes, unit`), a real `Path` `backup_dir`, and real `verify_steps=11`; `ProgressEvent` with `int` `phase`, real `current_path`, and real `files_done`/`files_total`; `MigrationOutcome` with `Path` `archive_dir`, `list[Path]` `log_paths`, `validated_steps=11`, `failed_phase=3`, `failed_step_index=7`, `failed_step_total=11`. Nothing is duck-typed on and nothing is stringified first. Only the three external work boundaries (`check_provider_updates`, `plan_migration`, `run_migration`) are patched so no user data is touched. `QThread.start` is not patched; the migration callable asserts it runs off the GUI thread, and the round-1 capture routine, offscreen real widgets, bundled fonts, 96 DPI, device pixel ratio 1, 640 x 540 are all unchanged.
+
+`MigrationPlanSummary` has no `skipped_move_only_items` field and page B never reads one, so that requested check is not applicable at this HEAD. The field lives on `pre_migrate_backup.py`'s step object and never reaches the wizard.
+
+ART keeps its meaning from the earlier rounds. New artifacts, all under `ART/574-round3-shots/` unless stated:
+
+| Evidence | Path |
+| --- | --- |
+| Exact-contract renderer, A-E both themes, real QThread, Escape/close/accept/reject/`done(0)`, files-progress shift probe | `ART/574-round3-review.py`, `ART/574-round3-review.log` |
+| Production-shape renderer: events built exactly as `run_migration.emit()` builds them (`on_entry`, `on_file_progress`, `on_text`) | `ART/574-round3-prodshape.py`, `ART/574-round3-prodshape.log`, `prodshape.json` |
+| Text advance/clipping, rich-text log gap measurement, failure-icon glyph pixels, footer path source, both themes' tokens | `ART/574-round3-probes.py`, `probes.json`, `E-icon-dark.png` |
+| Widget rectangles, resolved pixel fonts, weights, letter spacing, font metrics, QSS, layout margins/spacing, theme tokens, pixel samples, all 14 captures | `widget-metrics.json` |
+| Real-module/real-thread behavior results | `behavior.json` |
+
+Reproduce from the reviewed worktree as cwd, every command deadline-bounded:
+
+```
+python <ART>/574-review-run.py 180 python <ART>/574-round3-review.py
+python <ART>/574-review-run.py 120 python <ART>/574-round3-prodshape.py
+python <ART>/574-review-run.py  60 python <ART>/574-round3-probes.py
+```
+
+### Screenshots beside the approved mockup
+
+Mockup root, abbreviated **MOCK** below:
+
+`C:/Users/monch/AppData/Local/Temp/claude/C--Users-monch-WebstormProjects-agent-takkub/8889290a-14a2-45e1-bfe3-59a89bf52d2f/scratchpad/boot-flow-design/`
+
+| Page | Approved mockup | Round-3 dark | Round-3 light |
+| --- | --- | --- | --- |
+| A Main | `MOCK/Main.dc.html` | `A-dark.png` | `A-light.png` |
+| B PreMigrate | `MOCK/PreMigrate.dc.html` | `B-dark.png` | `B-light.png` |
+| C Migrating | `MOCK/Migrating.dc.html` | `C-dark.png` | `C-light.png` |
+| D Done | `MOCK/Done.dc.html` | `D-dark.png` | `D-light.png` |
+| E Failed | `MOCK/Failed.dc.html` | `E-dark.png` | `E-light.png` |
+
+Extra C variants against the same mockup: `C-files-{dark,light}.png` (same frame plus `files_done`/`files_total`), `C-backendlog-{dark,light}.png` (backend-shaped log line), `C-prod-entry-*`, `C-prod-files-*`, `C-prod-validate-*` (events built exactly as `run_migration` builds them).
+
+All 14 captures are 640 x 540. Dark and light rectangle lists are byte-identical per page (52, 41, 38, 35, 26 visible widgets for A-E), so every geometric measurement below holds in both themes; colors are listed separately where they differ.
+
+### V1-V15 remeasurement
+
+| ID / page / element | Expected from approved HTML | Round-3 actual measurement | Verdict |
+| --- | --- | --- | --- |
+| V1 - A-E typography | Title 16px/700, subtitle 12px/400, body/button 13px, chip/log 11px, percent 22px/700, line-height 1.45 | All pixel sizes and weights match. Header now carries real line boxes: title rect `(20,20,600,23)` against CSS 23.2, subtitle starts y=47 against 47.2, track starts y=77 against 76.6. `_apply_line_height` is applied to the title and subtitle only (lines 758, 762). Body rows keep Qt-native boxes: 13px key/value rows measure 20px against CSS 18.85, the 22px percent label 29px against 31.9. Drift accumulates to +5px by B's note block (y=378 against 372.95) and -2.5px by C's log box (y=347 against 349.5). | **FAIL** - residual, down from round 2's 3.2px title error to a 5px body drift |
+| V2 - A/B aggregate track | Always-visible 4px GROUND_INPUT track above the hairline, even at 0% | A and B both show `(0,77,640,4)`, sampled `#0F172A` dark and `#F8FAFC` light across left, middle and right, with the 1px `#262B36` / `#E2E8F0` hairline at y=81. | **PASS** |
+| V3 - C header and aggregate | Subtitle phase 2 of 5, visible 4px accent aggregate at 34%, stable phase across repeated events | Subtitle reads phase 2 of 5; the track pixel at x=4 is `#6366F1` dark / `#4F46E5` light and back to track color by x=320, consistent with a 34% fill; bar value 34, height 4. A second `phase=2` event keeps the promote row active and the header unchanged. | **PASS** |
+| V4 - B/D/E key/value grid | Key width 150px, gap 12px | Keys `(34,y,150,h)`, values start x=196 on all three pages, giving exactly 12px. | **PASS** |
+| V5 - B section heading spacing | Heading-to-card gap 6px, letter-spacing 0.04em (0.48px) | Heading `(20,94,600,18)`, card top y=118, gap 6px. Resolved QFont letter spacing 0.46875px, Qt's subpixel quantization of the 0.48px QSS value. | **PASS** |
+| V6 - B backup count units | `15,747 ไฟล์`, `29 โปรเจค`, `15 ไฟล์`, `4 รายการ` | Unit words are now correct, but every row appends a byte total the mockup does not have: `15,747 ไฟล์ · 1.2 GB`, `29 โปรเจค · 0.0 GB`, `15 ไฟล์ · 0.0 GB`, `4 รายการ · 0.0 GB`. Three of four rows therefore show a meaningless `0.0 GB`. `boot_flow_window.py:1072-1075`. | **FAIL** |
+| V7 - B explanatory note | 16px circle-info icon, 8px gap, 1px top offset, bold primary phrase | Icon `(20,379,16,16)`, text `(44,378,576,36)`: gap 8px, icon offset +1px, bold `คัดลอกก่อนเสมอ` in TEXT_PRIMARY with muted prose. | **PASS** |
+| V8 - C future-phase dots | Numbers 3, 4, 5, diameter 22px, text 11px/600 | Todo dots carry `3`, `4`, `5`; every dot widget is 22 x 22; the completed backup dot renders the check. | **PASS** |
+| V9 - C phase counters | Verify shows the real validation-step count, active counter `3 / 9 รายการ · providers/…` in TEXT_PRIMARY | Verify reads `11 ขั้น`, taken from the real `plan.verify_steps=11`, not from `len(promote_items)`. Active counter reads `3 / 9 รายการ · providers/…` in `#F3F4F6` dark / `#0F172A` light; label bold `#F8FAFC` / `#1E293B`; todo counters `#4B5563` / `#94A3B8`. | **PASS** |
+| V10 - C log colors and gaps | 11px mono, faint timestamp, muted operation, primary path, muted detail, 8px inline gaps | The log label is 11px IBM Plex Mono. The four runs render `#4B5563`, `#6B7280`, `#F3F4F6`, `#6B7280` dark (`#94A3B8`, `#64748B`, `#0F172A`, `#64748B` light). Gap measured off the laid-out rich-text document: ideal width 515.0 minus the 4.0px document margin on each side leaves 507.0 against 483.0 of summed run advances, so 24.0px over three gaps, exactly 8px each. Total 515.0 fits the 576px slot without clipping. | **PASS** |
+| V11 - C footer | Padding 14/20/18, warning icon at x=20 with an 8px gap, complete backup note wrapping on the right | The left side is correct: icon `(20,475,16,16)`, text `(44,474,340,18)`, gap 8px, footer margins 20/14/20/18. The right-hand note is not: it renders the raw absolute `Path`, wraps to three lines at `(400,444,220,78)`, and inflates the whole footer from the 68px every other page uses to **110px**, pushing C's body up. See R3-B1. | **FAIL** |
+| V12 - D validation result | Heading naming the validation-step count, exactly 3 summary rows | Real `validated_steps=11` gives `ตรวจสอบครบ 11 ขั้น — ไม่มีข้อมูลหาย` and the summary layout holds exactly 3 rows in both themes. The paths box below is border-only with no fill, matching the mockup's second box. | **PASS** |
+| V13 - D downgrade instructions | Muted Thai prose with the command inline in 12px IBM Plex Mono | Value `(196,338,410,20)` is rich text: 13px sans prose plus a 12px IBM Plex Mono command span. | **PASS** |
+| V14 - D footer hint | FAINT prose with a MUTED `Settings → Storage` span | Rich text, base FAINT with the embedded span at MUTED, 12px, both themes. | **PASS** |
+| V15 - E failure icon | 36px tinted disk holding a 20px outlined warning triangle plus an exclamation mark | Icon widget 36 x 36 over `#3a2226` dark / `#fee2e2` light. Pixels at the exact error color form a bounding box 18 wide by 15 tall spread over 15 distinct rows, with the widest stroke row spanning 18px: a triangle outline, not a bare single-column glyph. | **PASS** |
+
+**Visual rows: 12 PASS, 3 FAIL (V1 residual, V6, V11).** Round 2 was 9 PASS and 6 FAIL, so V3, V7, V9 and V10 close this round, V1 shrinks but does not close, V6 regresses on a different detail, and V11 regresses outright once the real absolute `Path` reaches it.
+
+### Round-2 blockers and the B1 residual
+
+| Round-2 finding | Round-3 result | Evidence |
+| --- | --- | --- |
+| R2-B1 - B/D/E path labels and E log list abort on real `Path` fields | **PASS, closed.** The exact-contract renderer completes A through E in both themes with exit 0 and no `TypeError`. B shows the relative backup path, D shows backup and archive paths, and E joins `list[Path]` into one line. `_path_str` (lines 297-308) now relativizes against `config.DATA_HOME` at every display boundary except the one in R3-B1. | `574-round3-review.log`, `B-dark.png`, `D-dark.png`, `E-dark.png` |
+| R2-B2 - repeated numeric phase advances the row, failed numeric phase loses its label and step position | **PASS, closed.** A second real `phase=2` event keeps the promote row active with dots backup done, promote active 2, and verify/archive/done todo 3/4/5, header still phase 2 of 5. E renders `ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน` from `failed_phase=3`, `failed_step_index=7`, `failed_step_total=11`. | `behavior.json` keys `repeated_phase2` and `E_heading` |
+| R2-B3 - four-tuple unit, real validation-step total, current path, structured and colored log | **PASS for the four items this row named.** Unit words come from tuple index 3; verify uses `plan.verify_steps=11`; the active counter carries the path segment; the log renders four correctly colored runs at 8px gaps. The byte suffix added alongside the unit is a separate new defect (V6, R3-H1), and the production event shapes raise separate gaps (R3-M2 through R3-M5). | V6, V9, V10 above, `prodshape.json` |
+| R2-V1 - CSS 1.45 line boxes | Partly fixed. Header labels match, body rows do not. See V1. | `widget-metrics.json` |
+| R2-V7 - note icon 1px top offset | **PASS, closed.** Icon y=379, text y=378. | V7 |
+| R2-V10 - exact 8px inline log gaps | **PASS, closed.** The table-cell padding renders 8.0px per gap, measured off the laid-out document. | V10, `probes.json` |
+| B1 residual - `done(0)` dismisses and emits during migration | **PASS, closed.** With a real `QThread` held inside the patched `run_migration` and page C showing, the probe returns visible true, finished empty, worker running true for a real `QTest.keyClick(Escape)`, for `close()` (which returns false), for `accept()`, for `reject()`, and for a direct `done(0)`. No `flowFinished` is emitted until the worker is released and D is reached. `done()` gained the same migrating-page guard at lines 1916-1926. | `behavior.json` keys `escape`, `close_return`, `accept_reject`, `direct_done0` |
+
+### files_done / files_total on page C
+
+The mockup contains no per-file count token anywhere; its active row reads `3 / 9 รายการ · providers/…`. The requirement is therefore that the new segment appears when the backend supplies the fields and that nothing else moves.
+
+With a real `ProgressEvent` carrying `files_done=1204, files_total=15747`, the active counter becomes `3 / 9 รายการ (1,204/15,747 ไฟล์) · providers/…`, inserted between the unit and the path segment, exactly as `boot_flow_window.py:1385-1394` orders it.
+
+Layout shift was measured by snapshotting every visible widget rectangle immediately before and after that event, in both themes:
+
+| Measure | Result |
+| --- | --- |
+| Widgets whose rectangle changed | 0 |
+| Widgets added or removed | 0 |
+| Dialog size before and after | 640 x 540, unchanged |
+| Counter text advance against its 364px slot | 307.0px, no clipping (176.0px without the segment) |
+
+**PASS.** The counter sits in a stretch slot wide enough for the longer string, so the segment costs no geometry. Captures: `C-files-dark.png`, `C-files-light.png`.
+
+### Remaining MUST-FIX
+
+| ID / severity | Element / expected | Actual / cause |
+| --- | --- | --- |
+| **R3-B1 - high** | C footer right shows the short backup path on one line, inside the same 68px footer every other page uses | `boot_flow_window.py:1426` interpolates the raw `Path` instead of calling `_path_str`, which every other path site does use. On a real machine `backup_dir` is absolute, so the label gets 137 characters and 817px of text into a 220px maximum-width wrapping slot: it renders as three lines at `(400,444,220,78)` and the footer grows to `(0,430,640,110)`, 42px taller than spec, lifting C's whole body. `_path_str(backup_dir)` yields 47 characters and 268px instead. Reproduced in both themes and in every C capture including the production-shape ones. |
+| **R3-H1 - high** | B backup rows read `15,747 ไฟล์`, `29 โปรเจค`, `15 ไฟล์`, `4 รายการ` | `boot_flow_window.py:1072-1075` appends a formatted byte total to each row. The mockup has no byte column here, and `_fmt_gb` renders anything under 50MB as `0.0 GB`, so three of the four rows carry a visible zero. Either drop the suffix or show it only where it is non-zero and the mockup allows it. |
+| **R3-M1 - medium** | Every displayed path uses the mockup's forward slashes and trailing separator | `_path_str` returns `str(Path)`, which on Windows uses backslashes and drops the trailing separator. Affects B's backup-location row, both D path rows, E's backup row and log list, and C's footer. Cross-platform relevant: the same code renders forward slashes on macOS, so the two platforms disagree with each other and one of them disagrees with the mockup. Use `as_posix()` at the display boundary. |
+| **R3-M2 - medium** | Only the active row carries a path segment; completed rows read `15,762 / 15,762 ไฟล์` | The suffix is written into whichever phase row the event belongs to and is never cleared, so once the phase advances the completed backup row still reads `15,762 / 15,762 ไฟล์ · v2`. `boot_flow_window.py:1392-1395`. The module docstring states the mockup rule that the code does not enforce. |
+| **R3-M3 - medium** | C shows an estimated time remaining | `boot_flow.run_migration.emit()` passes `eta_s=None` on every event it constructs (`boot_flow.py:516`), and `_render_progress_event` only writes the label when the formatter returns a non-empty string, so the slot stays empty for the entire real migration. Measured empty for `on_entry`, `on_file_progress` and `on_text` events in both themes. |
+| **R3-M4 - medium** | C's backup row reads `15,762 / 15,762 ไฟล์` | `emit()` hardcodes the unit to `รายการ` (`boot_flow.py:510`), so with production events the backup row reads `1 / 4 รายการ`. The mockup's per-phase unit vocabulary exists in `plan.backup_items` but never reaches `ProgressEvent`. |
+| **R3-M5 - medium** | C's log shows four runs: timestamp, operation, path, explanation | The production log line is step id and name only (`boot_flow.py:544`), with no timestamp and no detail, so the log renders two runs. Worse, `on_text` messages carry no colon at all and fall into the unstructured branch of `_parse_log_line`, so a validation message renders entirely in the FAINT timestamp color, the dimmest run on the page. Either have the backend emit timestamp and detail, or stop treating an unstructured line as a timestamp. |
+| **R3-M6 - medium** | D names the version to install before downgrading, and E names the current version in its prose and on its primary button | `MigrationOutcome` carries no previous-version field, so both suffixes are dropped. This is an interface gap, not a formatting bug; do not hardcode a version to make the captures pass. |
+| **R3-N1 - nit** | B reads free disk space as a whole number of gigabytes | Renders one decimal place, so the mockup's `123 GB` becomes `123.0 GB`. `_fmt_gb` always prints one decimal. |
+
+Page A matches its mockup on every element checked: five provider rows at 40px pitch with the 110px name column and 10px gap, chip pills 20px tall over GROUND_INPUT with STATE_WARN and STATE_OK text, the remember-choice row, the footer hint and both buttons, in both themes.
+
+### Verification result
+
+Existing tests pass: **117 passed**, exit 0, for `tests/test_boot_flow_window.py`, `tests/test_boot_main_window_gate.py`, `tests/test_boot_flow.py` and `tests/test_boot_flow_terminal.py`, run with `PYTHONPATH` pinned to this worktree's `src/` so the shared editable install cannot shadow it. Up from round 2's 90. No `qa-gate` was run, per the test-tier policy, and this review modified no application source or test.
+
+The exact production contract now renders end to end, which round 2 could not do at all, and no dismissal path reaches `flowFinished` while a real worker is migrating. What blocks acceptance is R3-B1's footer blowout on the page the user watches longest, R3-H1's incorrect page-B row content, and the interface gaps R3-M2 through R3-M6 that keep a real migration from looking like the approved page C. Fix those and rerun the same three scripts unchanged.
+
+**wizard matches approved mockup: no**
