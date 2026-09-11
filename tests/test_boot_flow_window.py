@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -381,6 +380,35 @@ class TestMigratingFooterWrap:
         w._set_footer_right_elided(full_text)
         assert w._migrate_footer_right.text() == full_text
 
+    def test_progress_event_backup_dir_goes_through_path_str(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#574 round-3 audit R3-B1: `_render_progress_event` interpolated
+        `event.backup_dir` directly instead of calling `_path_str` like
+        every other path site — on a real machine `backup_dir` is an
+        absolute `Path`, so the footer note ballooned to 3 lines and blew
+        the whole footer out to 110px. It must render the same short,
+        forward-slashed, trailing-`/` directory every other path site
+        does."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="backup",
+                    percent_overall=20,
+                    backup_dir=tmp_path / "backups" / "pre-migrate-2026-09-11-0832",
+                )
+            )
+            w._apply_pending_event()
+            assert w._migrate_footer_right.text() == "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832/"
+        finally:
+            w._migrate_throttle.stop()
+
 
 class TestVersionNumbers:
     """#574 fix-loop round: header/footer version text must show the
@@ -629,6 +657,25 @@ class TestBackupRowUnits:
         texts = {lbl.text() for lbl in w._backup_card.findChildren(QLabel)}
         assert "15,747 รายการ" in texts
 
+    def test_real_four_tuple_bytes_never_add_a_gb_suffix(self) -> None:
+        """#574 round-3 audit R3-H1: the mockup's backup rows are
+        "count unit" only — no byte column. Appending one anyway put a
+        meaningless "· 0.0 GB" on 3 of 4 rows once real (small) byte
+        totals arrived, since `_fmt_gb` renders anything under 50MB as
+        "0.0 GB"."""
+        plan = _plan(
+            backup_items=[
+                ("v2/ (ข้อมูลระบบ V2)", 15747, 1_200_000_000, "ไฟล์"),
+                ("โปรเจค", 29, 29_000, "โปรเจค"),
+            ]
+        )
+        flow = _FakeFlow(items=[], plan=plan)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        texts = {lbl.text() for lbl in w._backup_card.findChildren(QLabel)}
+        assert {"15,747 ไฟล์", "29 โปรเจค"} <= texts
+        assert not any("GB" in t for t in texts)
+
 
 class TestPremigrateNoteRichText:
     """#574 fix-loop round 3 (V7): "คัดลอกก่อนเสมอ" must render bold and
@@ -729,6 +776,41 @@ class TestActiveCounterPathAndColor:
         finally:
             w._migrate_throttle.stop()
 
+    def test_finished_row_drops_its_path_and_files_segment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#574 round-3 audit R3-M2: the current-item/files-progress suffix
+        only ever describes "what's happening right now" — once a row
+        stops being active, it must go back to reading plainly
+        "done / total unit", not keep the last path it was working on."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="backup",
+                    done=15762,
+                    total=15762,
+                    unit="ไฟล์",
+                    percent_overall=20,
+                    current_path="v2",
+                    files_done=15762,
+                    files_total=15762,
+                )
+            )
+            w._apply_pending_event()
+            assert w._phase_count_labels["backup"].text() == "15,762 / 15,762 ไฟล์ · v2"
+            w._on_progress(
+                SimpleNamespace(phase="promote", done=3, total=9, unit="รายการ", percent_overall=34)
+            )
+            w._apply_pending_event()
+            assert w._phase_count_labels["backup"].text() == "15,762 / 15,762 ไฟล์"
+        finally:
+            w._migrate_throttle.stop()
+
 
 class TestShortenCurrentPath:
     def test_truncates_to_first_segment(self) -> None:
@@ -749,9 +831,11 @@ class TestParseLogLine:
         assert detail == "คัดลอก 1,204 ไฟล์ · ตรวจ sha256 ตรง"
 
     def test_degrades_gracefully_on_a_short_line(self) -> None:
+        # #574 round-3 audit R3-M5: an unstructured line renders as plain
+        # body text (`detail`), not the dim `timestamp`/FAINT slot.
         ts, op, path, detail = bfw._parse_log_line("just one part")
-        assert ts == "just one part"
-        assert (op, path, detail) == ("", "", "")
+        assert detail == "just one part"
+        assert (ts, op, path) == ("", "", "")
 
 
 class TestMigratingLogColors:
@@ -779,6 +863,26 @@ class TestMigratingLogColors:
             assert theme.TEXT_PRIMARY in html_text
             assert "08:31:12" in html_text
             assert "providers/codex/default" in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_unstructured_log_line_is_not_all_faint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#574 round-3 audit R3-M5: a real `on_text` message (phase 3/5,
+        no colon at all, e.g. "ตรวจสอบขั้นที่ 7/11") used to land whole in
+        the FAINT timestamp slot, rendering the dimmest color on the page
+        for an ordinary status line."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="verify", log_line="ตรวจสอบขั้นที่ 7/11"))
+            w._apply_pending_event()
+            html_text = w._log_box.text()
+            assert theme.TEXT_FAINT not in html_text
+            assert theme.TEXT_MUTED in html_text
+            assert "ตรวจสอบขั้นที่ 7/11" in html_text
         finally:
             w._migrate_throttle.stop()
 
@@ -1063,17 +1167,23 @@ class TestDoneGuardOnMigratingPage:
 
 
 class TestPathStrHelper:
+    """#574 round-3 audit R3-M1: `as_posix()` (not `str(Path(...))`) so the
+    same value renders identically on Windows and macOS, and matches the
+    mockup's forward slashes either way. `is_dir=True` appends the
+    mockup's trailing `/` for a directory (backup_dir/archive_dir) — a
+    log FILE path never gets one."""
+
     def test_relative_to_data_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.setattr(config, "DATA_HOME", tmp_path)
         p = tmp_path / "backups" / "pre-migrate-test"
-        assert bfw._path_str(p) == str(Path("backups") / "pre-migrate-test")
+        assert bfw._path_str(p) == "backups/pre-migrate-test"
 
     def test_outside_data_home_falls_back_to_absolute(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         monkeypatch.setattr(config, "DATA_HOME", tmp_path / "elsewhere")
         p = tmp_path / "backups"
-        assert bfw._path_str(p) == str(p)
+        assert bfw._path_str(p) == p.as_posix()
 
     def test_none_and_empty_string(self) -> None:
         assert bfw._path_str(None) == ""
@@ -1081,6 +1191,22 @@ class TestPathStrHelper:
 
     def test_plain_string_passthrough(self) -> None:
         assert bfw._path_str("backups/pre-migrate-test/") == "backups/pre-migrate-test/"
+
+    def test_is_dir_appends_trailing_slash(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        p = tmp_path / "backups" / "pre-migrate-test"
+        assert bfw._path_str(p, is_dir=True) == "backups/pre-migrate-test/"
+
+    def test_is_dir_does_not_double_the_slash(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        p = tmp_path / "backups" / "pre-migrate-test"
+        assert bfw._path_str(p, is_dir=True).count("/") == bfw._path_str(p).count("/") + 1
+
+    def test_is_dir_never_appends_to_empty(self) -> None:
+        assert bfw._path_str(None, is_dir=True) == ""
+        assert bfw._path_str("", is_dir=True) == ""
 
 
 class TestUnpackBackupRow:

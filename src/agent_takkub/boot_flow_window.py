@@ -266,7 +266,14 @@ def _parse_log_line(text: str, current_path: str | None = None) -> tuple[str, st
     timestamp slot). `current_path` (from `ProgressEvent.current_path`,
     once that field lands — see module docstring) always wins over
     whatever path the text itself carries. Pads with empty strings on a
-    short/malformed line rather than raising."""
+    short/malformed line rather than raising.
+
+    Round-3 audit R3-M5: a real `on_text` message (phase 3/5, no colon at
+    all) used to land in the `timestamp` slot too, so it rendered in the
+    dimmest FAINT color as if it were a clock reading. An unstructured
+    line has no timestamp/operation/path to speak of, so it goes in
+    `detail` instead — the same MUTED "body" color every other plain
+    explanation run already uses."""
     text = text.strip()
     if not text:
         return "", "", "", ""
@@ -280,32 +287,43 @@ def _parse_log_line(text: str, current_path: str | None = None) -> tuple[str, st
         operation, _sep, rest = text.partition(":")
         timestamp, operation, path, detail = "", operation.strip(), rest.strip(), ""
     else:
-        # Unstructured — degrade to the whole line in the timestamp slot
-        # rather than guessing at fields that aren't there.
-        timestamp, operation, path, detail = text, "", "", ""
+        # Unstructured — render as plain body text, not the dim
+        # timestamp slot (R3-M5).
+        timestamp, operation, path, detail = "", "", "", text
     if current_path:
         path = str(current_path)
     return timestamp, operation, path, detail
 
 
-def _path_str(value: Any) -> str:
+def _path_str(value: Any, *, is_dir: bool = False) -> str:
     """`pathlib.Path` (or path-like) -> display string, relative to
     `config.DATA_HOME` when the path lives under it (mockup shows short
     paths, never a full absolute one) — `boot_flow.py`'s real dataclasses
     carry `Path` for `backup_dir`/`archive_dir`/`log_paths`, but `QLabel`/
     `str.join` both need a plain `str` (round 4 crash: passing a `Path`
     straight through raised `TypeError` and took the whole boot process
-    down with it)."""
+    down with it).
+
+    Round-3 audit R3-M1: `str(Path(...))` uses the native OS separator
+    (backslash on Windows), so the same value renders differently across
+    platforms and never matches the mockup's forward slashes either —
+    `as_posix()` is stable on both. `is_dir=True` appends the mockup's
+    trailing `/` (every backup/archive directory shown — `backup_dir`,
+    `archive_dir` — carries one; a log FILE path never should)."""
     if value is None or value == "":
         return ""
     if isinstance(value, Path):
         from . import config
 
         try:
-            return str(value.relative_to(config.DATA_HOME))
+            text = value.relative_to(config.DATA_HOME).as_posix()
         except ValueError:
-            return str(value)
-    return str(value)
+            text = value.as_posix()
+    else:
+        text = str(value)
+    if is_dir and text and not text.endswith("/"):
+        text += "/"
+    return text
 
 
 def _clear_layout(layout: Any) -> None:
@@ -368,6 +386,20 @@ def _apply_line_height(label: QLabel, px_size: float, line_height: float = 1.45)
     exact target height, with Qt's default vertical-center alignment
     distributing the extra space as leading above/below the text."""
     label.setMinimumHeight(round(px_size * line_height))
+
+
+def _set_exact_line_height(label: QLabel, px_size: float, line_height: float = 1.45) -> None:
+    """Like `_apply_line_height`, but pins the EXACT height (`setFixedHeight`)
+    rather than only a floor. Round-3 audit V1 residual: a single-line
+    `wordWrap(True)` `QLabel` (e.g. a 150px-wide key column, or a short
+    mono value) reports a `sizeHint()` a few px TALLER than its own CSS
+    line box — the reverse of the title/subtitle problem `_apply_line_height`
+    was built for — so a `setMinimumHeight` floor below that inflated
+    native height is a no-op and the row stays too tall. Only call this on
+    a label whose text is short/controlled enough to never need a second
+    line (a caller with genuinely long, wrapping content must keep using
+    `_apply_line_height` instead, or this would silently clip it)."""
+    label.setFixedHeight(round(px_size * line_height))
 
 
 class _CheckSquare(QWidget):
@@ -592,6 +624,12 @@ def _card(parent: QWidget | None = None) -> QWidget:
 def _kv_key_label(key: str, sans: str) -> QLabel:
     key_lbl = QLabel(key)
     key_lbl.setFont(_font(sans, 13))
+    # Every real key is one of a handful of short, hard-coded Thai/English
+    # captions under our control — always one line at the 150px column
+    # width — so the exact CSS line box (not just a floor) is safe here;
+    # see `_set_exact_line_height`'s docstring for why a floor alone
+    # doesn't shrink this the way it grows the header title/subtitle.
+    _set_exact_line_height(key_lbl, 13)
     key_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
     key_lbl.setFixedWidth(150)
     key_lbl.setWordWrap(True)
@@ -600,7 +638,12 @@ def _kv_key_label(key: str, sans: str) -> QLabel:
 
 
 def _kv_row(
-    key: str, value: str, sans: str, mono: bool = False, color: str | None = None
+    key: str,
+    value: str,
+    sans: str,
+    mono: bool = False,
+    color: str | None = None,
+    may_wrap: bool = False,
 ) -> QWidget:
     """One key/value line for an info card. `value` is plain text (`color`
     sets the *entire* value one uniform color — every real call site here
@@ -612,7 +655,15 @@ def _kv_row(
     dialog* is rendered as a single `grab()`/`render()` pass (reproduces
     only through an ancestor's grab, never the label's own; confirmed by
     isolating each: dropping this explicit override — even with plain,
-    tag-free text — brings the box straight back)."""
+    tag-free text — brings the box straight back).
+
+    `may_wrap=True` is for the one real caller whose value can genuinely
+    run to 2+ lines (the promoted-items list, mockup's own
+    `word-break: break-all`) — it keeps `wordWrap` on and only floors the
+    height (`_apply_line_height`), so long content still grows instead of
+    clipping. Every other caller's value is short/controlled, so the
+    default pins the exact CSS line box (`_set_exact_line_height`) the
+    same way `_kv_key_label` does — round-3 audit V1 residual."""
     row = QWidget()
     lay = QHBoxLayout(row)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -621,9 +672,12 @@ def _kv_row(
     val_lbl = QLabel(value)
     val_lbl.setTextFormat(Qt.TextFormat.PlainText)
     val_lbl.setWordWrap(True)
-    val_lbl.setFont(
-        _font((mono and theme.ensure_fonts_loaded()["mono"]) or sans, 12 if mono else 13)
-    )
+    val_size = 12 if mono else 13
+    val_lbl.setFont(_font((mono and theme.ensure_fonts_loaded()["mono"]) or sans, val_size))
+    if may_wrap:
+        _apply_line_height(val_lbl, val_size)
+    else:
+        _set_exact_line_height(val_lbl, val_size)
     val_lbl.setStyleSheet(
         f"color: {color or theme.TEXT_PRIMARY}; background: transparent; border: none;"
     )
@@ -644,9 +698,9 @@ def _kv_row_mixed(key: str, sans: str, *segments: tuple[str, bool]) -> QWidget:
         lbl = QLabel(text)
         lbl.setTextFormat(Qt.TextFormat.PlainText)
         lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        lbl.setFont(
-            _font((mono and theme.ensure_fonts_loaded()["mono"]) or sans, 12 if mono else 13)
-        )
+        seg_size = 12 if mono else 13
+        lbl.setFont(_font((mono and theme.ensure_fonts_loaded()["mono"]) or sans, seg_size))
+        _set_exact_line_height(lbl, seg_size)
         lbl.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; background: transparent; border: none;")
         lay.addWidget(lbl)
     lay.addStretch(1)
@@ -667,6 +721,7 @@ def _kv_row_rich(key: str, sans: str, value_html: str, color: str) -> QWidget:
     val_lbl.setTextFormat(Qt.TextFormat.RichText)
     val_lbl.setWordWrap(True)
     val_lbl.setFont(_font(sans, 13))
+    _apply_line_height(val_lbl, 13)
     val_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
     lay.addWidget(val_lbl, 1)
     return row
@@ -984,7 +1039,15 @@ class BootFlowWindow(QDialog):
 
         self._backup_card = _card()
         self._backup_card_lay = QVBoxLayout(self._backup_card)
-        self._backup_card_lay.setContentsMargins(0, 0, 0, 0)
+        # V1 residual: unlike CSS's content-box model, a QSS `border` on a
+        # plain QWidget paints INSIDE the widget's existing rect instead of
+        # adding to it, so this card rendered 2px shorter than the mockup's
+        # bordered box (1px top + 1px bottom) — the gap that put every row
+        # below it, down to page B's note, ~2px high of the mockup. A 1px
+        # top/bottom margin here reserves that space (and, as a side
+        # effect, keeps the border stroke from painting over the first/
+        # last row's own content).
+        self._backup_card_lay.setContentsMargins(0, 1, 0, 1)
         self._backup_card_lay.setSpacing(0)
         section_group.addWidget(self._backup_card)
         body_lay.addLayout(section_group)
@@ -1056,7 +1119,7 @@ class BootFlowWindow(QDialog):
         _clear_layout(self._backup_card_lay)
         backup_items = list(getattr(plan, "backup_items", []) or [])
         for i, entry in enumerate(backup_items):
-            label, count, size_bytes, unit = _unpack_backup_row(entry)
+            label, count, _size_bytes, unit = _unpack_backup_row(entry)
             row = QWidget()
             row_lay = QHBoxLayout(row)
             row_lay.setContentsMargins(14, 8, 14, 8)
@@ -1064,17 +1127,16 @@ class BootFlowWindow(QDialog):
                 _styled(row, f"border-bottom: 1px solid {theme.BORDER_CARD_ROW};")
             key_lbl = QLabel(str(label))
             key_lbl.setFont(_font(self._sans, 13))
+            _set_exact_line_height(key_lbl, 13)
             key_lbl.setStyleSheet(
                 f"color: {theme.TEXT_PRIMARY}; background: transparent; border: none;"
             )
             row_lay.addWidget(key_lbl)
             row_lay.addStretch(1)
             value_text = f"{count:,} {unit}"
-            size_text = _fmt_gb(size_bytes)
-            if size_text:
-                value_text += f" · {size_text}"
             val_lbl = QLabel(value_text)
             val_lbl.setFont(_font(self._mono, 12))
+            _set_exact_line_height(val_lbl, 12)
             val_lbl.setStyleSheet(
                 f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
             )
@@ -1082,7 +1144,7 @@ class BootFlowWindow(QDialog):
             self._backup_card_lay.addWidget(row)
 
         _clear_layout(self._backup_info_lay)
-        backup_dir = _path_str(getattr(plan, "backup_dir", None))
+        backup_dir = _path_str(getattr(plan, "backup_dir", None), is_dir=True)
         self._backup_info_lay.addWidget(_kv_row("ที่เก็บสำรอง", backup_dir, self._sans, mono=True))
         est = _fmt_gb(getattr(plan, "estimated_bytes", None))
         free = _fmt_gb(getattr(plan, "free_bytes", None))
@@ -1135,6 +1197,7 @@ class BootFlowWindow(QDialog):
         pct_row = QHBoxLayout()
         self._pct_label = QLabel("0%")
         self._pct_label.setFont(_font(self._sans, 22, 700))
+        _apply_line_height(self._pct_label, 22)
         self._pct_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY_ALT};")
         pct_row.addWidget(self._pct_label)
         pct_row.addStretch(1)
@@ -1167,12 +1230,14 @@ class BootFlowWindow(QDialog):
             row_lay.addWidget(dot)
             lbl = QLabel(label)
             lbl.setFont(_font(self._sans, 13))
+            _apply_line_height(lbl, 13)
             lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
             lbl.setFixedWidth(190)
             self._phase_labels[key] = lbl
             row_lay.addWidget(lbl)
             count_lbl = QLabel("")
             count_lbl.setFont(_font(self._mono, 12))
+            _apply_line_height(count_lbl, 12)
             count_lbl.setStyleSheet(
                 f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
             )
@@ -1184,6 +1249,7 @@ class BootFlowWindow(QDialog):
         self._log_box = QLabel("")
         self._log_box.setTextFormat(Qt.TextFormat.RichText)
         self._log_box.setFont(_font(self._mono, 11))
+        _apply_line_height(self._log_box, 11)
         self._log_box.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
         )
@@ -1279,6 +1345,8 @@ class BootFlowWindow(QDialog):
 
     def _start_migration(self) -> None:
         self._next_phase_slot = 0
+        self._active_phase_key = None
+        self._phase_count_base_text = {}
         for i, (key, _) in enumerate(_PHASE_ORDER):
             self._phase_rows[key].set_state("todo", str(i + 1))
             self._set_phase_row_kind(key, "todo")
@@ -1367,6 +1435,20 @@ class BootFlowWindow(QDialog):
                 self._phase_rows[key].set_state("todo", str(i + 1))
                 self._set_phase_row_kind(key, "todo")
         self._next_phase_slot = max(self._next_phase_slot, idx + 1)
+        # R3-M2: once a row stops being the active one, drop the
+        # current-item/files-progress segments it accumulated while it WAS
+        # active — those only ever describe "what's happening right now",
+        # not a finished row's own summary (`plan.backup_items` unit and a
+        # 4-tuple size aside, mockup's own completed rows read plainly
+        # "15,762 / 15,762 ไฟล์", never "... · v2"). `_phase_count_base_text`
+        # holds the last plain "done / total unit" text set on each row
+        # (below), with no path/files decoration.
+        prev_active = getattr(self, "_active_phase_key", None)
+        if prev_active is not None and prev_active != phase_key:
+            base = self._phase_count_base_text.get(prev_active)
+            if base is not None:
+                self._phase_count_labels[prev_active].setText(base)
+        self._active_phase_key = phase_key
         self._set_header(
             f"กำลังย้ายข้อมูลเป็นโครงใหม่ ({_app_version()}) — ขั้นตอน {idx + 1} จาก {len(_PHASE_ORDER)}",
             theme.TEXT_MUTED,
@@ -1376,7 +1458,9 @@ class BootFlowWindow(QDialog):
         total = getattr(event, "total", None)
         unit = getattr(event, "unit", "") or ""
         if done is not None and total is not None:
-            count_text = f"{done:,} / {total:,} {unit}".strip()
+            base_text = f"{done:,} / {total:,} {unit}".strip()
+            self._phase_count_base_text[phase_key] = base_text
+            count_text = base_text
             # #574 round11 item 3: `files_done`/`files_total` — progress
             # WITHIN one large directory entry (`on_file_progress`, not
             # `on_entry`) — read defensively, same reasoning as
@@ -1421,7 +1505,7 @@ class BootFlowWindow(QDialog):
             self._log_box.setText(
                 f'<table cellspacing="0" cellpadding="0" border="0"><tr>{cells}</tr></table>'
             )
-        backup_dir = getattr(event, "backup_dir", None)
+        backup_dir = _path_str(getattr(event, "backup_dir", None), is_dir=True)
         if backup_dir:
             self._set_footer_right_elided(f"สำรองไว้ที่ {backup_dir}")
 
@@ -1544,7 +1628,12 @@ class BootFlowWindow(QDialog):
         if promoted_n is not None:
             extra = f" ({', '.join(promoted)})" if isinstance(promoted, (list, tuple)) else ""
             self._done_summary_lay.addWidget(
-                _kv_row("ย้ายขึ้นโครงใหม่", f"{promoted_n} รายการ{extra}", self._sans)
+                _kv_row(
+                    "ย้ายขึ้นโครงใหม่",
+                    f"{promoted_n} รายการ{extra}",
+                    self._sans,
+                    may_wrap=True,
+                )
             )
         archived = getattr(outcome, "archived", None)
         junk = getattr(outcome, "junk_deleted", None)
@@ -1565,12 +1654,12 @@ class BootFlowWindow(QDialog):
                 )
             )
         _clear_layout(self._done_paths_lay)
-        backup_dir = _path_str(getattr(outcome, "backup_dir", None))
+        backup_dir = _path_str(getattr(outcome, "backup_dir", None), is_dir=True)
         if backup_dir:
             self._done_paths_lay.addWidget(
                 _kv_row("สำรองก่อนย้าย", backup_dir, self._sans, mono=True)
             )
-        archive_dir = _path_str(getattr(outcome, "archive_dir", None))
+        archive_dir = _path_str(getattr(outcome, "archive_dir", None), is_dir=True)
         if archive_dir:
             self._done_paths_lay.addWidget(
                 _kv_row("archive ของเก่า", archive_dir, self._sans, mono=True)
@@ -1738,7 +1827,11 @@ class BootFlowWindow(QDialog):
         self._failed_info_lay.addWidget(
             _kv_row("สถานะข้อมูล", status_text, self._sans, color=status_color)
         )
-        backup_dir = _path_str(getattr(outcome, "backup_dir", None)) if outcome is not None else ""
+        backup_dir = (
+            _path_str(getattr(outcome, "backup_dir", None), is_dir=True)
+            if outcome is not None
+            else ""
+        )
         if backup_dir:
             self._failed_info_lay.addWidget(
                 _kv_row("สำรองก่อนย้าย", backup_dir, self._sans, mono=True)
