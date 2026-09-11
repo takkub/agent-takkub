@@ -564,13 +564,19 @@ GEMINI_STALE_HINT = (
 )
 
 
-def _gemini_stale_hint(fetched_at: datetime | None) -> str:
-    """`GEMINI_STALE_HINT` plus the cache file's own date, so the UI shows
-    *how* stale the number is instead of just "stale" (#456 audit follow-up).
-    """
+def _gemini_stale_hint(fetched_at: datetime | None, live_fail_reason: str | None = None) -> str:
+    """`GEMINI_STALE_HINT` (or, when the live RPC was actually attempted and
+    failed, *live_fail_reason* — the specific cause, e.g. no keyring
+    credential or an expired token) plus the cache file's own date, so the
+    UI shows *how* stale the number is instead of just "stale" (#456 audit
+    follow-up). `live_fail_reason` is None (falls back to the generic
+    constant) whenever live was never attempted at all — e.g. the cache file
+    carries no `projectId` yet — since that isn't a credential/endpoint
+    problem to explain."""
+    base = live_fail_reason or GEMINI_STALE_HINT
     if fetched_at is None:
-        return GEMINI_STALE_HINT
-    return f"{GEMINI_STALE_HINT} (cache {fetched_at.date().isoformat()})"
+        return base
+    return f"{base} (cache {fetched_at.date().isoformat()})"
 
 
 def _antigravity_authorized_cache_dirs() -> list[Path]:
@@ -888,30 +894,59 @@ def _gemini_usage_from_live_buckets(
     )
 
 
-def _fetch_gemini_live_usage(project_id: Any, email: Any) -> ProviderUsage | None:
+def _gemini_token_missing_reason() -> str:
+    """Best-effort re-classification of *why* `_gemini_access_token()` just
+    returned None, for the user-facing stale hint. Re-reads the keyring (a
+    second read, but read-only and cheap) rather than threading a reason
+    through `_gemini_access_token()` itself, so that function's tested
+    `str | None` return contract — and every test that monkeypatches it
+    directly — never changes."""
+    secret = _read_gemini_keyring_secret()
+    if secret is None:
+        return "ไม่พบ credential ใน keyring (ยังไม่เคย login Antigravity บนเครื่องนี้)"
+    parsed = _parse_gemini_keyring_token(secret)
+    if parsed is None:
+        return "credential ใน keyring อ่านไม่ได้ (รูปแบบไม่ตรงที่คาด)"
+    _, expiry = parsed
+    if expiry is not None:
+        now = datetime.now(tz=expiry.tzinfo or UTC)
+        if (expiry - now).total_seconds() <= _GEMINI_TOKEN_EXPIRY_MARGIN_S:
+            return "token หมดอายุ — เปิดแอป Antigravity เพื่อ login ใหม่"
+    return "เรียก access token ไม่สำเร็จ"
+
+
+def _fetch_gemini_live_usage(
+    project_id: Any, email: Any
+) -> tuple[ProviderUsage | None, str | None]:
     """Best-effort live attempt: keyring credential -> RPC -> aggregate.
-    Returns None the moment any step doesn't pan out (no/expired
+    Returns `(None, reason)` the moment any step doesn't pan out (no/expired
     credential, RPC failure, empty/unusable response) so the caller falls
     through to the cache-file path unchanged — this is ONLY ever a bonus
-    freshness path, never the sole source of a number. Wrapped in a
-    catch-all (unlike the individual helpers, which already never raise on
-    their own) so an unforeseen failure here degrades the same way instead
-    of ever reaching a caller that isn't `fetch_provider_usage`'s own
-    catch-all — matches `fetch_codex_usage`'s same belt-and-suspenders
-    pattern for its RPC round trip."""
+    freshness path, never the sole source of a number. `reason` is a short
+    human-readable Thai cause the UI can show alongside a stale cache
+    snapshot instead of a generic "stale" — it is None only when live was
+    never attempted at all (no project id yet). Wrapped in a catch-all
+    (unlike the individual helpers, which already never raise on their own)
+    so an unforeseen failure here degrades the same way instead of ever
+    reaching a caller that isn't `fetch_provider_usage`'s own catch-all —
+    matches `fetch_codex_usage`'s same belt-and-suspenders pattern for its
+    RPC round trip."""
     if not isinstance(project_id, str) or not project_id:
-        return None
+        return None, None
     try:
         access_token = _gemini_access_token()
         if access_token is None:
-            return None
+            return None, _gemini_token_missing_reason()
         buckets = _fetch_gemini_live_buckets(access_token, project_id)
         if not buckets:
-            return None
-        return _gemini_usage_from_live_buckets(buckets, email if isinstance(email, str) else None)
+            return None, "เรียก Antigravity quota API ไม่สำเร็จ (endpoint อาจเปลี่ยน หรือเครือข่ายมีปัญหา)"
+        usage = _gemini_usage_from_live_buckets(buckets, email if isinstance(email, str) else None)
+        if usage is None:
+            return None, "quota API ตอบกลับมาแต่ไม่มีข้อมูลที่ใช้ได้"
+        return usage, None
     except Exception:
         _log.exception("gemini live quota fetch failed")
-        return None
+        return None, "เรียก Antigravity quota API ผิดพลาด (unexpected error)"
 
 
 def fetch_gemini_usage() -> ProviderUsage:
@@ -956,7 +991,7 @@ def fetch_gemini_usage() -> ProviderUsage:
     if not isinstance(raw, dict):
         return _error("gemini", "malformed Antigravity quota cache file")
 
-    live_usage = _fetch_gemini_live_usage(raw.get("projectId"), raw.get("email"))
+    live_usage, live_fail_reason = _fetch_gemini_live_usage(raw.get("projectId"), raw.get("email"))
     if live_usage is not None:
         return live_usage
 
@@ -1039,7 +1074,7 @@ def fetch_gemini_usage() -> ProviderUsage:
         fetched_at=fetched_at,
         raw_data={"email": raw.get("email"), "model_count": len(models)},
         windows=windows_out,
-        error=_gemini_stale_hint(fetched_at) if status == STATUS_STALE else None,
+        error=_gemini_stale_hint(fetched_at, live_fail_reason) if status == STATUS_STALE else None,
     )
 
 
