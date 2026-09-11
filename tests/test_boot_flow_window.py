@@ -398,6 +398,32 @@ class TestMigratingFooterWrap:
         w._set_footer_right_elided(full_text)
         assert w._migrate_footer_right.text() == full_text
 
+    def test_narrow_actual_width_still_wraps_within_two_lines_and_keeps_full_tail(
+        self,
+    ) -> None:
+        """#574 round-4 audit R4-M1: the elide budget used to come from
+        `maximumWidth()` (220px, only a CEILING) instead of the label's
+        real allocated width in the footer row — measured as low as
+        104px for a `backup_dir` outside `config.DATA_HOME` — so a path
+        elided against the wrong (wider) budget still needed 5 wrapped
+        lines inside the 2-line slot the fixed 68px footer has room for.
+        Budgeting (and hard-wrapping) against the real width must land
+        exactly 2 lines, with the path's tail fully intact, whatever
+        that real width turns out to be."""
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._migrate_footer_right.setFixedWidth(104)
+        full_text = (
+            "สำรองไว้ที่ D:/DataVolumes/agent-takkub-archive/"
+            "pre-migrate-backups/2026-09-11-0832-full-run/"
+        )
+        w._set_footer_right_elided(full_text)
+        rendered = w._migrate_footer_right.text()
+        assert rendered.count("<br>") == 1
+        assert "…" in rendered
+        assert rendered.split("<br>")[-1].endswith("full-run/")
+        assert w._migrate_footer_widget.height() == 68
+
     def test_progress_event_backup_dir_goes_through_path_str(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
@@ -931,6 +957,134 @@ class TestMigratingLogColors:
             assert theme.TEXT_FAINT not in html_text
             assert theme.TEXT_MUTED in html_text
             assert "ตรวจสอบขั้นที่ 7/11" in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_info_event_falls_back_to_log_line_when_structured_detail_is_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#574 round-4 audit R4-H2: the migration-open/close `info` events
+        set `log_operation` and `log_timestamp` but leave `log_detail`
+        empty and `current_path` unset — taking the structured branch
+        (right, since a timestamp is present) used to leave `detail`
+        empty too, dropping the actual message ("เริ่มย้ายข้อมูล"/"เสร็จ")
+        the mockup always shows, a regression from round 3's fallback
+        parser."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase=1,
+                    log_operation="info",
+                    log_timestamp="15:33:38",
+                    log_detail="",
+                    log_line="เริ่มย้ายข้อมูล",
+                    current_path=None,
+                )
+            )
+            w._apply_pending_event()
+            html_text = w._log_box.text()
+            assert "เริ่มย้ายข้อมูล" in html_text
+            # Body/MUTED, not the dim FAINT timestamp slot (R3-M5).
+            assert theme.TEXT_MUTED in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_raw_file_progress_digit_pair_is_formatted_with_commas_and_unit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#574 round-4 audit R4-M3: the production backend's file-progress
+        `log_detail` is a bare "<files_done>/<files_total>" digit pair —
+        no thousands separators, no unit word — reformat it the same way
+        the phase row's own count already is."""
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(
+                SimpleNamespace(
+                    phase="promote",
+                    done=7,
+                    total=9,
+                    unit="ไฟล์",
+                    percent_overall=60,
+                    current_path="providers",
+                    files_done=1204,
+                    files_total=15747,
+                    log_operation="promote",
+                    log_timestamp="08:31:12",
+                    log_detail="1204/15747",
+                )
+            )
+            w._apply_pending_event()
+            html_text = w._log_box.text()
+            assert "1,204/15,747 ไฟล์" in html_text
+            assert "1204/15747" not in html_text
+        finally:
+            w._migrate_throttle.stop()
+
+
+class TestMigrateETAClears:
+    """#574 round-4 audit R4-M2: `_fmt_eta` is write-only otherwise — once
+    it returns a value the label keeps showing it forever, including next
+    to the final 100% frame (measured: the round-4 recording held
+    "เหลืออีกประมาณ 1 นาที" from event 4 through event 39)."""
+
+    def test_eta_label_clears_when_event_carries_no_estimate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="backup", percent_overall=20, eta_s=90))
+            w._apply_pending_event()
+            assert w._eta_label.text() != ""
+            w._on_progress(SimpleNamespace(phase="promote", percent_overall=40, eta_s=None))
+            w._apply_pending_event()
+            assert w._eta_label.text() == ""
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_eta_label_clears_at_100_percent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="verify", percent_overall=80, eta_s=30))
+            w._apply_pending_event()
+            assert w._eta_label.text() != ""
+            w._on_progress(SimpleNamespace(phase="done", percent_overall=100, eta_s=5))
+            w._apply_pending_event()
+            assert w._eta_label.text() == ""
+        finally:
+            w._migrate_throttle.stop()
+
+    def test_eta_label_clears_on_the_terminal_done_phase_even_under_100_percent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw._MigrationWorker, "start", lambda self: None)
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._plan = _plan()
+        try:
+            w._start_migration()
+            w._on_progress(SimpleNamespace(phase="archive", percent_overall=90, eta_s=30))
+            w._apply_pending_event()
+            assert w._eta_label.text() != ""
+            w._on_progress(SimpleNamespace(phase="done", percent_overall=99, eta_s=5))
+            w._apply_pending_event()
+            assert w._eta_label.text() == ""
         finally:
             w._migrate_throttle.stop()
 
