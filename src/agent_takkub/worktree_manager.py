@@ -354,6 +354,39 @@ def _log_event(event: str, **details) -> None:
         _orch._log_event(event, **details)
 
 
+_STUCK_GIT_OP_MARKERS: tuple[tuple[str, str], ...] = (
+    ("MERGE_HEAD", "git merge --abort"),
+    ("REBASE_HEAD", "git rebase --abort"),
+    ("CHERRY_PICK_HEAD", "git cherry-pick --abort"),
+)
+
+
+def _stuck_git_op(git_root: str) -> tuple[str, str] | None:
+    """``(marker, abort_command)`` for an in-progress merge/rebase/cherry-pick
+    already sitting in *git_root*'s ``.git/`` before we touch anything, or
+    ``None`` when the tree is clean (#575).
+
+    *git_root* here is always the PRIMARY checkout (the toplevel the
+    isolated ``wt/*`` worktrees branch off of), never an isolated worktree
+    itself — a pane's own stuck merge in its own worktree is that pane's
+    problem (see #573's dirty-worktree snapshot path), not a reason to
+    refuse work on the shared tree.
+
+    Read-only probes (`merge-tree`, `rev-list`, `worktree list`, ...) never
+    call this — they don't mutate anything and are exactly how a stuck
+    state gets *discovered* in the first place. Only call sites that are
+    about to run a git command that MUTATES the primary checkout (a real
+    `merge`, `worktree remove`, `branch -d/-D`, `push --delete`) must check
+    this first and refuse instead of piling a second op onto an already
+    half-finished one.
+    """
+    git_dir = Path(git_root) / ".git"
+    for name, abort_cmd in _STUCK_GIT_OP_MARKERS:
+        if (git_dir / name).is_file():
+            return name, abort_cmd
+    return None
+
+
 def _claude_json_path_for(project: str) -> Path:
     """The ``.claude.json`` path Claude Code reads trust state from for
     *project*'s effective claude profile — inside ``CLAUDE_CONFIG_DIR`` when
@@ -1925,7 +1958,32 @@ class WorktreeManager:
         creating a commit ("Already up to date."), and trusting the exit
         code alone previously reported success (and deleted the worktree
         and branch) even though nothing landed on the target branch.
+
+        #575: this is the ONLY place in the codebase that runs a real `git
+        merge` against the primary checkout — every other caller (the
+        done-digest facts, the merge proposal, `check_only` above) reads
+        conflict state with `merge-tree`, which never touches the index or
+        working tree. Before running it, refuse outright if *git_root*
+        already has a merge/rebase/cherry-pick stuck mid-flight from an
+        earlier attempt (crash, killed pane, a `merge --abort` that itself
+        failed) — piling a second real merge on top of that is how a
+        cockpit ends up leaving `MERGE_HEAD` + `UU` files for the Lead to
+        clean up by hand.
         """
+        stuck = _stuck_git_op(git_root)
+        if stuck:
+            marker, abort_cmd = stuck
+            _log_event(
+                "worktree_merge_refused_stuck_op",
+                git_root=git_root,
+                branch=branch,
+                marker=marker,
+            )
+            return False, (
+                f"{git_root} มี {marker} ค้างจาก op ก่อนหน้าที่ไม่จบ — "
+                f'ยังไม่ merge {branch} ใหม่ทับ; แก้ด้วยมือก่อน: cd "{git_root}" แล้ว '
+                f"`{abort_cmd}` (หรือ resolve+commit ให้จบ) แล้วค่อยสั่ง merge {branch} ใหม่"
+            )
         rows = [r for r in self.list_isolated(git_root) if r["branch"] == branch]
         if not rows:
             return False, f"ไม่พบ worktree ของ branch {branch}"
@@ -1955,9 +2013,27 @@ class WorktreeManager:
         if not merge.ok:
             self._run(["-C", git_root, "merge", "--abort"], None)
             tail = (merge.stderr or merge.stdout).strip().splitlines()
+            detail = tail[-1] if tail else str(merge.returncode)
+            # #575: verify the abort actually cleared MERGE_HEAD instead of
+            # trusting its exit code — a failed abort (e.g. a locked ref on
+            # Windows) previously still reported "abort แล้ว", leaving the
+            # Lead to discover the stuck merge only later, by hand.
+            still_stuck = _stuck_git_op(git_root)
+            if still_stuck:
+                marker, abort_cmd = still_stuck
+                _log_event(
+                    "worktree_merge_abort_failed",
+                    git_root=git_root,
+                    branch=branch,
+                    marker=marker,
+                )
+                return False, (
+                    f"merge conflict/ล้มเหลว ({detail}) — abort ไม่สำเร็จ ({marker} ยังค้างอยู่ที่ "
+                    f'{git_root}) — ต้องแก้ด้วยมือ: cd "{git_root}" แล้ว `{abort_cmd}` เอง '
+                    f"แล้วเช็คด้วย git status; worktree ของ pane ยังอยู่ครบที่ {row['path']}"
+                )
             return False, (
-                f"merge conflict/ล้มเหลว ({tail[-1] if tail else merge.returncode}) — "
-                f"abort แล้ว worktree ยังอยู่ครบที่ {row['path']}"
+                f"merge conflict/ล้มเหลว ({detail}) — abort แล้ว worktree ยังอยู่ครบที่ {row['path']}"
             )
         # #527: `git merge --no-ff` exits 0 ("Already up to date.") without
         # creating any commit when *branch* is already an ancestor of HEAD —
@@ -2090,7 +2166,21 @@ class WorktreeManager:
           directory and its branch untouched and is reported as such, instead
           of the pre-#187 behavior where the branch was deleted unconditionally
           right after the (possibly failed) remove call.
+
+        #575: like `merge_isolated`, this mutates the primary checkout
+        (`worktree remove`, `branch -D`) — refuse outright when *git_root*
+        already has a merge/rebase/cherry-pick stuck mid-flight instead of
+        piling worktree/branch deletions on top of it.
         """
+        stuck = _stuck_git_op(git_root)
+        if stuck:
+            marker, abort_cmd = stuck
+            _log_event("worktree_clean_refused_stuck_op", git_root=git_root, marker=marker)
+            return [
+                f"REFUSED — {git_root} มี {marker} ค้างจาก op ก่อนหน้าที่ไม่จบ — "
+                f'แก้ด้วยมือก่อน: cd "{git_root}" แล้ว `{abort_cmd}` (หรือ resolve+commit ให้จบ) '
+                "แล้วค่อยสั่ง clean ใหม่"
+            ]
         live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
         rows = self.list_isolated(git_root)
