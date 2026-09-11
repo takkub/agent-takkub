@@ -85,6 +85,26 @@ def _app_version() -> str:
     return __version__
 
 
+def _previous_app_version() -> str | None:
+    """Best-effort fallback for the "previous version" text on the done/
+    failed pages: `outcome.previous_version` is the documented source, but
+    #574's backend interface may not carry it yet (see module docstring),
+    so this reads the last app version recorded in `version.json`
+    (`core.versioning.store`, under DATA_HOME) directly rather than waiting
+    on that field. Never raises — missing/corrupt file, or no "app"
+    component recorded yet, both read as `None` (caller already treats a
+    falsy previous-version as "don't show one")."""
+    try:
+        from .core.versioning.store import read_version_doc
+
+        for component_version in read_version_doc():
+            if component_version.component == "app":
+                return component_version.version
+    except Exception:
+        pass
+    return None
+
+
 class _WorkerError:
     """Wraps an exception raised inside a worker thread's target callable so
     it can travel across the `resultReady` signal instead of raising there
@@ -340,8 +360,21 @@ class _WarnTriangle(QWidget):
 
 
 def _styled(widget: QWidget, css: str) -> QWidget:
+    """Applies `css` scoped to exactly this widget instance via a `QWidget#id`
+    selector — a selector-less `setStyleSheet()` call is NOT scoped to the
+    widget alone: Qt treats a bare declaration block as an implicit
+    universal rule that cascades to every descendant regardless of type
+    (`QWidget#id` still matches, since every widget — QLabel included — is
+    a `QWidget` subclass). Before this, every `_card()`/box/row built with
+    the old bare form painted its own background+border+radius a *second*
+    time around each child row, wrapper, and label that didn't carry its
+    own explicit override — the root cause behind the many per-label
+    "background: transparent; border: none;" overrides elsewhere in this
+    module (harmless now, but were load-bearing against this leak)."""
+    name = f"styled_{id(widget)}"
+    widget.setObjectName(name)
     widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-    widget.setStyleSheet(css)
+    widget.setStyleSheet(f"QWidget#{name} {{ {css} }}")
     return widget
 
 
@@ -384,8 +417,9 @@ def _card(parent: QWidget | None = None) -> QWidget:
 def _kv_key_label(key: str, sans: str) -> QLabel:
     key_lbl = QLabel(key)
     key_lbl.setFont(_font(sans, 13))
-    key_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-    key_lbl.setFixedWidth(150)
+    key_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
+    key_lbl.setFixedWidth(170)
+    key_lbl.setWordWrap(True)
     key_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
     return key_lbl
 
@@ -651,7 +685,9 @@ class BootFlowWindow(QDialog):
 
             name_lbl = QLabel(str(getattr(item, "label", getattr(item, "name", ""))))
             name_lbl.setFont(_font(self._sans, 13, 500))
-            name_lbl.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
+            name_lbl.setStyleSheet(
+                f"color: {theme.TEXT_PRIMARY}; background: transparent; border: none;"
+            )
             name_lbl.setFixedWidth(110)
             row_lay.addWidget(name_lbl)
 
@@ -782,12 +818,16 @@ class BootFlowWindow(QDialog):
                 _styled(row, f"border-bottom: 1px solid {theme.BORDER_CARD_ROW};")
             key_lbl = QLabel(str(label))
             key_lbl.setFont(_font(self._sans, 13))
-            key_lbl.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
+            key_lbl.setStyleSheet(
+                f"color: {theme.TEXT_PRIMARY}; background: transparent; border: none;"
+            )
             row_lay.addWidget(key_lbl)
             row_lay.addStretch(1)
             val_lbl = QLabel(f"{count:,} รายการ")
             val_lbl.setFont(_font(self._mono, 12))
-            val_lbl.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            val_lbl.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
+            )
             row_lay.addWidget(val_lbl)
             self._backup_card_lay.addWidget(row)
 
@@ -900,14 +940,27 @@ class BootFlowWindow(QDialog):
         warn_lay.setContentsMargins(0, 0, 0, 0)
         warn_lay.setSpacing(8)
         warn_icon = _WarnTriangle(theme.STATE_WARN)
-        warn_lay.addWidget(warn_icon)
+        warn_lay.addWidget(warn_icon, 0, Qt.AlignmentFlag.AlignTop)
         warn_lbl = QLabel("อย่าปิดโปรแกรมระหว่างนี้ — ถ้าปิด ระบบจะกู้คืนให้เองตอนเปิดครั้งถัดไป")
         warn_lbl.setFont(_font(self._sans, 12))
-        warn_lbl.setStyleSheet(f"color: {theme.STATE_WARN}; border: none;")
+        warn_lbl.setStyleSheet(f"color: {theme.STATE_WARN}; background: transparent; border: none;")
+        # Fixed to ~60% of the footer's usable width (mockup: wraps to 2
+        # lines) — without wordWrap, this sentence's single-line sizeHint
+        # is wider than the 640px dialog, so the layout can't shrink it and
+        # both this label and `_migrate_footer_right` clip instead.
+        warn_lbl.setWordWrap(True)
+        warn_lbl.setFixedWidth(340)
         warn_lay.addWidget(warn_lbl)
+        self._migrate_warn_label = warn_lbl
         self._migrate_footer_right = QLabel("")
         self._migrate_footer_right.setFont(_font(self._sans, 12))
-        self._migrate_footer_right.setStyleSheet(f"color: {theme.TEXT_FAINT}; border: none;")
+        self._migrate_footer_right.setStyleSheet(
+            f"color: {theme.TEXT_FAINT}; background: transparent; border: none;"
+        )
+        self._migrate_footer_right.setMaximumWidth(190)
+        self._migrate_footer_right.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         outer.addWidget(_footer(self._sans, warn_wrap, []))
         # Right-hand backup-path note shares the footer row — appended after
         # `_footer()` builds it since that helper's `left` slot takes the
@@ -915,6 +968,18 @@ class BootFlowWindow(QDialog):
         footer_widget = outer.itemAt(outer.count() - 1).widget()
         footer_widget.layout().addWidget(self._migrate_footer_right)
         return page
+
+    def _set_footer_right_elided(self, text: str) -> None:
+        """Elides from the left (mockup: `…/pre-migrate-2026-09-11-0832/`) so
+        a long backup path never overflows the fixed-width footer slot —
+        the meaningful tail (the timestamped dir name) stays visible instead
+        of the fixed `สำรองไว้ที่` prefix."""
+        metrics = self._migrate_footer_right.fontMetrics()
+        elided = metrics.elidedText(
+            text, Qt.TextElideMode.ElideLeft, self._migrate_footer_right.maximumWidth()
+        )
+        self._migrate_footer_right.setText(elided)
+        self._migrate_footer_right.setToolTip(text)
 
     def _set_phase_row_kind(self, key: str, kind: str) -> None:
         """Matches the mockup: the active row's label goes bold+bright,
@@ -1001,7 +1066,7 @@ class BootFlowWindow(QDialog):
             self._log_box.setText(str(log_line))
         backup_dir = getattr(event, "backup_dir", None)
         if backup_dir:
-            self._migrate_footer_right.setText(f"สำรองไว้ที่ {backup_dir}")
+            self._set_footer_right_elided(f"สำรองไว้ที่ {backup_dir}")
 
     def _on_migration_done(self, outcome: Any) -> None:
         self._migrate_throttle.stop()
@@ -1111,6 +1176,14 @@ class BootFlowWindow(QDialog):
                     color=theme.STATE_OK,
                 )
             )
+        # Optional — not in the documented interface yet (see module
+        # docstring's backend-assumptions note), so absent on any outcome
+        # that predates it.
+        validated_steps = getattr(outcome, "validated_steps", None)
+        if validated_steps is not None:
+            self._done_summary_lay.addWidget(
+                _kv_row("ตรวจสอบ", f"ครบ {validated_steps} ขั้น", self._sans, color=theme.STATE_OK)
+            )
 
         while self._done_paths_lay.count():
             child = self._done_paths_lay.takeAt(0)
@@ -1127,13 +1200,18 @@ class BootFlowWindow(QDialog):
             self._done_paths_lay.addWidget(
                 _kv_row("archive ของเก่า", archive_dir, self._sans, mono=True)
             )
-        prev = getattr(outcome, "previous_version", None)
-        restore_segments = [("รัน ", False), ("takkub migrate restore-v1", True)]
+        prev = getattr(outcome, "previous_version", None) or _previous_app_version()
+        # A single wrapping `_kv_row` rather than `_kv_row_mixed`'s fixed-width
+        # segments: with `prev` appended this line is long enough to overflow
+        # `_done_paths_box`'s width, and `_kv_row_mixed`'s segments (each
+        # `QSizePolicy.Fixed`) can't reflow — they'd rather silently clip
+        # mid-word (as `note`'s docstring already found for RichText) than
+        # wrap. Costs the command's monospace styling; keeps the text intact
+        # for any length of `prev`.
+        restore_text = "รัน takkub migrate restore-v1"
         if prev:
-            restore_segments.append((f" ก่อนติดตั้ง {prev}", False))
-        self._done_paths_lay.addWidget(
-            _kv_row_mixed("ถ้าต้องกลับเวอร์ชันเดิม", self._sans, *restore_segments)
-        )
+            restore_text += f" ก่อนติดตั้ง {prev}"
+        self._done_paths_lay.addWidget(_kv_row("ถ้าต้องกลับเวอร์ชันเดิม", restore_text, self._sans))
 
         self._show_page(PAGE_DONE, subtitle_only=True)
 
@@ -1217,8 +1295,25 @@ class BootFlowWindow(QDialog):
         error = getattr(outcome, "error", "") or ""
         rolled_back = bool(getattr(outcome, "rolled_back", True))
         data_intact = bool(getattr(outcome, "data_intact", rolled_back))
+        # `failed_step_index`/`failed_step_total` — optional, not in the
+        # documented interface yet (see module docstring): when present,
+        # names which phase-ordinal and which sub-step within it failed
+        # (e.g. "ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน"); falls back to the plain
+        # phase-only heading otherwise.
+        phase_keys = [k for k, _ in _PHASE_ORDER]
+        phase_number = (
+            phase_keys.index(failed_phase.lower()) + 1
+            if failed_phase.lower() in phase_keys
+            else None
+        )
+        step_index = getattr(outcome, "failed_step_index", None)
+        step_total = getattr(outcome, "failed_step_total", None)
+        if phase_number is not None and step_index is not None and step_total is not None:
+            heading = f"ขั้นที่ {phase_number} {phase_label} ({step_index}/{step_total}) ไม่ผ่าน"
+        else:
+            heading = f"ขั้นตอน {phase_label} ไม่ผ่าน"
         self._show_failed(
-            heading=f"ขั้นตอน {phase_label} ไม่ผ่าน",
+            heading=heading,
             detail=str(failed_step or error),
             rolled_back=rolled_back,
             data_intact=data_intact,
@@ -1272,6 +1367,7 @@ class BootFlowWindow(QDialog):
             )
 
         prev = getattr(outcome, "previous_version", None) if outcome is not None else None
+        prev = prev or _previous_app_version()
         prev_text = f" ({prev})" if prev else ""
         self._failed_continue_btn.setText(f"ใช้เวอร์ชันเดิมต่อ{prev_text}")
         self._failed_note.setText(

@@ -16,8 +16,10 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtCore import QThread
+from PyQt6.QtWidgets import QLabel
 
 import agent_takkub.boot_flow_window as bfw
+from agent_takkub.core.models.version import ComponentVersion
 
 
 @pytest.fixture(autouse=True)
@@ -297,3 +299,203 @@ class TestFlowFinishedSignal:
         w.flowFinished.connect(received.append)
         w.start()
         assert received == [True]
+
+
+def _label_by_text(root, text: str) -> QLabel:
+    for lbl in root.findChildren(QLabel):
+        if lbl.text() == text:
+            return lbl
+    raise AssertionError(f"no QLabel with text {text!r} under {root!r}")
+
+
+class TestLabelsInsideCardsAreBorderless:
+    """Round-2 fix (#574): a label nested inside a rounded/bordered `_card()`
+    paints a stray box behind its own text once the whole dialog renders
+    through a single grab()/render() pass (see `_kv_row`'s docstring) unless
+    it explicitly nulls out background+border itself — the dialog-wide
+    `QLabel {...}` floor alone isn't enough for these."""
+
+    def test_provider_name_label_is_borderless(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        label = _label_by_text(w._provider_card, "Claude Code")
+        assert "background: transparent" in label.styleSheet()
+        assert "border: none" in label.styleSheet()
+
+    def test_premigrate_backup_item_labels_are_borderless(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        key_label = _label_by_text(w._backup_card, "v2/ (ข้อมูลระบบ V2)")
+        value_label = _label_by_text(w._backup_card, "15,747 รายการ")
+        for label in (key_label, value_label):
+            assert "background: transparent" in label.styleSheet()
+            assert "border: none" in label.styleSheet()
+
+    def test_kv_key_label_is_borderless_and_wraps_at_170(self) -> None:
+        key_label = bfw._kv_key_label("ถ้าต้องกลับเวอร์ชันเดิม", "Sans")
+        assert "background: transparent" in key_label.styleSheet()
+        assert "border: none" in key_label.styleSheet()
+        assert key_label.wordWrap() is True
+        assert key_label.minimumWidth() == 170
+        assert key_label.maximumWidth() == 170
+
+
+class TestMigratingFooterWrapAndElide:
+    def test_warning_label_wraps_within_a_fixed_width(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        assert w._migrate_warn_label.wordWrap() is True
+        assert w._migrate_warn_label.maximumWidth() == 340
+
+    def test_backup_path_elides_from_the_left_and_keeps_full_text_as_tooltip(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        full_text = "สำรองไว้ที่ backups/pre-migrate-2026-09-11-0832-some-very-long-directory-suffix/"
+        w._set_footer_right_elided(full_text)
+        shown = w._migrate_footer_right.text()
+        assert shown != full_text
+        assert "…" in shown
+        assert shown.endswith("suffix/")
+        assert w._migrate_footer_right.toolTip() == full_text
+
+    def test_short_backup_path_is_shown_in_full(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        full_text = "สำรองไว้ที่ backups/short/"
+        w._set_footer_right_elided(full_text)
+        assert w._migrate_footer_right.text() == full_text
+
+
+class TestVersionNumbers:
+    """#574 fix-loop round: header/footer version text must show the
+    RUNNING app's version (`agent_takkub.__version__`) where the mockup
+    means "the new version", and fall back to the version marker in
+    `version.json` (never the backend outcome's `previous_version` field
+    alone, which #574's backend half doesn't guarantee yet) where it means
+    "the version being migrated away from"."""
+
+    def test_previous_app_version_reads_the_version_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.versioning.store as version_store
+
+        monkeypatch.setattr(
+            version_store,
+            "read_version_doc",
+            lambda path=None: [ComponentVersion(id="app", component="app", version="2.0.8")],
+        )
+        assert bfw._previous_app_version() == "2.0.8"
+
+    def test_previous_app_version_is_none_when_marker_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.versioning.store as version_store
+
+        monkeypatch.setattr(version_store, "read_version_doc", lambda path=None: [])
+        assert bfw._previous_app_version() is None
+
+    def test_previous_app_version_fails_open_on_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.versioning.store as version_store
+
+        def _raise(path=None):
+            raise OSError("boom")
+
+        monkeypatch.setattr(version_store, "read_version_doc", _raise)
+        assert bfw._previous_app_version() is None
+
+    def test_premigrate_subtitle_shows_the_new_running_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw, "_app_version", lambda: "2.1.0")
+        monkeypatch.setattr(bfw, "_previous_app_version", lambda: "2.0.8")
+        flow = _FakeFlow(items=[], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert "2.1.0" in w._subtitle_label.text()
+        assert "2.0.8" not in w._subtitle_label.text()
+
+    def test_done_page_falls_back_to_version_marker_when_outcome_lacks_previous_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw, "_previous_app_version", lambda: "2.0.8")
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        texts = [lbl.text() for lbl in w._done_paths_box.findChildren(QLabel)]
+        assert any("2.0.8" in t for t in texts)
+
+    def test_failed_page_falls_back_to_version_marker_for_continue_button(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw, "_previous_app_version", lambda: "2.0.8")
+        outcome = _outcome(ok=False, failed_phase="verify", rolled_back=True, data_intact=True)
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert "2.0.8" in w._failed_continue_btn.text()
+
+    def test_outcome_previous_version_takes_priority_over_the_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bfw, "_previous_app_version", lambda: "2.0.8")
+        outcome = _outcome(previous_version="1.9.9")
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        texts = [lbl.text() for lbl in w._done_paths_box.findChildren(QLabel)]
+        assert any("1.9.9" in t for t in texts)
+        assert not any("2.0.8" in t for t in texts)
+
+
+class TestOptionalBackendFields:
+    """#574 backend interface is still landing in parallel — these fields
+    (`validated_steps`, `failed_step_index`/`failed_step_total`) aren't
+    documented yet, so every real `_outcome()` today omits them; both must
+    stay fully optional (`getattr(..., None)`), never required."""
+
+    def test_validated_steps_row_shown_when_present(self) -> None:
+        outcome = _outcome(validated_steps=11)
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._done_summary_lay.count() == 4
+        texts = [lbl.text() for lbl in w._done_summary_box.findChildren(QLabel)]
+        assert any("11 ขั้น" in t for t in texts)
+
+    def test_validated_steps_row_absent_by_default(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=_outcome())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._done_summary_lay.count() == 3
+
+    def test_failed_heading_includes_phase_number_and_step_progress_when_present(self) -> None:
+        outcome = _outcome(
+            ok=False,
+            failed_phase="verify",
+            failed_step_index=7,
+            failed_step_total=11,
+            rolled_back=True,
+            data_intact=True,
+        )
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._failed_heading.text() == "ขั้นที่ 3 ตรวจสอบ (7/11) ไม่ผ่าน"
+
+    def test_failed_heading_falls_back_without_step_progress(self) -> None:
+        outcome = _outcome(ok=False, failed_phase="verify", rolled_back=True, data_intact=True)
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._failed_heading.text() == "ขั้นตอน ตรวจสอบ ไม่ผ่าน"

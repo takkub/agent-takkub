@@ -309,13 +309,14 @@
       "module": "agent_takkub.boot_flow_window",
       "imports": [
         "agent_takkub",
-        "agent_takkub.cockpit_theme"
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.core.versioning.store"
       ],
       "imported_by": [
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.boot_update_window",
@@ -2399,9 +2400,10 @@
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
+        "agent_takkub.boot_flow_window",
         "agent_takkub.core.migration.steps"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 3
     },
     {
