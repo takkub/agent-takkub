@@ -799,6 +799,42 @@ def test_promote_rollback_delete_phase_failure_leaves_only_the_denied_entry_dupl
     assert (data_home / "state" / "only-b.json").read_text(encoding="utf-8") == "unique-b"
 
 
+def test_promote_rollback_batches_prune_phase_for_a_large_per_file_restore(
+    tmp_path, journal_backups
+):
+    """#504 round10 (R8-P2): `PromoteV2RootStep.rollback()` reconstructs one
+    `TransferEntry` PER FILE (surgical partial restore) — at a scale past
+    `_restore_fsync_batch`'s own checkpoint target this genuinely exercises
+    batch sizes > 1, not just the batch-of-1 case the small 2-entry
+    duplicate-failure test above already covers. Every file must still land
+    back under `v2/`, with none left behind at the top level."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    n = 200
+    v2_dir = data_home / "v2" / "bigmodels"
+    v2_dir.mkdir(parents=True)
+    for i in range(n):
+        (v2_dir / f"f{i}.txt").write_text(f"content-{i}", encoding="utf-8")
+
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    promoted_dir = data_home / "bigmodels"
+    assert promoted_dir.is_dir()
+    for i in range(n):
+        assert (promoted_dir / f"f{i}.txt").read_text(encoding="utf-8") == f"content-{i}"
+
+    report = step.rollback()
+
+    assert report.ok, report.summary
+    # The top-level dir itself is deliberately left in place, even emptied
+    # (`_prune_empty_dirs`'s own contract — a live provider home could
+    # share that basename) — only its files move back.
+    assert list(promoted_dir.iterdir()) == []
+    for i in range(n):
+        assert not (promoted_dir / f"f{i}.txt").exists()
+        assert (v2_dir / f"f{i}.txt").read_text(encoding="utf-8") == f"content-{i}"
+
+
 def test_promote_survives_a_crash_right_after_a_real_source_removal(
     tmp_path, journal_backups, monkeypatch
 ):

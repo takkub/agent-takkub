@@ -60,9 +60,16 @@ class MigrationPlanSummary:
     promote_items: list[str]
     archive_items: list[str]
     junk_items: list[str]
+    verify_steps: int = 0  # real ladder length (MigrationEngine.step_count()), e.g. 12 — NOT len(promote_items)
 
 def plan_migration() -> MigrationPlanSummary | None: ...
 ```
+
+`verify_steps` is the actual number of ladder steps `MigrationEngine.validate()` will walk — the same
+count `MigrationOutcome.failed_step_total` (below) reports once a validate() pass actually runs. Use it
+for any "step X/N" preview shown BEFORE migration starts; it can never drift from the real thing the way
+a locally-computed guess (e.g. `len(promote_items)`, which is only `promote-v2-root`'s own candidate
+count) could.
 
 `unit` in each `backup_items` row is one of `"ไฟล์"` (files), `"โปรเจค"`
 (projects — the `"projects"` row only), `"รายการ"` (generic items — the
@@ -88,6 +95,7 @@ class ProgressEvent:
     eta_s: float | None      # not populated yet (ponytail — see module docstring)
     log_line: str
     backup_dir: Path | None
+    current_path: str | None = None  # short path, relative to DATA_HOME, of the entry/file currently being moved
 
 PHASES = {1: "สำรองข้อมูล", 2: "คัดลอกขึ้นโครงใหม่", 3: "ตรวจสอบ", 4: "เก็บของเก่าเข้า archive", 5: "เสร็จ"}
 
@@ -102,6 +110,12 @@ write in one shot. Phases 3 (validate) and 5 (done) are indeterminate
 (`done=None, total=None`), driven off text messages, not a real counter.
 A fully granular byte-level meter would need every domain step wired the
 same way the copy/archive/backup steps now are — out of #574's scope.
+
+`current_path` carries the same entry name `on_entry(step_id, name)` fires
+with — set on EVERY event that has an item behind it (every phase 1/2/4
+event past the initial kickoff), `None` for every event that doesn't
+(phases 3/5, and the very first phase-1 event emitted before any entry has
+fired yet).
 
 ## 4. Outcome (screens D/E)
 
