@@ -370,6 +370,50 @@ _PHASE_LABELS: dict[int, str] = {
 }
 PHASES_TOTAL = 5
 
+# #574 round12 item 3: `MigrationEngine`'s own fixed ladder order (engine.py
+# `__init__`'s `self._steps` construction) — needed here only to number a
+# domain step's phase-3 "step X/verify_steps" position; duplicated as
+# literals (not imported from the engine) the same way `engine.py` itself
+# duplicates `promote-v2-root`/`archive-v1-legacy`'s ids rather than
+# constructing a step just to read one attribute.
+_LADDER_STEP_ORDER: tuple[str, ...] = (
+    "pre-migrate-backup",
+    "version-marker",
+    "promote-v2-root",
+    "readonly-registries",
+    "role-agent",
+    "capability",
+    "project",
+    "state",
+    "credential-reference",
+    "runtime-triage",
+    "core-internal-store",
+    "archive-v1-legacy",
+)
+# The 8 V1->V2 "domain" steps — everything in the ladder except backup/
+# version-marker/promote/archive, which already have their own phase 1/2/4
+# per-entry signal. These write in one shot with no per-file progress of
+# their own (#574's ponytail note), so phase 3 only ever gets a start/done
+# pair per step, never a fine-grained counter.
+_DOMAIN_STEP_IDS = frozenset(_LADDER_STEP_ORDER) - {
+    "pre-migrate-backup",
+    "version-marker",
+    "promote-v2-root",
+    "archive-v1-legacy",
+}
+
+
+def _entry_unit(name: str | None) -> str:
+    """Unit word for one top-level entry's own done/total counter — mirrors
+    `_backup_item_row`'s per-name convention (#574 R3-M4: `emit()` used to
+    hardcode `unit="รายการ"` for every phase, so a promote/archive/backup
+    row never matched the plan table's own `"ไฟล์"`/`"โปรเจค"` wording)."""
+    if name == "projects":
+        return "โปรเจค"
+    if name == "runtime/core":
+        return "รายการ"
+    return "ไฟล์"
+
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
@@ -397,6 +441,18 @@ class ProgressEvent:
     # None)`) — they were added after `ProgressEvent` first shipped.
     files_done: int | None = None
     files_total: int | None = None
+    # #574 round12 (R3-M5): structured log parts — a UI must never parse
+    # `log_line` itself (the mockup's own review found that fragile: "two
+    # NBSPs measuring 14px", "parser requires double spaces"). `log_operation`
+    # is a machine token (a step_id, or "validate"/"info" for a plain text
+    # message); `current_path` above already carries the path part;
+    # `log_detail` is the free-form human explanation. `log_line` stays as
+    # the legacy combined string for the terminal renderer, which has no
+    # need to re-split it. All three are `None`/`""` for a hand-built event
+    # that predates them — read defensively, same as files_done/files_total.
+    log_operation: str | None = None
+    log_detail: str = ""
+    log_timestamp: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +474,13 @@ class MigrationOutcome:
     validated_steps: int = 0
     failed_step_index: int | None = None
     failed_step_total: int | None = None
+    # #574 round12 (R3-M6): the "app" component version.json held BEFORE
+    # this run's own version-marker overwrite — screen D's downgrade note
+    # ("takkub migrate restore-v1 puts back <previous_version>") and
+    # screen E's "currently running <app_version>, migration to
+    # <target> failed" both need it. `None` when unreadable/missing (a
+    # from-scratch install with no prior version.json).
+    previous_version: str | None = None
 
 
 def _phase_of_step(step_id: str | None) -> int | None:
@@ -476,13 +539,20 @@ def run_migration(
 
     started = time.monotonic()
     plan = plan_migration()
+    previous_version = _read_previous_app_version()
     totals = {
         1: max(1, len(plan.backup_items)) if plan else 1,
         2: max(1, len(plan.promote_items)) if plan else 1,
         4: max(1, len(plan.archive_items)) if plan else 1,
     }
     grand_total = sum(totals.values())
-    state = {"phase": 1}
+    # `phase`: the phase the last emitted event belongs to. `phase_started`/
+    # `phase_events`: reset every time `phase` changes — #574 round12 item 4
+    # (R3-M3)'s eta_s basis, "rate of the CURRENT phase", needs its own
+    # clock/count per phase, never one running total since the whole
+    # migration started (an early slow phase 1 must never poison phase 2's
+    # own, unrelated rate).
+    state = {"phase": 0, "phase_started": started, "phase_events": 0}
 
     def emit(
         phase: int,
@@ -493,10 +563,33 @@ def run_migration(
         current_path: str | None = None,
         files_done: int | None = None,
         files_total: int | None = None,
+        unit: str = "รายการ",
+        operation: str | None = None,
+        detail: str = "",
     ) -> None:
         if progress_cb is None:
             return
-        state["phase"] = phase
+        if state["phase"] != phase:
+            state["phase"] = phase
+            state["phase_started"] = time.monotonic()
+            state["phase_events"] = 0
+        state["phase_events"] += 1
+        total_for_phase = total if total is not None else (totals.get(phase) if plan else None)
+        # #574 round12 item 2 (R6-B1/off-by-one): `promote-v2-root`/
+        # `archive-v1-legacy` each fire `on_entry` TWICE per top-level entry
+        # over a full apply — once from their own copy phase, once from
+        # their deferred prune phase (`_copy_phase`/`_prune_phase` in
+        # `promote_v1.py` both call the SAME bound `on_entry`) — while
+        # `totals[phase]` only ever counted entries once. A real prod
+        # rehearsal observed `done` climb to exactly 2x `total` by the end
+        # of each such phase (9->18, 27->54). `on_entry` below also dedupes
+        # by name so `done` climbs meaningfully instead of sticking at
+        # `total` for the whole prune half; this clamp is the second,
+        # unconditional guarantee — `done` (and therefore `percent_overall`)
+        # can never exceed `total`/100 even if some OTHER caller passes an
+        # inflated `done` by mistake.
+        if done is not None and total_for_phase:
+            done = min(done, total_for_phase)
         overall_done = 0
         for p in (1, 2, 4):
             if p < phase:
@@ -504,6 +597,22 @@ def run_migration(
             elif p == phase and done is not None:
                 overall_done += min(done, totals[p])
         percent = 100.0 if phase >= 5 else min(99.0, 100.0 * overall_done / grand_total)
+        # #574 round12 item 4 (R3-M3): eta from the CURRENT phase's own
+        # done/elapsed rate, once there's enough signal to trust it (>= 2s
+        # of this phase, or >= 5 events in it) — before that, an early
+        # single event's rate is noise, so eta stays None rather than
+        # reporting something wildly wrong.
+        eta: float | None = None
+        phase_elapsed = time.monotonic() - state["phase_started"]
+        if (
+            done is not None
+            and total_for_phase
+            and done > 0
+            and (phase_elapsed >= 2.0 or state["phase_events"] >= 5)
+        ):
+            rate = done / phase_elapsed if phase_elapsed > 0 else None
+            if rate:
+                eta = max(0.0, (total_for_phase - done) / rate)
         try:
             progress_cb(
                 ProgressEvent(
@@ -511,15 +620,18 @@ def run_migration(
                     phase_label=_PHASE_LABELS[phase],
                     phases_total=PHASES_TOTAL,
                     done=done,
-                    total=total if total is not None else (totals.get(phase) if plan else None),
-                    unit="รายการ",
+                    total=total_for_phase,
+                    unit=unit,
                     percent_overall=percent,
-                    eta_s=None,
+                    eta_s=eta,
                     log_line=log_line,
                     backup_dir=plan.backup_dir if plan else None,
                     current_path=current_path,
                     files_done=files_done,
                     files_total=files_total,
+                    log_operation=operation,
+                    log_detail=detail,
+                    log_timestamp=time.strftime("%H:%M:%S"),
                 )
             )
         except Exception:
@@ -527,28 +639,40 @@ def run_migration(
 
     if plan is None:
         result = auto_migrate_boot.run_boot_stage()
-        return _outcome_from_result(result, plan, started)
+        return _outcome_from_result(result, plan, started, previous_version=previous_version)
 
     step_done: dict[str, int] = {}
+    step_seen: dict[str, set[str]] = {}
 
     def on_entry(step_id: str, name: str) -> None:
         phase = _phase_of_step(step_id)
         if phase not in (1, 2, 4):
             return
-        step_done[step_id] = step_done.get(step_id, 0) + 1
+        # #574 round12 item 2: count each NAME once per step — `promote-
+        # v2-root`/`archive-v1-legacy` notify the same entry name again
+        # during their own deferred prune phase (see `emit()`'s own note
+        # above); a repeat notify still refreshes the log line/current_path
+        # (the entry is genuinely being worked on, just not NEW progress)
+        # but must not advance `done` a second time.
+        seen = step_seen.setdefault(step_id, set())
+        if name not in seen:
+            seen.add(name)
+            step_done[step_id] = step_done.get(step_id, 0) + 1
         emit(
             phase,
-            done=step_done[step_id],
+            done=step_done.get(step_id, 0),
             total=totals[phase],
             log_line=f"{step_id}: {name}",
             current_path=name,
+            unit=_entry_unit(name),
+            operation=step_id,
         )
 
     def on_text(msg: str) -> None:
         if "validate" in msg or "ตรวจสอบ" in msg:
-            emit(3, log_line=msg)
+            emit(3, log_line=msg, operation="validate", detail=msg)
         else:
-            emit(state["phase"], log_line=msg)
+            emit(state["phase"], log_line=msg, operation="info", detail=msg)
 
     def on_file_progress(
         step_id: str, name: str, files_done: int, files_total: int, current_path: str
@@ -569,18 +693,78 @@ def run_migration(
             current_path=f"{name}/{current_path}",
             files_done=files_done,
             files_total=files_total,
+            unit=_entry_unit(name),
+            operation=step_id,
+            detail=f"{files_done}/{files_total}",
         )
 
-    emit(1, done=0, total=totals[1], log_line="เริ่มย้ายข้อมูล")
+    def on_step(step_id: str, kind: str) -> None:
+        # #574 round12 item 3: the 8 domain steps (readonly-registries,
+        # role-agent, capability, project, state, credential-reference,
+        # runtime-triage, core-internal-store) write in one shot with no
+        # `on_entry`/`on_file_progress` of their own — before this, they
+        # produced ZERO progress events, so a real rehearsal's phase-3 event
+        # count was 0 (a wizard watching for phase 3 never saw it and
+        # jumped straight from 2 to 4). `MigrationEngine`'s new `on_step`
+        # observer (start/done around every ladder step's own apply) gives
+        # each domain step a start+done pair here, positioned by its FIXED
+        # ladder index (`_LADDER_STEP_ORDER`) out of the real ladder length
+        # (`plan.verify_steps`) — the same "step X/N" scheme
+        # `MigrationOutcome.failed_step_index/_total` already uses.
+        if step_id not in _DOMAIN_STEP_IDS:
+            return
+        try:
+            position = _LADDER_STEP_ORDER.index(step_id) + 1
+        except ValueError:
+            return
+        verify_total = plan.verify_steps or len(_LADDER_STEP_ORDER)
+        done = position if kind == "done" else max(0, position - 1)
+        detail = "ตรวจสอบแล้ว" if kind == "done" else "กำลังตรวจสอบ"
+        emit(
+            3,
+            done=done,
+            total=verify_total,
+            log_line=f"{step_id}: {detail}",
+            unit="ขั้น",
+            operation=step_id,
+            detail=detail,
+        )
+
+    emit(1, done=0, total=totals[1], log_line="เริ่มย้ายข้อมูล", operation="info")
     result = auto_migrate_boot.run_boot_stage(
-        progress_cb=on_text, on_entry=on_entry, on_file_progress=on_file_progress
+        progress_cb=on_text,
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
     )
-    emit(5, log_line="เสร็จ" if result.action in ("applied", "pending_applied") else "จบการทำงาน")
-    return _outcome_from_result(result, plan, started)
+    emit(
+        5,
+        log_line="เสร็จ" if result.action in ("applied", "pending_applied") else "จบการทำงาน",
+        operation="info",
+    )
+    return _outcome_from_result(result, plan, started, previous_version=previous_version)
+
+
+def _read_previous_app_version() -> str | None:
+    """The "app" component `version.json` held BEFORE this call — read
+    BEFORE `run_boot_stage()` runs (its own `VersionMarkerStep.apply()`
+    overwrites this same file with the running build's version), so this
+    is genuinely the version a `restore-v1` on this run would put back
+    (#574 R3-M6). `None` on a from-scratch install with no prior
+    version.json, or any read failure — `read_version_doc` already
+    fails open to `[]`."""
+    from .core.versioning.store import read_version_doc, version_doc_path
+
+    components = {c.component: c.version for c in read_version_doc(version_doc_path())}
+    return components.get("app")
 
 
 def _outcome_from_result(
-    result, plan: MigrationPlanSummary | None, started: float
+    result,
+    plan: MigrationPlanSummary | None,
+    started: float,
+    *,
+    previous_version: str | None = None,
 ) -> MigrationOutcome:
     duration = time.monotonic() - started
     failing = next((r for r in result.reports if not r.ok), None)
@@ -651,6 +835,7 @@ def _outcome_from_result(
         validated_steps=validated_steps,
         failed_step_index=failed_step_index,
         failed_step_total=failed_step_total,
+        previous_version=previous_version,
     )
 
 

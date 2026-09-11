@@ -104,16 +104,19 @@ class ProgressEvent:
     phase: int              # 1..5
     phase_label: str        # Thai label, see PHASES below
     phases_total: int       # always 5 today
-    done: int | None        # None = indeterminate (phases 3/5 have no per-item count)
+    done: int | None        # None = indeterminate; never > total (clamped)
     total: int | None
-    unit: str                # "รายการ" today
-    percent_overall: float   # 0..100, weighted across phases 1/2/4
-    eta_s: float | None      # not populated yet (ponytail — see module docstring)
-    log_line: str
+    unit: str                # per-phase/per-entry word — see "unit" below, NOT hardcoded
+    percent_overall: float   # 0..100, weighted across phases 1/2/4; never > 100
+    eta_s: float | None      # seconds remaining in the CURRENT phase — see "eta_s" below
+    log_line: str             # legacy combined string — DO NOT re-parse; use the structured fields below
     backup_dir: Path | None
     current_path: str | None = None  # short path, relative to DATA_HOME, of the entry/file currently being moved
     files_done: int | None = None    # #574 round11 item 3 — progress WITHIN one large directory entry
     files_total: int | None = None   # (added after this dataclass first shipped — read both defensively via getattr)
+    log_operation: str | None = None  # machine token — a step_id, or "validate"/"info" (#574 round12, see "log structure")
+    log_detail: str = ""              # free-form human explanation (Thai) — the 2nd log part, see "log structure"
+    log_timestamp: str | None = None  # wall-clock "HH:MM:SS", local time — the 1st log part
 
 PHASES = {1: "สำรองข้อมูล", 2: "คัดลอกขึ้นโครงใหม่", 3: "ตรวจสอบ", 4: "เก็บของเก่าเข้า archive", 5: "เสร็จ"}
 
@@ -123,17 +126,16 @@ def run_migration(progress_cb: Callable[[ProgressEvent], None] | None = None) ->
 Granularity ponytail (documented in `boot_flow.py`'s module docstring):
 `ProgressEvent`s for phases 1/2/4 fire once per TOP-LEVEL item copy-verify
 (one `v2/`, one `providers/`, ... — not once per underlying file within
-one of those), and NOT AT ALL for the 5 simpler V1→V2 domain steps that
-write in one shot. Phases 3 (validate) and 5 (done) are indeterminate
-(`done=None, total=None`), driven off text messages, not a real counter.
-A fully granular byte-level meter would need every domain step wired the
-same way the copy/archive/backup steps now are — out of #574's scope.
+one of those). Phase 3 (validate) now fires a start+done pair per domain
+step (#574 round12 item 3, below) — still not a fine-grained WITHIN-step
+counter (these write in one shot with nothing to report mid-step). Phase 5
+(done) stays indeterminate (`done=None, total=None`).
 
 `current_path` carries the same entry name `on_entry(step_id, name)` fires
 with — set on EVERY event that has an item behind it (every phase 1/2/4
 event past the initial kickoff), `None` for every event that doesn't
-(phases 3/5, and the very first phase-1 event emitted before any entry has
-fired yet).
+(phase 5, phase 3's domain-step events, and the very first phase-1 event
+emitted before any entry has fired yet).
 
 **#574 round11 item 3**: `files_done`/`files_total` fill the ONE gap the
 ponytail above calls out — progress WITHIN one large directory entry's own
@@ -151,6 +153,82 @@ zero signal on screen. `current_path` for these events is
 added after this dataclass first shipped — a consumer must read them
 defensively (`getattr(event, "files_done", None)`), the same way
 `current_path` above already documents.
+
+### done/total is always monotonic and bounded (#574 round12 item 2)
+
+`promote-v2-root`/`archive-v1-legacy` each fire `on_entry` TWICE per
+top-level entry over a full apply — once from their own copy phase, once
+from their deferred prune phase (`_copy_phase`/`_prune_phase` in
+`promote_v1.py` share the same bound `on_entry`). A real production
+rehearsal observed `done` climb to exactly 2x `total` (9→18, 27→54)
+before this fix, because every notify counted as new progress. Fixed two
+ways, both defensive: `on_entry` now counts each entry NAME once per step
+(a repeat notify for the same name refreshes `current_path`/`log_line`
+but does not advance `done` again), and `emit()` unconditionally clamps
+`done = min(done, total)` before building the event. A consumer can trust
+`done <= total` and `0 <= percent_overall <= 100` on every single event,
+never only at phase end.
+
+### unit (#574 round12 item 6, R3-M4)
+
+No longer hardcoded `"รายการ"` for every event. Phase 3 uses `"ขั้น"`
+(steps). Phase 1/2/4 events use the SAME per-entry-name convention
+`MigrationPlanSummary.backup_items`' own rows already use: `"projects"` →
+`"โปรเจค"`, `"runtime/core"` → `"รายการ"`, everything else → `"ไฟล์"`. A
+consumer showing "X/Y <unit>" now reads the same unit word the B-screen
+plan table already promised for that same entry.
+
+### eta_s (#574 round12 item 4, R3-M3)
+
+Populated from the CURRENT phase's own `done`/elapsed-time rate — NOT a
+whole-migration average (an early slow phase must never poison a later,
+unrelated phase's estimate). Stays `None` until there is enough signal to
+trust it: at least 2 seconds elapsed in the current phase, OR at least 5
+events emitted in it, whichever comes first. Resets (clock and event
+count) every time `phase` changes. Phases with no per-item `done`/`total`
+(phase 5, and any event where `total` is falsy) always report `None`.
+
+### log structure (#574 round12 item 7, R3-M5)
+
+A UI must NEVER re-parse `log_line` itself — a prior review found that
+fragile ("two NBSPs measuring 14px", "parser requires double spaces
+while backend emits `step_id: name`"). Read the 4 parts as their own
+fields instead:
+
+1. `log_timestamp` — wall-clock `"HH:MM:SS"`, local time.
+2. `log_operation` — a machine token: a step_id (`"promote-v2-root"`,
+   `"archive-v1-legacy"`, `"pre-migrate-backup"`, or any of the 8 domain
+   step ids) for an entry/step event, or `"validate"`/`"info"` for a
+   plain text message from `run_boot_stage`'s own progress callback
+   (`"validate"` when the message mentions validating, `"info"`
+   otherwise).
+3. `current_path` (already documented above) — the path/entry name, or
+   `None` when there isn't one.
+4. `log_detail` — the free-form human explanation (Thai). Empty string
+   for a plain entry-copy event (the path IS the detail); the full
+   message text for an `"info"`/`"validate"` event; `"n/m"` (as
+   `files_done`/`files_total`) for a within-entry file-progress event.
+
+`log_line` itself is kept only as the legacy combined string for the
+terminal renderer, which has no need to re-split it — it is NOT a stable
+machine-parseable format and its exact wording may change.
+
+### Domain-step phase 3 progress (#574 round12 item 3)
+
+The 8 V1→V2 "domain" steps (`readonly-registries`, `role-agent`,
+`capability`, `project`, `state`, `credential-reference`,
+`runtime-triage`, `core-internal-store`) write in one shot and used to
+produce ZERO progress events — a real rehearsal's phase-3 event count was
+0, so a wizard watching for phase 3 jumped straight from 2 to 4.
+`MigrationEngine` now accepts an `on_step: Callable[[str, str], None]`
+observer (`(step_id, "start"|"done")`), fired around EVERY ladder step's
+own apply in both `apply()` and `apply_pending()`. `boot_flow.py` wires
+this into a start+done pair per DOMAIN step only (backup/marker/promote/
+archive already have their own phase 1/2/4 signal), positioned by the
+step's fixed ladder index out of `plan.verify_steps` — the same "step
+X/N" scheme `MigrationOutcome.failed_step_index/_total` already uses.
+`unit` for these events is `"ขั้น"`; `current_path` is always `None`
+(no single file/entry behind a domain step's own apply).
 
 ## 4. Outcome (screens D/E)
 
@@ -174,7 +252,18 @@ class MigrationOutcome:
     validated_steps: int = 0             # count of validate() steps that passed
     failed_step_index: int | None = None  # 1-based position within the validate pass, e.g. 7
     failed_step_total: int | None = None  # total validate steps that pass ran over, e.g. 11
+    previous_version: str | None = None   # #574 round12 item 8 — see below
 ```
+
+`previous_version` (#574 round12 item 8, R3-M6): the "app" component
+`version.json` held BEFORE this run's own version-marker overwrite — read
+at the very start of `run_migration()`, before `run_boot_stage()` does
+anything. `None` on a from-scratch install with no prior version.json (or
+any read failure — fails open). This is genuinely the version a
+`takkub migrate restore-v1` on this same run would put back — screen D's
+downgrade note ("takkub migrate restore-v1 puts back `<previous_version>`
+if needed") and screen E's failure context (currently running the OLD
+build still, migration to the new one failed) both need it.
 
 `failed_step_index`/`failed_step_total` are populated ONLY for a full
 first-time apply that reached (and failed) its validate() pass — the
@@ -196,7 +285,14 @@ repeating a false positive.
   [--yes] [--json]` — the whole flow (A→E) as text screens, or `--json`
   for one JSON object per line (`type` in `provider`, `provider_update`,
   `provider_prompt_skipped`, `auto_confirmed`, `plan`, `progress`,
-  `outcome`).
+  `outcome`). `--json`'s stdout is EVERY line — a consumer can
+  `json.loads()` each one unconditionally. #574 round12 item 1: `cli.py`'s
+  own epilogue used to print an unconditional bare `"ok: migrate run
+  finished"`/`"err: migrate run failed"` line AFTER all of the above —
+  `cmd_migrate_run` now opts out of that (returns `quiet=True` with an
+  empty `msg`) whenever `--json` is set; the exit code (0/1) still
+  reflects success/failure exactly as before. Non-`--json` (text-screen)
+  runs keep the human status line unchanged.
   - `--no-backup` was **removed** (#574 round11 R7-M2): it only ever
     printed a warning and never actually skipped the backup step — a
     flag that silently does nothing is worse than no flag at all.

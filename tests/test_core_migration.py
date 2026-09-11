@@ -254,6 +254,39 @@ def test_engine_apply_runs_all_when_all_succeed():
     assert all(r.ok for r in reports)
 
 
+def test_engine_apply_notifies_on_step_start_and_done_per_step():
+    """#574 round12 item 3: `on_step` fires around EVERY ladder step's own
+    apply, in ladder order — the signal `boot_flow.run_migration()` needs
+    to show phase-3 progress for the 8 domain steps, which otherwise
+    produce zero progress events of their own."""
+    a = _FakeStep("a", ok=True)
+    b = _FakeStep("b", ok=True)
+    events: list[tuple[str, str]] = []
+    engine = MigrationEngine([a, b], on_step=lambda step_id, kind: events.append((step_id, kind)))
+    engine.apply()
+    assert events == [("a", "start"), ("a", "done"), ("b", "start"), ("b", "done")]
+
+
+def test_engine_apply_on_step_stops_notifying_after_a_failure():
+    a = _FakeStep("a", ok=False)
+    b = _FakeStep("b", ok=True)
+    events: list[tuple[str, str]] = []
+    engine = MigrationEngine([a, b], on_step=lambda step_id, kind: events.append((step_id, kind)))
+    engine.apply()
+    assert events == [("a", "start"), ("a", "done")]  # b never reached
+
+
+def test_engine_apply_on_step_observer_failure_never_breaks_apply():
+    a = _FakeStep("a", ok=True)
+
+    def _raise(_step_id, _kind):
+        raise RuntimeError("ui crashed")
+
+    engine = MigrationEngine([a], on_step=_raise)
+    reports = engine.apply()
+    assert reports[0].ok is True
+
+
 def test_engine_inspect_plan_dry_run_always_run_every_step():
     a = _FakeStep("a", ok=False)
     b = _FakeStep("b", ok=True)
@@ -478,6 +511,25 @@ class TestApplyPending:
         assert a.calls == ["validate", "apply"]
         assert [r.step_id for r in reports] == ["a"]
         assert reports[0].ok is True
+
+    def test_on_step_notifies_only_for_steps_actually_applied(self, tmp_path):
+        """#574 round12 item 3: a step skipped outright (applied + still
+        valid — no `apply()` call at all, per this method's own docstring)
+        must not fire `on_step` either; only steps this call genuinely
+        applies get a start/done pair."""
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        journal.record("a", "apply", True)
+        a = _FakeStep("a", ok=True)  # already applied + still valid -> skipped
+        b = _FakeStep("b", ok=True)  # never applied -> runs
+        events: list[tuple[str, str]] = []
+        engine = MigrationEngine(
+            [a, b],
+            data_home=tmp_path,
+            journal=journal,
+            on_step=lambda step_id, kind: events.append((step_id, kind)),
+        )
+        engine.apply_pending()
+        assert events == [("b", "start"), ("b", "done")]
 
     def test_skip_step_ids_holds_back_a_specific_step_regardless_of_pending_ness(self, tmp_path):
         journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
