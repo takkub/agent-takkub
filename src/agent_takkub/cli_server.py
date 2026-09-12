@@ -717,10 +717,32 @@ class CliServer(QObject):
                             self._reply(sock, ok=False, msg=cwd_err)
                             return
                 if cmd == "assign":
+                    req_base_role = role.split("#", 1)[0].strip().lower()
                     mode_requested = req.get("mode")
-                    if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
-                        self._reply(sock, ok=False, msg="--mode must be pane or subagent")
-                        return
+                    if req_base_role == "reviewer":
+                        if mode_requested is None:
+                            mode_requested = "code"
+                        elif mode_requested not in {"code", "e2e", "ui", "pane", "subagent"}:
+                            self._reply(
+                                sock,
+                                ok=False,
+                                msg="--mode for reviewer must be code, e2e, or ui",
+                            )
+                            return
+                    else:
+                        if mode_requested in {"code", "e2e", "ui"}:
+                            self._reply(
+                                sock,
+                                ok=False,
+                                msg=f"--mode {mode_requested} is only valid for --role reviewer",
+                            )
+                            return
+                        if mode_requested is not None and mode_requested not in {
+                            "pane",
+                            "subagent",
+                        }:
+                            self._reply(sock, ok=False, msg="--mode must be pane or subagent")
+                            return
                     # #364 lever 2: when the caller left --mode unset, decide
                     # pane vs. subagent here instead of defaulting straight to
                     # "pane" — an explicit --mode from the caller always wins
@@ -872,6 +894,7 @@ class CliServer(QObject):
                         distinct_from=(
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
+                        mode=mode,
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
@@ -1096,12 +1119,10 @@ class CliServer(QObject):
                     disabled_roles=_disabled_roles_fn(project=project_ns_list),
                 )
                 return
-            elif cmd == "instance-identity":
-                # #354: read-only, same trust level as `list` — lets
-                # `takkub doctor` (and any other caller) cross-check that the
-                # port file it resolved actually answers for the cockpit
-                # instance it expects, instead of a different one that
-                # clobbered/inherited the same port-file path.
+            elif cmd in ("instance-identity", "version"):
+                # #354/#564: read-only, same trust level as `list` — lets
+                # `takkub doctor` (and cross-instance CLI banners) query instance
+                # identity, reported version, and data home.
                 from . import config
 
                 self._reply(
@@ -1110,6 +1131,8 @@ class CliServer(QObject):
                     msg="instance identity",
                     port=self._server.serverPort(),
                     data_home=str(config.DATA_HOME),
+                    version=config.instance_display_version(),
+                    label=config.instance_identity_label(),
                 )
                 return
             elif cmd == "worktree-live-paths":

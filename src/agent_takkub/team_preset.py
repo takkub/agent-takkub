@@ -453,17 +453,18 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     if base not in _governed_roles(project):
         return True, ""
     if base in CHECKER_ROLES.values():
-        # #513 folded qa/critic into reviewer --mode; resolve_role_alias is the
+        # #513/#561 folded qa/critic into reviewer --mode; resolve_role_alias is the
         # single seam translating a legacy role name to its canonical role
         # (routing_planner._MODE_TO_LEGACY_ROLE is the reverse direction) so
         # this stays in lockstep instead of hand-rolling a second alias table.
         from .routing_planner import resolve_role_alias
 
-        canonical_role, _mode = resolve_role_alias(base)
-        allowed = cfg["checker"] in (base, canonical_role) or (
-            # a checker role also registered as a position (custom preset
-            # choosing e.g. "reviewer" as a coding position too) stays allowed
-            base in cfg["roles"] and cfg["roles"][base]
+        canonical_base, _ = resolve_role_alias(base)
+        canonical_checker, _ = resolve_role_alias(cfg.get("checker") or "")
+        allowed = (
+            cfg.get("checker") in (base, canonical_base)
+            or canonical_checker in (base, canonical_base)
+            or (base in cfg["roles"] and cfg["roles"][base])
         )
     else:
         allowed = bool(cfg["roles"].get(base, False))

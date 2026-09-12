@@ -44,6 +44,10 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
 @pytest.fixture(autouse=True)
 def _isolate_team_preset(tmp_path, monkeypatch):
     monkeypatch.setattr(team_preset, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(
+        "agent_takkub.provider_config.effective_provider_for",
+        lambda role, project=None: "claude",
+    )
 
 
 def _make_lead() -> MagicMock:

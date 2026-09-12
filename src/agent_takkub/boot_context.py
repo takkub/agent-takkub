@@ -355,13 +355,23 @@ def measure_native_skill_catalog(project_ns: str) -> CategoryMeasurement | None:
     skill files — nothing to report. Never raises."""
     from . import skill_scan
     from .lead_context import _allowed_project_roots
-    from .user_profile import config_dir_for
+    from .user_profile import config_dir_for, curated_config_dir_for
 
+    skills_dir = None
     try:
-        config_dir = config_dir_for(project_ns)
+        curated = curated_config_dir_for(project_ns)
+        if (curated / "skills").is_dir():
+            skills_dir = curated / "skills"
     except Exception:
-        return None
-    skills_dir = config_dir / "skills"
+        pass
+
+    if skills_dir is None:
+        try:
+            config_dir = config_dir_for(project_ns)
+            skills_dir = config_dir / "skills"
+        except Exception:
+            return None
+
     files = skill_scan._skill_files(skills_dir)
     if not files:
         return None

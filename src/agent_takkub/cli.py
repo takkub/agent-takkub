@@ -255,6 +255,106 @@ def _mark_warned_other_instance(other_port: int) -> None:
         pass
 
 
+def _resolve_other_instance_label(probe: object, other_data_home: Path, is_dev: bool) -> str:
+    """#564: Probe the other running cockpit instance for its real reported
+    version/identity rather than assuming the calling CLI's own version.
+
+    1. Tries to query `instance-identity` or `version` over the active socket connection.
+    2. Falls back to reading version.json / venv dist-info / pyproject.toml in the other DATA_HOME.
+    3. Falls back to '(version unknown)' for an installed prod instance where version cannot be proven.
+    """
+    other_version: str | None = None
+    other_label: str | None = None
+    try:
+        sendall = getattr(probe, "sendall", None)
+        recv = getattr(probe, "recv", None)
+        if callable(sendall) and callable(recv):
+            settimeout = getattr(probe, "settimeout", None)
+            if callable(settimeout):
+                settimeout(0.3)
+            sendall(b'{"cmd": "instance-identity"}\n')
+            buf = b""
+            while b"\n" not in buf and len(buf) < 4096:
+                chunk = recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+            if buf:
+                line = buf.split(b"\n", 1)[0]
+                data = json.loads(line.decode("utf-8"))
+                if isinstance(data, dict):
+                    v = data.get("version")
+                    if isinstance(v, str) and v.strip() and v != "?":
+                        other_version = v.strip()
+                    lbl = data.get("label")
+                    if isinstance(lbl, str) and lbl.strip():
+                        other_label = lbl.strip()
+                    dh = data.get("data_home")
+                    if dh and isinstance(dh, str):
+                        other_data_home = Path(dh)
+    except Exception:
+        pass
+
+    if not other_version and other_data_home:
+        # Check system/version.json or v2/system/version.json or runtime/core/version.json
+        for cand in (
+            other_data_home / "v2" / "system" / "version.json",
+            other_data_home / "system" / "version.json",
+            other_data_home / "runtime" / "core" / "version.json",
+        ):
+            if cand.is_file():
+                try:
+                    doc = json.loads(cand.read_text(encoding="utf-8"))
+                    if isinstance(doc, dict):
+                        v = doc.get("app_version")
+                        if isinstance(v, str) and v.strip():
+                            other_version = v.strip()
+                            break
+                except Exception:
+                    pass
+        # Check venv dist-info
+        if not other_version:
+            for venv_dir in (other_data_home / "venv", other_data_home / ".venv"):
+                if venv_dir.is_dir():
+                    try:
+                        for dist in venv_dir.glob("**/agent_takkub-*.dist-info"):
+                            metadata = dist / "METADATA"
+                            if metadata.is_file():
+                                try:
+                                    for mline in metadata.read_text(encoding="utf-8").splitlines():
+                                        if mline.startswith("Version: "):
+                                            other_version = mline.split(":", 1)[1].strip()
+                                            break
+                                except Exception:
+                                    pass
+                            if other_version:
+                                break
+                    except Exception:
+                        pass
+                if other_version:
+                    break
+        # Check pyproject.toml (e.g. dev)
+        if not other_version and (other_data_home / "pyproject.toml").is_file():
+            try:
+                text = (other_data_home / "pyproject.toml").read_text(encoding="utf-8")
+                m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+                if m:
+                    other_version = m.group(1)
+            except Exception:
+                pass
+
+    if is_dev:
+        if other_version:
+            return f"v{other_version}"
+        return "(version unknown)"
+
+    if other_label:
+        return other_label
+    if other_version:
+        return f"dev · v{other_version}"
+    return f"dev · {Path(config.REPO_ROOT).name}"
+
+
 def _instance_banner() -> str:
     """Return a best-effort identity banner for the active cockpit instance."""
     try:
@@ -269,8 +369,10 @@ def _instance_banner() -> str:
         is_dev = config.DATA_HOME == config.REPO_ROOT
         if is_dev:
             other_port_file = Path.home() / ".agent-takkub" / "runtime" / "port"
+            other_data_home = Path.home() / ".agent-takkub"
         else:
             other_port_file = Path(config.REPO_ROOT) / "runtime" / "port"
+            other_data_home = Path(config.REPO_ROOT)
 
         # A port-file override can point at the conventional path for the
         # other instance. Do not probe (or warn about) ourselves in that case.
@@ -282,14 +384,13 @@ def _instance_banner() -> str:
             return "\n".join(lines)
 
         probe = socket.create_connection(("127.0.0.1", other_port), timeout=0.3)
-        close = getattr(probe, "close", None)
-        if callable(close):
-            close()
+        try:
+            other_label = _resolve_other_instance_label(probe, other_data_home, is_dev=is_dev)
+        finally:
+            close = getattr(probe, "close", None)
+            if callable(close):
+                close()
 
-        if is_dev:
-            other_label = f"v{config.instance_display_version()}"
-        else:
-            other_label = f"dev · {Path(config.REPO_ROOT).name}"
         lines.append(f"  ⚠ {other_label} ก็รันอยู่ด้วย (port {other_port}) — คำสั่งนี้คุม {label} เท่านั้น")
         _mark_warned_other_instance(other_port)
     except Exception:
@@ -432,7 +533,7 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
     )
 
 
-def _browser_shard_warning(role: str, shards: int) -> str:
+def _browser_shard_warning(role: str, shards: int, mode: str | None = None) -> str:
     """#304 point 5: tell Lead up front, in the `assign` response itself,
     that a browser-role shard fan-out may not be able to open a browser at
     all — Playwright MCP has been observed failing to connect under
@@ -443,8 +544,10 @@ def _browser_shard_warning(role: str, shards: int) -> str:
     if shards <= 1:
         return ""
     from . import pane_guard
+    from .routing_planner import _MODE_TO_LEGACY_ROLE
 
-    if not pane_guard.is_browser_role(role):
+    target_role = _MODE_TO_LEGACY_ROLE.get(mode or "", role)
+    if not pane_guard.is_browser_role(target_role):
         return ""
     return (
         "\n⚠️ shard เปิดเบราว์เซอร์อาจไม่ได้: Playwright MCP บาง shard เคย connect ไม่ติดภายใต้ "
@@ -536,6 +639,39 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     if task_err:
         return {"ok": False, "msg": task_err}
     args.task = task_text
+    base_role = (getattr(args, "role", "") or "").split("#", 1)[0].strip().lower()
+
+    # #513/#561: Keep qa / critic working as aliases for >= 1 release, emitting deprecation warning
+    if base_role in ("qa", "critic"):
+        from .routing_planner import REVIEWER_MODE_ALIASES
+
+        alias_mode = REVIEWER_MODE_ALIASES[base_role]
+        print(
+            f"warn: --role {base_role} is deprecated (#513/#561); use --role reviewer --mode {alias_mode} instead",
+            file=sys.stderr,
+        )
+
+    mode_requested = getattr(args, "mode", None)
+    if base_role == "reviewer":
+        if mode_requested is None:
+            mode_requested = "code"
+        elif mode_requested not in {"code", "e2e", "ui", "pane", "subagent"}:
+            return {
+                "ok": False,
+                "msg": f"--mode for reviewer must be code, e2e, or ui (got {mode_requested!r})",
+            }
+    else:
+        if mode_requested in {"code", "e2e", "ui"}:
+            return {
+                "ok": False,
+                "msg": f"--mode {mode_requested} is only valid for --role reviewer",
+            }
+        if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
+            return {
+                "ok": False,
+                "msg": "--mode must be pane or subagent",
+            }
+
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
     # #364 lever 2: `args.mode` is None when the caller left --mode unset —
@@ -545,7 +681,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     # function's own local validation/display below, which must stay
     # conservative (pane's stricter rules) since a None request might still
     # resolve to either mode server-side.
-    mode_requested = getattr(args, "mode", None)
     mode = mode_requested or "pane"
     _SHARDS_MAX = 20 if mode == "subagent" else 8
     _raw_shards = getattr(args, "shards", 1)
@@ -721,7 +856,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         if resp.get("ok"):
             resp["msg"] = (
                 str(resp.get("msg", ""))
-                + _browser_shard_warning(args.role, shards)
+                + _browser_shard_warning(args.role, shards, mode=mode_requested)
                 + _self_commit_isolation_warning(args.task, "shared")
             )
         return resp
@@ -755,9 +890,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
-        warn = _browser_shard_warning(args.role, shards) + _self_commit_isolation_warning(
-            args.task, isolation
-        )
+        warn = _browser_shard_warning(
+            args.role, shards, mode=mode_requested
+        ) + _self_commit_isolation_warning(args.task, isolation)
         if mode == "subagent":
             details = "\n".join(str(r.get("msg", "")) for r in results if r.get("msg"))
             return {
@@ -3053,6 +3188,12 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         from .doctor import check_boot_context
 
         bc_project = getattr(args, "project", None) or _from_project() or active_project()[0]
+        try:
+            from .user_profile import ensure_curated_claude_config_dir
+
+            ensure_curated_claude_config_dir(bc_project)
+        except Exception:
+            pass
         bc_findings, boot_context_report = check_boot_context(
             role=getattr(args, "role", None), project=bc_project
         )
@@ -4476,10 +4617,11 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--cwd", default=None)
     sa.add_argument(
         "--mode",
-        choices=("pane", "subagent"),
+        choices=("pane", "subagent", "code", "e2e", "ui"),
         default=None,
         help="execution mode: pane (existing visible cockpit pane) or subagent "
         "(native same-provider child in the Lead process; no pane/model diversity). "
+        "For --role reviewer: sub-mode code (default), e2e (browser/qa), or ui (critic/gemini). "
         "Omit to let the server auto-pick subagent for a short task with no "
         "isolation/model-diversity/plan need (#364 lever 2) — pass this flag "
         "explicitly to pin one mode and skip that auto-selection",

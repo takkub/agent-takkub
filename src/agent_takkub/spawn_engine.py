@@ -70,6 +70,7 @@ from .orchestrator_text import (
 from .pane_env import (
     apply_default_model,
     inject_claude_project_dir_name_env,
+    inject_curated_claude_config_dir,
     inject_provider_home_env,
     inject_provider_no_autoupdate_env,
     inject_user_profile_env,
@@ -2893,6 +2894,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
+        inject_curated_claude_config_dir(env, project_ns)
         inject_claude_project_dir_name_env(env, project_ns, claude, base_role)
         inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled

@@ -528,6 +528,25 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
         pass
 
 
+def inject_curated_claude_config_dir(env: dict[str, str], project: str) -> None:
+    """Set ``CLAUDE_CONFIG_DIR`` to the curated directory for *project* (#563).
+
+    Curated dir isolates global skills so only project-relevant skills load,
+    while mirroring auth credentials and settings from the base profile.
+    """
+    if os.environ.get("TAKKUB_SKILL_GATE", "1").strip() == "0":
+        return
+    if not project or project == "default":
+        return
+    from .user_profile import ensure_curated_claude_config_dir
+
+    try:
+        curated = ensure_curated_claude_config_dir(project)
+        env["CLAUDE_CONFIG_DIR"] = str(curated)
+    except Exception:
+        pass
+
+
 def claude_project_dir_name(project_ns: str, base_role: str | None = None) -> str:
     """Return the cockpit-owned Claude transcript directory for a project.
 

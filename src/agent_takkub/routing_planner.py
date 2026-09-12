@@ -52,6 +52,7 @@ class RoutingAction:
     sequence: list[str] | None = None
     suggested_mode: str = "pane"  # advisory only; Lead chooses at dispatch time
     mode_reason: str = ""
+    provider: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -247,6 +248,16 @@ _ONESHOT = re.compile(
     r"(?:ถาม|ขอ|ให้)\s*(codex|gemini)\s*(?:ว่า|review|check|cross.check|ดู|ช่วย)?"
     r"|"
     r"(codex|gemini)\s*(?:review\b|check\b|ลอง)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Codex diff comparison: "ให้ codex เทียบ diff", "codex เทียบ diff", etc. (#561)
+# Routes to reviewer pane running on codex rather than oneshot query or role named codex.
+_CODEX_DIFF = re.compile(
+    r"(?:"
+    r"(?:ให้|ขอ|วาน|ฝาก)?\s*codex\s*(?:ช่วย)?\s*(?:เทียบ|ตรวจ|เช็ค|check|compare|ดู|รีวิว|review)?\s*diff"
+    r"|(?:เทียบ|ตรวจ|เช็ค|check|compare|ดู|รีวิว|review)\s*diff\s*(?:ด้วย|โดย|ใช้|ผ่าน|with|using|via)?\s*codex"
     r")",
     re.IGNORECASE,
 )
@@ -895,7 +906,27 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
     disabled: set[str] = set((context or {}).get("disabled_providers") or set())
     disabled_roles: set[str] = set((context or {}).get("disabled_roles") or set())
 
-    # 1. Explicit role ("ให้ backend ทำ X") → FIRE_ASSIGN immediately
+    # 1. Codex diff comparison ("ให้ codex เทียบ diff") → FIRE_ASSIGN reviewer/code on codex (#561)
+    if _CODEX_DIFF.search(msg):
+        if "reviewer" in disabled_roles:
+            return RoutingAction(
+                kind=ActionKind.INFORMATIONAL,
+                task_hint=msg,
+                reason=f"diff comparison requested; {_role_disabled_note('reviewer')}",
+            )
+        reason = "diff comparison routed to reviewer on codex (#561)"
+        if "codex" in disabled:
+            reason = f"{reason}; {_sub_note('codex')}"
+        return RoutingAction(
+            kind=ActionKind.FIRE_ASSIGN,
+            role="reviewer",
+            mode="code",
+            provider="codex",
+            task_hint=msg,
+            reason=reason,
+        )
+
+    # 2. Explicit role ("ให้ backend ทำ X") → FIRE_ASSIGN immediately
     explicit = _detect_explicit_role(msg)
     if explicit:
         if explicit in disabled_roles:
@@ -925,7 +956,7 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
             reason=reason,
         )
 
-    # 2. One-shot codex/gemini → FIRE_ONESHOT (no pane spawn)
+    # 3. One-shot codex/gemini → FIRE_ONESHOT (no pane spawn)
     oneshot = _detect_oneshot(msg)
     if oneshot:
         if oneshot in disabled_roles:

@@ -138,6 +138,7 @@ from .pane_env import (  # re-exported for test imports — see pane_env.py docs
     _apply_port_file,
     _build_lead_env,
     _build_pane_env,
+    inject_curated_claude_config_dir,
     inject_user_profile_env,
 )
 from .pipeline_executor import (  # re-exported for test imports; mixin provides methods
@@ -446,6 +447,7 @@ __all__ = [  # backwards-compat re-exports
     "_render_decision_note",
     "_render_lead_context",
     "_resolve_vault_dir",
+    "inject_curated_claude_config_dir",
     "inject_user_profile_env",
     "prune_old_transcripts",
     "prune_vault_logs",
@@ -2435,8 +2437,23 @@ class Orchestrator(
         (`team_preset.set_override`) and prepends a `[system]` notice ahead
         of *task* so the Lead sees it in the same message; ignored for every
         other role (spawning a teammate doesn't change the project's size)."""
-        if mode not in {"pane", "subagent"}:
-            return False, "mode must be pane or subagent"
+        base_role = role_name.split("#", 1)[0].strip().lower()
+        shard_suffix = ("#" + role_name.split("#", 1)[1]) if "#" in role_name else ""
+        if base_role == "reviewer":
+            reviewer_mode = (
+                mode if mode in {"code", "e2e", "ui"} else ("code" if mode == "pane" else mode)
+            )
+            if reviewer_mode not in {"code", "e2e", "ui", "subagent"}:
+                return False, f"mode for reviewer must be code, e2e, or ui (got {mode!r})"
+            if reviewer_mode != "subagent":
+                from .routing_planner import _MODE_TO_LEGACY_ROLE
+
+                dispatch_base = _MODE_TO_LEGACY_ROLE.get(reviewer_mode, "reviewer")
+                role_name = f"{dispatch_base}{shard_suffix}"
+                mode = "pane"
+        elif mode not in {"pane", "subagent"}:
+            return False, f"--mode {mode} is only valid for --role reviewer"
+
         # #510: enforce the Settings → Providers & Roles on/off toggle at the
         # single choke point both pane and subagent assigns pass through —
         # checked before mode branches so neither path silently substitutes a
@@ -2445,10 +2462,17 @@ class Orchestrator(
         role_check_project_ns = self._resolve_project(project)
         from .pipeline_config import is_role_enabled
 
-        if not is_role_enabled(role_name, role_check_project_ns):
-            base_role_disabled = role_name.split("#", 1)[0].strip().lower()
+        orig_role = base_role
+        if not is_role_enabled(role_name, role_check_project_ns) or not is_role_enabled(
+            orig_role, role_check_project_ns
+        ):
+            blocked_role = (
+                orig_role
+                if not is_role_enabled(orig_role, role_check_project_ns)
+                else role_name.split("#", 1)[0].strip().lower()
+            )
             return False, (
-                f"role {base_role_disabled} ถูกปิดใน Settings ของโปรเจคนี้ "
+                f"role {blocked_role} ถูกปิดใน Settings ของโปรเจคนี้ "
                 f"({role_check_project_ns}) — เปิดที่ Providers & Roles หรือใช้ role อื่น"
             )
         # #512: a role the project's (or the task's override) team preset

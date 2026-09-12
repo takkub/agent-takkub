@@ -21,6 +21,7 @@ def fake_request(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     monkeypatch.setattr(cli, "_request", _fake)
     monkeypatch.delenv("TAKKUB_ROLE", raising=False)  # prevent pane env bleeding into tests
+    monkeypatch.delenv("TAKKUB_PROJECT", raising=False)
     return sent
 
 
@@ -42,8 +43,14 @@ class TestArgparse:
         assert fake_request[-1]["cwd"] == "/x"
 
     def test_assign_mode_defaults_to_pane(self, fake_request: list[dict[str, Any]]) -> None:
-        cli.main(["assign", "--role", "reviewer", "scan auth"])
+        cli.main(["assign", "--role", "backend", "scan auth"])
         assert fake_request[-1]["mode"] == "pane"
+
+    def test_assign_reviewer_mode_defaults_to_code(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        cli.main(["assign", "--role", "reviewer", "scan auth"])
+        assert fake_request[-1]["mode"] == "code"
 
     def test_assign_subagent_mode_forwarded(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "reviewer", "--mode", "subagent", "scan auth"])
@@ -890,6 +897,121 @@ class TestInstanceBanner:
         assert fake_socket.closed is True
         assert "⚠ dev · checkout ก็รันอยู่ด้วย (port 43124)" in banner
         assert "คำสั่งนี้คุม v9.9.9 เท่านั้น" in banner
+
+    def test_banner_dev_probes_prod_version_via_socket_564(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#564: dev CLI probing prod instance gets prod's real version from socket."""
+        repo_root = tmp_path / "dev-repo"
+        repo_root.mkdir(parents=True)
+        monkeypatch.setattr(cli.config, "REPO_ROOT", repo_root)
+        monkeypatch.setattr(cli.config, "DATA_HOME", repo_root)
+        monkeypatch.setattr(cli.config, "instance_identity_label", lambda: "dev · dev-repo")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 50001)
+        current_port_file = repo_root / "runtime" / "port"
+        current_port_file.parent.mkdir(parents=True)
+        current_port_file.write_text("50001", encoding="utf-8")
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+
+        prod_home = tmp_path / "prod-home"
+        monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: prod_home))
+        prod_port_file = prod_home / ".agent-takkub" / "runtime" / "port"
+        prod_port_file.parent.mkdir(parents=True)
+        prod_port_file.write_text("62938", encoding="utf-8")
+
+        class FakeSocket:
+            def __init__(self):
+                self.closed = False
+                self.sent = b""
+
+            def sendall(self, data: bytes) -> None:
+                self.sent += data
+
+            def recv(self, size: int) -> bytes:
+                return (
+                    json.dumps({"ok": True, "version": "2.0.6", "label": "v2.0.6"}).encode("utf-8")
+                    + b"\n"
+                )
+
+            def settimeout(self, timeout: float) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_sock = FakeSocket()
+        monkeypatch.setattr(cli.socket, "create_connection", lambda *_a, **_k: fake_sock)
+
+        banner = cli._instance_banner()
+        assert "⚠ v2.0.6 ก็รันอยู่ด้วย (port 62938)" in banner
+        assert fake_sock.closed is True
+
+    def test_banner_dev_probes_prod_version_via_file_fallback_564(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#564: socket returns no version (e.g. older cockpit build) -> falls back to version.json."""
+        repo_root = tmp_path / "dev-repo"
+        repo_root.mkdir(parents=True)
+        monkeypatch.setattr(cli.config, "REPO_ROOT", repo_root)
+        monkeypatch.setattr(cli.config, "DATA_HOME", repo_root)
+        monkeypatch.setattr(cli.config, "instance_identity_label", lambda: "dev · dev-repo")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 50001)
+        current_port_file = repo_root / "runtime" / "port"
+        current_port_file.parent.mkdir(parents=True)
+        current_port_file.write_text("50001", encoding="utf-8")
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+
+        prod_home = tmp_path / "prod-home"
+        monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: prod_home))
+        prod_dir = prod_home / ".agent-takkub"
+        prod_port_file = prod_dir / "runtime" / "port"
+        prod_port_file.parent.mkdir(parents=True)
+        prod_port_file.write_text("62938", encoding="utf-8")
+
+        # Put version.json in prod_dir / system / version.json
+        version_file = prod_dir / "system" / "version.json"
+        version_file.parent.mkdir(parents=True)
+        version_file.write_text(json.dumps({"app_version": "2.0.5"}), encoding="utf-8")
+
+        class FakeSocket:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli.socket, "create_connection", lambda *_a, **_k: FakeSocket())
+
+        banner = cli._instance_banner()
+        assert "⚠ v2.0.5 ก็รันอยู่ด้วย (port 62938)" in banner
+
+    def test_banner_dev_falls_back_to_version_unknown_564(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#564: prod running but version cannot be determined -> (version unknown)."""
+        repo_root = tmp_path / "dev-repo"
+        repo_root.mkdir(parents=True)
+        monkeypatch.setattr(cli.config, "REPO_ROOT", repo_root)
+        monkeypatch.setattr(cli.config, "DATA_HOME", repo_root)
+        monkeypatch.setattr(cli.config, "instance_identity_label", lambda: "dev · dev-repo")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 50001)
+        current_port_file = repo_root / "runtime" / "port"
+        current_port_file.parent.mkdir(parents=True)
+        current_port_file.write_text("50001", encoding="utf-8")
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+
+        prod_home = tmp_path / "prod-home"
+        monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: prod_home))
+        prod_dir = prod_home / ".agent-takkub"
+        prod_port_file = prod_dir / "runtime" / "port"
+        prod_port_file.parent.mkdir(parents=True)
+        prod_port_file.write_text("62938", encoding="utf-8")
+
+        class FakeSocket:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli.socket, "create_connection", lambda *_a, **_k: FakeSocket())
+
+        banner = cli._instance_banner()
+        assert "⚠ (version unknown) ก็รันอยู่ด้วย (port 62938)" in banner
 
     def test_banner_warns_only_once_per_session(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

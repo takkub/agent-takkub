@@ -491,6 +491,183 @@ def config_dir_for(project: str) -> Path:
     return _DEFAULT_CONFIG_DIR
 
 
+def _mirror_file(src: Path, dst: Path) -> None:
+    """Keep *dst* in sync with *src* via hardlink (falling back to copy)."""
+    if not src.is_file():
+        if dst.exists() or dst.is_symlink():
+            try:
+                dst.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists() or dst.is_symlink():
+            try:
+                s_stat = src.stat()
+                d_stat = dst.stat()
+                if s_stat.st_ino != 0 and (s_stat.st_ino, s_stat.st_dev) == (
+                    d_stat.st_ino,
+                    d_stat.st_dev,
+                ):
+                    return
+                if s_stat.st_mtime == d_stat.st_mtime and s_stat.st_size == d_stat.st_size:
+                    return
+            except OSError:
+                pass
+            dst.unlink(missing_ok=True)
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    except OSError:
+        pass
+
+
+def _extract_skill_name(path: Path) -> str:
+    from . import skill_scan
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        fm = skill_scan._parse_frontmatter(text)
+        name = fm.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except OSError:
+        pass
+    return path.parent.name if path.name == "SKILL.md" else path.stem
+
+
+def curated_config_dir_for(project: str) -> Path:
+    """Return the curated ``CLAUDE_CONFIG_DIR`` path for *project* under DATA_HOME (#563).
+
+    Follows #504's layout: ``DATA_HOME/providers/claude/<account>-<slug>``.
+    """
+    from .config import DATA_HOME
+
+    account = profile_for(project)
+    slug = _project_slug(project)
+    return DATA_HOME / "providers" / "claude" / f"{account}-{slug}"
+
+
+def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None) -> Path:
+    """Prepare a curated ``CLAUDE_CONFIG_DIR`` for *project* (#563).
+
+    Mirrors auth credentials (.credentials.json) and settings from the base
+    profile, links session stores (projects, todos, plugins), and populates
+    a curated skills/ directory containing only project-owned skills and
+    skills assigned in the Skill Matrix policy.
+    """
+    from . import skill_policy, skill_scan
+    from .lead_context import _allowed_project_roots
+    from .worktree_manager import _is_link_point, _make_link, _remove_link
+
+    if base_dir is None:
+        base_dir = config_dir_for(project)
+    dest_dir = curated_config_dir_for(project)
+    try:
+        if dest_dir.resolve() == base_dir.resolve():
+            return dest_dir
+    except OSError:
+        pass
+
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return base_dir
+
+    # 1. Mirror auth credentials and user settings
+    for fname in (
+        ".credentials.json",
+        "settings.json",
+        "settings.local.json",
+        "keybindings.json",
+        "CLAUDE.md",
+    ):
+        _mirror_file(base_dir / fname, dest_dir / fname)
+
+    # 2. Link shared session stores
+    for dirname in ("projects", "todos", "plugins"):
+        src = base_dir / dirname
+        dst = dest_dir / dirname
+        if src.is_dir() and not (dst.exists() or dst.is_symlink()):
+            _make_link(src, dst)
+
+    # 3. Curate skills directory
+    base_skills = base_dir / "skills"
+    curated_skills = dest_dir / "skills"
+    try:
+        curated_skills.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return dest_dir
+
+    # Collect allowed skill names for this project
+    allowed_names: set[str] = set()
+    try:
+        roots = _allowed_project_roots(project)
+        allowed_names.update(s.name for s in skill_scan.scan_skills(roots))
+    except Exception:
+        pass
+    try:
+        for r_skills in skill_policy.load_policy().values():
+            allowed_names.update(r_skills)
+    except Exception:
+        pass
+
+    # Copy / link matching skills from base_skills
+    if base_skills.is_dir():
+        try:
+            for entry in base_skills.iterdir():
+                if entry.is_dir():
+                    md_file = entry / "SKILL.md"
+                    if not md_file.is_file():
+                        mds = list(entry.glob("*.md"))
+                        md_file = mds[0] if mds else None
+                    if md_file is not None:
+                        sname = _extract_skill_name(md_file)
+                    else:
+                        sname = entry.name
+                    if sname in allowed_names or entry.name in allowed_names:
+                        dst_skill = curated_skills / entry.name
+                        if not (dst_skill.exists() or dst_skill.is_symlink()):
+                            _make_link(entry, dst_skill)
+                elif entry.is_file() and entry.suffix == ".md":
+                    sname = _extract_skill_name(entry)
+                    if sname in allowed_names or entry.stem in allowed_names:
+                        _mirror_file(entry, curated_skills / entry.name)
+        except OSError:
+            pass
+
+    # Prune non-allowed skills from curated_skills
+    try:
+        for existing in curated_skills.iterdir():
+            sname = ""
+            if existing.is_dir():
+                md_file = existing / "SKILL.md"
+                if not md_file.is_file():
+                    mds = list(existing.glob("*.md"))
+                    md_file = mds[0] if mds else None
+                sname = _extract_skill_name(md_file) if md_file else existing.name
+            elif existing.is_file() and existing.suffix == ".md":
+                sname = _extract_skill_name(existing)
+
+            if (
+                sname not in allowed_names
+                and existing.name not in allowed_names
+                and existing.stem not in allowed_names
+            ):
+                if _is_link_point(existing):
+                    _remove_link(existing)
+                elif existing.is_file() or existing.is_symlink():
+                    existing.unlink(missing_ok=True)
+                elif existing.is_dir():
+                    shutil.rmtree(existing, ignore_errors=True)
+    except OSError:
+        pass
+
+    return dest_dir
+
+
 # ── First-boot profile clone (installed instances only) ─────────────────────
 #
 # ~/.claude can be multiple GB (projects/ transcripts, security/, plugins
