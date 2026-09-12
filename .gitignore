@@ -146,3 +146,9 @@ graft-graphs/
 # dev checkout doubles as DATA_HOME (config._resolve_data_home) — central skill stores (#419)
 skills/
 project-skills/
+
+# Same DATA_HOME-is-the-checkout story for #563's curated CLAUDE_CONFIG_DIR
+# (user_profile.ensure_curated_claude_config_dir → DATA_HOME/providers/<provider>/
+# <account>-<slug>/). It mirrors `.credentials.json` and settings.json in, so
+# this MUST stay ignored — never a candidate for `git add`.
+providers/
