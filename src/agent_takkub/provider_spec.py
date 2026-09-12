@@ -524,6 +524,15 @@ CLAUDE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = (
     "Monitor",
     "REPL",
     "JavaScript",
+    # ⚠ DO NOT REMOVE — ToolSearch is what keeps deferred tool schemas OUT of
+    # the prompt, so it PAYS FOR ITSELF many times over instead of costing.
+    # Measured 2026-09-12 with this exact list: 33,779 tokens with it, 46,503
+    # without — a 12.7k swing, and the without-it number is 7.8k WORSE than
+    # passing no --tools flag at all (38,661). It looks like a rarely-called
+    # tool in usage stats (188 calls in 14 days), which is exactly how someone
+    # talks themselves into cutting it; the call count is irrelevant, its
+    # presence in the allowlist is what enables deferral.
+    # Pinned by tests/test_teammate_builtin_tools.py.
     "ToolSearch",
     "SendUserMessage",
     "SendUserFile",

@@ -270,3 +270,24 @@ def test_doctor_drift_check_info_when_probe_fails(monkeypatch):
     finding = check_claude_tools_drift(current_defaults=None)
     assert finding.status == Status.INFO
     assert "could not probe" in finding.detail
+
+
+def test_toolsearch_stays_in_the_teammate_allowlist():
+    """ToolSearch is the deferral switch, not a tool we happen to ship (#581).
+
+    `--tools` replaces the default set wholesale, and whether ToolSearch is in
+    that set decides whether every OTHER tool's schema is deferred out of the
+    prompt or inlined into it. Measured on 2026-09-12 with the shipped list:
+    33,779 input tokens with ToolSearch, 46,503 without — and the without
+    number is worse than passing no `--tools` flag at all (38,661), i.e.
+    dropping it would make the cockpit spend MORE than before this feature
+    existed. Its own call count (188 in 14 days) invites exactly that mistake,
+    so pin it here rather than trusting the comment to be read.
+    """
+    from agent_takkub.provider_spec import (
+        TEAMMATE_CUT_TOOLS,
+        TEAMMATE_DEFAULT_BUILTIN_TOOLS,
+    )
+
+    assert "ToolSearch" in TEAMMATE_DEFAULT_BUILTIN_TOOLS
+    assert "ToolSearch" not in TEAMMATE_CUT_TOOLS
