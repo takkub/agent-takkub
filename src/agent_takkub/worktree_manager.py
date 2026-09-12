@@ -2195,6 +2195,21 @@ class WorktreeManager:
                     "ปิด pane ก่อน (`takkub close --role <role>`) แล้วค่อย clean ใหม่"
                 )
                 continue
+            # #571: protect newly-created worktrees (within last 5 min) from removal
+            # — pane spawned seconds earlier may not be registered in live-pane registry yet
+            try:
+                worktree_path = Path(row["path"]).resolve()
+                mtime = worktree_path.stat().st_mtime if worktree_path.exists() else 0
+                elapsed = time.time() - mtime
+                if elapsed < 300:  # 5 minutes
+                    out.append(
+                        f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "
+                        "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่"
+                    )
+                    continue
+            except (OSError, ValueError):
+                # If we can't stat the worktree, skip this check and continue
+                pass
             cherry_picked = False
             keep_reason = ""
             discard_stat = ""

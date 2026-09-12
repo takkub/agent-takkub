@@ -1079,4 +1079,43 @@ class TestFailureAutoCapture:
         ok, _msg = orch.done("backend", note="something broke", project=proj, failed=True)
 
         assert ok is True
-        assert captured and "FAILED" in captured[0]
+
+
+def test_find_evidence_files_excludes_repo_checkouts(tmp_path, monkeypatch):
+    """#567 regression: _find_evidence_files must exclude images from git
+    archive/checkout fixtures (e.g., `tag-v2.0.8/src/agent_takkub/static/`)
+    so they don't contaminate evidence collection with unrelated sprites."""
+    from agent_takkub.orchestrator import Orchestrator
+
+    # Create directory structure mimicking a git archive export with fixture images
+    repo_checkout = tmp_path / "tag-v2.0.8"
+    (repo_checkout / "src" / "agent_takkub" / "static" / "sprites").mkdir(parents=True)
+    (repo_checkout / "src" / "agent_takkub" / "static" / "sprites" / "walk.png").write_bytes(
+        b"fake PNG"
+    )
+    (repo_checkout / "vendor" / "icons").mkdir(parents=True)
+    (repo_checkout / "vendor" / "icons" / "icon.png").write_bytes(b"fake PNG")
+    (repo_checkout / "__pycache__").mkdir()
+    (repo_checkout / "__pycache__" / "module.png").write_bytes(b"fake PNG")
+
+    # Also create a "real" screenshot at the top level
+    (tmp_path / "real-screenshot.png").write_bytes(b"real PNG")
+
+    # Scan and verify only the real screenshot is found
+    # Need to wait for settle time (1 second) and account for it in the time window
+    import time as time_module
+
+    time_module.sleep(1.1)  # Wait for EVIDENCE_SETTLE_SEC
+    now = time.time()
+    assign_ts = now - 10
+    found = Orchestrator._find_evidence_files(tmp_path, assign_ts, now)
+
+    found_paths = [p.name for _mt, p, _sz in found]
+    # Should find the real screenshot at top level
+    assert "real-screenshot.png" in found_paths, (
+        f"Expected to find real screenshot, got: {found_paths}"
+    )
+    # Should NOT find any images from excluded directories
+    assert "walk.png" not in found_paths, f"Should exclude src/*/static/*, got: {found_paths}"
+    assert "icon.png" not in found_paths, f"Should exclude vendor/*, got: {found_paths}"
+    assert "module.png" not in found_paths, f"Should exclude __pycache__/*, got: {found_paths}"

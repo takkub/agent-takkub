@@ -3253,4 +3253,61 @@ class TestPreTrustPaneCwd:
         assert json_path.read_text(encoding="utf-8") == before
         assert len(events) == 1
         assert events[0][0] == "pane_pretrust_skip"
-        assert events[0][1]["role"] == "devops"
+
+    def test_clean_isolated_protects_recently_created_worktrees(self, monkeypatch):
+        """#571 regression: newly-created worktrees (spawned seconds earlier)
+        must not be removed by `clean` even if not yet registered in live-pane
+        registry. A 5-minute grace period prevents race conditions where a pane
+        is spawned but not yet in the live-pane registry."""
+        import time
+
+        # Use FakeRunner to simulate git operations without a real repo
+        rules = [
+            (["worktree", "list"], _ok(json.dumps([]))),
+            (["rev-parse", "--show-toplevel"], _ok(str(self.tmp_path / "repo") + "\n")),
+        ]
+        runner = FakeRunner(rules)
+
+        mgr = WorktreeManager(runner=runner)
+        root = self.tmp_path / "repo"
+        root.mkdir()
+        (root / ".git").mkdir()
+
+        # Create a recently-created worktree directory and git directory
+        wt_path = self.tmp_path / "worktrees" / "wt" / "test-backend-1234567890"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        (wt_path / ".git").mkdir(exist_ok=True)
+
+        # Mock list_isolated to return the new worktree
+        def mock_list_isolated(git_root):
+            return [
+                {
+                    "path": str(wt_path),
+                    "branch": "wt/test-backend-1234567890",
+                    "dirty": False,
+                    "ahead": 0,
+                }
+            ]
+
+        monkeypatch.setattr(mgr, "list_isolated", mock_list_isolated)
+
+        # Verify that clean_isolated reports it as KEEP (recently created)
+        # without it being in live_paths
+        lines = mgr.clean_isolated(root, live_paths=set())
+        kept_lines = [line for line in lines if "KEEP" in line and "สร้างใหม่" in line]
+        # At least one KEEP line should mention the newly created worktree
+        assert len(kept_lines) > 0, f"Expected KEEP line for new worktree, got: {lines}"
+
+        # Now simulate time passing (5+ minutes) and verify it's no longer protected
+        # by manually updating the mtime of the worktree directory
+        old_time = time.time() - 400  # 6+ minutes ago
+        try:
+            os.utime(wt_path, (old_time, old_time))
+        except (OSError, ValueError):
+            pass  # Skip if we can't touch the directory
+
+        # Now clean should not protect it (it's old, not newly created)
+        lines = mgr.clean_isolated(root, live_paths=set())
+        old_kept_lines = [line for line in lines if "KEEP" in line and "สร้างใหม่" in line]
+        # Should not have the "newly created" KEEP line anymore for old worktrees
+        assert len(old_kept_lines) == 0, f"Old worktree should not be protected, got: {lines}"

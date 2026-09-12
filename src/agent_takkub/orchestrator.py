@@ -356,12 +356,17 @@ _EVIDENCE_MAX_FILES = 10
 # warning line (everyone else silently gets nothing when they have no shots).
 _EVIDENCE_WARN_ROLES = ("qa", "critic", "designer", "reviewer")
 
-# Issue #500: a pane that npm-installed a tool (e.g. playwright) inside the
+# Issue #500/#567: a pane that npm-installed a tool (e.g. playwright) inside the
 # exports scratch dir left node_modules images (icons, fixtures) in the tree
 # — the recursive scan swept them in as "evidence" alongside real
 # screenshots. Any path with one of these as a directory component is never
 # a real capture; skip it outright rather than filter by name/extension.
-_EVIDENCE_EXCLUDED_DIR_NAMES = frozenset({"node_modules", "vendor"})
+# #567 addition: also exclude paths from repo checkouts (git archives) like
+# `tag-v2.0.8/src/agent_takkub/static/sprites/` which contaminated evidence
+# collection with unrelated fixture images.
+_EVIDENCE_EXCLUDED_DIR_NAMES = frozenset(
+    {"node_modules", "vendor", "src", "static", ".git", "__pycache__"}
+)
 
 # Issue #159: a screenshot capture can fail silently (blank/loading page,
 # race with render, browser crash mid-shot) and still land as a valid file

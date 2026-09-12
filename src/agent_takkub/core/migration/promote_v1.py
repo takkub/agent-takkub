@@ -1988,7 +1988,13 @@ class PromoteV2RootStep:
                 self._manifest_path(), {"schema": 3, "created_at": time.time(), "promoted": merged}
             )
 
-        prune = _prune_phase(new_entries, write_committed, ledger, on_entry=self.on_entry)
+        prune = _prune_phase(
+            new_entries,
+            write_committed,
+            ledger,
+            on_entry=self.on_entry,
+            fsync_every=_restore_fsync_batch(len(new_entries)),
+        )
         if not prune.ok:
             # #504/#574 R8-H4 (= R7-H2): `write_committed` above only ever
             # records `pruned`/the one `failed` entry — every entry
@@ -2760,7 +2766,13 @@ class ArchiveV1LegacyStep:
                 },
             )
 
-        prune = _prune_phase(new_entries, write_committed, ledger, on_entry=self.on_entry)
+        prune = _prune_phase(
+            new_entries,
+            write_committed,
+            ledger,
+            on_entry=self.on_entry,
+            fsync_every=_restore_fsync_batch(len(new_entries)),
+        )
         if not prune.ok:
             self.journal.record(self.step_id, "apply", False, f"cleanup-pending: {prune.error}")
             return StepReport(
