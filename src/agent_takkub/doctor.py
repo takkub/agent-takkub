@@ -234,60 +234,143 @@ def check_claude() -> list[Finding]:
     return findings
 
 
-def _extract_claude_help_tools(claude_bin: str | None = None) -> list[str] | None:
-    """Extract built-in tool names from ``claude --help`` if present.
+def _scan_claude_transcript_tools(
+    projects_dir: Path | str | None = None,
+    *,
+    days: int = 14,
+) -> set[str] | None:
+    """Extract built-in tool names observed in Claude Code transcripts (#581).
 
-    Some CLI builds / help formats document tool choices under ``--tools`` (e.g.
-    ``choices: "Bash", "Read", ...`` or an enumerated list). Returns None if the
-    help text cannot be parsed or does not enumerate tools.
+    Scans session jsonl files under ``claude-config/projects/`` (or the provided
+    ``projects_dir``) modified within the last ``days`` days.
+    Collects all ``content[].type == "tool_use"`` names, filtering out MCP tools
+    (names starting with ``mcp__``).
+
+    Returns None if no transcript files were found within the window (e.g. fresh install),
+    allowing callers to yield Status.INFO without failing.
     """
-    try:
-        if claude_bin is None:
-            from .config import find_claude_executable
+    import json
+    import time
+    from pathlib import Path
 
-            claude_bin = find_claude_executable()
-        if not claude_bin:
-            return None
-        _, out = _run([claude_bin, "--help"])
-        if not out:
-            return None
-        import re
+    cutoff: float | None = None
+    if days is not None and days > 0:
+        cutoff = time.time() - (days * 86400.0)
 
-        m = re.search(r"--tools[^\n]*\n((?:\s{10,}[^\n]+\n)+)", out)
-        if m:
-            block = m.group(1)
-            cm = re.search(r"choices:\s*([A-Za-z0-9_,\s\"']+)", block)
-            if cm:
-                raw_choices = cm.group(1).replace('"', "").replace("'", "")
-                tools = [t.strip() for t in raw_choices.split(",") if t.strip()]
-                if tools:
-                    return tools
-    except Exception:
-        pass
-    return None
+    search_dirs: list[Path] = []
+    if projects_dir is not None:
+        search_dirs.append(Path(projects_dir))
+    else:
+        from .config import DATA_HOME, default_claude_config_dir
+
+        try:
+            cfg_dir = default_claude_config_dir() / "projects"
+            if cfg_dir.is_dir():
+                search_dirs.append(cfg_dir)
+        except Exception:
+            pass
+
+        try:
+            dot_claude = Path.home() / ".claude" / "projects"
+            if dot_claude.is_dir() and dot_claude not in search_dirs:
+                search_dirs.append(dot_claude)
+        except Exception:
+            pass
+
+        try:
+            data_projects = DATA_HOME / "claude-config" / "projects"
+            if data_projects.is_dir() and data_projects not in search_dirs:
+                search_dirs.append(data_projects)
+        except Exception:
+            pass
+
+    files_found = 0
+    tools: set[str] = set()
+
+    for s_dir in search_dirs:
+        if not s_dir.exists():
+            continue
+        if s_dir.is_file() and s_dir.suffix == ".jsonl":
+            candidates = [s_dir]
+        else:
+            try:
+                candidates = list(s_dir.glob("**/*.jsonl"))
+            except OSError:
+                continue
+
+        for fpath in candidates:
+            try:
+                if cutoff is not None and fpath.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+
+            files_found += 1
+            try:
+                with fpath.open(encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if "tool_use" not in line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+
+                        blocks: list = []
+                        if isinstance(rec, dict):
+                            if rec.get("type") == "tool_use":
+                                blocks.append(rec)
+                            msg = rec.get("message")
+                            if isinstance(msg, dict):
+                                c = msg.get("content")
+                                if isinstance(c, list):
+                                    blocks.extend(c)
+                                elif isinstance(c, dict) and c.get("type") == "tool_use":
+                                    blocks.append(c)
+                            c = rec.get("content")
+                            if isinstance(c, list):
+                                blocks.extend(c)
+                            elif isinstance(c, dict) and c.get("type") == "tool_use":
+                                blocks.append(c)
+
+                        for b in blocks:
+                            if isinstance(b, dict) and b.get("type") == "tool_use":
+                                name = b.get("name")
+                                if isinstance(name, str) and name and not name.startswith("mcp__"):
+                                    tools.add(name)
+            except OSError:
+                continue
+
+    if files_found == 0:
+        return None
+    return tools
 
 
 def check_claude_tools_drift(
     current_defaults: Sequence[str] | None = None,
+    projects_dir: Path | str | None = None,
+    *,
+    days: int = 14,
 ) -> Finding:
     """Check whether Claude Code built-in tools have drifted beyond known policy (#581).
 
-    If a newer Claude Code adds built-in tools not present in CLAUDE_DEFAULT_BUILTIN_TOOLS,
-    warn so our teammate --tools allowlist doesn't silently hide new tools.
-    If default tools cannot be extracted, returns Status.INFO so doctor does not fail.
+    Compares tools observed in Claude Code transcripts against CLAUDE_DEFAULT_BUILTIN_TOOLS.
+    If a newer Claude Code calls built-in tools not present in CLAUDE_DEFAULT_BUILTIN_TOOLS,
+    warns so our teammate --tools allowlist doesn't silently hide new tools.
+    If transcripts cannot be probed or none exist, returns Status.INFO so doctor does not fail.
     """
     from .provider_spec import CLAUDE_DEFAULT_BUILTIN_TOOLS
 
     if current_defaults is None:
-        extracted = _extract_claude_help_tools()
+        extracted = _scan_claude_transcript_tools(projects_dir=projects_dir, days=days)
         if extracted is None:
             return Finding(
                 "claude",
                 "tools_drift",
                 Status.INFO,
-                "could not probe built-in tool list from claude --help",
+                "could not probe built-in tool list from transcripts (no session logs found)",
             )
-        current_defaults = extracted
+        current_defaults = sorted(extracted)
 
     known = set(CLAUDE_DEFAULT_BUILTIN_TOOLS)
     new_tools = sorted(set(current_defaults) - known)

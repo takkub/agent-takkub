@@ -538,13 +538,17 @@ CLAUDE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = (
     "SendUserFile",
     "SendFeedback",
     "Artifact",
+    "ListAgents",
+    "SendMessage",
+    "PushNotification",
 )
 
 # Tools hard-cut in Phase 1 (#581): never called in 14 days / 685 sessions /
 # 70,104 tool calls, so cutting them cannot break a workflow that exists today.
 #
 # Measured saving is ~4.9k tok/turn, not the ~11k quoted on the issue: that
-# figure came from a 9-tool probe, while the list below keeps 27. The single
+# figure came from a 9-tool probe, while the list below keeps 30 (including
+# ListAgents, SendMessage, PushNotification from real session audits). The single
 # most expensive survivor is `Skill` at +6,819 tok on its own (it carries the
 # whole skill catalogue), which is why #580 — gating plugin skills per project
 # — is the lever that shrinks this budget further, not cutting more tools.

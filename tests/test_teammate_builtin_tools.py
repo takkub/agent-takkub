@@ -69,6 +69,10 @@ def test_tool_constants_definition():
     # Also verify Skill and WebFetch are preserved (#581 scope)
     assert "Skill" in TEAMMATE_DEFAULT_BUILTIN_TOOLS
     assert "WebFetch" in TEAMMATE_DEFAULT_BUILTIN_TOOLS
+    # Verify tools discovered from real session transcripts (#581)
+    for t in ("ListAgents", "SendMessage", "PushNotification"):
+        assert t in CLAUDE_DEFAULT_BUILTIN_TOOLS
+        assert t in TEAMMATE_DEFAULT_BUILTIN_TOOLS
 
 
 def test_provider_spec_tools_flag_mapping():
@@ -247,29 +251,65 @@ def test_unsupported_provider_omits_tools_flag():
 # ── Doctor Drift Check ────────────────────────────────────────────────────────
 
 
-def test_doctor_drift_check_matches_known_baseline():
-    """Known tool set reports Status.OK."""
-    finding = check_claude_tools_drift(current_defaults=list(CLAUDE_DEFAULT_BUILTIN_TOOLS))
+def _write_session_transcript(path, tool_names: list[str]) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = [
+        {"type": "text", "text": "let's do work"},
+        *[{"type": "tool_use", "name": t, "input": {}} for t in tool_names],
+    ]
+    record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": content,
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def test_doctor_drift_check_matches_known_baseline(tmp_path):
+    """Transcript with known built-in tools and MCP tools reports Status.OK."""
+    sess = tmp_path / "projects" / "p1" / "sess.jsonl"
+    _write_session_transcript(sess, ["Bash", "Read", "Edit", "mcp__github__create_issue"])
+    finding = check_claude_tools_drift(projects_dir=tmp_path)
     assert finding.status == Status.OK
     assert "in sync" in finding.detail
+    assert "3 tools checked" in finding.detail
 
 
-def test_doctor_drift_check_warns_on_new_tools():
-    """Unexpected new tool in defaults produces Status.WARN."""
-    drifted_list = [*CLAUDE_DEFAULT_BUILTIN_TOOLS, "AutonomousSubtask", "NewSecretTool"]
-    finding = check_claude_tools_drift(current_defaults=drifted_list)
+def test_doctor_drift_check_warns_on_new_tools(tmp_path):
+    """Transcript with unexpected new built-in tools produces Status.WARN."""
+    sess = tmp_path / "projects" / "p1" / "sess.jsonl"
+    _write_session_transcript(sess, ["Bash", "AutonomousSubtask", "NewSecretTool"])
+    finding = check_claude_tools_drift(projects_dir=tmp_path)
     assert finding.status == Status.WARN
     assert "AutonomousSubtask" in finding.detail
     assert "NewSecretTool" in finding.detail
     assert finding.fix_hint != ""
 
 
-def test_doctor_drift_check_info_when_probe_fails(monkeypatch):
-    """When help extraction fails and no defaults are supplied, reports Status.INFO without failing."""
-    monkeypatch.setattr("agent_takkub.doctor._extract_claude_help_tools", lambda: None)
-    finding = check_claude_tools_drift(current_defaults=None)
+def test_doctor_drift_check_info_when_no_transcripts(tmp_path):
+    """When no transcripts exist, reports Status.INFO without failing."""
+    empty_dir = tmp_path / "empty_projects"
+    empty_dir.mkdir()
+    finding = check_claude_tools_drift(projects_dir=empty_dir)
     assert finding.status == Status.INFO
     assert "could not probe" in finding.detail
+
+
+def test_doctor_drift_check_current_defaults_override():
+    """Explicit current_defaults evaluates directly without reading transcripts."""
+    finding_ok = check_claude_tools_drift(current_defaults=list(CLAUDE_DEFAULT_BUILTIN_TOOLS))
+    assert finding_ok.status == Status.OK
+    assert "in sync" in finding_ok.detail
+
+    drifted = [*CLAUDE_DEFAULT_BUILTIN_TOOLS, "NewSecretTool"]
+    finding_warn = check_claude_tools_drift(current_defaults=drifted)
+    assert finding_warn.status == Status.WARN
+    assert "NewSecretTool" in finding_warn.detail
 
 
 def test_toolsearch_stays_in_the_teammate_allowlist():
