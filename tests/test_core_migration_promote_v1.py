@@ -1862,3 +1862,80 @@ def test_list_v1_archives_reports_a_listing_failure_instead_of_vanishing(tmp_pat
     # `None` would be read by `ArchiveV1LegacyStep.rollback(archive_ts=
     # None)` as "restore the latest generation" instead of failing closed.
     assert archives[0]["ts"] == ""
+
+
+# ---------------------------------------------------------------------------
+# #579 — junk-only failures should not cascade validation failures
+# ---------------------------------------------------------------------------
+
+
+def test_archive_junk_deletion_failure_does_not_block_validation(tmp_path, journal_backups):
+    """#579: if junk deletion fails (e.g., locked files on Windows), it
+    should not block validation of the real V1 archive completion. The
+    distinction is between 'junk still present' vs 'real V1 data pending'."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+
+    # Create real V1 data (not junk) that will be archived successfully
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    apply_report = step.apply()
+
+    # apply() succeeds — real data archived
+    assert apply_report.ok
+    assert not (data_home / "projects.json").exists()  # archive moved it
+
+    # Create junk that would fail to delete (manually, to simulate failure on next call)
+    junk_dir = data_home / "claude-config.partial"
+    junk_dir.mkdir()
+    (junk_dir / "file.txt").write_text("junk", encoding="utf-8")
+
+    # Now validate() should still pass even though junk is present,
+    # because real V1 data (projects.json) was successfully archived
+    validate_report = step.validate()
+    assert validate_report.ok
+    # The validation passes because real V1 data was archived; junk doesn't block it
+    # (only real V1 data/archive candidates should block validation per #579)
+
+
+def test_archive_junk_deletion_partial_removal_detected(tmp_path, journal_backups, monkeypatch):
+    """#579: if _remove() does not raise OSError but the path still exists
+    (e.g., locked files on Windows allowing partial shutil.rmtree success),
+    verify it is detected and treated as a failure."""
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+
+    # Create a junk file that will 'fail' to delete
+    junk_file = data_home / "claude-config.partial"
+    junk_file.write_text("junk", encoding="utf-8")
+
+    # Mock _remove to NOT raise but also not actually delete the file
+    real_remove = promote_mod._remove
+
+    def remove_but_fail_to_delete(path):
+        if path == junk_file:
+            # Don't raise, but don't delete either (simulate Windows locked file)
+            return
+        return real_remove(path)
+
+    monkeypatch.setattr(promote_mod, "_remove", remove_but_fail_to_delete)
+
+    # Create real V1 data that will be archived successfully
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    apply_report = step.apply()
+
+    # apply() should succeed (real data archived)
+    assert apply_report.ok
+    # But the summary should note that junk deletion failed
+    assert "junk item(s) could not be deleted" in apply_report.summary
+    # Check that the failure was recorded
+    assert any(
+        "still exists after removal" in f for f in apply_report.detail.get("delete_failures", [])
+    )

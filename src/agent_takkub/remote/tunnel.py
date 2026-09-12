@@ -131,6 +131,8 @@ def _write_named_config(tunnel: TunnelConfig, public_url: str, port: int) -> Pat
     # H-D: build the config as a dict and let `yaml.safe_dump` handle all
     # escaping — no more hand-rolled string templating that a newline/colon
     # in any of these values could break out of.
+    import os
+
     hostname = _validate_public_url(public_url)
     tunnel_id = _read_tunnel_id(tunnel.credentials_json)
     config = {
@@ -147,7 +149,12 @@ def _write_named_config(tunnel: TunnelConfig, public_url: str, port: int) -> Pat
     out_dir = RUNTIME_DIR / "tunnel"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "config.yml"
-    out_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    # #578: write atomically (temp + replace) to avoid partial reads on Windows
+    # under xdist — a bare write_text can leave the file empty if the read
+    # happens mid-write before flush completes.
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    tmp_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    os.replace(tmp_path, out_path)
     return out_path
 
 

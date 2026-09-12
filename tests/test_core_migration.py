@@ -1410,3 +1410,54 @@ def test_validate_catches_a_present_but_null_required_domain_value(tmp_path, mon
     assert not all(r.ok for r in reports)
     failed = next(r for r in reports if not r.ok)
     assert failed.step_id == "project"
+
+
+# ---------------------------------------------------------------------------
+# #576 — apply_pending validates all domain steps regardless of pending
+# ---------------------------------------------------------------------------
+
+
+def test_apply_pending_counts_skipped_valid_domain_steps_in_validate_reports(tmp_path, monkeypatch):
+    """#576: when apply_pending() is called and some domain steps are already
+    applied and still valid (so they're skipped), they should still be
+    included in last_validate_reports so that MigrationOutcome.validated_steps
+    counts all valid steps, not just the ones that were re-applied. This is
+    especially important on the re-apply-after-restore path where most domain
+    steps are already complete."""
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+
+    # Create a simple ladder engine
+    engine = MigrationEngine(
+        data_home=data_home,
+        journal=journal,
+    )
+
+    # First pass: apply everything
+    reports = engine.apply()
+    assert all(r.ok for r in reports)
+
+    # Second pass: apply_pending should skip already-valid steps but still
+    # count them in validate_reports. This is the re-apply-after-restore scenario
+    # where most domain steps are already complete.
+    engine2 = MigrationEngine(
+        data_home=data_home,
+        journal=journal,
+    )
+    engine2.apply_pending()
+
+    # Even though most steps were skipped (already applied and valid),
+    # last_validate_reports should include them for the count
+    assert len(engine2.last_validate_reports) > 0
+    # The validate_reports should include all the skipped steps that are still valid
+    validate_count = len(
+        [
+            r
+            for r in engine2.last_validate_reports
+            if r.ok and r.step_id not in ("pre-migrate-backup", "archive-v1-legacy")
+        ]
+    )
+    # Should have validated at least some domain steps
+    assert validate_count > 0

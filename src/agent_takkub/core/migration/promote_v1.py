@@ -2274,18 +2274,24 @@ class ArchiveV1LegacyStep:
     def _archive_base(self) -> Path:
         return self.data_home / _ARCHIVE_DIR_NAME
 
+    def _pending_real_data(self) -> bool:
+        """Check whether there is genuine V1 data pending that should block
+        validation (archive candidates, shared-directory V1 files, or the
+        legacy v2/ folder). Junk deletion failures are recorded but should
+        not block validation of real domain data. See #579."""
+        return (
+            bool(self._archive_candidates())
+            or bool(self._shared_dir_legacy_candidates())
+            or self._legacy_root().is_dir()
+        )
+
     def _pending(self) -> bool:
         """There is work for this step whenever either a genuine V1
         top-level leftover, a #504-item-5 junk entry, a shared-directory V1
         file (#504 H7), or the (already emptied-by-`PromoteV2RootStep`)
         legacy v2/ folder is still on disk — this step is idempotent/no-op
         once all of those are gone."""
-        return (
-            bool(self._archive_candidates())
-            or bool(self._delete_candidates())
-            or bool(self._shared_dir_legacy_candidates())
-            or self._legacy_root().is_dir()
-        )
+        return self._pending_real_data() or bool(self._delete_candidates())
 
     def _named_account_home_names(self) -> set[str]:
         """Every top-level basename under `data_home` that a LIVE
@@ -2824,12 +2830,18 @@ class ArchiveV1LegacyStep:
         # #504 item 5: delete outright, only AFTER the archive above has
         # fully succeeded and verified — a failure here just leaves a bit of
         # named junk clutter (never data), so it doesn't unwind the archive.
+        # #579: verify non-existence after _remove() succeeds (e.g., a locked
+        # file on Windows can cause partial rmtree success without raising OSError).
         delete_failures: list[str] = []
         deleted: list[str] = []
         for p in self._delete_candidates():
             try:
                 _remove(p)
-                deleted.append(p.name)
+                # Verify the path is actually gone, not just that _remove didn't raise
+                if p.exists():
+                    delete_failures.append(f"{p.name}: path still exists after removal attempt")
+                else:
+                    deleted.append(p.name)
             except OSError as e:
                 delete_failures.append(f"{p.name}: {e}")
         if deleted or delete_failures:
@@ -2869,7 +2881,9 @@ class ArchiveV1LegacyStep:
         )
 
     def validate(self) -> StepReport:
-        pending = self._pending()
+        # #579: only fail validation if there is REAL V1 data pending, not just
+        # junk entries that failed to delete (which don't affect domain validation)
+        pending = self._pending_real_data()
         if pending:
             return StepReport(
                 self.step_id,

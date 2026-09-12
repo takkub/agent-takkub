@@ -452,6 +452,7 @@ class MigrationEngine:
                 promote_has_pending_work = bool(promote_candidates_fn())
             except Exception:
                 promote_has_pending_work = True  # fail open: never suppress on a probe error
+        skipped_valid_steps: list[tuple[MigrationStep, str, StepReport]] = []
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
             if step_id in skip:
@@ -459,7 +460,18 @@ class MigrationEngine:
             if step_id in applied_before:
                 if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
                     continue
-                if s.validate().ok:
+                # #576: call validate() exactly once here and reuse its result
+                # below — this is the same call the pre-#576 code already made
+                # to decide whether to skip re-apply, not an extra one. Calling
+                # _validate_one() again on the same step in the loop below
+                # (the original #576 fix) double-counted the validate call and
+                # broke callers asserting each step's call log (regression
+                # caught by TestApplyPending::test_applied_and_still_valid_step_is_skipped_entirely).
+                _validated = s.validate()
+                if _validated.ok:
+                    # still count this step for validated_steps, even though
+                    # it's already applied and doesn't need re-apply
+                    skipped_valid_steps.append((s, step_id, _validated))
                     continue
             self._notify_step(step_id, "start")
             r = self._copy_only_apply(s)
@@ -513,6 +525,18 @@ class MigrationEngine:
         # step (or FakeStep stand-ins with matching ids but no copy/prune
         # split) has nothing to defer — behave exactly as before, no extra
         # `validate()` probing beyond what this method already did.
+
+        # #576: add validation reports for skipped-but-valid domain steps so
+        # that MigrationOutcome.validated_steps counts all steps that are valid,
+        # not just the ones that were actually run (this is crucial for the
+        # re-apply-after-restore path where most domain steps are already valid).
+        # Don't emit validate events for skipped steps (they weren't re-applied,
+        # just confirmed already valid), only add to the validation report count.
+        # Reuses the StepReport from the single validate() call made above —
+        # see the comment there on why this must not call validate again.
+        for _s, _step_id, v in skipped_valid_steps:
+            self.last_validate_reports.append(v)
+
         if not any(self._prune_deferred(s) for s in steps_run):
             return reports
         finished = self._finish_deferred_prune(
