@@ -686,6 +686,26 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if cfg is not None and hasattr(cfg, "SETTINGS_HOME"):
         monkeypatch.setattr(cfg, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False)
 
+    # `team_preset` takes an IMPORT-TIME copy (`from .config import
+    # SETTINGS_HOME as _BASE_DIR`), so the patch just above never reaches it and
+    # `team_preset.path()` kept resolving into the developer's real
+    # `~/.takkub/projects/<slug>/team_preset.json`.
+    #
+    # That made the suite read live cockpit settings: this machine had
+    # `projects/default/team_preset.json` = `{"override": "pair"}` left over
+    # from a `--team pair` assign, and the "pair" preset does not enable
+    # `backend`, so every test that spawns a teammate under project "default"
+    # — and there are ~74 of them across test_cli_server.py,
+    # test_spawn_default_model_env.py, test_orchestrator_claude_env_leak.py,
+    # test_orchestrator_session_uuid.py and friends — died on "role backend
+    # ไม่เปิดใน team preset 'คู่'". CI never saw it (no such file there), it
+    # reproduced identically on the v2.1.0 tag, and it survived every attempt
+    # to bisect it to a code change, which is exactly what made it read as
+    # "local full-gate flakiness" for weeks.
+    tp_mod = _maybe_module("agent_takkub.team_preset", force=True)
+    if tp_mod is not None and hasattr(tp_mod, "_BASE_DIR"):
+        monkeypatch.setattr(tp_mod, "_BASE_DIR", tmp_path / "_isolated_takkub", raising=False)
+
     # #196/#504: `session_store.py`'s password-session store used to be a
     # module-level `_PATH` (SETTINGS_HOME-bound) needing isolation here so
     # AuthGate.__init__ (built by any RemoteHttpServer/AuthGate test, not
