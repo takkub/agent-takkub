@@ -457,14 +457,23 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
         # single seam translating a legacy role name to its canonical role
         # (routing_planner._MODE_TO_LEGACY_ROLE is the reverse direction) so
         # this stays in lockstep instead of hand-rolling a second alias table.
+        #
+        # Deliberately asymmetric: only `base`'s own alias is resolved, not
+        # the checker's. checker="qa" (e2e) must NOT satisfy a bare
+        # can_spawn("reviewer") (mode=code) — those are different checking
+        # contracts even though #561 dispatches both through the `reviewer`
+        # CLI surface. Resolving the checker's alias too (a round-4 attempt
+        # at a "reverse-direction gap") silently let checker="qa" allow
+        # "reviewer" through, breaking test_custom_checker_qa_explicit_
+        # keeps_qa_allowed_and_reviewer_blocked's decade-old invariant that
+        # a checker slot pinned to a specific mode-role only that role.
         from .routing_planner import resolve_role_alias
 
-        canonical_base, _ = resolve_role_alias(base)
-        canonical_checker, _ = resolve_role_alias(cfg.get("checker") or "")
-        allowed = (
-            cfg.get("checker") in (base, canonical_base)
-            or canonical_checker in (base, canonical_base)
-            or (base in cfg["roles"] and cfg["roles"][base])
+        canonical_role, _mode = resolve_role_alias(base)
+        allowed = cfg["checker"] in (base, canonical_role) or (
+            # a checker role also registered as a position (custom preset
+            # choosing e.g. "reviewer" as a coding position too) stays allowed
+            base in cfg["roles"] and cfg["roles"][base]
         )
     else:
         allowed = bool(cfg["roles"].get(base, False))

@@ -256,15 +256,22 @@ class TestReviewerOrchestratorDispatch:
 
 class TestTeamPresetCanSpawnSeam:
     def test_can_spawn_canonical_alias(self):
-        # When preset config sets checker to "qa", can_spawn("reviewer") must succeed
+        # checker="qa" satisfies can_spawn("qa") (identity) but must NOT
+        # satisfy bare can_spawn("reviewer") (mode=code) — qa/e2e and
+        # reviewer/code are different checking contracts even though #561
+        # dispatches both through the `reviewer` CLI surface (asymmetric by
+        # design — see the comment in team_preset.can_spawn).
         with patch(
             "agent_takkub.team_preset.current",
             return_value={"preset": "duo", "roles": {}, "checker": "qa"},
         ):
-            ok, _ = team_preset.can_spawn("reviewer", "test-proj")
+            ok, _ = team_preset.can_spawn("qa", "test-proj")
             assert ok is True
+            ok, _ = team_preset.can_spawn("reviewer", "test-proj")
+            assert ok is False
 
         # When preset config sets checker to "reviewer", can_spawn("qa") must succeed
+        # (b7248a11: qa/e2e satisfies a canonical "reviewer" checker slot).
         with patch(
             "agent_takkub.team_preset.current",
             return_value={"preset": "duo", "roles": {}, "checker": "reviewer"},
