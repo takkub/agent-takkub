@@ -443,6 +443,17 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     rmem = _maybe_module("agent_takkub.role_memory", force=False)
     if rmem is not None:
         monkeypatch.setattr(rmem, "ROLE_MEMORY_DIR", runtime / "role-memory", raising=False)
+        # role_memory ALSO keeps its own import-time copy of RUNTIME_DIR beside
+        # the derived dir above, and bm25_search takes a second copy of
+        # ROLE_MEMORY_DIR. Both surfaced on CI (not locally, where they happened
+        # to be imported after the patch) via #584's guard — exactly the leak
+        # class it exists to catch.
+        if hasattr(rmem, "RUNTIME_DIR"):
+            monkeypatch.setattr(rmem, "RUNTIME_DIR", runtime, raising=False)
+
+    bm25 = _maybe_module("agent_takkub.bm25_search", force=False)
+    if bm25 is not None and hasattr(bm25, "ROLE_MEMORY_DIR"):
+        monkeypatch.setattr(bm25, "ROLE_MEMORY_DIR", runtime / "role-memory", raising=False)
 
     # Derived constants bound from RUNTIME_DIR at import time (#584):
     orch_mod = _maybe_module("agent_takkub.orchestrator", force=False)

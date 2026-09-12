@@ -1089,6 +1089,39 @@ def _teammate_builtin_tools() -> list[str]:
     return list(TEAMMATE_DEFAULT_BUILTIN_TOOLS)
 
 
+def _teammate_autocompact() -> int | None:
+    """Token window after which a pane auto-compacts itself (#582).
+
+    Claude Code compacts on its own near the context limit, but that limit is
+    1M now, so a pane realistically never reaches it: measured over 417 real
+    sessions the average turn already carried a 201k prefix, and 91.5% of all
+    prefix spend sat in sessions of 151+ turns — every token of which is
+    re-read on every later turn.
+
+    This only moves WHEN the CLI's own compaction runs, never how it runs, so
+    it is not the "cockpit injects /compact mid-task" design that
+    `main_window._on_session_cap_exceeded` deliberately refuses to do.
+
+    ``TAKKUB_AUTOCOMPACT`` overrides the window; empty (or an unparseable /
+    out-of-range value) means "do not pass the flag at all", i.e. exactly the
+    pre-#582 behaviour. The CLI accepts 100k-1M.
+    """
+    raw = os.environ.get("TAKKUB_AUTOCOMPACT")
+    if raw is not None:
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if 100_000 <= value <= 1_000_000 else None
+
+    from .provider_spec import TEAMMATE_AUTOCOMPACT_TOKENS
+
+    return TEAMMATE_AUTOCOMPACT_TOKENS
+
+
 def _remap_pinned_model(model: str, env: dict[str, str]) -> str:
     """Translate a concrete ``claude-*`` model pin through the profile's remap.
 
@@ -2532,6 +2565,12 @@ class SpawnEngineMixin:
                 if _tools:
                     tools_argv.extend([spec.tools_flag, ",".join(_tools)])
 
+            autocompact_argv: list[str] = []
+            if spec.autocompact_flag:
+                _window = _teammate_autocompact()
+                if _window:
+                    autocompact_argv.extend([spec.autocompact_flag, str(_window)])
+
             from .core.providers.plan import assemble_generic_argv
 
             provider_argv = assemble_generic_argv(
@@ -2542,6 +2581,7 @@ class SpawnEngineMixin:
                 mcp_argv=mcp_argv,
                 project_scope_argv=project_scope_argv,
                 resume_argv=resume_argv,
+                autocompact_argv=autocompact_argv,
                 tools_argv=tools_argv,
             )
 
@@ -3349,6 +3389,19 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 if _tools:
                     tools_argv.extend([_claude_tools_flag, ",".join(_tools)])
 
+        # Applies to the Lead too, unlike --tools: a Lead pane accumulates the
+        # longest transcripts of any role, so exempting it would skip the
+        # biggest single beneficiary (#582).
+        autocompact_argv: list[str] = []
+        from .provider_config import CLAUDE as _CLAUDE_FOR_AUTOCOMPACT
+        from .provider_spec import PROVIDER_REGISTRY as _REGISTRY_FOR_AUTOCOMPACT
+
+        _autocompact_flag = _REGISTRY_FOR_AUTOCOMPACT[_CLAUDE_FOR_AUTOCOMPACT].autocompact_flag
+        if _autocompact_flag:
+            _window = _teammate_autocompact()
+            if _window:
+                autocompact_argv.extend([_autocompact_flag, str(_window)])
+
         from .core.providers.claude_plan import assemble_claude_argv
 
         argv = assemble_claude_argv(
@@ -3364,6 +3417,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             mcp_argv=_claude_mcp_argv,
             denied_tools_argv=denied_tools_argv,
             resume_argv=resume_argv,
+            autocompact_argv=autocompact_argv,
             tools_argv=tools_argv,
         )
 

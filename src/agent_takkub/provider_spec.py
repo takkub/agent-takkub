@@ -181,6 +181,7 @@ class ProviderSpec:
     disallowed_tools: tuple[str, ...] = field(default_factory=tuple)
     model_flag: str | None = None
     tools_flag: str | None = None
+    autocompact_flag: str | None = None
     # Most CLIs accept effort as a regular ``flag value`` pair. Codex instead
     # exposes it through its generic config override:
     # ``-c model_reasoning_effort=<level>``. When effort_config_key is set,
@@ -566,6 +567,21 @@ TEAMMATE_CUT_TOOLS: tuple[str, ...] = (
     "TodoWrite",
 )
 
+# Where a pane's own auto-compaction kicks in (#582). Claude Code compacts on
+# its own near the context limit, but that limit is now 1M, so in practice a
+# pane never compacts: measured across 417 real sessions the average turn
+# carried a 201k prefix, 91.5% of all prefix spend sat in sessions of 151+
+# turns, and every one of those tokens is re-read on each later turn.
+#
+# Capping the window at 200k models out at ~22% of total prefix spend (150k is
+# ~34%, 100k ~52%). Deliberately starting at the least aggressive end: this
+# hands the work to the CLI's OWN compaction — the same mechanism that already
+# runs today, just reached sooner — rather than injecting `/compact` mid-task,
+# so it changes when compaction happens and not how. Lower it once a week of
+# real use shows nothing degraded. `--autocompact` accepts 100k-1M.
+TEAMMATE_AUTOCOMPACT_TOKENS = 200_000
+
+
 # Default teammate tools = baseline minus the 8 cut tools.
 TEAMMATE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = tuple(
     t for t in CLAUDE_DEFAULT_BUILTIN_TOOLS if t not in TEAMMATE_CUT_TOOLS
@@ -624,6 +640,7 @@ claude_spec = ProviderSpec(
     plugin_dirs=("TAKKUB_EXTRA_PLUGINS",),  # spawn_engine.py:1529-1536 (env var name)
     disallowed_tools=("Task",),  # spawn_engine.py:351 _teammate_disallowed_tools() default
     tools_flag="--tools",  # #581 Phase 1: teammate built-in tool schema filtering
+    autocompact_flag="--autocompact",  # #582: compact at 200k instead of ~1M
     # (AskUserQuestion is a SECOND, separate --disallowed-tools flag at
     # spawn_engine.py:1594-1608 — not collapsed into this one field in Phase 0)
     model_flag="--model",  # spawn_engine.py:1483
@@ -717,6 +734,8 @@ codex_spec = ProviderSpec(
     system_prompt_flag=None,
     # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
     tools_flag=None,
+    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
+    autocompact_flag=None,
     ready_hard_blockers=("esc to interrupt", "esc to cancel"),  # pty_session.py:208-209
     ready_rules=(
         # Current-code truth (post-#99 fix): the banner-alone rule
@@ -922,6 +941,8 @@ gemini_spec = ProviderSpec(
     system_prompt_flag=None,
     # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
     tools_flag=None,
+    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
+    autocompact_flag=None,
     ready_hard_blockers=(
         "esc to interrupt",
         "esc to cancel",
@@ -1123,6 +1144,8 @@ opencode_spec = ProviderSpec(
     system_prompt_flag=None,
     # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
     tools_flag=None,
+    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
+    autocompact_flag=None,
     ready_hard_blockers=("esc interrupt",),  # opencode shows "esc interrupt" without "to"
     ready_rules=(
         # Idle composer markers across OpenCode versions and terminal layouts:
@@ -1212,6 +1235,8 @@ kimi_spec = ProviderSpec(
     system_prompt_flag=None,
     # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
     tools_flag=None,
+    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
+    autocompact_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
     # ⚠ BUSY marker STILL NOT calibrated (#257): the idle footer below was
@@ -1335,6 +1360,8 @@ cursor_spec = ProviderSpec(
     system_prompt_flag=None,
     # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
     tools_flag=None,
+    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
+    autocompact_flag=None,
     ready_hard_blockers=(),
     # ⚠ NOT yet calibrated: no Cursor TUI idle/busy markers have been observed.
     # Keep this empty rather than guessing markers that could misroute tasks.

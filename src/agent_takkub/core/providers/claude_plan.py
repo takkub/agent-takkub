@@ -50,6 +50,7 @@ def assemble_claude_argv(
     mcp_argv: Sequence[str] = (),
     denied_tools_argv: Sequence[str] = (),
     resume_argv: Sequence[str] = (),
+    autocompact_argv: Sequence[str] = (),
     tools_argv: Sequence[str] = (),
 ) -> list[str]:
     """Pure re-assembly of the claude branch's argv, same order the branch
@@ -89,5 +90,6 @@ def assemble_claude_argv(
         *mcp_argv,
         *denied_tools_argv,
         *resume_argv,
+        *autocompact_argv,
         *tools_argv,
     ]

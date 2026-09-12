@@ -139,7 +139,10 @@ def _spawn_claude_and_capture_argv(qapp, monkeypatch, role_name: str = "backend"
 
 
 def test_assemble_claude_argv_reproduces_live_branch_argv(qapp, monkeypatch):
-    from agent_takkub.provider_spec import TEAMMATE_DEFAULT_BUILTIN_TOOLS
+    from agent_takkub.provider_spec import (
+        TEAMMATE_AUTOCOMPACT_TOKENS,
+        TEAMMATE_DEFAULT_BUILTIN_TOOLS,
+    )
 
     real_argv = _spawn_claude_and_capture_argv(qapp, monkeypatch)
 
@@ -156,6 +159,7 @@ def test_assemble_claude_argv_reproduces_live_branch_argv(qapp, monkeypatch):
         mcp_argv=FAKE_MCP_ARGV,
         denied_tools_argv=["--disallowed-tools", "Task,AskUserQuestion"],
         resume_argv=["--session-id", str(FIXED_UUID)],
+        autocompact_argv=["--autocompact", str(TEAMMATE_AUTOCOMPACT_TOKENS)],
         tools_argv=["--tools", ",".join(TEAMMATE_DEFAULT_BUILTIN_TOOLS)],
     )
 
