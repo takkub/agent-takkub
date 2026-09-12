@@ -2817,13 +2817,18 @@ class Orchestrator(
         new task."""
         from . import role_messages
 
-        pending = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
-        if not pending:
+        pending, expired = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
+        if not pending and not expired:
             return ""
-        return (
-            f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' จะถูกส่งให้ pane "
-            f"ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
-        )
+        note = ""
+        if pending:
+            note = f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' จะถูกส่งให้ pane ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
+        if expired:
+            note += (
+                ("\n" if note else "")
+                + f"⚠️ {len(expired)} queued messages for '{role_name}' were older than 12 hours and will be dropped."
+            )
+        return note
 
     def _latest_queued_task_text(self, detail_path: pathlib.Path | None, fallback: str) -> str:
         """Resolve the text to actually deliver once a gate-blocked assign is
@@ -3938,14 +3943,32 @@ class Orchestrator(
         `_flush_pending_lead_cc`'s retry shape: a no-op if the pane went
         busy/died again before this fired (5s after spawn — see
         spawn_engine.py) — the records stay `"queued_no_pane"` on disk and
-        the next spawn retries them."""
+        the next spawn retries them.
+
+        #565: Messages older than _QUEUED_NO_PANE_MAX_AGE_HOURS are dropped
+        instead of delivered, to prevent stale messages from old tasks
+        replaying into unrelated new assignments."""
         from . import role_messages
 
-        pending = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
-        if not pending:
+        pending, expired = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
+        if not (pending or expired):
             return
         pane = self._project_panes(project_ns).get(role_name)
         if not (pane and pane.session and pane.session.is_alive):
+            return
+        # Handle expired messages first: drop them without delivering
+        for rec in expired:
+            msg_id = rec.get("id", "")
+            role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "expired_queued_message")
+        if expired:
+            _log_event(
+                "send_queued_no_pane_expired",
+                project=project_ns,
+                role=role_name,
+                count=len(expired),
+            )
+        # Now deliver the pending (non-expired) messages
+        if not pending:
             return
         # #473: a message queued while this role's pane was fully closed can
         # cross a task boundary — Lead may `takkub assign` a brand-new,

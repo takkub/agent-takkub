@@ -1743,7 +1743,10 @@ class SpawnEngineMixin:
                 from . import role_messages
 
                 _runtime_dir = _from_orch("RUNTIME_DIR")
-                if role_messages.queued_no_pane_for_role(_runtime_dir, project_ns, role_name):
+                pending, _expired = role_messages.queued_no_pane_for_role(
+                    _runtime_dir, project_ns, role_name
+                )
+                if pending:
                     QTimer.singleShot(
                         5_000,
                         lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),
@@ -3446,7 +3449,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 from . import role_messages
 
                 _runtime_dir = _from_orch("RUNTIME_DIR")
-                if role_messages.queued_no_pane_for_role(_runtime_dir, project_ns, role_name):
+                pending, _expired = role_messages.queued_no_pane_for_role(
+                    _runtime_dir, project_ns, role_name
+                )
+                if pending:
                     QTimer.singleShot(
                         5_000,
                         lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),

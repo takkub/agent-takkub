@@ -145,10 +145,13 @@ class TestQueuedMessageFlush:
         ok, _msg = orch.send("backend", "safety note", from_role="lead", project="p")
         assert ok is True
 
-        pending = role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, "p", "backend")
+        pending, expired = role_messages.queued_no_pane_for_role(
+            orch_mod.RUNTIME_DIR, "p", "backend"
+        )
         assert len(pending) == 1
         assert pending[0]["body"] == "safety note"
         assert pending[0]["from"] == "lead"
+        assert expired == []
 
     def test_flush_delivers_once_pane_is_alive_and_clears_the_queue(
         self, orch: Orchestrator
@@ -162,7 +165,10 @@ class TestQueuedMessageFlush:
         orch._flush_queued_no_pane_messages("p", "backend")
 
         pane.session.write.assert_called()
-        assert role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, "p", "backend") == []
+        assert role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, "p", "backend") == (
+            [],
+            [],
+        )
         # The delivery itself went through send() again, landing a fresh
         # "sent" record distinct from the now-abandoned queued placeholder.
         all_records = role_messages.read(orch_mod.RUNTIME_DIR, "p", role="backend")
@@ -175,8 +181,11 @@ class TestQueuedMessageFlush:
         orch.send("backend", "safety note", from_role="lead", project="p")
         orch._flush_queued_no_pane_messages("p", "backend")
 
-        pending = role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, "p", "backend")
+        pending, expired = role_messages.queued_no_pane_for_role(
+            orch_mod.RUNTIME_DIR, "p", "backend"
+        )
         assert len(pending) == 1  # untouched — still queued, retried on the next spawn
+        assert expired == []
 
 
 class TestQueuedMessageStaleAcrossAssign:

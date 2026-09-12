@@ -317,8 +317,11 @@ class TestLaunchSessionFlushesQueuedNoPaneMessages:
 
         from agent_takkub import role_messages
 
-        assert (
-            role_messages.queued_no_pane_for_role(orch_mod.RUNTIME_DIR, TEST_PROJECT, "codex") == []
+        assert role_messages.queued_no_pane_for_role(
+            orch_mod.RUNTIME_DIR, TEST_PROJECT, "codex"
+        ) == (
+            [],
+            [],
         )
         all_records = role_messages.read(orch_mod.RUNTIME_DIR, TEST_PROJECT, role="codex")
         assert any(r["state"] == "sent" for r in all_records)

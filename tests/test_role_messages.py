@@ -121,15 +121,16 @@ class TestQueuedNoPane:
         )
         _append(tmp_path, to_role="backend", body="already sent, not queued")
 
-        pending = role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend")
+        pending, expired = role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend")
         assert [r["body"] for r in pending] == ["for backend"]
+        assert expired == []
 
     def test_mark_abandoned_removes_it_from_the_queued_view(self, tmp_path: pathlib.Path) -> None:
         msg_id = role_messages.append_queued_no_pane(
             tmp_path, "proj", to_role="backend", from_role="lead", body="safety note"
         )
         role_messages.mark_abandoned(tmp_path, "proj", msg_id, "flushed_after_spawn")
-        assert role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend") == []
+        assert role_messages.queued_no_pane_for_role(tmp_path, "proj", "backend") == ([], [])
 
 
 class TestCliRendering:

@@ -1849,6 +1849,21 @@ class PtySession(QObject):
                     self._last_output_ts = now
                     if fingerprint and self._first_content_ts is None:
                         self._first_content_ts = now
+                # #569 (root cause of no_content_pane_recover firing on live,
+                # spinner-only panes): a pane whose only rendered output so far
+                # is a spinner/elapsed-counter/trailing-dots animation (e.g.
+                # "⠂ Thinking... (12s)") normalizes to an EMPTY fingerprint
+                # above — `_content_fingerprint` deliberately strips those
+                # patterns so animation alone never registers as a real
+                # content *change* — but the screen is NOT actually blank the
+                # way a pane fed only its terminal-init handshake is (no
+                # visible glyph painted at all). first_content_ts must key off
+                # that distinction (any visible glyph painted, even one the
+                # fingerprint later normalizes away), not the normalized
+                # fingerprint or raw byte count — `output_bytes_total` also
+                # counts pure mode-set escape sequences that paint nothing.
+                if self._first_content_ts is None and any(line.rstrip() for line in lines):
+                    self._first_content_ts = now
         except Exception:
             # pyte sometimes chokes on partial sequences; skip and continue
             pass

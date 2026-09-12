@@ -56,6 +56,14 @@ MAX_RECORDS_PER_ROLE = 200
 # into an infinite loop of duplicated instructions.
 MAX_REPLAYS = 3
 
+# #565: maximum age for queued no-pane messages. Messages older than this
+# should not be delivered to a new pane, even if that pane takes the same
+# role name. Prevents stale messages from old tasks replaying into unrelated
+# new assignments. Configurable via env var for testing/custom needs.
+_QUEUED_NO_PANE_MAX_AGE_HOURS = int(
+    __import__("os").environ.get("TAKKUB_QUEUED_MESSAGE_MAX_AGE_HOURS", "12")
+)
+
 
 def _store_path(runtime_dir: pathlib.Path, project_ns: str) -> pathlib.Path:
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in project_ns) or "default"
@@ -194,14 +202,29 @@ def append_queued_no_pane(
     )
 
 
-def queued_no_pane_for_role(runtime_dir: pathlib.Path, project_ns: str, role: str) -> list[dict]:
+def queued_no_pane_for_role(
+    runtime_dir: pathlib.Path, project_ns: str, role: str
+) -> tuple[list[dict], list[dict]]:
     """Messages `takkub send` recorded while *role* had no pane open (#303
-    item 3), still waiting to be delivered once it spawns."""
-    return [
-        rec
-        for rec in read(runtime_dir, project_ns)
-        if rec.get("to") == role and rec.get("state") == "queued_no_pane"
-    ]
+    item 3), still waiting to be delivered once it spawns (#565: now includes
+    stale expiration check).
+
+    Returns: (pending_messages, expired_messages)
+    - pending_messages: not yet expired and ready to deliver
+    - expired_messages: older than _QUEUED_NO_PANE_MAX_AGE_HOURS, to be dropped
+    """
+    now = time.time()
+    max_age_seconds = _QUEUED_NO_PANE_MAX_AGE_HOURS * 3600
+    pending = []
+    expired = []
+    for rec in read(runtime_dir, project_ns):
+        if rec.get("to") == role and rec.get("state") == "queued_no_pane":
+            msg_ts = rec.get("ts", 0)
+            if now - msg_ts > max_age_seconds:
+                expired.append(rec)
+            else:
+                pending.append(rec)
+    return pending, expired
 
 
 def _update(runtime_dir: pathlib.Path, project_ns: str, msg_id: str, **fields) -> bool:
