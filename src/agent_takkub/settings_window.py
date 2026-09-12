@@ -109,6 +109,7 @@ from PyQt6.QtWidgets import (
 
 from . import (
     auto_issue_signals,
+    auto_resume,
     autoskills_installer,
     cockpit_theme,
     config,
@@ -1698,6 +1699,26 @@ class SettingsWindow(
         self._pane_discard_chk.toggled.connect(self._on_pane_discard_toggled)
         discard_lay.addWidget(self._pane_discard_chk)
         lay.addWidget(discard_panel)
+
+        park_panel = QWidget(view)
+        park_panel.setObjectName("panel")
+        park_lay = QVBoxLayout(park_panel)
+        park_lay.setContentsMargins(16, 16, 16, 16)
+        park_lay.setSpacing(8)
+        self._park_fallback_chk = QCheckBox("เมื่อ reroute ไม่ได้ → park รอ reset", park_panel)
+        self._park_fallback_chk.setChecked(auto_resume.park_fallback_enabled())
+        self._park_fallback_chk.toggled.connect(auto_resume.set_park_fallback_enabled)
+        park_lay.addWidget(self._park_fallback_chk)
+        park_hint = QLabel(
+            "เมื่อ quota หมด จะลองย้ายงานไป provider อื่นก่อนเสมอ · "
+            "เปิด: ถ้าย้ายไม่ได้ให้พักรอ quota reset · ปิด: หยุดงานและแจ้ง Lead · "
+            "บันทึกทันที มีผลเมื่อ quota หมดครั้งถัดไป",
+            park_panel,
+        )
+        park_hint.setObjectName("panelHint")
+        park_hint.setWordWrap(True)
+        park_lay.addWidget(park_hint)
+        lay.addWidget(park_panel)
 
         # #297: the switch for automatic cockpit bug reports. Lives here rather
         # than buried in a config file because it decides whether something

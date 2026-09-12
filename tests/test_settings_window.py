@@ -11,12 +11,14 @@ targeted-tests rule.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
+    auto_resume,
     claude_auth_config,
     config,
     custom_roles,
@@ -182,6 +184,40 @@ class TestSettingsWindowStructure:
         saved = performance_settings.load()
         assert saved.mode == "safe"
         assert saved.max_heavy_global == 2
+        dlg.deleteLater()
+
+
+class TestParkFallbackToggle:
+    def test_default_on_and_clicks_persist_across_reopen(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        assert dlg._park_fallback_chk.text() == "เมื่อ reroute ไม่ได้ → park รอ reset"
+        assert dlg._park_fallback_chk.isChecked() is True
+        dlg._park_fallback_chk.click()
+        assert auto_resume.park_fallback_enabled() is False
+        dlg.deleteLater()
+
+        reopened = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        assert reopened._park_fallback_chk.isChecked() is False
+        reopened._park_fallback_chk.click()
+        assert auto_resume.park_fallback_enabled() is True
+        reopened.deleteLater()
+
+    def test_toggle_off_gives_up_when_no_provider_is_available(self) -> None:
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+        from agent_takkub.spawn_engine import PaneState
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        dlg._park_fallback_chk.click()
+        orch = MagicMock(spec=AutoResumeMixin)
+        orch._pick_reroute_provider.return_value = None
+        ps = PaneState()
+        ps.quota_provider = "claude"
+        AutoResumeMixin._reroute_or_park(orch, "proj", "backend", ps)
+        orch._park_pane_for_limit.assert_not_called()
+        orch._reroute_pane_to_provider.assert_not_called()
+        orch._give_up_auto_resume.assert_called_once_with(
+            "proj", "backend", ps, reason="no_fallback_park_disabled"
+        )
         dlg.deleteLater()
 
 
