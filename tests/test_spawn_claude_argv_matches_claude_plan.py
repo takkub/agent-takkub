@@ -84,6 +84,7 @@ _PATCHES: list[tuple[str, object]] = [
     ("agent_takkub.mcp_bridge.mcp_argv_for_provider", FAKE_MCP_ARGV),
     ("agent_takkub.mcp_bridge.describe_mcp_handshake", {}),
     ("agent_takkub.role_models.effort_for", ""),
+    ("agent_takkub.core.routing.effective_provider_for_v2", "claude"),
 ]
 
 
@@ -138,6 +139,8 @@ def _spawn_claude_and_capture_argv(qapp, monkeypatch, role_name: str = "backend"
 
 
 def test_assemble_claude_argv_reproduces_live_branch_argv(qapp, monkeypatch):
+    from agent_takkub.provider_spec import TEAMMATE_DEFAULT_BUILTIN_TOOLS
+
     real_argv = _spawn_claude_and_capture_argv(qapp, monkeypatch)
 
     reassembled = assemble_claude_argv(
@@ -153,6 +156,7 @@ def test_assemble_claude_argv_reproduces_live_branch_argv(qapp, monkeypatch):
         mcp_argv=FAKE_MCP_ARGV,
         denied_tools_argv=["--disallowed-tools", "Task,AskUserQuestion"],
         resume_argv=["--session-id", str(FIXED_UUID)],
+        tools_argv=["--tools", ",".join(TEAMMATE_DEFAULT_BUILTIN_TOOLS)],
     )
 
     assert real_argv == reassembled, (

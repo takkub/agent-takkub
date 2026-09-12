@@ -60,6 +60,16 @@ from .vault_mirror import _is_junk_note
 # keeps per-turn context (and the cache bill) flat. Kept terse on purpose: a
 # guard against token bloat must not itself be bloat.
 #
+# #583 (2026-09-12): text threshold cut 300KB -> 50KB. Measured over 250 real
+# sessions / 6,146 Read calls: `Read` is 90.3% of all tool-result tokens and
+# ~64% of everything billed. The old 300KB line sat ~13x above where the money
+# is — reads in the 20-75k-token band (~80-300KB of text) are 8.5% of calls but
+# 48.8% of Read spend, and this guard was explicitly blessing every one of them
+# with "<=300KB -> read normally"; only 1.3% of calls ever crossed 300KB at all.
+# The IMAGE threshold below deliberately stays at 300KB: images are charged by
+# resolution rather than bytes, so neither the byte heuristic nor offset/limit
+# transfers to them.
+#
 # #157: extended to cover images. Images are charged by resolution (vision
 # tiling), not linearly by byte size like text, so the text-file "check bytes,
 # offset/limit" workaround doesn't apply — the only real levers are "don't
@@ -77,10 +87,12 @@ BIG_FILE_GUARD = """
 
 **ก่อน `Read` ไฟล์ที่อาจใหญ่** (asset bundle, `*.html` เกม/หน้าเดียว, `sprites*.js`, `*.min.js`, base64/data-URI, lockfile, generated, dump) → **เช็คขนาดก่อน** (`ls -la <file>` หรือ `wc -c`):
 
-- ≤ ~300KB → อ่านได้ตามปกติ
-- \\> ~300KB → **ห้าม `Read` ทั้งไฟล์** ใช้แทน:
+- ≤ ~50KB → อ่านได้ตามปกติ
+- \\> ~50KB → **ห้าม `Read` ทั้งไฟล์** ใช้แทน:
   - `Grep` หา symbol/section ที่ต้องการ → ได้เลขบรรทัด
-  - `Read` แบบ `offset`/`limit` เฉพาะช่วงนั้น
+  - `Read` แบบ `offset`/`limit` เฉพาะช่วงนั้น (±50 บรรทัดรอบจุดที่สนใจก็พอ)
+
+ตัวที่กินจริงคือ source ธรรมดาขนาด 80-300KB ไม่ใช่ไฟล์ยักษ์ — วัด 2026-09-12: การอ่าน 9.8% ที่ใหญ่ที่สุดกิน 75% ของค่า `Read` ทั้งหมด และเกินครึ่งของนั้นเป็นไฟล์ที่ยังไม่ถึง 300KB
 - **ห้าม `cat`/dump ไฟล์ใหญ่ลง terminal** (โดน persist + ก้อนยังหลุดเข้า context อยู่ดี)
 
 ### 🖼️ รูปภาพ (mockup/screenshot) — แพงกว่าไฟล์ข้อความต่อไบต์ ห้าม Read ซ้ำ

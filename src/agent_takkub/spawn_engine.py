@@ -1067,6 +1067,28 @@ def _teammate_disallowed_tools() -> list[str]:
     return raw.replace(",", " ").split()
 
 
+def _teammate_builtin_tools() -> list[str]:
+    """Tools allowlisted for teammate panes via provider's ``tools_flag`` (e.g. claude ``--tools``).
+
+    Phase 1 (#581): removes unused built-in tool schemas from the system
+    prompt. Measured ~4.9k cached tokens per turn with the current 27-name
+    list (38,661 -> 33,780 on a `claude --print` probe), charged again on
+    every turn because the system prompt sits in the cached prefix.
+
+    Override or disable via ``TAKKUB_TEAMMATE_TOOLS`` (space/comma-separated tool names;
+    empty string disables passing the flag entirely). Only teammates are restricted —
+    the Lead is left unrestricted.
+    """
+    if "TAKKUB_TEAMMATE_TOOLS" in os.environ:
+        raw = os.environ["TAKKUB_TEAMMATE_TOOLS"].strip()
+        if not raw:
+            return []
+        return raw.replace(",", " ").split()
+    from .provider_spec import TEAMMATE_DEFAULT_BUILTIN_TOOLS
+
+    return list(TEAMMATE_DEFAULT_BUILTIN_TOOLS)
+
+
 def _remap_pinned_model(model: str, env: dict[str, str]) -> str:
     """Translate a concrete ``claude-*`` model pin through the profile's remap.
 
@@ -2504,6 +2526,12 @@ class SpawnEngineMixin:
             if resume_uuid:
                 resume_argv.extend([spec.session_resume_flag, resume_uuid])
 
+            tools_argv: list[str] = []
+            if role_name != LEAD.name and spec.tools_flag:
+                _tools = _teammate_builtin_tools()
+                if _tools:
+                    tools_argv.extend([spec.tools_flag, ",".join(_tools)])
+
             from .core.providers.plan import assemble_generic_argv
 
             provider_argv = assemble_generic_argv(
@@ -2514,6 +2542,7 @@ class SpawnEngineMixin:
                 mcp_argv=mcp_argv,
                 project_scope_argv=project_scope_argv,
                 resume_argv=resume_argv,
+                tools_argv=tools_argv,
             )
 
             return self._launch_session(
@@ -3309,6 +3338,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # never by newest-mtime-in-cwd (issue #129: peer panes sharing a cwd).
         _spawned_session_uuid = self._ps(_ekey_spawn).session_uuid
 
+        tools_argv: list[str] = []
+        if role_name != LEAD.name:
+            from .provider_config import CLAUDE
+            from .provider_spec import PROVIDER_REGISTRY
+
+            _claude_tools_flag = PROVIDER_REGISTRY[CLAUDE].tools_flag
+            if _claude_tools_flag:
+                _tools = _teammate_builtin_tools()
+                if _tools:
+                    tools_argv.extend([_claude_tools_flag, ",".join(_tools)])
+
         from .core.providers.claude_plan import assemble_claude_argv
 
         argv = assemble_claude_argv(
@@ -3324,6 +3364,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             mcp_argv=_claude_mcp_argv,
             denied_tools_argv=denied_tools_argv,
             resume_argv=resume_argv,
+            tools_argv=tools_argv,
         )
 
         # #476: generalizes #444's worktree-only pre-trust to any claude cwd —

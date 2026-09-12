@@ -151,4 +151,9 @@ project-skills/
 # (user_profile.ensure_curated_claude_config_dir → DATA_HOME/providers/<provider>/
 # <account>-<slug>/). It mirrors `.credentials.json` and settings.json in, so
 # this MUST stay ignored — never a candidate for `git add`.
-providers/
+#
+# Anchored with a leading slash on purpose: unanchored `providers/` matches at
+# ANY depth and silently swallowed the real source package
+# `src/agent_takkub/core/providers/` (already-tracked files kept working, so it
+# only surfaced when `git add` refused a change in there).
+/providers/

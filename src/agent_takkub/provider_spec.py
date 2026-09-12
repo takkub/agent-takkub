@@ -180,6 +180,7 @@ class ProviderSpec:
     plugin_dirs: tuple[str, ...] = field(default_factory=tuple)
     disallowed_tools: tuple[str, ...] = field(default_factory=tuple)
     model_flag: str | None = None
+    tools_flag: str | None = None
     # Most CLIs accept effort as a regular ``flag value`` pair. Codex instead
     # exposes it through its generic config override:
     # ``-c model_reasoning_effort=<level>``. When effort_config_key is set,
@@ -491,6 +492,73 @@ def _discover_cursor() -> str | None:
     return None
 
 
+# Baseline set of built-in tools known to Claude Code CLI (#581).
+CLAUDE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = (
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "PowerShell",
+    "Skill",
+    "WebFetch",
+    "WebSearch",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "BashOutput",
+    "KillShell",
+    "MultiEdit",
+    "NotebookEdit",
+    "SlashCommand",
+    "Task",
+    "TodoWrite",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskUpdate",
+    "TaskStop",
+    "TaskOutput",
+    "ScheduleWakeup",
+    "Monitor",
+    "REPL",
+    "JavaScript",
+    "ToolSearch",
+    "SendUserMessage",
+    "SendUserFile",
+    "SendFeedback",
+    "Artifact",
+)
+
+# Tools hard-cut in Phase 1 (#581): never called in 14 days / 685 sessions /
+# 70,104 tool calls, so cutting them cannot break a workflow that exists today.
+#
+# Measured saving is ~4.9k tok/turn, not the ~11k quoted on the issue: that
+# figure came from a 9-tool probe, while the list below keeps 27. The single
+# most expensive survivor is `Skill` at +6,819 tok on its own (it carries the
+# whole skill catalogue), which is why #580 — gating plugin skills per project
+# — is the lever that shrinks this budget further, not cutting more tools.
+# Probe used: `claude --print --output-format json --tools "<list>"`, summing
+# input + cache_creation + cache_read. Floor (`--tools ""`) is 22,850;
+# unrestricted baseline is 38,661.
+TEAMMATE_CUT_TOOLS: tuple[str, ...] = (
+    "BashOutput",
+    "ExitPlanMode",
+    "KillShell",
+    "MultiEdit",
+    "NotebookEdit",
+    "SlashCommand",
+    "Task",
+    "TodoWrite",
+)
+
+# Default teammate tools = baseline minus the 8 cut tools.
+TEAMMATE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = tuple(
+    t for t in CLAUDE_DEFAULT_BUILTIN_TOOLS if t not in TEAMMATE_CUT_TOOLS
+)
+
+
 # ── claude ──────────────────────────────────────────────────────────────────
 # NOT wired into spawn_engine.py's claude argv builder in Phase 0 (see module
 # docstring) — fields below are faithful documentation of spawn_engine.py's
@@ -542,6 +610,7 @@ claude_spec = ProviderSpec(
     supports_hooks=True,
     plugin_dirs=("TAKKUB_EXTRA_PLUGINS",),  # spawn_engine.py:1529-1536 (env var name)
     disallowed_tools=("Task",),  # spawn_engine.py:351 _teammate_disallowed_tools() default
+    tools_flag="--tools",  # #581 Phase 1: teammate built-in tool schema filtering
     # (AskUserQuestion is a SECOND, separate --disallowed-tools flag at
     # spawn_engine.py:1594-1608 — not collapsed into this one field in Phase 0)
     model_flag="--model",  # spawn_engine.py:1483
@@ -633,6 +702,8 @@ codex_spec = ProviderSpec(
     # GAP (CLI 0.145.0 --help, checked 2026-07-24): only positional [PROMPT];
     # no file-backed append-system-prompt option. Keep task pointer delivery.
     system_prompt_flag=None,
+    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
+    tools_flag=None,
     ready_hard_blockers=("esc to interrupt", "esc to cancel"),  # pty_session.py:208-209
     ready_rules=(
         # Current-code truth (post-#99 fix): the banner-alone rule
@@ -836,6 +907,8 @@ gemini_spec = ProviderSpec(
     # GAP (agy 1.1.5 --help, checked 2026-07-24): --prompt-interactive accepts
     # a prompt string, not a system-prompt file. Keep task pointer delivery.
     system_prompt_flag=None,
+    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
+    tools_flag=None,
     ready_hard_blockers=(
         "esc to interrupt",
         "esc to cancel",
@@ -1035,6 +1108,8 @@ opencode_spec = ProviderSpec(
     # GAP (opencode 1.18.4 --help, checked 2026-07-24): --prompt is a string;
     # there is no file-backed append-system-prompt option.
     system_prompt_flag=None,
+    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
+    tools_flag=None,
     ready_hard_blockers=("esc interrupt",),  # opencode shows "esc interrupt" without "to"
     ready_rules=(
         # Idle composer markers across OpenCode versions and terminal layouts:
@@ -1122,6 +1197,8 @@ kimi_spec = ProviderSpec(
     # and --agent-file is a whole agent specification, not an append-system-
     # prompt file. Keep the task pointer flow.
     system_prompt_flag=None,
+    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
+    tools_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
     # ⚠ BUSY marker STILL NOT calibrated (#257): the idle footer below was
@@ -1243,6 +1320,8 @@ cursor_spec = ProviderSpec(
     # locally): only a positional initial user prompt is documented, with no
     # file-backed append-system-prompt option. Keep task pointer delivery.
     system_prompt_flag=None,
+    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
+    tools_flag=None,
     ready_hard_blockers=(),
     # ⚠ NOT yet calibrated: no Cursor TUI idle/busy markers have been observed.
     # Keep this empty rather than guessing markers that could misroute tasks.

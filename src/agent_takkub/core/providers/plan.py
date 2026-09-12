@@ -68,10 +68,11 @@ def assemble_generic_argv(
     mcp_argv: Sequence[str] = (),
     project_scope_argv: Sequence[str] = (),
     resume_argv: Sequence[str] = (),
+    tools_argv: Sequence[str] = (),
 ) -> list[str]:
     """Pure re-assembly of the generic non-claude branch's argv, same order
     the branch builds it in: bin, autonomy flags, model, effort, MCP,
-    project-scope, resume. Every *_argv piece is caller-resolved (already
+    project-scope, resume, tools. Every *_argv piece is caller-resolved (already
     empty when that piece doesn't apply) — this function only concatenates.
     """
     return [
@@ -82,6 +83,7 @@ def assemble_generic_argv(
         *mcp_argv,
         *project_scope_argv,
         *resume_argv,
+        *tools_argv,
     ]
 
 
@@ -98,6 +100,7 @@ def build_generic_spawn_plan(
     mcp_argv: Sequence[str] = (),
     project_scope_argv: Sequence[str] = (),
     resume_argv: Sequence[str] = (),
+    tools_argv: Sequence[str] = (),
 ) -> SpawnPlan:
     """Combine `assemble_generic_argv` + `account_env_overrides` into one
     `SpawnPlan` for a non-claude provider. `base_env` is copied, never
@@ -113,5 +116,6 @@ def build_generic_spawn_plan(
         mcp_argv=mcp_argv,
         project_scope_argv=project_scope_argv,
         resume_argv=resume_argv,
+        tools_argv=tools_argv,
     )
     return SpawnPlan(provider_id=provider_id, argv=tuple(argv), env=env, cwd=cwd)

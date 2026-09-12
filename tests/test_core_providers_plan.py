@@ -73,6 +73,7 @@ def test_assemble_generic_argv_matches_branch_order():
     mcp = ["-c", "mcp_servers={}"]
     project_scope = ["--project-id", "abc123"]
     resume = ["--resume", "uuid-1"]
+    tools = ["--tools", "tool1,tool2"]
 
     expected: list[str] = [bin_path]
     expected.extend(autonomy)
@@ -81,6 +82,7 @@ def test_assemble_generic_argv_matches_branch_order():
     expected.extend(mcp)
     expected.extend(project_scope)
     expected.extend(resume)
+    expected.extend(tools)
 
     got = assemble_generic_argv(
         bin_path,
@@ -90,6 +92,7 @@ def test_assemble_generic_argv_matches_branch_order():
         mcp_argv=mcp,
         project_scope_argv=project_scope,
         resume_argv=resume,
+        tools_argv=tools,
     )
     assert got == expected
 

@@ -30,6 +30,7 @@ def test_assemble_claude_argv_matches_branch_order():
     mcp = ["--mcp-config", "/tmp/mcp.json", "--strict-mcp-config"]
     denied_tools = ["--disallowed-tools", "Task,AskUserQuestion"]
     resume = ["--resume", "uuid-1"]
+    tools = ["--tools", "Bash,Read,Edit"]
 
     expected: list[str] = [
         claude_bin,
@@ -47,6 +48,7 @@ def test_assemble_claude_argv_matches_branch_order():
     expected.extend(mcp)
     expected.extend(denied_tools)
     expected.extend(resume)
+    expected.extend(tools)
 
     got = assemble_claude_argv(
         claude_bin,
@@ -61,6 +63,7 @@ def test_assemble_claude_argv_matches_branch_order():
         mcp_argv=mcp,
         denied_tools_argv=denied_tools,
         resume_argv=resume,
+        tools_argv=tools,
     )
     assert got == expected
 

@@ -21,7 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -229,7 +229,82 @@ def check_claude() -> list[Finding]:
                 )
             )
 
+    findings.append(check_claude_tools_drift())
+
     return findings
+
+
+def _extract_claude_help_tools(claude_bin: str | None = None) -> list[str] | None:
+    """Extract built-in tool names from ``claude --help`` if present.
+
+    Some CLI builds / help formats document tool choices under ``--tools`` (e.g.
+    ``choices: "Bash", "Read", ...`` or an enumerated list). Returns None if the
+    help text cannot be parsed or does not enumerate tools.
+    """
+    try:
+        if claude_bin is None:
+            from .config import find_claude_executable
+
+            claude_bin = find_claude_executable()
+        if not claude_bin:
+            return None
+        _, out = _run([claude_bin, "--help"])
+        if not out:
+            return None
+        import re
+
+        m = re.search(r"--tools[^\n]*\n((?:\s{10,}[^\n]+\n)+)", out)
+        if m:
+            block = m.group(1)
+            cm = re.search(r"choices:\s*([A-Za-z0-9_,\s\"']+)", block)
+            if cm:
+                raw_choices = cm.group(1).replace('"', "").replace("'", "")
+                tools = [t.strip() for t in raw_choices.split(",") if t.strip()]
+                if tools:
+                    return tools
+    except Exception:
+        pass
+    return None
+
+
+def check_claude_tools_drift(
+    current_defaults: Sequence[str] | None = None,
+) -> Finding:
+    """Check whether Claude Code built-in tools have drifted beyond known policy (#581).
+
+    If a newer Claude Code adds built-in tools not present in CLAUDE_DEFAULT_BUILTIN_TOOLS,
+    warn so our teammate --tools allowlist doesn't silently hide new tools.
+    If default tools cannot be extracted, returns Status.INFO so doctor does not fail.
+    """
+    from .provider_spec import CLAUDE_DEFAULT_BUILTIN_TOOLS
+
+    if current_defaults is None:
+        extracted = _extract_claude_help_tools()
+        if extracted is None:
+            return Finding(
+                "claude",
+                "tools_drift",
+                Status.INFO,
+                "could not probe built-in tool list from claude --help",
+            )
+        current_defaults = extracted
+
+    known = set(CLAUDE_DEFAULT_BUILTIN_TOOLS)
+    new_tools = sorted(set(current_defaults) - known)
+    if new_tools:
+        return Finding(
+            "claude",
+            "tools_drift",
+            Status.WARN,
+            f"new built-in tools detected: {', '.join(new_tools)} (not in CLAUDE_DEFAULT_BUILTIN_TOOLS)",
+            "review #581 tool policy in provider_spec.py and update CLAUDE_DEFAULT_BUILTIN_TOOLS",
+        )
+    return Finding(
+        "claude",
+        "tools_drift",
+        Status.OK,
+        f"built-in tools in sync ({len(current_defaults)} tools checked)",
+    )
 
 
 # ---------------------------------------------------------------------------

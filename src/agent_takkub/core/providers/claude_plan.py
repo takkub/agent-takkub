@@ -50,6 +50,7 @@ def assemble_claude_argv(
     mcp_argv: Sequence[str] = (),
     denied_tools_argv: Sequence[str] = (),
     resume_argv: Sequence[str] = (),
+    tools_argv: Sequence[str] = (),
 ) -> list[str]:
     """Pure re-assembly of the claude branch's argv, same order the branch
     builds it in (`spawn_engine.py` ~2639-2947):
@@ -68,6 +69,7 @@ def assemble_claude_argv(
     10. `denied_tools_argv` — `--disallowed-tools` hard-deny list (Task/
         AskUserQuestion)
     11. `resume_argv` — `--resume <uuid>` or `--session-id <uuid>`
+    12. `tools_argv` — teammate `--tools <tools>` filter (#581, variadic so placed last)
 
     Every `*_argv` piece is caller-resolved (already empty when that piece
     doesn't apply) — this function only concatenates, never resolves.
@@ -87,4 +89,5 @@ def assemble_claude_argv(
         *mcp_argv,
         *denied_tools_argv,
         *resume_argv,
+        *tools_argv,
     ]
