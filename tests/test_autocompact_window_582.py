@@ -1,10 +1,13 @@
-"""#582 — panes auto-compact at a real window instead of never.
+"""#582 — the pane auto-compaction window, and why it ships OFF.
 
-Claude Code compacts on its own near the context limit, but that limit is 1M,
-so panes in practice never reach it: 417 real sessions averaged a 201k prefix
-per turn, with 91.5% of all prefix spend in sessions of 151+ turns. Passing
-`--autocompact` moves WHEN the CLI's own compaction runs without changing how
-it runs.
+The token maths was real: 417 real sessions averaged a 201k prefix per turn,
+with 91.5% of all prefix spend in sessions of 151+ turns, so a 200k window
+modelled out at ~22% of prefix spend. 2.1.2 shipped that window and it was
+reverted the same day — panes compacted constantly in every role and the
+interruptions made them unusable, with Lead explicitly told to run to 1M.
+
+So these tests pin the OFF default and keep the opt-in lever honest, because
+the flag still works and someone will want to try a window again.
 """
 
 from __future__ import annotations
@@ -17,14 +20,21 @@ from agent_takkub.spawn_engine import _teammate_autocompact
 
 
 class TestWindowResolution:
-    def test_defaults_to_the_shipped_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ships_off_so_panes_keep_the_cli_default_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No window by default = no `--autocompact` = the CLI's own 1M, i.e.
+        exactly the pre-2.1.2 behaviour the user asked to go back to."""
         monkeypatch.delenv("TAKKUB_AUTOCOMPACT", raising=False)
-        assert _teammate_autocompact() == TEAMMATE_AUTOCOMPACT_TOKENS
+        assert TEAMMATE_AUTOCOMPACT_TOKENS is None
+        assert _teammate_autocompact() is None
 
-    def test_shipped_window_is_inside_the_cli_accepted_range(self) -> None:
+    def test_any_shipped_window_would_be_inside_the_cli_accepted_range(self) -> None:
         # `--autocompact` accepts 100k-1M; a value outside it would be rejected
-        # by the CLI at spawn, i.e. every pane would fail to start.
-        assert 100_000 <= TEAMMATE_AUTOCOMPACT_TOKENS <= 1_000_000
+        # by the CLI at spawn, i.e. every pane would fail to start. Guards the
+        # day someone sets a number here again.
+        if TEAMMATE_AUTOCOMPACT_TOKENS is not None:
+            assert 100_000 <= TEAMMATE_AUTOCOMPACT_TOKENS <= 1_000_000
 
     def test_empty_env_disables_the_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TAKKUB_AUTOCOMPACT", "")

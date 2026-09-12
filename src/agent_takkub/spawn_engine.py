@@ -1092,19 +1092,20 @@ def _teammate_builtin_tools() -> list[str]:
 def _teammate_autocompact() -> int | None:
     """Token window after which a pane auto-compacts itself (#582).
 
-    Claude Code compacts on its own near the context limit, but that limit is
-    1M now, so a pane realistically never reaches it: measured over 417 real
-    sessions the average turn already carried a 201k prefix, and 91.5% of all
-    prefix spend sat in sessions of 151+ turns — every token of which is
-    re-read on every later turn.
+    ``None`` -- the shipped default -- means the ``--autocompact`` flag is not
+    passed at all, so every pane keeps the CLI's own 1M window. 2.1.2 shipped a
+    200k window and it was reverted the same day: panes compacted constantly in
+    every role and the interruptions made them unusable, with Lead explicitly
+    told to run to 1M. See ``provider_spec.TEAMMATE_AUTOCOMPACT_TOKENS`` for the
+    full history before changing this.
 
-    This only moves WHEN the CLI's own compaction runs, never how it runs, so
-    it is not the "cockpit injects /compact mid-task" design that
-    `main_window._on_session_cap_exceeded` deliberately refuses to do.
+    Whatever the window is, this only moves WHEN the CLI's own compaction runs,
+    never how it runs, so it is not the "cockpit injects /compact mid-task"
+    design that `main_window._on_session_cap_exceeded` deliberately refuses.
 
-    ``TAKKUB_AUTOCOMPACT`` overrides the window; empty (or an unparseable /
-    out-of-range value) means "do not pass the flag at all", i.e. exactly the
-    pre-#582 behaviour. The CLI accepts 100k-1M.
+    ``TAKKUB_AUTOCOMPACT`` opts a machine back in; empty (or an unparseable /
+    out-of-range value) means "do not pass the flag", same as the default. The
+    CLI accepts 100k-1M.
     """
     raw = os.environ.get("TAKKUB_AUTOCOMPACT")
     if raw is not None:

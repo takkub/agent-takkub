@@ -567,19 +567,26 @@ TEAMMATE_CUT_TOOLS: tuple[str, ...] = (
     "TodoWrite",
 )
 
-# Where a pane's own auto-compaction kicks in (#582). Claude Code compacts on
-# its own near the context limit, but that limit is now 1M, so in practice a
-# pane never compacts: measured across 417 real sessions the average turn
-# carried a 201k prefix, 91.5% of all prefix spend sat in sessions of 151+
-# turns, and every one of those tokens is re-read on each later turn.
+# Where a pane's own auto-compaction kicks in (#582) -- or rather, where it
+# DOESN'T any more. None means "never pass `--autocompact`", i.e. every pane
+# keeps the CLI's own default window (1M), which is what shipped for the whole
+# life of this project before 2.1.2.
 #
-# Capping the window at 200k models out at ~22% of total prefix spend (150k is
-# ~34%, 100k ~52%). Deliberately starting at the least aggressive end: this
-# hands the work to the CLI's OWN compaction — the same mechanism that already
-# runs today, just reached sooner — rather than injecting `/compact` mid-task,
-# so it changes when compaction happens and not how. Lower it once a week of
-# real use shows nothing degraded. `--autocompact` accepts 100k-1M.
-TEAMMATE_AUTOCOMPACT_TOKENS = 200_000
+# History, so nobody re-derives this and re-breaks it. The saving was real on
+# paper: across 417 real sessions the average turn already carried a 201k
+# prefix and 91.5% of all prefix spend sat in sessions of 151+ turns, every
+# token of which is re-read on every later turn, so a 200k window modelled out
+# at ~22% of total prefix spend. 2.1.2 shipped that 200k window and the user
+# reverted it within the day: panes compacted constantly, in EVERY role, and
+# the interruptions made the panes unusable ("compact ไม่ถึง 200k มันทำให้
+# สดุดไปหมด", 2026-09-12). Lead was explicitly told to run to 1M, and the
+# other roles were put back the same way.
+#
+# So the lever stays built but stays OFF: `TAKKUB_AUTOCOMPACT=<100000-1000000>`
+# still opts a machine in for anyone who wants to experiment. Do NOT give this
+# constant a number again without the user asking for it -- the token maths was
+# never the disputed part, the interruptions were.
+TEAMMATE_AUTOCOMPACT_TOKENS: int | None = None
 
 
 # Default teammate tools = baseline minus the 8 cut tools.
