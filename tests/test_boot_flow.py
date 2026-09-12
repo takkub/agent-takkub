@@ -240,6 +240,22 @@ class TestPlanMigration:
         monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v2")
         assert boot_flow.plan_migration() is None
 
+    def test_none_on_dev_checkout_even_when_not_v2(self, monkeypatch):
+        """2026-09-12 bug: a dev checkout's `layout_state()` returns
+        `"mixed"` forever (its nested `v2/` root is the permanent, by-design
+        resting state — `storage_layout_v2`'s own docstring), so the plain
+        `layout_state() == "v2"` check never short-circuited there and every
+        dev boot showed the "must migrate or close the program" wizard for
+        nothing real to do. `plan_migration()` must also treat
+        `is_dev_checkout()` as a hard `None`, matching every other #504 dev-
+        checkout exclusion (`auto_migrate_boot.run_boot_stage`)."""
+        import agent_takkub.auto_migrate_boot as amb_mod
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "mixed")
+        monkeypatch.setattr(amb_mod, "is_dev_checkout", lambda: True)
+        assert boot_flow.plan_migration() is None
+
     def test_plan_lists_promote_and_archive_candidates(self, monkeypatch):
         import agent_takkub.core.storage.layout as layout_mod
 

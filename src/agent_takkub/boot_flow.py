@@ -324,13 +324,25 @@ def _backup_item_row(entry) -> tuple[str, int, int, str]:
 
 def plan_migration() -> MigrationPlanSummary | None:
     """`None` once this machine is fully on the V2 layout with nothing left
-    to migrate (`layout_state() == "v2"`) — screen B (and the whole rest of
-    the migration UI) has nothing to show at that point."""
+    to migrate (`layout_state() == "v2"`), OR on a dev checkout — screen B
+    (and the whole rest of the migration UI) has nothing to show at that
+    point.
+
+    Dev-checkout bug (found 2026-09-12): `layout_state()` returns `"mixed"`
+    forever on a dev checkout, never `"v2"` (`data_home / "v2"` IS its
+    permanent, by-design nested root — see `storage_layout_v2`'s own
+    docstring), so the `== "v2"` check alone never short-circuits there. The
+    real physical-migration ladder was already correctly gated off for dev
+    checkouts everywhere else (`auto_migrate_boot.run_boot_stage`,
+    `is_dev_checkout()`) — clicking "migrate" on this screen was already a
+    harmless no-op — but this function forgot the same gate, so every dev
+    boot showed the "must migrate or close the program" wizard for nothing
+    real to do."""
     from . import auto_migrate_boot as _amb
     from .core.migration.engine import MigrationEngine
     from .core.storage.layout import layout_state
 
-    if layout_state() == "v2":
+    if _amb.is_dev_checkout() or layout_state() == "v2":
         return None
 
     data_home = config.DATA_HOME
