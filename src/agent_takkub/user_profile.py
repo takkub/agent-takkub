@@ -538,6 +538,201 @@ def _extract_skill_name(path: Path) -> str:
     return path.parent.name if path.name == "SKILL.md" else path.stem
 
 
+def _find_plugin_dir(base_dir: Path, plugin_key: str, dest_dir: Path | None = None) -> Path | None:
+    """Locate the root directory for *plugin_key* (e.g. ``name@marketplace`` or ``name``).
+
+    Searches:
+    1. ``installed_plugins.json`` in base_dir / dest_dir
+    2. ``plugins/cache/<marketplace>/<name>`` (version subdirs or direct)
+    3. ``plugins/marketplaces/<marketplace>/plugins/<name>``
+    4. ``plugins/marketplaces/<marketplace>``
+    5. ``plugins/<name>``
+    """
+    search_dirs: list[Path] = [base_dir / "plugins"]
+    if dest_dir is not None and dest_dir != base_dir:
+        search_dirs.append(dest_dir / "plugins")
+
+    for pdir in search_dirs:
+        installed_file = pdir / "installed_plugins.json"
+        if installed_file.is_file():
+            try:
+                data = json.loads(installed_file.read_text(encoding="utf-8"))
+                entries = data.get("plugins", {}).get(plugin_key, [])
+                if isinstance(entries, list) and entries:
+                    ip = entries[0].get("installPath")
+                    if ip:
+                        p = Path(ip)
+                        if p.is_dir():
+                            return p
+            except Exception:
+                pass
+
+    name, _, marketplace = plugin_key.partition("@")
+
+    for pdir in search_dirs:
+        if marketplace:
+            cache_dir = pdir / "cache" / marketplace / name
+            if cache_dir.is_dir():
+                try:
+                    versions = sorted((v for v in cache_dir.iterdir() if v.is_dir()), reverse=True)
+                    if versions:
+                        return versions[0]
+                except OSError:
+                    pass
+                return cache_dir
+
+            mp_plugin = pdir / "marketplaces" / marketplace / "plugins" / name
+            if mp_plugin.is_dir():
+                return mp_plugin
+
+            mp_root = pdir / "marketplaces" / marketplace
+            if mp_root.is_dir():
+                return mp_root
+
+        direct = pdir / name
+        if direct.is_dir():
+            return direct
+
+        cache_base = pdir / "cache"
+        if cache_base.is_dir():
+            try:
+                for mp in cache_base.iterdir():
+                    if mp.is_dir():
+                        cand = mp / name
+                        if cand.is_dir():
+                            versions = sorted(
+                                (v for v in cand.iterdir() if v.is_dir()), reverse=True
+                            )
+                            return versions[0] if versions else cand
+            except OSError:
+                pass
+
+        mp_base = pdir / "marketplaces"
+        if mp_base.is_dir():
+            try:
+                for mp in mp_base.iterdir():
+                    if mp.is_dir():
+                        cand = mp / "plugins" / name
+                        if cand.is_dir():
+                            return cand
+            except OSError:
+                pass
+
+    return None
+
+
+def _extract_plugin_skills(plugin_dir: Path) -> set[str]:
+    """Return set of skill names provided by the plugin at *plugin_dir*.
+
+    Checks:
+    1. Manifest (``.claude-plugin/plugin.json`` or ``plugin.json``) for a ``skills`` path
+    2. Standard ``skills`` or ``.claude/skills`` directories
+    Returns empty set if no skills are defined or skills are explicitly disabled.
+    """
+    if not plugin_dir.is_dir():
+        return set()
+
+    skills_dirs: list[Path] = []
+    manifest = plugin_dir / ".claude-plugin" / "plugin.json"
+    if not manifest.is_file():
+        manifest = plugin_dir / "plugin.json"
+
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            skills_val = data.get("skills")
+            if skills_val is False:
+                return set()
+            if isinstance(skills_val, str) and skills_val.strip():
+                custom_dir = (plugin_dir / skills_val.strip()).resolve()
+                if custom_dir.is_dir():
+                    skills_dirs.append(custom_dir)
+        except Exception:
+            pass
+
+    if not skills_dirs:
+        for candidate_name in ("skills", ".claude/skills"):
+            candidate = plugin_dir / candidate_name
+            if candidate.is_dir():
+                skills_dirs.append(candidate)
+
+    from .skill_scan import _skill_files
+
+    skill_names: set[str] = set()
+    for sdir in skills_dirs:
+        try:
+            for f in _skill_files(sdir):
+                sname = _extract_skill_name(f)
+                if sname:
+                    skill_names.add(sname)
+                skill_names.add(f.parent.name if f.name == "SKILL.md" else f.stem)
+        except OSError:
+            pass
+    return skill_names
+
+
+def _curate_settings_plugins(
+    base_dir: Path,
+    dest_dir: Path,
+    allowed_names: set[str],
+) -> None:
+    """Rewrite curated settings.json enabledPlugins to only keep assigned plugins (#580).
+
+    Rules:
+    - Never remove plugins that do not provide skills (e.g. MCP / hooks only).
+    - If metadata cannot be resolved, preserve the plugin (do not guess).
+    - For plugins providing skills, keep only those whose skills or identifiers
+      are in allowed_names.
+    """
+    src_settings = base_dir / "settings.json"
+    dst_settings = dest_dir / "settings.json"
+
+    target_read = src_settings if src_settings.is_file() else dst_settings
+    if not target_read.is_file():
+        return
+
+    try:
+        data = json.loads(target_read.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    enabled_plugins = data.get("enabledPlugins")
+    if not isinstance(enabled_plugins, dict):
+        return
+
+    curated_plugins: dict[str, object] = {}
+    for plugin_key, val in enabled_plugins.items():
+        plugin_dir = _find_plugin_dir(base_dir, plugin_key, dest_dir=dest_dir)
+        if plugin_dir is not None:
+            skills = _extract_plugin_skills(plugin_dir)
+            if not skills:
+                # Plugin does not provide skills (e.g. MCP / hooks only) -> keep
+                curated_plugins[plugin_key] = val
+                continue
+        else:
+            # Metadata could not be determined; per spec: do not guess, preserve
+            curated_plugins[plugin_key] = val
+            continue
+
+        # Plugin provides skills: keep only if assigned
+        name, _, mp = plugin_key.partition("@")
+        identifiers = {plugin_key, name}
+        if mp:
+            identifiers.add(mp)
+
+        if bool(skills & allowed_names) or bool(identifiers & allowed_names):
+            curated_plugins[plugin_key] = val
+
+    data["enabledPlugins"] = curated_plugins
+
+    try:
+        if dst_settings.exists() or dst_settings.is_symlink():
+            dst_settings.unlink(missing_ok=True)
+        dst_settings.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def curated_config_dir_for(project: str) -> Path:
     """Return the curated ``CLAUDE_CONFIG_DIR`` path for *project* under DATA_HOME (#563).
 
@@ -551,12 +746,13 @@ def curated_config_dir_for(project: str) -> Path:
 
 
 def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None) -> Path:
-    """Prepare a curated ``CLAUDE_CONFIG_DIR`` for *project* (#563).
+    """Prepare a curated ``CLAUDE_CONFIG_DIR`` for *project* (#563, #580).
 
     Mirrors auth credentials (.credentials.json) and settings from the base
-    profile, links session stores (projects, todos, plugins), and populates
+    profile, links session stores (projects, todos, plugins), populates
     a curated skills/ directory containing only project-owned skills and
-    skills assigned in the Skill Matrix policy.
+    skills assigned in the Skill Matrix policy, and filters enabledPlugins
+    in settings.json to include only assigned plugins and non-skill plugins.
     """
     from . import skill_policy, skill_scan
     from .lead_context import _allowed_project_roots
@@ -614,6 +810,12 @@ def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None)
     except Exception:
         pass
 
+    gate_active = (
+        os.environ.get("TAKKUB_SKILL_GATE", "1").strip() != "0"
+        and bool(project)
+        and project != "default"
+    )
+
     # Copy / link matching skills from base_skills
     if base_skills.is_dir():
         try:
@@ -627,13 +829,13 @@ def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None)
                         sname = _extract_skill_name(md_file)
                     else:
                         sname = entry.name
-                    if sname in allowed_names or entry.name in allowed_names:
+                    if not gate_active or sname in allowed_names or entry.name in allowed_names:
                         dst_skill = curated_skills / entry.name
                         if not (dst_skill.exists() or dst_skill.is_symlink()):
                             _make_link(entry, dst_skill)
                 elif entry.is_file() and entry.suffix == ".md":
                     sname = _extract_skill_name(entry)
-                    if sname in allowed_names or entry.stem in allowed_names:
+                    if not gate_active or sname in allowed_names or entry.stem in allowed_names:
                         _mirror_file(entry, curated_skills / entry.name)
         except OSError:
             pass
@@ -651,7 +853,7 @@ def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None)
             elif existing.is_file() and existing.suffix == ".md":
                 sname = _extract_skill_name(existing)
 
-            if (
+            if gate_active and (
                 sname not in allowed_names
                 and existing.name not in allowed_names
                 and existing.stem not in allowed_names
@@ -664,6 +866,10 @@ def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None)
                     shutil.rmtree(existing, ignore_errors=True)
     except OSError:
         pass
+
+    # 4. Curate plugins in settings.json (#580)
+    if gate_active:
+        _curate_settings_plugins(base_dir, dest_dir, allowed_names)
 
     return dest_dir
 

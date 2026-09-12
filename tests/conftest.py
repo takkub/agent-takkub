@@ -325,14 +325,23 @@ _RUNTIME_DIR_MODULES = (
     "agent_takkub.lead_bash_audit",
     "agent_takkub.shared_dev_tools",
     "agent_takkub.limit_autoresume",  # #158 progress-marker dump, copies RUNTIME_DIR at import time
+    "agent_takkub.lead_context",
+    "agent_takkub.remote.tunnel",
+    "agent_takkub.task_ledger",
+    "agent_takkub.tutorial_overlay",
+    "agent_takkub.update_worker",
+    "agent_takkub.disk_usage",
 )
 _EVENTS_LOG_MODULES = (
     "agent_takkub.config",
     "agent_takkub.orchestrator",
     "agent_takkub.orchestrator_text",  # _log_event reads EVENTS_LOG from this module
+    "agent_takkub.auto_issue_signals",
+    "agent_takkub.headless",
+    "agent_takkub.maintenance",
 )
 # Patched when present but never force-imported (heavy GUI deps).
-_OPTIONAL_MODULES = ("agent_takkub.main_window",)
+_OPTIONAL_MODULES = ("agent_takkub.main_window", "agent_takkub.app")
 
 
 def _maybe_module(name: str, *, force: bool):
@@ -398,6 +407,7 @@ class _AbundantVM:
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    cfg = _maybe_module("agent_takkub.config", force=True)
     # Most orchestration unit tests intentionally assert the legacy
     # synchronous Lead-notice path without running a Qt event loop. Keep those
     # tests focused by disabling the production 60 s inbox window per test;
@@ -434,6 +444,43 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if rmem is not None:
         monkeypatch.setattr(rmem, "ROLE_MEMORY_DIR", runtime / "role-memory", raising=False)
 
+    # Derived constants bound from RUNTIME_DIR at import time (#584):
+    orch_mod = _maybe_module("agent_takkub.orchestrator", force=False)
+    if orch_mod is not None:
+        if hasattr(orch_mod, "_LAST_SESSION_FILE"):
+            monkeypatch.setattr(
+                orch_mod, "_LAST_SESSION_FILE", runtime / "last-session.json", raising=False
+            )
+        if hasattr(orch_mod, "_RESTART_REASON_FILE"):
+            monkeypatch.setattr(
+                orch_mod, "_RESTART_REASON_FILE", runtime / "restart-reason.json", raising=False
+            )
+
+    lba_mod = _maybe_module("agent_takkub.lead_bash_audit", force=False)
+    if lba_mod is not None and hasattr(lba_mod, "_DEFAULT_LOG"):
+        monkeypatch.setattr(lba_mod, "_DEFAULT_LOG", runtime / "lead_bash_audit.log", raising=False)
+
+    sdt_mod = _maybe_module("agent_takkub.shared_dev_tools", force=False)
+    if sdt_mod is not None and hasattr(sdt_mod, "SHARED_MCP_FILE"):
+        monkeypatch.setattr(sdt_mod, "SHARED_MCP_FILE", runtime / "shared-mcp.json", raising=False)
+
+    rt_mod = _maybe_module("agent_takkub.remote.tunnel", force=False)
+    if rt_mod is not None and hasattr(rt_mod, "_PID_FILE"):
+        monkeypatch.setattr(
+            rt_mod, "_PID_FILE", runtime / "tunnel" / "tunnel_pid.json", raising=False
+        )
+
+    li_mod = _maybe_module("agent_takkub.lead_inbox", force=False)
+    if li_mod is not None and hasattr(li_mod, "_RUNTIME_DIR_DEFAULT"):
+        monkeypatch.setattr(li_mod, "_RUNTIME_DIR_DEFAULT", runtime, raising=False)
+
+    if cfg is not None and hasattr(cfg, "DOCS_DIR"):
+        monkeypatch.setattr(cfg, "DOCS_DIR", runtime / "docs", raising=False)
+
+    app_mod = _maybe_module("agent_takkub.app", force=False)
+    if app_mod is not None and hasattr(app_mod, "_BOOT_LOG"):
+        monkeypatch.setattr(app_mod, "_BOOT_LOG", runtime / "boot.log", raising=False)
+
     # Neutralise TAKKUB_PORT_FILE + isolate PORT_FILE. Importing agent_takkub.app
     # runs a module-level `os.environ.setdefault("TAKKUB_PORT_FILE", <tmp>/agent-
     # takkub-port.<pid>)` whenever TAKKUB_ALLOW_MULTI is set (which it always is
@@ -455,7 +502,6 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # spuriously look like a leaked cross-instance override. Tests that need
     # to model the actual leak scenario re-set it themselves.
     monkeypatch.delenv("TAKKUB_ROLE", raising=False)
-    cfg = _maybe_module("agent_takkub.config", force=True)
     # #362 guard setup: capture the REAL SETTINGS_HOME (before anything below
     # patches `cfg.SETTINGS_HOME` to the isolated tmp dir) and snapshot its
     # top-level files now, so teardown can detect whether this test wrote to
@@ -595,8 +641,15 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     )
     for _mod_name, _attr, _fname in _settings_home_path_modules:
         _m = _maybe_module(_mod_name, force=True)
-        if _m is not None and hasattr(_m, _attr):
-            monkeypatch.setattr(_m, _attr, tmp_path / "_isolated_takkub" / _fname, raising=False)
+        if _m is not None:
+            if hasattr(_m, _attr):
+                monkeypatch.setattr(
+                    _m, _attr, tmp_path / "_isolated_takkub" / _fname, raising=False
+                )
+            if hasattr(_m, "SETTINGS_HOME"):
+                monkeypatch.setattr(
+                    _m, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False
+                )
 
     # #510: pipeline_config._PATH / _BASE_DIR are the same import-time-bound-
     # to-SETTINGS_HOME shape as the constants above — missed by the 2026-08-23
@@ -643,13 +696,23 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # with its own `monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", ...)`
     # (the test_user_profile.py `isolate` fixture's convention) still wins.
     up_mod = _maybe_module("agent_takkub.user_profile", force=True)
-    if up_mod is not None and hasattr(up_mod, "_DEFAULT_CONFIG_DIR"):
-        monkeypatch.setattr(
-            up_mod,
-            "_DEFAULT_CONFIG_DIR",
-            tmp_path / "_isolated_takkub" / "dot-claude",
-            raising=False,
-        )
+    if up_mod is not None:
+        if hasattr(up_mod, "_DEFAULT_CONFIG_DIR"):
+            monkeypatch.setattr(
+                up_mod,
+                "_DEFAULT_CONFIG_DIR",
+                tmp_path / "_isolated_takkub" / "dot-claude",
+                raising=False,
+            )
+        if hasattr(up_mod, "_BASE_DIR"):
+            monkeypatch.setattr(up_mod, "_BASE_DIR", tmp_path / "_isolated_takkub", raising=False)
+        if hasattr(up_mod, "_REGISTRY_PATH"):
+            monkeypatch.setattr(
+                up_mod,
+                "_REGISTRY_PATH",
+                tmp_path / "_isolated_takkub" / "user-profiles.json",
+                raising=False,
+            )
 
     # worktree_manager.DATA_HOME = config.DATA_HOME is likewise bound by
     # value at import time (`from .config import DATA_HOME`), so patching
@@ -664,6 +727,52 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     wm_mod = _maybe_module("agent_takkub.worktree_manager", force=True)
     if wm_mod is not None and hasattr(wm_mod, "DATA_HOME") and "_isolated_repo_root" in locals():
         monkeypatch.setattr(wm_mod, "DATA_HOME", _isolated_repo_root, raising=False)
+
+    # #584: Modules copying DATA_HOME or import-time derived config paths
+    if "_isolated_repo_root" in locals():
+        if cfg is not None:
+            if hasattr(cfg, "PROJECTS_JSON"):
+                monkeypatch.setattr(
+                    cfg, "PROJECTS_JSON", _isolated_repo_root / "projects.json", raising=False
+                )
+            if hasattr(cfg, "PROJECT_SKILLS_HOME"):
+                monkeypatch.setattr(
+                    cfg,
+                    "PROJECT_SKILLS_HOME",
+                    _isolated_repo_root / "project-skills",
+                    raising=False,
+                )
+            if hasattr(cfg, "GLOBAL_SKILLS_HOME"):
+                monkeypatch.setattr(
+                    cfg, "GLOBAL_SKILLS_HOME", _isolated_repo_root / "skills", raising=False
+                )
+
+        for _d_mod_name in (
+            "agent_takkub.disk_usage",
+            "agent_takkub.issues",
+            "agent_takkub.spawn_engine",
+            "agent_takkub.orchestrator",
+        ):
+            _dm = _maybe_module(_d_mod_name, force=False)
+            if _dm is not None and hasattr(_dm, "DATA_HOME"):
+                monkeypatch.setattr(_dm, "DATA_HOME", _isolated_repo_root, raising=False)
+
+        app_dm = _maybe_module("agent_takkub.app", force=False)
+        if app_dm is not None and hasattr(app_dm, "DATA_HOME"):
+            monkeypatch.setattr(app_dm, "DATA_HOME", _isolated_repo_root, raising=False)
+
+        gs_mod = _maybe_module("agent_takkub.graft_store", force=False)
+        if gs_mod is not None:
+            if hasattr(gs_mod, "DATA_HOME"):
+                monkeypatch.setattr(gs_mod, "DATA_HOME", _isolated_repo_root, raising=False)
+            if hasattr(gs_mod, "REPO_ROOT"):
+                monkeypatch.setattr(gs_mod, "REPO_ROOT", _isolated_repo_root, raising=False)
+            monkeypatch.setattr(
+                gs_mod, "GRAFT_STORE_ROOT", _isolated_repo_root / "graft-graphs", raising=False
+            )
+            monkeypatch.setattr(
+                gs_mod, "GRAFT_STAGING_ROOT", _isolated_repo_root / "graft-staging", raising=False
+            )
 
     # Several modules deliberately resolve their state path lazily from
     # `config.SETTINGS_HOME` at CALL time instead of binding a module-level
@@ -705,6 +814,53 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     tp_mod = _maybe_module("agent_takkub.team_preset", force=True)
     if tp_mod is not None and hasattr(tp_mod, "_BASE_DIR"):
         monkeypatch.setattr(tp_mod, "_BASE_DIR", tmp_path / "_isolated_takkub", raising=False)
+
+    # claude_auth_config copies SETTINGS_HOME at import time (#584)
+    cac_mod = _maybe_module("agent_takkub.claude_auth_config", force=True)
+    if cac_mod is not None:
+        _takkub_dir = tmp_path / "_isolated_takkub"
+        if hasattr(cac_mod, "_SETTINGS_HOME"):
+            monkeypatch.setattr(cac_mod, "_SETTINGS_HOME", _takkub_dir, raising=False)
+        if hasattr(cac_mod, "_LEGACY_GLOBAL_PATH"):
+            monkeypatch.setattr(
+                cac_mod, "_LEGACY_GLOBAL_PATH", _takkub_dir / "claude-auth.json", raising=False
+            )
+        if hasattr(cac_mod, "_DEFAULT_CONFIG_DIR"):
+            monkeypatch.setattr(
+                cac_mod, "_DEFAULT_CONFIG_DIR", _takkub_dir / "dot-claude", raising=False
+            )
+
+    # cleanup service copies SETTINGS_HOME at import time (#584)
+    cleanup_mod = _maybe_module("agent_takkub.settings_management.services.cleanup", force=True)
+    if cleanup_mod is not None and hasattr(cleanup_mod, "SETTINGS_HOME"):
+        monkeypatch.setattr(
+            cleanup_mod, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False
+        )
+
+    # openviking_cleanup binds ~/.agent-takkub/services/openviking paths at import time (#584)
+    ovk_mod = _maybe_module("agent_takkub.openviking_cleanup", force=True)
+    if ovk_mod is not None:
+        _ovk_home = tmp_path / "_isolated_takkub" / "openviking"
+        if hasattr(ovk_mod, "SERVICES_ROOT"):
+            monkeypatch.setattr(
+                ovk_mod, "SERVICES_ROOT", tmp_path / "_isolated_takkub" / "services", raising=False
+            )
+        if hasattr(ovk_mod, "OPENVIKING_HOME"):
+            monkeypatch.setattr(ovk_mod, "OPENVIKING_HOME", _ovk_home, raising=False)
+        if hasattr(ovk_mod, "VENV_DIR"):
+            monkeypatch.setattr(ovk_mod, "VENV_DIR", _ovk_home / "venv", raising=False)
+        if hasattr(ovk_mod, "CONFIG_DIR"):
+            monkeypatch.setattr(ovk_mod, "CONFIG_DIR", _ovk_home / "config", raising=False)
+        if hasattr(ovk_mod, "DATA_DIR"):
+            monkeypatch.setattr(ovk_mod, "DATA_DIR", _ovk_home / "data", raising=False)
+        if hasattr(ovk_mod, "STATE_FILE"):
+            monkeypatch.setattr(ovk_mod, "STATE_FILE", _ovk_home / "state.json", raising=False)
+        if hasattr(ovk_mod, "LOG_DIR"):
+            monkeypatch.setattr(ovk_mod, "LOG_DIR", _ovk_home / "logs", raising=False)
+        if hasattr(ovk_mod, "PID_FILE"):
+            monkeypatch.setattr(
+                ovk_mod, "PID_FILE", _ovk_home / "openviking_pid.json", raising=False
+            )
 
     # #196/#504: `session_store.py`'s password-session store used to be a
     # module-level `_PATH` (SETTINGS_HOME-bound) needing isolation here so

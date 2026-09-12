@@ -916,9 +916,26 @@ def test_record_turn_skips_non_numeric_usage_field_instead_of_raising():
     assert rows == []
 
 
-def test_import_all_isolates_one_providers_crash_from_the_others(monkeypatch):
+def test_import_all_isolates_one_providers_crash_from_the_others(monkeypatch, tmp_path):
     def _boom():
         raise RuntimeError("blew up")
+
+    # Without this the surviving importers run for real against the developer's
+    # own provider stores: `import_codex(profiles=None)` resolves
+    # `user_profile.profiles_for_provider("codex")` -> `codex_home()` and parses
+    # every rollout JSONL under it (198 files on this machine). Alone that is
+    # merely slow; inside the xdist gate, with a live cockpit still appending to
+    # those same files, it blew past the 4m40s faulthandler timeout and took the
+    # whole gate down with zero failing tests to point at. The assertions here
+    # only care that one importer raising does not poison the others, so give
+    # every provider an empty profile rooted in tmp_path.
+    from agent_takkub import user_profile as _up
+
+    monkeypatch.setattr(
+        _up,
+        "profiles_for_provider",
+        lambda provider: [{"name": "default", "config_dir": str(tmp_path / provider)}],
+    )
 
     monkeypatch.setitem(ul._IMPORTERS, "claude", _boom)
     result = ul.import_all()
