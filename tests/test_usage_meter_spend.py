@@ -51,6 +51,7 @@ def test_opencode_spend_never_renders_a_bar():
     """No quota denominator exists for a self-tallied token count — a bar
     would fabricate a '% full' reading that doesn't exist."""
     entries = _provider_body_entries(_opencode_usage(), datetime.now(tz=UTC))
+    assert entries, "rendered nothing — all() below would pass vacuously"
     assert all(kind != "bar" for kind, *_ in entries)
 
 

@@ -490,6 +490,9 @@ class TestProvidersRolesView:
         bulk.setCurrentIndex(bulk.findData("codex"))
         dlg._bulk_role_provider_btn.click()
         roles = tuple(dlg._role_provider_combos)
+        # A view that rendered no role combos would satisfy all() below while
+        # proving nothing about the bulk change.
+        assert roles
 
         dlg._on_save_apply_clicked()
 

@@ -2209,6 +2209,9 @@ class TestAssignTeamFlag:
                 "scan",
             ]
         )
+        # `--shards 2` must actually have fanned out — without this an empty
+        # fake_request would satisfy all() and the test would assert nothing.
+        assert len(fake_request) == 2
         assert all(p["team"] is None for p in fake_request)
 
 

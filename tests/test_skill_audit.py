@@ -323,8 +323,16 @@ class TestAuditNewRoleText:
         assert overlaps == []
 
     def test_candidate_never_compared_against_itself(self) -> None:
-        existing = {"qa": "playwright browser test smoke e2e"}
+        # Needs a third doc: on a two-doc corpus of identical text every term
+        # appears in every doc, so idf == log(2/2) == 0 zeroes each vector and
+        # audit_new_role_text returns [] no matter what — which used to make
+        # the `all(name != "qa2")` assertion below pass while proving nothing.
+        existing = {
+            "qa": "playwright browser test smoke e2e",
+            "backend": "fastapi database migration sql endpoint",
+        }
         overlaps = audit_new_role_text(
             "qa2", "playwright browser test smoke e2e", threshold=0.9, existing=existing
         )
+        assert [name for name, _sim in overlaps] == ["qa"]
         assert all(name != "qa2" for name, _sim in overlaps)

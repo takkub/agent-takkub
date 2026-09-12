@@ -64,7 +64,10 @@ class TestProjectSlug:
 
     def test_slug_is_lowercase_safe(self, tmp_path: Path) -> None:
         slug = services._project_slug(tmp_path)
-        # Only lowercase, digits, hyphens
+        # Only lowercase, digits, hyphens. `isalnum()` alone admits uppercase,
+        # and all() over an empty slug would pass — pin both.
+        assert slug
+        assert slug == slug.lower()
         assert all(c.isalnum() or c == "-" for c in slug)
 
     def test_different_dirs_produce_different_slugs(self, tmp_path: Path) -> None:

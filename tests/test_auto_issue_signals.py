@@ -302,6 +302,7 @@ class TestDeliveryFailureReasons:
         now = datetime(2026, 8, 21, 12, 0, 0)
         log = _log(tmp_path / "events.log", _delivery_failures(now, 3, "writer_queue_full"))
         hits = sig.scan_for_signals(log, now=now)
+        assert hits[0].samples, "no sample carried — all() below proves nothing"
         assert all("writer_queue_full" in s for s in hits[0].samples)
 
 

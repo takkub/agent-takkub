@@ -1675,6 +1675,7 @@ class TestListIsolated:
             )
         )
         rows = mgr.list_isolated("/repo")
+        assert rows, "no worktree listed — all() below would pass vacuously"
         assert all(r["dirty"] for r in rows)
 
     def test_dirty_flag_ignores_crlf_phantom(self):
@@ -1691,6 +1692,7 @@ class TestListIsolated:
             )
         )
         rows = mgr.list_isolated("/repo")
+        assert rows, "no worktree listed — all() below would pass vacuously"
         assert all(r["dirty"] is False for r in rows)
 
 
@@ -2252,6 +2254,7 @@ class TestCleanIsolated:
             ]
         )
         lines = WorktreeManager(r).clean_isolated("/repo")
+        assert lines, "nothing reported — all() below would pass vacuously"
         assert all(line.startswith("KEEP") for line in lines), lines
         assert all("commit ยังไม่ merge" in line for line in lines), lines
 
