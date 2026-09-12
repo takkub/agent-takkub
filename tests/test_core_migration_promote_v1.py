@@ -187,13 +187,21 @@ def test_copy_verified_bridges_the_copy_to_verify_gap_with_an_explicit_call(tmp_
     assert all(done == total for done, total, _path in calls)  # never a false reset to 0
 
 
-def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path):
+def test_copy_verified_on_file_throttles_by_count_and_always_fires_last(tmp_path, monkeypatch):
     """#574 round11 item 3: a large directory entry's copy+verify must
     surface progress WITHIN itself — not just one `on_entry` fire for the
     whole thing. Default throttle is every 200 files; a 500-file entry
     must fire at 200, 400, and a guaranteed final call at 500 (verify
     phase, real target-file count doubling every count since copy AND
     verify each throttle independently)."""
+    # The throttle fires on whichever comes first: _PROGRESS_EVERY_N_FILES or
+    # _PROGRESS_EVERY_N_SECONDS. This test is about the COUNT path (see its
+    # name), so take the 2s timer out of the picture — leaving it in makes the
+    # assertions below depend on how fast the machine writes 500 tiny files.
+    # Observed failing 1 run in 3 on a loaded box, emitting at 69/97/132/165/202
+    # instead of 200/400 because the timer kept winning the race.
+    monkeypatch.setattr(verify_copy, "_PROGRESS_EVERY_N_SECONDS", float("inf"))
+
     src = tmp_path / "src"
     src.mkdir()
     n = 500

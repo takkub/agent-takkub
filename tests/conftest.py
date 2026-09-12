@@ -756,6 +756,17 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
             _dm = _maybe_module(_d_mod_name, force=False)
             if _dm is not None and hasattr(_dm, "DATA_HOME"):
                 monkeypatch.setattr(_dm, "DATA_HOME", _isolated_repo_root, raising=False)
+                # REPO_ROOT has to move WITH DATA_HOME, never on its own. A dev
+                # checkout is defined by `DATA_HOME == REPO_ROOT`
+                # (config._resolve_data_home), and code branches on exactly that
+                # equality — `issues._cockpit_repo_cwd()` returns REPO_ROOT when
+                # they match and None when they do not. Isolating only DATA_HOME
+                # silently turned every test into an "installed build", so
+                # `_cockpit_repo_cwd()` started returning None and ten
+                # test_issues.py cases failed. graft_store below already patches
+                # both for the same reason.
+                if hasattr(_dm, "REPO_ROOT"):
+                    monkeypatch.setattr(_dm, "REPO_ROOT", _isolated_repo_root, raising=False)
 
         app_dm = _maybe_module("agent_takkub.app", force=False)
         if app_dm is not None and hasattr(app_dm, "DATA_HOME"):
