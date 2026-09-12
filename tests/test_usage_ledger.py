@@ -9,9 +9,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent_takkub import usage_ledger as ul
+
+
+def _recent(hours_ago: float = 2.0) -> str:
+    """A timestamp guaranteed to stay inside query_usage's default 7-day
+    window regardless of what day the suite happens to run on — a fixed
+    literal (e.g. "2026-09-05T00:00:00Z") rolls out of a `days=7` window
+    the moment "today" advances past day+6 (#561-batch qa-gate, 2026-09-12:
+    CI went red exactly at that rollover, not from any code regression)."""
+    return (datetime.now(tz=UTC) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 # ── record_turn / record_quota_sample ───────────────────────────────────
 
@@ -924,7 +934,7 @@ def test_query_usage_aggregates_claude_and_flags_uncountable_gemini():
     ul.record_turn(
         "claude",
         "default",
-        "2026-09-05T00:00:00Z",
+        _recent(),
         "r1",
         "claude-sonnet-5",
         {"input": 1, "cache_creation": 2, "cache_read": 3, "output": 4},
@@ -956,11 +966,11 @@ def test_query_usage_provider_filter_and_uncountable_listing():
 
 
 def test_query_usage_quota_delta_sums_only_positive_movement():
-    ul.record_quota_sample("claude", "default", "2026-09-05T00:00:00Z", "five_hour", 10.0, None)
-    ul.record_quota_sample("claude", "default", "2026-09-05T01:00:00Z", "five_hour", 40.0, None)
+    ul.record_quota_sample("claude", "default", _recent(4), "five_hour", 10.0, None)
+    ul.record_quota_sample("claude", "default", _recent(3), "five_hour", 40.0, None)
     # A reset (utilization drops) must contribute 0, not a negative delta.
-    ul.record_quota_sample("claude", "default", "2026-09-05T02:00:00Z", "five_hour", 5.0, None)
-    ul.record_quota_sample("claude", "default", "2026-09-05T03:00:00Z", "five_hour", 20.0, None)
+    ul.record_quota_sample("claude", "default", _recent(2), "five_hour", 5.0, None)
+    ul.record_quota_sample("claude", "default", _recent(1), "five_hour", 20.0, None)
     result = ul.query_usage(days=7, provider="claude")
     window = next(q for q in result["quota"] if q["window"] == "five_hour")
     assert window["delta_pct"] == 45.0  # (40-10) + (20-5), reset drop ignored

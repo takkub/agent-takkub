@@ -9,11 +9,18 @@ import base64
 import json
 import socket
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agent_takkub.remote import api
+
+
+def _recent_iso(hours_ago: float = 2.0) -> str:
+    """A timestamp inside query_usage's default 7-day window regardless of
+    what day the suite runs on — see the same helper in test_usage_ledger.py."""
+    return (datetime.now(tz=UTC) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class _FakeCliServer:
@@ -758,7 +765,7 @@ class TestUsageHistory:
         usage_ledger.record_turn(
             "claude",
             "default",
-            "2026-09-05T00:00:00Z",
+            _recent_iso(),
             "r1",
             "claude-sonnet-5",
             {"input": 1, "cache_creation": 2, "cache_read": 3, "output": 4},
@@ -780,7 +787,7 @@ class TestUsageHistory:
         usage_ledger.record_turn(
             "claude",
             "default",
-            "2026-09-05T00:00:00Z",
+            _recent_iso(),
             "r1",
             "m",
             {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
@@ -879,7 +886,7 @@ class TestUsageHistory:
         usage_ledger.record_turn(
             "claude",
             "default",
-            "2026-09-05T00:00:00Z",
+            _recent_iso(),
             "r1",
             "m",
             {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},

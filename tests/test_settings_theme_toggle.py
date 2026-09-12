@@ -4,9 +4,17 @@ and immediate live re-apply across open windows."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from agent_takkub import cockpit_theme, settings_window, theme_settings
+
+
+def _recent_iso(hours_ago: float = 2.0) -> str:
+    """A timestamp inside query_usage's default 7-day window regardless of
+    what day the suite runs on — see the same helper in test_usage_ledger.py."""
+    return (datetime.now(tz=UTC) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @pytest.fixture(autouse=True)
@@ -185,7 +193,7 @@ class TestRethemeReachesInlineStyledChildren:
         usage_ledger.record_turn(
             "claude",
             "default",
-            "2026-09-05T10:00:00Z",
+            _recent_iso(),
             "r1",
             "claude-sonnet-5",
             {"input": 10, "cache_creation": 20, "cache_read": 30, "output": 40},
