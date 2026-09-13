@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.6] - 2026-09-13
+
 ### Fixed (แก้)
 
 - **watchdog เตือน "Lead อาจค้างจริง" ผิดตอน Lead ว่างจริง (#588)** — root cause สองจุด: (1) Lead's
