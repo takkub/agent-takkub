@@ -4,6 +4,38 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **guard ของ Lead ปฏิเสธเมื่อตัวเองพัง (fail-closed)** — เดิมถ้าตัวตรวจ Edit/Write ของ Lead error
+  ระบบจะปล่อยผ่าน และตรวจพบว่า deny-list ที่เชื่อกันว่ากันไว้อีกชั้น (`render_lead_settings`) ไม่เคยถูกใช้จริง
+  (pane รันด้วย `--dangerously-skip-permissions`) ตอนนี้ deny + บันทึก event `pane_guard_error` และถอด
+  โค้ด deny-list ที่ตายแล้วออกทั้งสาย
+- **งานหายเงียบเมื่อ assign role เดียวกันในวินาทีเดียว** — ไฟล์ handoff ชื่อ `HHMMSS-role.md` ชนกัน
+  ใบหลังเขียนทับใบแรกโดยไม่มี error ตอนนี้ใช้ microsecond + เปิดไฟล์แบบห้ามทับ + retry
+- **เพดานการแก้ไฟล์ของ Lead** รีเซ็ตเฉพาะตอนเริ่ม session ใหม่ (`/clear`, resume, auto-compact
+  ไม่รีเซ็ตอีก) · ไม่นับไฟล์ที่ไม่ใช่ source (`*.md`/`*.txt`, runtime ของ cockpit, ไฟล์นอกโปรเจค) ·
+  เช็คหมวด deep ก่อนข้อยกเว้น เพื่อไม่ให้ `package.json`/lockfile/CI ระดับ repo หลุด
+- **busy-machine gate ใช้งานได้จริง** — เดิมเงื่อนไข RAM/CPU อ่าน snapshot ที่สดพอเพียง ~17% ของเวลา
+  ตอนนี้มี `runtime/machine-state.json` เขียนตอน pane เปลี่ยนสถานะ + heartbeat
+- **UI ค้างจากการเขียน snapshot** — ย้ายการวัด governor และเขียนไฟล์ออกจาก main thread
+- **กฎ qa-gate ตามขนาดงานใน batch** คำนวณจากโค้ดจริงแล้ว (`task_ledger.batch_max_scope`) แทนการอ่าน
+  จากเอกสาร · `qa-gate --auto` และ `takkub ma` แสดงเหตุผล
+- root `CLAUDE.md` ยังสั่งทุก pane ให้ "เขียนเทสกันถอย" ขัดกับกติกา #585 — แก้ให้ตรงแล้ว
+- ready marker ของ claude: footer ที่มี `Press up to edit queued messages` ไม่ถูกมองว่ายุ่งอีก
+- คำเตือน "--provider/--model/--effort ไม่มีผล" ยิงเฉพาะเมื่อค่าที่ขอต่างจากที่ pane รันอยู่จริง
+- เทสที่ล้มเฉพาะเครื่องที่รัน cockpit อยู่ (pane ส่ง `TAKKUB_STORAGE_ROOT` ต่อลงเทส) แยกออกจาก
+  config ของเครื่องแล้ว
+
+### Changed (เปลี่ยน)
+
+- เพิ่ม pre-commit hook `pytest --collect-only` — จับไฟล์เทสที่ import ของที่ไม่มีอยู่ก่อนถึง CI
+  (2.1.4 เสีย CI ไป 3 รอบเพราะเรื่องนี้)
+
+### Known gaps (ยังไม่ปิด)
+
+- watchdog ยังเตือน "Lead อาจค้าง" ได้ผิดเมื่อ Lead หยุดรอนาน (~20 นาที) ทั้งที่ footer ตัดสินว่า ready
+  ได้ถูกต้อง — ต้นเหตุอยู่ในตัวจับ marker ค้าง (#588)
+
 ## [v2.1.4] - 2026-09-13
 
 ### Added (เพิ่ม)
