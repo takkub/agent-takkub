@@ -2342,3 +2342,82 @@ class TestLeadEditsCommand:
         assert rc == 0
         # assign should NOT call reset_lead_edits
         assert reset_calls == []
+
+
+class TestCmdGuardFailClosed:
+    """#587 F1: the Lead direct-edit branch of `cmd_guard` must fail CLOSED
+    (exit_code 2) when the evaluator itself raises — unlike every other
+    guard path, which fails open by design (see `cmd_guard` docstring)."""
+
+    def _run_guard(
+        self, monkeypatch: pytest.MonkeyPatch, *, role: str, tool_name: str
+    ) -> dict[str, Any]:
+        monkeypatch.setenv("TAKKUB_ROLE", role)
+        monkeypatch.setenv("TAKKUB_PROJECT", "proj-x")
+        monkeypatch.setattr(
+            cli,
+            "_read_hook_stdin",
+            lambda: {
+                "tool_name": tool_name,
+                "tool_input": {"file_path": "src/foo.py", "content": "x = 1\n"},
+                "cwd": "C:/proj-x",
+            },
+        )
+        import argparse
+
+        return cli.cmd_guard(argparse.Namespace())
+
+    def test_lead_edit_denies_when_evaluator_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*_a, **_kw):
+            raise RuntimeError("evaluator broke")
+
+        monkeypatch.setattr("agent_takkub.pane_guard.evaluate_lead_direct_edit", _boom)
+
+        events: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda name, **kw: events.append({"name": name, **kw}),
+        )
+
+        resp = self._run_guard(monkeypatch, role="lead", tool_name="Edit")
+        assert resp["exit_code"] == 2
+        assert any(e["name"] == "pane_guard_error" for e in events)
+
+    def test_lead_write_denies_when_evaluator_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*_a, **_kw):
+            raise RuntimeError("evaluator broke")
+
+        monkeypatch.setattr("agent_takkub.pane_guard.evaluate_lead_direct_edit", _boom)
+        monkeypatch.setattr("agent_takkub.orchestrator_text._log_event", lambda name, **kw: None)
+
+        resp = self._run_guard(monkeypatch, role="lead", tool_name="Write")
+        assert resp["exit_code"] == 2
+
+    def test_specialist_bash_guard_still_fails_open_when_it_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Lead direct-edit branch is the ONE fail-closed exception —
+        every other guard path (e.g. a specialist's Bash command) must keep
+        failing open when its evaluator raises."""
+        from agent_takkub.core.capabilities.permission_engine import PermissionEngine
+
+        def _boom(self, *_a, **_kw):
+            raise RuntimeError("shell evaluator broke")
+
+        monkeypatch.setattr(PermissionEngine, "evaluate_shell_command", _boom)
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        monkeypatch.setenv("TAKKUB_PROJECT", "proj-x")
+        monkeypatch.setattr(
+            cli,
+            "_read_hook_stdin",
+            lambda: {
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "cwd": "C:/proj-x",
+            },
+        )
+        import argparse
+
+        resp = cli.cmd_guard(argparse.Namespace())
+        assert "exit_code" not in resp
+        assert resp["ok"] is True

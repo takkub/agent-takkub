@@ -1322,3 +1322,90 @@ class TestLeadDirectEdit:
         assert status_after["files_count"] == 1
         assert status_after["total_lines"] == 1
         assert status_after["updated_at"] is not None
+
+
+class TestDirectEditExemptRuntime:
+    """#587 F2: `_is_direct_edit_exempt`'s runtime carve-out must only apply
+    to a `runtime/` directory sitting directly at a configured project root
+    (or cockpit's own `config.RUNTIME_DIR`) — not any `runtime` segment
+    anywhere in the path (previously exempted `src/runtime/app.py` too,
+    letting Lead edit arbitrary project source unlimited)."""
+
+    def test_runtime_at_project_root_is_exempt(self, tmp_path, monkeypatch) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [root.resolve()],
+        )
+        file_path = str(root / "runtime" / "state.json")
+        assert pane_guard._is_direct_edit_exempt(file_path, str(root), "proj") is True
+
+    def test_runtime_nested_under_src_is_not_exempt(self, tmp_path, monkeypatch) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [root.resolve()],
+        )
+        file_path = str(root / "src" / "runtime" / "app.py")
+        assert pane_guard._is_direct_edit_exempt(file_path, str(root), "proj") is False
+
+    def test_cockpit_runtime_dir_is_exempt_anywhere(self, tmp_path, monkeypatch) -> None:
+        fake_runtime = tmp_path / "cockpit_runtime"
+        monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", fake_runtime)
+        file_path = str(fake_runtime / "lead_edits" / "proj.json")
+        assert pane_guard._is_direct_edit_exempt(file_path, None, None) is True
+
+
+class TestDeepCategoryOutranksRootExemption:
+    """#587 F3: `evaluate_lead_direct_edit` must check the deep-file-category
+    patterns BEFORE the runtime/outside-root exemption. A multi-root project
+    (paths={"web": ".../pms-web"}) can easily leave a repo-level file like
+    `package.json` outside every configured root — that must still deny,
+    not slip past via the exemption meant for scratchpad/memory notes."""
+
+    def test_deep_file_outside_every_root_is_still_denied(self, tmp_path, monkeypatch) -> None:
+        repo_root = tmp_path / "proj"
+        sub_root = repo_root / "pms-web"
+        sub_root.mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [sub_root.resolve()],
+        )
+        state_file = tmp_path / "state.json"
+        for bad_file in [
+            str(repo_root / "package.json"),
+            str(repo_root / ".github" / "workflows" / "ci.yml"),
+        ]:
+            verdict = pane_guard.evaluate_lead_direct_edit(
+                "Write",
+                {"file_path": bad_file, "content": "{}"},
+                cwd=str(repo_root),
+                project="proj",
+                scope="tiny",
+                state_file=state_file,
+            )
+            assert not verdict.allowed
+            assert verdict.rule == "lead_direct_edit:deep_category"
+
+    def test_non_deep_file_outside_every_root_still_exempt(self, tmp_path, monkeypatch) -> None:
+        repo_root = tmp_path / "proj"
+        sub_root = repo_root / "pms-web"
+        sub_root.mkdir(parents=True)
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [sub_root.resolve()],
+        )
+        scratch = tmp_path / "scratch" / "note.json"
+        scratch.parent.mkdir(parents=True)
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(scratch), "content": "x" * 500},
+            cwd=str(repo_root),
+            project="proj",
+            scope="normal",
+            state_file=state_file,
+        )
+        assert verdict.allowed

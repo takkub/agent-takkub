@@ -822,26 +822,40 @@ def _is_machine_busy_from_snapshot(
     return False, ""
 
 
+def _is_note_exempt(file_path: str) -> bool:
+    """#587 A2: a `*.md`/`*.txt` note is never counted toward, or denied by,
+    Lead's direct-edit caps (carve-out #474 already allows these in prose;
+    this makes the guard agree instead of pushing Lead to write them
+    through Bash to dodge `lines_per_call`)."""
+    lower = file_path.replace("\\", "/").rstrip("/").lower()
+    return lower.endswith(".md") or lower.endswith(".txt")
+
+
 def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None) -> bool:
-    """#587 A2: paths that must never be counted toward, or denied by,
-    Lead's direct-edit caps — a `*.md`/`*.txt` note (carve-out #474 already
-    allows these in prose; this makes the guard agree instead of pushing
-    Lead to write them through Bash to dodge `lines_per_call`), anything
-    under a `runtime/` segment (cockpit's own state, not project source),
-    and anything outside the current project's configured paths entirely
-    (scratchpad, memory files under `~/.claude-work/`, etc — confirmed live:
-    Lead writing its OWN task-spec file to scratchpad was denied at 62
-    lines even though it is neither source nor even inside the project).
+    """#587 A2/F2: paths that must never be counted toward, or denied by,
+    Lead's direct-edit caps — cockpit's own runtime state under
+    `config.RUNTIME_DIR` (any depth), a `runtime/` directory sitting
+    directly at one of the project's configured roots (its own state, not
+    project source), and anything outside the project's configured paths
+    entirely (scratchpad, memory files under `~/.claude-work/`, etc —
+    confirmed live: Lead writing its OWN task-spec file to scratchpad was
+    denied at 62 lines even though it is neither source nor even inside
+    the project).
+
+    F2 fix: the runtime carve-out used to match ANY `runtime` path segment
+    anywhere (`"runtime" in segments`), so a project with real source at
+    `src/runtime/app.py` had that file exempted from every cap — narrowed
+    to only a `runtime` segment immediately under a known root.
+
+    Deliberately does NOT check `.md`/`.txt` — that carve-out
+    (`_is_note_exempt`) and the deep-file-category deny both run in
+    `evaluate_lead_direct_edit` BEFORE this function (#587 F3), so a
+    repo-level file like `package.json` that happens to live outside every
+    configured root still hits the deep-category deny instead of slipping
+    past via this exemption.
 
     Only narrows what counts — a file that IS project source is unaffected.
     """
-    norm = file_path.replace("\\", "/").rstrip("/")
-    lower = norm.lower()
-    if lower.endswith(".md") or lower.endswith(".txt"):
-        return True
-    if "runtime" in (seg.lower() for seg in norm.split("/") if seg):
-        return True
-
     resolved = pathlib.Path(file_path)
     if not resolved.is_absolute() and cwd:
         resolved = pathlib.Path(cwd) / resolved
@@ -849,6 +863,14 @@ def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None)
         resolved = resolved.resolve()
     except OSError:
         return False  # unresolvable path — don't exempt, keep prior (counted) behavior
+
+    try:
+        from .config import RUNTIME_DIR
+
+        resolved.relative_to(RUNTIME_DIR.resolve())
+        return True  # cockpit's own runtime state, anywhere under it
+    except (ValueError, OSError):
+        pass
 
     roots: list[pathlib.Path] = []
     if project:
@@ -868,10 +890,12 @@ def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None)
 
     for root in roots:
         try:
-            resolved.relative_to(root)
-            return False  # inside a known project root
+            rel = resolved.relative_to(root)
         except ValueError:
             continue
+        # inside a known project root — exempt only its own top-level
+        # `runtime/` dir, not project source anywhere else under it.
+        return bool(rel.parts) and rel.parts[0].lower() == "runtime"
     return True  # outside every known root
 
 
@@ -893,16 +917,20 @@ def evaluate_lead_direct_edit(
     4. Cumulative <= 30 lines per task
     5. NOT in deep category (schema, migration, auth, security, tokens/secrets, crypto, payment, infra, lockfiles)
 
-    None of the above applies to a path `_is_direct_edit_exempt` recognises
-    as outside project source (#587 A2) — those are allowed unconditionally
-    and never touch the cumulative counters at all.
+    None of the above applies to a `.md`/`.txt` note (`_is_note_exempt`) or
+    when the project's team preset has `lead_may_implement=True`
+    (``solo-lead``/``pair``) — a prior `lead_context` function used to reach
+    the same outcome (Edit/Write allowed unconditionally) through a settings
+    file that spawn never actually wired in, and has since been removed.
+    This is the ONLY place that guarantee is enforced now.
 
-    None of the above applies at all (#587 A3) when the project's team
-    preset has `lead_may_implement=True` (``solo-lead``/``pair``) — a prior
-    `lead_context` function used to reach the same outcome (Edit/Write
-    allowed unconditionally) through a settings file that spawn never
-    actually wired in, and has since been removed. This is the ONLY place
-    that guarantee is enforced now.
+    The deep-category deny (condition 5) runs BEFORE the runtime/
+    outside-root exemption (#587 F3) — a repo-level file like `package.json`
+    that happens to live outside every configured project root (a common
+    gap in a multi-root project) must still be denied, not silently pass
+    through the exemption meant for scratchpad/memory notes. Only after
+    that does `_is_direct_edit_exempt` get a chance to allow it
+    unconditionally, still ahead of the scope/line/cumulative caps below.
     """
     if not isinstance(tool_input, dict):
         return Verdict(True)
@@ -911,7 +939,7 @@ def evaluate_lead_direct_edit(
     if not file_path:
         return Verdict(True)
 
-    if _is_direct_edit_exempt(file_path, cwd, project):
+    if _is_note_exempt(file_path):
         return Verdict(True)
 
     if project:
@@ -923,16 +951,8 @@ def evaluate_lead_direct_edit(
         except Exception:
             pass
 
-    # 1. Non-tiny scope check
-    norm_scope = (scope or "").strip().lower()
-    if norm_scope and norm_scope != "tiny":
-        return Verdict(
-            False,
-            rule=f"lead_direct_edit:{norm_scope}_scope",
-            reason=f"Lead direct-edit ไม่อนุญาตในงาน scope={norm_scope} (อนุญาตเฉพาะ scope=tiny) — ต้อง delegate ผ่าน takkub assign --role <role>",
-        )
-
-    # Deep patterns on file path
+    # Deep patterns on file path — checked before the runtime/outside-root
+    # exemption below (#587 F3), see docstring.
     norm_file = file_path.replace("\\", "/").lower()
     deep_file_patterns = (
         r"\b(?:schema|prisma)\b|schemas?/",
@@ -956,6 +976,18 @@ def evaluate_lead_direct_edit(
                 rule="lead_direct_edit:deep_category",
                 reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
             )
+
+    if _is_direct_edit_exempt(file_path, cwd, project):
+        return Verdict(True)
+
+    # 1. Non-tiny scope check
+    norm_scope = (scope or "").strip().lower()
+    if norm_scope and norm_scope != "tiny":
+        return Verdict(
+            False,
+            rule=f"lead_direct_edit:{norm_scope}_scope",
+            reason=f"Lead direct-edit ไม่อนุญาตในงาน scope={norm_scope} (อนุญาตเฉพาะ scope=tiny) — ต้อง delegate ผ่าน takkub assign --role <role>",
+        )
 
     # 2. Line count per tool call (<= 15 lines)
     if tool_name == "Edit":
