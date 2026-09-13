@@ -35,6 +35,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 - watchdog ยังเตือน "Lead อาจค้าง" ได้ผิดเมื่อ Lead หยุดรอนาน (~20 นาที) ทั้งที่ footer ตัดสินว่า ready
   ได้ถูกต้อง — ต้นเหตุอยู่ในตัวจับ marker ค้าง (#588)
+- เทส `check_scope_effort` ล้มหลอกบนเครื่องที่รัน cockpit dev และ prod พร้อมกัน เพราะไปอ่าน events.log
+  ของ cockpit อีกตัว (#589) — ไม่กระทบผู้ใช้ CI ผ่านปกติ
 
 ## [v2.1.4] - 2026-09-13
 
