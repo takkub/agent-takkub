@@ -1123,3 +1123,7 @@ def suggest_team_size(user_message: str, context: dict | None = None) -> tuple[s
 # #585: the fix-loop ceiling lives in `task_scope` (stdlib-only leaf) and is
 # re-exported here because Lead-side routing already imports this module — the
 # SAME objects, not copies (tests/test_fix_loop_ceiling.py pins that).
+from .task_scope import MAX_FIX_LOOP_ATTEMPTS as MAX_FIX_LOOP_ATTEMPTS  # noqa: E402
+from .task_scope import FixLoopDecision as FixLoopDecision  # noqa: E402
+from .task_scope import FixLoopTracker as FixLoopTracker  # noqa: E402
+from .task_scope import check_fix_loop_ceiling as check_fix_loop_ceiling  # noqa: E402
