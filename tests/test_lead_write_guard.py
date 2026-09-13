@@ -1,16 +1,16 @@
-"""Tests for Phase 2a: Lead write-boundary enforcement via permissions.deny.
+"""Tests for Lead vs teammate spawn argv permission flags.
 
-Covers:
-  render_lead_settings(project) → generates deny rules for project paths
-  spawn(Lead)  → argv has --settings <guard-path>, NO --dangerously-skip-permissions
-  spawn(teammate) → argv still has --dangerously-skip-permissions, NO --settings guard
-  Multi-project isolation: each Lead gets deny rules for its own project only
-  Idempotency: calling render_lead_settings twice returns same path, same content
+Lead's write boundary is enforced by `pane_guard.evaluate_lead_direct_edit`
+(a PreToolUse hook check on every Edit/Write call, see test_pane_guard.py
+and test_team_preset_orchestrator.py) — not by anything baked into spawn's
+argv. This file only covers the argv flags themselves:
+
+  spawn(Lead)     → argv has --dangerously-skip-permissions, no --permission-mode
+  spawn(teammate) → argv has --dangerously-skip-permissions too
 """
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import MagicMock, patch
 
@@ -19,12 +19,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import (
-    _LEAD_GUARD_ALLOW_TOOLS,
-    _LEAD_GUARD_WRITE_TOOLS,
-    Orchestrator,
-    render_lead_settings,
-)
+from agent_takkub.orchestrator import Orchestrator
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures
@@ -48,9 +43,9 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, se
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
-    # render_lead_settings was extracted to lead_context.py — patch its
-    # module namespace too so the function writes into tmp instead of the
-    # real runtime/.
+    # lead_context.py has its own module-level RUNTIME_DIR/REPO_ROOT/
+    # ASSETS_ROOT (used by _render_lead_context during spawn) — patch its
+    # namespace too so spawn writes into tmp instead of the real runtime/.
     from agent_takkub import lead_context as lc_mod
 
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
@@ -74,234 +69,6 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, se
         },
         active="proj_a",
     )
-
-
-# ─────────────────────────────────────────────────────────────
-# render_lead_settings: output file location and content
-# ─────────────────────────────────────────────────────────────
-
-
-class TestRenderLeadSettings:
-    def test_creates_file_in_runtime_dir(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        assert result.parent == tmp_path / "runtime"
-        assert result.name == "lead-guard-proj_a.json"
-        assert result.exists()
-
-    def test_output_is_valid_json(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert isinstance(data, dict)
-
-    def test_has_permissions_deny_key(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert "permissions" in data
-        assert "deny" in data["permissions"]
-        assert isinstance(data["permissions"]["deny"], list)
-
-    def test_thai_project_name_produces_sanitized_filename(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        # #294: the filename used to embed the raw project name unsanitized.
-        result = render_lead_settings("โปรเจกต์ไทย")
-        assert result.parent == tmp_path / "runtime"
-        assert result.name.startswith("lead-guard-")
-        assert result.name.endswith(".json")
-        assert result.exists()
-
-    def test_deny_rules_contain_all_write_tools_for_each_path(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        deny = data["permissions"]["deny"]
-
-        api_path = (tmp_path / "proj_a" / "api").resolve().as_posix()
-        web_path = (tmp_path / "proj_a" / "web").resolve().as_posix()
-
-        for tool in _LEAD_GUARD_WRITE_TOOLS:
-            assert f"{tool}({api_path}/**)" in deny, f"{tool} deny rule for api path missing"
-            assert f"{tool}({web_path}/**)" in deny, f"{tool} deny rule for web path missing"
-
-    def test_deny_rules_do_not_contain_other_project_paths(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        deny = data["permissions"]["deny"]
-        deny_str = json.dumps(deny)
-
-        proj_b_api = (tmp_path / "proj_b" / "api").resolve().as_posix()
-        assert proj_b_api not in deny_str, "proj_b path must NOT appear in proj_a Lead guard"
-
-    def test_has_default_mode_accept_edits(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"].get("defaultMode") == "acceptEdits"
-
-    def test_has_permissions_allow_key(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        """Allow list must exist so Lead skips prompts for Bash/Read/MCP/etc."""
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert "allow" in data["permissions"]
-        assert isinstance(data["permissions"]["allow"], list)
-
-    def test_allow_contains_bash(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        """Lead runs Bash constantly (git/ls/takkub) — must not prompt."""
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert "Bash" in data["permissions"]["allow"]
-
-    def test_allow_contains_read_only_tools(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        allow = data["permissions"]["allow"]
-        for tool in ("Read", "Grep", "Glob", "WebFetch", "WebSearch"):
-            assert tool in allow, f"{tool} missing from allow list"
-
-    def test_allow_contains_mcp_wildcard(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        """All MCP tools (pms / playwright / chrome-devtools) auto-allow."""
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert "mcp__*" in data["permissions"]["allow"]
-
-    def test_allow_does_not_contain_write_tools(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        """Edit/Write/MultiEdit must NOT be in allow — they go through
-        defaultMode=acceptEdits (cockpit files) and deny rules (project paths)
-        so the write boundary stays enforceable."""
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        allow = data["permissions"]["allow"]
-        for tool in _LEAD_GUARD_WRITE_TOOLS:
-            assert tool not in allow, f"{tool} must NOT auto-allow — deny rules need to win"
-
-    def test_allow_matches_constant(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        """Settings file allow list mirrors _LEAD_GUARD_ALLOW_TOOLS exactly
-        (guards against silent drift between constant and renderer)."""
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"]["allow"] == list(_LEAD_GUARD_ALLOW_TOOLS)
-
-    def test_empty_project_gives_empty_deny_list(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("empty_proj")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"]["deny"] == []
-
-    def test_unknown_project_gives_empty_deny_list(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        result = render_lead_settings("nonexistent")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"]["deny"] == []
-
-
-# ─────────────────────────────────────────────────────────────
-# render_lead_settings: idempotency
-# ─────────────────────────────────────────────────────────────
-
-
-class TestRenderLeadSettingsIdempotency:
-    def test_same_path_returned_on_second_call(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        first = render_lead_settings("proj_a")
-        second = render_lead_settings("proj_a")
-        assert first == second
-
-    def test_same_content_on_second_call(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        first = render_lead_settings("proj_a")
-        content_first = first.read_text(encoding="utf-8")
-        second = render_lead_settings("proj_a")
-        content_second = second.read_text(encoding="utf-8")
-        assert content_first == content_second
-
-    def test_file_reflects_path_changes_on_regenerate(
-        self,
-        two_project_json,
-        tmp_path: pathlib.Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """If the project registry's paths change, render_lead_settings picks
-        them up."""
-        render_lead_settings("proj_a")
-
-        # Modify the project registry with a new path
-        new_data = two_project_json.read()
-        new_data["projects"]["proj_a"]["paths"]["extra"] = str(tmp_path / "proj_a" / "extra")
-        two_project_json.write(new_data)
-
-        result = render_lead_settings("proj_a")
-        data = json.loads(result.read_text(encoding="utf-8"))
-        deny_str = json.dumps(data["permissions"]["deny"])
-        extra_path = (tmp_path / "proj_a" / "extra").resolve().as_posix()
-        assert extra_path in deny_str, "New path must appear after regeneration"
-
-
-# ─────────────────────────────────────────────────────────────
-# Multi-project isolation
-# ─────────────────────────────────────────────────────────────
-
-
-class TestMultiProjectIsolation:
-    def test_separate_files_for_separate_projects(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        path_a = render_lead_settings("proj_a")
-        path_b = render_lead_settings("proj_b")
-        assert path_a != path_b
-        assert path_a.name == "lead-guard-proj_a.json"
-        assert path_b.name == "lead-guard-proj_b.json"
-
-    def test_proj_a_guard_denies_only_proj_a_paths(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        path_a = render_lead_settings("proj_a")
-        data_a = json.loads(path_a.read_text(encoding="utf-8"))
-        deny_str = json.dumps(data_a["permissions"]["deny"])
-
-        proj_a_api = (tmp_path / "proj_a" / "api").resolve().as_posix()
-        proj_b_api = (tmp_path / "proj_b" / "api").resolve().as_posix()
-
-        assert proj_a_api in deny_str
-        assert proj_b_api not in deny_str
-
-    def test_proj_b_guard_denies_only_proj_b_paths(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
-    ) -> None:
-        path_b = render_lead_settings("proj_b")
-        data_b = json.loads(path_b.read_text(encoding="utf-8"))
-        deny_str = json.dumps(data_b["permissions"]["deny"])
-
-        proj_a_api = (tmp_path / "proj_a" / "api").resolve().as_posix()
-        proj_b_api = (tmp_path / "proj_b" / "api").resolve().as_posix()
-
-        assert proj_b_api in deny_str
-        assert proj_a_api not in deny_str
 
 
 # ─────────────────────────────────────────────────────────────
@@ -419,20 +186,6 @@ class TestSpawnArgvLeadVsTeammate:
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "lead")
         assert "--permission-mode" not in argv
 
-    def test_lead_argv_no_settings_guard_path(
-        self,
-        qapp: QCoreApplication,
-        two_project_json: pathlib.Path,
-        tmp_path: pathlib.Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Lead no longer receives a lead-guard-*.json --settings file
-        (deny rules are bypassed under --dangerously-skip-permissions)."""
-        argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "lead")
-        settings_values = [argv[i + 1] for i, v in enumerate(argv) if v == "--settings"]
-        for sv in settings_values:
-            assert "lead-guard" not in sv
-
     def test_teammate_argv_has_dangerously_skip_permissions(
         self,
         qapp: QCoreApplication,
@@ -442,16 +195,3 @@ class TestSpawnArgvLeadVsTeammate:
     ) -> None:
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "backend")
         assert "--dangerously-skip-permissions" in argv
-
-    def test_teammate_argv_no_lead_guard_settings(
-        self,
-        qapp: QCoreApplication,
-        two_project_json: pathlib.Path,
-        tmp_path: pathlib.Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "backend")
-        # No --settings pointing to lead-guard file
-        settings_values = [argv[i + 1] for i, v in enumerate(argv) if v == "--settings"]
-        for sv in settings_values:
-            assert "lead-guard" not in sv, "teammate must not receive lead write-guard settings"

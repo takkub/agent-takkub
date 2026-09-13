@@ -47,15 +47,12 @@ from .config import (
 )
 from .headless_pane import HeadlessPane
 from .lead_context import (  # re-exported for test imports
-    _LEAD_GUARD_ALLOW_TOOLS,
-    _LEAD_GUARD_WRITE_TOOLS,
     BIG_FILE_GUARD,
     STALE_FILE_GUARD,
     _allowed_project_roots,
     _default_plugin_dirs,
     _recent_session_brief,
     _render_lead_context,
-    render_lead_settings,
 )
 from .lead_draft_state import LeadDraftState  # re-exported for test imports
 from .lead_inbox import (  # re-exported for test/compat imports; mixin provides methods
@@ -427,8 +424,6 @@ __all__ = [  # backwards-compat re-exports
     "_JUNK_NOTE_MIN_LEN",
     "_JUNK_PROJECT_PREFIXES",
     "_LEAD_ENV_EXTRA_ALLOWLIST",
-    "_LEAD_GUARD_ALLOW_TOOLS",
-    "_LEAD_GUARD_WRITE_TOOLS",
     "_PANE_ENV_ALLOWLIST",
     "_VAULT_ENV",
     "PaneRegistry",
@@ -451,7 +446,6 @@ __all__ = [  # backwards-compat re-exports
     "inject_user_profile_env",
     "prune_old_transcripts",
     "prune_vault_logs",
-    "render_lead_settings",
     "scan_artifacts",
     "write_obsidian_graph_filter",
 ]
@@ -2505,14 +2499,18 @@ class Orchestrator(
         if team is not None:
             if role_name != LEAD.name:
                 return False, "--team override ใช้ได้เฉพาะ --role lead"
-            # M7: a live Lead pane already has its edit-permission guard
-            # (render_lead_settings) and Lead system-prompt policy text baked
-            # in from its last spawn — team_preset.set_override only takes
-            # effect at Lead's NEXT spawn (render_lead_settings' own
-            # docstring says so), so silently accepting the override here
-            # would tell the operator it governs "งานนี้" while the already-
-            # running Lead keeps its old edit permissions. Report the
-            # restart requirement instead of pretending the override is live.
+            # M7: a live Lead pane already has its BLOCKED_DIRS/policy-text
+            # system prompt baked in from its last spawn (`_render_lead_context`).
+            # #587 A3: a settings-file deny-list this comment used to also name
+            # was dead code — never wired into spawn's argv — and has been
+            # removed; the actual enforcement, `pane_guard.evaluate_lead_direct_edit`,
+            # reads `team_preset` live per Edit/Write call, but Lead's own
+            # understanding of its boundary — the prompt text — is still
+            # spawn-time only. So silently accepting the override here would
+            # tell the operator it governs "งานนี้" while the already-running
+            # Lead still narrates its OLD policy to itself. Report the
+            # restart requirement instead of pretending the override is
+            # fully live.
             _lead_pane = self._project_panes(role_check_project_ns).get(LEAD.name)
             if (
                 _lead_pane is not None
@@ -3024,7 +3022,19 @@ class Orchestrator(
             and getattr(existing_pane, "session", None) is not None
             and getattr(existing_pane.session, "is_alive", False)
         )
-        if provider and pane_is_running:
+        if (
+            provider
+            and pane_is_running
+            # #587 C3: only actually-different requests are worth the noise —
+            # re-assigning the same role with the same --provider it's
+            # already running (a common queued-follow-up pattern) used to
+            # warn every time even though the override is already in effect.
+            and provider
+            != (
+                ps_assign.provider_override
+                or effective_provider_for(base_role_a, project=project_ns)
+            )
+        ):
             self._notify_lead(
                 project_ns,
                 f"⚠️ [{role_name}] --provider {provider!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
@@ -3135,7 +3145,9 @@ class Orchestrator(
             supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
             scope=scope,
         )
-        if model and pane_is_running:
+        if model and pane_is_running and model != ps_assign.model_override:
+            # #587 C3: same "only actually-different requests" rule as the
+            # provider check above.
             self._notify_lead(
                 project_ns,
                 f"⚠️ [{role_name}] --model {model!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
@@ -3156,7 +3168,8 @@ class Orchestrator(
             # --model must clear the prior one-shot choice; a new assign with
             # --model survives spawn gate/FIFO retries and crash auto-respawn.
             ps_assign.model_override = model
-        if effort and pane_is_running:
+        if effort and pane_is_running and effort != ps_assign.effort_override:
+            # #587 C3: same "only actually-different requests" rule as above.
             self._notify_lead(
                 project_ns,
                 f"⚠️ [{role_name}] --effort {effort!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
@@ -7048,7 +7061,11 @@ class Orchestrator(
         if not session_id:
             return False, "missing session_id"
         project_ns = self._resolve_project(project)
-        if from_role == "lead":
+        # #587 C1: SessionStart's `source` covers startup/resume/clear/compact
+        # alike — reset Lead's tiny-fix accumulation only for a real fresh
+        # startup. Resetting on every source meant `/clear` or an auto-compact
+        # mid-task silently handed Lead a brand-new 2-file/30-line budget.
+        if from_role == "lead" and source == "startup":
             try:
                 from . import pane_guard
 

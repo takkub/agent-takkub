@@ -31,4 +31,4 @@ def test_mixins_reexported():
 
 def test_lead_context_symbols_reexported():
     assert hasattr(orch_mod, "REPO_ROOT")
-    assert hasattr(orch_mod, "render_lead_settings")
+    assert hasattr(orch_mod, "_render_lead_context")

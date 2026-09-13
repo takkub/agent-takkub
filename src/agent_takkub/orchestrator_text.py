@@ -1049,11 +1049,28 @@ def _task_handoff_pointer(
     if len(task_scope.strip_budget(task)) < TASK_HANDOFF_THRESHOLD:
         return task, None
     day = _task_handoff_dir(project_ns)
-    path = day / f"{datetime.now().strftime('%H%M%S')}-{role_name}.md"
-    try:
-        path.write_text(task, encoding="utf-8")
-    except OSError:
-        return task, None
+    # #587 A5: two assigns to the same role within one second (e.g. Lead
+    # queuing two tasks back-to-back) used to collide on second-resolution
+    # names and the later `write_text` silently overwrote the earlier file
+    # with no error, no event — the earlier task simply vanished. Microsecond
+    # resolution (matches task_ledger's detail-file stamp) makes a real
+    # collision rare; the exclusive-open retry loop below is the actual
+    # guarantee — it can never overwrite an existing handoff file.
+    stamp = datetime.now().strftime("%H%M%S%f")
+    path = day / f"{stamp}-{role_name}.md"
+    attempt = 0
+    while True:
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(task)
+            break
+        except FileExistsError:
+            attempt += 1
+            if attempt > 50:
+                return task, None
+            path = day / f"{stamp}-{role_name}-{attempt}.md"
+        except OSError:
+            return task, None
     forward_path = str(path).replace(os.sep, "/")
     pointer = (
         f"[ROLE: {role_name}] อ่าน task spec เต็มจากไฟล์: {forward_path} "

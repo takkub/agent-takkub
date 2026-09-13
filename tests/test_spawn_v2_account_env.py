@@ -107,7 +107,6 @@ _CLAUDE_COMMON_PATCHES: list[tuple[str, object]] = [
     ("agent_takkub.orchestrator.find_claude_executable", "fake-claude"),
     ("agent_takkub.orchestrator._build_transcript_path", pathlib.Path("/tmp/t.log")),
     ("agent_takkub.orchestrator._default_plugin_dirs", []),
-    ("agent_takkub.orchestrator.render_lead_settings", pathlib.Path("/tmp/lead.json")),
     ("agent_takkub.orchestrator._render_lead_context", "/tmp/lead-ctx.md"),
     ("agent_takkub.orchestrator.apply_claude_auth_overrides", None),
     ("agent_takkub.orchestrator.agent_role_dir", pathlib.Path("/tmp/nonexistent-staging-xyz")),

@@ -2,8 +2,8 @@
 into a single filesystem-safe path segment (#294).
 
 Before this module, `role_memory._safe`, `core.brain.store._safe_project`,
-`task_ledger._ledger_dir`, and `lead_context.render_lead_settings` each
-handled (or didn't handle) this differently. The original `_safe` collapsed
+and `task_ledger._ledger_dir` each handled (or didn't handle) this
+differently. The original `_safe` collapsed
 every non-`[A-Za-z0-9._-]` character to `_` independently, so two distinct
 non-ASCII names of the same length (e.g. two different Thai project names)
 could collapse to the identical string of underscores and silently share a

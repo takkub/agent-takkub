@@ -2908,7 +2908,6 @@
         "agent_takkub.config",
         "agent_takkub.exec_mode",
         "agent_takkub.pane_tools_policy",
-        "agent_takkub.path_safe",
         "agent_takkub.pipeline_config",
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
@@ -2924,6 +2923,7 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_guard",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.settings_knowledge_design",
@@ -2932,8 +2932,8 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 12,
-      "fan_out": 13
+      "fan_in": 13,
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -3332,7 +3332,9 @@
     {
       "module": "agent_takkub.pane_guard",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.lead_context",
+        "agent_takkub.team_preset"
       ],
       "imported_by": [
         "agent_takkub.browser_chrome",
@@ -3344,7 +3346,7 @@
         "agent_takkub.pipeline_executor"
       ],
       "fan_in": 7,
-      "fan_out": 1
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.pane_health",
@@ -3412,12 +3414,11 @@
       "module": "agent_takkub.path_safe",
       "imports": [],
       "imported_by": [
-        "agent_takkub.lead_context",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
         "agent_takkub.task_ledger"
       ],
-      "fan_in": 4,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -5094,6 +5095,7 @@
         "agent_takkub.exec_mode",
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator",
+        "agent_takkub.pane_guard",
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
         "agent_takkub.settings_window",
@@ -5101,7 +5103,7 @@
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 3
     },
     {

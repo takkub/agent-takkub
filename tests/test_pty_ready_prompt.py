@@ -1135,6 +1135,62 @@ def test_claude_background_footer_wrapped_across_80col_rows_is_still_ready() -> 
     assert s.has_background_work() is True
 
 
+# ── #587 C2: "Press up to edit queued messages" neutralizes esc-to-interrupt ─
+# Live incident: a genuinely idle Lead pane's footer kept showing "esc to
+# interrupt" with no background work backing it — the same #391 shape as
+# above — but the composer ALSO showed "Press up to edit queued messages", a
+# leftover slot from an earlier queued message, not proof of an active turn.
+# is_at_ready_prompt() read this as busy forever, so Lead's own queued
+# notices piled up unanswered while Lead itself sat idle.
+
+
+def test_claude_queued_message_footer_with_background_segment_is_ready() -> None:
+    """Verbatim real capture (minus ANSI/pyte row-fill): queued-message line
+    above the idle footer, footer also carries the background segment."""
+    s = _feed_screen(
+        "─" * 40,
+        "❯ Press up to edit queued messages",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    )
+    assert s.is_at_ready_prompt() is True
+
+
+def test_claude_queued_message_footer_without_background_segment_is_ready() -> None:
+    """The neutralizer must not depend on background-segment evidence also
+    being present — "for agents" removed here, queued-message alone is
+    enough."""
+    s = _feed_screen(
+        "─" * 40,
+        "❯ Press up to edit queued messages",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+    )
+    assert s.is_at_ready_prompt() is True
+
+
+def test_claude_busy_footer_without_queued_message_stays_busy() -> None:
+    """The other half of the requirement: a footer with "esc to interrupt"
+    and NO queued-message evidence (and no background segment either) must
+    NOT be neutralized into ready — this is ordinary busy."""
+    s = _feed_screen(
+        "❯ ",
+        "─" * 40,
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_claude_busy_spinner_above_queued_message_footer_stays_busy() -> None:
+    """A real spinner line elsewhere on screen must still win over the
+    queued-message neutralizer, exactly like it wins over the background-
+    segment one (test_claude_spinner_above_background_footer_is_still_busy)."""
+    s = _feed_screen(
+        "✻ Churning… (esc to interrupt)",
+        "❯ Press up to edit queued messages",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
 # ── has_background_work() (#391/#394/#395/#398) ─────────────────────────────
 # d047ab4 correctly stopped the background-task footer segment from reading
 # BUSY (is_at_ready_prompt() True above) but that alone can't tell "genuinely

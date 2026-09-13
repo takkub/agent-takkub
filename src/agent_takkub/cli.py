@@ -729,8 +729,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             "msg": "--team override ใช้ได้เฉพาะ --role lead (#512) — set project preset จาก Settings แทนสำหรับ role อื่น",
         }
     # #510/#512 M3: Lead calling `assign --role lead --team ...` on ITSELF
-    # would lift its own Edit/Write deny-list (render_lead_settings) with no
-    # user in the loop — `assign` is already lead-only (only a Lead pane, or
+    # would lift its own Edit/Write caps (pane_guard.evaluate_lead_direct_edit
+    # reads team_preset.lead_may_implement, #587 A3) with no user in the
+    # loop — `assign` is already lead-only (only a Lead pane, or
     # a bare terminal with TAKKUB_ROLE unset, can reach this far), so this
     # is the one caller identity `--team` must never be accepted from.
     # cli_server enforces this too (defense against a direct-socket caller
@@ -4108,7 +4109,12 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         session_id = payload.get("session_id") or ""
         if not session_id:
             return {"ok": True, "msg": ""}  # malformed payload — nothing to report
-        if (role or "").strip().lower() == "lead":
+        source = payload.get("source", "")
+        # #587 C1: SessionStart fires on startup/resume/clear/compact alike —
+        # only a real fresh startup should reset Lead's tiny-fix accumulation,
+        # else `/clear` or an auto-compact mid-task gives Lead a brand-new
+        # 2-file/30-line budget it hasn't earned.
+        if (role or "").strip().lower() == "lead" and source == "startup":
             try:
                 from . import pane_guard
 
@@ -4120,7 +4126,7 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
                 {
                     "cmd": "session-report",
                     "session_id": session_id,
-                    "source": payload.get("source", ""),
+                    "source": source,
                     "cwd": payload.get("cwd", ""),
                     "from": role,
                 }
@@ -4177,6 +4183,25 @@ def _log_guard_denied(role: str, command: str, verdict: object) -> None:
         pass
 
 
+def _log_guard_error(role: str, project: str | None, tool_name: str, exc: BaseException) -> None:
+    """#587 A1: record that the Lead direct-edit guard itself raised, so the
+    fail-closed deny it forces has an audit trail distinct from a normal
+    `guard_denied` (a rule verdict, not a broken evaluator). Best-effort:
+    never raises, mirrors every other `_log_event` call site."""
+    try:
+        from .orchestrator_text import _log_event
+
+        _log_event(
+            "pane_guard_error",
+            role=role,
+            project=project or "",
+            tool=tool_name.lower(),
+            error=f"{type(exc).__name__}: {exc}"[:300],
+        )
+    except Exception:
+        pass
+
+
 def _notify_lead_of_guard_block(role: str, verdict: object) -> None:
     """Best-effort, fire-and-forget notice to Lead when a high-severity guard
     rule fires — reuses the existing `progress` IPC path (`takkub progress`),
@@ -4222,7 +4247,14 @@ def cmd_guard(_: argparse.Namespace) -> dict:
     (#309 Wave C) rather than calling `pane_guard.classify` directly, so a
     denial is also audited; the outer `except Exception` below is what
     keeps the fail-open contract, not anything inside that engine. Rules
-    and rationale live in `pane_guard.py`."""
+    and rationale live in `pane_guard.py`.
+
+    One exception to fail-open (#587 A1): the Lead direct-edit branch
+    (`tool_name in ("Edit", "Write")` for the `lead` role) denies instead
+    when `evaluate_lead_edit` itself raises — Lead has no MCP-gate layer
+    behind it the way a specialist's Bash guard does, so a broken evaluator
+    here would mean unlimited silent Lead edits rather than a wedged shell.
+    That branch returns its own verdict before this outer `except` runs."""
     try:
         from .core.capabilities.permission_engine import PermissionEngine
 
@@ -4261,14 +4293,26 @@ def cmd_guard(_: argparse.Namespace) -> dict:
 
         if normalise_role(role) == "lead" and tool_name in ("Edit", "Write"):
             project = _from_project()
-            verdict = PermissionEngine().evaluate_lead_edit(
-                tool_name,
-                tool_input if isinstance(tool_input, dict) else {},
-                role=role,
-                cwd=cwd,
-                project=project,
-                scope=scope,
-            )
+            try:
+                verdict = PermissionEngine().evaluate_lead_edit(
+                    tool_name,
+                    tool_input if isinstance(tool_input, dict) else {},
+                    role=role,
+                    cwd=cwd,
+                    project=project,
+                    scope=scope,
+                )
+            except Exception as exc:
+                # #587 A1: this branch (Lead direct Edit/Write) must fail
+                # CLOSED, unlike the rest of this function — a broken
+                # evaluator here means Lead could edit anything, silently,
+                # forever. The outer `except Exception` below stays
+                # fail-open for every other guard path on purpose; this one
+                # returns its own deny before that catch ever sees it.
+                _log_guard_error(role, project, tool_name, exc)
+                reason = f"guard ตรวจไม่ได้ ({type(exc).__name__}) — ปฏิเสธไว้ก่อน ใช้ takkub assign แทน"
+                print(f"[takkub guard: lead_direct_edit:guard_error] {reason}", file=sys.stderr)
+                return {"ok": True, "msg": "", "exit_code": 2}
             if verdict.allowed:
                 return {"ok": True, "msg": ""}
             print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)

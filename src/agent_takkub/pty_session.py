@@ -39,6 +39,7 @@ from .provider_spec import (
     tool_running_markers_for,
 )
 from .provider_spec import GENERIC_QUOTA_MARKERS as _DEFAULT_RATE_LIMIT_MARKERS
+from .provider_spec import READY_BLOCKER_NEUTRALIZERS as _READY_BLOCKER_NEUTRALIZERS
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
 
@@ -425,6 +426,18 @@ def _has_background_segment_evidence(text_lower: str) -> bool:
     return bool(_BACKGROUND_WORK_COUNT_RE.search(joined))
 
 
+def _has_queued_message_evidence(text_lower: str) -> bool:
+    """True when *text_lower* shows a per-provider `ready_blocker_neutralizers`
+    marker (#587 C2) — e.g. claude's "press up to edit queued messages" — a
+    leftover composer state that proves the pane is idle even though a
+    footer-chrome "esc to interrupt" also matches on the same line. Checked
+    over the whole region with newlines removed, same as
+    `_has_background_segment_evidence` and for the same reason (a narrow
+    terminal can wrap the marker text across two pyte rows)."""
+    joined = text_lower.replace("\n", "")
+    return any(m in joined for m in _READY_BLOCKER_NEUTRALIZERS)
+
+
 def _footer_chrome_esc_to_interrupt_line(line: str) -> bool:
     """True when *line* (already lowercased) is the footer-chrome line
     (`_FOOTER_CHROME_LINE_MARKERS`) AND carries "esc to interrupt" on that
@@ -438,11 +451,15 @@ def _footer_chrome_esc_to_interrupt_line(line: str) -> bool:
 def _blocker_scan_text(text_lower: str) -> str:
     """*text_lower* with the "esc to interrupt" substring removed from the
     footer-chrome line, but ONLY when the region also independently proves
-    it's about background work (`_has_background_segment_evidence`) — what
-    the hard-blocker scan looks at. A footer-chrome line whose "esc to
-    interrupt" has no such evidence anywhere in the region (ordinary busy,
-    no background task) is left untouched — that's still a genuine blocker."""
-    if not _has_background_segment_evidence(text_lower):
+    it's about background work (`_has_background_segment_evidence`) OR shows
+    a per-provider queued-message leftover (`_has_queued_message_evidence`,
+    #587 C2) — what the hard-blocker scan looks at. A footer-chrome line
+    whose "esc to interrupt" has neither kind of evidence anywhere in the
+    region (ordinary busy, no background task, no queued message) is left
+    untouched — that's still a genuine blocker."""
+    if not (
+        _has_background_segment_evidence(text_lower) or _has_queued_message_evidence(text_lower)
+    ):
         return text_lower
     lines = text_lower.splitlines()
     if not any(_footer_chrome_esc_to_interrupt_line(ln) for ln in lines):
@@ -919,6 +936,26 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     (
         "❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
         False,
+        "claude",
+    ),
+    # #587 C2 (live finding): a genuinely idle Lead pane whose footer still
+    # shows "esc to interrupt" with no background work, but the composer
+    # ALSO shows "Press up to edit queued messages" — a leftover queued-
+    # message slot, not proof of an active turn. Must read READY (verbatim
+    # real capture, minus the ANSI/pyte row-fill).
+    (
+        "❯ Press up to edit queued messages\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        True,
+        "claude",
+    ),
+    # Same queued-message evidence alone (no "for agents" either) — the
+    # neutralizer must not depend on background-segment evidence also
+    # being present.
+    (
+        "❯ Press up to edit queued messages\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+        True,
         "claude",
     ),
     # Same finding via the bare spinner line alone — the build's spinner no

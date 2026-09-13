@@ -537,8 +537,9 @@ class CliServer(QObject):
 
         # #510/#512 M3 (review 2026-09-07): `assign --role lead --team
         # <preset> "task"` sets a per-task team_preset override that, for
-        # solo-lead/pair, LIFTS Lead's own Edit/Write deny-list (see
-        # lead_context.render_lead_settings). `assign` is lead-only (Layer
+        # solo-lead/pair, LIFTS Lead's own Edit/Write caps (see
+        # pane_guard.evaluate_lead_direct_edit's team_preset.lead_may_implement
+        # check, #587 A3). `assign` is lead-only (Layer
         # 1 above already requires from_role == "lead" to even reach here),
         # so a running Lead pane calling this on itself is Lead granting
         # itself write access to the very project the guard exists to
@@ -1058,7 +1059,12 @@ class CliServer(QObject):
                 return
             elif cmd == "session-report":
                 from_role = req.get("from") or ""
-                if (from_role or "").split("#", 1)[0].strip().lower() == "lead":
+                # #587 C1: only a fresh startup resets Lead's direct-edit
+                # budget — resume/clear/compact fire SessionStart too but must
+                # not reset it (see orchestrator.consume_session_report).
+                if (from_role or "").split("#", 1)[0].strip().lower() == "lead" and req.get(
+                    "source", ""
+                ) == "startup":
                     try:
                         from . import pane_guard
 

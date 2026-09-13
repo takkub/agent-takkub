@@ -88,6 +88,21 @@ class ProviderSpec:
     ready_hard_blockers: tuple[str, ...] = field(default_factory=tuple)
     ready_rules: tuple[ReadyRule, ...] = field(default_factory=tuple)
     ready_wait_ms: int = 45_000
+    # #587 C2: lower-case substrings that, anywhere in the ready region,
+    # prove the composer is genuinely idle EVEN THOUGH a `ready_hard_blockers`
+    # entry ("esc to interrupt") also matches on the same footer-chrome line
+    # — mirrors the existing background-segment ("for agents"/"N shell")
+    # neutralization pty_session.py's `_blocker_scan_text` already does, but
+    # as a per-provider spec field instead of a pty_session-hardcoded
+    # constant (#103 shape), so a future provider can declare its own. Root
+    # incident: claude's idle footer keeps showing "esc to interrupt" even
+    # with zero background work whenever an earlier message is sitting in
+    # its queued-message slot ("Press up to edit queued messages") — that
+    # queue is a leftover composer state, not proof of an active turn, but
+    # the hard blocker alone read it as busy forever, so Lead's queued
+    # notices piled up unanswered and Lead itself sat idle. Empty by
+    # default — never guess one for an unconfirmed provider.
+    ready_blocker_neutralizers: tuple[str, ...] = field(default_factory=tuple)
     # Lower-case substrings this provider's CLI shows on screen while it is
     # actively running a shell/tool call (#308). Narrower than
     # ready_hard_blockers: a generic busy indicator ("esc to interrupt")
@@ -627,6 +642,11 @@ claude_spec = ProviderSpec(
         ReadyRule("shift+tab to cycle", True),  # pty_session.py:250
     ),  # WIRED in Phase 0 — see provider_spec.READY_RULES compat concat below
     ready_wait_ms=45_000,  # lead_inbox.py:426 default (claude keeps it; not degraded)
+    # #587 C2: "Press up to edit queued messages" — live capture of an idle
+    # Lead pane whose footer still showed "esc to interrupt" with no
+    # background work backing it (see ready_blocker_neutralizers' own
+    # docstring on ProviderSpec).
+    ready_blocker_neutralizers=("press up to edit queued messages",),
     context_strategy="append_system_prompt_file",
     cheatsheet_filename="CLAUDE.md",
     inline_learned_notes=True,
@@ -1552,6 +1572,15 @@ READY_RULES: tuple[tuple[bool, str], ...] = tuple(
 READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
     dict.fromkeys(
         blocker for spec in PROVIDER_REGISTRY.values() for blocker in spec.ready_hard_blockers
+    )
+)
+
+# #587 C2: same compat-concat shape as READY_HARD_BLOCKERS above, for the
+# per-provider `ready_blocker_neutralizers` field — order is irrelevant here
+# too (`any(...)` short-circuit over the union).
+READY_BLOCKER_NEUTRALIZERS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        marker for spec in PROVIDER_REGISTRY.values() for marker in spec.ready_blocker_neutralizers
     )
 )
 

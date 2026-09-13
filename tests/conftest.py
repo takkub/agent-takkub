@@ -504,6 +504,20 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # read or write the real runtime/port.
     monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
     monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
+    # #587 A4: this suite is routinely run INSIDE a spawned cockpit pane
+    # (same lesson as the TAKKUB_ROLE delenv below) — pane_env.py stamps
+    # every spawned pane's env with `TAKKUB_STORAGE_ROOT` = the HOST
+    # cockpit's own already-resolved storage root
+    # (`core.storage.v2_target._primary_data_home` reads it back). Left
+    # ambient, `effective_data_home(None, prefer_primary=True)` — called by
+    # provider_config._routing_target() and any other global-scope V2
+    # reader — returns that REAL primary path instead of None, which
+    # bypasses the `storage_layout_v2` isolation patch below entirely (that
+    # patch only redirects a bare no-arg/None call). Confirmed live:
+    # test_provider_config.py/test_task_handoff.py read this MACHINE's real
+    # role→provider routing.json instead of an empty/isolated one. Same
+    # fix shape as the TAKKUB_PORT_FILE delenv above.
+    monkeypatch.delenv("TAKKUB_STORAGE_ROOT", raising=False)
     # config._effective_port_file_for_app()'s #354 guard trusts a foreign-
     # looking TAKKUB_PORT_FILE unless TAKKUB_ROLE (the pane marker
     # pane_env.py stamps into every spawned pane) is also present. This test

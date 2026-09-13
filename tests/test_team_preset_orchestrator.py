@@ -3,12 +3,12 @@
 - --team override (assign --role lead --team ...) sets the override + notice
 - set_team_preset() / clear_team_preset_override() broadcast to that
   project's Lead pane only (not every project's)
-- render_lead_settings() lifts the deny-list when the preset lets Lead edit
+- pane_guard.evaluate_lead_direct_edit lifts the tiny-fix caps when the
+  preset lets Lead edit (team_preset.lead_may_implement, #587 A3)
 """
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -123,7 +123,8 @@ class TestAssignTeamOverride:
         self, orch: Orchestrator
     ) -> None:
         """No live Lead pane yet (fresh spawn) — override applies immediately,
-        it will be picked up by render_lead_settings at that upcoming spawn."""
+        it will be in effect for Lead's own direct-edit checks at that
+        upcoming spawn."""
         team_preset.set_current("full", TEST_PROJECT)
         with (
             patch.object(orch, "spawn", return_value=(True, "spawned")),
@@ -315,41 +316,49 @@ class TestSetTeamPresetBroadcast:
         assert lead.session.write.called
 
 
-class TestRenderLeadSettingsPresetAware:
-    def test_lead_may_implement_lifts_deny_list(self, tmp_path, monkeypatch, seed_projects):
-        from agent_takkub import config
-        from agent_takkub import lead_context as lc_mod
+class TestDirectEditCapsPresetAware:
+    """#587 A3: `pane_guard.evaluate_lead_direct_edit` is the ONLY place the
+    "solo-lead"/"pair" `lead_may_implement` guarantee is enforced now — a
+    prior settings-file-based mechanism was dead code (never wired into
+    spawn's argv) and has been removed."""
 
-        runtime = tmp_path / "runtime"
-        monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
-        monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
+    def _write_input(self, file_path: str, n_lines: int) -> dict:
+        # Comfortably over evaluate_lead_direct_edit's 15-line-per-call cap.
+        return {"file_path": file_path, "content": "\n".join(f"line {i}" for i in range(n_lines))}
+
+    def test_lead_may_implement_lifts_line_cap(self, tmp_path, seed_projects):
+        from agent_takkub import pane_guard
+
         seed_projects(
             tmp_path,
             {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
             active=TEST_PROJECT,
         )
-
         team_preset.set_current("solo-lead", TEST_PROJECT)
-        result = lc_mod.render_lead_settings(TEST_PROJECT)
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"]["deny"] == []
-        assert "Edit" in data["permissions"]["allow"]
 
-    def test_full_preset_keeps_deny_list(self, tmp_path, monkeypatch, seed_projects):
-        from agent_takkub import config
-        from agent_takkub import lead_context as lc_mod
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            self._write_input(str(tmp_path / "api" / "big.py"), 20),
+            project=TEST_PROJECT,
+            state_file=tmp_path / "lead_edits_state.json",
+        )
+        assert verdict.allowed is True
 
-        runtime = tmp_path / "runtime"
-        monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
-        monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
+    def test_full_preset_keeps_line_cap(self, tmp_path, seed_projects):
+        from agent_takkub import pane_guard
+
         seed_projects(
             tmp_path,
             {TEST_PROJECT: {"paths": {"api": str(tmp_path / "api")}}},
             active=TEST_PROJECT,
         )
-
         team_preset.set_current("full", TEST_PROJECT)
-        result = lc_mod.render_lead_settings(TEST_PROJECT)
-        data = json.loads(result.read_text(encoding="utf-8"))
-        assert data["permissions"]["deny"] != []
-        assert "Edit" not in data["permissions"]["allow"]
+
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            self._write_input(str(tmp_path / "api" / "big.py"), 20),
+            project=TEST_PROJECT,
+            state_file=tmp_path / "lead_edits_state.json",
+        )
+        assert verdict.allowed is False
+        assert verdict.rule == "lead_direct_edit:lines_per_call"

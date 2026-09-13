@@ -822,6 +822,59 @@ def _is_machine_busy_from_snapshot(
     return False, ""
 
 
+def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None) -> bool:
+    """#587 A2: paths that must never be counted toward, or denied by,
+    Lead's direct-edit caps — a `*.md`/`*.txt` note (carve-out #474 already
+    allows these in prose; this makes the guard agree instead of pushing
+    Lead to write them through Bash to dodge `lines_per_call`), anything
+    under a `runtime/` segment (cockpit's own state, not project source),
+    and anything outside the current project's configured paths entirely
+    (scratchpad, memory files under `~/.claude-work/`, etc — confirmed live:
+    Lead writing its OWN task-spec file to scratchpad was denied at 62
+    lines even though it is neither source nor even inside the project).
+
+    Only narrows what counts — a file that IS project source is unaffected.
+    """
+    norm = file_path.replace("\\", "/").rstrip("/")
+    lower = norm.lower()
+    if lower.endswith(".md") or lower.endswith(".txt"):
+        return True
+    if "runtime" in (seg.lower() for seg in norm.split("/") if seg):
+        return True
+
+    resolved = pathlib.Path(file_path)
+    if not resolved.is_absolute() and cwd:
+        resolved = pathlib.Path(cwd) / resolved
+    try:
+        resolved = resolved.resolve()
+    except OSError:
+        return False  # unresolvable path — don't exempt, keep prior (counted) behavior
+
+    roots: list[pathlib.Path] = []
+    if project:
+        try:
+            from .lead_context import _allowed_project_roots
+
+            roots = _allowed_project_roots(project)
+        except Exception:
+            roots = []
+    if not roots and cwd:
+        try:
+            roots = [pathlib.Path(cwd).resolve()]
+        except OSError:
+            roots = []
+    if not roots:
+        return False  # no project and no cwd to compare against — keep counting
+
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return False  # inside a known project root
+        except ValueError:
+            continue
+    return True  # outside every known root
+
+
 def evaluate_lead_direct_edit(
     tool_name: str,
     tool_input: dict,
@@ -839,6 +892,17 @@ def evaluate_lead_direct_edit(
     3. Cumulative <= 2 distinct files per task
     4. Cumulative <= 30 lines per task
     5. NOT in deep category (schema, migration, auth, security, tokens/secrets, crypto, payment, infra, lockfiles)
+
+    None of the above applies to a path `_is_direct_edit_exempt` recognises
+    as outside project source (#587 A2) — those are allowed unconditionally
+    and never touch the cumulative counters at all.
+
+    None of the above applies at all (#587 A3) when the project's team
+    preset has `lead_may_implement=True` (``solo-lead``/``pair``) — a prior
+    `lead_context` function used to reach the same outcome (Edit/Write
+    allowed unconditionally) through a settings file that spawn never
+    actually wired in, and has since been removed. This is the ONLY place
+    that guarantee is enforced now.
     """
     if not isinstance(tool_input, dict):
         return Verdict(True)
@@ -846,6 +910,18 @@ def evaluate_lead_direct_edit(
     file_path = str(tool_input.get("file_path") or "").strip()
     if not file_path:
         return Verdict(True)
+
+    if _is_direct_edit_exempt(file_path, cwd, project):
+        return Verdict(True)
+
+    if project:
+        try:
+            from .team_preset import lead_may_implement
+
+            if lead_may_implement(project):
+                return Verdict(True)
+        except Exception:
+            pass
 
     # 1. Non-tiny scope check
     norm_scope = (scope or "").strip().lower()

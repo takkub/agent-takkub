@@ -1,7 +1,6 @@
-"""Lead-spawn-time context rendering — system prompt, write-boundary
-settings, and plugin discovery.
+"""Lead-spawn-time context rendering — system prompt and plugin discovery.
 
-Three concerns live here, all aimed at building what Lead sees the
+Two concerns live here, both aimed at building what Lead sees the
 moment a Lead pane starts:
 
 1. `_render_lead_context(project)` — assembles `runtime/lead-context.md`
@@ -9,13 +8,7 @@ moment a Lead pane starts:
    disabled-providers section, and recent-session brief. This is the
    file claude reads via `--append-system-prompt-file` on Lead spawn.
 
-2. `render_lead_settings(project)` — generates
-   `runtime/lead-guard-<project>.json` with permissions.deny rules that
-   block Lead from editing files under the project's configured roots.
-   Currently bypassed by --dangerously-skip-permissions but kept for
-   reference / future re-enable.
-
-3. `_default_plugin_dirs()` — discover the on-disk
+2. `_default_plugin_dirs()` — discover the on-disk
    `<config.default_claude_config_dir()>/plugins/cache/...` directory for
    each plugin the cockpit wants spawned panes to inherit (skipping
    claude-obsidian's broken SessionStart hook). Returns the list passed
@@ -23,14 +16,23 @@ moment a Lead pane starts:
    `_SAFE_PLUGINS` is the source-of-truth list; it lives in `config.py`
    (leaf hub) so doctor.py can import it without pulling in this module.
 
+(#587 A3: a third function used to live here too — one generating a
+permissions.deny settings file meant to block Lead from editing project
+paths. It was never actually wired into spawn's argv (Lead always spawns
+with `--dangerously-skip-permissions`, which ignores a `--settings` deny
+list entirely), so it was pure dead weight kept "for reference", and has
+been removed. The real write-boundary enforcement is
+`pane_guard.evaluate_lead_direct_edit`, which now also consults
+`team_preset.lead_may_implement` directly instead of relying on a settings
+file nothing ever read.)
+
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle. orchestrator.py re-exports the names so existing test
-imports (test_session_brief, test_lead_write_guard) keep working.
+imports (test_session_brief) keep working.
 """
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 import sys
@@ -47,7 +49,6 @@ from .config import (
     load_projects,
 )
 from .pane_tools_policy import effective_plugins
-from .path_safe import safe_segment
 from .plugin_installer import normalize_plugin_hook_timeout
 from .user_profile import config_dir_for
 from .vault_mirror import _is_junk_note
@@ -863,89 +864,6 @@ def render_lead_agents_md(
     except OSError:
         return None
     return str(target)
-
-
-_LEAD_GUARD_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-
-# Tools Lead can use without a permission prompt. Read-only ops (Read/Grep/
-# Glob), arbitrary Bash (git/ls/takkub CLI — Lead's daily bread), web reads,
-# task tracking, plan-mode toggles, and every MCP tool. Edit/Write are
-# deliberately omitted: they go through defaultMode=acceptEdits (auto-accept
-# on cockpit files) AND the deny rules above (hard-block project paths) so
-# the write-boundary survives even if a future allow pattern broadens.
-_LEAD_GUARD_ALLOW_TOOLS = (
-    "Bash",
-    "Read",
-    "Grep",
-    "Glob",
-    "WebFetch",
-    "WebSearch",
-    "TaskCreate",
-    "TaskUpdate",
-    "TaskGet",
-    "TaskList",
-    "TaskOutput",
-    "TaskStop",
-    "EnterPlanMode",
-    "ExitPlanMode",
-    "mcp__*",
-)
-
-
-def render_lead_settings(project: str) -> pathlib.Path:
-    """Generate runtime/lead-guard-<project>.json with permissions.deny rules
-    that block Lead from editing any path under the project's configured roots.
-
-    Also sets defaultMode=acceptEdits so Lead auto-accepts edits to cockpit
-    files without requiring --dangerously-skip-permissions, and injects an
-    allow list for read-only / coordinator tools (Bash, Read, Grep, MCP, ...)
-    so Lead doesn't get prompt-spammed for every git/ls/takkub call.
-
-    Idempotent: regenerates the file on every call so path changes in
-    projects.json are picked up on the next Lead spawn.
-
-    #512: a team preset with ``lead_may_implement=True`` (solo-lead/pair, or
-    a custom preset that opts in) lifts this deny-list entirely — the whole
-    point of "ทำเอง"/"คู่" is Lead editing the project itself. Read via the
-    per-task override same as the prompt-text block above, so an
-    `assign --team` override takes effect at the Lead's NEXT spawn just like
-    a preset change from Settings does.
-    """
-    from .team_preset import lead_may_implement as _lead_may_implement
-
-    if _lead_may_implement(project):
-        settings = {
-            "permissions": {
-                "allow": list(_LEAD_GUARD_ALLOW_TOOLS) + list(_LEAD_GUARD_WRITE_TOOLS),
-                "deny": [],
-                "defaultMode": "acceptEdits",
-            }
-        }
-        ensure_runtime()
-        out = RUNTIME_DIR / f"lead-guard-{safe_segment(project)}.json"
-        out.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-        return out
-
-    roots = _allowed_project_roots(project)
-    deny_rules: list[str] = []
-    for root in roots:
-        # Use POSIX forward-slash path; Claude Code accepts both on Windows.
-        path_str = root.as_posix()
-        for tool in _LEAD_GUARD_WRITE_TOOLS:
-            deny_rules.append(f"{tool}({path_str}/**)")
-
-    settings: dict = {
-        "permissions": {
-            "allow": list(_LEAD_GUARD_ALLOW_TOOLS),
-            "deny": deny_rules,
-            "defaultMode": "acceptEdits",
-        }
-    }
-
-    ensure_runtime()
-    out = RUNTIME_DIR / f"lead-guard-{safe_segment(project)}.json"
-    out.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-    return out
 
 
 # Role-scoped plugin injection. `--plugin-dir` loads each plugin's skill +

@@ -11,7 +11,9 @@ already existed piecemeal:
   * :mod:`exec_mode` (solo vs multi-instance fan-out — informational field
     here; the module itself is currently forced PARALLEL, see its docstring)
   * whether **Lead** may edit project files itself (``lead_may_implement``,
-    enforced by :func:`lead_context.render_lead_settings`)
+    enforced by :func:`pane_guard.evaluate_lead_direct_edit`, #587 A3 — a
+    prior settings-file-based enforcement path was dead code, never wired
+    into spawn's argv, and has been removed)
 
 Preset roster (2026-09-07 Lead scope addition; extended 2026-09-09 with five
 secondary positions): a preset sees/toggles **nine positions** — the four

@@ -90,7 +90,11 @@ class TestTaskHandoffPointer:
         def _boom(*_a, **_kw):
             raise OSError("disk full")
 
-        monkeypatch.setattr(pathlib.Path, "write_text", _boom)
+        # #587 A5: the handoff file is now opened exclusively (`"x"` mode, via
+        # `pathlib.Path.open`) rather than `write_text`, so a collision never
+        # silently overwrites an earlier assign's file — patch the primitive
+        # `_task_handoff_pointer` actually calls now.
+        monkeypatch.setattr(pathlib.Path, "open", _boom)
         paste_text, task_file = _task_handoff_pointer(task, TEST_PROJECT, "backend")
         assert paste_text == task
         assert task_file is None
