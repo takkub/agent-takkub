@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.4] - 2026-09-13
+
 ### Added (เพิ่ม)
 
 - **Scope budget (#585)** — ทุก task มี "ขนาดงาน" ติดไปด้วย: `tiny` / `normal` / `deep`
