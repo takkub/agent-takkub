@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.5] - 2026-09-13
+
 ### Fixed (แก้)
 
 - **guard ของ Lead ปฏิเสธเมื่อตัวเองพัง (fail-closed)** — เดิมถ้าตัวตรวจ Edit/Write ของ Lead error
