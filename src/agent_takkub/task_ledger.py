@@ -366,6 +366,47 @@ def _open_row(state: dict, ptr: dict) -> tuple[dict, list[dict]] | tuple[None, N
     return rows[idx], rows
 
 
+def batch_max_scope(project: str) -> str:
+    """Highest scope tier among tasks in *project*'s **current batch** (#587 B3).
+
+    "Batch" has no dedicated concept elsewhere in the app — this defines it
+    purely from what the ledger already tracks: the most recently opened
+    goal-group, ``state["groups"][0]``. `create_assignment` always inserts a
+    brand-new group at index 0 and reuses the existing one for a repeated
+    ``(date, goal)`` pair, so every task Lead hands out (any role) under one
+    shared goal before the next goal starts lands in that same group — the
+    same "one round of work" a human means by "batch" in
+    `docs/qa-gate-policy.md`.
+
+    Every row in that group counts, not just still-open ones: `qa-gate
+    --auto` reads this *after* the batch's dev panes have already called
+    `done`, so by then every row but qa's own is terminal — restricting to
+    "working" rows would make this always report the wrong thing at the one
+    moment it's actually read.
+
+    Returns ``"normal"`` (never silently the "skip" tier) when *project* has
+    no ledger yet or its newest group carries no rows, so a fresh project's
+    first `qa-gate --auto` call doesn't read as "batch is tiny" by default.
+    """
+    from .task_scope import SCOPE_TIERS
+
+    state = _load_state(project)
+    groups = state.get("groups", [])
+    if not groups:
+        return "normal"
+    rows = [r for f in groups[0].get("features", []) for r in f.get("rows", [])]
+    if not rows:
+        return "normal"
+    best = SCOPE_TIERS[0]  # "tiny" — the lowest tier, so any real row raises it
+    for row in rows:
+        scope = (row.get("scope") or "normal").strip().lower()
+        if scope not in SCOPE_TIERS:
+            scope = "normal"
+        if SCOPE_TIERS.index(scope) > SCOPE_TIERS.index(best):
+            best = scope
+    return best
+
+
 def get_open_scope(project: str, role: str) -> str | None:
     """Read the scope tier of *role*'s currently-open assignment in *project*, or None."""
     state = _load_state(project)

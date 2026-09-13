@@ -724,31 +724,76 @@ def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
     return False, ""
 
 
-def _is_machine_busy_from_snapshot(
-    role: str, snapshot_path: pathlib.Path | None = None
-) -> tuple[bool, str]:
-    """Check if the machine is busy from recent session snapshot (#585 round 2)."""
-    from .config import RUNTIME_DIR
+def _load_fresh_busy_snapshot(path: pathlib.Path) -> dict | None:
+    """Read *path* and return its dict iff it exists and is fresh (<=30s old
+    by mtime, and by any `saved_at`/`ts` field it carries) — else None.
 
-    path = snapshot_path or (RUNTIME_DIR / "last-session.json")
+    Shared by `_is_machine_busy_from_snapshot`'s two sources (#587 B1):
+    `machine-state.json` (a bare epoch `ts` field) and `last-session.json`
+    (an ISO `saved_at` field). Either field is checked when present so one
+    function covers both schemas without the caller knowing which it got.
+    """
     if not path.is_file():
-        return False, ""
+        return None
     try:
         mtime = path.stat().st_mtime
         if (time.time() - mtime) > 30.0:
-            return False, ""
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return False, ""
+        return None
 
     saved_at = data.get("saved_at")
     if saved_at:
         try:
             dt = datetime.fromisoformat(saved_at)
             if (datetime.now() - dt).total_seconds() > 30.0:
-                return False, ""
+                return None
         except Exception:
             pass
+
+    ts = data.get("ts")
+    if ts is not None:
+        try:
+            if (time.time() - float(ts)) > 30.0:
+                return None
+        except Exception:
+            pass
+
+    return data
+
+
+def _is_machine_busy_from_snapshot(
+    role: str,
+    snapshot_path: pathlib.Path | None = None,
+    machine_state_path: pathlib.Path | None = None,
+) -> tuple[bool, str]:
+    """Check if the machine is busy from a recent session snapshot (#585
+    round 2; #587 B1 adds the machine-state.json source).
+
+    Reads the light, frequently-refreshed `machine-state.json` first (see
+    that file's module comment in orchestrator.py for why) and falls back to
+    the heavier, more-throttled `last-session.json` only when the former is
+    missing or stale. `snapshot_path` alone (no `machine_state_path`) skips
+    the machine-state.json lookup entirely and checks only that one file —
+    the exact pre-#587 single-file contract every existing caller/test
+    already relies on; passing `machine_state_path` explicitly (tests) opts
+    a call back into the two-source chain against caller-chosen paths
+    instead of the real `RUNTIME_DIR`.
+    """
+    from .config import RUNTIME_DIR
+
+    data: dict | None = None
+    if machine_state_path is not None:
+        data = _load_fresh_busy_snapshot(machine_state_path)
+    elif snapshot_path is None:
+        data = _load_fresh_busy_snapshot(RUNTIME_DIR / "machine-state.json")
+    if data is None:
+        data = _load_fresh_busy_snapshot(
+            snapshot_path if snapshot_path is not None else (RUNTIME_DIR / "last-session.json")
+        )
+    if data is None:
+        return False, ""
 
     # Condition 1: Other pane is working
     working_panes = data.get("working_panes")
@@ -1268,6 +1313,7 @@ def classify(
     cwd: str | None = None,
     scope: str | None = None,
     snapshot_path: pathlib.Path | None = None,
+    machine_state_path: pathlib.Path | None = None,
 ) -> Verdict:
     """Decide whether `role` may run `command`.
 
@@ -1297,6 +1343,12 @@ def classify(
 
     *snapshot_path* (#585 round 2): optional path to last-session.json for
     busy-machine checks. None uses RUNTIME_DIR / "last-session.json".
+
+    *machine_state_path* (#587 B1): optional path to machine-state.json,
+    checked BEFORE `snapshot_path`/last-session.json (see
+    `_is_machine_busy_from_snapshot`'s docstring for the exact precedence).
+    None uses RUNTIME_DIR / "machine-state.json" unless `snapshot_path` was
+    given explicitly, which keeps the pre-#587 single-file behavior.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -1338,7 +1390,9 @@ def classify(
     if name and name != "shell":
         is_heavy, heavy_type = _is_heavy_build_or_suite(cmd)
         if is_heavy:
-            busy, busy_reason = _is_machine_busy_from_snapshot(name, snapshot_path=snapshot_path)
+            busy, busy_reason = _is_machine_busy_from_snapshot(
+                name, snapshot_path=snapshot_path, machine_state_path=machine_state_path
+            )
             if busy:
                 return Verdict(
                     False,

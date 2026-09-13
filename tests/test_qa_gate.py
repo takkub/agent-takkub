@@ -19,6 +19,20 @@ import pytest
 from agent_takkub import qa_gate
 
 
+@pytest.fixture(autouse=True)
+def _no_batch_scope_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#587 B3 added a `batch-scope` auto-tier row driven by `TAKKUB_PROJECT`
+    / `config.active_project()`. This repo dogfoods its own cockpit, so a
+    pane running these tests already has `TAKKUB_PROJECT` set for real —
+    without this, the exact-step-list assertions below pass or fail
+    depending on which machine (inside a live cockpit or not) runs them,
+    the same contamination class as #584. Force "no project resolves" so
+    every test here sees the same step list everywhere.
+    """
+    monkeypatch.delenv("TAKKUB_PROJECT", raising=False)
+    monkeypatch.setattr("agent_takkub.config.active_project", lambda: (None, {}))
+
+
 class _FakeCompleted:
     def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
         self.returncode = returncode
@@ -1252,6 +1266,48 @@ def test_auto_source_without_a_test_widens_to_full(repo, monkeypatch):
         "ruff",
         "lint-imports",
     ]
+
+
+def test_auto_prints_batch_scope_when_a_project_resolves(repo, monkeypatch, tmp_path):
+    """#587 B3: `qa-gate --auto` must surface WHY the batch does/doesn't
+    earn a full gate, reading straight from the ledger — not just from
+    prose in a doc nobody re-checks at the moment it matters."""
+    from agent_takkub import task_ledger
+
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path)
+    monkeypatch.setenv("TAKKUB_PROJECT", "demo")
+    task_ledger.create_assignment(
+        "demo", "backend", "/api", "auth rewrite", "goal", "feat", "claude", scope="deep"
+    )
+
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "src" / "app.css").write_text(".x{padding:2px}", encoding="utf-8")
+    (repo / "README.md").write_text("y", encoding="utf-8")
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory([], []))
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    names = [s.name for s in report.steps]
+    assert "batch-scope" in names
+    step = report.steps[names.index("batch-scope")]
+    assert "deep" in step.detail
+    assert "demo" in step.detail
+
+
+def test_auto_omits_batch_scope_when_no_project_resolves(repo, monkeypatch):
+    """No `TAKKUB_PROJECT` and no active project (a raw checkout, or a
+    human running qa-gate outside any cockpit pane) → no row, not a
+    misleading default."""
+    _make_complete_venv(repo)
+    _ignore_venv(repo)
+    (repo / "src" / "app.css").write_text(".x{padding:2px}", encoding="utf-8")
+    (repo / "README.md").write_text("y", encoding="utf-8")
+    monkeypatch.setattr(qa_gate.subprocess, "run", _fake_run_factory([], []))
+
+    report = qa_gate.run_gate(cwd=repo, auto=True)
+
+    assert "batch-scope" not in [s.name for s in report.steps]
 
 
 def test_auto_tooling_or_schema_change_is_full_tier(repo, monkeypatch):

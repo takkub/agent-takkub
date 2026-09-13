@@ -3088,14 +3088,15 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.config",
-        "agent_takkub.issues"
+        "agent_takkub.issues",
+        "agent_takkub.task_ledger"
       ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.doctor"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.mcp_bridge",
@@ -3912,6 +3913,7 @@
         "agent_takkub.db_preflight",
         "agent_takkub.prisma_gate",
         "agent_takkub.smoke_gate",
+        "agent_takkub.task_ledger",
         "agent_takkub.tidy_gate",
         "agent_takkub.verify"
       ],
@@ -3919,7 +3921,7 @@
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.ram_report",
@@ -5051,16 +5053,19 @@
       "imports": [
         "agent_takkub.cached_read",
         "agent_takkub.config",
-        "agent_takkub.path_safe"
+        "agent_takkub.path_safe",
+        "agent_takkub.task_scope"
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.maintenance",
         "agent_takkub.orchestrator",
         "agent_takkub.project_nav",
+        "agent_takkub.qa_gate",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 4,
-      "fan_out": 3
+      "fan_in": 6,
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.task_scope",
@@ -5069,9 +5074,10 @@
         "agent_takkub.cli",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
-        "agent_takkub.routing_planner"
+        "agent_takkub.routing_planner",
+        "agent_takkub.task_ledger"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {

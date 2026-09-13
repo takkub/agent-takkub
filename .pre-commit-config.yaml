@@ -79,6 +79,29 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+  # pytest collect-only: catch an import error before it reaches CI (#587 B4
+  # — 3 red CI runs in one day traced to a test file importing something
+  # that doesn't exist, which fails pytest's collection phase and takes the
+  # WHOLE suite down with it; none of ruff/format/docs-verify/import-linter/
+  # depgraph catch that, since none of them actually import the test files).
+  # Collect only — never runs a single test, so this stays cheap enough for
+  # every commit. Same BIN/EXT venv-resolution + PYTHONPATH pattern as the
+  # import-linter/depgraph-fresh hooks above (see those for why).
+  - repo: local
+    hooks:
+      - id: pytest-collect-only
+        name: pytest collect-only (import sanity)
+        language: system
+        entry: >-
+          bash -c '
+          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
+          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
+          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" -m pytest tests --collect-only -q
+          '
+        pass_filenames: false
+        files: ^(src|tests)/
+        stages: [pre-commit]
+
   # depgraph freshness: regenerate in memory and compare, no working-tree write
   - repo: local
     hooks:

@@ -21,6 +21,14 @@ Batch flow is tied to the **highest scope in the batch** (#585):
   before merge/push. Not a gate per `done` — full pytest/vitest saturates the
   whole machine's CPU and stalls the user's machine for the day.
 
+This is no longer prose-only (#587 B3): `task_ledger.batch_max_scope(project)`
+computes the highest scope tier in the current batch straight from the ledger
+(the most recently opened goal-group — see that function's docstring for the
+exact definition), `qa_gate._batch_scope_step()` prints the reasoning as a
+`batch-scope` row whenever `takkub qa-gate --auto` runs, and `takkub ma`'s
+"Scope & effort" section (`maintenance.check_scope_effort`) shows the same
+value so Lead can see it without running the gate first.
+
 
 `--auto` (#436) picks the tier from `git diff` itself and prints its
 reasoning:

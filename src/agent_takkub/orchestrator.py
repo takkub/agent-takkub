@@ -1022,6 +1022,19 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 # new timer.
 _PERIODIC_SNAPSHOT_INTERVAL_S = 3 * 60
 
+# #587 B1: `pane_guard._is_machine_busy_from_snapshot`'s busy-machine gate
+# only trusts a snapshot younger than 30s, but `last-session.json` above is
+# throttled to 3 minutes and nothing ever wrote it on a pane's actual
+# working-state transition — so in practice the gate saw a fresh file only
+# ~30s / 180s ≈ 17% of the time. `machine-state.json` is a much lighter
+# sibling (five scalar fields, no per-pane task/session_uuid history) that
+# `_maybe_write_machine_state` refreshes immediately on every working
+# transition PLUS a heartbeat at this interval, so the 30s cutoff is met in
+# normal operation instead of the exception. `pane_guard` reads this file
+# first and only falls back to `last-session.json` when it's missing/stale.
+_MACHINE_STATE_FILE = RUNTIME_DIR / "machine-state.json"
+_MACHINE_STATE_HEARTBEAT_S = 15.0
+
 
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
@@ -9130,14 +9143,21 @@ class Orchestrator(
     # ──────────────────────────────────────────────────────────────
     # session snapshot — restore teammate panes across cockpit restarts
     # ──────────────────────────────────────────────────────────────
-    def snapshot_state(self) -> dict:
-        """Return a JSON-serialisable picture of every live teammate pane
-        across every project. Lead panes are excluded because the tab
-        restore in main_window (driven by `open_tabs` in projects.json)
-        already brings Lead back. We only capture panes that are actively
-        running and in a state worth resuming (active/working) — empty,
-        exited, or error panes are intentionally skipped so a crashed
-        run doesn't get re-spawned into the same crash.
+    def _collect_pane_snapshot_data(self) -> dict:
+        """The Qt-only half of `snapshot_state()` — reads `pane.session`/
+        `pane.state`/`pane._session_cwd` (Qt widget state, unsafe to touch
+        off the main thread) and returns just ``{"projects", "working_panes"}``.
+        Split out (#587 B2) so the periodic-snapshot path can gather this on
+        the Qt main thread and hand it to `_finish_snapshot` on a worker
+        thread for the governor sampling + disk write, instead of doing all
+        of it inline on the thread that ticks the watchdog.
+
+        Lead panes are excluded because the tab restore in main_window
+        (driven by `open_tabs` in projects.json) already brings Lead back.
+        We only capture panes that are actively running and in a state
+        worth resuming (active/working) — empty, exited, or error panes are
+        intentionally skipped so a crashed run doesn't get re-spawned into
+        the same crash.
         """
         projects: dict[str, list[dict]] = {}
         for project, panes in self._panes_by_project.items():
@@ -9187,28 +9207,52 @@ class Orchestrator(
             for e in entries
             if e.get("state") == "working"
         ]
-        ram_pct = None
-        cpu_pct = None
-        overloaded = False
-        gov = getattr(self, "_resource_governor", None)
-        if gov is not None:
-            try:
-                gov_snap = gov.snapshot()
-                cpu_pct = gov_snap.get("cpu_percent")
-                avail_ram = gov_snap.get("available_memory_percent")
-                ram_pct = (100.0 - avail_ram) if avail_ram is not None else None
-                overloaded = bool(gov_snap.get("overloaded"))
-            except Exception:
-                pass
+        return {"projects": projects, "working_panes": working_panes}
 
+    def _governor_snapshot_fields(self) -> tuple[float | None, float | None, bool]:
+        """``(ram_percent, cpu_percent, overloaded)`` off `_resource_governor`.
+
+        Pure psutil-via-governor sampling, no Qt object involved — safe to
+        call from a worker thread (#587 B2), which is why this is split out
+        of `_finish_snapshot` rather than inlined there."""
+        gov = getattr(self, "_resource_governor", None)
+        if gov is None:
+            return None, None, False
+        try:
+            gov_snap = gov.snapshot()
+            cpu_pct = gov_snap.get("cpu_percent")
+            avail_ram = gov_snap.get("available_memory_percent")
+            ram_pct = (100.0 - avail_ram) if avail_ram is not None else None
+            overloaded = bool(gov_snap.get("overloaded"))
+            return ram_pct, cpu_pct, overloaded
+        except Exception:
+            return None, None, False
+
+    def _finish_snapshot(self, data: dict) -> dict:
+        """Governor sampling + final dict assembly on top of
+        `_collect_pane_snapshot_data()`'s Qt-derived `data`. Safe off the Qt
+        main thread (#587 B2) — touches only `_resource_governor` (psutil),
+        never a pane/Qt object."""
+        ram_pct, cpu_pct, overloaded = self._governor_snapshot_fields()
         return {
             "saved_at": datetime.now().isoformat(timespec="seconds"),
-            "projects": projects,
-            "working_panes": working_panes,
+            "projects": data["projects"],
+            "working_panes": data["working_panes"],
             "overloaded": overloaded,
             "ram_percent": ram_pct,
             "cpu_percent": cpu_pct,
         }
+
+    def snapshot_state(self) -> dict:
+        """Return a JSON-serialisable picture of every live teammate pane
+        across every project — see `_collect_pane_snapshot_data` for what's
+        captured and why. Synchronous end-to-end; used by the graceful
+        shutdown/restart call sites (`write_session_snapshot`) where running
+        on the Qt main thread is correct (closeEvent/_restart_cockpit are
+        already tearing the event loop down, see #587 B2's docstring on
+        `_maybe_write_periodic_snapshot` for the path that does NOT want
+        this)."""
+        return self._finish_snapshot(self._collect_pane_snapshot_data())
 
     def write_session_snapshot(self) -> None:
         """Persist the current snapshot to disk. Best-effort: any error
@@ -9586,20 +9630,96 @@ class Orchestrator(
         threading.Thread(target=_hot_md_worker, daemon=True, name="hot-md-writer").start()
 
     def _maybe_write_periodic_snapshot(self, now: float) -> None:
-        """#532: throttled periodic call to `write_session_snapshot()` so a
-        long-`working` pane's `last_assigned_task` reaches disk well before
-        any eventual close, not only at the two graceful shutdown/restart
-        call sites (see `_PERIODIC_SNAPSHOT_INTERVAL_S`). Best-effort —
-        `write_session_snapshot` already swallows its own I/O errors, and a
-        stray exception here must never break the watchdog tick that calls
-        this."""
+        """#532: throttled periodic call so a long-`working` pane's
+        `last_assigned_task` reaches disk well before any eventual close,
+        not only at the two graceful shutdown/restart call sites (see
+        `_PERIODIC_SNAPSHOT_INTERVAL_S`).
+
+        #587 B2: unlike `write_session_snapshot()` (used unchanged by those
+        two synchronous call sites), this collects the Qt-derived pane data
+        on the calling (Qt main) thread — via `_collect_pane_snapshot_data`,
+        since touching `pane.session`/`pane.state` off it is unsafe — but
+        runs the governor sample (psutil) and the atomic disk write on a
+        background thread, the two pieces a proven `main_thread_stall`
+        traced to this call site. Coalesces like `_write_hot_md`'s worker: a
+        tick landing while the previous write is still in flight is a
+        no-op, so a slow disk never piles up threads. Best-effort — the
+        worker swallows its own errors (same contract `write_session_
+        snapshot` always had), and a stray exception collecting pane data
+        must never break the watchdog tick that calls this.
+        """
         if now - getattr(self, "_last_periodic_snapshot_ts", 0.0) < _PERIODIC_SNAPSHOT_INTERVAL_S:
             return
         self._last_periodic_snapshot_ts = now
+        if getattr(self, "_periodic_snapshot_writing", False):
+            return
         try:
-            self.write_session_snapshot()
+            data = self._collect_pane_snapshot_data()
         except Exception:
-            pass
+            return
+        self._periodic_snapshot_writing = True
+
+        def _worker() -> None:
+            try:
+                snap = self._finish_snapshot(data)
+                ensure_runtime()
+                _write_json_atomic(_LAST_SESSION_FILE, snap)
+            except Exception:
+                pass
+            finally:
+                self._periodic_snapshot_writing = False
+
+        threading.Thread(target=_worker, daemon=True, name="periodic-snapshot-writer").start()
+
+    def _maybe_write_machine_state(self, now: float) -> None:
+        """#587 B1: refresh the light `machine-state.json` far more often
+        than `_maybe_write_periodic_snapshot`'s 3-minute throttle allows for
+        `last-session.json` — see `_MACHINE_STATE_FILE`'s module comment for
+        why that left `pane_guard`'s busy-machine gate stale ~83% of the
+        time. Fires immediately on any pane entering/leaving "working"
+        (edge-triggered, cheap to detect — just a list comparison) and
+        otherwise at most every `_MACHINE_STATE_HEARTBEAT_S`. Rides the same
+        5s watchdog tick as `_maybe_write_periodic_snapshot` rather than
+        adding a new QTimer, same reasoning as every other detector on that
+        tick. The governor sample + atomic write run off the Qt main thread
+        (#587 B2's reasoning applies here too), coalesced the same way.
+        """
+        working_panes = sorted(
+            role
+            for panes in self._panes_by_project.values()
+            for role, pane in panes.items()
+            if pane.state == "working"
+        )
+        changed = working_panes != getattr(self, "_machine_state_last_working", None)
+        due = (
+            now - getattr(self, "_machine_state_last_write_ts", 0.0)
+        ) >= _MACHINE_STATE_HEARTBEAT_S
+        if not changed and not due:
+            return
+        self._machine_state_last_working = working_panes
+        self._machine_state_last_write_ts = now
+        if getattr(self, "_machine_state_writing", False):
+            return
+        self._machine_state_writing = True
+
+        def _worker() -> None:
+            try:
+                ram_pct, cpu_pct, overloaded = self._governor_snapshot_fields()
+                payload = {
+                    "ts": time.time(),
+                    "working_panes": working_panes,
+                    "ram_percent": ram_pct,
+                    "cpu_percent": cpu_pct,
+                    "overloaded": overloaded,
+                }
+                ensure_runtime()
+                _write_json_atomic(_MACHINE_STATE_FILE, payload)
+            except Exception:
+                pass
+            finally:
+                self._machine_state_writing = False
+
+        threading.Thread(target=_worker, daemon=True, name="machine-state-writer").start()
 
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — surface teammates that forgot to `takkub done`
@@ -9623,6 +9743,10 @@ class Orchestrator(
         # #532: periodic session-state persistence rides the same tick — see
         # _PERIODIC_SNAPSHOT_INTERVAL_S docstring.
         self._maybe_write_periodic_snapshot(now)
+        # #587 B1: the busy-machine gate's light, frequently-refreshed
+        # sibling file rides the same tick too — see _MACHINE_STATE_FILE's
+        # module comment.
+        self._maybe_write_machine_state(now)
         # Stuck-pane detection rides the same 5 s tick so we don't pay
         # for another QTimer. Runs before the idle-reminder logic so a
         # recover (which closes the pane) doesn't fight with reminder

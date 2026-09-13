@@ -28,6 +28,17 @@ def isolated_session_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Pat
 
 
 @pytest.fixture
+def isolated_machine_state_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> pathlib.Path:
+    """Redirect the module-level _MACHINE_STATE_FILE (#587 B1) to a tmp path
+    so tests don't stomp the real cockpit's file under `runtime/`."""
+    target = tmp_path / "machine-state.json"
+    monkeypatch.setattr(orch_mod, "_MACHINE_STATE_FILE", target)
+    return target
+
+
+@pytest.fixture
 def isolated_restart_reason_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> pathlib.Path:
@@ -457,56 +468,128 @@ class TestRestoreTeammatesWorktreeBookkeeping:
         assert fake._pane_state == {}
 
 
+class _SyncThread:
+    """Runs `target()` inline instead of on a real thread, so a test's
+    assertions right after `start()` don't race the #587 B2 off-thread
+    periodic-snapshot/machine-state writers (same technique
+    tests/test_stuck_recover.py's `_SyncThread` already uses for the
+    stuck-pane background scan)."""
+
+    def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None) -> None:
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+
+@pytest.fixture
+def sync_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_takkub.orchestrator.threading.Thread", _SyncThread)
+
+
+def _bind_snapshot_helpers(fake) -> None:
+    """Wire the real (unbound) Qt-collect/governor/finish helpers onto a
+    bare `SimpleNamespace` fake (#587 B2 split `snapshot_state()` into these
+    three methods so the periodic-snapshot path can run the governor sample
+    + disk write off the Qt main thread) — same "call the unbound method
+    with the fake as self" technique the old e2e test already used for
+    `snapshot_state`/`write_session_snapshot`."""
+    from agent_takkub.orchestrator import Orchestrator
+
+    fake._collect_pane_snapshot_data = lambda: Orchestrator._collect_pane_snapshot_data(fake)
+    fake._governor_snapshot_fields = lambda: Orchestrator._governor_snapshot_fields(fake)
+    fake._finish_snapshot = lambda data: Orchestrator._finish_snapshot(fake, data)
+
+
 class TestMaybeWritePeriodicSnapshot:
     """#532: `write_session_snapshot()` used to run ONLY from the two
     graceful shutdown/restart call sites — a hard kill of an unresponsive
     cockpit (e.g. a pane wedged with a runaway child-process tree) skipped
     both, so `last_assigned_task` never reached disk and the next boot's
-    restore_teammates() respawned the pane with no task to re-paste."""
+    restore_teammates() respawned the pane with no task to re-paste.
 
-    def test_writes_snapshot_on_first_call(self) -> None:
+    #587 B2: the governor sample + atomic write now run on a background
+    thread — `sync_thread` collapses that back to inline execution so these
+    stay deterministic (see `_SyncThread`); `test_write_runs_off_the_main_
+    thread` below is the one test that deliberately does NOT use it, to
+    prove the real thread hand-off actually happens.
+    """
+
+    def test_writes_snapshot_on_first_call(
+        self, sync_thread: None, isolated_session_file: pathlib.Path
+    ) -> None:
         from types import SimpleNamespace
 
         from agent_takkub.orchestrator import Orchestrator
 
-        calls: list[None] = []
-        fake = SimpleNamespace(write_session_snapshot=lambda: calls.append(None))
+        fake = SimpleNamespace(_panes_by_project={}, _pane_state={}, _resource_governor=None)
+        _bind_snapshot_helpers(fake)
         Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
-        assert len(calls) == 1
         assert fake._last_periodic_snapshot_ts == 1000.0
+        assert isolated_session_file.is_file()
+        # the in-flight coalescing flag must not get stuck true once the
+        # (synchronous, here) worker has actually finished.
+        assert fake._periodic_snapshot_writing is False
 
     def test_throttles_within_interval(self) -> None:
         from types import SimpleNamespace
 
         from agent_takkub.orchestrator import Orchestrator
 
-        calls: list[None] = []
+        collected: list[None] = []
         fake = SimpleNamespace(
-            write_session_snapshot=lambda: calls.append(None),
             _last_periodic_snapshot_ts=1000.0,
+            _collect_pane_snapshot_data=lambda: collected.append(None),
         )
         Orchestrator._maybe_write_periodic_snapshot(fake, now=1010.0)  # type: ignore[arg-type]
-        assert calls == []
+        assert collected == []
         assert fake._last_periodic_snapshot_ts == 1000.0
 
-    def test_fires_again_once_interval_elapses(self) -> None:
+    def test_fires_again_once_interval_elapses(
+        self, sync_thread: None, isolated_session_file: pathlib.Path
+    ) -> None:
         from types import SimpleNamespace
 
         from agent_takkub.orchestrator import _PERIODIC_SNAPSHOT_INTERVAL_S, Orchestrator
 
-        calls: list[None] = []
         fake = SimpleNamespace(
-            write_session_snapshot=lambda: calls.append(None),
+            _panes_by_project={},
+            _pane_state={},
+            _resource_governor=None,
             _last_periodic_snapshot_ts=1000.0,
         )
+        _bind_snapshot_helpers(fake)
         later = 1000.0 + _PERIODIC_SNAPSHOT_INTERVAL_S
         Orchestrator._maybe_write_periodic_snapshot(fake, now=later)  # type: ignore[arg-type]
-        assert len(calls) == 1
         assert fake._last_periodic_snapshot_ts == later
+        assert isolated_session_file.is_file()
 
-    def test_swallows_write_errors(self) -> None:
-        """A disk hiccup here must never break the watchdog tick that calls
-        this — same best-effort contract as write_session_snapshot itself."""
+    def test_coalesces_while_a_write_is_already_in_flight(self) -> None:
+        """A tick landing while the previous write is still running is a
+        no-op — prevents a thread pile-up on a slow disk (same contract as
+        `_write_hot_md`'s `_hot_md_writing` flag)."""
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        collected: list[None] = []
+        fake = SimpleNamespace(
+            _last_periodic_snapshot_ts=0.0,
+            _periodic_snapshot_writing=True,
+            _collect_pane_snapshot_data=lambda: collected.append(None),
+        )
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
+        # the throttle clock still advances (so it isn't fired again next
+        # tick either), but no new collect/write is started.
+        assert fake._last_periodic_snapshot_ts == 1000.0
+        assert collected == []
+
+    def test_swallows_collect_errors(self) -> None:
+        """A disk hiccup / Qt read failure here must never break the
+        watchdog tick that calls this — same best-effort contract
+        `write_session_snapshot` always had."""
         from types import SimpleNamespace
 
         from agent_takkub.orchestrator import Orchestrator
@@ -514,12 +597,42 @@ class TestMaybeWritePeriodicSnapshot:
         def _boom() -> None:
             raise OSError("disk full")
 
-        fake = SimpleNamespace(write_session_snapshot=_boom)
+        fake = SimpleNamespace(_collect_pane_snapshot_data=_boom)
         Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
         assert fake._last_periodic_snapshot_ts == 1000.0
+        # never got far enough to claim the in-flight flag
+        assert getattr(fake, "_periodic_snapshot_writing", False) is False
+
+    def test_write_runs_off_the_main_thread(self, isolated_session_file: pathlib.Path) -> None:
+        """The actual point of #587 B2: the governor sample + atomic write
+        must not execute on the calling (Qt main) thread."""
+        import threading
+        import time as time_mod
+        from types import SimpleNamespace
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        seen_thread_ids: list[int] = []
+        fake = SimpleNamespace(_panes_by_project={}, _pane_state={}, _resource_governor=None)
+        _bind_snapshot_helpers(fake)
+        real_finish = fake._finish_snapshot
+
+        def _spying_finish(data):
+            seen_thread_ids.append(threading.get_ident())
+            return real_finish(data)
+
+        fake._finish_snapshot = _spying_finish
+        main_thread_id = threading.get_ident()
+        Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
+        for _ in range(50):
+            if isolated_session_file.is_file():
+                break
+            time_mod.sleep(0.02)
+        assert isolated_session_file.is_file()
+        assert seen_thread_ids and seen_thread_ids[0] != main_thread_id
 
     def test_end_to_end_persists_last_assigned_task_without_graceful_shutdown(
-        self, isolated_session_file: pathlib.Path
+        self, sync_thread: None, isolated_session_file: pathlib.Path
     ) -> None:
         """The scenario from #532: a `working` pane with an assigned task,
         never closed gracefully — periodic snapshot must still land it on
@@ -534,13 +647,117 @@ class TestMaybeWritePeriodicSnapshot:
         fake = SimpleNamespace(
             _panes_by_project={"p": {"frontend": pane}},
             _pane_state={"p::frontend": PaneState(last_assigned_task="verify checkout UI")},
+            _resource_governor=None,
         )
-        fake.snapshot_state = lambda: Orchestrator.snapshot_state(fake)
-        fake.write_session_snapshot = lambda: Orchestrator.write_session_snapshot(fake)
+        _bind_snapshot_helpers(fake)
         Orchestrator._maybe_write_periodic_snapshot(fake, now=1000.0)  # type: ignore[arg-type]
         assert isolated_session_file.is_file()
         saved = json.loads(isolated_session_file.read_text(encoding="utf-8"))
         assert saved["projects"]["p"][0]["last_task"] == "verify checkout UI"
+
+
+def _pane(state: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(state=state)
+
+
+def _machine_state_fake(panes: dict) -> object:
+    """A bare fake wired for `_maybe_write_machine_state`, which calls
+    `self._governor_snapshot_fields()` directly (unlike the periodic-
+    snapshot path's `_finish_snapshot`) — `_bind_snapshot_helpers` covers
+    it too, so it's reused here rather than duplicating the binding."""
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(_panes_by_project=panes, _resource_governor=None)
+    _bind_snapshot_helpers(fake)
+    return fake
+
+
+class TestMaybeWriteMachineState:
+    """#587 B1: `pane_guard`'s busy-machine gate only trusted a snapshot
+    younger than 30s, but the only writer (`write_session_snapshot`) was
+    throttled to 3 minutes and nothing rode a pane's actual working-state
+    transition — so the gate saw a fresh file ~30s/180s ≈ 17% of the time in
+    practice. `_maybe_write_machine_state` fixes that with an edge-trigger
+    plus a 15s heartbeat onto a lighter sibling file."""
+
+    def test_writes_immediately_on_first_working_pane(
+        self, sync_thread: None, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = _machine_state_fake({"p": {"backend": _pane("working")}})
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        assert isolated_machine_state_file.is_file()
+        saved = json.loads(isolated_machine_state_file.read_text(encoding="utf-8"))
+        assert saved["working_panes"] == ["backend"]
+        assert saved["overloaded"] is False
+        assert fake._machine_state_writing is False
+
+    def test_no_write_when_nothing_changed_and_heartbeat_not_due(
+        self, sync_thread: None, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = _machine_state_fake({"p": {"backend": _pane("working")}})
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        mtime_1 = isolated_machine_state_file.stat().st_mtime_ns
+        Orchestrator._maybe_write_machine_state(fake, now=1005.0)  # type: ignore[arg-type]
+        assert isolated_machine_state_file.stat().st_mtime_ns == mtime_1
+
+    def test_heartbeat_refreshes_even_without_a_change(
+        self, sync_thread: None, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        from agent_takkub.orchestrator import _MACHINE_STATE_HEARTBEAT_S, Orchestrator
+
+        fake = _machine_state_fake({"p": {"backend": _pane("working")}})
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        later = 1000.0 + _MACHINE_STATE_HEARTBEAT_S
+        Orchestrator._maybe_write_machine_state(fake, now=later)  # type: ignore[arg-type]
+        assert fake._machine_state_last_write_ts == later
+
+    def test_pane_leaving_working_triggers_an_immediate_write(
+        self, sync_thread: None, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        from agent_takkub.orchestrator import Orchestrator
+
+        panes = {"p": {"backend": _pane("working")}}
+        fake = _machine_state_fake(panes)
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        panes["p"]["backend"].state = "done"
+        # well under the heartbeat interval — only the edge trigger should
+        # explain a second write this soon.
+        Orchestrator._maybe_write_machine_state(fake, now=1001.0)  # type: ignore[arg-type]
+        saved = json.loads(isolated_machine_state_file.read_text(encoding="utf-8"))
+        assert saved["working_panes"] == []
+
+    def test_coalesces_while_a_write_is_already_in_flight(
+        self, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = _machine_state_fake({"p": {"backend": _pane("working")}})
+        fake._machine_state_writing = True
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        assert not isolated_machine_state_file.exists()
+
+    def test_written_file_is_read_as_fresh_by_pane_guard(
+        self, sync_thread: None, isolated_machine_state_file: pathlib.Path
+    ) -> None:
+        """The point of the 15s heartbeat: `pane_guard`'s 30s staleness
+        cutoff must actually be met in normal operation, not just parse the
+        JSON. Round-trips through the real writer AND the real reader."""
+        from agent_takkub import pane_guard
+        from agent_takkub.orchestrator import Orchestrator
+
+        fake = _machine_state_fake({"p": {"frontend": _pane("working")}})
+        Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
+        verdict_busy, reason = pane_guard._is_machine_busy_from_snapshot(
+            "backend", machine_state_path=isolated_machine_state_file
+        )
+        assert verdict_busy is True
+        assert "frontend" in reason
 
 
 class TestSnapshotStateWorktreeBookkeeping:
@@ -572,6 +789,7 @@ class TestSnapshotStateWorktreeBookkeeping:
             _panes_by_project={"p": {"backend": self._pane("/wt/backend-1")}},
             _pane_state={"p::backend": PaneState(worktree=wt, last_assigned_task="fix X")},
         )
+        _bind_snapshot_helpers(fake)
         snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
         entry = snap["projects"]["p"][0]
         assert entry["worktree"] == wt
@@ -594,6 +812,7 @@ class TestSnapshotStateWorktreeBookkeeping:
                 )
             },
         )
+        _bind_snapshot_helpers(fake)
         snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
         entry = snap["projects"]["p"][0]
         assert entry["assign_base_sha"] == "deadbeef"
@@ -614,6 +833,7 @@ class TestSnapshotStateWorktreeBookkeeping:
             _panes_by_project={"p": {"backend": self._pane("/not/a/repo", state="active")}},
             _pane_state={"p::backend": PaneState(assign_non_git=True)},
         )
+        _bind_snapshot_helpers(fake)
         snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
         entry = snap["projects"]["p"][0]
         assert entry["assign_non_git"] is True
@@ -628,6 +848,7 @@ class TestSnapshotStateWorktreeBookkeeping:
             _panes_by_project={"p": {"backend": self._pane("/repo/api")}},
             _pane_state={},
         )
+        _bind_snapshot_helpers(fake)
         snap = Orchestrator.snapshot_state(fake)  # type: ignore[arg-type]
         entry = snap["projects"]["p"][0]
         assert entry["worktree"] is None

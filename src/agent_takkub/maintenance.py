@@ -742,6 +742,30 @@ def check_scope_effort(
 
     details.append(f"Test files written: {test_files_written_total} file(s)")
 
+    # #587 B3: same batch-scope value `qa-gate --auto` reasons from
+    # (task_ledger.batch_max_scope) — surfaced here too so Lead sees it
+    # without having to run qa-gate first. Best-effort: no project resolves
+    # (raw terminal, unregistered checkout) or the ledger has nothing yet →
+    # omit the line rather than claim a scope that isn't real.
+    batch_scope: str | None = None
+    batch_project = os.environ.get("TAKKUB_PROJECT")
+    if not batch_project:
+        try:
+            from .config import active_project
+
+            batch_project, _ = active_project()
+        except Exception:
+            batch_project = None
+    if batch_project:
+        try:
+            from .task_ledger import batch_max_scope
+
+            batch_scope = batch_max_scope(batch_project)
+        except Exception:
+            batch_scope = None
+    if batch_scope:
+        details.append(f"Batch scope (project '{batch_project}'): {batch_scope}")
+
     if guard_denied_counts:
         guard_parts = [f"{rule} ×{cnt}" for rule, cnt in guard_denied_counts.most_common()]
         details.append(f"Guard denied: {' · '.join(guard_parts)}")
@@ -763,6 +787,8 @@ def check_scope_effort(
         "guard_denied": dict(guard_denied_counts),
         "test_files_written": test_files_written_total,
         "wall_time_by_scope": avg_wall_times,
+        "batch_scope": batch_scope,
+        "batch_project": batch_project,
     }
     return Check("scope_effort", "Scope & effort (24h)", "ok", summary, details, data)
 

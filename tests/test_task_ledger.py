@@ -555,3 +555,46 @@ class TestAtomicWriteWindowsRetry:
         with pytest.raises(PermissionError):
             task_ledger._atomic_write(tmp_path / "state.json", "{}")
         assert calls["n"] == task_ledger._REPLACE_RETRIES
+
+
+class TestBatchMaxScope:
+    """#587 B3: `qa-gate --auto`'s "run full vs. skip" reasoning reads this
+    value — a wrong answer here means a batch with a real `deep` task
+    silently reports "skip", so these pin both the happy path and the
+    define-away-from-data corners (missing ledger, empty group, an
+    unknown/garbled scope string)."""
+
+    def test_no_ledger_defaults_to_normal(self) -> None:
+        assert task_ledger.batch_max_scope("no-such-project") == "normal"
+
+    def test_single_role_returns_its_scope(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "fix typo", "goal", "feat", "claude", scope="tiny"
+        )
+        assert task_ledger.batch_max_scope(PROJECT) == "tiny"
+
+    def test_deep_wins_even_when_assigned_before_others(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "auth rewrite", "goal", "feat", "claude", scope="deep"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "frontend", "/web", "button copy", "goal", "feat", "claude", scope="tiny"
+        )
+        assert task_ledger.batch_max_scope(PROJECT) == "deep"
+
+    def test_only_the_newest_goal_group_counts(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "old deep task", "old goal", "feat", "claude", scope="deep"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "new tiny task", "new goal", "feat", "claude", scope="tiny"
+        )
+        # the new goal opened a fresh group at index 0 — the old group's
+        # "deep" row must not leak into the current batch's answer.
+        assert task_ledger.batch_max_scope(PROJECT) == "tiny"
+
+    def test_unknown_scope_string_treated_as_normal(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task", "goal", "feat", "claude", scope="huge"
+        )
+        assert task_ledger.batch_max_scope(PROJECT) == "normal"

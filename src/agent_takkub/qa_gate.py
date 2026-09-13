@@ -1393,6 +1393,58 @@ def _tier_step(tier: DiffTier) -> StepResult:
     return StepResult("auto-tier", True, False, 0.0, detail)
 
 
+def _project_for_gate() -> str | None:
+    """Best-effort project namespace for the calling pane (#587 B3).
+
+    `qa-gate` is deliberately "pure-local" (works with the cockpit closed,
+    no orchestrator socket) so it has no project concept of its own to read
+    `task_ledger` with. `TAKKUB_PROJECT` is the same env var the orchestrator
+    already stamps on every spawned pane's shell for this exact purpose (see
+    `cli._from_project`); `config.active_project()` covers a human running
+    `qa-gate` from a raw terminal in the single-project-open common case.
+    None (no project resolves) means "no batch info" to callers, not an
+    error.
+    """
+    env_project = os.environ.get("TAKKUB_PROJECT")
+    if env_project:
+        return env_project
+    try:
+        from . import config
+
+        name, _ = config.active_project()
+        return name
+    except Exception:
+        return None
+
+
+def _batch_scope_step() -> StepResult | None:
+    """(#587 B3) Print WHY this batch does or doesn't earn a full gate.
+
+    Team policy has always been prose (`docs/qa-gate-policy.md`: "tiny/normal
+    batch → skip qa-gate entirely; batch has a deep task → run full once at
+    the end") with nothing in the tool saying which side of that line the
+    CURRENT batch falls on. Returns None (adds no row) when no project
+    resolves — an unregistered checkout has no ledger to read.
+    """
+    project = _project_for_gate()
+    if not project:
+        return None
+    from .task_ledger import batch_max_scope
+
+    try:
+        scope = batch_max_scope(project)
+    except Exception:
+        return None
+    if scope == "deep":
+        detail = f"batch scope: deep (project '{project}') → รัน full gate ครั้งนี้ถูกต้องแล้ว"
+    else:
+        detail = (
+            f"batch scope: {scope} (project '{project}') → ปกติควรข้าม qa-gate ทั้ง batch "
+            "(นโยบาย docs/qa-gate-policy.md) — เห็น step นี้เพราะถูกเรียกตรงๆ"
+        )
+    return StepResult("batch-scope", True, False, 0.0, detail)
+
+
 def _tidy_step(root: Path, env: dict | None = None) -> StepResult:
     """#477: repo-tidiness WARN — misplaced test files / scratch files that
     leaked into the diff. Every tier that has a real git diff to look at gets
@@ -1728,6 +1780,9 @@ def run_gate(
             if kind == "python":
                 report = GateReport(v2_flags=v2_flags, targeted=[])
                 report.steps.append(_tier_step(tier))
+                batch_step = _batch_scope_step()
+                if batch_step is not None:
+                    report.steps.append(batch_step)
                 report.steps.append(_tidy_step(wroot))
                 report.steps.append(_skip("pytest", skip_reason))
                 report.steps.append(_skip("ruff", skip_reason))
@@ -1753,6 +1808,9 @@ def run_gate(
     report = GateReport(v2_flags=v2_flags, targeted=list(targeted) if targeted else None)
     if tier is not None:
         report.steps.append(_tier_step(tier))
+        batch_step = _batch_scope_step()
+        if batch_step is not None:
+            report.steps.append(batch_step)
 
     # #477: every remaining tier has a real git diff to look at (auto's
     # style/targeted/full sub-tiers, and an explicit full gate) — only an
