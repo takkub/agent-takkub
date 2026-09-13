@@ -584,3 +584,12 @@ class TestCheckLeadNoise:
         monkeypatch.setattr(maintenance, "_other_cockpit_events_log", lambda _log: other_log)
         check = maintenance.check_lead_noise(this_log, since_hours=1, now=now)
         assert check.data["counts"]["progress"] == 2
+
+    def test_other_cockpit_events_log_defaults_to_none_in_tests(self, tmp_path: Path) -> None:
+        """(#589) conftest's autouse fixture patches this to `None` by
+        default — without it, this resolves to a REAL path outside any
+        test's own `tmp_path` (`Path.home() / ".agent-takkub"/runtime/
+        events.log` or this checkout's own runtime/events.log), so
+        `check_lead_noise` could read (and get flaky counts from) whatever a
+        real cockpit on the machine running the suite has actually logged."""
+        assert maintenance._other_cockpit_events_log(tmp_path / "events.log") is None

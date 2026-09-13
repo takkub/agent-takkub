@@ -355,6 +355,50 @@ class TestLastTurnEndTsStamping:
         assert ps.last_turn_end_ts is None
 
 
+class TestLeadStopStampsLastTurnEndTs:
+    """(#588) Lead's Stop hook never opens the done-gate, but it is still
+    authoritative evidence Lead's turn ended — `_check_stale_markers`'s
+    turn-end exemption needs the same stamp teammates already get, or a
+    Lead sitting genuinely idle at its own prompt (composer chrome the
+    marker table doesn't recognise) gets escalated as possibly wedged."""
+
+    def test_lead_stop_stamps_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["lead"] = _make_pane(state="working")
+
+        ok, block, _ = orch.consume_pane_hook("lead", project=TEST_PROJECT, event="Stop")
+
+        assert ok is True
+        assert block is False
+        ps = orch._ps(_key("lead"))
+        assert ps.last_turn_end_ts == 10_000.0
+
+    def test_lead_notification_does_not_stamp_last_turn_end_ts(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["lead"] = _make_pane(state="working")
+
+        orch.consume_pane_hook("lead", project=TEST_PROJECT, event="Notification")
+
+        ps = orch._ps(_key("lead"))
+        assert ps.last_turn_end_ts is None
+
+    def test_teammate_stop_stamping_is_unaffected_by_the_lead_branch(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 10_000.0)
+        orch.panes["backend"] = _make_pane(state="working")
+        ps = _assign_task(orch, "backend")
+
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
+
+        assert block is True  # unchanged: done-gate still fires for a teammate
+        assert ps.last_turn_end_ts is None  # unchanged: only the non-blocking _pass() stamps
+
+
 class TestIdleStateSignalIdempotency:
     def test_first_idle_ts_set_once(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch

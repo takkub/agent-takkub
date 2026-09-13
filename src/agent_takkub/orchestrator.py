@@ -625,6 +625,21 @@ STALE_MARKER_QUIET_S = 20.0
 STALE_MARKER_COOLDOWN_S = 600.0
 STALE_MARKER_TAIL_ROWS = 4
 
+# (#588) A claude pane's Stop hook (`consume_pane_hook`) stamps
+# `PaneState.last_turn_end_ts` the instant a turn genuinely ends — for both
+# teammates (`_pass()`) and, as of #588, Lead too. That is strictly better
+# evidence of "idle, waiting for input" than any PTY-text marker: it can't be
+# fooled by a redrawn footer the marker table doesn't recognise yet. If the
+# pane has produced no output since shortly after that stamp, it is sitting
+# at its own prompt, full stop — exempt it from the unrecognised-marker
+# streak entirely rather than requiring the (fragile) text markers to also
+# agree. Slack only needs to cover the hook's own dispatch latency plus one
+# redraw, not a whole polling interval. Providers with no Stop hook
+# (codex/gemini-agy/opencode/kimi/cursor) never stamp `last_turn_end_ts`, so
+# this exemption never fires for them — they still rely solely on the
+# text-marker table below.
+STALE_MARKER_TURN_END_SLACK_S = 10.0
+
 # (#468) The loud stale-marker escalation below is a PTY-screen-text signal
 # only — it says nothing about whether the pane's underlying provider process
 # is actually still working. A real incident: a codex pane mid-deploy sat
@@ -691,6 +706,25 @@ def _stale_marker_footer(sess: PtySession) -> str:
     return " | ".join(
         ln.strip() for ln in sess.display_lines()[-STALE_MARKER_TAIL_ROWS:] if ln.strip()
     )[:300]
+
+
+def _stale_marker_checks(sess: PtySession) -> dict[str, bool]:
+    """(#588) Re-run each of `_STALE_MARKER_CHECKS_TRIED` by name at
+    escalation/log time and report every individual verdict — named
+    explicitly (instead of leaving "all False" implicit in the caller's own
+    earlier if-chain) so a diagnostic dump can catch the screen having
+    changed between `_check_stale_markers`'s own checks and this later
+    capture, rather than just asserting they were all False. Best-effort per
+    check: a failed probe reads as False (matching this file's surrounding
+    except-Exception-continue style), never raises."""
+    checks: dict[str, bool] = {}
+    for name in _STALE_MARKER_CHECKS_TRIED:
+        try:
+            result = getattr(sess, name)()
+        except Exception:
+            result = False
+        checks[name] = bool(result)
+    return checks
 
 
 # A teammate pane in `working` state with no PTY output for this long
@@ -6973,8 +7007,19 @@ class Orchestrator(
             if entry["first_idle_ts"] is None:
                 entry["first_idle_ts"] = time.time()
 
-        # Lead never gets the done-gate (it never calls `done` on itself);
-        # the gate only applies to a turn actually ending (Stop).
+        # Lead never gets the done-gate (it never calls `done` on itself),
+        # but its Stop hook is still authoritative evidence its turn ended —
+        # stamp it the same way _pass() does below for teammates, so
+        # `_check_stale_markers`'s turn-end exemption also covers Lead
+        # sitting idle at its own ready prompt (#588). Never opens the
+        # done-gate for Lead; only the timestamp changes.
+        if from_role == LEAD.name and event == "Stop":
+            try:
+                self._ps(key).last_turn_end_ts = time.time()
+            except Exception:
+                pass
+
+        # The done-gate below only applies to a turn actually ending (Stop).
         if from_role == LEAD.name or event != "Stop":
             return True, False, ""
 
@@ -10232,6 +10277,26 @@ class Orchestrator(
                         self._stale_marker_streak.pop(key, None)
                         self._stale_marker_nudged.pop(key, None)
                         continue
+                    # (#588) Stop-hook turn-end stamp beats PTY-text markers:
+                    # if this pane's last output landed at/before its last
+                    # recorded turn-end (plus dispatch/redraw slack), it is
+                    # idling at its own prompt no matter what the footer text
+                    # says. `now` here is wall-clock (`time.time()`, stamped
+                    # by the same sweep loop that stamps `last_turn_end_ts`);
+                    # `seconds_since_output()` is a monotonic-clock DURATION,
+                    # not a timestamp, so subtracting it from `now` to
+                    # reconstruct an approximate wall-clock last-output time
+                    # is valid — elapsed seconds read the same on either
+                    # clock over a short window. `inf` (no output ever seen)
+                    # always exempts, which is correct: never having output
+                    # is not evidence of a wedged pane either.
+                    ps = getattr(self, "_pane_state", {}).get(key)
+                    if ps is not None and ps.last_turn_end_ts is not None:
+                        last_output_ts = now - sess.seconds_since_output()
+                        if last_output_ts <= ps.last_turn_end_ts + STALE_MARKER_TURN_END_SLACK_S:
+                            self._stale_marker_streak.pop(key, None)
+                            self._stale_marker_nudged.pop(key, None)
+                            continue
                     if name == LEAD.name:
                         idle_since = self._team_idle_since_for(project_name, project_panes, now)
                         if idle_since and (now - idle_since) < LEAD_DONE_IDLE_GRACE_S:
@@ -10430,6 +10495,27 @@ class Orchestrator(
             )
             self._stale_marker_streak.pop(key, None)
             return
+        # (#588) Captured once here and threaded through to
+        # _escalate_stale_marker so both events reflect the exact same
+        # snapshot instant rather than two separate (and possibly
+        # inconsistent) screen reads a few lines apart.
+        last_turn_end_age_s: float | None = None
+        diag: dict[str, object] = {}
+        checks: dict[str, bool] = {}
+        try:
+            ps = getattr(self, "_pane_state", {}).get(key)
+            if ps is not None and ps.last_turn_end_ts is not None:
+                last_turn_end_age_s = round(now - ps.last_turn_end_ts, 1)
+        except Exception:
+            pass
+        try:
+            diag = sess.ready_diagnostics()
+        except Exception:
+            diag = {}
+        try:
+            checks = _stale_marker_checks(sess)
+        except Exception:
+            checks = {}
         _log_event(
             "ready_marker_nudge_result",
             role=name,
@@ -10441,9 +10527,22 @@ class Orchestrator(
             footer_after=footer_after,
             recognised_after=recognised_after,
             structural_recovered=structural_recovered,
+            diag=diag,
+            checks=checks,
+            last_turn_end_age_s=last_turn_end_age_s,
         )
         self._escalate_stale_marker(
-            project_name, name, pane, sess, footer_after, quiet_s, streak, now
+            project_name,
+            name,
+            pane,
+            sess,
+            footer_after,
+            quiet_s,
+            streak,
+            now,
+            diag=diag,
+            checks=checks,
+            last_turn_end_age_s=last_turn_end_age_s,
         )
 
     def _stale_marker_liveness(
@@ -10531,6 +10630,10 @@ class Orchestrator(
         quiet_s: int,
         streak: int,
         now: float,
+        *,
+        diag: dict[str, object] | None = None,
+        checks: dict[str, bool] | None = None,
+        last_turn_end_age_s: float | None = None,
     ) -> None:
         """(#343) The loud path: a pane that stayed unrecognised-and-quiet
         across _STALE_MARKER_ESCALATE_EVERY occurrences AND did not recover
@@ -10605,6 +10708,9 @@ class Orchestrator(
             last_progress_ts=last_progress_ts,
             last_progress_age_s=(round(now - last_progress_ts) if last_progress_ts else None),
             liveness_checked=True,
+            diag=diag or {},
+            checks=checks or {},
+            last_turn_end_age_s=last_turn_end_age_s,
         )
         try:
             # (#468) Two wordings: claude has a structural recovery fallback

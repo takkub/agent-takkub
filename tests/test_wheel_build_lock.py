@@ -21,6 +21,7 @@ require actually building a wheel (that's already exercised by the
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import (
+    _STALE_WHEEL_LOCK_AGE_S,
     _build_or_reuse_wheel,
     _cross_process_wheel_lock,
 )
@@ -76,6 +78,38 @@ class TestCrossProcessWheelLock:
             pass
         with _cross_process_wheel_lock(lock_path, timeout=10.0, poll=0.01):
             pass
+
+    def test_stale_lock_older_than_threshold_is_reclaimed(self, tmp_path: Path) -> None:
+        """(#589) A lock left behind by a worker that died mid-build (real
+        incident: held 54h across CI runs) must not wedge every future run
+        forever — a lock file older than the stale-age threshold is treated
+        as abandoned and reclaimed instead of waited out for the full
+        `timeout`."""
+        lock_path = tmp_path / "wheel-build.lock"
+        lock_path.write_text("stale")
+        old_mtime = time.time() - (_STALE_WHEEL_LOCK_AGE_S + 60)
+        os.utime(lock_path, (old_mtime, old_mtime))
+
+        with _cross_process_wheel_lock(lock_path, timeout=2.0, poll=0.01):
+            pass  # must acquire promptly instead of timing out
+
+        assert not lock_path.exists()
+
+    def test_fresh_held_lock_is_not_reclaimed(self, tmp_path: Path) -> None:
+        """A lock file created moments ago (genuinely held) must still time
+        out normally — staleness reclaim must never bypass a real holder."""
+        lock_path = tmp_path / "wheel-build.lock"
+        lock_path.write_text("held")
+
+        with pytest.raises(TimeoutError):
+            with _cross_process_wheel_lock(lock_path, timeout=0.2, poll=0.05):
+                pass  # pragma: no cover - must time out before entering
+
+    def test_lock_file_records_pid_for_debugging(self, tmp_path: Path) -> None:
+        lock_path = tmp_path / "wheel-build.lock"
+        with _cross_process_wheel_lock(lock_path, timeout=10.0, poll=0.01):
+            content = lock_path.read_text()
+        assert str(os.getpid()) in content
 
 
 class TestBuildOrReuseWheel:

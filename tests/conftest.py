@@ -98,6 +98,14 @@ _ORIG_OS_STAT = os.stat
 
 _REPO_ROOT_FOR_WHEEL_BUILD = Path(__file__).resolve().parents[1]
 
+# (#589) A lock file left behind by a worker that died mid-build (observed:
+# held 54h across CI runs, wedging every subsequent run behind a lock nobody
+# still holds) is treated as abandoned once it's this old — removed and
+# retried immediately instead of counting against `timeout` below. Well
+# above the 240s default `timeout` (and any plausible real wheel build) so a
+# lock genuinely still in use is never mistaken for stale.
+_STALE_WHEEL_LOCK_AGE_S = 900.0
+
 
 @contextlib.contextmanager
 def _cross_process_wheel_lock(lock_path: Path, *, timeout: float = 240.0, poll: float = 0.2):
@@ -119,12 +127,26 @@ def _cross_process_wheel_lock(lock_path: Path, *, timeout: float = 240.0, poll: 
             # moment we try to create — seen as a flaky
             # test_wheel_build_lock failure on windows-latest CI
             # (2026-08-26, 1.6.6 run). Same meaning as "still held": wait.
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > _STALE_WHEEL_LOCK_AGE_S:
+                lock_path.unlink(missing_ok=True)
+                continue
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"timed out after {timeout}s waiting for lock {lock_path} "
                     "(held by another pytest-xdist worker?)"
                 ) from None
             time.sleep(poll)
+    try:
+        # Debug breadcrumb only (never read back by the lock logic itself) —
+        # so a lock found stale/held can be traced to the pid/time that
+        # created it instead of just its bare existence.
+        os.write(fd, f"{os.getpid()} {time.time()}".encode())
+    except OSError:
+        pass
     try:
         yield
     finally:
@@ -433,6 +455,24 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         mod = _maybe_module(name, force=force)
         if mod is not None and hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, value, raising=False)
+
+    # (#589) `maintenance._other_cockpit_events_log` resolves to a REAL path
+    # (`Path.home() / ".agent-takkub"/runtime/events.log` or this checkout's
+    # own `runtime/events.log`, whichever is the dev/prod DATA_HOME pairing's
+    # "other" side) — entirely outside the per-test `runtime`/`events` above,
+    # so `check_lead_noise` and friends could read (and get flaky counts
+    # from) whatever a real cockpit on the machine running the suite has
+    # actually logged. Force-imported (like config/orchestrator above) so
+    # the SAME module object is patched regardless of which test file
+    # happens to import `maintenance` first. Tests that need a specific
+    # "other" log override this default themselves (see
+    # test_maintenance.py's `monkeypatch.setattr(maintenance,
+    # "_other_cockpit_events_log", ...)`, which simply wins for that test).
+    maint_mod = _maybe_module("agent_takkub.maintenance", force=True)
+    if maint_mod is not None and hasattr(maint_mod, "_other_cockpit_events_log"):
+        monkeypatch.setattr(
+            maint_mod, "_other_cockpit_events_log", lambda _log: None, raising=False
+        )
 
     # role_memory computes ROLE_MEMORY_DIR = RUNTIME_DIR / "role-memory" once at
     # import time (not a lazy join), so patching its copied RUNTIME_DIR name

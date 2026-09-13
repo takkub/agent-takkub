@@ -21,6 +21,7 @@ from agent_takkub.orchestrator import (
     _STALE_MARKER_ESCALATE_EVERY,
     STALE_MARKER_COOLDOWN_S,
     STALE_MARKER_QUIET_S,
+    STALE_MARKER_TURN_END_SLACK_S,
     Orchestrator,
 )
 from agent_takkub.pty_session import PtySession
@@ -447,6 +448,46 @@ def test_composer_stability_requires_both_sides_of_the_nudge(
     assert notify_calls
 
 
+def test_claude_empty_composer_with_busy_spinner_escalates_not_recovered(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(#588 follow-up) A genuinely stuck pane whose screen happens to show
+    the borderless composer chrome WHILE claude's busy spinner is still
+    rendered above it must escalate like any other unrecognised-and-quiet
+    pane — the structural fallback must not wave this through as "recovered"
+    just because the composer shape matches. Wires `is_at_claude_empty_composer`
+    to the REAL `_is_claude_empty_composer` predicate (unlike every other nudge
+    test above, which stubs it as a plain bool) so a regression that drops the
+    spinner guard is caught at the orchestrator level too, not only by the
+    unit-level predicate tests below."""
+    from agent_takkub.pty_session import _is_claude_empty_composer
+
+    spinner_lines = [
+        "✽ Mulling… (2m 29s · ↓ 7.3k tokens)",
+        "  tip: press esc to interrupt",
+        "─" * 160,
+        "❯",
+        "",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    ]
+    sess = _sess(quiet=STALE_MARKER_QUIET_S + 10, lines=spinner_lines)
+    sess.is_at_claude_empty_composer.side_effect = lambda: _is_claude_empty_composer(
+        sess.display_lines()
+    )
+    _add_pane(orch, "projX", "lead", sess)
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    results = [e for e in events if e[0] == "ready_marker_nudge_result"]
+    assert len(results) == 1
+    assert results[0][1]["structural_recovered"] is False
+    assert not [e for e in events if e[0] == "ready_marker_nudge_recovered"]
+    assert [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert notify_calls
+
+
 # -- #343: the raw structural predicate itself --------------------------------
 
 
@@ -479,6 +520,175 @@ def test_is_claude_empty_composer_rejects_bare_prompt_without_borders() -> None:
 
     lines = ["some conversation text", "❯", "more conversation text"]
     assert _is_claude_empty_composer(lines) is False
+
+
+# -- #588: composer chrome that dropped its bottom border -------------------
+
+
+def test_is_claude_empty_composer_matches_borderless_footer_chrome_shape() -> None:
+    """A live watchdog false-positive capture: border, bare prompt, a blank
+    row, then the footer-chrome hint line — with NO closing border at all."""
+    from agent_takkub.pty_session import _is_claude_empty_composer
+
+    lines = [
+        "some earlier conversation text",
+        "─" * 160,
+        "❯",
+        "",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        "",
+        "",
+    ]
+    assert _is_claude_empty_composer(lines) is True
+
+
+def test_is_claude_empty_composer_borderless_shape_rejects_typed_text() -> None:
+    from agent_takkub.pty_session import _is_claude_empty_composer
+
+    lines = [
+        "─" * 160,
+        "❯ an unsent message still sitting here",
+        "",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    ]
+    assert _is_claude_empty_composer(lines) is False
+
+
+def test_is_claude_empty_composer_ignores_trailing_blank_screen_padding() -> None:
+    """`lines` is a fixed-height screen buffer — the composer rarely sits on
+    the terminal's very last row, so real captures have blank padding below
+    it. Trailing blanks must be stripped before windowing, or a tall enough
+    screen pushes the real composer content out of the (fixed-size) tail
+    window entirely."""
+    from agent_takkub.pty_session import _is_claude_empty_composer
+
+    lines = ["─" * 160, "❯", "─" * 137] + [""] * 20
+    assert _is_claude_empty_composer(lines) is True
+
+
+# -- #588 follow-up: the composer shape must not win over a live spinner ----
+
+
+def test_is_claude_empty_composer_returns_false_during_busy_spinner() -> None:
+    """The borderless composer chrome (border → ❯ → blank → footer line) also
+    renders on screen WHILE claude is mid-turn — the busy spinner line just
+    sits above the window this predicate scans. Without checking the spinner
+    first, this reads as an idle empty composer during a genuine hang, and
+    the stale-marker nudge treats it as recovered instead of escalating
+    (exactly the #343 failure this predicate exists to catch)."""
+    from agent_takkub.pty_session import _is_claude_empty_composer
+
+    lines = [
+        "✽ Mulling… (2m 29s · ↓ 7.3k tokens)",
+        "  tip: press esc to interrupt",
+        "─" * 160,
+        "❯",
+        "",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    ]
+    assert _is_claude_empty_composer(lines) is False
+
+
+def test_ready_diagnostics_reports_claude_empty_composer_and_region() -> None:
+    from agent_takkub.pty_session import PtySession as _RealPtySession
+
+    s = _RealPtySession(cols=80, rows=24)
+    s._feed_and_log(("\r\n".join(["", "─" * 80, "❯", "─" * 80])).encode())
+    diag = s.ready_diagnostics()
+    assert diag["claude_empty_composer"] is True
+    assert diag["cols"] == 80
+    assert diag["rows"] == 24
+    assert isinstance(diag["ready_region"], str)
+    assert isinstance(diag["spinner_lines"], list)
+    assert isinstance(diag["blockers_matched"], list)
+
+
+# -- #588: Stop-hook turn-end stamp exempts from the stale-marker streak -----
+
+
+def test_recent_turn_end_stamp_exempts_from_stale_streak(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane whose last output landed at/before its last Stop-hook
+    turn-end stamp (plus slack) is idling at its own prompt no matter what
+    the footer says — never even logged as possibly-stale."""
+    key = "projX::backend"
+    sess = _sess(quiet=STALE_MARKER_QUIET_S + 10)
+    _add_pane(orch, "projX", "backend", sess)
+    now = 1000.0
+    ps = orch._ps(key)
+    ps.last_turn_end_ts = now - sess.seconds_since_output.return_value
+    events = _capture_events(monkeypatch)
+
+    orch._check_stale_markers(now)
+
+    assert not [e for e in events if e[0] == "ready_marker_possibly_stale"]
+    assert key not in orch._stale_marker_streak
+
+
+def test_turn_end_stamp_too_old_still_escalates_normally(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flip side: the pane DID end a turn once, but has produced output
+    well after that stamp (past the slack) — the exemption must not apply,
+    and detection falls through to the ordinary marker-based path."""
+    key = "projX::backend"
+    sess = _sess(quiet=STALE_MARKER_QUIET_S + 10)
+    _add_pane(orch, "projX", "backend", sess)
+    now = 1000.0
+    ps = orch._ps(key)
+    # Stamp is from well before the last output (now - quiet_s) minus slack.
+    ps.last_turn_end_ts = (now - sess.seconds_since_output.return_value) - (
+        STALE_MARKER_TURN_END_SLACK_S + 5
+    )
+    events = _capture_events(monkeypatch)
+
+    orch._check_stale_markers(now)
+
+    stale = [e for e in events if e[0] == "ready_marker_possibly_stale"]
+    assert len(stale) == 1
+
+
+def test_no_turn_end_stamp_escalates_normally(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No PaneState / no stamp at all (non-claude providers never get one) —
+    unchanged from pre-#588 behaviour."""
+    key = "projX::backend"
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+
+    orch._check_stale_markers(1000.0)
+
+    stale = [e for e in events if e[0] == "ready_marker_possibly_stale"]
+    assert len(stale) == 1
+    assert key in orch._stale_marker_streak
+
+
+def test_stale_prolonged_event_carries_diagnostics(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(#588) The loud escalation dump carries the full structural
+    diagnostic snapshot, not just the footer text — so an operator can see
+    WHY without reproducing the classify chain by hand."""
+    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    events = _capture_events(monkeypatch)
+    _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert len(escalations) == 1
+    payload = escalations[0][1]
+    assert "diag" in payload
+    assert "checks" in payload
+    assert "last_turn_end_age_s" in payload
+    assert payload["last_turn_end_age_s"] is None  # never a Stop hook on this mock pane
+
+    results = [e for e in events if e[0] == "ready_marker_nudge_result"]
+    assert len(results) == 1
+    assert "diag" in results[0][1]
+    assert "checks" in results[0][1]
 
 
 # -- #412: Lead's idle-awaiting-user grace exemption --------------------------

@@ -4,6 +4,25 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **watchdog เตือน "Lead อาจค้างจริง" ผิดตอน Lead ว่างจริง (#588)** — root cause สองจุด: (1) Lead's
+  Stop hook มาถึง orchestrator แต่ไม่เคย stamp `last_turn_end_ts` เหมือน teammate เพราะโค้ด return
+  ก่อนถึงจุด stamp ตอนนี้ stamp ให้แล้ว (ไม่เปิด done-gate ให้ Lead เหมือนเดิม) และ `_check_stale_markers`
+  ยกเว้น pane ที่ output ล่าสุดมาก่อน/ใกล้ stamp นี้ (ไม่นับ pane นั้นว่า marker จับไม่ได้เลย) — ใช้ได้กับ
+  claude เท่านั้น เพราะมีแค่ claude ที่มี Stop hook (codex/gemini-agy/opencode/kimi/cursor ยังพึ่ง
+  text-marker table เดิม, gap ระบุไว้ในโค้ด); (2) composer chrome ของ claude เปลี่ยนไปไม่มีเส้นขอบล่าง
+  อีกต่อไป (`_is_claude_empty_composer` เดิมต้องการ border/❯/border) ตอนนี้รู้จักรูปแบบ border → ❯ ว่าง →
+  (แถวว่าง) → แถว footer chrome ด้วย พร้อมแก้ tail-window ให้ตัดแถวว่างท้ายจอก่อน (ของเดิมหลุดถ้ามีแถวว่าง
+  ท้ายจอเกิน 6 แถว) — เพิ่ม `PtySession.ready_diagnostics()` + field `diag`/`checks`/`last_turn_end_age_s`
+  ใน event `ready_marker_nudge_result`/`ready_marker_stale_prolonged` ให้เห็นสาเหตุตรงๆ ครั้งหน้า
+- **เทส maintenance/`check_lead_noise` ล้มหลอกบนเครื่องที่รัน cockpit dev+prod พร้อมกัน (#589)** —
+  `maintenance._other_cockpit_events_log` เดิมชี้ไปไฟล์จริงนอก `tmp_path` ของเทส ตอนนี้ conftest
+  autouse patch ให้คืน `None` เป็นค่าเริ่มต้นเสมอ (เทสที่ต้องการ "other log" จริงยัง override เองได้)
+- **`_cross_process_wheel_lock` ค้างถาวรถ้า worker ตายกลางทาง (#589)** — เจอจริง lock ค้าง 54 ชม.
+  ข้าม CI run ตอนนี้ lock ไฟล์ที่เก่ากว่า 900s ถูกมองว่าถูกทิ้งร้างแล้ว ลบแล้วลองใหม่ทันทีแทนที่จะรอ
+  timeout ทุกรอบ และเขียน pid+เวลาไว้ในไฟล์ lock เพื่อ debug ครั้งต่อไป
+
 ## [v2.1.5] - 2026-09-13
 
 ### Fixed (แก้)

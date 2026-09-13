@@ -554,6 +554,42 @@ def _classify_ready(text_lower: str) -> bool:
     return False
 
 
+def _ready_diagnostics_text(text_lower: str) -> dict[str, object]:
+    """(#588) Same precedence walk as `_classify_ready`, returning WHY
+    instead of just the bool — backs `PtySession.ready_diagnostics()` so a
+    stale-marker log/escalation states exactly what each check saw instead
+    of leaving the reader to reconstruct it from the raw footer text.
+
+    A separate walk, not a refactor of `_classify_ready` itself, so this
+    diagnostic path can never change the actual ready/not-ready verdict.
+    `spinner_lines`/`blockers_matched` are collected unconditionally (for
+    visibility even when they aren't what decided the verdict);
+    `ready_rule_matched` is only set when `_classify_ready` would actually
+    reach the rule table (no spinner line, no hard blocker already matched),
+    mirroring its short-circuit precedence exactly."""
+    spinner_lines = [
+        ln.strip() for ln in text_lower.splitlines() if _BUSY_SPINNER_LINE_RE.match(ln.strip())
+    ]
+    blocker_text = _blocker_scan_text(text_lower)
+    blockers_matched = [b for b in _READY_HARD_BLOCKERS if b in blocker_text]
+    ready_rule_matched: str | None = None
+    if not spinner_lines and not blockers_matched:
+        for marker in _extra_ready_markers():
+            if marker in text_lower:
+                ready_rule_matched = marker
+                break
+        else:
+            for _ready_when, marker in _READY_RULES:
+                if marker in text_lower:
+                    ready_rule_matched = marker
+                    break
+    return {
+        "spinner_lines": spinner_lines,
+        "blockers_matched": blockers_matched,
+        "ready_rule_matched": ready_rule_matched,
+    }
+
+
 # Ready/blocker markers are bottom-row TUI chrome — the footer hint, the spinner
 # status line ('esc to interrupt'), the input box. Conversation BODY text scrolls
 # ABOVE that region. Scoping detection to the bottom rows stops body text that
@@ -735,8 +771,38 @@ _COMPOSER_EMPTY_PROMPT_RE = re.compile(r"^❯$")
 
 def _is_claude_empty_composer(lines: list[str]) -> bool:
     """True when the bottom of the screen is claude's bordered input box with
-    a bare, empty prompt — see the module note above this function."""
-    tail = [ln.strip() for ln in lines[-_READY_TAIL_ROWS:] if ln.strip()]
+    a bare, empty prompt — see the module note above this function.
+
+    (#588) A live watchdog false-positive showed the composer chrome has
+    since dropped its bottom border entirely for at least one build:
+        ──────────────────────────────────────────── (border)
+        ❯                                              (prompt, no hint text)
+        (blank row(s))
+          ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+    Both shapes are recognised: the original border/❯/border sandwich, and
+    border → bare "❯" → (blank rows) → a footer-chrome line
+    (`_FOOTER_CHROME_LINE_MARKERS`), no closing border required for the
+    latter. `lines` is trimmed of trailing blank screen padding first (like
+    `_ready_region`) so a composer that doesn't sit on the terminal's very
+    last row isn't pushed out of the tail window by that padding.
+
+    (#588 follow-up) The borderless shape's composer chrome (border → ❯ →
+    blank → footer line) still renders on screen WHILE claude is generating
+    — the busy spinner line sits above this window, out of the
+    `_READY_TAIL_ROWS` slice this function scans, so the structural match
+    alone can't tell "idle with an empty prompt" apart from "mid-turn, empty
+    prompt because nothing's been typed yet". A stuck-marker nudge that reads
+    this as an idle composer during a genuine hang treats it as recovered and
+    never escalates — exactly the #343 hang this fallback exists to catch.
+    Checking `_has_busy_spinner_line` first (same shared marker the ordinary
+    `_classify_ready` path already checks) closes that gap for both shapes."""
+    if _has_busy_spinner_line(_ready_region(lines)):
+        return False
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    window = [ln.strip() for ln in lines[max(0, end - _READY_TAIL_ROWS) : end]]
+    tail = [ln for ln in window if ln]
     for i in range(len(tail) - 2):
         top, mid, bot = tail[i], tail[i + 1], tail[i + 2]
         if (
@@ -744,6 +810,17 @@ def _is_claude_empty_composer(lines: list[str]) -> bool:
             and _COMPOSER_EMPTY_PROMPT_RE.match(mid)
             and _COMPOSER_BORDER_RE.match(bot)
         ):
+            return True
+    for i, ln in enumerate(window):
+        if not _COMPOSER_BORDER_RE.match(ln):
+            continue
+        j = i + 1
+        if j >= len(window) or not _COMPOSER_EMPTY_PROMPT_RE.match(window[j]):
+            continue
+        j += 1
+        while j < len(window) and not window[j]:
+            j += 1
+        if j < len(window) and any(m in window[j].lower() for m in _FOOTER_CHROME_LINE_MARKERS):
             return True
     return False
 
@@ -2403,6 +2480,40 @@ class PtySession(QObject):
         # string quoted in the conversation body can't poison the verdict — the
         # #70 false-busy stall / #20 fragility root fix.
         return _classify_ready(_ready_region(self.display_lines()))
+
+    def ready_diagnostics(self) -> dict[str, object]:
+        """(#588) Full structural snapshot behind the ready/not-ready verdict
+        — logged alongside `ready_marker_nudge_result`/
+        `ready_marker_stale_prolonged` so an operator can see WHY detection
+        concluded what it did without reproducing the classify chain by hand
+        from the raw footer text. Returns ``ready_region`` (truncated to
+        1200 chars), ``spinner_lines``, ``blockers_matched`` (post
+        `_blocker_scan_text`), ``ready_rule_matched``, ``claude_empty_composer``,
+        ``cols``, ``rows``.
+
+        Best-effort, matching every other prompt-state method's
+        except-Exception-continue style: never raises — a failed sub-check
+        reads as ``None``/empty rather than aborting the whole snapshot, and
+        callers should still wrap this in their own try/except since a
+        diagnostic dump must never take a sweep tick down with it."""
+        diag: dict[str, object] = {
+            "ready_region": "",
+            "spinner_lines": [],
+            "blockers_matched": [],
+            "ready_rule_matched": None,
+            "claude_empty_composer": None,
+            "cols": self.cols,
+            "rows": self.rows,
+        }
+        try:
+            lines = self.display_lines()
+            region = _ready_region(lines)
+            diag.update(_ready_diagnostics_text(region))
+            diag["ready_region"] = region[:1200]
+            diag["claude_empty_composer"] = _is_claude_empty_composer(lines)
+        except Exception:
+            pass
+        return diag
 
     def has_background_work(self) -> bool:
         """Claude-only structural signal (#391/#394/#395/#398): True when the
