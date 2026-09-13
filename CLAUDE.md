@@ -12,4 +12,4 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 
 > **Cross-platform (Windows ConPTY + macOS `_pty_backend`):** ทุกการเปลี่ยนแปลงต้องทำงานทั้ง 2 OS — ห้าม hardcode path/command เฉพาะ platform · CI matrix `windows-latest`+`macos-latest` ต้องเขียวทั้งคู่ก่อน merge
 
-> **Test tiers (#485 — gate ครั้งเดียวตอนจบ batch, ห้ามรันถี่):** specialist **ห้ามรัน `takkub qa-gate` เอง** — เขียนเทสกันถอย (#478) + รันได้แค่ **targeted เฉพาะไฟล์ที่แก้** แล้ว `takkub done` · full gate = qa pane ทำครั้งเดียวท้าย batch (`takkub qa-gate --auto`) ก่อน merge/push · รายละเอียดเต็ม (Node/Python ต่างกันยังไง, ทำไม full tier ถึงจำเป็น) → `docs/qa-gate-policy.md`
+> **Test tiers (#485/#585 — ทดสอบของจริง ไม่ใช่เขียนไฟล์เทส):** specialist **ห้ามรัน `takkub qa-gate` เอง** — ทดสอบสิ่งที่แก้ด้วยของจริงแล้วเขียนในโน้ตว่าเห็นอะไร · เขียนไฟล์เทสใหม่เฉพาะ scope=deep / bug ที่เคยหลุด / Lead สั่ง (งาน UI ห้ามเขียน) · รันได้แค่ **targeted เฉพาะไฟล์ที่แก้** และห้าม build/รัน suite ตอนเครื่องไม่ว่าง แล้ว `takkub done` · qa-gate ครั้งเดียวท้าย batch **เฉพาะ batch ที่มีงาน deep** · รายละเอียดเต็ม → `docs/qa-gate-policy.md`
