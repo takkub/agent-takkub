@@ -142,6 +142,7 @@ class TaskDelivery:
     state: DeliveryState = DeliveryState.QUEUED
     submit_attempts: int = 0
     enter_retries: int = 0
+    kind: str = "task"
 
     @property
     def pane_session_key(self) -> tuple[str, str, int]:
@@ -232,6 +233,7 @@ class DeliveryManager:
         payload: str,
         ttl_sec: float | None = None,
         waiting_resource: bool = False,
+        kind: str = "task",
     ) -> TaskDelivery:
         now = self._clock()
         ttl = self.default_ttl_sec if ttl_sec is None else float(ttl_sec)
@@ -245,6 +247,7 @@ class DeliveryManager:
             created_at=now,
             expires_at=now + max(0.0, ttl),
             state=(DeliveryState.WAITING_RESOURCE if waiting_resource else DeliveryState.QUEUED),
+            kind=kind,
         )
         with self._lock:
             self._deliveries[delivery.delivery_id] = delivery
@@ -445,6 +448,14 @@ class DeliveryManager:
                     and delivery.session_generation == int(session_generation)
                     and delivery.state not in _TERMINAL_STATES
                 ):
+                    # #586: send must NEVER cancel a delivery that is an assign/task!
+                    # Only non-task (kind != "task") deliveries (e.g. send->send) are cancel-eligible.
+                    if only_delivered and delivery.kind == "task":
+                        if has_reached_pane(delivery):
+                            # Already in front of pane / running / accepted. Leave it for done() to close.
+                            continue
+                        kept.append(delivery)
+                        continue
                     if only_delivered and delivery.state not in _RESEND_ELIGIBLE_STATES:
                         if has_reached_pane(delivery):
                             # RUNNING/SPAWNED_IDLE (#463 follow-up): already
@@ -461,6 +472,30 @@ class DeliveryManager:
         for delivery in kept:
             self._emit("task_delivery_kept_undelivered", delivery, state=str(delivery.state))
         return cancelled, kept
+
+    def cancelled_count(self, project_id: str, pane_id: str | None = None) -> int:
+        """Count deliveries in CANCELLED state for a project and optional role."""
+        with self._lock:
+            return sum(
+                1
+                for d in self._deliveries.values()
+                if d.project_id == project_id
+                and (pane_id is None or d.pane_id == pane_id)
+                and d.state == DeliveryState.CANCELLED
+            )
+
+    def cancelled_deliveries(
+        self, project_id: str, pane_id: str | None = None
+    ) -> list[TaskDelivery]:
+        """Return deliveries in CANCELLED state for a project and optional role."""
+        with self._lock:
+            return [
+                d
+                for d in self._deliveries.values()
+                if d.project_id == project_id
+                and (pane_id is None or d.pane_id == pane_id)
+                and d.state == DeliveryState.CANCELLED
+            ]
 
     def expire_stale(self) -> list[TaskDelivery]:
         """Reap deliveries stuck in an in-flight state (see

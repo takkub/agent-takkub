@@ -130,6 +130,18 @@ class PermissionEngine:
             state_file=state_file,
         )
         if not verdict.allowed:
+            try:
+                from agent_takkub.orchestrator_text import _log_event
+
+                _log_event(
+                    "guard_denied",
+                    role=role or "lead",
+                    project=project or "",
+                    rule=verdict.rule,
+                    tool=tool_name.lower(),
+                )
+            except Exception:
+                pass
             log_capability_event(
                 "capability.lead_direct_edit_denied",
                 who=role,

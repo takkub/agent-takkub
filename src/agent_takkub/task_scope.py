@@ -46,7 +46,12 @@ _DEEP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "auth",
         re.compile(
-            r"\b(?:auth|authentication|authorization|oauth|jwt|login|logout|signin|signup)\b"
+            r"\b(?:auth|authentication|authorization|oauth|jwt|login|logout|signin|signup"
+            r"|password|permission|privilege|otp|2fa|mfa|rate[\s_-]?limit)\b"
+            r"|(?:bypass|skip|disable|remove)\s*(?:verif|valid|signature|sanitiz|auth|check)"
+            r"|(?:verif|valid|signature|sanitiz|auth|check).*(?:bypass|skip|disable|remove)"
+            r"|(?:admin|role|session)[\s\-_]*(?:permission|access|based|privilege|panel|timeout|expiry|cookie|hijack|fixation)"
+            r"|(?:permission|access|based|privilege|panel|timeout|expiry|cookie|hijack|fixation)[\s\-_]*(?:admin|role|session)"
             r"|สิทธิ์|ล็อกอิน|ยืนยันตัวตน|ระบบสมาชิก|รหัสผ่าน",
             re.I,
         ),
@@ -227,6 +232,22 @@ def budget_block(scope: str) -> str:
     """Return the Thai prose budget block for *scope*."""
     norm = (scope or "normal").strip().lower()
     return BUDGET_BLOCKS.get(norm, BUDGET_BLOCKS["normal"])
+
+
+def strip_budget(task_text: str) -> str:
+    """Return *task_text* without a leading system-injected budget block (#585).
+
+    The budget block is scaffolding the orchestrator prepends, not task content,
+    so any length/threshold decision about the task itself must measure the body
+    (see `orchestrator_text._task_handoff_pointer`: a ~300-char budget block used
+    to push every short task over TASK_HANDOFF_THRESHOLD, turning a direct paste
+    into a read-this-file pointer — an extra hop and extra tokens per assign).
+    """
+    text = task_text or ""
+    for block in BUDGET_BLOCKS.values():
+        if text.startswith(block):
+            return text[len(block) :].lstrip(chr(13) + chr(10))
+    return text
 
 
 def inject_budget(task_text: str, scope: str) -> str:

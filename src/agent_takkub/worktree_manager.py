@@ -2723,3 +2723,54 @@ def build_merge_proposal_line(
         readiness = "merge-tree ตรวจไม่ได้ (unknown) — review diff ก่อน"
     phantom_note = " (CRLF phantom เฉยๆ)" if crlf_phantom else ""
     return f"merge:{readiness}{phantom_note} → `takkub worktree merge --role {role}`"
+
+
+_TEST_FILE_PATTERN = re.compile(
+    r"(?:^|[/\\])(?:tests?|__tests__|e2e|playwright)(?:[/\\]|$)"
+    r"|test_[^/\\]+\.py$"
+    r"|[^/\\]+_test\.py$"
+    r"|\.(?:test|spec)\.[jt]sx?$",
+    re.IGNORECASE,
+)
+
+
+def is_test_file(path: str) -> bool:
+    """True if *path* matches standard test file patterns across languages (#585)."""
+    p = path.strip()
+    return bool(_TEST_FILE_PATTERN.search(p))
+
+
+def count_test_files_in_diff(cwd: str | None, base_sha: str | None = None) -> list[str]:
+    """Identify test files in git diff vs base_sha (#585 metric)."""
+    if not cwd:
+        return []
+    try:
+        from pathlib import Path
+
+        if not Path(cwd).is_dir():
+            return []
+    except Exception:
+        return []
+    mgr = WorktreeManager()
+    test_files: set[str] = set()
+    diff_args = ["-C", cwd, "diff", "--numstat"]
+    if base_sha:
+        diff_args.append(str(base_sha))
+    else:
+        diff_args.append("HEAD")
+    res = mgr._run(diff_args, None)
+    if res.ok and res.stdout:
+        for line in res.stdout.splitlines():
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3:
+                fpath = parts[2].strip()
+                if is_test_file(fpath):
+                    test_files.add(fpath)
+    res_status = mgr._run(["-C", cwd, "status", "--porcelain"], None)
+    if res_status.ok and res_status.stdout:
+        for line in res_status.stdout.splitlines():
+            if line.startswith("??"):
+                fpath = line[2:].strip()
+                if is_test_file(fpath):
+                    test_files.add(fpath)
+    return sorted(test_files)

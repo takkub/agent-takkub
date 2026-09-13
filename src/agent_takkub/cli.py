@@ -878,12 +878,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
         )
         if resp.get("ok"):
-            try:
-                from . import pane_guard
-
-                pane_guard.reset_lead_edits(project=_from_project())
-            except Exception:
-                pass
             resp["msg"] = (
                 str(resp.get("msg", ""))
                 + _browser_shard_warning(args.role, shards, mode=mode_requested)
@@ -921,13 +915,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
-        if ok_count > 0:
-            try:
-                from . import pane_guard
-
-                pane_guard.reset_lead_edits(project=_from_project())
-            except Exception:
-                pass
         warn = _browser_shard_warning(
             args.role, shards, mode=mode_requested
         ) + _self_commit_isolation_warning(args.task, isolation)
@@ -981,12 +968,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         )
     )
     if resp.get("ok"):
-        try:
-            from . import pane_guard
-
-            pane_guard.reset_lead_edits(project=_from_project())
-        except Exception:
-            pass
         resp["msg"] = str(resp.get("msg", "")) + _self_commit_isolation_warning(
             args.task, isolation
         )
@@ -2353,6 +2334,7 @@ _INBOX_QUEUE_LABEL = {
     "digest": "digest (debounce window, ~60s)",
     "live": "live (ready-prompt delivery queue)",
     "durable": "durable (survives a restart)",
+    "cancelled": "cancelled (delivery ถูกยกเลิก)",
 }
 
 
@@ -4176,11 +4158,19 @@ def _log_guard_denied(role: str, command: str, verdict: object) -> None:
     try:
         from .orchestrator_text import _log_event
 
+        rule = getattr(verdict, "rule", "") or ""
+        _log_event(
+            "guard_denied",
+            role=role,
+            project=_from_project(),
+            rule=rule,
+            cmd=(command or "")[:200],
+        )
         _log_event(
             "pane_guard_denied",
             role=role,
             project=_from_project(),
-            rule=getattr(verdict, "rule", "") or "",
+            rule=rule,
             cmd=(command or "")[:200],
         )
     except Exception:

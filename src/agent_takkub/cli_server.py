@@ -947,12 +947,6 @@ class CliServer(QObject):
                     queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)
                     if queued_notice:
                         ack_msg = f"{ack_msg}\n{queued_notice}"
-                    try:
-                        from . import pane_guard
-
-                        pane_guard.reset_lead_edits(project=from_project)
-                    except Exception:
-                        pass
                     self._reply(sock, ok=True, msg=ack_msg)
                 return
             elif cmd == "send":
@@ -1259,7 +1253,12 @@ class CliServer(QObject):
                 # Lead-only (see _LEAD_ONLY_CMDS above) — same M3#16
                 # rationale as status's transcript_tail gate.
                 items = self._orch.inbox_report(project=from_project, role=req.get("role"))
-                self._reply(sock, ok=True, msg=f"{len(items)} pending item(s)", items=items)
+                cancelled_count = sum(1 for i in items if i.get("queue") == "cancelled")
+                pending_count = len(items) - cancelled_count
+                msg = f"{pending_count} pending item(s)"
+                if cancelled_count:
+                    msg += f" · {cancelled_count} cancelled delivery(s)"
+                self._reply(sock, ok=True, msg=msg, items=items)
                 return
             elif cmd == "wait-begin":
                 # #242: register (or attach to) a wait for one or more roles.

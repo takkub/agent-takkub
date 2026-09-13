@@ -21,6 +21,7 @@ import time
 from collections.abc import Collection
 from datetime import datetime
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
 from .lead_context import _allowed_project_roots
 from .provider_spec import PROVIDER_REGISTRY
@@ -220,6 +221,9 @@ def _get_git_diff_numstat(cwd: str | None) -> list[tuple[int, int, str]] | None:
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_NO_WINDOW,
             timeout=5,
         )
         if res.returncode != 0:
@@ -228,6 +232,9 @@ def _get_git_diff_numstat(cwd: str | None) -> list[tuple[int, int, str]] | None:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=SUBPROCESS_NO_WINDOW,
                 timeout=5,
             )
         if res.returncode != 0:
@@ -1035,7 +1042,11 @@ def _task_handoff_pointer(
     """
     if not supports_file_read:
         return task, None
-    if len(task) < TASK_HANDOFF_THRESHOLD:
+    from . import task_scope
+
+    # Measure the task BODY, not the injected budget block (#585): the block is
+    # scaffolding, and counting it flipped every short task onto the pointer path.
+    if len(task_scope.strip_budget(task)) < TASK_HANDOFF_THRESHOLD:
         return task, None
     day = _task_handoff_dir(project_ns)
     path = day / f"{datetime.now().strftime('%H%M%S')}-{role_name}.md"

@@ -2325,9 +2325,11 @@ class TestLeadEditsCommand:
         err = capsys.readouterr().err
         assert "error:" in err
 
-    def test_assign_resets_lead_edits_on_success(
+    def test_assign_does_not_reset_lead_edits(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """F1: assign no longer resets lead edits — only SessionStart and
+        `lead-edits --reset` do."""
         reset_calls: list[str | None] = []
         monkeypatch.setattr(
             "agent_takkub.pane_guard.reset_lead_edits",
@@ -2338,4 +2340,5 @@ class TestLeadEditsCommand:
 
         rc = cli.main(["assign", "--role", "frontend", "build button"])
         assert rc == 0
-        assert reset_calls == ["myproj"]
+        # assign should NOT call reset_lead_edits
+        assert reset_calls == []

@@ -194,6 +194,13 @@ class TestAssignAutoPresetSuggestion:
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         assert team_preset.current_preset_id(TEST_PROJECT) == "auto"
+        # Ensure LEAD role is not detected as CODEX (which would add a different notice)
+        from agent_takkub.provider_config import CLAUDE
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: CLAUDE,
+        )
         monkeypatch.setattr(
             "agent_takkub.routing_planner.suggest_team_size",
             lambda task, context=None: ("solo-lead", "งานเดี่ยว scope ชัด — ทำเองได้"),
@@ -215,6 +222,8 @@ class TestAssignAutoPresetSuggestion:
     def test_non_auto_standing_preset_skips_suggestion(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from tests import extract_task_body
+
         team_preset.set_current("full", TEST_PROJECT)
         sugg_mock = MagicMock(return_value=("solo-lead", "x"))
         monkeypatch.setattr("agent_takkub.routing_planner.suggest_team_size", sugg_mock)
@@ -224,12 +233,15 @@ class TestAssignAutoPresetSuggestion:
         ):
             ok, _ = orch.assign(LEAD.name, cwd=None, task="fix a typo", project=TEST_PROJECT)
         assert ok is True
-        assert send_mock.call_args.args[1] == "fix a typo"
+        # #585: budget block is prepended for all roles
+        assert extract_task_body(send_mock.call_args.args[1]) == "fix a typo"
         sugg_mock.assert_not_called()
 
     def test_active_override_skips_suggestion(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from tests import extract_task_body
+
         team_preset.set_override("pair", TEST_PROJECT)
         sugg_mock = MagicMock(return_value=("solo-lead", "x"))
         monkeypatch.setattr("agent_takkub.routing_planner.suggest_team_size", sugg_mock)
@@ -239,7 +251,8 @@ class TestAssignAutoPresetSuggestion:
         ):
             ok, _ = orch.assign(LEAD.name, cwd=None, task="fix a typo", project=TEST_PROJECT)
         assert ok is True
-        assert send_mock.call_args.args[1] == "fix a typo"
+        # #585: budget block is prepended for all roles
+        assert extract_task_body(send_mock.call_args.args[1]) == "fix a typo"
         sugg_mock.assert_not_called()
 
     def test_explicit_team_override_skips_suggestion(

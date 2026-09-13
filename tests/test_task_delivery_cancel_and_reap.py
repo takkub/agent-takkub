@@ -115,7 +115,12 @@ class TestSendAutoCancelsStaleDelivery:
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
         manager = DeliveryManager(default_ttl_sec=120)
         delivery = manager.create(
-            task_id="t1", project_id="P", pane_id="backend", session_generation=1, payload="do X"
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=1,
+            payload="do X",
+            kind="send",
         )
         manager.begin_write(delivery.delivery_id, 1)
         manager.mark_written(delivery.delivery_id)
@@ -130,11 +135,10 @@ class TestSendAutoCancelsStaleDelivery:
 
         assert ok is True
         assert delivery.state.value == "cancelled"
-        # #464: this used to also interrupt Lead with a paste ending in its
-        # own "ปลอดภัย ไม่ต้องทำอะไร" (safe, nothing to do) — a message that
-        # names itself actionless must not reach Lead at all anymore.
+        # #464 / #586: Lead is alerted via [delivery-cancelled] instead of silent cancellation.
         notices = _written_strings(lead.session)
         assert not any("delivery-superseded" in m for m in notices)
+        assert any("delivery-cancelled" in m for m in notices)
         # #392: the audit trail must still name the cancelled task
         # (role#task_id + a preview of its text) and the message that
         # replaced it, not just a bare count — now via events.log instead
@@ -148,6 +152,38 @@ class TestSendAutoCancelsStaleDelivery:
         assert "backend#t1" in superseded_call.kwargs["cancelled_desc"]
         assert "do X" in superseded_call.kwargs["cancelled_desc"]
         assert "hey, doing this myself now" in superseded_call.kwargs["replacement_desc"]
+
+    def test_lead_send_never_cancels_task_delivery_that_already_reached_the_pane(
+        self, orch: Orchestrator
+    ) -> None:
+        """#586: task delivery (kind='task') is NEVER cancelled by send even if written/accepted."""
+        lead = _pane(_live_session())
+        backend = _pane(_live_session(), generation=1)
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=1,
+            payload="do X",
+            kind="task",
+        )
+        manager.begin_write(delivery.delivery_id, 1)
+        manager.mark_written(delivery.delivery_id)
+        orch._delivery_manager = manager
+        with (
+            patch("agent_takkub.orchestrator._log_event") as mock_log_event,
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            ok, _msg = orch.send("backend", "hey, additional info", from_role="lead", project="P")
+
+        assert ok is True
+        assert delivery.state.value != "cancelled"
+        assert not any(
+            c.args and c.args[0] == "delivery_superseded_by_send"
+            for c in mock_log_event.call_args_list
+        )
 
     def test_lead_send_keeps_a_delivery_that_never_reached_the_pane(
         self, orch: Orchestrator

@@ -138,6 +138,8 @@ class TestAutoRespawnReplay:
 
     def test_assign_stores_task_in_cache(self, orch: Orchestrator) -> None:
         """assign() must persist the task before calling _send_when_ready."""
+        from tests import extract_task_body
+
         ekey = _exit_key(TEST_PROJECT, "frontend")
 
         with (
@@ -146,7 +148,9 @@ class TestAutoRespawnReplay:
         ):
             orch.assign("frontend", cwd="/web", task=SAMPLE_TASK, project=TEST_PROJECT)
 
-        assert (orch._pane_state.get(ekey) or PaneState()).last_assigned_task == SAMPLE_TASK
+        cached = (orch._pane_state.get(ekey) or PaneState()).last_assigned_task
+        # #585: budget block is prepended, so compare the body
+        assert extract_task_body(cached) == SAMPLE_TASK
 
     def test_assign_rewrites_codex_task_with_override_notice(self, orch: Orchestrator) -> None:
         """assign() must prepend the override notice when the role is backed
@@ -181,7 +185,9 @@ class TestAutoRespawnReplay:
             orch.assign("codex", cwd="/web", task=raw_task, project=TEST_PROJECT)
 
         cached = orch._pane_state[ekey].last_assigned_task
-        assert cached.startswith(_CODEX_TASK_NOTICE)
+        # #585: budget block may come first, then CODEX notice
+        assert _CODEX_TASK_NOTICE in cached
+        assert "[ROLE: codex" in cached
 
         # #273: pasted verbatim in full, not pointer-ized — codex has no
         # file-read tool to act on a pointer with.
@@ -189,11 +195,20 @@ class TestAutoRespawnReplay:
         assert sent_task == cached
         assert orch._pane_state[ekey].last_assigned_task_file is None
 
-    def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator) -> None:
+    def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator, monkeypatch) -> None:
         """Non-codex roles must NOT receive the codex-specific override
         notice — claude/gemini panes have their own rules and the notice
         text references codex-only context."""
         from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
+
+        # Ensure backend is not detected as CODEX
+        from agent_takkub.provider_config import CLAUDE
+        from tests import extract_task_body
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: CLAUDE,
+        )
 
         ekey = _exit_key(TEST_PROJECT, "backend")
         raw_task = "[ROLE: backend] implement /auth/logout"
@@ -205,8 +220,10 @@ class TestAutoRespawnReplay:
             orch.assign("backend", cwd="/api", task=raw_task, project=TEST_PROJECT)
 
         cached = orch._pane_state[ekey].last_assigned_task
+        # #585: no CODEX notice, but budget block is prepended
         assert _CODEX_TASK_NOTICE not in cached
-        assert cached == raw_task
+        assert "[ROLE: backend]" in cached
+        assert extract_task_body(cached) == raw_task
 
     def test_done_clears_replay_cache_so_late_crash_does_not_replay(
         self, orch: Orchestrator

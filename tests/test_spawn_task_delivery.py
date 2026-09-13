@@ -300,7 +300,8 @@ def test_fresh_claude_prompt_write_failure_falls_back_once_to_pointer(
 
     mock_send.assert_called_once()
     sent = mock_send.call_args.args[1]
-    assert sent.startswith("[ROLE: backend]")
+    # #585: budget block may come first, but [ROLE: backend] should be present
+    assert "[ROLE: backend]" in sent
     assert "file-read tool" in sent
     assert orch._pane_state[_exit_key(TEST_PROJECT, "backend")].spawn_initial_task_state == (
         "fallback"
@@ -378,6 +379,7 @@ def test_deferred_fresh_claude_spawn_retains_preload_without_early_pointer(
     tmp_path: Path,
 ) -> None:
     from agent_takkub.provider_config import CLAUDE
+    from tests import extract_task_body
 
     orch._panes_by_project[TEST_PROJECT] = {"backend": _pane()}
     task = "[ROLE: backend]\n" + ("deferred\n" * 80)
@@ -401,7 +403,8 @@ def test_deferred_fresh_claude_spawn_retains_preload_without_early_pointer(
     mock_send.assert_not_called()
     state = orch._pane_state[_exit_key(TEST_PROJECT, "backend")]
     assert state.spawn_initial_task_state == "pending"
-    assert state.spawn_initial_task == task
+    # #585: budget block is prepended, so compare the body
+    assert extract_task_body(state.spawn_initial_task) == task
     assert state.spawn_initial_task_fallback is not None
 
 

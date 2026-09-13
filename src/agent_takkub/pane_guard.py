@@ -816,7 +816,9 @@ def evaluate_lead_direct_edit(
     deep_file_patterns = (
         r"\b(?:schema|prisma)\b|schemas?/",
         r"\bmigrations?\b",
-        r"\b(?:auth|oauth|jwt|login|signup|password)\b",
+        r"\b(?:auth|oauth|jwt|login|signup|password|permission|privilege|otp|2fa|mfa|rate[\s_-]?limit)\b",
+        r"(?:bypass|skip|disable|remove)\s*(?:verif|valid|signature|sanitiz|auth|check)",
+        r"(?:admin|role|session)[\s\-_]*(?:permission|access|based|privilege|panel|timeout|expiry|cookie)",
         r"\b(?:security|vulnerabilit|cve|xss|csrf)\b",
         r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
         r"\b(?:crypto|encryption|bcrypt)\b",

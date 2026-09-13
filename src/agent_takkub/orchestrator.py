@@ -2558,13 +2558,34 @@ class Orchestrator(
         from . import task_scope
 
         requested_scope = (scope or "auto").strip().lower()
+        auto_scope = task_scope.classify(task).scope
         if requested_scope == "auto":
-            resolved_scope = task_scope.classify(task).scope
+            resolved_scope = auto_scope
+            source = "auto"
         else:
             resolved_scope = (
                 requested_scope if requested_scope in task_scope.SCOPE_TIERS else "normal"
             )
+            source = "lead"
         task = task_scope.inject_budget(task, resolved_scope)
+
+        # #585 metric: record scope_assigned and scope_override in events.log (audit only)
+        _log_event(
+            "scope_assigned",
+            role=role_name,
+            project=role_check_project_ns,
+            scope=resolved_scope,
+            source=source,
+            auto_scope=auto_scope,
+        )
+        if source == "lead" and resolved_scope != auto_scope:
+            _log_event(
+                "scope_override",
+                role=role_name,
+                project=role_check_project_ns,
+                auto_scope=auto_scope,
+                chosen_scope=resolved_scope,
+            )
 
         if mode == "subagent":
             if model:
@@ -4139,7 +4160,9 @@ class Orchestrator(
                 if superseded:
                     last_ids = getattr(self, "_last_delivery_ids", None)
                     if last_ids is not None:
-                        last_ids.pop((project_ns, to_role), None)
+                        for d in cancelled_list:
+                            if last_ids.get((project_ns, to_role)) == d.delivery_id:
+                                last_ids.pop((project_ns, to_role), None)
                     # #392: a bare count ("ยกเลิก 1 pending delivery") gave
                     # Lead no way to tell WHICH task got cancelled or what
                     # replaced it without cross-checking the transcript by
@@ -4148,12 +4171,6 @@ class Orchestrator(
                         f'{d.pane_id}#{d.task_id[:8]} "{_truncate_at_word_boundary(d.payload, 30)}"'
                         for d in cancelled_list
                     )
-                    # #464: this used to also `_notify_lead` a paragraph
-                    # ending in its own "ปลอดภัย ไม่ต้องทำอะไร" (safe, nothing
-                    # to do) — a message that names itself actionless has no
-                    # business interrupting Lead. The audit trail below is
-                    # enough; `takkub inbox`/events.log still has the detail
-                    # (cancelled_desc/replacement_desc) if anyone needs it.
                     _log_event(
                         "delivery_superseded_by_send",
                         role=to_role,
@@ -4161,6 +4178,15 @@ class Orchestrator(
                         cancelled=superseded,
                         cancelled_desc=cancelled_desc,
                         replacement_desc=_truncate_at_word_boundary(msg, 30),
+                    )
+                    # #586: notify Lead immediately if a delivery was cancelled
+                    self._notify_lead(
+                        project_ns,
+                        f"⚠️ [delivery-cancelled] งาน {cancelled_desc} ถูกยกเลิกเพราะมีข้อความใหม่จาก {from_role or 'lead'}: "
+                        f'"{_truncate_at_word_boundary(msg, 40)}"',
+                        from_role="system",
+                        note="delivery_cancelled",
+                        kind="delivery-cancelled",
                     )
                 if kept_undelivered:
                     # #336: "not yet delivered" and "we cannot tell" need
@@ -4208,6 +4234,32 @@ class Orchestrator(
                         kept=len(kept_undelivered),
                         states=sorted({str(d.state) for d in kept_undelivered}),
                     )
+
+        # #586 (Item 1): merge into task if task has not yet reached the pane
+        ps_send = self._ps(f"{project_ns}::{to_role}")
+        if not getattr(ps_send, "task_delivered", False) and getattr(
+            ps_send, "last_assigned_task", None
+        ):
+            _tf = getattr(ps_send, "last_assigned_task_file", None)
+            if _tf:
+                try:
+                    from pathlib import Path
+
+                    _tf_path = Path(_tf)
+                    if _tf_path.is_file():
+                        with _tf_path.open("a", encoding="utf-8") as _f:
+                            _f.write(
+                                f"\n\n[ข้อความเพิ่มเติมจาก {from_role or 'lead'}]: {_sanitize_pane_text(msg)}\n"
+                            )
+                        ps_send.last_assigned_task += f"\n\n[ข้อความเพิ่มเติมจาก {from_role or 'lead'}]: {_sanitize_pane_text(msg)}"
+                        _log_event(
+                            "send_merged_into_task_file",
+                            role=to_role,
+                            project=project_ns,
+                            task_file=_tf,
+                        )
+                except Exception:
+                    pass
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + _sanitize_pane_text(msg)
@@ -4479,9 +4531,13 @@ class Orchestrator(
             return False, f"อ่าน message log ไม่ได้: {exc}", []
         pending = sum(1 for r in records if r.get("state") == "sent")
         queued_no_pane = sum(1 for r in records if r.get("state") == "queued_no_pane")
+        delivery_mgr = getattr(self, "_delivery_manager", None)
+        cancelled_deliveries = delivery_mgr.cancelled_count(project_ns, role) if delivery_mgr else 0
         note = f"ยังไม่ยืนยันว่าถึงมือ {pending}"
         if queued_no_pane:
             note += f" · รอ pane เปิด {queued_no_pane}"
+        if cancelled_deliveries:
+            note += f" · delivery ถูกยกเลิก {cancelled_deliveries}"
         return (
             True,
             f"{len(records)} ข้อความถึง {role} ({note})",
@@ -6164,6 +6220,38 @@ class Orchestrator(
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
+
+        # #585 metrics: task_wall_time and test_files_written (audit log only)
+        if had_assign_ts:
+            wall_time_s = max(0.0, time.time() - had_assign_ts)
+            _log_event(
+                "task_wall_time",
+                role=from_role,
+                project=project_ns,
+                scope=_assigned_scope or "normal",
+                duration_s=round(wall_time_s, 2),
+                task_id=had_task_id,
+                failed=failed,
+            )
+        try:
+            from .worktree_manager import count_test_files_in_diff
+
+            _diff_cwd = getattr(pane, "_session_cwd", None) or had_assign_git_root
+            _diff_base = had_assign_base_sha or (
+                had_worktree.get("base_sha") if had_worktree else None
+            )
+            _written_tests = count_test_files_in_diff(_diff_cwd, _diff_base)
+            _log_event(
+                "test_files_written",
+                role=from_role,
+                project=project_ns,
+                count=len(_written_tests),
+                files=_written_tests,
+                scope=_assigned_scope or "normal",
+                task_id=had_task_id,
+            )
+        except Exception:
+            pass
         transcript_path = getattr(pane, "_transcript_path", None)
         # #546: file the decision note under the cwd's own repo when this
         # role was assigned a cross-repo --cwd outside project_ns's
@@ -7514,6 +7602,20 @@ class Orchestrator(
                     ),
                 }
             )
+
+        # #586: surface cancelled deliveries in inbox
+        delivery_mgr = getattr(self, "_delivery_manager", None)
+        if delivery_mgr is not None:
+            for d in delivery_mgr.cancelled_deliveries(project_ns, role):
+                items.append(
+                    {
+                        "role": d.pane_id,
+                        "queue": "cancelled",
+                        "body": f"[delivery ถูกยกเลิก] task {d.task_id[:8]} ({d.kind}): {_truncate_at_word_boundary(d.payload, 60)}",
+                        "origin_confirmed": None,
+                        "queued_ts": d.created_at,
+                    }
+                )
 
         return items
 

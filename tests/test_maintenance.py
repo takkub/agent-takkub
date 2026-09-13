@@ -285,6 +285,7 @@ class TestRunMaintenance:
             "logs",
             "local_issues",
             "lead_noise",
+            "scope_effort",
             "repo",
         }
 

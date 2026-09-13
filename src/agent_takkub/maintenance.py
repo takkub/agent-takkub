@@ -611,6 +611,162 @@ def check_lead_noise(
     )
 
 
+# ── 3d. scope & effort (24h) ─────────────────────────────────────────────────
+
+
+def check_scope_effort(
+    log_path: Path,
+    since_hours: float = 24.0,
+    *,
+    now: datetime | None = None,
+) -> Check:
+    """Summarize scope classification, overrides, guard denials, test file volume,
+    and task wall times over *since_hours* (#585/#586)."""
+    candidates = {log_path, _other_cockpit_events_log(log_path)}
+    logs = [p for p in candidates if p is not None and p.is_file()]
+    if not logs:
+        return Check("scope_effort", "Scope & effort (24h)", "skip", f"ไม่มีไฟล์ {log_path}")
+
+    cutoff = (now or datetime.now()) - timedelta(hours=since_hours)
+    assigned_by_scope: Counter[str] = Counter()
+    assigned_by_source: Counter[str] = Counter()
+    scope_override_count = 0
+    guard_denied_counts: Counter[str] = Counter()
+    test_files_written_total = 0
+    task_wall_times: dict[str, list[float]] = {}
+    seen_records: set[str] = set()
+
+    for path in logs:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    evt = rec.get("event")
+                    if evt not in {
+                        "scope_assigned",
+                        "scope_override",
+                        "guard_denied",
+                        "test_files_written",
+                        "task_wall_time",
+                    }:
+                        continue
+                    ts = _parse_ts(rec.get("ts"))
+                    if ts is None or ts < cutoff:
+                        continue
+
+                    # Deduplicate across paired logs if identical record
+                    rec_key = f"{rec.get('ts')}_{evt}_{rec.get('role')}_{rec.get('scope')}_{rec.get('rule')}"
+                    if rec_key in seen_records:
+                        continue
+                    seen_records.add(rec_key)
+
+                    if evt == "scope_assigned":
+                        scope = str(rec.get("scope") or "normal")
+                        source = str(rec.get("source") or "auto")
+                        assigned_by_scope[scope] += 1
+                        assigned_by_source[source] += 1
+                    elif evt == "scope_override":
+                        scope_override_count += 1
+                    elif evt == "guard_denied":
+                        rule = str(rec.get("rule") or "unknown")
+                        guard_denied_counts[rule] += 1
+                    elif evt == "test_files_written":
+                        test_files_written_total += int(rec.get("count") or 0)
+                    elif evt == "task_wall_time":
+                        scope = str(rec.get("scope") or "normal")
+                        dur = float(rec.get("duration_s") or 0.0)
+                        task_wall_times.setdefault(scope, []).append(dur)
+        except OSError:
+            continue
+
+    total_assigned = sum(assigned_by_scope.values())
+    total_completed = sum(len(durs) for durs in task_wall_times.values())
+    override_rate = (scope_override_count / total_assigned * 100.0) if total_assigned > 0 else 0.0
+
+    if total_assigned == 0 and total_completed == 0 and not guard_denied_counts:
+        return Check(
+            "scope_effort",
+            "Scope & effort (24h)",
+            "ok",
+            f"ไม่มีข้อมูล task/scope ใน {since_hours:.0f} ชม.ล่าสุด",
+            [],
+            {
+                "total_assigned": 0,
+                "override_rate": 0.0,
+                "guard_denied": {},
+                "test_files_written": 0,
+                "wall_time_by_scope": {},
+            },
+        )
+
+    def _fmt_dur(sec: float) -> str:
+        if sec < 60:
+            return f"{sec:.0f}s"
+        m = sec / 60
+        if m < 60:
+            return f"{m:.1f}m"
+        return f"{sec / 3600:.1f}h"
+
+    details: list[str] = []
+    scope_breakdown = (
+        ", ".join(
+            f"{s}={assigned_by_scope.get(s, 0)}"
+            for s in ("tiny", "normal", "deep")
+            if s in assigned_by_scope
+        )
+        or "none"
+    )
+    source_breakdown = (
+        f"auto={assigned_by_source.get('auto', 0)}, lead={assigned_by_source.get('lead', 0)}"
+    )
+    details.append(f"Scope assigned ({total_assigned}): {scope_breakdown} ({source_breakdown})")
+
+    details.append(
+        f"Lead override rate: {override_rate:.1f}% ({scope_override_count}/{total_assigned})"
+    )
+
+    if task_wall_times:
+        wall_parts = [
+            f"{s}: avg {_fmt_dur(sum(durs) / len(durs))} (×{len(durs)})"
+            for s, durs in sorted(task_wall_times.items())
+        ]
+        details.append(f"Task wall time: {', '.join(wall_parts)}")
+    else:
+        details.append("Task wall time: ไม่มีงานที่ done ในช่วงนี้")
+
+    details.append(f"Test files written: {test_files_written_total} file(s)")
+
+    if guard_denied_counts:
+        guard_parts = [f"{rule} ×{cnt}" for rule, cnt in guard_denied_counts.most_common()]
+        details.append(f"Guard denied: {' · '.join(guard_parts)}")
+    else:
+        details.append("Guard denied: 0 ครั้ง")
+
+    summary = (
+        f"{total_assigned} task(s) assigned · override rate {override_rate:.1f}% · "
+        f"{sum(guard_denied_counts.values())} guard denials"
+    )
+
+    avg_wall_times = {s: round(sum(durs) / len(durs), 1) for s, durs in task_wall_times.items()}
+    data = {
+        "total_assigned": total_assigned,
+        "by_scope": dict(assigned_by_scope),
+        "by_source": dict(assigned_by_source),
+        "override_count": scope_override_count,
+        "override_rate": round(override_rate, 2),
+        "guard_denied": dict(guard_denied_counts),
+        "test_files_written": test_files_written_total,
+        "wall_time_by_scope": avg_wall_times,
+    }
+    return Check("scope_effort", "Scope & effort (24h)", "ok", summary, details, data)
+
+
 # ── 4. repo shippability ─────────────────────────────────────────────────────
 
 
@@ -768,6 +924,12 @@ def run_maintenance(
             log_path or EVENTS_LOG,
             since_hours=since_hours,
             threshold_per_hour=noise_threshold_per_hour,
+        )
+    )
+    checks.append(
+        check_scope_effort(
+            log_path or EVENTS_LOG,
+            since_hours=since_hours,
         )
     )
     checks.append(

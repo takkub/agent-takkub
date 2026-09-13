@@ -10,6 +10,7 @@ import re
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QTimer
+from PyQt6.QtTest import QTest
 
 from agent_takkub.cli_server import CliServer
 
@@ -57,6 +58,14 @@ class _FakeOrch:
     def __init__(self) -> None:
         self.assign_calls: list[tuple] = []
         self.spawn_calls: list[tuple] = []
+        self.last_assign_model = None
+        self.last_assign_provider = None
+        self.last_assign_effort = None
+        self.last_assign_mode = "pane"
+        self.last_assign_team = None
+        self.last_assign_base_ref = None
+        self.last_assign_distinct_from = None
+        self.last_assign_scope = "auto"
 
     def assign(
         self,
@@ -77,6 +86,8 @@ class _FakeOrch:
         team=None,
         base_ref=None,
         distinct_from=None,
+        scope="auto",
+        **kwargs,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
@@ -86,6 +97,7 @@ class _FakeOrch:
         self.last_assign_team = team
         self.last_assign_base_ref = base_ref
         self.last_assign_distinct_from = distinct_from
+        self.last_assign_scope = scope
         return True, "ok"
 
     def subagent_done(self, role, note="", project=None, failed=False):
@@ -221,7 +233,14 @@ class TestAsyncSpawnDispatch:
         qapp.processEvents()
         assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
 
-    def test_assign_passes_flags(self, qapp: QCoreApplication) -> None:
+    def test_assign_passes_flags(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bypass team preset check so test can use a role without needing full preset config
+        monkeypatch.setattr(
+            "agent_takkub.team_preset.can_spawn",
+            lambda *_args, **_kwargs: (True, ""),
+        )
         orch = _FakeOrch()
         srv = CliServer(orch)
         sock = _FakeSock()
@@ -237,10 +256,21 @@ class TestAsyncSpawnDispatch:
                     "auto_chain": True,
                     "isolation": "worktree",
                     "model": "claude-haiku-4-5",
+                    "provider": "claude",  # Force provider to claude to avoid model validation error
+                    "mode": "pane",  # Explicitly set mode to pane
                 }
             ),
         )
-        qapp.processEvents()
+        # Extract the delay from the response message
+        replies = _replies(sock)
+        if not replies:
+            raise AssertionError("No replies received")
+        reply = replies[0]
+        if not reply.get("ok"):
+            raise AssertionError(f"Dispatch failed: {reply.get('msg')}")
+        delay_ms = int(reply["msg"].split("+")[1].split("ms")[0])
+        # Wait for the timer to fire plus some buffer
+        QTest.qWait(delay_ms + 100)
         assert orch.assign_calls == [("backend", "C:/x", "t", True, True, "worktree")]
         assert orch.last_assign_model == "claude-haiku-4-5"
 
@@ -1149,14 +1179,25 @@ class TestBrowserShardSpawnStagger:
         assert 0 < _delay_ms(_replies(s2)[0]["msg"]) <= 400
 
     def test_non_browser_shard_not_penalized_by_browser_shard_gap(
-        self, qapp: QCoreApplication
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Bypass team preset check
+        monkeypatch.setattr(
+            "agent_takkub.team_preset.can_spawn",
+            lambda *_args, **_kwargs: (True, ""),
+        )
         srv = CliServer(_FakeOrch())
+        # Mock _is_codex_spawn to return False so backend is not treated as codex
+        srv._is_codex_spawn = lambda *_args, **_kwargs: False
         srv._spawn_gap_ms = 400
         srv._browser_shard_gap_ms = 3_000
         s1, s2 = _FakeSock(), _FakeSock()
-        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend#1", "task": "x"}))
-        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend#2", "task": "y"}))
+        srv._dispatch(
+            s1, _auth({"cmd": "assign", "role": "backend#1", "task": "x", "provider": "claude"})
+        )
+        srv._dispatch(
+            s2, _auth({"cmd": "assign", "role": "backend#2", "task": "y", "provider": "claude"})
+        )
         assert 0 < _delay_ms(_replies(s2)[0]["msg"]) <= 400
 
 

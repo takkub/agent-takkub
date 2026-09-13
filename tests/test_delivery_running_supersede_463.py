@@ -96,12 +96,16 @@ class TestSupersedeUnitLevel:
         assert kept == []
         assert delivery.state == DeliveryState.SPAWNED_IDLE
 
-    def test_accepted_is_still_cancelled(self) -> None:
-        """#255, unchanged: ACCEPTED already pasted once, so cancelling it
-        only suppresses a duplicate re-paste."""
+    def test_accepted_send_is_still_cancelled(self) -> None:
+        """A send delivery with kind='send' in ACCEPTED is superseded by a newer send."""
         manager = DeliveryManager(default_ttl_sec=120)
         delivery = manager.create(
-            task_id="t1", project_id="P", pane_id="backend", session_generation=0, payload="do X"
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=0,
+            payload="do X",
+            kind="send",
         )
         manager.begin_write(delivery.delivery_id, 0)
         manager.mark_written(delivery.delivery_id)
@@ -113,6 +117,28 @@ class TestSupersedeUnitLevel:
         assert cancelled == [delivery]
         assert kept == []
         assert delivery.state == DeliveryState.CANCELLED
+
+    def test_task_delivery_accepted_is_never_cancelled(self) -> None:
+        """#586: A task delivery (kind='task') is NEVER cancelled by supersede_for_session."""
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=0,
+            payload="do X",
+            kind="task",
+        )
+        manager.begin_write(delivery.delivery_id, 0)
+        manager.mark_written(delivery.delivery_id)
+        manager.begin_submit(delivery.delivery_id, 0)
+        manager.mark_accepted(delivery.delivery_id)
+
+        cancelled, kept = manager.supersede_for_session("P", "backend", 0)
+
+        assert cancelled == []
+        assert kept == []
+        assert delivery.state == DeliveryState.ACCEPTED
 
     def test_uncertain_is_still_kept(self) -> None:
         """#336, unchanged: an UNCERTAIN delivery cannot be proven to have
@@ -232,14 +258,21 @@ class TestOrchestratorEndToEnd:
         # `_last_delivery_ids` is consumed (popped) by done() itself.
         assert ("P", "backend") not in orch._last_delivery_ids
 
-    def test_send_still_cancels_an_accepted_delivery_end_to_end(self, orch: Orchestrator) -> None:
-        """(c) ACCEPTED stays cancel-worthy through the real send() path,
+    def test_send_still_cancels_an_accepted_send_delivery_end_to_end(
+        self, orch: Orchestrator
+    ) -> None:
+        """(c) ACCEPTED send delivery stays cancel-worthy through the real send() path,
         unchanged behaviour from #255."""
         _register(orch, LEAD.name, _live_session())
         _register(orch, "backend", _live_session())
         manager = DeliveryManager(default_ttl_sec=120)
         delivery = manager.create(
-            task_id="t1", project_id="P", pane_id="backend", session_generation=0, payload="do X"
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=0,
+            payload="do X",
+            kind="send",
         )
         manager.begin_write(delivery.delivery_id, 0)
         manager.mark_written(delivery.delivery_id)
@@ -264,3 +297,40 @@ class TestOrchestratorEndToEnd:
         assert superseded_call.kwargs["cancelled"] == 1
         # The role's delivery pointer is cleared along with the cancel.
         assert ("P", "backend") not in orch._last_delivery_ids
+
+    def test_send_never_cancels_an_accepted_task_delivery_end_to_end(
+        self, orch: Orchestrator
+    ) -> None:
+        """#586: ACCEPTED task delivery is NEVER cancelled by send."""
+        _register(orch, LEAD.name, _live_session())
+        _register(orch, "backend", _live_session())
+        manager = DeliveryManager(default_ttl_sec=120)
+        delivery = manager.create(
+            task_id="t1",
+            project_id="P",
+            pane_id="backend",
+            session_generation=0,
+            payload="do X",
+            kind="task",
+        )
+        manager.begin_write(delivery.delivery_id, 0)
+        manager.mark_written(delivery.delivery_id)
+        manager.begin_submit(delivery.delivery_id, 0)
+        manager.mark_accepted(delivery.delivery_id)
+        orch._delivery_manager = manager
+        orch._last_delivery_ids = {("P", "backend"): delivery.delivery_id}
+
+        with (
+            patch("agent_takkub.orchestrator._log_event") as mock_log_event,
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            ok, _msg = orch.send("backend", "follow-up note", from_role="lead", project="P")
+
+        assert ok is True
+        assert delivery.state == DeliveryState.ACCEPTED
+        assert not any(
+            c.args and c.args[0] == "delivery_superseded_by_send"
+            for c in mock_log_event.call_args_list
+        )
+        # Still the delivery of record for this role.
+        assert orch._last_delivery_ids[("P", "backend")] == delivery.delivery_id

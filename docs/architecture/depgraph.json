@@ -76,6 +76,7 @@
         "agent_takkub.maintenance",
         "agent_takkub.mcp_bridge",
         "agent_takkub.opencode_helper",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.plugin_installer",
         "agent_takkub.prisma_gate",
@@ -105,7 +106,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 45,
+      "fan_in": 46,
       "fan_out": 0
     },
     {
@@ -1104,6 +1105,7 @@
       "module": "agent_takkub.core.capabilities.permission_engine",
       "imports": [
         "agent_takkub.core.capabilities.audit",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.pane_guard",
         "agent_takkub.pane_tools_policy"
       ],
@@ -1112,7 +1114,7 @@
         "agent_takkub.core.capabilities.design_integrations"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.core.capabilities.plugin_manager",
@@ -3278,6 +3280,7 @@
     {
       "module": "agent_takkub.orchestrator_text",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.pane_guard",
@@ -3294,6 +3297,7 @@
         "agent_takkub.boot_flow",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
+        "agent_takkub.core.capabilities.permission_engine",
         "agent_takkub.core.migration.pre_migrate_backup",
         "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.wal",
@@ -3305,8 +3309,8 @@
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 15,
-      "fan_out": 9
+      "fan_in": 16,
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.pane_env",
