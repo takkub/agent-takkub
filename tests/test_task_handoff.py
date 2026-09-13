@@ -27,6 +27,7 @@ from agent_takkub.orchestrator_text import (
     TASK_HANDOFF_THRESHOLD,
     _task_handoff_pointer,
 )
+from tests import extract_task_body
 
 TEST_PROJECT = "handofftest"
 
@@ -136,9 +137,10 @@ class TestAssignDispatchHandoff:
             orch.assign("backend", cwd="/api", task=task, project=TEST_PROJECT)
 
         ps = orch._pane_state[ekey]
-        assert ps.last_assigned_task == task
+        # #585: the task now carries a budget block prefix — compare the body.
+        assert extract_task_body(ps.last_assigned_task) == task
         assert ps.last_assigned_task_file is None
-        assert mock_send.call_args.args[1] == task
+        assert extract_task_body(mock_send.call_args.args[1]) == task
 
     def test_long_task_stored_full_but_pasted_as_pointer(self, orch: Orchestrator) -> None:
         ekey = _exit_key(TEST_PROJECT, "backend")
@@ -153,9 +155,12 @@ class TestAssignDispatchHandoff:
         ps = orch._pane_state[ekey]
         # Full text always in last_assigned_task — this is the crash-replay
         # unit (spawn_engine._auto_respawn) and must never be a pointer.
-        assert ps.last_assigned_task == task
+        assert extract_task_body(ps.last_assigned_task) == task
         assert ps.last_assigned_task_file is not None
-        assert pathlib.Path(ps.last_assigned_task_file).read_text(encoding="utf-8") == task
+        assert (
+            extract_task_body(pathlib.Path(ps.last_assigned_task_file).read_text(encoding="utf-8"))
+            == task
+        )
 
         pasted = mock_send.call_args.args[1]
         assert pasted != task

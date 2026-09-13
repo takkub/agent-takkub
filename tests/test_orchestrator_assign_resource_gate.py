@@ -27,6 +27,7 @@ from agent_takkub import orchestrator as orch_mod
 from agent_takkub import task_ledger
 from agent_takkub.orchestrator import Orchestrator
 from agent_takkub.resource_governor import GovernorLimits, ResourceClass, ResourceGovernor
+from tests import extract_task_body
 
 PROJECT = "proj"
 
@@ -167,7 +168,8 @@ class TestAdmissionRereadsEditedFile:
         ).token
         waiting.on_admitted(fake_token)
 
-        assert captured["task"] == "run e2e suite unedited"
+        # #585: budget block is prepended before dispatch — compare the body.
+        assert extract_task_body(captured["task"]) == "run e2e suite unedited"
 
 
 class TestCancelQueuedResourceTask:

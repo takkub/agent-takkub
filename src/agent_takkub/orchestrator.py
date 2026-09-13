@@ -6049,13 +6049,21 @@ class Orchestrator(
         # #433: a frontend/mobile done on a UI-shaped task must carry real
         # screenshot evidence — see `orchestrator_text.ui_evidence_gate`.
         # Skipped for FAILED/blocked reports (nothing to show) and `--force`.
-        if not force and not failed and not blocked:
-            _ps_done = self._pane_state.get(f"{project_ns}::{from_role}")
-            _assigned_scope = getattr(_ps_done, "last_assigned_scope", None)
-            if not _assigned_scope:
-                from . import task_ledger
+        # #585: resolve the assignment's scope BEFORE the evidence gate — the
+        # scope metrics below run on every done (including FAILED/blocked and
+        # `--force`), so resolving it inside the gate's `if` left the name
+        # unbound on exactly those paths (UnboundLocalError on every failure
+        # report).
+        _ps_done = self._pane_state.get(f"{project_ns}::{from_role}")
+        _assigned_scope = getattr(_ps_done, "last_assigned_scope", None)
+        if not _assigned_scope:
+            from . import task_ledger as _task_ledger_scope
 
-                _assigned_scope = task_ledger.get_open_scope(project_ns, from_role)
+            try:
+                _assigned_scope = _task_ledger_scope.get_open_scope(project_ns, from_role)
+            except Exception:
+                _assigned_scope = None
+        if not force and not failed and not blocked:
             _is_worktree = bool(getattr(_ps_done, "worktree", None))
             _touched_files = None
             if not _is_worktree and _ps_done is not None:

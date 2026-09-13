@@ -51,11 +51,20 @@ def test_carveout_present_and_self_check_references_it(dev_mode_env: pathlib.Pat
     # it must point back at the carve-out instead of contradicting it.
     self_check_idx = text.index("Self-check บังคับ")
     self_check_line = text[self_check_idx : text.index("\n", self_check_idx)]
-    assert "ข้อยกเว้น" in self_check_line
+    # #585 reworded the escape hatch ("เว้นแต่เข้าเกณฑ์ tiny-fix carve-out")
+    # — the wording may change, but the line must still point at a carve-out
+    # instead of reading as an unconditional ban.
+    assert "ข้อยกเว้น" in self_check_line or (
+        "เว้นแต่" in self_check_line and "carve-out" in self_check_line
+    )
 
-    # Source-code / tests remain banned with no exception, unchanged.
-    assert "ห้ามทำเองแม้แค่บรรทัดเดียว" in text
+    # Source / tests still have to be delegated by default. #585 added ONE
+    # exception (the tiny-fix carve-out: <=2 files, <=15 lines, non-deep), so
+    # the ban is no longer worded as "not even one line" — but the delegate
+    # list itself must still name source code and tests.
+    assert "ห้ามทำเอง" in text
     assert "ทุกไฟล์ที่เป็น source code หรือ tests" in text
+    assert "tiny-fix carve-out" in text
 
 
 def test_carveout_covers_user_project_md_txt_under_blocked_dirs(dev_mode_env: pathlib.Path) -> None:

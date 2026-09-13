@@ -4,6 +4,54 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **Scope budget (#585)** — ทุก task มี "ขนาดงาน" ติดไปด้วย: `tiny` / `normal` / `deep`
+  ตีจากโจทย์อัตโนมัติ หรือระบุเองด้วย `takkub assign --scope`, `assign` พิมพ์ขนาด+เหตุผล
+  กลับมาทุกครั้ง และฉีด budget block เป็นบรรทัดแรกของ task ที่ pane ได้รับทุก provider
+- `takkub lead-edits [--reset]` — ดู/ล้างตัวนับ Lead direct-edit ต่อโปรเจค
+- Metric ลง `events.log` + section ใหม่ใน `takkub ma`: `scope_assigned`, `scope_override`,
+  `test_files_written`, `task_wall_time` (audit log อย่างเดียว ไม่ยิง notice หา Lead)
+
+### Changed (เปลี่ยน)
+
+- **pane ต้อง "ทดสอบของจริง" ไม่ใช่ "เขียนไฟล์เทส"** — ถอนข้อบังคับ #478 ("ทุกงานที่แตะ logic
+  ต้องมีเทสกันถอยในดิฟฟ์เดียวกัน") ออกจาก role file 17 ใบ + `docs/roles/common.md`; เขียนไฟล์เทส
+  ใหม่เฉพาะ scope=deep, แก้ bug ที่เคยหลุด, หรือ Lead สั่ง · งาน UI (หน้าตา/CSS/layout/copy)
+  ห้ามเขียนไฟล์เทสเลย และห้ามสร้าง snapshot/visual-regression suite ใหม่
+- `qa-gate` ผูกกับขนาดงานใน batch: batch ที่มีแต่ tiny/normal ไม่ต้องรัน gate
+- `takkub assign` = auto-fire รายงานบรรทัดเดียว; propose+confirm เหลือ 3 กรณี (irreversible /
+  ต้องใช้ความรู้ที่มีแต่ user รู้ / 2 ทางเลือกที่ผลต่างกันมาก) · fix loop ยิงเองได้ไม่เกิน 2 รอบต่อเรื่อง
+- Lead แก้ source เองได้เมื่อเป็นงานจิ๋ว (≤ 2 ไฟล์, ≤ 15 บรรทัดต่อครั้ง, สะสม ≤ 30 บรรทัด,
+  ไม่ใช่หมวด schema/auth/security/infra) บังคับด้วย PreToolUse guard บน Edit/Write ที่นับบรรทัดจริง
+- `pane_guard` ปฏิเสธ full suite / `qa-gate` เมื่อ scope=tiny และปฏิเสธ build/suite เมื่อเครื่อง
+  ไม่ว่าง (มี pane อื่นทำงาน หรือ RAM/CPU เกินเพดาน) — ยกเว้น pane `shell` ที่ user พิมพ์เอง
+- `ui_evidence_gate` ผ่อนตามขนาดงาน: tiny ใช้ 1 screenshot, diff css/ข้อความล้วน ≤ 20 บรรทัด
+  ไม่ต้องแนบภาพ
+- `docs/lead/role-and-workflow.md` 12.6k → 3.97k token (แยกเป็น 11 ไฟล์ย่อยใต้ `docs/lead/`,
+  ย้ายไม่ลบ) + guard test กันโตกลับและกันหัวข้อสำคัญหาย
+
+### Fixed (แก้)
+
+- **#586** `takkub send` เคยยกเลิก delivery ของ assign ที่รออยู่ในคิวทั้งใบเงียบๆ — งานหายจริง
+  โดย Lead ไม่รู้ตัว (รู้ได้เฉพาะขุด `events.log`) ตอนนี้ send ไม่ cancel task delivery,
+  มีการแจ้ง Lead เมื่อ cancel และโชว์ใน `takkub messages` / inbox
+- เพดาน Lead direct-edit เคยรีเซ็ตทุกครั้งที่ assign สำเร็จ (Lead ทำหลายสิบครั้งต่อ session)
+  ทำให้เพดานสะสมไร้ผล — เหลือรีเซ็ตตอน SessionStart กับคำสั่ง `lead-edits --reset`
+- classifier เคยตีคำ trust-boundary (password / privilege / OTP / 2FA / rate limit /
+  "skip signature verification") เป็นงานจิ๋ว — ตอนนี้เป็น deep; ส่วนศัพท์ที่กำกวมในโปรเจคเอง
+  (admin / role / session / token) ใช้ compound pattern เพื่อไม่ให้ "ปุ่มปิด session" กลายเป็น deep
+- `.json` / `.yaml` / `.csv` / `.xml` ไม่ถูกนับเป็นไฟล์ "style/text" อีก (runtime อ่านจริง)
+- budget block เคยดัน task สั้นทุกใบข้ามเกณฑ์ `TASK_HANDOFF_THRESHOLD` จนถูกส่งเป็น pointer
+  "ไปอ่านไฟล์" แทนการ paste ตรง (เพิ่ม hop + token ต่อ assign) — วัดจากเนื้องานจริงแล้ว
+- `_get_git_diff_numstat` ใส่ `encoding`/`errors`/`creationflags` ตาม repo subprocess guard
+
+### Known gaps (ยังไม่ปิด — #587)
+
+- busy-machine gate อ่าน snapshot ที่เขียนทุก 180 วิ แต่ถือว่า stale ที่ 30 วิ → เงื่อนไข
+  RAM/CPU ทำงานจริงราว 17% ของเวลา (เงื่อนไข "มี pane อื่นทำงาน" ยังทำงานปกติ)
+- กฎ "gate ตาม scope สูงสุดของ batch" ยังเป็นข้อความในเอกสาร ไม่มีโค้ดคำนวณให้
+
 ## [v2.1.0] - 2026-09-11
 
 The 2.1.0 storage migration (#504) passed ten acceptance-review rounds (`docs/audit/2026-09-10-504-acceptance-review.md`, round 10: "releasable: yes") and three full rehearsals on a copy of a production data home (244,659 files): apply 4.5–13 min, `restore-v1` 4–7 min, no user file lost, and a git-archived 2.0.8 boots on the restored store. The boot flow and migration wizard (#574) passed six UI review rounds against the approved mockup.

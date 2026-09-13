@@ -21,6 +21,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.orchestrator import Orchestrator, _exit_key
+from tests import extract_task_body
 
 TEST_PROJECT = "plantest"
 
@@ -155,7 +156,8 @@ class TestAssignPlan:
         assert ps.plan_fanout["shards"] == 4
         # The fan-out task carries the verify-fail reporting hint so the QA
         # shards inherit it (they verify → must report --fail on failure).
-        assert ps.plan_fanout["task"].startswith("smoke")
+        # #585: the stored fan-out task carries the budget block prefix.
+        assert extract_task_body(ps.plan_fanout["task"]).startswith("smoke")
         assert "done --fail" in ps.plan_fanout["task"]
         assert ps.plan_fanout["plan_file"].endswith(f"{TEST_PROJECT}-qa-plan.json")
         # wrapped planner task is remembered whole for respawn replay (issue #1
