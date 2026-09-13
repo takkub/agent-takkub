@@ -160,6 +160,7 @@ class TestSessionReportCommandAuth:
             {
                 "cmd": "session-report",
                 "session_id": "lead-uuid",
+                "source": "startup",  # #587 C1: only a fresh startup resets
                 "from": "lead",
                 "from_project": "proj-xyz",
                 "auth": _LEAD_TOKEN,
@@ -168,3 +169,28 @@ class TestSessionReportCommandAuth:
         resp = sock.last_response()
         assert resp["ok"] is True
         assert reset_calls == ["proj-xyz"]
+
+    @pytest.mark.parametrize("source", ["resume", "clear", "compact", ""])
+    def test_lead_session_report_non_startup_source_does_not_reset(
+        self, server_and_sock, monkeypatch, source: str
+    ) -> None:
+        srv, sock, _mock_orch = server_and_sock
+        reset_calls: list[str | None] = []
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.reset_lead_edits",
+            lambda project=None, **kw: reset_calls.append(project) or True,
+        )
+        sock.reset()
+        req = {
+            "cmd": "session-report",
+            "session_id": "lead-uuid",
+            "from": "lead",
+            "from_project": "proj-xyz",
+            "auth": _LEAD_TOKEN,
+        }
+        if source:
+            req["source"] = source
+        srv._dispatch(sock, req)
+        resp = sock.last_response()
+        assert resp["ok"] is True
+        assert reset_calls == []

@@ -466,6 +466,10 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
             monkeypatch.setattr(
                 orch_mod, "_RESTART_REASON_FILE", runtime / "restart-reason.json", raising=False
             )
+        if hasattr(orch_mod, "_MACHINE_STATE_FILE"):  # #587 B1
+            monkeypatch.setattr(
+                orch_mod, "_MACHINE_STATE_FILE", runtime / "machine-state.json", raising=False
+            )
 
     lba_mod = _maybe_module("agent_takkub.lead_bash_audit", force=False)
     if lba_mod is not None and hasattr(lba_mod, "_DEFAULT_LOG"):

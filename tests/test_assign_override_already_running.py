@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config
+from agent_takkub import config, provider_config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator, _exit_key
 
@@ -33,6 +33,19 @@ def qapp() -> QCoreApplication:
     if app is None:
         app = QCoreApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _providers_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests exercise `--provider codex`/`--provider gemini` overrides
+    # purely for the "does the override match what's already running"
+    # warning logic — they must not depend on whether codex/gemini CLIs
+    # happen to be installed on the machine running the suite. A dev box
+    # with both installed made this pass locally while a clean CI runner
+    # (neither installed) failed `assign_provider_override_error`'s real
+    # `_provider_available` check before ever reaching the code under test.
+    # Mirrors the same monkeypatch in test_core_providers.py.
+    monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
 
 
 @pytest.fixture
