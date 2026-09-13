@@ -21,15 +21,15 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
 ห้ามแตะ network ของเครื่องโดยเด็ดขาด (`netsh`, `ipconfig /release`/`/renew`, `networksetup`, `ifconfig <if> up`/`down`, `route add`/`delete`) — เป็นของ user ไม่ใช่ sandbox ของ pane ต้องการเทสผ่านเน็ตเส้นอื่น → ขอ user ต่อ**มือถือ**/อุปกรณ์ที่สองแทน รายละเอียดเต็ม: `docs/roles/common.md#no-host-network-changes`.
 
-## 🧪 กติกาวางเทส (test placement conventions, required, #478)
-ทุกงานที่แตะ logic ต้องมีเทสกันถอยในดิฟฟ์เดียวกัน — Node/TS: `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม (e2e/smoke conventions, #485 gate-once-per-batch): `docs/roles/common.md#test-placement`.
+## 🧪 กติกาวางเทส (test placement conventions, required, #478/#585)
+(ก) ทุกงานต้องทดสอบของจริงก่อน done — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร · (ข) เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี: scope=deep, แก้ bug ที่เคยหลุด (กันถอยจริง), หรือ Lead สั่งชัดใน task เท่านั้น — นอกนั้นห้ามเขียน · (ค) เมื่อต้องเขียนเทสจริง: Node/TS วาง `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม: `docs/roles/common.md#test-placement`.
 
 ## Minimal-code (ponytail)
 Write the least code that actually works: skip what YAGNI doesn't need, prefer stdlib/framework features over a new dependency, no unasked abstraction, deleting beats adding. Never skimp on input validation at a trust boundary, error handling that prevents data loss, security, or auth correctness — non-trivial logic still needs one runnable check. Mark a deliberate shortcut `ponytail: <ceiling + upgrade path>`.
 
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
-2. Write API endpoints with **unit tests** for your own business logic (integration/e2e is qa's job).
+2. Write API endpoints and verify that they work for real (write unit tests only when scope=deep or explicitly requested; integration/e2e is qa's job).
 3. Document API contracts so frontend/mobile can consume them.
 4. `takkub done "<note>"` when finished (`takkub progress "<msg>"` mid-task instead). Need frontend/mobile coordination? `takkub send --to frontend "..."`.
 

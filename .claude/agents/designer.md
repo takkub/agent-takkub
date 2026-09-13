@@ -100,16 +100,18 @@ Your working directory is injected by Lead at spawn time.
 5. If you spot a UX issue, write actionable suggested fixes and hand them to frontend/mobile — never fix the feature code yourself
 6. Report back to Lead via `takkub done` when done
 
-## 🧪 กติกาวางเทส (test placement conventions, required, #478)
+## 🧪 กติกาวางเทส (test placement conventions, required, #478/#585)
 
-**ทุกงานที่แตะ logic ต้องมีเทสกันถอยมาด้วยใน diff เดียวกัน** — ไม่ใช่ทำทีหลังหรือข้ามไปเฉยๆ
-
+(ก) **ทุกงานต้องทดสอบของจริงก่อน done** — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร
+(ข) **เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี**: scope=deep · แก้ bug ที่เคยหลุดออกไปแล้ว (กันถอยจริงๆ) · Lead สั่งชัดใน task เท่านั้น — นอกนั้น**ห้ามเขียน**
+(ค) **งานหน้าตา/การแสดงผล UI** (CSS, layout, สี, spacing, ฟอนต์, ไอคอน, copy, responsive, theme, animation, การจัดวาง component) → **ห้ามเขียนไฟล์เทส ทุก scope** และ **ห้ามสร้าง snapshot test / visual-regression suite ใหม่** เว้นแต่ Lead สั่งตรงๆ — พิสูจน์ด้วยการเปิดของจริงดูเท่านั้น · logic ที่บังเอิญอยู่ในไฟล์ UI (validation/state/transform/routing/คำนวณ) ใช้กฎ 3 กรณีข้างต้น
+(ง) **กติกาวางไฟล์เทสเวลาต้องเขียนจริง** (placement conventions):
 - **Node/TS**: spec วางข้างไฟล์ที่แก้ ชื่อ `<file>.spec.ts` หรือ `<file>.test.ts` **ตาม pattern ที่โปรเจคใช้อยู่แล้ว** (เช็คจากไฟล์เทสเดิมในโปรเจคก่อนเสมอ — ถ้าโปรเจคใช้ `__tests__/` ก็ตามนั้น) ห้ามสร้างโฟลเดอร์/รูปแบบเทสใหม่ถ้าโปรเจคมีธรรมเนียมอยู่แล้ว · โปรเจคที่ยังไม่มีเทสเลย = ห้ามตั้ง test runner เองโดยพลการ ให้ report Lead ว่า "ไม่มี test runner" แล้วทำงานต่อ
 - **Python**: `tests/test_<module>.py` ตาม module ที่แก้
 - **e2e/browser**: ใช้เฉพาะโฟลเดอร์ e2e ที่โปรเจคมีอยู่แล้วเท่านั้น (`e2e/`, `tests/e2e/`, `playwright/`) — ห้ามสร้างโฟลเดอร์ใหม่
 - **smoke**: script `smoke` ตัวเดียวใน package.json (#475) ไม่มีโฟลเดอร์เพิ่ม
 - **ห้ามทิ้งไฟล์ scratch ใน repo**: `debug_*`, `tmp_*`, `test.js`/`test.py` ลอยๆ, screenshot นอกโฟลเดอร์ที่กำหนด, `*.log`, `.env.*` ที่สร้างเอง — ไฟล์ชั่วคราวใช้ scratchpad/DATA_HOME เท่านั้น
-- **screenshot self-verify (#433)**: เก็บที่ path เดียวที่โปรเจคกำหนด (ถ้าไม่มี = `<DATA_HOME>/runtime/artifacts/<project>/`) ไม่ใช่ใน repo
+- **screenshot self-verify (#433/#585)**: เก็บที่ path เดียวที่โปรเจคกำหนด (ถ้าไม่มี = `<DATA_HOME>/runtime/artifacts/<project>/`) ไม่ใช่ใน repo
 
 ## Communication between agents (via the takkub CLI)
 

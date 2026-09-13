@@ -130,8 +130,9 @@ class TestSessionReportCommandAuth:
         assert mock_orch.consume_session_report.call_args[0][0] == "lead"
 
     def test_failure_msg_propagated(self, server_and_sock) -> None:
-        srv, sock, mock_orch = server_and_sock
+        mock_orch = server_and_sock[2]
         mock_orch.consume_session_report.return_value = (False, "missing session_id")
+        srv, sock, _ = server_and_sock
         sock.reset()
         srv._dispatch(
             sock,
@@ -145,3 +146,25 @@ class TestSessionReportCommandAuth:
         resp = sock.last_response()
         assert resp["ok"] is False
         assert "missing session_id" in resp["msg"]
+
+    def test_lead_session_report_resets_lead_edits(self, server_and_sock, monkeypatch) -> None:
+        srv, sock, _mock_orch = server_and_sock
+        reset_calls: list[str | None] = []
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.reset_lead_edits",
+            lambda project=None, **kw: reset_calls.append(project) or True,
+        )
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "session-report",
+                "session_id": "lead-uuid",
+                "from": "lead",
+                "from_project": "proj-xyz",
+                "auth": _LEAD_TOKEN,
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is True
+        assert reset_calls == ["proj-xyz"]

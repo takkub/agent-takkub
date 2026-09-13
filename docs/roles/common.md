@@ -95,11 +95,12 @@ in the project's repo — evidence for your own task specifically →
 wrong pane's images, #109). Always read files with the Read tool — never a
 shell one-liner (`cat`/`type`) on a long path.
 
-## test-placement (#478)
+## test-placement (#478, #585)
 
-Every task that touches logic needs a regression test in the **same diff**
-— not "later", not skipped.
-
+(ก) **ทุกงานต้องทดสอบของจริงก่อน done** — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร
+(ข) **เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี**: scope=deep · แก้ bug ที่เคยหลุดออกไปแล้ว (กันถอยจริงๆ) · Lead สั่งชัดใน task เท่านั้น — นอกนั้น**ห้ามเขียน**
+(ค) **งานหน้าตา/การแสดงผล UI** (CSS, layout, สี, spacing, ฟอนต์, ไอคอน, copy, responsive, theme, animation, การจัดวาง component) → **ห้ามเขียนไฟล์เทส ทุก scope** และ **ห้ามสร้าง snapshot test / visual-regression suite ใหม่** เว้นแต่ Lead สั่งตรงๆ — พิสูจน์ด้วยการเปิดของจริงดูเท่านั้น · logic ที่บังเอิญอยู่ในไฟล์ UI (validation/state/transform/routing/คำนวณ) ใช้กฎ 3 กรณีของข้อ (ข)
+(ง) **กติกาวางไฟล์เทสเวลาต้องเขียนจริง** (placement conventions):
 - Node/TS: spec next to the file it tests, named `<file>.spec.ts` or
   `<file>.test.ts`, **matching whatever pattern the project already uses**
   (check its existing test files first — if it uses `__tests__/`, follow
@@ -113,7 +114,7 @@ Every task that touches logic needs a regression test in the **same diff**
 - Never leave scratch files in the repo: `debug_*`, `tmp_*`, a bare
   `test.js`/`test.py`, screenshots outside the designated folder, `*.log`,
   self-created `.env.*` — temp files belong in scratchpad/DATA_HOME only.
-- Screenshot self-verify (#433): the one path the project designates (or
+- Screenshot self-verify (#433/#585): the one path the project designates (or
   `<DATA_HOME>/runtime/artifacts/<project>/` if none) — never in the repo.
 
 ## reporting-done
@@ -136,10 +137,10 @@ takkub done "<note summarizing what changed>"
 The orchestrator notifies Lead and closes your pane automatically — this is
 the only way Lead learns the task is done. Never skip it.
 
-Per #485/#433/root-CLAUDE.md test tiers: do not run `takkub qa-gate`
-yourself — write the regression test in your diff, run at most the targeted
-test/spec for the files you touched, and let qa's single end-of-batch gate +
-CI prove the rest.
+Per #485/#433/#585/root-CLAUDE.md test tiers: do not run `takkub qa-gate`
+yourself — test your changes directly, run at most the targeted test/spec for
+the files you touched (if tests already exist), and let qa's end-of-batch
+gate (for batches with deep scope) + CI prove the rest.
 
 ## communication
 

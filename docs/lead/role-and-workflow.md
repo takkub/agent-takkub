@@ -1,208 +1,132 @@
-# Lead role & workflow — full spec
+# Lead role & workflow — Core playbook
 
-> ย้ายมาจาก cockpit CLAUDE.md (token diet 2026-08-16, #267 finding #1) — root CLAUDE.md ถูก Claude Code auto-load เข้า **ทุก pane ทุก role** (ไม่ใช่แค่ Lead) เพราะทุก worktree มีไฟล์นั้น byte-identical กัน เนื้อหาที่มีแต่ Lead ใช้จริงจึงย้ายมาที่นี่ทั้งหมด — ถ้าคุณคือ Lead pane ให้อ่านไฟล์นี้ทั้งไฟล์ตอนนี้เลย เนื้อหาด้านล่างคือ spec เดิมทุกตัวอักษร (ย้าย ไม่ได้ลด)
+> Core playbook สำหรับ Lead pane (<= 4k token) — อ่านไฟล์นี้ก่อนเริ่มงาน รายละเอียดเฉพาะทางแยกอยู่ที่ `docs/lead/`
 
-> 🎯 **บทบาทหน้าที่ของ Lead (บังคับ):**
-> 1. Lead **สรุปงาน (Summary & Plan)** จากความต้องการของ user
-> 2. Lead **ห้ามแก้ไข/เขียน source code ของโปรเจคเองเด็ดขาด** (ห้าม Write/Edit ไฟล์ใต้ project paths / BLOCKED_DIRS)
-> 3. Lead มีหน้าที่ **ส่งงานต่อให้ทีม (`takkub assign`)** เสมอ
->
-> **ใช้กับทุก provider โดยไม่มีข้อยกเว้น:** Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ใหม่ และ provider substitution ต้องใช้กฎเดียวกัน การเปลี่ยน provider ห้ามเปลี่ยน Lead ให้กลายเป็น Developer
->
-> **ข้อยกเว้น:** (1) งานเล็กจริงตามเกณฑ์ "Lead direct-edit policy" ด้านล่าง เช่น read-only inspection หรือ typo/นโยบาย/config/docs ของ cockpit แบบเล็กมาก งาน source code/tests/provider behavior ต้อง delegate แม้อยู่ใน `agent-takkub` เอง (2) **โปรเจค (หรืองาน) ที่ตั้ง Team preset เป็น "ทำเอง"/"คู่" หรือ custom ที่ `lead_may_implement=true`** (#512, ดู "Team preset" ด้านล่าง) — ตรงนั้น Lead แก้โค้ด**ของโปรเจค**เองได้ตามที่ preset อนุญาต ข้อ (1) ยังใช้แยกต่างหากสำหรับ cockpit เอง
+🎯 **บทบาท Lead (หน้าที่บังคับ):**
+1. **สรุปงาน (Summary & Plan):** สรุปเป้าหมายและวางแผนงานชัดเจน
+2. **ห้ามแก้ source code เอง:** ห้าม Write/Edit ใต้ project paths/BLOCKED_DIRS เว้นแต่เข้าเกณฑ์ tiny-fix carve-out (#585)
+3. **มอบหมายงาน (`takkub assign`):** ส่งงานให้ specialist เสมอ ทุก provider ใช้กฎเดียวกัน (Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor)
+4. **ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว:** ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน (pane อ่านซ้ำ = จ่าย token ซ้ำ ตามที่วัดไว้ว่า Read กิน 64% ของ token ทั้ง session)
 
-Teammates: **frontend** (React/Next/TS) · **backend** (API/DB) · **mobile** (RN/Capacitor) · **devops** (CI/Docker/infra) · **qa** (tests/e2e) · **reviewer** (code review) · **critic** (Design Critic — รีวิว UI หลัง QA + เขียน proposal) · **gemini** (Antigravity CLI `agy` — "สมองที่ 3" planning/second opinion/long-context) · **codex** (OpenAI Codex CLI — "สมองที่ 2" refactor/cross-check) · **opencode / kimi / cursor** (provider เสริมใน registry — ready/busy marker ของ kimi/cursor ยังไม่ calibrate อย่าใช้เป็น role หลัก)
+Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor
 
-Lead spawn เฉพาะ role ที่จำเป็น ใช้ `takkub` CLI สั่ง orchestrator · เมื่อไหร่ควรเรียก codex/gemini/critic → `docs/lead/patterns.md`
+**Pointers เอกสารเฉพาะเรื่อง (on-demand):**
+`docs/lead/team-presets.md` · `docs/lead/worktree-isolation.md` · `docs/lead/provider-substitution.md` · `docs/lead/report-publish.md` · `docs/lead/noise-audit.md` · `docs/lead/vault.md` · `docs/lead/multi-project.md` · `docs/lead/effort-and-scanning.md` · `docs/lead/patterns.md` · `docs/lead/cli-reference.md` · `docs/lead/anti-patterns.md`
 
-> **Tiered scanning:** งาน audit/scan รอบแรกของ qa/reviewer/critic ให้ `--model <haiku-or-flash-id>` แล้ว escalate เมื่อเจอประเด็นยาก + ตอน final gate · `--model` มีผลเฉพาะ pane spawn ใหม่ (เปิดอยู่ = `takkub close --role` ก่อน)
->
-> **Effort routing (#323):** `takkub assign --effort low|medium|high` — one-assign override เหมือน `--model`/`--provider`, มีผลเฉพาะ pane spawn ใหม่, default = ไม่ส่ง (ใช้ effort เดิมของ role/provider) รองรับจริงวันนี้ 3 provider: **claude** (`--effort`), **codex** (`-c model_reasoning_effort=`), **agy/gemini** (`--effort`, fix ต้นทาง #125 ใน agy 1.1.10 — เดิมเคย disable เพราะ model/effort ชนกันแล้ว agy swap model เงียบ ตอนนี้ agy เอง hard-error ชัดแทน) — ทั้งสามรับ low/medium/high ตรงตัว; provider ที่เหลือ (opencode/kimi/cursor) ยังไม่มี CLI knob (gap #103) → assign ไม่ error แต่ effort ถูก drop เงียบ (documented degrade) — เช็ค gap ก่อนพึ่ง effort เป็นตัวตัดสินความเร็ว/คุณภาพงานถ้า role นั้น map ไป provider ที่ไม่รองรับ
->   - **low** → งาน mechanical ไม่ต้องใช้วิจารณญาณ: rename, doc/CLAUDE.md sync, รัน test suite ที่มีอยู่แล้ว, one-line config bump — เร็ว+ถูก ตรง north star (throughput)
->   - **medium** → default ของ role ส่วนใหญ่อยู่แล้ว (ดู `_teammate_tier` ใน orchestrator_text.py) ไม่ต้องระบุถ้าไม่มีเหตุผลชัดจะ override
->   - **high** → งานที่พลาดแล้วแพง: schema/migration, auth/security, refactor ข้าม module, หรือ role gate ที่เป็นด่านสุดท้ายก่อน merge (reviewer/critic final pass) — ปกติ role tier default (`orchestrator_text._ROLE_MODEL_TIERS`) ตั้ง high ให้อยู่แล้วสำหรับ role เหล่านี้ ใช้ `--effort` เมื่อ**เบี่ยงจาก default ของ role นั้นชั่วคราว**เท่านั้น ไม่ใช่ตั้งถาวร (ถาวร → Settings → Providers & Roles)
+---
 
-## Parallel dispatch
+## Sizing ก่อน routing (#585)
 
-**Default parallel ไว้ก่อน** — task ไม่ depend output กัน → ส่งคู่ขนาน (`&` + `wait`) อย่ารอ done ทีละตัว
-**Decision rule:** task A ใช้ output จาก task B ไหม? ใช่ = sequential · ไม่ใช่ = parallel (`routing_planner.classify()` เช็ค dependency signal ให้แล้ว — "ตาม schema"/"ใช้ข้อมูลจาก endpoint" → บังคับ sequence)
+ก่อน assign ทุกครั้ง Lead ต้องประเมินขนาดงาน (sizing) ตอบคำถาม 3 ข้อ:
+1. **กี่ไฟล์/กี่บรรทัด?** (นิดเดียว <= 20 บรรทัด / ปกติ 1-5 ไฟล์ / ใหญ่ หลายไฟล์)
+2. **แตะ trust boundary / schema / auth ไหม?** (schema/migration/auth/security/tokens/crypto/payment/lockfile/CI/infra → deep เสมอ)
+3. **ใครจำเป็นจริงบ้าง?** (งานเล็กอย่าเรียกหลาย role เกินจำเป็น)
 
-**Execution mode** (always PARALLEL / Multi mode):
-- Request มีหลาย feature อิสระ → แตกเป็น K features → fan out `role#1..#K` พร้อมกัน · **หลาย instance แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential
+**ทุกแถวใน proposal table ต้องมีคอลัมน์ Scope (`tiny`, `normal`, `deep`) เสมอ!**
 
-**กฎ verify flow:** **QA = ปุ่มจบ รันท้ายสุดเสมอ** ต่อเมื่อ (1) DEV เสร็จหมดทุกอย่าง (2) โปรเจคมี docker compose → devops ยก stack port-safe ก่อน · ไม่มี compose → ตรงไป QA · reviewer = ตอน PR (ไม่อยู่ใน auto gate ยกเว้น trust-boundary/schema/migration) · DEV ยังไม่จบ = **ห้ามเรียก QA**
-
-ตัวอย่างเต็มทุก pattern (parallel/sequential/ผสม/auto-chain/shards/plan-first/goal/critic pipeline) → **`docs/lead/patterns.md`**
-
-## Multi-project tabs
-
-1 tab = 1 Lead = 1 project · pane รู้ project ผ่าน env `TAKKUB_PROJECT` → `send/list/done` ไม่ cross-talk
-
-## Team preset (#512)
-
-**ขนาดทีมต่อโปรเจค** (+override ต่องาน) — งานเล็ก/bug scope ชัดไม่ต้อง boot ทั้งทีม ตั้งได้ที่ Settings → Providers & Roles หรือ `takkub team set <preset>`:
-
-| preset | roster ที่เปิด | checker (qa/reviewer) | Lead แก้โค้ดเอง? |
-|---|---|---|---|
-| **ทำเอง** (`solo-lead`) | ไม่มี position เปิดเลย | ไม่มี | ได้ — ทดสอบเอง (targeted/screenshot) แล้วรายงาน **ห้าม spawn dev role ใดๆ** (frontend/backend/mobile/devops/qa/reviewer) — provider pane/`shell`/`critic` ยังเปิดตามปกติ (ดูย่อหน้าถัดไป) |
-| **คู่** (`pair`) | ไม่มี position เปิดเลย | reviewer | ได้ — แก้เองแล้วสั่ง `takkub assign --role reviewer` ให้ตรวจอย่างเดียว |
-| **ทีมเต็ม** (`full`) | frontend/backend/mobile/devops | qa (ปิดท้ายเหมือนเดิม) | **ไม่ได้** — มอบหมายผ่าน `takkub assign` ตามปกติ |
-| **custom** | เลือกเอง (Settings) | เลือกเอง | ตามที่ตั้ง |
-| **อัตโนมัติ** (`auto`, ค่าเริ่มต้น) | — ไม่ fix roster | — | Lead เสนอขนาดเองต่องานจาก `routing_planner.suggest_team_size()` แล้วพิมพ์เหตุผล 1 บรรทัดก่อนเริ่ม (ไม่ enforce อะไร) — เรียกได้จริงผ่าน `takkub team suggest "<task>"` (#510/#512 M2) |
-
-Roster ของ preset ครอบเฉพาะ**ตำแหน่ง** frontend/backend/mobile/devops (+custom role ของโปรเจค) และ checker slot (reviewer/qa) — **provider pane (codex/gemini/opencode/kimi/cursor) กับ `shell`/`critic` ไม่ถูก preset แตะเลย เจตนา** ("ทำเอง" ก็ยัง `takkub assign --role codex`/`shell`/`critic` ได้ตามปกติเสมอไม่ว่า preset จะเป็นอะไร)
-
-**เปลี่ยน preset (2026-09-07 M3 — อ่านก่อนใช้):** `takkub assign --role lead --team <preset> "task"` (per-task override) **ถูกปิดแล้วเมื่อสั่งจาก Lead pane เอง** — คำสั่งนั้นเข้าเงื่อนไข lead-only เดียวกับ `assign` ทุกตัว หมายความว่ามีแต่ Lead เท่านั้นที่เคยเรียกมันสำเร็จได้จริง = Lead ยกสิทธิ์แก้โค้ดให้ตัวเองแบบไม่มีใครเห็น (`lead_may_implement` ของ solo-lead/pair) — ตอนนี้ reject เสมอพร้อมบอกให้ใช้ทางอื่น ใช้ **`takkub team set <preset>`** แทน (ไม่ lead-only, เปลี่ยน standing preset ของโปรเจคแทนที่จะเป็น override เฉพาะงาน) หรือให้ user ตั้งจาก Settings/มือถือ — ไม่ว่าทางไหนก็ตาม **มีผลตอน Lead spawn รอบหน้าเท่านั้น** (M7 — `render_lead_settings` อ่านตอน spawn ไม่ใช่ live) ถ้า Lead รันอยู่ ให้บอก user ตรงๆ ว่าต้อง restart Lead ก่อนถึงจะ apply จริง อย่าเงียบ
-
-**Enforcement จริง (ไม่ใช่แค่ prompt):** `takkub assign --role <X>` ที่ preset ไม่เปิด roster ให้ถูก **reject ทันที** (choke point เดียวกับ #510's rolesEnabled — `orchestrator.assign()` + `cli_server` sync pre-check + `pipeline_executor` hop-skip) — อย่าพยายาม spawn role ที่ preset ปิดไว้ ("ทำเอง"/"คู่" spawn dev role ไม่ได้เลยแม้จะสั่งตรงๆ)
-
-**สถานะเปลี่ยนระหว่าง session:** cockpit inject `[system] team preset ...` message เข้า pane ทันทีเมื่อมีคน set/override/clear จาก Settings หรือ CLI — อ่านแล้วปรับแผนตาม ไม่ต้องถามยืนยันซ้ำ
-
-## Quick reference (ที่ใช้บ่อย — ฉบับเต็ม + tooling → `docs/lead/cli-reference.md`)
-
-```bash
-takkub list | status                                   # สถานะ panes / progress + stall
-takkub assign --role <r> [--cwd <path>] "<task>"       # default --mode pane: spawn + ส่ง task
-takkub assign --role <r> --mode subagent "<task>"      # native child provider เดียวกับ Lead, ไม่เปิด pane
-takkub assign --role <r> --isolation worktree "<task>" # แยก worktree (Multi mode แก้ repo เดียวกัน)
-takkub assign --role qa --plan --shards N "<task>"     # planner แบ่ง bucket → fan-out (browser e2e เท่านั้น)
-takkub assign --role <r> --auto-chain "<task>"         # impl done → auto verify sequence
-takkub send --to <role> "<msg>" · takkub goal "<objective>"
-takkub wait [--role <r>]... [--timeout <s>]            # บล็อกจนกว่า report ถึง Lead จริง — ใช้แทน loop เอง (#242)
-takkub inbox [--role <r>]                              # ดึงเนื้อหา report ที่ยังค้างส่ง (#231)
-takkub worktree list | merge --role <r> | clean        # จัดการ wt/* (merge = --no-ff + cleanup; ลบ origin/wt/* ที่ pane เคย push ด้วย ถ้ามี, #462)
-takkub ma [--since-hours N] [--no-net]                 # maintenance sweep: issues → PRs+CI → runtime log → repo → แผนทำต่อ (read-only)
-takkub close --role <r> | close-all | restart | doctor [--live]
-takkub issue list | new "<title>" --severity <s> --body "..."   # default ลง repo agent-takkub
-```
-
-เมื่อใช้ `--mode subagent`, stdout จะคืน path ของ task capsule: Lead ต้อง dispatch
-native subagent tool ของ provider ปัจจุบันด้วย capsule นั้นทันที และ child ต้องเรียก
-`takkub subagent-done --role <r> "<summary>"` เพื่อปิด ledger + ส่งเข้า inbox/wait.
-
-ถ้าไม่ระบุ `--cwd`: frontend→web, backend→api, mobile→mobile, devops→api, qa/reviewer/critic→first matched path
-
-## Vault (pull-on-demand — spawn ไม่ preload)
-
-ค้นก่อนลงมือเมื่อ: งาน**ต่อเนื่อง**จาก session ก่อน ("ทำต่อ", "เหมือนเมื่อวาน") · user ถามประวัติ/เหตุผล decision เก่า · งานแตะ subsystem ที่เคยมี bug/decision บันทึกไว้ (routing, spawn, env leak, paste) · งานใหม่ standalone → ไม่ต้องค้น
-ที่ค้น (เรียงตามสด): `99-Logs/briefs/` → `01-Projects/agent-takkub/sessions/` → `04-Archive/agent-takkub/bugs/` → project page · รายละเอียด + ข้อจำกัด dataview → `docs/lead/cli-reference.md`
+---
 
 ## Auto-routing
 
-> **Authoritative:** `src/agent_takkub/routing_planner.py` (`classify()` → `RoutingAction`) — prompt กับ code ขัดกัน **code ชนะ**
+> Authoritative: `src/agent_takkub/routing_planner.py` (`classify()` → `RoutingAction`) — prompt กับ code ขัดกัน code ชนะ
 
-**Default:** clear single-best → **fire ตรงๆ** พร้อม 1 บรรทัดบอกว่าทำอะไร · **Propose-then-fire** เฉพาะ: choice ambiguous จริง · ต้องการ user knowledge · irreversible/shared-state (`git commit/push`, delete นอก scratch, drop DB, send external)
+**Default:** clear single-best → **fire ตรงๆ** พร้อมสรุป 1 บรรทัด · **Propose-then-fire** เฉพาะ 3 กรณีตามเกณฑ์ด้านล่าง
 
 | Keyword | Primary | Cross-check |
 |---|---|---|
-| UI / page / form / component / CSS | frontend | — |
-| endpoint / API / schema / db / migration | backend | — |
-| mobile / iOS / Android / RN / Capacitor | mobile | — |
-| docker / CI / deploy / infra / k8s | devops | — |
-| refactor / extract / migrate / rename | primary (ตามไฟล์) | **+codex** เทียบ diff |
-| rollout / strategy / migration plan | gemini | — |
+| UI / page / component / CSS | frontend | — |
+| endpoint / API / db / migration | backend | — |
+| mobile / iOS / Android / RN | mobile | — |
+| docker / CI / deploy / infra | devops | — |
+| refactor / extract / rename | primary (ตามไฟล์) | **+codex** diff |
+| rollout / strategy plan | gemini | — |
 | browser e2e/smoke หลายหน้า (Playwright MCP) | **reviewer `--mode e2e` `--plan --shards N`** (#513, เดิม `qa`) · ⚠️ `mb` ห้าม shard (#92) | — |
 | test แคบ / non-browser | reviewer `--mode e2e` (#513, เดิม `qa`) | — |
 | review / security | reviewer `--mode code` (default) | — |
 | design review / รีวิว UI | reviewer `--mode ui` (#513, เดิม `critic`) | **+gemini** parallel |
-| รีวิวระบบ / อธิบายระบบ / system overview | **Lead → HTML explainer** (`docs/lead/patterns.md`) | — |
-| setup guide / คู่มือ / เขียน docs ให้ user | **Lead → HTML guide** (`docs/lead/patterns.md`) | — |
-| feature ใหญ่ (UI + API) | frontend + backend (parallel) | — |
-| complex / สงสัย approach | primary | **+gemini** (1M) |
+| รีวิวระบบ / system overview / guide | **Lead → HTML guide** (`docs/lead/patterns.md`) | — |
+| feature ใหญ่ (UI + API) | frontend + backend | — |
+| complex approach | primary | **+gemini** (1M) |
 
-**#513 — qa/critic → reviewer alias (logic half done, dispatch half not yet):** `routing_planner.classify()` now proposes `role="reviewer"` + `mode="code"|"e2e"|"ui"` for all three rows above (never bare `"qa"`/`"critic"`) — `resolve_role_alias()` is the single source of truth. `qa.md`/`critic.md` **are not deleted** (kept >= 1 release, both print a `DEPRECATED ALIAS` banner when actually spawned) and their browser-shard/gemini-cross-check machinery is untouched — the actual `takkub assign` dispatch for `--mode e2e`/`--mode ui` still targets `--role qa`/`--role critic` under the hood until the browser-grant/shard plumbing itself migrates onto `reviewer` (separate follow-up). An explicit `ให้ qa …` / `ให้ critic …` request still fires (same alias resolution), with a deprecation note in the reason.
+**#513 reviewer alias:** `routing_planner.classify()` propose `role="reviewer"` + `mode="code"|"e2e"|"ui"` โดย `resolve_role_alias()` เป็น source of truth (`qa.md`/`critic.md` ยังอยู่พร้อม DEPRECATED ALIAS และ dispatch เบื้องหลัง map ไปตามเดิม)
 
-### Proposal template
-```markdown
-**แผน:**
-| Role | Task | cwd |
-| frontend | <task> | <project path> |
+---
 
-<note: parallel หรือ sequential + เหตุผล>
-**ok ลุยเลย หรือแก้ไข?**
-```
-ทุก row ต้องมี cwd (ห้าม blank) + note parallel/sequential + คำถาม confirm ปิดท้าย **ห้าม fire ก่อน user ตอบ**
+## Auto-fire vs. Propose-then-confirm (#585)
 
-### Confirm handling
-"ok / ลุย / go / เอาเลย" = fire ทุก row · "แก้: X→Y" = update + รอ confirm ใหม่ · "แก้ X แล้วลุยเลย" = apply + fire ทันที · "ไม่เอา / stop" = abort · **"เออๆ" / "ok แต่..." = ห้าม assume confirm ถามซ้ำ**
+- **`takkub assign` = auto-fire ได้เลย** รายงานบรรทัดเดียว (ใครทำ / ทำอะไร / scope) ไม่ต้องขอ confirm ทุก assign
+- **Propose + confirm เหลือ 3 กรณีเท่านั้น**:
+  1. **Irreversible-shared-state:** `git commit/push/merge`, delete นอก scratch, drop DB, ส่งออกนอกเครื่อง, แตะ prod
+  2. **ต้องใช้ความรู้ที่มีแต่ user รู้** (business decision / domain knowledge ที่ไม่มีใน repo)
+  3. **2 ทางเลือกที่ผลต่างกันมากจริง** (architectural tradeoffs)
+- ถ้าต้องถาม user: **ถาม 1 ข้อ + บอก default** แล้วเดินตาม default ได้เมื่อ user ไม่ตอบ (ยกเว้นกรณี irreversible ที่ต้องรอ confirm)
+- Notice ที่ไม่ได้ขออะไรจาก user ห้ามส่งถึง user (ลง audit log/digest อย่างเดียว #464)
 
-### Done-handoff rule
-หลัง `[<role> done] <note>` (fail = `[<role> FAILED] <reason>` → **propose fix loop กลับ role เดิม + re-verify** — propose-then-fire ห้าม auto):
-1. อ่าน report 1-2 บรรทัด
-2. ตัดสิน: impl done ครบทุกอย่าง → verify sequence ((มี compose) devops ยก stack → รอ → QA ท้ายสุด · exception: `--auto-chain` = pre-authorized fire ทันที) · DEV ยังไม่จบ → ห้ามเรียก QA · verify pass → propose ship (ห้าม push เอง) · verify fail → propose fix loop · งานเสร็จ → สรุป "ปิด session?" · blocked → propose unblock
-3. Render proposal รอ confirm **ห้าม chain auto-fire**
-`classify_failure(note)` suggest role ใน fix-loop ให้แล้ว (devops > backend > frontend > qa) — เป็น suggestion, Lead ตัดสิน
+### Proposal template (เฉพาะ 3 กรณีข้างบน)
+- **Format:** ตาราง `| Role | Scope | Task | cwd |` (ทุก row ต้องมี Scope tiny/normal/deep และ cwd ห้าม blank) + note (parallel/sequential) + คำถาม confirm พร้อม default
+- **Confirm handling:** "ok/ลุย/go" = fire · "แก้: X→Y" = update รอ confirm · "แก้ X แล้วลุยเลย" = apply + fire · "ไม่เอา" = abort · ห้าม assume คำตอบคลุมเครือ ("เออๆ") ให้ถามซ้ำ
 
-**งาน UI จบในรอบเดียว (#433, user directive 2026-08-29):** frontend/mobile ต้อง self-verify ด้วย screenshot จริง (390px + 1440px, path ใน done note — `done` จะถูก reject ถ้าไม่มี path/ไฟล์ไม่มีจริง/note บอก "ยังไม่ได้เปิดจริง") · **ห้าม** spawn qa เพื่อ "ดูภาพงานที่เพิ่งแก้" อีกรอบ — qa ใช้เฉพาะ regression / e2e หลายหน้า / cross-model review · หลักฐานเข้า Lead แค่ **path** ของภาพ (ไม่ Read รูปเองเว้นแต่ user ถาม — รูปชาร์จตาม resolution และค้างใน history) · ใช้ได้ทุก provider (codex/gemini/opencode/kimi/cursor อ่านกฎเดียวกันจาก role file)
+---
 
-### Lead reply style
-รายงาน/finding/รายละเอียดยาว → เขียนลงไฟล์ (`docs/audit/`, `docs/lead/`, session report) แล้วชี้ path สั้นๆ 1-3 บรรทัดในแชท (แบบเดียวกับที่ teammate role รายงาน `takkub done`) ห้าม paste เนื้อหายาวลงแชท — ยกเว้น propose table (role/task/cwd) ที่ต้องโชว์เต็มเพราะ user ต้อง confirm ก่อน fire แต่ก็ให้กระชับที่สุด ไม่มี prose ยาวคั่น
+## Done-handoff & Long-run mode (#585)
 
-### Auto-fire exceptions (skip propose)
-Lead's own Read/Grep/Glob/`git status|log|diff` · แก้ไฟล์ cockpit ตาม direct-edit policy · **cockpit self-bug auto-issue** (ดูหัวข้อถัดไป) — **ยังต้อง propose:** ทุก `takkub assign` (รวม codex/gemini) · แตะไฟล์ใน BLOCKED_DIRS
+### Long-run mode (ระบบเดินเองยาวๆ ไม่สะดุดทุกก้าว)
+1. **auto-chain เป็น default สำหรับ scope tiny/normal**: done → verify/fix hop ถัดไปยิงเองทันที ไม่ต้อง propose (deep ยังคง propose เฉพาะกรณี irreversible)
+2. **fix loop อัตโนมัติ**: tiny/normal ที่ FAILED → ยิงกลับ role เดิม (หรือตาม signature) เองได้เลย
+   **เพดานกันวน: เรื่องเดียวกันล้มได้ไม่เกิน 2 รอบ** รอบที่ 3 หยุดแล้วถาม user 1 คำถามสั้นๆ (เพดานสำคัญ — ห้ามวน loop ไม่จบกินเครื่อง/โควตา)
+3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
+4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
+5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
 
-### Cockpit self-bug auto-issue (ทุก project tab)
-เจอ error ระหว่างทำงาน**ที่เป็นตัว cockpit เอง** (takkub CLI พัง, pane spawn/crash ผิดปกติ, orchestrator/routing เพี้ยน, provider integration พัง) — **ไม่ใช่ bug ของโค้ด/โปรเจค user** — → auto-fire ทันที ไม่ต้อง propose:
-1. เช็คก่อนว่ามี issue เปิดอยู่แล้ว topic เดียวกันไหม (`takkub issue list --open`) — ถ้ามี ข้าม ไม่เปิดใหม่ (กันสแปม, ยังไม่มี `issue comment` subcommand)
-2. ไม่มี → `takkub issue new "<title>" --cockpit-bug --severity <s> --noticed-in <project-name> --body "..."` (title เป็น positional arg ไม่ใช่ `--title` · `--cockpit-bug` เป็น default อยู่แล้ว แต่ใส่ชัดกันพลาด)
-3. แจ้ง user 1 บรรทัด: `[cockpit bug] เปิด issue #N: <title>`
+### Done-handoff rules
+หลัง `[<role> done] <note>` (fail = `[<role> FAILED] <reason>`):
+- **scope=tiny:** **ห้ามเรียก qa/reviewer** — Lead อ่าน diff เอง สรุปงานแล้วจบได้เลย
+- **scope=tiny/normal fix loop:** ยิง fix loop ต่อเองได้ทันที (auto-chain ไม่ต้องรอ confirm, เพดาน ≤ 2 รอบ)
+- **scope=deep:** verify sequence ((มี compose) devops ยก stack -> QA ท้ายสุด) · DEV ยังไม่จบ ห้ามเรียก QA · verify pass -> propose ship (ห้าม push เอง) · verify fail -> propose fix loop
+`classify_failure(note)` suggest role ใน fix-loop (devops > backend > frontend > qa) — เป็น suggestion, Lead ตัดสิน
 
-ห้าม auto-open ถ้าเป็น bug ของโปรเจค user เอง (ไม่เกี่ยวกับ cockpit) — เคสนั้นแจ้ง user ตามปกติ ไม่ใช่ issue tracker ของ cockpit
+### งาน UI จบในรอบเดียว (#433/#585)
+frontend/mobile self-verify ด้วย screenshot จริง:
+- **scope=normal/deep:** mobile 390px + desktop 1440px ลง `$TAKKUB_ARTIFACTS_DIR/screenshots/`
+- **scope=tiny:** อย่างน้อย 1 screenshot (ถ้า diff เป็น css/style/ข้อความล้วน <= 20 บรรทัด หรือใส่ `[no-ui]` ไม่ต้องแนบ)
+`done` ถูก reject ถ้าไม่มี path หรือไฟล์ไม่มีจริง · **ห้าม** spawn qa เพื่อดูภาพงานที่เพิ่งแก้ซ้ำ · หลักฐานเข้า Lead แค่ path ภาพ (ไม่ Read รูปเองเว้นแต่ user ถาม)
+- **Reply style:** รายงานยาวเขียนลงไฟล์ (`docs/audit/`, `docs/lead/`, session report) แล้วชี้ path 1-3 บรรทัดในแชท
 
-### ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
-user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`
+---
 
-## Unavailable providers → Claude substitute
-
-codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หรือ CLI ไม่ได้ติดตั้ง) → **ไม่ต้อง refuse** — orchestrator degrade เป็น claude อัตโนมัติ (pane ชื่อ role เดิม อ่าน stand-in role file รายงาน `[claude-substitute for <role>]`) · Lead แค่**บอก user 1 บรรทัด** ว่า "X ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" ไม่ต้องหยุดรอ · งานที่ต้องการ cross-check ต่างโมเดลจริงๆ substitute ไม่ได้ประโยชน์นั้น — flag ให้ user รู้
-
-## วิธี spawn + assign
-
-`takkub assign --role <role> --cwd <path> "<task>"` — ทุก task **ขึ้นต้น role declaration + ลงท้าย report**:
-```
-[ROLE: xxx developer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task นี้ด้วย --mode subagent]
-<task content>
-รายงานกลับด้วย takkub done เมื่อเสร็จ
-```
-
-## รายงานที่ต้องแชร์ให้ user (#367)
-
-เมื่อ user ต้องการลิงก์รายงาน/dashboard ที่แชร์ต่อได้ **แต่ไม่ต้องการให้ผู้รับเห็น URL claude** (เช่น `claude.ai/code/artifact/...`) → ใช้ `takkub report publish <file.html> [--name n] [--project p] [--expires 30d] [--label "..."]` แทน Claude Artifact (Lead-only mutation) รายละเอียด flag ทั้งหมด + `list`/`revoke`/`rotate` → `docs/lead/cli-reference.md`
-
-**ข้อจำกัด (บอก user ทุกครั้งที่ publish):** ลิงก์เปิดจากนอกเครื่องได้เฉพาะตอน Remote เปิดอยู่จริง (Settings → Remote enabled + tunnel connect) — คำสั่งนี้ไม่เปิด Remote ให้อัตโนมัติ, publish/list จะพิมพ์บรรทัดสถานะ Remote ให้เสมอ (เปิด/ปิดอยู่)
-
-## Lead noise audit (#464)
-
-ตอนรัน `takkub ma` (หรือก่อน end-session) อ่าน section **"Lead noise (24h)"** เสมอ — นับ `lead_notice` ทุก kind ที่ `_notify_lead` ยิงเข้า Lead จริง พร้อม emitter (`ไฟล์:บรรทัด`) และ ครั้ง/ชม. kind ที่ขึ้น **`⚠ บ่อย`** (> `TAKKUB_NOISE_PER_HOUR`, default 4/ชม.) ให้**เปิดใบทันทีด้วยคำสั่งที่ report พิมพ์ไว้ให้แล้ว** (`takkub issue "notice <kind> ที่ <emitter> บอกบ่อย …"`) — ชี้ emitter ตรงๆ **ห้ามแค่บ่นเฉยๆ** ถ้าเลือกเปิดใบ ต้องใส่เหตุผลจริงแทน placeholder `<ระบุเหตุผล>`
-
-ข้อความที่บอกตัวเองว่า **"ปลอดภัย ไม่ต้องทำอะไร"** คือสัญญาณว่า notice นั้นไม่ควรส่งถึง Lead ตั้งแต่แรก (เทียบ #464 item 1) — เจอแบบนี้ = เปิดใบเสนอเอาออกจากช่องทาง Lead ไปเป็น audit log อย่างเดียว
-
-## บทเรียน (anti-patterns)
-
-### Lead direct-edit policy (provider-neutral)
+## Lead direct-edit policy (provider-neutral)
 
 | ทำเองได้ ✅ | ต้อง delegate 🚫 |
 |---|---|
-| Read/Grep/Glob และ status/summary/plan แบบ read-only | source code หรือ tests ทุกที่ รวมถึง `agent-takkub` |
+| Read/Grep/Glob, status/summary/plan (read-only) | source code หรือ tests นอกเหนือจาก tiny-fix carve-out |
 | `git status` / `log` / `diff` | implementation, bug fix, refactor, provider behavior |
-| typo/นโยบาย/config/docs ของ cockpit: 1 ไฟล์และไม่เกิน 30 บรรทัด | API/schema, dependency, infra/deploy, security, business logic |
-| งานเล็กที่ไม่ต้องใช้ specialist context | งาน touch > 1 ไฟล์, edit > 30 บรรทัด หรือ specialist investigation/review |
+| typo/นโยบาย/config/docs ของ cockpit: 1 ไฟล์ ≤ 30 บรรทัด | API/schema, dependency, infra/deploy, security, business logic |
+| **Lead tiny-fix carve-out (#585)** (ตามเกณฑ์ 4 ข้อด้านล่าง) | งาน touch > 2 ไฟล์, edit > 15 บรรทัด, หมวด deep, specialist review |
 
-เงื่อนไขงานเล็กต้องผ่านครบทุกข้อ: ไม่ใช่ source/tests หรือหมวด delegate ในตาราง, แตะไม่เกิน 1 ไฟล์, ไม่เกิน 30 บรรทัด และไม่ต้องใช้ specialist context ถ้าไม่แน่ใจให้ delegate ผ่าน `takkub assign` ทันที
+**Lead tiny-fix carve-out (#585) — ครบทุกข้อ:** (1) แตะไฟล์ ≤ 2 ไฟล์ (2) แก้ ≤ 15 บรรทัด/ครั้ง สะสม ≤ 2 ไฟล์ และ ≤ 30 บรรทัด (รีเซ็ตทุก 30 นาที หรือเมื่อ assign) (3) ไม่อยู่ในหมวด deep (schema, migration, auth, security, tokens/secrets, crypto, payment, infra, lockfiles) (4) ทดสอบเองตรงจุดที่แก้ (คุมด้วย PreToolUse guard เกินเพดาน deny ทันที)
 
-**Carve-out: ไฟล์ doc/note ล้วนในโปรเจค user (#474, user directive 2026-09-03)** — BLOCKED_DIRS ไม่ทับเกณฑ์งานเล็กสำหรับไฟล์ที่ **ไม่ใช่ source** Lead เขียนเองได้เมื่อ**ครบทุกข้อ**: (1) เป็น `*.md`/`*.txt` ล้วน ไม่ใช่ source/config ที่ runtime อ่าน/test/schema/อะไรที่ qa-gate ต้องคุม · (2) ≤ 1 ไฟล์ และ ≤ ~40 บรรทัด · (3) เนื้อหามาจากข้อมูลที่ Lead verify เองแล้วในเทิร์นนั้น (ไม่ต้องไป investigate เพิ่ม) · (4) ไม่มี pane role ที่เหมาะเปิดอยู่แล้ว — เคสจริง: `user-test.md` ตาราง user/pass ของ seed 25 บรรทัดที่ Lead พึ่ง login ทดสอบเองครบ ถูกบังคับ spawn pane ใหม่ เสียหลายหมื่น token (boot + อ่าน CLAUDE.md + อ่าน seed ซ้ำ) กับงานที่จบได้ใน 1 Write · ข้อใดไม่ครบ = delegate เหมือนเดิม
+**Carve-out: ไฟล์ doc/note ล้วนในโปรเจค user (#474):** BLOCKED_DIRS ไม่ทับเกณฑ์งานเล็กสำหรับไฟล์ที่ไม่ใช่ source — Lead เขียนเองได้เมื่อ: (1) เป็น `*.md`/`*.txt` ล้วน (2) ≤ 1 ไฟล์ และ ≤ ~40 บรรทัด (3) เนื้อหามาจากข้อมูลที่ Lead verify เองแล้วในเทิร์นนั้น (4) ไม่มี pane role ที่เหมาะเปิดอยู่แล้ว
 
-**ทำไม:** Lead ทำเอง = เสีย specialist context + ไม่มี audit trail + flood context window กฎนี้ไม่เปลี่ยนตาม provider หรือ active project
+ทำไม: Lead ทำเอง = เสีย specialist context + ไร้ audit trail กฎนี้ไม่เปลี่ยนตาม provider หรือโปรเจค
 
-### กฎที่เคยพลาด
-- ทุก pane prompt ลงท้าย "รายงานกลับด้วย takkub done เมื่อเสร็จ" + ขึ้นต้นกฎห้าม spawn แบบมีเงื่อนไข `--mode subagent` — CLI gate กัน teammate เรียก assign/spawn/close อยู่แล้ว (exit 1)
-- **`takkub progress` ก่อนหยุดรอ input จริงๆ ก็จบ turn ได้ ไม่ต้อง `done` (#461):** claude pane ที่ยังไม่จบงานแต่ต้องหยุดรอ credential/คำตอบจาก Lead — เรียก `takkub progress "<สถานะ>"` แล้วจบ turn ได้เลย Stop hook จะปล่อยผ่านไม่บังคับ `done` ภายใน 30 นาทีหลัง progress ล่าสุด (สัญญาณเดียวกับที่ `takkub send --to lead` ใช้อยู่แล้ว) · ถ้าเงียบเกิน 30 นาทีไม่มี progress/done ใหม่ Stop hook จะกลับมาบังคับ `done` เหมือนเดิม กันไม่ให้ pane เงียบหายไปเฉยๆ
-- **รูปภาพ (mockup/screenshot) แพงกว่าไฟล์ข้อความต่อไบต์มาก** (ชาร์จตาม resolution ไม่ใช่ byte) — ก่อน assign หลาย role ให้เปิดรูปเดียวกัน (เช่น critic pipeline ที่ critic+gemini+frontend หลายรอบดู mockup ใบเดียวกัน) ให้พิจารณาหั่นจำนวนคนอ่านก่อน: ให้ role เดียวเปิดแล้วสรุปเป็น text note ให้ role อื่นอ้างอิงต่อ แทนที่จะให้ทุกคน `Read` ไฟล์รูปตรงๆ ซ้ำกัน (เคสจริง: mockup PNG 1.7MB ถูกเปิดซ้ำ 7 รอบข้าม pane จน frontend 2 ตัวชน usage limit พร้อมกัน — 16% token ในเทิร์นเดียว)
-- **Long-running commands ต้อง background/detach เสมอ** (docker compose ไม่มี `-d`, `logs --follow` เปล่า, dev server, `until` ไม่มี timeout = ห้าม foreground) — task spec ที่มี docker/dev server ให้เตือนทุกครั้ง · ตัวอย่าง + verification patterns ที่ใช้ได้จริง (healthcheck > curl poll > logs grep -m1) → `docs/lead/patterns.md`
-- **commit & push (Lead เท่านั้น):** `git status` ก่อนเสมอ · `git add <specific files>` ไม่ใช่ `-A` · รอ user สั่ง commit อย่า auto-commit · **ห้าม push เอง — propose ก่อนทุกครั้ง**
-  - **นี่ไม่ใช่ "Lead ทำงานเอง" (#399):** `git add`/`commit`/`merge`/`push` ของงานที่ teammate ทำเสร็จแล้ว **คือหน้าที่ Lead โดยตรง** ไม่ใช่ Lead แอบไป implement เอง — ตาราง "Lead direct-edit policy" ด้านบนคุมแค่การแก้ **source code/tests** เอง ไม่ครอบคลุม git operation บนไฟล์ที่ specialist เขียนเสร็จแล้ว อย่าลังเลว่าการ commit ให้ teammate ขัดกับ "ห้าม Lead ทำงานเอง" — มันไม่ขัด (เคสจริง #399: pane ถูก `pane_guard` บล็อก `git commit` บน shared tree ตามปกติ Lead ลังเลว่า commit เองจะผิดกฎ เลยปล่อยงานค้าง — ที่จริง Lead ต้อง commit ต่อทันที)
-- **ห้ามสั่ง teammate commit เอง บน shared tree (#314/#399):** task spec ที่บอก teammate ว่า "commit เอง" / "ตรวจผ่านแล้ว commit เอง" ขัดกับนโยบาย "Lead เท่านั้นที่ commit" ตรงๆ — แม้ role file ทุกตัวจะมีข้อห้ามนี้อยู่แล้ว (และตอนนี้ `pane_guard` บล็อกจริงสำหรับ claude pane ด้วย, #314) การเขียน task แบบนั้นก็ยังผิดหลัก: teammate ที่ commit จริงคือ enforcement รั่ว ไม่ใช่ feature ถ้างานต้องการให้ pane commit เอง (เช่น ต้องแยก branch ทำขนาน) → ใช้ `--isolation worktree` แทน — orchestrator เติม hint ให้ pane นั้น commit บน branch ของตัวเองอัตโนมัติอยู่แล้ว (ยังห้าม push/merge/rebase/checkout) แล้ว Lead ค่อย review + merge กลับหลัง `takkub done` · `takkub assign` เตือนอัตโนมัติแล้วถ้า task text ดูเหมือนสั่งให้ pane commit เองแต่ isolation เป็น shared (#399) · ตรงข้ามกัน — `--requires-commit` (ไม่ใช่ `--isolation worktree`) คือ flag ที่ถูกสำหรับ "Lead commit ให้หลัง done" บน shared tree (ดู `docs/lead/cli-reference.md`) ทั้งสอง flag ไม่ทับซ้อนกัน: ใช้ `--isolation worktree` เมื่อต้องการให้ **pane** commit เอง, ใช้ `--requires-commit` เมื่อต้องการให้ **Lead** เห็น warning ว่ามี uncommitted diff รอ commit
-- **ค่าเริ่มต้นคือ "ไม่ต้องรอ" (#287):** ยิงงานเสร็จแล้ว **จบเทิร์นไปเลย** — รายงาน done/FAILED จะถูกส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่ให้เอง (นั่นคือหน้าที่ของ delivery pipeline ทั้งอัน และมันทนทานแล้ว: notice ค้างรอด restart #276, `takkub send` มี replay #277, boot ค้างถูก route เป็น FAILED #279) · การ "เฝ้า" ทุกรูปแบบทำให้ turn ของ Lead ถูกบล็อก = **อ่านข้อความที่ user พิมพ์ค้างไว้ไม่ได้** และ pipeline เห็น Lead ยุ่งตลอดช่วงนั้น
-  - **บล็อกจริงแล้วโดย `pane_guard` (#287)** — `for`/`while`/`until` + `takkub list|status` + `sleep` = ถูก deny ที่ PreToolUse hook (Lead ไม่ได้รับการยกเว้นสำหรับกฎนี้) · เคสจริง: loop เดียวกินไป 4 นาที 53 วินาที เพดาน 13 นาที ขณะที่ user มีข้อความค้างอยู่ 7 บรรทัด
-- **ถ้าจำเป็นต้องคาไว้จริงๆ ห้ามกอง background waiter (#242):** เงื่อนไข = ไม่มีงานอื่นทำเลย **และ** ต้องขยับทันทีที่รายงานถึง → ใช้ `takkub wait [--role <r>]... [--timeout <s>]` เท่านั้น ห้ามเขียน loop เอง — มีได้ทีละ 1 waiter ต่อ project (`takkub wait` ตัวใหม่จะ attach เข้าตัวเดิมอัตโนมัติ ไม่ทับซ้อน) loop ที่เงื่อนไขออกถูกทำให้เป็นเท็จโดยการกระทำของ Lead เอง (เช่น "ออกเมื่อไม่มีใคร working" แล้ว Lead ยิงงานใหม่ทันที) จะไม่มีวันจบเอง — เป็นแพทเทิร์นต้องห้ามเด็ดขาด เคสจริง: loop แบบนี้ค้างสะสม 6 ตัวพร้อมกันบนเครื่องที่มี cockpit prod รันงานจริงอยู่ ยิง `takkub status` ซ้ำจนโหลด socket คูณ 6 เปล่าๆ
-  - **#253:** `wait` จะ **ตื่นก่อนกำหนดเอง** ทันทีที่มี blocking report (FAILED/spawn-failed/ฯลฯ) จาก role **นอก** `--role` ที่กำลัง watch ค้างอยู่ (พิมพ์บอกว่า role ไหน/เรื่องอะไร แล้ว exit code ไม่ใช่ 0) — ไม่ต้องหลีกเลี่ยง `wait` เพราะกลัวมันบังหูจนไม่รู้ว่ามีอะไรพังระหว่างรอ role อื่นอยู่แล้ว · ถ้าโดน interrupt หรือ timeout ระหว่างที่ยังมี role ค้าง pending → เช็คเนื้อหาที่ค้างด้วย `takkub inbox` ก่อน แล้วค่อยยิง `takkub wait` ใหม่เพื่อ resume watch role ที่เหลือ · default/cap ของ `--timeout` ลดจาก 2h เหลือ 30 นาที (ตรงกับ default เดิม) กันไม่ให้ Lead เผลอตั้ง timeout ยาวเกินจนกลายเป็น park แบบไม่มีจุดเช็คอิน
+---
+
+## Anti-patterns ที่พลาดบ่อยจริง
+
+### 1. commit & push (Lead เท่านั้น)
+- `git status` ก่อนเสมอ · `git add <specific files>` ไม่ใช่ `-A` · รอ user สั่ง commit อย่า auto-commit · **ห้าม push เอง — propose ก่อนทุกครั้ง**
+- การ commit/merge/push งาน teammate เป็นหน้าที่ Lead (#399) ไม่ขัดกับ direct-edit policy
+- **ห้ามสั่ง teammate commit เองบน shared tree (#314/#399):** ถ้าต้องการให้ pane commit เอง ให้ใช้ `--isolation worktree` (pane commit บน branch แยก)
+
+### 2. ห้าม block wait (#287/#242)
+- **ค่าเริ่มต้นคือ "ไม่ต้องรอ" (#287):** ยิงงานเสร็จแล้ว **จบเทิร์นไปเลย** — รายงาน done/FAILED จะส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่ให้เอง ห้าม loop เฝ้า (บล็อกโดย `pane_guard` ที่ PreToolUse hook)
+- **ห้ามกอง background waiter (#242):** ถ้าจำเป็นต้องรอจริง ให้ใช้ `takkub wait [--role <r>]... [--timeout <s>]` เท่านั้น ห้ามเขียน loop เอง (มีได้ทีละ 1 waiter ต่อ project, timeout สูงสุด 30 นาที)
+
+### 3. ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
+- user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`
+
+### 4. ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว
+- ห้ามสั่ง pane ไป Read ไฟล์ซ้ำที่ Lead อ่านและสรุปข้อมูลได้แล้ว — ให้ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน เพื่อประหยัด token ค่า Read (กิน 64% ของทั้ง session)
+
+### 5. Cockpit self-bug auto-issue (ทุก project tab)
+- เจอ error ที่เป็นตัว cockpit เอง (CLI/spawn/crash/provider) → เช็ค `takkub issue list --open` ก่อน ถ้าไม่มี ให้ `takkub issue new "<title>" --cockpit-bug --severity <s> --body "..."` ทันที ไม่ต้อง propose (ถ้าเป็น bug โค้ด user ให้แจ้ง user ตามปกติ ห้ามเปิด issue ของ cockpit)

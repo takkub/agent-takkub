@@ -226,6 +226,7 @@ def create_assignment(
     feature: str | None,
     provider: str,
     status: str = "working",
+    scope: str = "normal",
 ) -> tuple[str, pathlib.Path | None]:
     """Record a fresh assignment: per-task detail `.md` + an upserted `INDEX.md` row.
 
@@ -253,6 +254,7 @@ def create_assignment(
     role = role.strip()
     cwd_disp = _display_path(cwd) if cwd else "—"
     summary = _derive_summary(task)
+    scope = (scope or "normal").strip().lower()
 
     detail_name = f"{hhmmss}-{role}-ledger.md"
     detail_rel = f"{date}/{detail_name}"
@@ -272,6 +274,7 @@ def create_assignment(
             f"feature: {feature_text}\n"
             f"provider: {provider}\n"
             f"status: {status}\n"
+            f"scope: {scope}\n"
             f"assign_ts: {now.strftime('%H:%M:%S')}\n"
             f"---\n\n{task}\n",
         )
@@ -285,6 +288,7 @@ def create_assignment(
         "cwd": cwd_disp,
         "summary": summary,
         "status": status,
+        "scope": scope,
         "assign_hhmmss": now.strftime("%H:%M:%S"),
         "done_hhmmss": None,
         "detail_rel": detail_rel if detail_written else None,
@@ -307,6 +311,7 @@ def create_assignment(
         "goal": goal_text,
         "feature": feature_text,
         "row_index": len(feat["rows"]) - 1,
+        "scope": scope,
     }
 
     try:
@@ -359,6 +364,20 @@ def _open_row(state: dict, ptr: dict) -> tuple[dict, list[dict]] | tuple[None, N
     if not (0 <= idx < len(rows)):
         return None, None
     return rows[idx], rows
+
+
+def get_open_scope(project: str, role: str) -> str | None:
+    """Read the scope tier of *role*'s currently-open assignment in *project*, or None."""
+    state = _load_state(project)
+    ptr = state.get("open", {}).get(role)
+    if ptr is None:
+        return None
+    if "scope" in ptr:
+        return ptr["scope"]
+    row, _ = _open_row(state, ptr)
+    if row is not None:
+        return row.get("scope")
+    return None
 
 
 def _resolve_open_row(

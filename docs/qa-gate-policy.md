@@ -5,17 +5,22 @@ auto-loads that file, so it stays terse). Read this file when you actually
 need the detail — the batch-gate mechanics, the Node/Python distinction, or
 why `--targeted` doesn't exist on Node.
 
-## Test tiers (user directive 2026-09-04 #485 — gate once per batch, never run it often)
+## Test tiers (user directives #485, #585 — gate tied to task scope, never run it often)
 
-Specialists **must not run `takkub qa-gate` themselves** — finish the work,
-write a regression test for what you touched (#478), run at most
-**targeted tests for the files you changed**, then `takkub done`.
+Specialists **must not run `takkub qa-gate` themselves** (for `scope=tiny` tasks,
+`pane_guard` actively blocks `takkub qa-gate`). Finish the work, test the change
+for real (run it, open it in browser, or invoke function; write regression tests
+only when `scope=deep` or explicitly requested), run at most **targeted tests for
+the files you changed**, then `takkub done`.
 
-Batch flow: every dev pane finishes → **qa pane tests what just changed**
-(targeted functional/e2e) → once that's clean, run **`takkub qa-gate
---auto` once** covering everything changed in that batch, before
-merge/push. Not a gate per `done` — full pytest/vitest saturates the whole
-machine's CPU and stalls the user's machine for the day.
+Batch flow is tied to the **highest scope in the batch** (#585):
+- **tiny / normal only**: **No `takkub qa-gate` is run.** Dev panes test their
+  own changes directly and Lead reviews the diff. Full-suite testing is skipped.
+- **contains `deep` tasks**: Once dev panes finish and qa tests what changed,
+  the qa pane runs **`takkub qa-gate --auto` once** at the end of the batch
+  before merge/push. Not a gate per `done` — full pytest/vitest saturates the
+  whole machine's CPU and stalls the user's machine for the day.
+
 
 `--auto` (#436) picks the tier from `git diff` itself and prints its
 reasoning:

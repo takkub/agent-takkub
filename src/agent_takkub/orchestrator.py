@@ -2115,6 +2115,7 @@ class Orchestrator(
         project: str | None = None,
         feature: str = "",
         base_ref: str | None = None,
+        scope: str = "normal",
     ) -> tuple[bool, str]:
         """Register a native child without opening a cockpit pane (#268).
 
@@ -2216,6 +2217,7 @@ class Orchestrator(
             "worktree": worktree,
             "provider": parent_provider,
             "capsule": str(capsule_path),
+            "scope": scope,
         }
         try:
             from .task_ledger import create_assignment
@@ -2228,6 +2230,7 @@ class Orchestrator(
                 self.get_session_goal(project=project_ns),
                 feature,
                 parent_provider,
+                scope=scope,
             )
             if warning:
                 self._notify_lead(
@@ -2409,6 +2412,7 @@ class Orchestrator(
         _resource_token: ResourceToken | None = None,
         worktree_prepared: tuple | None = None,
         base_ref: str | None = None,
+        scope: str = "auto",
     ) -> tuple[bool, str]:
         """*distinct_from* (#514): this task must never end up running the
         same provider as *distinct_from*'s pane — a cross-check pairing
@@ -2551,6 +2555,17 @@ class Orchestrator(
                     ) + task
                 except Exception:
                     pass
+        from . import task_scope
+
+        requested_scope = (scope or "auto").strip().lower()
+        if requested_scope == "auto":
+            resolved_scope = task_scope.classify(task).scope
+        else:
+            resolved_scope = (
+                requested_scope if requested_scope in task_scope.SCOPE_TIERS else "normal"
+            )
+        task = task_scope.inject_budget(task, resolved_scope)
+
         if mode == "subagent":
             if model:
                 return False, "model override is not supported in subagent mode"
@@ -2573,6 +2588,7 @@ class Orchestrator(
                 project=project,
                 feature=feature,
                 base_ref=base_ref,
+                scope=resolved_scope,
             )
         provider = (provider or "").strip().lower() or None
         if provider:
@@ -2653,6 +2669,7 @@ class Orchestrator(
                         feature,
                         provider or "",
                         status="queued",
+                        scope=resolved_scope,
                     )
                     if ledger_warning_q:
                         self._notify_lead(
@@ -2781,6 +2798,7 @@ class Orchestrator(
                 provider,
                 effort,
                 distinct_from,
+                scope=resolved_scope,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -2803,6 +2821,7 @@ class Orchestrator(
                 prepared=worktree_prepared,
                 base_ref=base_ref,
                 distinct_from=distinct_from,
+                scope=resolved_scope,
             )
         else:
             result = self._assign_dispatch(
@@ -2820,6 +2839,7 @@ class Orchestrator(
                 provider=provider,
                 effort=effort,
                 distinct_from=distinct_from,
+                scope=resolved_scope,
             )
         if not result[0]:
             token = self._resource_tokens.pop(resource_key, None)
@@ -2936,6 +2956,7 @@ class Orchestrator(
         provider: str | None = None,
         effort: str | None = None,
         distinct_from: str | None = None,
+        scope: str = "normal",
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -3078,6 +3099,7 @@ class Orchestrator(
             project_ns,
             role_name,
             supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
+            scope=scope,
         )
         if model and pane_is_running:
             self._notify_lead(
@@ -3169,6 +3191,7 @@ class Orchestrator(
 
         ps_assign.last_assigned_task = delivery_task
         ps_assign.last_assigned_task_file = task_file
+        ps_assign.last_assigned_scope = scope
         # #484: a fresh assignment always starts undelivered, even when this
         # PaneState object is being reused from an earlier assignment that
         # DID deliver (or from close()'s new "kept, never delivered" retention
@@ -3194,6 +3217,7 @@ class Orchestrator(
                 self.get_session_goal(project=project_ns),
                 feature,
                 effective_provider,
+                scope=scope,
             )
             if ledger_warning:
                 self._notify_lead(
@@ -3423,6 +3447,7 @@ class Orchestrator(
         prepared: tuple | None = None,
         base_ref: str | None = None,
         distinct_from: str | None = None,
+        scope: str = "normal",
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -3485,6 +3510,7 @@ class Orchestrator(
                 provider=provider,
                 effort=effort,
                 distinct_from=distinct_from,
+                scope=scope,
             )
 
         if not base_cwd:
@@ -3585,6 +3611,7 @@ class Orchestrator(
             provider=provider,
             effort=effort,
             distinct_from=distinct_from,
+            scope=scope,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -5968,11 +5995,36 @@ class Orchestrator(
         # Skipped for FAILED/blocked reports (nothing to show) and `--force`.
         if not force and not failed and not blocked:
             _ps_done = self._pane_state.get(f"{project_ns}::{from_role}")
+            _assigned_scope = getattr(_ps_done, "last_assigned_scope", None)
+            if not _assigned_scope:
+                from . import task_ledger
+
+                _assigned_scope = task_ledger.get_open_scope(project_ns, from_role)
+            _is_worktree = bool(getattr(_ps_done, "worktree", None))
+            _touched_files = None
+            if not _is_worktree and _ps_done is not None:
+                _assign_snap = getattr(_ps_done, "assign_dirty_snapshot", None)
+                _git_root = getattr(_ps_done, "assign_git_root", None)
+                if _assign_snap is not None and _git_root:
+                    try:
+                        from .worktree_manager import WorktreeManager, changed_dirty_paths
+
+                        _wm = WorktreeManager()
+                        _cwd = getattr(pane, "_session_cwd", None) or _git_root
+                        _porc = _wm.shared_tree_status_porcelain(_cwd)
+                        if _porc is not None:
+                            _cur_snap = _wm.dirty_snapshot(_git_root, _porc)
+                            _touched_files = changed_dirty_paths(_assign_snap, _cur_snap)
+                    except Exception:
+                        _touched_files = None
             _gate_msg = ui_evidence_gate(
                 from_role,
                 note,
                 getattr(_ps_done, "last_assigned_task", None),
                 getattr(pane, "_session_cwd", None),
+                scope=_assigned_scope,
+                touched_files=_touched_files,
+                is_worktree=_is_worktree,
             )
             if _gate_msg:
                 _log_event("done_rejected_ui_evidence", role=from_role, project=project_ns)
@@ -6887,6 +6939,13 @@ class Orchestrator(
         if not session_id:
             return False, "missing session_id"
         project_ns = self._resolve_project(project)
+        if from_role == "lead":
+            try:
+                from . import pane_guard
+
+                pane_guard.reset_lead_edits(project=project_ns)
+            except Exception:
+                pass
         key = f"{project_ns}::{from_role}"
         ps = self._ps(key)
         ps.session_uuid = session_id
@@ -9011,9 +9070,34 @@ class Orchestrator(
                 )
             if entries:
                 projects[project] = entries
+
+        working_panes: list[str] = [
+            e["role"]
+            for entries in projects.values()
+            for e in entries
+            if e.get("state") == "working"
+        ]
+        ram_pct = None
+        cpu_pct = None
+        overloaded = False
+        gov = getattr(self, "_resource_governor", None)
+        if gov is not None:
+            try:
+                gov_snap = gov.snapshot()
+                cpu_pct = gov_snap.get("cpu_percent")
+                avail_ram = gov_snap.get("available_memory_percent")
+                ram_pct = (100.0 - avail_ram) if avail_ram is not None else None
+                overloaded = bool(gov_snap.get("overloaded"))
+            except Exception:
+                pass
+
         return {
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "projects": projects,
+            "working_panes": working_panes,
+            "overloaded": overloaded,
+            "ram_percent": ram_pct,
+            "cpu_percent": cpu_pct,
         }
 
     def write_session_snapshot(self) -> None:
@@ -11697,6 +11781,7 @@ class Orchestrator(
         provider: str | None = None,
         effort: str | None = None,
         distinct_from: str | None = None,
+        scope: str = "normal",
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
@@ -11722,6 +11807,7 @@ class Orchestrator(
                 "provider": provider,
                 "effort": effort,
                 "distinct_from": distinct_from,
+                "scope": scope,
             }
         )
         depth = len(q[project_ns])
@@ -11786,6 +11872,7 @@ class Orchestrator(
                 provider=item.get("provider"),
                 effort=item.get("effort"),
                 distinct_from=item.get("distinct_from"),
+                scope=item.get("scope", "normal"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a

@@ -159,9 +159,15 @@ docstring); `cli.cmd_guard` passes the hook payload's `cwd` field through.
 
 from __future__ import annotations
 
+import json
+import math
+import os
+import pathlib
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 # Roles allowed to drive a browser. `qa` owns e2e/smoke; `critic` and
 # `designer` need to look at rendered pages for visual review. Everyone else
@@ -671,6 +677,361 @@ def _full_suite_rule(cmd: str) -> str | None:
     return None
 
 
+# #585: When task scope is "tiny", full-suite and takkub qa-gate are denied.
+_PM_TEST = re.compile(
+    rf"{_CMD_START}(?:npm|pnpm|yarn|bun)(?![\w-])\s+(?:run\s+)?test\b(?P<tail>[^\n|;&]*)",
+    re.I | re.M,
+)
+_TAKKUB_QA_GATE = re.compile(
+    rf"{_CMD_START}(?:python3?\s+-m\s+agent_takkub\.cli|takkub)\s+qa-gate\b",
+    re.I | re.M,
+)
+SCOPE_TINY_DENY_TEXT = "งานนี้ถูกตีเป็นงานเล็ก — ถ้าจำเป็นต้อง gate จริง ให้ takkub progress ขอ Lead ปรับ scope"
+
+
+# #585 round 2: Heavy build and test suite detection for busy-machine gate
+def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
+    """Check if *cmd* is a heavy build or full test suite command (#585 round 2)."""
+    if _TAKKUB_QA_GATE.search(cmd):
+        return True, "qa_gate"
+    fs = _full_suite_rule(cmd)
+    if fs:
+        return True, fs
+    pm_t = _PM_TEST.search(cmd)
+    if pm_t and not _tail_is_narrow(pm_t.group("tail")):
+        return True, "pm_test"
+    m_build = re.search(
+        rf"{_CMD_START}(?:npm|pnpm|yarn|bun)(?![\w-])\s+(?:run\s+)?build\b", cmd, re.I | re.M
+    )
+    if m_build:
+        return True, "pm_build"
+    if re.search(rf"{_CMD_START}(?:npx\s+)?next\s+build\b", cmd, re.I | re.M):
+        return True, "next_build"
+    if re.search(rf"{_CMD_START}(?:npx\s+)?vite\s+build\b", cmd, re.I | re.M):
+        return True, "vite_build"
+    m_tsc = re.search(rf"{_CMD_START}(?:npx\s+)?tsc(?![\w-])(?P<tail>[^\n|;&]*)", cmd, re.I | re.M)
+    if m_tsc:
+        tail = m_tsc.group("tail")
+        if re.search(r"\b-(?:b|p|-build|-project)\b", tail, re.I) or not re.search(
+            r"\b[\w./\\-]+\.tsx?\b", tail, re.I
+        ):
+            return True, "tsc_project"
+    m_pw = re.search(
+        rf"{_CMD_START}(?:npx\s+)?playwright\s+test\b(?P<tail>[^\n|;&]*)", cmd, re.I | re.M
+    )
+    if m_pw and not _tail_is_narrow(m_pw.group("tail")):
+        return True, "playwright_test"
+    return False, ""
+
+
+def _is_machine_busy_from_snapshot(
+    role: str, snapshot_path: pathlib.Path | None = None
+) -> tuple[bool, str]:
+    """Check if the machine is busy from recent session snapshot (#585 round 2)."""
+    from .config import RUNTIME_DIR
+
+    path = snapshot_path or (RUNTIME_DIR / "last-session.json")
+    if not path.is_file():
+        return False, ""
+    try:
+        mtime = path.stat().st_mtime
+        if (time.time() - mtime) > 30.0:
+            return False, ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, ""
+
+    saved_at = data.get("saved_at")
+    if saved_at:
+        try:
+            dt = datetime.fromisoformat(saved_at)
+            if (datetime.now() - dt).total_seconds() > 30.0:
+                return False, ""
+        except Exception:
+            pass
+
+    # Condition 1: Other pane is working
+    working_panes = data.get("working_panes")
+    if working_panes is None:
+        working_panes = []
+        for entries in (data.get("projects") or {}).values():
+            for e in entries:
+                if e.get("state") == "working":
+                    working_panes.append(e.get("role"))
+
+    norm_role = normalise_role(role)
+    other_working = [r for r in working_panes if normalise_role(r) != norm_role]
+    if other_working:
+        return True, f"มี pane อื่นกำลังทำงาน ({', '.join(other_working)})"
+
+    # Condition 2: RAM or CPU exceeds governor ceiling
+    if bool(data.get("overloaded")):
+        return True, "ระบบอยู่ในสถานะ overloaded"
+    ram_pct = data.get("ram_percent")
+    if ram_pct is not None and ram_pct >= 85.0:
+        return True, f"RAM สูง ({ram_pct:.1f}%)"
+    cpu_pct = data.get("cpu_percent")
+    if cpu_pct is not None and cpu_pct >= 90.0:
+        return True, f"CPU สูง ({cpu_pct:.1f}%)"
+
+    return False, ""
+
+
+def evaluate_lead_direct_edit(
+    tool_name: str,
+    tool_input: dict,
+    *,
+    cwd: str | None = None,
+    project: str | None = None,
+    scope: str | None = None,
+    state_file: pathlib.Path | None = None,
+) -> Verdict:
+    """Evaluate whether Lead is permitted to perform a direct Edit/Write on source code (#585 round 2).
+
+    Conditions (all required):
+    1. scope = tiny (if scope is known and not tiny -> deny)
+    2. <= 15 lines touched in this tool call (Edit: max(old, new) lines; Write: diff vs existing file)
+    3. Cumulative <= 2 distinct files per task
+    4. Cumulative <= 30 lines per task
+    5. NOT in deep category (schema, migration, auth, security, tokens/secrets, crypto, payment, infra, lockfiles)
+    """
+    if not isinstance(tool_input, dict):
+        return Verdict(True)
+
+    file_path = str(tool_input.get("file_path") or "").strip()
+    if not file_path:
+        return Verdict(True)
+
+    # 1. Non-tiny scope check
+    norm_scope = (scope or "").strip().lower()
+    if norm_scope and norm_scope != "tiny":
+        return Verdict(
+            False,
+            rule=f"lead_direct_edit:{norm_scope}_scope",
+            reason=f"Lead direct-edit ไม่อนุญาตในงาน scope={norm_scope} (อนุญาตเฉพาะ scope=tiny) — ต้อง delegate ผ่าน takkub assign --role <role>",
+        )
+
+    # Deep patterns on file path
+    norm_file = file_path.replace("\\", "/").lower()
+    deep_file_patterns = (
+        r"\b(?:schema|prisma)\b|schemas?/",
+        r"\bmigrations?\b",
+        r"\b(?:auth|oauth|jwt|login|signup|password)\b",
+        r"\b(?:security|vulnerabilit|cve|xss|csrf)\b",
+        r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
+        r"\b(?:crypto|encryption|bcrypt)\b",
+        r"\b(?:payments?|stripe|billing)\b",
+        r"(?:package\.json|requirements\.txt|pyproject\.toml|go\.mod|cargo\.toml)$",
+        r"(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|bun\.lock)$",
+        r"\.github/(?:workflows|actions)",
+        r"(?:dockerfile|docker-compose.*\.ya?ml)$",
+    )
+    for pat in deep_file_patterns:
+        if re.search(pat, norm_file):
+            return Verdict(
+                False,
+                rule="lead_direct_edit:deep_category",
+                reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
+            )
+
+    # 2. Line count per tool call (<= 15 lines)
+    if tool_name == "Edit":
+        old_str = str(tool_input.get("old_string") or "")
+        new_str = str(tool_input.get("new_string") or "")
+        old_count = len(old_str.splitlines()) if old_str else 0
+        new_count = len(new_str.splitlines()) if new_str else 0
+        lines_this_call = max(old_count, new_count)
+    else:  # Write
+        content = str(tool_input.get("content") or "")
+        new_lines = content.splitlines() if content else []
+        resolved = pathlib.Path(file_path)
+        if not resolved.is_absolute() and cwd:
+            resolved = pathlib.Path(cwd) / resolved
+        if resolved.is_file():
+            try:
+                old_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+                import difflib
+
+                matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+                lines_this_call = sum(
+                    max(e1 - s1, e2 - s2)
+                    for tag, s1, e1, s2, e2 in matcher.get_opcodes()
+                    if tag != "equal"
+                )
+            except Exception:
+                lines_this_call = len(new_lines)
+        else:
+            lines_this_call = len(new_lines)
+
+    if lines_this_call > 15:
+        return Verdict(
+            False,
+            rule="lead_direct_edit:lines_per_call",
+            reason=(
+                f"Lead direct-edit เกินเพดาน 15 บรรทัดต่อครั้ง (แตะ {lines_this_call} บรรทัด) "
+                "— ต้อง delegate ผ่าน takkub assign --role <role>"
+            ),
+        )
+
+    # 3. Cumulative file count (<= 2) and line count (<= 30)
+    norm_path = os.path.normcase(os.path.normpath(file_path))
+    s_path = state_file
+    if s_path is None:
+        try:
+            from .config import RUNTIME_DIR
+
+            s_dir = RUNTIME_DIR / "lead_edits"
+            s_dir.mkdir(parents=True, exist_ok=True)
+            p_name = re.sub(r"[^\w.-]", "_", project or "default")
+            s_path = s_dir / f"{p_name}.json"
+        except Exception:
+            s_path = None
+
+    files_list: list[str] = []
+    accum_lines: int = 0
+    updated_at_dt: datetime | None = None
+    if s_path and s_path.is_file():
+        try:
+            s_data = json.loads(s_path.read_text(encoding="utf-8"))
+            updated_at_str = s_data.get("updated_at")
+            is_stale = False
+            if updated_at_str:
+                try:
+                    updated_at_dt = datetime.fromisoformat(updated_at_str)
+                    if (datetime.now() - updated_at_dt).total_seconds() > 1800.0:
+                        is_stale = True
+                except Exception:
+                    pass
+            if not is_stale:
+                files_list = s_data.get("files", [])
+                accum_lines = int(s_data.get("total_lines", 0))
+            else:
+                updated_at_dt = None
+        except Exception:
+            files_list = []
+            accum_lines = 0
+
+    remaining_minutes = 30
+    if updated_at_dt:
+        elapsed_s = (datetime.now() - updated_at_dt).total_seconds()
+        remaining_s = max(0.0, 1800.0 - elapsed_s)
+        remaining_minutes = max(1, math.ceil(remaining_s / 60.0))
+
+    distinct_files = set(files_list)
+    if norm_path not in distinct_files and len(distinct_files) >= 2:
+        return Verdict(
+            False,
+            rule="lead_direct_edit:cumulative_files",
+            reason=(
+                f"Lead direct-edit เกินเพดานสะสม 2 ไฟล์ต่อ task (แตะไฟล์ที่ {len(distinct_files) + 1}: {file_path}) "
+                f"— ต้อง delegate ผ่าน takkub assign --role <role> "
+                f"(เพดานจะรีเซ็ตเองใน {remaining_minutes} นาที หรือใช้ takkub lead-edits --reset)"
+            ),
+        )
+
+    new_accum = accum_lines + lines_this_call
+    if new_accum > 30:
+        return Verdict(
+            False,
+            rule="lead_direct_edit:cumulative_lines",
+            reason=(
+                f"Lead direct-edit เกินเพดานสะสม 30 บรรทัดต่อ task (สะสม {new_accum} บรรทัด) "
+                f"— ต้อง delegate ผ่าน takkub assign --role <role> "
+                f"(เพดานจะรีเซ็ตเองใน {remaining_minutes} นาที หรือใช้ takkub lead-edits --reset)"
+            ),
+        )
+
+    # Update state
+    if s_path:
+        try:
+            distinct_files.add(norm_path)
+            state_data = {
+                "files": list(distinct_files),
+                "total_lines": new_accum,
+                "updated_at": datetime.now().isoformat(),
+            }
+            tmp = s_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state_data), encoding="utf-8")
+            tmp.replace(s_path)
+        except Exception:
+            pass
+
+    return Verdict(True)
+
+
+def reset_lead_edits(
+    project: str | None = None,
+    *,
+    state_file: pathlib.Path | None = None,
+) -> bool:
+    """Reset the lead_edits accumulation state for a project (#585 round 4)."""
+    s_path = state_file
+    if s_path is None:
+        try:
+            from .config import RUNTIME_DIR
+
+            s_dir = RUNTIME_DIR / "lead_edits"
+            p_name = re.sub(r"[^\w.-]", "_", project or "default")
+            s_path = s_dir / f"{p_name}.json"
+        except Exception:
+            return False
+
+    if s_path and s_path.is_file():
+        try:
+            s_path.unlink()
+            return True
+        except Exception:
+            return False
+    return True
+
+
+def get_lead_edits_status(
+    project: str | None = None,
+    *,
+    state_file: pathlib.Path | None = None,
+) -> dict:
+    """Get the current lead_edits accumulation status for a project (#585 round 4)."""
+    s_path = state_file
+    if s_path is None:
+        try:
+            from .config import RUNTIME_DIR
+
+            s_dir = RUNTIME_DIR / "lead_edits"
+            p_name = re.sub(r"[^\w.-]", "_", project or "default")
+            s_path = s_dir / f"{p_name}.json"
+        except Exception:
+            s_path = None
+
+    files_list: list[str] = []
+    accum_lines = 0
+    updated_at = None
+    if s_path and s_path.is_file():
+        try:
+            s_data = json.loads(s_path.read_text(encoding="utf-8"))
+            updated_at_str = s_data.get("updated_at")
+            is_stale = False
+            if updated_at_str:
+                try:
+                    dt = datetime.fromisoformat(updated_at_str)
+                    if (datetime.now() - dt).total_seconds() > 1800.0:
+                        is_stale = True
+                except Exception:
+                    pass
+            if not is_stale:
+                files_list = s_data.get("files", [])
+                accum_lines = int(s_data.get("total_lines", 0))
+                updated_at = updated_at_str
+        except Exception:
+            pass
+
+    return {
+        "files": files_list,
+        "files_count": len(set(files_list)),
+        "total_lines": accum_lines,
+        "updated_at": updated_at,
+    }
+
+
 # git subcommand gate (#314): "only Lead commits" — see module docstring for
 # why prose alone wasn't enough. Flags between `git` and the subcommand are
 # skipped ONLY when they look like bare flags (`-c foo=bar` style two-token
@@ -903,6 +1264,8 @@ def classify(
     *,
     mb_fallback_check: Callable[[], bool] | None = None,
     cwd: str | None = None,
+    scope: str | None = None,
+    snapshot_path: pathlib.Path | None = None,
 ) -> Verdict:
     """Decide whether `role` may run `command`.
 
@@ -926,6 +1289,12 @@ def classify(
     `git commit` carve-out (see `_is_worktree_cwd`). `None`/missing defaults
     to "not a worktree" — i.e. `git commit` stays blocked, the same
     conservative direction every other rule here fails toward.
+
+    *scope* (#585): current task scope budget ("tiny" | "normal" | "deep").
+    When "tiny", blocks `takkub qa-gate` and full-suite test runs.
+
+    *snapshot_path* (#585 round 2): optional path to last-session.json for
+    busy-machine checks. None uses RUNTIME_DIR / "last-session.json".
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -960,8 +1329,51 @@ def classify(
                 ),
             )
 
+    # #585 round 2/4: Deny heavy build or full suite when machine is busy
+    # (other pane working or RAM/CPU overloaded).
+    # Gated BEFORE _UNGUARDED_ROLES so Lead is caught; `shell` (user terminal)
+    # and unknown/empty role (human outside cockpit) are exempt.
+    if name and name != "shell":
+        is_heavy, heavy_type = _is_heavy_build_or_suite(cmd)
+        if is_heavy:
+            busy, busy_reason = _is_machine_busy_from_snapshot(name, snapshot_path=snapshot_path)
+            if busy:
+                return Verdict(
+                    False,
+                    rule=f"busy_machine:{heavy_type}",
+                    reason=(
+                        f"เครื่องกำลังไม่ว่าง ({busy_reason}) — ห้ามรัน heavy build หรือ full test suite. "
+                        "ใช้ targeted test/typecheck ไฟล์เดียว หรือรอให้เครื่องว่างก่อน"
+                    ),
+                )
+
     if not name or name in _UNGUARDED_ROLES:
         return Verdict(True)
+
+    # #585: When task scope is tiny, deny takkub qa-gate and full-suite test runs.
+    # Targeted tests of the modified file remain allowed.
+    norm_scope = (scope or "").strip().lower()
+    if norm_scope == "tiny":
+        if _TAKKUB_QA_GATE.search(cmd):
+            return Verdict(
+                False,
+                rule="scope_tiny:qa_gate",
+                reason=SCOPE_TINY_DENY_TEXT,
+            )
+        fs_rule = _full_suite_rule(cmd)
+        if fs_rule is not None:
+            return Verdict(
+                False,
+                rule=f"scope_tiny:{fs_rule}",
+                reason=SCOPE_TINY_DENY_TEXT,
+            )
+        pm_m = _PM_TEST.search(cmd)
+        if pm_m and not _tail_is_narrow(pm_m.group("tail")):
+            return Verdict(
+                False,
+                rule="scope_tiny:pm_test",
+                reason=SCOPE_TINY_DENY_TEXT,
+            )
 
     raw_role = (role or "").strip().lower()
     if "#" in raw_role and is_browser_role(name) and _MB_INVOKE.search(cmd):

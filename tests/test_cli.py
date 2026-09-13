@@ -2274,3 +2274,68 @@ class TestTeamCommand:
         out = capsys.readouterr().out
         assert "solo-lead" in out
         assert "งานเดี่ยว scope ชัด" in out
+
+
+class TestLeadEditsCommand:
+    """#585 round 4 item 1: `takkub lead-edits` CLI and reset on assign."""
+
+    def test_lead_edits_reset_calls_reset_lead_edits(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reset_calls: list[str | None] = []
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.reset_lead_edits",
+            lambda project=None, **kw: reset_calls.append(project) or True,
+        )
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setenv("TAKKUB_PROJECT", "proj-a")
+
+        rc = cli.main(["lead-edits", "--reset"])
+        assert rc == 0
+        assert reset_calls == ["proj-a"]
+        out = capsys.readouterr().out
+        assert "lead-edits counter reset for project 'proj-a'" in out
+
+    def test_lead_edits_status_display(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.get_lead_edits_status",
+            lambda project=None, **kw: {
+                "files": ["src/a.py"],
+                "files_count": 1,
+                "total_lines": 10,
+                "updated_at": "2026-09-13T08:00:00",
+            },
+        )
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setenv("TAKKUB_PROJECT", "proj-b")
+
+        rc = cli.main(["lead-edits"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "lead-edits [proj-b]: 1/2 files, 10/30 lines" in out
+
+    def test_lead_edits_blocked_for_teammate(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        rc = cli.main(["lead-edits", "--reset"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "error:" in err
+
+    def test_assign_resets_lead_edits_on_success(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reset_calls: list[str | None] = []
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.reset_lead_edits",
+            lambda project=None, **kw: reset_calls.append(project) or True,
+        )
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        monkeypatch.setenv("TAKKUB_PROJECT", "myproj")
+
+        rc = cli.main(["assign", "--role", "frontend", "build button"])
+        assert rc == 0
+        assert reset_calls == ["myproj"]

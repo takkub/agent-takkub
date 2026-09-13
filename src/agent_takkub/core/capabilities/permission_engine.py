@@ -44,6 +44,7 @@ lives in `cmd_guard`, unchanged by this rewiring.
 
 from __future__ import annotations
 
+import pathlib
 from collections.abc import Callable
 
 from agent_takkub import pane_guard, pane_tools_policy
@@ -73,18 +74,25 @@ class PermissionEngine:
         agent: str | None = None,
         provider: str | None = None,
         account: str | None = None,
+        scope: str | None = None,
+        snapshot_path: pathlib.Path | None = None,
     ) -> pane_guard.Verdict:
         """Layer 2. Returns `pane_guard.classify`'s `Verdict` unchanged;
         additionally audits a DENIED verdict (see module docstring for why
         only denials are logged).
 
-        *mb_fallback_check* / *cwd* are passed straight through to
-        `pane_guard.classify` verbatim — see that function's docstring for
-        their contracts (the #304 mb-shard grant check and the #314
-        worktree `git commit` carve-out). Neither is inspected or altered
-        here; this façade must not change what the two kwargs mean to the
-        rule engine, only forward them."""
-        verdict = pane_guard.classify(command, role, mb_fallback_check=mb_fallback_check, cwd=cwd)
+        *mb_fallback_check* / *cwd* / *scope* / *snapshot_path* are passed straight
+        through to `pane_guard.classify` verbatim — see that function's docstring for
+        their contracts. Neither is inspected or altered here; this façade must
+        not change what the kwargs mean to the rule engine, only forward them."""
+        verdict = pane_guard.classify(
+            command,
+            role,
+            mb_fallback_check=mb_fallback_check,
+            cwd=cwd,
+            scope=scope,
+            snapshot_path=snapshot_path,
+        )
         if not verdict.allowed:
             log_capability_event(
                 "capability.shell_command_denied",
@@ -93,6 +101,42 @@ class PermissionEngine:
                 provider=provider,
                 account=account,
                 tool="bash",
+                rule=verdict.rule,
+                reason=verdict.reason,
+            )
+        return verdict
+
+    def evaluate_lead_edit(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        *,
+        role: str | None = None,
+        cwd: str | None = None,
+        project: str | None = None,
+        scope: str | None = None,
+        state_file: pathlib.Path | None = None,
+        agent: str | None = None,
+        provider: str | None = None,
+        account: str | None = None,
+    ) -> pane_guard.Verdict:
+        """Evaluate whether Lead is permitted to perform a direct Edit/Write (#585 round 2)."""
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            tool_name,
+            tool_input,
+            cwd=cwd,
+            project=project,
+            scope=scope,
+            state_file=state_file,
+        )
+        if not verdict.allowed:
+            log_capability_event(
+                "capability.lead_direct_edit_denied",
+                who=role,
+                agent=agent,
+                provider=provider,
+                account=account,
+                tool=tool_name.lower(),
                 rule=verdict.rule,
                 reason=verdict.reason,
             )

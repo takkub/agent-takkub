@@ -814,3 +814,511 @@ class TestFullSuiteAllowed:
         never itself trip this rule for any role."""
         assert pane_guard.classify("takkub qa-gate --targeted src/foo.ts", "qa").allowed
         assert pane_guard.classify("takkub qa-gate --auto", "qa").allowed
+
+
+class TestScopeBudgetGuards:
+    """#585: When task scope is tiny, block takkub qa-gate and full test suite,
+    while allowing targeted test executions."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "takkub qa-gate",
+            "takkub qa-gate --auto",
+            "takkub qa-gate --targeted src/foo.ts",
+        ],
+    )
+    def test_qa_gate_denied_for_tiny_scope(self, cmd: str) -> None:
+        for role in ["backend", "frontend", "qa"]:
+            verdict = pane_guard.classify(cmd, role, scope="tiny")
+            assert not verdict.allowed
+            assert verdict.rule == "scope_tiny:qa_gate"
+            assert "งานเล็ก" in verdict.reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "pytest",
+            "npm test",
+            "pnpm test",
+            "npm run test",
+            "yarn test",
+            "vitest run",
+        ],
+    )
+    def test_full_suite_denied_for_tiny_scope(self, cmd: str) -> None:
+        for role in ["backend", "frontend", "tester"]:
+            verdict = pane_guard.classify(cmd, role, scope="tiny")
+            assert not verdict.allowed
+            assert verdict.rule.startswith("scope_tiny")
+            assert "งานเล็ก" in verdict.reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "pytest tests/test_task_scope.py",
+            "python -m pytest tests/test_task_scope.py",
+            "vitest run src/foo.test.ts",
+            "npm test -- tests/foo.test.ts",
+            "git status",
+            "git diff",
+        ],
+    )
+    def test_targeted_tests_and_other_commands_allowed_for_tiny_scope(self, cmd: str) -> None:
+        verdict = pane_guard.classify(cmd, "backend", scope="tiny")
+        assert verdict.allowed
+
+
+class TestBusyMachineDenied:
+    """#585 round 2: When machine is busy (other pane working or RAM/CPU overloaded),
+    deny heavy build or full test suite (within 30s of snapshot).
+    Allow targeted tests, dev server, and commands when snapshot is stale or machine is idle."""
+
+    def test_heavy_build_denied_when_other_pane_working(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": False,
+            "ram_percent": 50.0,
+            "cpu_percent": 30.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        for cmd in [
+            "npm run build",
+            "pnpm run build",
+            "yarn run build",
+            "bun run build",
+            "next build",
+            "vite build",
+            "tsc -b",
+            "tsc -p tsconfig.json",
+            "pytest",
+            "npm test",
+            "vitest run",
+            "playwright test",
+            "takkub qa-gate",
+        ]:
+            verdict = pane_guard.classify(cmd, "backend", snapshot_path=snap)
+            assert not verdict.allowed, f"Should be blocked: {cmd}"
+            assert verdict.rule.startswith("busy_machine:")
+            assert "เครื่องกำลังไม่ว่าง" in verdict.reason
+
+    def test_heavy_build_denied_when_overloaded(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": [],
+            "overloaded": True,
+            "ram_percent": 88.0,
+            "cpu_percent": 40.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        verdict = pane_guard.classify("npm run build", "backend", snapshot_path=snap)
+        assert not verdict.allowed
+        assert verdict.rule.startswith("busy_machine:")
+
+    def test_targeted_tests_and_dev_servers_allowed_when_busy(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": False,
+            "ram_percent": 50.0,
+            "cpu_percent": 30.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        for cmd in [
+            "pytest tests/test_foo.py",
+            "tsc src/foo.ts",
+            "npm run dev",
+            "next dev",
+            "vite dev",
+            "npm test -- src/foo.test.ts",
+        ]:
+            verdict = pane_guard.classify(cmd, "backend", snapshot_path=snap)
+            assert verdict.allowed, f"Should be allowed: {cmd}"
+
+        # Browser role running targeted playwright test is allowed
+        verdict = pane_guard.classify("playwright test tests/foo.spec.ts", "qa", snapshot_path=snap)
+        assert verdict.allowed
+
+    def test_stale_snapshot_passes_through(self, tmp_path) -> None:
+        import json
+        import os
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        stale_time = datetime.now().timestamp() - 60
+        data = {
+            "saved_at": datetime.fromtimestamp(stale_time).isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": True,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+        os.utime(snap, (stale_time, stale_time))
+
+        verdict = pane_guard.classify("npm run build", "backend", snapshot_path=snap)
+        assert verdict.allowed
+
+    def test_pane_does_not_block_itself_as_working(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["backend"],  # own role
+            "overloaded": False,
+            "ram_percent": 50.0,
+            "cpu_percent": 30.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        verdict = pane_guard.classify("npm run build", "backend", snapshot_path=snap)
+        assert verdict.allowed
+
+    def test_lead_is_denied_heavy_build_when_machine_busy(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": False,
+            "ram_percent": 50.0,
+            "cpu_percent": 30.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        # Lead running heavy build or full suite is denied (#585 round 4 item 3)
+        v1 = pane_guard.classify("npm run build", "lead", snapshot_path=snap)
+        assert not v1.allowed
+        assert v1.rule == "busy_machine:pm_build"
+        assert "เครื่องกำลังไม่ว่าง" in v1.reason
+
+        v2 = pane_guard.classify("pytest", "lead", snapshot_path=snap)
+        assert not v2.allowed
+        assert v2.rule == "busy_machine:pytest"
+
+    def test_shell_is_exempt_from_busy_machine_gate(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": True,
+            "ram_percent": 95.0,
+            "cpu_percent": 95.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        # shell is user-driven pane — never blocked (#585 round 4 item 3)
+        v1 = pane_guard.classify("npm run build", "shell", snapshot_path=snap)
+        assert v1.allowed
+
+        v2 = pane_guard.classify("pytest", "shell", snapshot_path=snap)
+        assert v2.allowed
+
+    def test_human_terminal_is_exempt_from_busy_machine_gate(self, tmp_path) -> None:
+        import json
+        from datetime import datetime
+
+        snap = tmp_path / "last-session.json"
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "working_panes": ["frontend"],
+            "overloaded": True,
+            "ram_percent": 95.0,
+            "cpu_percent": 95.0,
+        }
+        snap.write_text(json.dumps(data), encoding="utf-8")
+
+        # human outside cockpit (role=None) is never blocked
+        v1 = pane_guard.classify("npm run build", None, snapshot_path=snap)
+        assert v1.allowed
+
+
+class TestLeadDirectEdit:
+    """#585 round 2: Lead tiny-fix carve-out.
+    <=2 files, <=15 lines per call, cumulative <=2 files/30 lines per task, non-deep."""
+
+    def test_allowed_when_tiny_and_within_budget(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/agent_takkub/foo.py",
+                "old_string": "x = 1\n",
+                "new_string": "x = 2\n",
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert verdict.allowed
+
+    def test_denied_when_scope_is_not_tiny(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/agent_takkub/foo.py",
+                "old_string": "x = 1\n",
+                "new_string": "x = 2\n",
+            },
+            scope="normal",
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:normal_scope"
+
+    def test_denied_when_deep_category_file(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        for bad_file in [
+            "prisma/schema.prisma",
+            "src/auth/jwt.py",
+            "package.json",
+            "package-lock.json",
+            ".github/workflows/ci.yml",
+            "docker-compose.yml",
+        ]:
+            verdict = pane_guard.evaluate_lead_direct_edit(
+                "Edit",
+                {
+                    "file_path": bad_file,
+                    "old_string": "x\n",
+                    "new_string": "y\n",
+                },
+                scope="tiny",
+                state_file=state_file,
+            )
+            assert not verdict.allowed
+            assert verdict.rule == "lead_direct_edit:deep_category"
+
+    def test_denied_when_lines_per_call_exceeds_15(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/agent_takkub/foo.py",
+                "old_string": "\n".join(f"line {i}" for i in range(20)),
+                "new_string": "short\n",
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:lines_per_call"
+
+    def test_denied_when_cumulative_files_exceeds_2(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        v1 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v1.allowed
+
+        v2 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file2.py", "old_string": "a\n", "new_string": "b\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v2.allowed
+
+        v3 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file3.py", "old_string": "a\n", "new_string": "b\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v3.allowed
+        assert v3.rule == "lead_direct_edit:cumulative_files"
+
+    def test_denied_when_cumulative_lines_exceeds_30(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        v1 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"x{i}" for i in range(15)),
+                "new_string": "y\n",
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v1.allowed
+
+        v2 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"z{i}" for i in range(15)),
+                "new_string": "w\n",
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v2.allowed
+
+        v3 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\nb\n", "new_string": "c\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v3.allowed
+        assert v3.rule == "lead_direct_edit:cumulative_lines"
+
+    def test_rolling_window_resets_after_30_minutes(self, tmp_path) -> None:
+        import json
+        from datetime import datetime, timedelta
+
+        state_file = tmp_path / "state.json"
+        # Reach 30 lines limit
+        v1 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"x{i}" for i in range(15)),
+                "new_string": "y\n",
+            },
+            state_file=state_file,
+        )
+        assert v1.allowed
+        v2 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"z{i}" for i in range(15)),
+                "new_string": "w\n",
+            },
+            state_file=state_file,
+        )
+        assert v2.allowed
+
+        # 3rd edit is denied (exceeds 30 cumulative lines)
+        v3 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert not v3.allowed
+        assert v3.rule == "lead_direct_edit:cumulative_lines"
+
+        # Backdate updated_at by 31 minutes (> 1800 seconds)
+        s_data = json.loads(state_file.read_text(encoding="utf-8"))
+        old_time = datetime.now() - timedelta(minutes=31)
+        s_data["updated_at"] = old_time.isoformat()
+        state_file.write_text(json.dumps(s_data), encoding="utf-8")
+
+        # Now edit should be allowed because rolling window reset (#585 round 4 item 1)
+        v4 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert v4.allowed
+
+        # Check that state is reset to only lines from v4
+        s_new = json.loads(state_file.read_text(encoding="utf-8"))
+        assert s_new["total_lines"] == 1
+
+    def test_reset_lead_edits_function(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        v1 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert v1.allowed
+        v2 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file2.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert v2.allowed
+        v3 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file3.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert not v3.allowed
+        assert v3.rule == "lead_direct_edit:cumulative_files"
+
+        # Explicit reset via reset_lead_edits (#585 round 4 item 1)
+        res = pane_guard.reset_lead_edits(state_file=state_file)
+        assert res is True
+        assert not state_file.is_file()
+
+        # Next edit is allowed again
+        v4 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file3.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert v4.allowed
+
+    def test_deny_message_informs_about_auto_reset_and_command(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        v1 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"x{i}" for i in range(15)),
+                "new_string": "y\n",
+            },
+            state_file=state_file,
+        )
+        assert v1.allowed
+        v2 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/file1.py",
+                "old_string": "\n".join(f"z{i}" for i in range(15)),
+                "new_string": "w\n",
+            },
+            state_file=state_file,
+        )
+        assert v2.allowed
+        v3 = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        assert not v3.allowed
+        assert "เพดานจะรีเซ็ตเองใน" in v3.reason
+        assert "takkub lead-edits --reset" in v3.reason
+
+    def test_get_lead_edits_status(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        status_empty = pane_guard.get_lead_edits_status(state_file=state_file)
+        assert status_empty["files_count"] == 0
+        assert status_empty["total_lines"] == 0
+
+        pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/file1.py", "old_string": "a\n", "new_string": "b\n"},
+            state_file=state_file,
+        )
+        status_after = pane_guard.get_lead_edits_status(state_file=state_file)
+        assert status_after["files_count"] == 1
+        assert status_after["total_lines"] == 1
+        assert status_after["updated_at"] is not None

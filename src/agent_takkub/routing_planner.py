@@ -53,6 +53,8 @@ class RoutingAction:
     suggested_mode: str = "pane"  # advisory only; Lead chooses at dispatch time
     mode_reason: str = ""
     provider: str | None = None
+    scope: str | None = None
+    scope_reason: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1063,9 +1065,17 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
 
 
 def classify(user_message: str, context: dict | None = None) -> RoutingAction:
-    """Classify routing and attach an advisory pane/subagent mode suggestion."""
+    """Classify routing and attach an advisory pane/subagent mode suggestion and scope budget (#585)."""
     action = _classify_core(user_message, context)
     action.suggested_mode, action.mode_reason = suggest_assign_mode(user_message)
+    try:
+        from . import task_scope
+
+        scope_dec = task_scope.classify(user_message)
+        action.scope = scope_dec.scope
+        action.scope_reason = scope_dec.reason
+    except Exception:
+        pass
     return action
 
 
@@ -1105,3 +1115,6 @@ def suggest_team_size(user_message: str, context: dict | None = None) -> tuple[s
     if action.role:
         return "solo-lead", f"งานเดี่ยว scope ชัด ({action.role}) — ทำเองได้ ไม่ต้อง spawn"
     return "full", "จำแนก scope ไม่ได้ชัดเจน — เปิดทีมไว้ก่อนเพื่อความปลอดภัย"
+
+
+# ── Fix loop ceiling re-exports (#585 round 3) ───────────────────────────────

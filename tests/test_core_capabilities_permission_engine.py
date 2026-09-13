@@ -144,3 +144,47 @@ def test_evaluate_shell_command_does_not_audit_allowed_verdict(
 
     assert verdict.allowed is True
     assert not events_log.exists()
+
+
+def test_evaluate_shell_command_passes_scope_through(engine: PermissionEngine) -> None:
+    """#585: evaluate_shell_command must forward scope to pane_guard.classify verbatim."""
+    # Under scope="tiny", takkub qa-gate is denied
+    verdict_tiny = engine.evaluate_shell_command("takkub qa-gate", "backend", scope="tiny")
+    assert verdict_tiny.allowed is False
+    assert verdict_tiny.rule.startswith("scope_tiny")
+
+    # Under normal scope, takkub qa-gate is allowed
+    verdict_normal = engine.evaluate_shell_command("takkub qa-gate", "backend", scope="normal")
+    assert verdict_normal.allowed is True
+
+
+def test_evaluate_lead_edit_delegates_and_audits_denial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: PermissionEngine
+) -> None:
+    """#585 round 2: evaluate_lead_edit evaluates Lead direct edit and audits denial."""
+    events_log = tmp_path / "events.log"
+    monkeypatch.setattr(config_mod, "EVENTS_LOG", events_log)
+    monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
+
+    # Allowed edit
+    v_allow = engine.evaluate_lead_edit(
+        "Edit",
+        {"file_path": "src/foo.py", "old_string": "a\n", "new_string": "b\n"},
+        role="lead",
+        scope="tiny",
+        state_file=tmp_path / "lead_edit.json",
+    )
+    assert v_allow.allowed is True
+    assert not events_log.exists()
+
+    # Denied edit (deep file)
+    v_deny = engine.evaluate_lead_edit(
+        "Edit",
+        {"file_path": "package.json", "old_string": "a\n", "new_string": "b\n"},
+        role="lead",
+        scope="tiny",
+        state_file=tmp_path / "lead_edit.json",
+    )
+    assert v_deny.allowed is False
+    assert events_log.exists()
+    assert "capability.lead_direct_edit_denied" in events_log.read_text(encoding="utf-8")

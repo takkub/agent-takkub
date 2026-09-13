@@ -855,6 +855,7 @@ class CliServer(QObject):
                         distinct_from=(
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
+                        scope=str(req.get("scope", "auto") or "auto"),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -895,6 +896,7 @@ class CliServer(QObject):
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
                         mode=mode,
+                        scope=str(req.get("scope", "auto") or "auto"),
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):
@@ -945,6 +947,12 @@ class CliServer(QObject):
                     queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)
                     if queued_notice:
                         ack_msg = f"{ack_msg}\n{queued_notice}"
+                    try:
+                        from . import pane_guard
+
+                        pane_guard.reset_lead_edits(project=from_project)
+                    except Exception:
+                        pass
                     self._reply(sock, ok=True, msg=ack_msg)
                 return
             elif cmd == "send":
@@ -1055,8 +1063,16 @@ class CliServer(QObject):
                 self._reply(sock, ok=ok, msg=msg, block=blocked)
                 return
             elif cmd == "session-report":
+                from_role = req.get("from") or ""
+                if (from_role or "").split("#", 1)[0].strip().lower() == "lead":
+                    try:
+                        from . import pane_guard
+
+                        pane_guard.reset_lead_edits(project=from_project)
+                    except Exception:
+                        pass
                 ok, msg = self._orch.consume_session_report(
-                    req.get("from") or "",
+                    from_role,
                     project=from_project,
                     session_id=req.get("session_id", ""),
                     source=req.get("source", ""),

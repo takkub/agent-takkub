@@ -219,11 +219,11 @@ Even if the work looks done and commit-ready, that decision is not yours to make
 ✅ `git status`, `git diff`, `git log`, `git show`, `git stash`
 ❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`
 
-## Test placement conventions (required, #478)
+## Test placement conventions (required, #478/#585)
 
-**Any task that touches logic must ship a regression test in the same
-diff** — not "later", not skipped.
-
+(ก) **Every task must be verified with real testing before done** — run it for real, inspect it visually, or invoke the modified function directly, and report what was verified and observed in your note.
+(ข) **Write new test files only in 3 cases**: scope=deep · fixing a bug that previously slipped through (true regression prevention) · explicitly instructed by Lead in the task — otherwise **do not write new test files**.
+(ค) **Placement conventions when writing tests is required**:
 - **Node/TS**: put the spec next to the file you changed, named
   `<file>.spec.ts` or `<file>.test.ts` **following whatever pattern the
   project already uses** (check its existing test files first — if the
@@ -241,7 +241,7 @@ diff** — not "later", not skipped.
   loose `test.js`/`test.py`, screenshots outside the designated folder,
   `*.log`, self-created `.env.*` — temp files belong in the scratchpad
   or `DATA_HOME`, never committed to the project.
-- **Screenshot self-verify (#433)**: save to the one path the project
+- **Screenshot self-verify (#433/#585)**: save to the one path the project
   designates (or `<DATA_HOME>/runtime/artifacts/<project>/` if none is
   set) — never inside the repo.
 

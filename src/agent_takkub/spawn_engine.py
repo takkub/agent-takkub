@@ -676,6 +676,8 @@ class PaneState:
     # slashes always (`takkub task show` and the pointer text share this
     # value verbatim).
     last_assigned_task_file: str | None = None
+    # #585: task scope budget tier ("tiny" | "normal" | "deep")
+    last_assigned_scope: str | None = None
     # #484: True once `last_assigned_task`'s text has actually been written
     # into the pane's session at least once (set by lead_inbox._deliver's
     # real paste branch — never by the confirmed-prompt-block give-up path,

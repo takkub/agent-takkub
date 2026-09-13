@@ -26,15 +26,15 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
 ห้ามแตะ network ของเครื่องโดยเด็ดขาด (`netsh`, `ipconfig /release`/`/renew`, `networksetup`, `ifconfig <if> up`/`down`, `route add`/`delete`) — เป็นของ user ไม่ใช่ sandbox ของ pane ต้องการเทสผ่านเน็ตเส้นอื่น → ขอ user ต่อ**มือถือ**/อุปกรณ์ที่สองแทน รายละเอียดเต็ม: `docs/roles/common.md#no-host-network-changes`.
 
-## 🧪 กติกาวางเทส (test placement conventions, required, #478)
-ทุกงานที่แตะ logic ต้องมีเทสกันถอยในดิฟฟ์เดียวกัน — Node/TS: `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม (e2e/smoke conventions, #485 gate-once-per-batch): `docs/roles/common.md#test-placement`.
+## 🧪 กติกาวางเทส (test placement conventions, required, #478/#585)
+(ก) ทุกงานต้องทดสอบของจริงก่อน done — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร · (ข) เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี: scope=deep, แก้ bug ที่เคยหลุด (กันถอยจริง), หรือ Lead สั่งชัดใน task เท่านั้น — นอกนั้นห้ามเขียน · (ค) เมื่อต้องเขียนเทสจริง: Node/TS วาง `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม: `docs/roles/common.md#test-placement`.
 
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
-2. **Test the just-changed work first (#485):** write/run integration/e2e tests covering the happy path + edge cases of what the team actually changed this batch — functional verification comes before any gate. Found a problem → send it back to the owning pane (`takkub send`) and stop here; no gate yet.
-3. **Single batch gate, only when step 2 is clean (#485):** `takkub qa-gate --auto` — **once per batch**, covering everything changed in the round, right before Lead merges/pushes. Specialists no longer gate before `takkub done`, so this run is the one local gate the batch gets. `--auto` picks the tier from `git diff` (#436); canonical entrypoint #325 — report auto-saved to `<DATA_HOME>/runtime/qa-reports/`, never into the repo. Never invoke `pytest`/`ruff`/`lint-imports` directly, and never a raw full pytest run outside this command.
+2. **Test the just-changed work first (#485):** run tests covering the happy path + edge cases of what the team actually changed this batch — functional verification comes before any gate. Found a problem → send it back to the owning pane (`takkub send`) and stop here; no gate yet.
+3. **Single batch gate, only for batches containing deep tasks (#485, #585):** if the batch contains deep tasks and step 2 is clean, run `takkub qa-gate --auto` **once per batch** before merge/push (batches with only tiny/normal tasks skip qa-gate). `--auto` picks the tier from `git diff` (#436); canonical entrypoint #325 — report auto-saved to `<DATA_HOME>/runtime/qa-reports/`, never into the repo. Never invoke `pytest`/`ruff`/`lint-imports` directly.
 4. Every smoke/e2e report needs a 1–5 verdict with evidence — read `docs/roles/qa/e2e-verification.md` before writing the `takkub done` note, every time.
-5. `takkub done "<note>"` (paste the qa-report path from step 3, and the shot dir from step 4).
+5. `takkub done "<note>"` (paste the qa-report path from step 3 if run, and the shot dir from step 4).
 
 ## Read on demand (not staged into your boot context — pull in only when it applies)
 - Temp file / screenshot storage locations (#1, #104), `takkub send` + blocked-escalation protocol → `docs/roles/common.md`

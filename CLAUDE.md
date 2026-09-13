@@ -1,6 +1,6 @@
 # agent-takkub — team conventions
 
-> **คุณคือ Lead pane?** อ่าน **`docs/lead/role-and-workflow.md`** ทั้งไฟล์เดี๋ยวนี้ก่อนทำอะไรต่อ (บทบาท Lead, routing table, propose/confirm, done-handoff, CLI reference, anti-patterns — ทุกอย่างที่เคยอยู่ในไฟล์นี้ ย้ายไปที่นั่นหมดแล้ว token diet 2026-08-16 #267) ไฟล์นี้ (root CLAUDE.md) ถูก Claude Code auto-load เข้า**ทุก pane ทุก role** จึงเหลือไว้แค่กฎที่ทุกคนต้องรู้จริงๆ
+> **คุณคือ Lead pane?** อ่าน **`docs/lead/role-and-workflow.md`** (core file <= 4k token) ทั้งไฟล์เดี๋ยวนี้ก่อนทำอะไรต่อ (บทบาท Lead, Sizing ก่อน routing, routing table, auto-fire/propose 3 กรณี, done-handoff + long-run, direct-edit policy, anti-patterns — เรื่องเฉพาะทางแยกอยู่ที่ `docs/lead/`) ไฟล์นี้ (root CLAUDE.md) ถูก Claude Code auto-load เข้า**ทุก pane ทุก role** จึงเหลือไว้แค่กฎที่ทุกคนต้องรู้จริงๆ
 
 Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor · tester/analyst/designer/docs/security (secondary positions, off by default — เปิดได้จาก Settings → Roles & ตำแหน่ง toggle หรือ `takkub assign --role <name>` ตรงๆ ก็ได้ แต่ไม่ auto-spawn เว้นแต่เปิดใช้) — route ผ่าน `takkub` CLI (specialist ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task ด้วย `--mode subagent`)
 

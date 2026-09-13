@@ -1438,3 +1438,20 @@ class TestClassifyCodeRootCause:
         from agent_takkub.routing_planner import classify_code_root_cause
 
         assert classify_code_root_cause("") == (False, "")
+
+
+class TestScopeBudgetClassification:
+    def test_tiny_scope_attached_to_action(self) -> None:
+        action = classify("แก้คำผิดบนปุ่ม submit")
+        assert action.scope == "tiny"
+        assert action.scope_reason
+
+    def test_deep_scope_attached_to_action(self) -> None:
+        action = classify("refactor auth flow and migrate database schema")
+        assert action.scope == "deep"
+        assert action.scope_reason
+
+    def test_normal_scope_default(self) -> None:
+        action = classify("implement user profile page")
+        assert action.scope == "normal"
+        assert action.scope_reason

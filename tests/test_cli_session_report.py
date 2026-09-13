@@ -72,6 +72,29 @@ class TestReportsSessionId:
         assert payload["from"] == "backend"
         assert payload["from_project"] == "myproj"
 
+    def test_lead_session_start_resets_lead_edits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(
+            monkeypatch,
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "lead-session-id",
+                "source": "startup",
+                "cwd": "/proj",
+            },
+            TAKKUB_ROLE="lead",
+            TAKKUB_PROJECT="myproj",
+        )
+        reset_calls: list[str | None] = []
+        monkeypatch.setattr(
+            "agent_takkub.pane_guard.reset_lead_edits",
+            lambda project=None, **kw: reset_calls.append(project) or True,
+        )
+        monkeypatch.setattr(cli, "_hook_request", lambda p, **kw: {"ok": True})
+
+        resp = cli.cmd_session_report(None)
+        assert resp == {"ok": True, "msg": ""}
+        assert reset_calls == ["myproj"]
+
     def test_fires_on_startup_source_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Idempotent no-op case: startup source with the same uuid the
         # orchestrator already stamped at spawn time — still reported

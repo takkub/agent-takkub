@@ -63,6 +63,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         # docstring).
         "report",
         "tail",  # reads recent transcript output of other panes — #541
+        "lead-edits",  # inspect / reset lead direct-edit counters — #585 round 4
     }
 )
 
@@ -641,6 +642,28 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     args.task = task_text
     base_role = (getattr(args, "role", "") or "").split("#", 1)[0].strip().lower()
 
+    from . import task_scope
+
+    requested_scope = (getattr(args, "scope", "auto") or "auto").strip().lower()
+    auto_decision = task_scope.classify(task_text)
+    if requested_scope == "auto":
+        scope = auto_decision.scope
+        scope_reason = auto_decision.reason
+    else:
+        scope = requested_scope
+        diff_steps = abs(
+            task_scope.TIER_ORDER.get(scope, 1) - task_scope.TIER_ORDER.get(auto_decision.scope, 1)
+        )
+        if diff_steps >= 2:
+            print(
+                f"warn: --scope {scope} ต่างจากการประเมิน auto ({auto_decision.scope} — {auto_decision.reason}) 2 ขั้น",
+                file=sys.stderr,
+            )
+        scope_reason = f"ระบุเอง (auto ประเมินเป็น {auto_decision.scope}: {auto_decision.reason})"
+
+    # assign ต้องพิมพ์ scope + เหตุผล 1 บรรทัดกลับมาเสมอ (ทั้งตอน auto และตอน Lead ระบุเอง)
+    print(f"scope: {scope} ({scope_reason})")
+
     # #513/#561: Keep qa / critic working as aliases for >= 1 release, emitting deprecation warning
     if base_role in ("qa", "critic"):
         from .routing_planner import REVIEWER_MODE_ALIASES
@@ -850,10 +873,17 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "mode": mode_requested,
                     "team": team,
                     "distinct_from": distinct_from,
+                    "scope": scope,
                 }
             )
         )
         if resp.get("ok"):
+            try:
+                from . import pane_guard
+
+                pane_guard.reset_lead_edits(project=_from_project())
+            except Exception:
+                pass
             resp["msg"] = (
                 str(resp.get("msg", ""))
                 + _browser_shard_warning(args.role, shards, mode=mode_requested)
@@ -885,11 +915,19 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "mode": mode_requested,
                         "team": team,
                         "distinct_from": distinct_from,
+                        "scope": scope,
                     }
                 )
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
+        if ok_count > 0:
+            try:
+                from . import pane_guard
+
+                pane_guard.reset_lead_edits(project=_from_project())
+            except Exception:
+                pass
         warn = _browser_shard_warning(
             args.role, shards, mode=mode_requested
         ) + _self_commit_isolation_warning(args.task, isolation)
@@ -938,10 +976,17 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "mode": mode,
                 "team": team,
                 "distinct_from": distinct_from,
+                "scope": scope,
             }
         )
     )
     if resp.get("ok"):
+        try:
+            from . import pane_guard
+
+            pane_guard.reset_lead_edits(project=_from_project())
+        except Exception:
+            pass
         resp["msg"] = str(resp.get("msg", "")) + _self_commit_isolation_warning(
             args.task, isolation
         )
@@ -4081,6 +4126,13 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         session_id = payload.get("session_id") or ""
         if not session_id:
             return {"ok": True, "msg": ""}  # malformed payload — nothing to report
+        if (role or "").strip().lower() == "lead":
+            try:
+                from . import pane_guard
+
+                pane_guard.reset_lead_edits(project=_from_project())
+            except Exception:
+                pass
         _hook_request(
             _with_project(
                 {
@@ -4205,8 +4257,41 @@ def cmd_guard(_: argparse.Namespace) -> dict:
             return granted
 
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        scope: str | None = None
+        try:
+            from . import task_ledger
+
+            project = _from_project()
+            if project:
+                scope = task_ledger.get_open_scope(project, role)
+        except Exception:
+            pass
+        tool_name = str(payload.get("tool_name") or "")
+        from .pane_guard import normalise_role
+
+        if normalise_role(role) == "lead" and tool_name in ("Edit", "Write"):
+            project = _from_project()
+            verdict = PermissionEngine().evaluate_lead_edit(
+                tool_name,
+                tool_input if isinstance(tool_input, dict) else {},
+                role=role,
+                cwd=cwd,
+                project=project,
+                scope=scope,
+            )
+            if verdict.allowed:
+                return {"ok": True, "msg": ""}
+            print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
+            target_desc = (
+                (tool_input.get("file_path") or "") if isinstance(tool_input, dict) else ""
+            )
+            _log_guard_denied(role, f"{tool_name} {target_desc}".strip(), verdict)
+            return {"ok": True, "msg": "", "exit_code": 2}
+        elif tool_name in ("Edit", "Write"):
+            return {"ok": True, "msg": ""}
+
         verdict = PermissionEngine().evaluate_shell_command(
-            command, role, mb_fallback_check=_mb_fallback_check, cwd=cwd
+            command, role, mb_fallback_check=_mb_fallback_check, cwd=cwd, scope=scope
         )
         if verdict.allowed:
             return {"ok": True, "msg": ""}
@@ -4602,6 +4687,28 @@ def cmd_provision(args: argparse.Namespace) -> dict:
     }
 
 
+def cmd_lead_edits(args: argparse.Namespace) -> dict:
+    """Inspect or reset the lead direct-edit counters (#585 round 4)."""
+    project = getattr(args, "project", None) or _from_project()
+    from . import pane_guard
+
+    if getattr(args, "reset", False):
+        pane_guard.reset_lead_edits(project=project)
+        p_name = project or "default"
+        msg = f"lead-edits counter reset for project '{p_name}'"
+        _utf8_print(msg)
+        return {"ok": True, "msg": msg}
+
+    status = pane_guard.get_lead_edits_status(project=project)
+    p_name = project or "default"
+    msg = (
+        f"lead-edits [{p_name}]: {status['files_count']}/2 files, "
+        f"{status['total_lines']}/30 lines (updated: {status.get('updated_at') or 'never'})"
+    )
+    _utf8_print(msg)
+    return {"ok": True, "msg": msg, "data": status}
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdio()
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
@@ -4615,6 +4722,15 @@ def main(argv: list[str] | None = None) -> int:
     sa = sub.add_parser("assign", help="spawn (if needed) and send a task")
     sa.add_argument("--role", required=True)
     sa.add_argument("--cwd", default=None)
+    sa.add_argument(
+        "--scope",
+        choices=("tiny", "normal", "deep", "auto"),
+        default="auto",
+        help="task scope budget (#585): tiny|normal|deep|auto (default: auto). "
+        "tiny: small fixes/styling (forbids new test files, full suite, or qa-gate); "
+        "normal: standard task (verify the change, no new test files); "
+        "deep: high risk (schema/auth/payment/infra) — test real logic + allow gate.",
+    )
     sa.add_argument(
         "--mode",
         choices=("pane", "subagent", "code", "e2e", "ui"),
@@ -6161,6 +6277,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ssvcs.set_defaults(func=cmd_services)
+
+    sled = sub.add_parser(
+        "lead-edits",
+        help="inspect or reset lead direct edit counters (#585 round 4)",
+    )
+    sled.add_argument(
+        "--reset",
+        action="store_true",
+        default=False,
+        help="reset lead direct edit line/file counters",
+    )
+    sled.add_argument(
+        "--project",
+        default=None,
+        help="project name (defaults to current project)",
+    )
+    sled.set_defaults(func=cmd_lead_edits)
 
     args = p.parse_args(argv)
 

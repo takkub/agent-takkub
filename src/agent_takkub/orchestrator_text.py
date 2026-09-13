@@ -15,8 +15,10 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys as _sys
 import time
+from collections.abc import Collection
 from datetime import datetime
 
 from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
@@ -141,6 +143,155 @@ def screenshot_paths_in_note(note: str) -> list[str]:
     return [m.group(0).strip("\"'`.,;:") for m in _SCREENSHOT_PATH_RE.finditer(note or "")]
 
 
+_STYLE_OR_TEXT_EXTENSIONS = (
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".styl",
+    ".style",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".avif",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".md",
+    ".mdx",
+    ".txt",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".po",
+    ".pot",
+    ".mo",
+    ".properties",
+    ".strings",
+    ".csv",
+    ".tsv",
+    ".xml",
+)
+
+_STYLE_OR_TEXT_DIR_HINTS = (
+    "/locales/",
+    "/i18n/",
+    "/messages/",
+    "/lang/",
+    "/translations/",
+    "/public/",
+    "/assets/",
+    "/static/",
+    "/docs/",
+    "locales/",
+    "i18n/",
+    "messages/",
+    "lang/",
+    "translations/",
+    "public/",
+    "assets/",
+    "static/",
+    "docs/",
+)
+
+
+def _is_style_or_text_file(path: str) -> bool:
+    norm = path.replace("\\", "/").lower().strip()
+    if any(norm.endswith(ext) for ext in _STYLE_OR_TEXT_EXTENSIONS):
+        return True
+    if any(hint in norm for hint in _STYLE_OR_TEXT_DIR_HINTS):
+        return True
+    return False
+
+
+def _get_git_diff_numstat(cwd: str | None) -> list[tuple[int, int, str]] | None:
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    try:
+        res = subprocess.run(
+            ["git", "diff", "--numstat", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            res = subprocess.run(
+                ["git", "diff", "--numstat"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        if res.returncode != 0:
+            return None
+        out = res.stdout.strip()
+        lines: list[tuple[int, int, str]] = []
+        if not out:
+            return lines
+        for line in out.splitlines():
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3:
+                added = int(parts[0]) if parts[0].isdigit() else 0
+                deleted = int(parts[1]) if parts[1].isdigit() else 0
+                lines.append((added, deleted, parts[2]))
+        return lines
+    except Exception:
+        return None
+
+
+def is_tiny_style_or_text_diff(
+    cwd: str | None,
+    git_numstat_fn=None,
+    *,
+    touched_files: Collection[str] | None = None,
+    is_worktree: bool = False,
+) -> bool:
+    """Return True if the pane's diff has <= 20 lines total and touches only style/text files (#585).
+
+    In a shared tree, multiple panes modify the same workspace. If touched_files
+    is provided (from assign-time dirty snapshot comparison), only those paths
+    are inspected. If touched_files cannot be isolated in a shared tree (None),
+    we fail closed (return False) rather than reading the whole repo's diff.
+    In an isolated worktree (is_worktree=True), all diffs in cwd belong to this pane.
+    """
+    if not is_worktree and touched_files is None:
+        return False
+
+    if touched_files is not None:
+        if not touched_files:
+            return False
+        # Every touched file must be a style or text file
+        if not all(_is_style_or_text_file(f) for f in touched_files):
+            return False
+
+    numstat = git_numstat_fn(cwd) if git_numstat_fn is not None else _get_git_diff_numstat(cwd)
+    if numstat is None:
+        return False
+
+    if touched_files is not None:
+        norm_touched = {f.replace("\\", "/").strip("/").lower() for f in touched_files}
+        filtered_numstat = [
+            (added, deleted, path)
+            for added, deleted, path in numstat
+            if path.replace("\\", "/").strip("/").lower() in norm_touched
+        ]
+        total_lines = sum(added + deleted for added, deleted, _ in filtered_numstat)
+    else:
+        total_lines = sum(added + deleted for added, deleted, _ in numstat)
+        if not all(_is_style_or_text_file(filepath) for _, _, filepath in numstat):
+            return False
+
+    return total_lines <= 20
+
+
 def ui_evidence_gate(
     role: str,
     note: str,
@@ -148,9 +299,20 @@ def ui_evidence_gate(
     cwd: str | None = None,
     *,
     exists=None,
+    scope: str | None = None,
+    git_numstat_fn=None,
+    touched_files: Collection[str] | None = None,
+    is_worktree: bool = False,
 ) -> str | None:
     """Return a rejection message when *role*'s done note lacks screenshot
     evidence for a UI-shaped task, else None.
+
+    #585 scope budget:
+    - If scope == "tiny":
+      - When diff is style/text-only and <= 20 lines (via git diff --numstat),
+        no screenshot is required (returns None).
+      - Otherwise, only 1 screenshot is required (not both 390px and 1440px).
+    - normal/deep: unchanged (requires screenshot evidence).
 
     Gated only when the assigned task text reads as UI work (or the note
     itself admits the work was never opened in a browser) — a frontend pane
@@ -170,7 +332,30 @@ def ui_evidence_gate(
     ui_task = bool(task_text) and bool(_UI_TASK_HINT_RE.search(task_text or ""))
     if not ui_task and not admits_unverified:
         return None
+
+    norm_scope = (scope or "normal").strip().lower()
+    if norm_scope == "tiny":
+        try:
+            is_tiny = is_tiny_style_or_text_diff(
+                cwd,
+                git_numstat_fn=git_numstat_fn,
+                touched_files=touched_files,
+                is_worktree=is_worktree,
+            )
+        except TypeError:
+            is_tiny = is_tiny_style_or_text_diff(cwd, git_numstat_fn=git_numstat_fn)
+        if is_tiny:
+            return None
+
     if admits_unverified:
+        if norm_scope == "tiny":
+            return (
+                f"done ถูกปฏิเสธ (#433/#585): note บอกว่ายังไม่ได้เปิดดูจริง/จะให้ qa ดู — งาน UI ต้อง "
+                f"self-verify เอง: รัน app จับ screenshot อย่างน้อย 1 ภาพของหน้าที่แตะ "
+                f"บันทึกลง $TAKKUB_ARTIFACTS_DIR/screenshots/ ดูด้วยตาเทียบโจทย์ แล้วใส่ path ภาพใน note "
+                f"(บรรทัดละไฟล์) ค่อย done ใหม่ · งานที่ไม่มีผลต่อหน้าจอ ใส่ {UI_NO_UI_MARKER} · "
+                f"เสร็จจริงแต่ระบบบันทึกผิด → `takkub done --force`"
+            )
         return (
             f"done ถูกปฏิเสธ (#433): note บอกว่ายังไม่ได้เปิดดูจริง/จะให้ qa ดู — งาน UI ต้อง "
             f"self-verify เอง: รัน app จับ screenshot (mobile 390px + desktop 1440px) ของทุกหน้าที่แตะ "
@@ -180,6 +365,13 @@ def ui_evidence_gate(
         )
     paths = screenshot_paths_in_note(text)
     if not paths:
+        if norm_scope == "tiny":
+            return (
+                f"done ถูกปฏิเสธ (#433/#585): งาน UI ของ {role} ต้องแนบ path screenshot จริงใน note "
+                f"(อย่างน้อย 1 screenshot ของหน้าที่แตะ บันทึกลง $TAKKUB_ARTIFACTS_DIR/screenshots/ "
+                f"แล้วใส่ path บรรทัดละไฟล์ — ไม่ต้อง embed รูป) · "
+                f"ไม่มีผลต่อหน้าจอ → ใส่ {UI_NO_UI_MARKER} ใน note · `--force` ถ้าระบบบันทึกผิด"
+            )
         return (
             f"done ถูกปฏิเสธ (#433): งาน UI ของ {role} ต้องแนบ path screenshot จริงใน note "
             f"(mobile 390px + desktop 1440px ของทุกหน้า/คอมโพเนนต์ที่แตะ บันทึกลง "
@@ -733,9 +925,17 @@ def _rewrite_task_for_codex(task: str) -> str:
     before the task so the override cannot be ranked below the constraint.
     Idempotent: if the notice marker is already present we return unchanged
     (e.g. orchestrator replays the stored task after auto-respawn).
+    #585: When a budget block is present on line 1, ensure the budget block
+    remains line 1 with _CODEX_TASK_NOTICE placed directly below it.
     """
     if _CODEX_TASK_NOTICE in task:
         return task
+    from . import task_scope
+
+    for block in task_scope.BUDGET_BLOCKS.values():
+        if task.startswith(block):
+            rest = task[len(block) :].lstrip("\r\n")
+            return f"{block}\n\n{_CODEX_TASK_NOTICE}{rest}"
     return _CODEX_TASK_NOTICE + task
 
 
@@ -794,7 +994,12 @@ def _task_handoff_dir(project_ns: str) -> pathlib.Path:
 
 
 def _task_handoff_pointer(
-    task: str, project_ns: str, role_name: str, *, supports_file_read: bool = True
+    task: str,
+    project_ns: str,
+    role_name: str,
+    *,
+    supports_file_read: bool = True,
+    scope: str | None = None,
 ) -> tuple[str, str | None]:
     """Write *task* to a handoff file when it's long, returning what to paste.
 
@@ -845,6 +1050,10 @@ def _task_handoff_pointer(
         "เป็นคำสั่ง shell (#104) แล้วทำตามทั้งหมด · "
         "รายงาน takkub done เมื่อเสร็จ"
     )
+    if scope:
+        from . import task_scope
+
+        pointer = f"{task_scope.budget_block(scope)}\n\n{pointer}"
     return pointer, forward_path
 
 

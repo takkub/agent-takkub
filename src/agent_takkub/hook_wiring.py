@@ -139,24 +139,25 @@ _HOOK_SETTINGS: dict = {
 }
 
 
-def guard_hook_fragment() -> dict:
-    """The `PreToolUse`/`Bash` entry that runs `pane_guard` before every Bash
-    call. A fresh dict each call so a caller can't mutate shared state.
+def guard_hook_fragment(matcher: str = "Bash") -> dict:
+    """The `PreToolUse` entry that runs `pane_guard` before tools. A fresh
+    dict each call so a caller can't mutate shared state.
 
     Unlike rtk this is NOT conditional: the guard is the only thing standing
     between a teammate pane and the shell workaround for its MCP tool policy
-    (`npx playwright`), and `takkub` is guaranteed on every pane's PATH
-    (`spawn_engine` prepends `config.CLI_BIN_DIR`) — the same guarantee the
-    Stop/SessionStart hooks already rely on."""
+    (`npx playwright`), enforces the busy-machine build/suite gate, and enforces
+    Lead's direct-edit limits on Edit/Write tools (#585). `takkub` is guaranteed
+    on every pane's PATH (`spawn_engine` prepends `config.CLI_BIN_DIR`) — the same
+    guarantee the Stop/SessionStart hooks already rely on."""
     return {
-        "matcher": "Bash",
+        "matcher": matcher,
         "hooks": [{"type": "command", "command": GUARD_COMMAND}],
     }
 
 
 def _rendered_settings(*, concise: bool = False, remote_control: bool = True) -> dict:
     """The hook settings for this spawn: the static Stop/Notification/
-    SessionStart wiring, the always-on PreToolUse Bash guard, plus rtk's
+    SessionStart wiring, the always-on PreToolUse Bash/Edit/Write guards, plus rtk's
     PreToolUse Bash hook when rtk is enabled centrally AND on PATH
     (`rtk_helper.rtk_should_inject`).
 
@@ -180,7 +181,11 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     ``True`` so `doctor.check_hook_wiring()`'s no-arg call keeps behaving
     like it always has."""
     settings = copy.deepcopy(_HOOK_SETTINGS)
-    pre_tool_use: list[dict] = [guard_hook_fragment()]
+    pre_tool_use: list[dict] = [
+        guard_hook_fragment("Bash"),
+        guard_hook_fragment("Edit"),
+        guard_hook_fragment("Write"),
+    ]
     try:
         from . import rtk_helper
 

@@ -457,6 +457,106 @@ class TestUiEvidenceGate:
         assert pane_guard.is_browser_role("mobile#2")
         assert pane_guard.UI_SELF_VERIFY_ROLES == {"frontend", "mobile"}
 
+    def test_tiny_scope_style_text_diff_exempts_screenshot(self, monkeypatch):
+        from agent_takkub import orchestrator_text
+
+        monkeypatch.setattr(
+            orchestrator_text,
+            "is_tiny_style_or_text_diff",
+            lambda cwd, git_numstat_fn=None, **kw: True,
+        )
+        # Even without screenshot and with UI task text, tiny style/text diff is exempt
+        msg = ui_evidence_gate("frontend", "แก้ padding ปุ่ม", "แก้หน้า member UI", None, scope="tiny")
+        assert msg is None
+
+    def test_is_tiny_style_or_text_diff_shared_tree_isolation(self):
+        from agent_takkub.orchestrator_text import is_tiny_style_or_text_diff
+
+        # Shared tree where diff contains 500 lines from other pane (backend.py),
+        # but this pane only touched button.css (3 lines).
+        fake_numstat = [
+            (3, 0, "src/styles/button.css"),
+            (400, 100, "src/backend/server.py"),
+        ]
+        # When touched_files isolates this pane to button.css:
+        assert (
+            is_tiny_style_or_text_diff(
+                None,
+                git_numstat_fn=lambda _: fake_numstat,
+                touched_files=["src/styles/button.css"],
+                is_worktree=False,
+            )
+            is True
+        )
+
+        # When touched_files includes non-style/text code:
+        assert (
+            is_tiny_style_or_text_diff(
+                None,
+                git_numstat_fn=lambda _: fake_numstat,
+                touched_files=["src/styles/button.css", "src/backend/server.py"],
+                is_worktree=False,
+            )
+            is False
+        )
+
+        # Fail closed: in shared tree without touched_files, cannot isolate -> False
+        assert (
+            is_tiny_style_or_text_diff(
+                None,
+                git_numstat_fn=lambda _: fake_numstat,
+                touched_files=None,
+                is_worktree=False,
+            )
+            is False
+        )
+
+        # In worktree isolation, all changes belong to this pane:
+        clean_numstat = [(2, 1, "src/styles/button.css")]
+        assert (
+            is_tiny_style_or_text_diff(
+                None,
+                git_numstat_fn=lambda _: clean_numstat,
+                touched_files=None,
+                is_worktree=True,
+            )
+            is True
+        )
+
+    def test_tiny_scope_single_screenshot_passes_even_for_responsive(self, tmp_path):
+        # When no screenshots are provided:
+        # For normal scope, rejection message specifies dual-viewport (390px + 1440px)
+        msg_normal = ui_evidence_gate(
+            "frontend",
+            "fix responsive แล้ว",
+            "แก้หน้า member ให้ responsive",
+            str(tmp_path),
+            scope="normal",
+        )
+        assert msg_normal and "mobile 390px + desktop 1440px" in msg_normal
+
+        # For tiny scope, rejection message asks for at least 1 screenshot (not dual-viewport)
+        msg_tiny_no_shot = ui_evidence_gate(
+            "frontend",
+            "fix responsive แล้ว",
+            "แก้หน้า member ให้ responsive",
+            str(tmp_path),
+            scope="tiny",
+        )
+        assert msg_tiny_no_shot and "อย่างน้อย 1 screenshot" in msg_tiny_no_shot
+        assert "1440px" not in msg_tiny_no_shot
+
+        # When 1 screenshot is provided and exists, tiny scope passes
+        shot = tmp_path / "member.png"
+        shot.write_bytes(b"\x89PNG")
+        note = f"fix เสร็จ\n{shot}\n"
+        assert (
+            ui_evidence_gate(
+                "frontend", note, "แก้หน้า member ให้ responsive", str(tmp_path), scope="tiny"
+            )
+            is None
+        )
+
 
 # ── #430 ───────────────────────────────────────────────────────────────────
 class TestResourceLock:

@@ -21,8 +21,8 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
 ห้ามแตะ network ของเครื่องโดยเด็ดขาด (`netsh`, `ipconfig /release`/`/renew`, `networksetup`, `ifconfig <if> up`/`down`, `route add`/`delete`) — เป็นของ user ไม่ใช่ sandbox ของ pane ต้องการเทสผ่านเน็ตเส้นอื่น → ขอ user ต่อ**มือถือ**/อุปกรณ์ที่สองแทน รายละเอียดเต็ม: `docs/roles/common.md#no-host-network-changes`.
 
-## 🧪 กติกาวางเทส (test placement conventions, required, #478)
-ทุกงานที่แตะ logic ต้องมีเทสกันถอยในดิฟฟ์เดียวกัน — Node/TS: `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม (e2e/smoke conventions, #485 gate-once-per-batch): `docs/roles/common.md#test-placement`.
+## 🧪 กติกาวางเทส (test placement conventions, required, #478/#585)
+(ก) ทุกงานต้องทดสอบของจริงก่อน done — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร · (ข) เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี: scope=deep, แก้ bug ที่เคยหลุด (กันถอยจริง), หรือ Lead สั่งชัดใน task เท่านั้น — นอกนั้นห้ามเขียน · (ค) **งานหน้าตา/การแสดงผล UI** (CSS, layout, สี, spacing, ฟอนต์, ไอคอน, copy, responsive, theme, animation, จัดวาง component) → **ห้ามเขียนไฟล์เทส ทุก scope** และ **ห้ามสร้าง snapshot test / visual-regression suite ใหม่** เว้นแต่ Lead สั่งตรงๆ — พิสูจน์ด้วยการเปิดของจริงดูเท่านั้น · logic ที่บังเอิญอยู่ในไฟล์ UI (validation/state/transform/routing/คำนวณ) ใช้กฎ 3 กรณีข้างต้น · (ง) เมื่อต้องเขียนเทสจริง: Node/TS วาง `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม (e2e/smoke conventions, #485 gate-once-per-batch): `docs/roles/common.md#test-placement`.
 
 ## Minimal-code (ponytail)
 Write the least code that actually works: skip what YAGNI doesn't need, prefer stdlib/RN built-ins/native platform features over a new dependency (new native packages carry a build cost), no unasked abstraction, deleting beats adding. Never skimp on input validation at a trust boundary, error handling that prevents data loss, security, or accessibility — non-trivial logic still needs one runnable check. Mark a deliberate shortcut `ponytail: <ceiling + upgrade path>`.
@@ -30,8 +30,8 @@ Write the least code that actually works: skip what YAGNI doesn't need, prefer s
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
 2. Check the project's conventions (Expo vs pure RN, etc.) before writing code.
-3. Write code + a regression test for what you changed, and self-verify every UI change with screenshots (see below) — full e2e/regression suites are qa's job.
-4. **Touched any UI? Read `docs/roles/mobile/ui-self-verify.md` before `takkub done`, every time** — it's rejected without a screenshot path. Zero visual impact (pure logic/config/types) → write `[no-ui]` in the note.
+3. Write code and verify that it works for real. **UI presentation (CSS, layout, colors, spacing, copy, responsive) MUST NOT have test files written for it across any scope**; verify visually with screenshots instead. For non-visual logic (validation, state, transform) inside UI files, write a regression test only when scope=deep or explicitly requested — full e2e/regression suites are qa's job.
+4. **Touched any UI? Read `docs/roles/mobile/ui-self-verify.md` before `takkub done`, every time** — it's rejected without a screenshot path (scope=tiny: 1 screenshot sufficient, and <=20 line css/style exempt). Zero visual impact (pure logic/config/types) → write `[no-ui]` in the note.
 5. `takkub done "<note>"` when finished (`takkub progress "<msg>"` mid-task instead). Need backend input? `takkub send --to backend "..."`.
 
 ## Read on demand (not staged into your boot context — pull in only when it applies)
