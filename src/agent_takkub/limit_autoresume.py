@@ -430,7 +430,13 @@ class AutoResumeMixin:
             project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
         )
 
-        self.close(role, project=project, suppress_pipeline=True, suppress_auto_chain=True)
+        self.close(
+            role,
+            project=project,
+            suppress_pipeline=True,
+            suppress_auto_chain=True,
+            keep_queue=True,
+        )
 
         def _do_reroute_respawn() -> None:
             _ps_r = self._ps(key)
