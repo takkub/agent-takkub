@@ -48,6 +48,7 @@ import uuid
 
 from .orchestrator_text import _exit_key
 from .roles import LEAD
+from .routing_planner import pane_role_resolution_chain
 
 # Grace window added on top of a registration's own timeout before a stale
 # `_active_waits` entry (whose owning CLI process died without calling
@@ -116,6 +117,10 @@ class LeadWaitMixin:
     `_wait_done_events` (per (project_ns, role) last-resolution record) are
     initialised in `Orchestrator.__init__`, exactly like every other queue
     this mixin cluster depends on — this class only defines methods.
+
+    Per-client reference counting (#598): each `_active_waits` registration
+    tracks how many clients are attached via `ref_count`. Only pops when
+    ref_count reaches 0 (last client detaches).
     """
 
     def note_assign_queued(self, project_ns: str, role: str) -> None:
@@ -126,6 +131,29 @@ class LeadWaitMixin:
         (see below) see a just-queued role that has no pane, no
         `_subagent_assignments` entry, and no `list_status` presence yet."""
         self._recent_assign_queue[(project_ns, role)] = time.time()
+
+    def _resolve_requested_roles(
+        self, requested_roles: list[str], known_roles: set[str]
+    ) -> list[str]:
+        """Resolve requested role names to actual panes (#597).
+
+        For each requested role, if it matches a known pane exactly, returns it.
+        Otherwise uses pane_role_resolution_chain to search for candidates.
+        Returns flattened list of all matching panes, de-duplicated."""
+        result = []
+        seen = set()
+        for role in requested_roles:
+            if role in known_roles:
+                if role not in seen:
+                    result.append(role)
+                    seen.add(role)
+            else:
+                candidates = pane_role_resolution_chain(role)
+                for c in candidates:
+                    if c in known_roles and c not in seen:
+                        result.append(c)
+                        seen.add(c)
+        return result
 
     def begin_wait(self, project_ns: str, roles: list[str] | None, timeout_s: float) -> dict:
         """Register (or attach to) a wait for *roles* in *project_ns*.
@@ -138,33 +166,37 @@ class LeadWaitMixin:
         """
         # #428 bug 2: accept `a,b,c` from older/raw clients too.
         split_roles = [part.strip() for item in (roles or []) for part in str(item).split(",")]
-        clean_roles = [r for r in dict.fromkeys(split_roles) if r and r != LEAD.name]
-        if not clean_roles:
-            known = self.list_status(project=project_ns)
-            native_pending = {
-                role
-                for (pending_project, role) in getattr(self, "_subagent_assignments", {})
-                if pending_project == project_ns
-            }
-            # #497: a role whose `assign` was JUST accepted (see
-            # `note_assign_queued`) but whose staggered dispatch hasn't run
-            # yet — no pane, no subagent entry, invisible to `list_status`.
-            # Without this, `takkub assign` immediately followed by
-            # `takkub wait` (Lead's standard sequence, no explicit --role)
-            # found nothing to auto-detect and failed outright, seconds
-            # before the pane would have registered on its own.
-            now_ts = time.time()
-            queued_pending = {
-                role
-                for (pending_project, role), queued_ts in getattr(
-                    self, "_recent_assign_queue", {}
-                ).items()
-                if pending_project == project_ns
-                and now_ts - queued_ts < _WAIT_QUEUED_ASSIGN_GRACE_S
-            }
-            clean_roles = sorted(
-                {r for r in known if r != LEAD.name} | native_pending | queued_pending
-            )
+        requested_roles = [r for r in dict.fromkeys(split_roles) if r and r != LEAD.name]
+
+        # Get known roles to enable resolution
+        known = self.list_status(project=project_ns)
+        native_pending = {
+            role
+            for (pending_project, role) in getattr(self, "_subagent_assignments", {})
+            if pending_project == project_ns
+        }
+        now_ts = time.time()
+        queued_pending = {
+            role
+            for (pending_project, role), queued_ts in getattr(
+                self, "_recent_assign_queue", {}
+            ).items()
+            if pending_project == project_ns and now_ts - queued_ts < _WAIT_QUEUED_ASSIGN_GRACE_S
+        }
+        all_known = set(known) | native_pending | queued_pending
+
+        if requested_roles:
+            # #597: resolve requested role names to actual panes, handling aliases like reviewer
+            clean_roles = self._resolve_requested_roles(requested_roles, all_known)
+            if not clean_roles:
+                unresolved = ", ".join(requested_roles)
+                return {
+                    "ok": False,
+                    "msg": f"no matching pane(s) for requested role(s): {unresolved}",
+                }
+        else:
+            # Auto-detect: all known roles except Lead
+            clean_roles = sorted({r for r in all_known if r != LEAD.name})
             if not clean_roles:
                 return {
                     "ok": False,
@@ -178,10 +210,11 @@ class LeadWaitMixin:
             if now - active["last_poll_ts"] < stale_after:
                 # Attach: union the role sets instead of starting a second,
                 # independent poll loop for the same project (the exact
-                # duplication #242 exists to prevent).
+                # duplication #242 exists to prevent). #598: increment ref_count.
                 active["roles"] = sorted(set(active["roles"]) | set(clean_roles))
                 active["timeout_s"] = max(active["timeout_s"], timeout_s)
                 active["last_poll_ts"] = now
+                active["ref_count"] = active.get("ref_count", 1) + 1
                 return {
                     "ok": True,
                     "msg": f"attached to an existing wait ({len(active['roles'])} role(s))",
@@ -201,6 +234,7 @@ class LeadWaitMixin:
             "started_ts": now,
             "timeout_s": max(1.0, float(timeout_s)),
             "last_poll_ts": now,
+            "ref_count": 1,
         }
         return {
             "ok": True,
@@ -596,7 +630,11 @@ class LeadWaitMixin:
             "interrupt": interrupt,
         }
         if not pending or expired or interrupt is not None:
-            self._active_waits.pop(project_ns, None)
+            # #598: decrement ref_count instead of immediately popping,
+            # only pop when last client detaches
+            active["ref_count"] = active.get("ref_count", 1) - 1
+            if active["ref_count"] <= 0:
+                self._active_waits.pop(project_ns, None)
             # Stash this exact payload so any OTHER client still attached to
             # *wait_id* whose poll lands after this pop echoes the real
             # terminal result instead of a manufactured error — see this
@@ -612,10 +650,13 @@ class LeadWaitMixin:
     def end_wait(self, project_ns: str, wait_id: str) -> bool:
         """Explicitly release a wait registration (early abort — Ctrl-C, the
         CLI process dying between polls). No-op if *wait_id* no longer
-        matches (already resolved/expired/superseded)."""
+        matches (already resolved/expired/superseded). #598: decrements
+        ref_count and only pops when last client detaches."""
         active = self._active_waits.get(project_ns)
         if active is not None and active["wait_id"] == wait_id:
-            self._active_waits.pop(project_ns, None)
+            active["ref_count"] = active.get("ref_count", 1) - 1
+            if active["ref_count"] <= 0:
+                self._active_waits.pop(project_ns, None)
             return True
         return False
 
