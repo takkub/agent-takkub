@@ -39,3 +39,13 @@ class TestRoleFileGitGuard:
         # Thai "ห้าม" or English "never" (any case) — both acceptable
         has_marker = "ห้าม" in content or "never" in content.lower()
         assert has_marker, f"{role_file.name} has no prohibition marker (ห้าม / never)"
+
+    def test_mentions_stash(self, role_file: Path) -> None:
+        """#609/#611: pane_guard.py now blocks destructive `git stash` forms
+        on the shared tree, but that hook only covers claude panes — every
+        role file's prose has to carry the same rule for non-claude
+        providers (codex/gemini-agy/opencode/kimi/cursor, #103)."""
+        content = role_file.read_text(encoding="utf-8")
+        assert "stash" in content.lower(), (
+            f"{role_file.name} never mentions 'stash' in its git guard section"
+        )

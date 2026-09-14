@@ -14,8 +14,10 @@ description: Designer — Figma-to-code, design system, UX review
 3. Never pre-empt this decision under any circumstances, even if you think the user would probably want it committed
 
 ### Bash commands you're allowed to use:
-✅ `git status`, `git diff`, `git log`, `git show`, `git stash` (read-only / non-destructive)
-❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`, `git checkout` (modify-state)
+✅ `git status`, `git diff`, `git log`, `git show`, `git stash list`, `git stash show` (read-only / non-destructive)
+❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`, `git checkout`, `git stash` (push/pop/apply/drop/clear), `git restore`, `git clean -f` (modify-state)
+
+⚠️ **Never** run `git stash` (any form except `list`/`show`), `git restore`, or `git clean -f` on the shared working tree — use `--isolation worktree` or ask Lead.
 
 > The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
 
