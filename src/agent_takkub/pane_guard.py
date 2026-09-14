@@ -132,6 +132,24 @@ It stays subject to every other rule in this module (version control,
 browser driving, host-destructive commands, ...) — the exemption is narrow
 to `_full_suite_rule` alone.
 
+A ninth rule (#609) extends `git_lead_only` to `git stash` (any subcommand
+except the read-only `list`/`show`), `git restore`, and `git clean -f*` on the
+shared tree. Root incident: a `frontend` pane ran `git stash && vitest ...;
+git stash pop` on the shared tree while a `backend` pane had ~165 files of
+uncommitted work in progress — every dirty file's mtime changed and the
+backend pane's work was one `git stash drop` away from gone. `git checkout --
+<path>` and `git reset --hard` were already covered by the existing
+`checkout`/`reset-hard` patterns above; `stash`/`restore`/`clean -f*` were the
+gap. Same worktree carve-out as `reset-hard`/`checkout`/`branch-delete`
+(#545): safe unconditionally inside the pane's own `--isolation worktree`
+checkout, since nothing there is shared with another pane. Deliberately NOT
+gated on "does dirty state belong to another pane" (a #601-style ownership
+diff would need a `git status` subprocess on every guarded Bash call, which
+this stdlib-only leaf hook — fired on EVERY Bash call — can't afford) — shared
+tree + non-readonly stash/restore/clean is blocked outright, mirroring how
+`reset-hard`/`checkout`/`branch-delete` already ask no ownership question
+either.
+
 Carve-outs for `--isolation worktree`: `git commit` is allowed unconditionally
 when the pane's cwd is inside a cockpit-managed `.../worktrees/...` checkout;
 `git push` is allowed ONLY when every target it names is that pane's own
@@ -249,7 +267,8 @@ PIP_EDITABLE_RULE_TEXT = (
 # below by tests/test_agent_role_files_have_git_commit_guard.py.
 GIT_LEAD_ONLY_RULE_TEXT = (
     "ห้าม `git commit` / `git push` / `git reset --hard` / `git branch -D` / "
-    "`git tag -d` / `git rebase` / `git merge` / `git checkout` ไม่ว่า task จะสั่งว่า "
+    "`git tag -d` / `git rebase` / `git merge` / `git checkout` / `git stash` "
+    "(ยกเว้น `list`/`show`) / `git restore` / `git clean -f*` ไม่ว่า task จะสั่งว่า "
     "'commit เอง'/'ตรวจผ่านแล้ว commit เอง' แค่ไหนก็ตาม — มีแค่ Lead เท่านั้นที่ commit "
     "(เคสจริง #314: backend/admin role commit เองเมื่อ task สั่ง ในขณะที่ frontend ปฏิเสธ "
     "เพราะ role file ทั้งคู่มีข้อห้ามเดียวกัน แต่ prose อย่างเดียวโน้มน้าวให้ทำผิดได้). "
@@ -899,6 +918,24 @@ def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None)
     return True  # outside every known root
 
 
+_DEEP_TEST_PATH_EXEMPT = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|[\w-]*-e2e)(?:/|$)|\.(?:spec|test)\.[^./]+$",
+    re.I,
+)
+
+
+def _direct_edit_diff_text(tool_name: str, tool_input: dict) -> str:
+    """The text Lead is actually about to write (#611) — old+new for Edit,
+    full content for Write — used by the sensitive-keyword deep-category
+    check below so a genuine secret/auth change hiding inside a test file
+    still denies even though its PATH is exempt."""
+    if tool_name == "Edit":
+        old_str = str(tool_input.get("old_string") or "")
+        new_str = str(tool_input.get("new_string") or "")
+        return f"{old_str}\n{new_str}"
+    return str(tool_input.get("content") or "")
+
+
 def evaluate_lead_direct_edit(
     tool_name: str,
     tool_input: dict,
@@ -931,6 +968,16 @@ def evaluate_lead_direct_edit(
     through the exemption meant for scratchpad/memory notes. Only after
     that does `_is_direct_edit_exempt` get a chance to allow it
     unconditionally, still ahead of the scope/line/cumulative caps below.
+
+    #611: the "sensitive keyword" half of condition 5 (auth/security/token/
+    crypto/payment — see `sensitive_deep_patterns` below) is checked against
+    both the file's diff text AND its path, with the path leg skipped for a
+    test/e2e path (`_DEEP_TEST_PATH_EXEMPT`) — a folder merely named
+    `security-e2e/` denied a 1-line type fix even though nothing sensitive
+    was touched. The "structural" half (schema/migration/lockfile/manifest/
+    CI/Dockerfile) stays path-only with no test exemption — those are deep
+    because of WHERE the file lives, not a word in its name, per Lead's own
+    package.json/pyproject.toml version-bump experience the same night.
     """
     if not isinstance(tool_input, dict):
         return Verdict(True)
@@ -954,9 +1001,37 @@ def evaluate_lead_direct_edit(
     # Deep patterns on file path — checked before the runtime/outside-root
     # exemption below (#587 F3), see docstring.
     norm_file = file_path.replace("\\", "/").lower()
-    deep_file_patterns = (
+
+    # Structural deep categories: deep because of WHERE the file lives, not
+    # because of a word that can appear in an unrelated directory name — path
+    # is the only signal that makes sense here, and there's no legitimate
+    # "test version" of a lockfile/migration/CI workflow to exempt. Unchanged
+    # by #611 below.
+    structural_deep_patterns = (
         r"\b(?:schema|prisma)\b|schemas?/",
         r"\bmigrations?\b",
+        r"(?:package\.json|requirements\.txt|pyproject\.toml|go\.mod|cargo\.toml)$",
+        r"(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|bun\.lock)$",
+        r"\.github/(?:workflows|actions)",
+        r"(?:dockerfile|docker-compose.*\.ya?ml)$",
+    )
+    for pat in structural_deep_patterns:
+        if re.search(pat, norm_file):
+            return Verdict(
+                False,
+                rule="lead_direct_edit:deep_category",
+                reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
+            )
+
+    # #611: these are word-based, and a word alone can sit in a path that
+    # isn't actually sensitive source — `apps/api/src/security-e2e/
+    # test-harness.ts` denied a 1-line type fix in a TEST file because
+    # "security" is in the folder name. Path is only trusted here when the
+    # path is NOT a test/e2e path (`_DEEP_TEST_PATH_EXEMPT`); independently,
+    # the actual diff text (old_string+new_string for Edit, content for
+    # Write) is always checked, so a genuinely sensitive change hiding
+    # inside a test file (e.g. a hardcoded secret in a fixture) still denies.
+    sensitive_deep_patterns = (
         r"\b(?:auth|oauth|jwt|login|signup|password|permission|privilege|otp|2fa|mfa|rate[\s_-]?limit)\b",
         r"(?:bypass|skip|disable|remove)\s*(?:verif|valid|signature|sanitiz|auth|check)",
         r"(?:admin|role|session)[\s\-_]*(?:permission|access|based|privilege|panel|timeout|expiry|cookie)",
@@ -964,13 +1039,13 @@ def evaluate_lead_direct_edit(
         r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
         r"\b(?:crypto|encryption|bcrypt)\b",
         r"\b(?:payments?|stripe|billing)\b",
-        r"(?:package\.json|requirements\.txt|pyproject\.toml|go\.mod|cargo\.toml)$",
-        r"(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|bun\.lock)$",
-        r"\.github/(?:workflows|actions)",
-        r"(?:dockerfile|docker-compose.*\.ya?ml)$",
     )
-    for pat in deep_file_patterns:
-        if re.search(pat, norm_file):
+    is_test_path = bool(_DEEP_TEST_PATH_EXEMPT.search(norm_file))
+    diff_text = _direct_edit_diff_text(tool_name, tool_input).lower()
+    for pat in sensitive_deep_patterns:
+        path_hit = (not is_test_path) and re.search(pat, norm_file)
+        content_hit = re.search(pat, diff_text)
+        if path_hit or content_hit:
             return Verdict(
                 False,
                 rule="lead_direct_edit:deep_category",
@@ -1264,7 +1339,49 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "checkout",
         re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout{_SUBCMD_END}", re.M),
     ),
+    # #609: `git restore` is the modern alias for `checkout -- <path>` — same
+    # blast radius (overwrites working-tree files from HEAD/index), same
+    # worktree carve-out as `checkout` below.
+    (
+        "restore",
+        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}restore{_SUBCMD_END}", re.M),
+    ),
+    # #609: `-f`/`--force` in any combined short-flag form (`-fd`, `-fdx`, …).
+    # A bare `git clean` with no force flag only prints what WOULD be removed
+    # (dry-run by default) and stays allowed.
+    (
+        "clean-force",
+        re.compile(
+            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}clean{_SUBCMD_END}{_SAME_CMD}"
+            rf"(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)",
+            re.M,
+        ),
+    ),
 )
+
+# #609: every `git stash` subcommand except the read-only `list`/`show` —
+# `push`/pop`/`apply`/`drop`/`clear`/`branch`, and a bare `git stash` (which
+# defaults to `push`). Handled outside `_GIT_LEAD_ONLY_PATTERNS` (like
+# `commit`/`merge` above it) because the read-only carve-out needs the
+# matched tail, not just a yes/no `.search()`.
+_GIT_STASH_PATTERN = re.compile(
+    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}stash{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
+)
+
+
+def _git_stash_is_readonly(cmd: str) -> bool:
+    """True only when EVERY `git stash` invocation in *cmd* is `list` or
+    `show` (#609) — a mixed command with even one mutating stash call denies
+    the whole thing, same conservative direction as every other rule here."""
+    hits = list(_GIT_STASH_PATTERN.finditer(cmd))
+    if not hits:
+        return True
+    for m in hits:
+        first_tok = m.group("tail").split()[:1]
+        if not first_tok or first_tok[0].lower() not in ("list", "show"):
+            return False
+    return True
+
 
 # #545: unlike `push`/`merge` (each shape-checked to a narrow safe form),
 # these three are safe UNCONDITIONALLY inside the pane's own worktree
@@ -1277,7 +1394,9 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # `tag-delete`/`rebase` are deliberately excluded — both act on refs a
 # worktree pane can't safely disown its own copy of, unlike a plain branch
 # reset/switch/delete confined to the checkout itself.
-_WORKTREE_SAFE_RULES = frozenset({"reset-hard", "checkout", "branch-delete"})
+_WORKTREE_SAFE_RULES = frozenset(
+    {"reset-hard", "checkout", "branch-delete", "restore", "clean-force"}
+)
 
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
 # pane's own `--isolation worktree` checkout. There the pane's branch is the
@@ -1621,6 +1740,21 @@ def classify(
             False,
             rule="git_lead_only:merge",
             reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
+        )
+
+    # #609: shared-tree `git stash` (mutating forms) — safe unconditionally
+    # inside the pane's own worktree, same as reset-hard/checkout/branch-delete
+    # (see `_WORKTREE_SAFE_RULES`); `list`/`show` stay read-only-allowed
+    # everywhere.
+    if not in_worktree and _GIT_STASH_PATTERN.search(cmd) and not _git_stash_is_readonly(cmd):
+        return Verdict(
+            False,
+            rule="git_lead_only:stash",
+            reason=(
+                f"role `{name}` ใช้ `git stash` บน shared tree ไม่ได้ (#609 — เคยเปลี่ยน mtime "
+                "ไฟล์ dirty ของ pane อื่นทั้งหมด เสี่ยงงานที่ยังไม่ commit ของคนอื่นหาย). "
+                f"{GIT_LEAD_ONLY_RULE_TEXT} อ่านอย่างเดียวใช้ได้: `git stash list` / `git stash show`."
+            ),
         )
 
     for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
