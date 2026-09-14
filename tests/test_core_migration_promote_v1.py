@@ -1977,6 +1977,39 @@ def test_os_junk_names_are_deleted_outright_not_archived(
     assert [p.name for p in step._delete_candidates()] == [junk_name]
 
 
+def test_delete_candidates_protects_named_account_home_colliding_with_junk_glob(
+    tmp_path, journal_backups
+) -> None:
+    """#605 M2: `_delete_candidates()` must respect the same protected-name
+    set as `_archive_candidates()` — a registered named account home whose
+    basename happens to collide with a junk name/glob (here `._teamhome`,
+    matching the `._*` glob) must never be deleted outright, while an
+    unrelated real junk file alongside it is still swept up as before."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    named_home = data_home / "._teamhome"
+    named_home.mkdir()
+    (named_home / "auth.json").write_text("named-account-secret", encoding="utf-8")
+    (data_home / "user-profiles.json").write_text(
+        json.dumps([{"name": "team", "config_dir": str(named_home)}]),
+        encoding="utf-8",
+    )
+    (data_home / ".DS_Store").write_text("", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    delete_names = {p.name for p in step._delete_candidates()}
+    archive_names = {p.name for p in step._archive_candidates()}
+    assert "._teamhome" not in delete_names
+    assert "._teamhome" not in archive_names
+    assert delete_names == {".DS_Store"}
+
+    report = step.apply()
+    assert report.ok, report.summary
+    assert (named_home / "auth.json").exists()
+    assert not (data_home / ".DS_Store").exists()
+
+
 def test_os_junk_at_top_level_does_not_block_validate_after_real_data_archived(
     tmp_path, journal_backups
 ) -> None:

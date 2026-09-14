@@ -2362,11 +2362,27 @@ class ArchiveV1LegacyStep:
                 out.add(rel.parts[0])
         return out
 
+    def _protected_top_level_names(self) -> set[str]:
+        """#605 M2: the combined skip-set both `_delete_candidates()` and
+        `_archive_candidates()` must honor — a real top-level entry (a
+        named account home in particular, which has no fixed basename a
+        static list can enumerate; see `_named_account_home_names()`)
+        must never be swept away just because its basename happens to
+        collide with a junk name/glob (e.g. `._*`, `.DS_Store`)."""
+        return (
+            _ARCHIVE_SKIP_NAMES
+            | self._named_account_home_names()
+            | self._promoted_top_level_names()
+        )
+
     def _delete_candidates(self) -> list[Path]:
         if not self.data_home.is_dir():
             return []
+        protected = self._protected_top_level_names()
         out = []
         for p in sorted(self.data_home.iterdir()):
+            if p.name in protected:
+                continue
             if p.name in _DELETE_OUTRIGHT_NAMES or any(
                 fnmatch.fnmatch(p.name, pat) for pat in _DELETE_OUTRIGHT_GLOBS
             ):
@@ -2429,11 +2445,7 @@ class ArchiveV1LegacyStep:
         if not self.data_home.is_dir():
             return []
         delete_names = {p.name for p in self._delete_candidates()}
-        protected = (
-            _ARCHIVE_SKIP_NAMES
-            | self._named_account_home_names()
-            | self._promoted_top_level_names()
-        )
+        protected = self._protected_top_level_names()
         return [
             p
             for p in sorted(self.data_home.iterdir())
