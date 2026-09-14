@@ -3077,8 +3077,8 @@ class Orchestrator(
 
         project_ns = self._resolve_project(project)
         key = _exit_key(project_ns, role_name)
-        current_state = self._ps(key)
         current_pane = self._project_panes(project_ns).get(role_name)
+        current_state = self._ps(key)
         # Keep the active task's identity, delivery and done metadata intact.
         # A starting pane also owns its assignment before its first ready prompt.
         if (
@@ -3137,7 +3137,7 @@ class Orchestrator(
             and getattr(existing_pane, "session", None) is not None
             and getattr(existing_pane.session, "is_alive", False)
         )
-        if (
+        _provider_switch_wanted = bool(
             provider
             and pane_is_running
             # #587 C3: only actually-different requests are worth the noise —
@@ -3149,7 +3149,17 @@ class Orchestrator(
                 ps_assign.provider_override
                 or effective_provider_for(settings_role_a, project=project_ns)
             )
+        )
+        if (
+            _provider_switch_wanted
+            and existing_pane is not None
+            and existing_pane.state == "working"
         ):
+            # Reaching here at all means the busy-queue check above didn't
+            # fire (no `last_assigned_task` recorded yet, e.g. mid-delivery
+            # race) even though the pane reports itself mid-turn right now —
+            # too risky to close out from under an actual in-flight turn, so
+            # this one edge still only warns, same as before #603.
             self._notify_lead(
                 project_ns,
                 f"⚠️ [{role_name}] --provider {provider!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
@@ -3165,6 +3175,56 @@ class Orchestrator(
                 provider=provider,
                 reason="pane-already-running",
             )
+        elif _provider_switch_wanted:
+            # #603: the pane is idle (active/done/error, not mid-turn) — no
+            # in-flight turn a close would clobber. Used to only warn
+            # "ไม่มีผล" and leave the old provider running until Lead closed
+            # the pane by hand; now close+respawn automatically, same
+            # close→delay→respawn shape as the quota-hit reroute
+            # (`AutoResumeMixin._reroute_pane_to_provider`, #514) — the
+            # delay lets PTY teardown finish before the new session starts.
+            old_provider = ps_assign.provider_override or effective_provider_for(
+                settings_role_a, project=project_ns
+            )
+            _log_event(
+                "assign_provider_switch_idle",
+                role=role_name,
+                project=project_ns,
+                from_provider=old_provider,
+                to_provider=provider,
+            )
+            self._notify_lead(
+                project_ns,
+                f"🔀 [{role_name}] --provider {provider!r}: pane ว่างอยู่ (ไม่มีงานค้าง) "
+                f"→ ปิดแล้วเปิดใหม่บน {provider} ให้อัตโนมัติ (เดิม {old_provider})",
+                from_role=role_name,
+                note="",
+                kind="assign-provider-switch",
+            )
+            self.close(
+                role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True
+            )
+            QTimer.singleShot(
+                2_000,
+                lambda: self._assign_dispatch(
+                    role_name,
+                    cwd,
+                    task,
+                    requires_commit=requires_commit,
+                    auto_chain=auto_chain,
+                    shard_total=shard_total,
+                    plan=plan,
+                    project=project_ns,
+                    worktree=worktree,
+                    feature=feature,
+                    model=model,
+                    provider=provider,
+                    effort=effort,
+                    distinct_from=distinct_from,
+                    scope=scope,
+                ),
+            )
+            return True, f"{role_name}: idle pane closing, respawning on provider {provider!r}"
         elif not pane_is_running:
             # Same "clear on a plain re-assign, survive gate/FIFO/respawn
             # otherwise" contract as model_override below. A watchdog-set
