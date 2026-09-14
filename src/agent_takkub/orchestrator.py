@@ -2995,7 +2995,17 @@ class Orchestrator(
         `_flush_queued_no_pane_messages`). Surface that to Lead's own stdout
         at assign time instead of silently, so Lead can `takkub messages
         --role <r>` and clear/ignore them before they arrive alongside the
-        new task."""
+        new task.
+
+        #615: this used to only ever READ the expired bucket, so the same
+        "will be dropped" warning re-printed on every subsequent assign —
+        the actual drop was left to `_flush_queued_no_pane_messages`, which
+        only runs once the new pane is alive ~5s after spawn (and never at
+        all if that spawn fails or the pane dies before then). Drop them
+        HERE instead, synchronously, the moment they're noticed — the warn
+        is then a one-time "this just happened", not a recurring nag, and
+        `takkub messages --role <r>` reflects it immediately (state flips to
+        "abandoned" right away, not just once the flush eventually runs)."""
         from . import role_messages
 
         pending, expired = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
@@ -3005,9 +3015,19 @@ class Orchestrator(
         if pending:
             note = f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' จะถูกส่งให้ pane ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
         if expired:
+            for rec in expired:
+                role_messages.mark_abandoned(
+                    RUNTIME_DIR, project_ns, rec.get("id", ""), "expired_queued_message"
+                )
+            _log_event(
+                "send_queued_no_pane_expired",
+                project=project_ns,
+                role=role_name,
+                count=len(expired),
+            )
             note += (
                 ("\n" if note else "")
-                + f"⚠️ {len(expired)} queued messages for '{role_name}' were older than 12 hours and will be dropped."
+                + f"⚠️ {len(expired)} queued messages for '{role_name}' were older than 12 hours and were dropped."
             )
         return note
 
