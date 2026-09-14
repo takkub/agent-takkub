@@ -308,9 +308,15 @@ class TestDoneClears:
         assert (
             orch._pane_state.get(key) is not None and orch._pane_state[key].session_uuid is not None
         )
-        # done() clears all per-pane state regardless of session state
+        # done() clears all per-pane state regardless of session state.
+        # A fresh PaneState carrying only the still-live session's
+        # provider/model/effort override survives until close() (2.5s
+        # later) pops it for real — see orchestrator.py's `session_state =
+        # self._ps(key)` right after the done()-pop, "wip(codex): snapshot
+        # on close" (a07c279d). session_uuid itself must be cleared.
         orch.done("backend", note="done", project=_PROJECT)
-        assert orch._pane_state.get(key) is None
+        ps = orch._pane_state.get(key)
+        assert ps is None or ps.session_uuid is None
 
     def test_post_done_spawn_gets_fresh_session_id(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, "qa")

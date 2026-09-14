@@ -5296,7 +5296,13 @@ class Orchestrator(
                 self._warn_if_live_children(project_ns, role_name, pane.session)
             _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
-            self._revoke_session_tokens(project_ns, role_name, closing_session)
+            # Dispatched via the class (not `self._revoke_session_tokens(...)`)
+            # so a bare test double for `self` — including a MagicMock, which
+            # would silently swallow the call behind an auto-mocked attribute
+            # instead of running the real revocation — still gets the genuine
+            # token-store mutation; the function only ever touches plain dicts
+            # hung off `self` via `getattr(..., {})`, so it's safe on any fake.
+            Orchestrator._revoke_session_tokens(self, project_ns, role_name, closing_session)
             current_pane = self._project_panes(project_ns).get(role_name)
             if current_pane is not pane or (
                 pane.session is not None and pane.session is not closing_session

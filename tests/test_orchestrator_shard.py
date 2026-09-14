@@ -213,9 +213,15 @@ class TestShardPaneIndependence:
         with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="shard 1 ok", project=TEST_PROJECT)
 
-        # qa#1 state popped, qa#2 state intact
-        assert orch._pane_state.get(key1) is None
-        assert orch._pane_state.get(key2) is not None
+        # qa#1 state popped (shard_total cleared — a fresh PaneState carrying
+        # only the still-live session's provider/model/effort override may
+        # survive until close() pops it for real 2.5s later, see
+        # orchestrator.py's `session_state = self._ps(key)` right after the
+        # done()-pop), qa#2 state intact
+        ps1 = orch._pane_state.get(key1)
+        assert ps1 is None or ps1.shard_total == 0
+        ps2 = orch._pane_state.get(key2)
+        assert ps2 is not None and ps2.shard_total == 2
 
 
 # ──────────────────────────────────────────────────────────────

@@ -151,7 +151,12 @@ class TestIdleOrphanChildrenShortCircuit:
             clock["t"] += DONE_CLOSE_IDLE_CHILD_THRESHOLD_S + 1.0
             with patch.object(orch, "close") as close_mock3:
                 poll_cb2()
-            close_mock3.assert_called_once_with("devops", project=TEST_PROJECT)
+            # #604: the idle short-circuit close suppresses close()'s own
+            # "live children" Lead notice — the deferred notice at tick 1
+            # already told Lead once for this episode.
+            close_mock3.assert_called_once_with(
+                "devops", project=TEST_PROJECT, suppress_live_children_warning=True
+            )
 
     def test_active_cpu_usage_keeps_deferring(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
