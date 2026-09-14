@@ -943,6 +943,11 @@ class CliServer(QObject):
                             lambda _role=role, _kw=_assign_kwargs: self._orch.assign(_role, **_kw),
                         )
                     ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
+                    if (role or "").strip().lower() == "reviewer" and mode in {"code", "e2e", "ui"}:
+                        from .routing_planner import _MODE_TO_LEGACY_ROLE
+
+                        resolved_pane = _MODE_TO_LEGACY_ROLE.get(mode, "reviewer")
+                        ack_msg += f" → pane: {resolved_pane}"
                     # #590 item D: `orchestrator.assign()` runs staggered off
                     # a QTimer and its return value (which includes the
                     # "qa = reviewer --mode e2e · provider ... (ตามแถว
@@ -1257,7 +1262,9 @@ class CliServer(QObject):
                             msg=f"bad --since format: {since_hhmm!r} (use HH:MM)",
                         )
                         return
-                report = self._orch.pane_status_report(project=from_project, since_ts=since_ts)
+                report = self._orch.pane_status_report(
+                    project=from_project, since_ts=since_ts, role=req.get("role")
+                )
                 # M3#16: transcript tails can contain secrets and screenshot paths
                 # leak the filesystem layout. Surface them only to a caller holding
                 # the Lead token; any other local caller (a teammate pane, a manual

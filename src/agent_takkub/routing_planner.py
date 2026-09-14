@@ -309,11 +309,14 @@ def pane_role_resolution_chain(role: str) -> list[str]:
     returns [reviewer, qa, critic] search chain.
     """
     r = (role or "").strip().lower()
-    if r in REVIEWER_MODE_ALIASES:
-        mode = REVIEWER_MODE_ALIASES[r]
-        return [_MODE_TO_LEGACY_ROLE.get(mode, "reviewer")]
-    if r == "reviewer":
-        return ["reviewer", "qa", "critic"]
+    base_role = r.split("#", 1)[0]
+    shard_suffix = ("#" + r.split("#", 1)[1]) if "#" in r else ""
+    if base_role in REVIEWER_MODE_ALIASES:
+        mode = REVIEWER_MODE_ALIASES[base_role]
+        legacy = _MODE_TO_LEGACY_ROLE.get(mode, "reviewer")
+        return [f"{legacy}{shard_suffix}"]
+    if base_role == "reviewer":
+        return [f"reviewer{shard_suffix}", f"qa{shard_suffix}", f"critic{shard_suffix}"]
     return [r]
 
 

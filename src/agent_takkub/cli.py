@@ -118,6 +118,25 @@ def _split_role_args(raw: list[str] | None) -> list[str]:
     return out
 
 
+def _warn_deprecated_role(raw: str | list[str] | None) -> None:
+    """Warn when a deprecated role alias (qa, critic) is specified (#513/#561)."""
+    if not raw:
+        return
+    items = [raw] if isinstance(raw, str) else raw
+    for item in items:
+        for part in str(item).split(","):
+            part = part.strip()
+            base_r = part.split("#", 1)[0].lower()
+            if base_r in ("qa", "critic"):
+                from .routing_planner import REVIEWER_MODE_ALIASES
+
+                alias_mode = REVIEWER_MODE_ALIASES[base_r]
+                print(
+                    f"warn: --role {base_r} is deprecated (#513/#561); use --role reviewer --mode {alias_mode} instead",
+                    file=sys.stderr,
+                )
+
+
 def _request_with_retry(payload: dict) -> dict:
     """`_request` that rides out a transient orchestrator bridge timeout
     (#431). Only the timeout shape is retried — a real error answer from
@@ -664,15 +683,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     # assign ต้องพิมพ์ scope + เหตุผล 1 บรรทัดกลับมาเสมอ (ทั้งตอน auto และตอน Lead ระบุเอง)
     print(f"scope: {scope} ({scope_reason})")
 
-    # #513/#561: Keep qa / critic working as aliases for >= 1 release, emitting deprecation warning
-    if base_role in ("qa", "critic"):
-        from .routing_planner import REVIEWER_MODE_ALIASES
-
-        alias_mode = REVIEWER_MODE_ALIASES[base_role]
-        print(
-            f"warn: --role {base_role} is deprecated (#513/#561); use --role reviewer --mode {alias_mode} instead",
-            file=sys.stderr,
-        )
+    _warn_deprecated_role(base_role)
 
     mode_requested = getattr(args, "mode", None)
     if base_role == "reviewer":
@@ -1382,12 +1393,14 @@ def cmd_send(args: argparse.Namespace) -> dict:
         return cmd_report(report_args)
     if not (args.msg or "").strip():
         return {"ok": False, "msg": "send requires a message (or --to user --file <path>)"}
+    _warn_deprecated_role(getattr(args, "to", None))
     return _request(
         _with_project({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
     )
 
 
 def cmd_close(args: argparse.Namespace) -> dict:
+    _warn_deprecated_role(getattr(args, "role", None))
     return _request(_with_project({"cmd": "close", "role": args.role, "from": _from_role()}))
 
 
@@ -2181,6 +2194,7 @@ def cmd_messages(args: argparse.Namespace) -> dict:
     (queued / confirmed received / abandoned), and whether the cockpit had to
     re-send it after a respawn.
     """
+    _warn_deprecated_role(getattr(args, "role", None))
     resp = _request(
         _with_project(
             {
@@ -2215,6 +2229,7 @@ def cmd_task(args: argparse.Namespace) -> dict:
     row can stick at "working" forever once the cockpit process that owned
     it exits, since only a live pane's done/close handler ever flips it.
     """
+    _warn_deprecated_role(getattr(args, "role", None))
     if args.t_cmd == "show":
         resp = _request(
             _with_project({"cmd": "task-show", "role": args.role, "from": _from_role()})
@@ -2368,15 +2383,19 @@ def _print_inbox_items(items: object) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> dict:
+    _warn_deprecated_role(getattr(args, "role", None))
     payload = _with_project({"cmd": "status"})
     if getattr(args, "since", None):
         payload["since"] = args.since
+    if getattr(args, "role", None):
+        payload["role"] = args.role
     return _request(payload)
 
 
 def cmd_tail(args: argparse.Namespace) -> dict:
     """`takkub tail --role <r> [--lines N]` — read recent PTY output/transcript
     of a role, including exited panes (#541)."""
+    _warn_deprecated_role(getattr(args, "role", None))
     lines_n = getattr(args, "lines", 20) or 20
     resp = _request(
         _with_project(
@@ -2476,6 +2495,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
     no_interrupt = getattr(args, "no_interrupt", False)
     requested_roles = _split_role_args(getattr(args, "role", None))
+    _warn_deprecated_role(requested_roles)
 
     begin = _request_with_retry(
         _with_project(
@@ -5509,6 +5529,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="HH:MM",
         help="window start for done-event scan (default: 1h ago)",
+    )
+    sst.add_argument(
+        "--role",
+        default=None,
+        metavar="ROLE",
+        help="filter status to this role (e.g. backend, reviewer)",
     )
     sst.set_defaults(func=cmd_status)
 

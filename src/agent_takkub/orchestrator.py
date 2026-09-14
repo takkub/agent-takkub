@@ -2047,6 +2047,49 @@ class Orchestrator(
         `self.panes` works for the active project."""
         return self._panes_by_project.setdefault(self._resolve_project(project), {})
 
+    def resolve_pane_role(self, role: str, project: str | None = None) -> str:
+        """Resolve *role* to an actual pane name using pane_role_resolution_chain (#597).
+
+        When *role* is an alias or generic 'reviewer', searches for an active or
+        known pane among candidates (e.g. reviewer -> qa -> critic). Returns the
+        first candidate that exists, or the primary candidate if none match.
+        """
+        role_clean = (role or "").strip()
+        if not role_clean:
+            return role_clean
+        from .routing_planner import pane_role_resolution_chain
+
+        candidates = pane_role_resolution_chain(role_clean)
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else role_clean
+
+        project_ns = self._resolve_project(project)
+        panes = self._project_panes(project_ns)
+        for c in candidates:
+            if c in panes:
+                return c
+
+        detailed = self.list_status(project=project_ns)
+        for c in candidates:
+            if c in detailed:
+                return c
+
+        for pending_proj, r in getattr(self, "_subagent_assignments", {}):
+            if pending_proj == project_ns and r in candidates:
+                return r
+
+        now_ts = time.time()
+        for (pending_proj, r), queued_ts in getattr(self, "_recent_assign_queue", {}).items():
+            if pending_proj == project_ns and r in candidates and now_ts - queued_ts < 300.0:
+                return r
+
+        for c in candidates:
+            key = _exit_key(project_ns, c)
+            if key in self._pane_state:
+                return c
+
+        return candidates[0]
+
     def _project_ns_for_pane(self, pane: AgentPaneLike) -> str | None:
         """Reverse-lookup: which project namespace owns *pane* (identity
         match). Needed because every project's Lead pane shares
@@ -4221,6 +4264,7 @@ class Orchestrator(
         from_role: str | None = None,
         project: str | None = None,
     ) -> tuple[bool, str]:
+        to_role = self.resolve_pane_role(to_role, project)
         try:
             to_role = validate_name(to_role, "role")
         except ValueError as exc:
@@ -4621,6 +4665,7 @@ class Orchestrator(
     ) -> tuple[bool, str, list[str]]:
         """`takkub messages --role <r>` (#277): the send-audit log for one
         role, rendered for the CLI. Read-only — never mutates delivery state."""
+        role = self.resolve_pane_role(role, project)
         try:
             role = validate_name(role, "role")
         except ValueError as exc:
@@ -5028,6 +5073,7 @@ class Orchestrator(
         closes (force=True, tab close) do NOT suppress so the #8 behaviour holds:
         if a user forcibly removes the last auto-chain pane the handoff still fires.
         """
+        role_name = self.resolve_pane_role(role_name, project)
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role_name)
@@ -7660,6 +7706,8 @@ class Orchestrator(
         Lead already read through this call.
         """
         project_ns = self._resolve_project(project)
+        if role is not None:
+            role = self.resolve_pane_role(role, project_ns)
         if not hasattr(self, "_inbox_seen"):
             self._inbox_seen = {}
         seen = self._inbox_seen.setdefault(project_ns, set())
@@ -8800,6 +8848,7 @@ class Orchestrator(
         self,
         project: str | None = None,
         since_ts: float | None = None,
+        role: str | None = None,
     ) -> dict:
         """Per-pane summary for `takkub status`.
 
@@ -8942,6 +8991,10 @@ class Orchestrator(
                 "resource_wait_message": info.get("resource_wait_message"),
             }
 
+        if role:
+            target_role = self.resolve_pane_role(role, project_ns)
+            panes_out = {k: v for k, v in panes_out.items() if k == target_role}
+
         any_stalled = any(info["stall_minutes"] is not None for info in panes_out.values())
         return {"panes": panes_out, "any_stalled": any_stalled, "project": project_ns}
 
@@ -8957,6 +9010,7 @@ class Orchestrator(
         or most-recent `.transcript.log` under `runtime/sessions/`.
         """
         project_ns = self._resolve_project(project)
+        role = self.resolve_pane_role(role, project_ns)
         t_path = self._find_latest_transcript_path(project_ns, role)
         if t_path is None or not t_path.is_file():
             return False, f"no transcript found for role {role!r} in project {project_ns!r}", {}
@@ -9031,6 +9085,7 @@ class Orchestrator(
         (full text), `task_file` (path or None).
         """
         project_ns = self._resolve_project(project)
+        role = self.resolve_pane_role(role, project_ns)
         key = _exit_key(project_ns, role)
         ps = self._pane_state.get(key)
         if ps is None or not ps.last_assigned_task:
@@ -9154,6 +9209,7 @@ class Orchestrator(
         from . import task_ledger
 
         project_ns = self._resolve_project(project)
+        role = self.resolve_pane_role(role, project_ns)
         live_roles = self._live_roles(project_ns)
         if dry_run:
             state = task_ledger.load_state(project_ns)

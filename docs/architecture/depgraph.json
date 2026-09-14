@@ -493,6 +493,7 @@
         "agent_takkub.pipeline_config",
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
+        "agent_takkub.routing_planner",
         "agent_takkub.service_spawner",
         "agent_takkub.spawn_queue_health",
         "agent_takkub.team_preset",
@@ -504,7 +505,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -4239,11 +4240,12 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.cli_server",
         "agent_takkub.lead_wait",
         "agent_takkub.orchestrator",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
