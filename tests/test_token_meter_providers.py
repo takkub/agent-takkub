@@ -33,6 +33,17 @@ def _codex_meta_line(cwd: str, session_id: str = "sess-1") -> str:
     )
 
 
+def _codex_turn_context_line(model: str) -> str:
+    return json.dumps(
+        {
+            "timestamp": "2026-08-30T04:55:00.000Z",
+            "ordinal": 2,
+            "type": "turn_context",
+            "payload": {"turn_id": "t-1", "model": model},
+        }
+    )
+
+
 def _codex_token_count_line(inp: int, cached: int, out: int, limit: int) -> str:
     return json.dumps(
         {
@@ -133,6 +144,34 @@ class TestReadCodexTokenUsage:
 
     def test_missing_file_returns_none(self, tmp_path: pathlib.Path) -> None:
         assert read_codex_token_usage(tmp_path / "nope.jsonl") is None
+
+    def test_reports_real_model_from_turn_context(self, tmp_path: pathlib.Path) -> None:
+        """#591 follow-up: usage["model"] used to be the hardcoded literal
+        "codex" — never the CLI's actual live model — which permanently
+        false-flagged every codex pane's header as a mismatch."""
+        f = tmp_path / "rollout.jsonl"
+        f.write_text(
+            _codex_meta_line("C:/repo")
+            + "\n"
+            + _codex_turn_context_line("gpt-6-astra")
+            + "\n"
+            + _codex_token_count_line(1000, 500, 100, 258_400)
+            + "\n",
+            encoding="utf-8",
+        )
+        u = read_codex_token_usage(f)
+        assert u is not None
+        assert u["model"] == "gpt-6-astra"
+
+    def test_no_turn_context_falls_back_to_codex_placeholder(self, tmp_path: pathlib.Path) -> None:
+        f = tmp_path / "rollout.jsonl"
+        f.write_text(
+            _codex_meta_line("C:/repo") + "\n" + _codex_token_count_line(10, 0, 5, 200_000) + "\n",
+            encoding="utf-8",
+        )
+        u = read_codex_token_usage(f)
+        assert u is not None
+        assert u["model"] == "codex"
 
     def test_tail_scan_finds_event_past_512kb(self, tmp_path: pathlib.Path) -> None:
         f = tmp_path / "big-rollout.jsonl"

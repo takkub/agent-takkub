@@ -74,6 +74,17 @@ class AgentPaneModel:
         # read (#103); other providers must not arm the session-cap watchdog.
         self.provider_name: str | None = None
         self.supports_token_meter: bool = False
+        # #591: provider/model/effort this pane's most recent spawn actually
+        # resolved to (set by spawn_engine.spawn() on every branch — generic
+        # provider, claude teammate, claude Lead). None until the first
+        # spawn. `provider_model_display()` below prefers a live-reported
+        # model (passed in by the caller) over these when one is available.
+        self.spawn_model: str | None = None
+        self.spawn_effort: str | None = None
+        # True when spawn_model came from an explicit --model (an assign
+        # override or the TAKKUB_TEAMMATE_MODEL env force) rather than a
+        # role/provider/tier default pin.
+        self.spawn_model_explicit: bool = False
         # Edge-trigger latch: warn once while at/above the cap, then re-arm
         # only after a later usage sample falls below it (e.g. /compact).
         self.session_cap_warning_active: bool = False
@@ -144,6 +155,24 @@ class AgentPaneModel:
         self.provider_name = provider_name
         self.supports_token_meter = bool(supports_token_meter)
         self.session_cap_warning_active = False
+
+    def provider_model_display(self, live_model: str | None = None):
+        """#591: what this pane's header/tab should show for provider +
+        model, or None when nothing has spawned yet / this provider has no
+        model concept. `live_model` is the caller's already-resolved live
+        read (token_meter's usage["model"] for claude/codex,
+        `PtySession.current_model_label("gemini")` for gemini) — this
+        method itself does no I/O, so it stays importable/testable without
+        a display, same as the rest of this class."""
+        from .pane_provider_label import resolve_provider_model_display
+
+        return resolve_provider_model_display(
+            provider=self.provider_name,
+            spawn_model=self.spawn_model,
+            spawn_effort=self.spawn_effort,
+            spawn_explicit=self.spawn_model_explicit,
+            live_model=live_model,
+        )
 
     def observe_session_cap(self, prompt: int, threshold: int | None) -> bool:
         """Return True exactly once for each below→at/above cap crossing.

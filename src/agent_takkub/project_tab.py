@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from . import cockpit_theme
 from .agent_pane import AgentPane
+from .pane_provider_label import tab_label_with_model
 from .project_explorer import ProjectExplorer
 
 _logger = logging.getLogger(__name__)
@@ -167,6 +168,11 @@ class ProjectTab(QWidget):
         # keyed by (role_color, status_color) so repeat states reuse one QIcon.
         self._tab_status_icons: dict[tuple[str, str], QIcon] = {}
         self.pane_tabs.setIconSize(_TAB_ICON_SIZE)
+        # #591: each teammate tab's label MINUS the " · <model>" suffix
+        # (i.e. exactly what add_teammate_tab was called with), so the
+        # per-tick model refresh can rebuild the suffix without it creeping
+        # onto itself on every poll.
+        self._teammate_base_labels: dict[str, str] = {}
 
         # Poll teammate pane `.state` and repaint each tab's status dot —
         # see the _TAB_STATUS_* module comment for why this is a poll, not a
@@ -246,6 +252,7 @@ class ProjectTab(QWidget):
         nothing happened. setCurrentIndex fires `_on_pane_tab_changed` →
         `_apply_pane_keepalive`, so the new pane also resumes painting."""
         self.teammate_panes[role_name] = pane
+        self._teammate_base_labels[role_name] = label
         idx = self.pane_tabs.addTab(pane, label)
         self.pane_tabs.setCurrentIndex(idx)
         self._apply_pane_keepalive()
@@ -257,6 +264,7 @@ class ProjectTab(QWidget):
         """Drop a teammate pane's tab and registry entry. Returns the pane so
         the caller can tear down its WebEngine view, or None if not present."""
         pane = self.teammate_panes.pop(role_name, None)
+        self._teammate_base_labels.pop(role_name, None)
         if pane is None:
             return None
         idx = self.pane_tabs.indexOf(pane)
@@ -354,12 +362,29 @@ class ProjectTab(QWidget):
         self.pane_tabs.setStyleSheet(_pane_tabs_qss())
         self._refresh_teammate_tab_icons()
 
+    def _refresh_tab_provider_label(self, idx: int, pane: AgentPane, base_label: str) -> None:
+        """#591: rewrite one pane-tab's text/tooltip to include its live
+        provider/model suffix, e.g. "Backend" -> "Backend · sonnet-5"."""
+        display_fn = getattr(pane, "provider_model_display", None)
+        if not callable(display_fn):
+            return
+        display = display_fn()
+        text = tab_label_with_model(base_label, display)
+        if self.pane_tabs.tabText(idx) != text:
+            self.pane_tabs.setTabText(idx, text)
+        self.pane_tabs.setTabToolTip(idx, display.tooltip if display else "")
+
     def _refresh_teammate_tab_icons(self) -> None:
-        """Repaint every teammate pane-tab's role/status dot from the live
-        pane state. Cheap no-op when there are no teammate tabs."""
+        """Repaint every teammate pane-tab's role/status dot, and (#591) its
+        provider/model suffix + tooltip, from the live pane state. Cheap
+        no-op when there are no teammate tabs and no Lead attached."""
+        if self.lead_pane is not None:
+            idx = self.pane_tabs.indexOf(self.lead_pane)
+            if idx >= 0:
+                self._refresh_tab_provider_label(idx, self.lead_pane, "Lead")
         if not self.teammate_panes:
             return
-        for pane in self.teammate_panes.values():
+        for role_name, pane in self.teammate_panes.items():
             idx = self.pane_tabs.indexOf(pane)
             if idx < 0:
                 continue
@@ -367,6 +392,9 @@ class ProjectTab(QWidget):
             role_color = getattr(role, "color", None) or cockpit_theme.ROLE_COLOR_FALLBACK
             status_color = _tab_status_color(getattr(pane, "state", None))
             self.pane_tabs.setTabIcon(idx, self._tab_status_icon(role_color, status_color))
+            base_label = self._teammate_base_labels.get(role_name)
+            if base_label is not None:
+                self._refresh_tab_provider_label(idx, pane, base_label)
 
     # ------------------------------------------------------------------
     # unread red dot on the Lead tab

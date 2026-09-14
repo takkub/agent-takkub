@@ -2467,6 +2467,7 @@ class SpawnEngineMixin:
                 if provider_model:
                     model_argv.extend([spec.model_flag, provider_model])
             effort_argv: list[str] = []
+            provider_effort = ""
             if not _is_lead:
                 # Role tiers are provider-neutral for effort: a pane mapped to
                 # agy or Codex should retain the role's low/medium/high setting
@@ -2479,6 +2480,13 @@ class SpawnEngineMixin:
                     settings_role, spec, provider_model, override=_ps_initial.effort_override or ""
                 )
                 _append_provider_effort(effort_argv, spec, provider_effort)
+            # #591: remember what this pane actually resolved to spawn with
+            # for the header/tab "provider · model" display — a live-reported
+            # model (when the CLI exposes one) takes precedence over this at
+            # render time, see pane_provider_label.py.
+            pane.model.spawn_model = provider_model
+            pane.model.spawn_effort = provider_effort
+            pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
             # codex gets native `-c mcp_servers.<name>.<key>=…` session
             # overrides; agy's "plugin_import" resolves to a documented no-op
@@ -3168,6 +3176,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 PROVIDER_REGISTRY[CLAUDE],
                 teammate_effort,
             )
+            # #591: same bookkeeping as the generic provider branch above —
+            # explicit covers both the per-assign override and the
+            # TAKKUB_TEAMMATE_MODEL env force (model_argv branches).
+            pane.model.spawn_model = teammate_model
+            pane.model.spawn_effort = teammate_effort
+            pane.model.spawn_model_explicit = bool(_ps_initial.model_override) or (
+                "TAKKUB_TEAMMATE_MODEL" in os.environ
+            )
             # Graceful degradation under load. When the teammate's model is
             # overloaded (HTTP 529) or not found, claude switches to this
             # model for the rest of the session instead of hard-failing the
@@ -3236,6 +3252,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             lead_fallback = _remap_pinned_model(lead_fallback, env)
             if lead_fallback:
                 fallback_argv.extend(["--fallback-model", lead_fallback])
+            # #591: Lead never gets --effort (rides the user's own default).
+            pane.model.spawn_model = lead_model
+            pane.model.spawn_effort = ""
+            pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
 
         # Explicit plugin allowlist (skip the broken claude-obsidian hook).
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin

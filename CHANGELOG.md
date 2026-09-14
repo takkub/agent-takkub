@@ -4,6 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **แสดง provider/model จริงที่แต่ละ pane รันอยู่ บนหัว pane + tab (#591)** — หัว pane (เช่น
+  `claude · sonnet-5`, `codex · gpt-5.6-sol`) และ tab (`Backend · sonnet-5`) โชว์ทั้ง Lead,
+  teammate, shard และ Reviewer e2e/ui panes; tooltip บอก provider/model เต็ม/effort/ที่มา
+  (`ตาม CLI จริง` เมื่อ token_meter หรือ gemini footer รายงาน model จริงได้, `ตามที่ตั้งตอนเปิด`
+  เมื่อยังไม่มีข้อมูลจริงหรือ CLI ไม่รายงาน, `--model ที่ระบุ` เมื่อมาจาก assign override/
+  `TAKKUB_TEAMMATE_MODEL`) — model จริงต่างจากที่ spawn ไว้ (downgrade กลางเซสชัน, `/model`)
+  ขึ้น ⚠ พร้อมบอกทั้งสองค่าใน tooltip · logic ล้วนอยู่ที่ `pane_provider_label.py` (unit-testable,
+  ไม่แตะ Qt) ส่วน `spawn_engine.spawn()` เซ็ต `pane.model.spawn_model/spawn_effort/
+  spawn_model_explicit` ที่ทั้ง 3 จุด resolve (generic provider / claude teammate / claude Lead)
+  · **gap**: opencode/kimi/cursor ไม่มีกลไกรายงาน model จริงกลับมา (CLI ไม่ expose) — โชว์ได้แค่
+  ค่าที่ spawn resolve พร้อม tooltip บอกตรงๆ ว่า "CLI นี้ไม่รายงาน model"
+
 ## [v2.1.7] - 2026-09-14
 
 ### Fixed (แก้)

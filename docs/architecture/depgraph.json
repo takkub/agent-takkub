@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 340,
+  "module_count": 341,
   "modules": [
     {
       "module": "agent_takkub",
@@ -155,6 +155,7 @@
     {
       "module": "agent_takkub.agent_pane_model",
       "imports": [
+        "agent_takkub.pane_provider_label",
         "agent_takkub.plan_tier",
         "agent_takkub.pty_session",
         "agent_takkub.roles",
@@ -165,7 +166,7 @@
         "agent_takkub.headless_pane"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.app",
@@ -3361,6 +3362,16 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.pane_provider_label",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.agent_pane_model",
+        "agent_takkub.project_tab"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.pane_tools_dialog",
       "imports": [
         "agent_takkub.config",
@@ -3637,6 +3648,7 @@
       "imports": [
         "agent_takkub.agent_pane",
         "agent_takkub.cockpit_theme",
+        "agent_takkub.pane_provider_label",
         "agent_takkub.project_explorer"
       ],
       "imported_by": [
@@ -3646,7 +3658,7 @@
         "agent_takkub.status_header"
       ],
       "fan_in": 4,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.project_wizard",

@@ -227,9 +227,19 @@ def resolve_newest_codex_session_for_cwd(
 _CODEX_TAIL_SCAN_BYTES = 512 * 1024
 
 
-def _scan_lines_for_codex_token_count(lines) -> dict | None:
-    """Return the last `event_msg.payload.info` block seen in `lines`, or None."""
+def _scan_lines_for_codex_token_count(lines) -> tuple[dict | None, str | None]:
+    """Return `(last event_msg.payload.info block, last live model id)` seen
+    in `lines` — either half may be None.
+
+    The live model id comes from `turn_context` events' own top-level
+    `"model"` field (verified against a real rollout, codex-cli 0.154.0,
+    2026-09-14: `{"type":"turn_context","payload":{...,"model":"gpt-6-astra",
+    ...}}`) — a *different* top-level `type` than the `event_msg`/
+    `token_count` pair the token-usage numbers come from, so both are
+    tracked in one pass over the same lines rather than scanning twice.
+    """
     last_info: dict | None = None
+    last_model: str | None = None
     for line in lines:
         if not line.strip():
             continue
@@ -237,7 +247,15 @@ def _scan_lines_for_codex_token_count(lines) -> dict | None:
             j = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if j.get("type") != "event_msg":
+        j_type = j.get("type")
+        if j_type == "turn_context":
+            payload = j.get("payload")
+            if isinstance(payload, dict):
+                model = payload.get("model")
+                if isinstance(model, str) and model:
+                    last_model = model
+            continue
+        if j_type != "event_msg":
             continue
         payload = j.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "token_count":
@@ -245,7 +263,7 @@ def _scan_lines_for_codex_token_count(lines) -> dict | None:
         info = payload.get("info")
         if isinstance(info, dict):
             last_info = info
-    return last_info
+    return last_info, last_model
 
 
 def read_codex_token_usage(jsonl: Path) -> dict | None:
@@ -266,6 +284,14 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
     codex reports it live, so no static per-model table is needed the way
     claude's is (see token_meter._MODEL_LIMITS).
 
+    `model` is the id from the most recent `turn_context` event in the same
+    scan (e.g. `"gpt-6-astra"` — verified against a real rollout, codex-cli
+    0.154.0, 2026-09-14), falling back to the literal `"codex"` placeholder
+    when no `turn_context` event was seen (older rollout, or one truncated
+    out of the tail-scan window) — same fallback #591's `_live_model()`
+    caller already tolerates via its "unknown" empty-check, so this is a
+    pure improvement, never a new failure mode.
+
     Returns `{"status": "no_data", ...}` when the file has no token_count
     event yet (fresh session, first turn still in flight), and
     `{"status": "no_data", ...}` with a schema-drift reason if a future codex
@@ -277,6 +303,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
         return None
 
     last_info: dict | None = None
+    last_model: str | None = None
     if size > _CODEX_TAIL_SCAN_BYTES:
         try:
             with open(jsonl, "rb") as f:
@@ -285,7 +312,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
             nl = raw.find(b"\n")
             if nl != -1:
                 raw = raw[nl + 1 :]
-            last_info = _scan_lines_for_codex_token_count(
+            last_info, last_model = _scan_lines_for_codex_token_count(
                 raw.decode("utf-8", "replace").splitlines()
             )
         except OSError:
@@ -294,18 +321,19 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
     if last_info is None:
         try:
             with jsonl.open("r", encoding="utf-8", errors="replace") as f:
-                last_info = _scan_lines_for_codex_token_count(f)
+                last_info, last_model = _scan_lines_for_codex_token_count(f)
         except OSError:
             return None
 
+    model = last_model or "codex"
     if not last_info:
-        return {"status": "no_data", "model": "codex", "reason": "no token_count event logged yet"}
+        return {"status": "no_data", "model": model, "reason": "no token_count event logged yet"}
 
     last = last_info.get("last_token_usage")
     if not isinstance(last, dict):
         return {
             "status": "no_data",
-            "model": "codex",
+            "model": model,
             "reason": "token_count event missing last_token_usage (schema drift)",
         }
     inp = int(last.get("input_tokens") or 0)
@@ -315,7 +343,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
     limit = last_info.get("model_context_window")
     return {
         "status": "ok",
-        "model": "codex",
+        "model": model,
         "input": inp,
         "cache_creation": 0,
         "cache_read": cr,

@@ -203,6 +203,15 @@ class AgentPane(QFrame):
         title_color = cockpit_theme.ROLE_COLORS.get(role.name, role.color)
         self._title.setStyleSheet(f"color: {title_color};")
 
+        # #591: provider/model this pane is actually running, e.g.
+        # "claude · sonnet-5" — dim/small so it never competes with the role
+        # title. Hidden until the pane has spawned at least once.
+        self._provider_label = QLabel("", header)
+        self._provider_label.setStyleSheet(
+            f"color: {cockpit_theme.TEXT_FAINT_ALT}; font-size: 10px;"
+        )
+        self._provider_label.hide()
+
         self._note = QLabel("", header)
         self._note.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED}; font-size: 11px;")
 
@@ -284,6 +293,7 @@ class AgentPane(QFrame):
 
         hl.addWidget(self._dot)
         hl.addWidget(self._title)
+        hl.addWidget(self._provider_label)
         hl.addWidget(self._note, 1)
         hl.addWidget(self._token_label)
         hl.addWidget(self._btn_spawn)
@@ -669,6 +679,10 @@ class AgentPane(QFrame):
             # one quick refresh after a short delay so the badge appears as
             # soon as the first turn lands without waiting a full interval
             QTimer.singleShot(1_500, self._refresh_token_meter)
+        # #591: show the spawn-resolved provider/model immediately — live
+        # data (when this provider reports one) arrives later via the token
+        # meter poll / gemini footer read in _apply_token_meter.
+        self._refresh_provider_label()
 
     # Minimum interval between pyte-state polls so a chatty TUI doesn't
     # fire this 50+ times a second.
@@ -919,6 +933,7 @@ class AgentPane(QFrame):
         if usage is None:
             return
         self.model.record_token_meter_result(usage)
+        self._refresh_provider_label()
         status = usage.get("status", "ok")
         if status != "ok":
             # "unsupported" (confirmed no data for this provider) or
@@ -948,6 +963,39 @@ class AgentPane(QFrame):
         """Return the last-known usage dict for status-bar aggregation, or
         None if this pane has no active session / hasn't logged a turn yet."""
         return self.model.current_usage()
+
+    def _live_model(self) -> str | None:
+        """#591: this pane's live-reported model right now, or None when
+        this provider doesn't report one (yet, or ever)."""
+        provider = self.model.provider_name
+        if provider in ("claude", "codex"):
+            usage = self.model.last_usage_raw
+            if usage and usage.get("status", "ok") == "ok":
+                m = usage.get("model")
+                # codex_helper falls back to the literal "codex" when no
+                # turn_context was in the scanned tail — not a real model id.
+                if m and m not in ("unknown", provider):
+                    return m
+            return None
+        if provider == "gemini" and self.session is not None:
+            return self.session.current_model_label("gemini")
+        return None
+
+    def provider_model_display(self):
+        """#591: what this pane's header/tab should show for provider +
+        model right now (`pane_provider_label.ProviderModelDisplay`), or
+        None. Used by both this pane's own header label and
+        ProjectTab's tab-strip refresh."""
+        return self.model.provider_model_display(live_model=self._live_model())
+
+    def _refresh_provider_label(self) -> None:
+        display = self.provider_model_display()
+        if display is None:
+            self._provider_label.hide()
+            return
+        self._provider_label.setText(display.short_text)
+        self._provider_label.setToolTip(display.tooltip)
+        self._provider_label.show()
 
     def mark_expected_exit(self) -> None:
         """Called by orchestrator.close()/done() before terminate so the next
