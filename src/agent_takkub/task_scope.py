@@ -353,6 +353,31 @@ def _clean_analysis(text: str) -> str:
     return "\n".join(lines)
 
 
+# ── Explicit scope marker (#620) ──────────────────────────────────────────────
+# A task's first line sometimes already states its own tier ("scope=deep",
+# "scope: tiny", or a bare "(deep)"/"(scope normal)" aside in a heading) —
+# that is Lead's own explicit call, made with full knowledge of the work,
+# and must win over every keyword-derived signal below it, deep-category
+# detection included. Restricted to the first line only so a later mention
+# of the word "scope" in prose (e.g. "scope of this change") never matches.
+_SCOPE_MARKER_RE = re.compile(
+    r"\bscope\s*[:=]\s*(tiny|normal|deep)\b"
+    r"|\(\s*(?:scope\s+)?(tiny|normal|deep)\s*\)",
+    re.I,
+)
+
+
+def _explicit_scope_marker(text: str) -> str | None:
+    """Return the tier named by an explicit scope marker on *text*'s first
+    line, or None if there isn't one."""
+    first_line = (text or "").split("\n", 1)[0]
+    m = _SCOPE_MARKER_RE.search(first_line)
+    if not m:
+        return None
+    tier = (m.group(1) or m.group(2) or "").lower()
+    return tier if tier in SCOPE_TIERS else None
+
+
 def _deep_categories(text: str) -> tuple[set[str], tuple[str, str] | None]:
     """Return `(set of matched deep category names, first (name, sample))`."""
     names: set[str] = set()
@@ -381,6 +406,10 @@ def classify(task_text: str) -> ScopeDecision:
     text = strip_budget((task_text or "").strip())
     if not text:
         return ScopeDecision("normal", "ข้อความเปล่า (default tier)")
+
+    marker = _explicit_scope_marker(text)
+    if marker:
+        return ScopeDecision(marker, f"ตาม scope={marker} ในข้อความ")
 
     analyzed = _clean_analysis(_action_region(text))
     full_analyzed = _clean_analysis(text)
