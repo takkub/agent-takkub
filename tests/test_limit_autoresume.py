@@ -909,7 +909,11 @@ class TestReroutePaneToProvider:
                 "proj", "backend", ps, "codex", "claude", time.time() + 3600
             )
         o.close.assert_called_once_with(
-            "backend", project="proj", suppress_pipeline=True, suppress_auto_chain=True
+            "backend",
+            project="proj",
+            suppress_pipeline=True,
+            suppress_auto_chain=True,
+            keep_queue=True,
         )
         o.spawn.assert_called_once()
         assert o.spawn.call_args.kwargs["cwd"] == "C:/work/api"

@@ -3138,26 +3138,35 @@ class Orchestrator(
             if not hasattr(self, "_pending_assignments"):
                 self._pending_assignments = {}
             pending_id = _queued_task_id or _uuid.uuid4().hex
-            self._pending_assignments.setdefault(key, []).append(
-                dict(
-                    role_name=role_name,
-                    cwd=cwd,
-                    task=task,
-                    requires_commit=requires_commit,
-                    auto_chain=auto_chain,
-                    shard_total=shard_total,
-                    plan=plan,
-                    project=project_ns,
-                    worktree=worktree,
-                    feature=feature,
-                    model=model,
-                    provider=provider,
-                    effort=effort,
-                    distinct_from=distinct_from,
-                    scope=scope,
-                    _queued_task_id=pending_id,
-                )
+            pending_item = dict(
+                role_name=role_name,
+                cwd=cwd,
+                task=task,
+                requires_commit=requires_commit,
+                auto_chain=auto_chain,
+                shard_total=shard_total,
+                plan=plan,
+                project=project_ns,
+                worktree=worktree,
+                feature=feature,
+                model=model,
+                provider=provider,
+                effort=effort,
+                distinct_from=distinct_from,
+                scope=scope,
+                _queued_task_id=pending_id,
             )
+            bucket = self._pending_assignments.setdefault(key, [])
+            if _queued_task_id is not None:
+                # M3: this call is `_dispatch_next_assignment` re-delivering an
+                # item it just popped off the FRONT of the queue (the pane was
+                # still busy at that instant) — put it back at position 0, not
+                # the end, or a queue with 2+ items silently reorders itself
+                # ([A,B,C] -> dispatch A while busy -> [B,C,A]) every time this
+                # busy race fires.
+                bucket.insert(0, pending_item)
+            else:
+                bucket.append(pending_item)
             return True, f"{role_name}: task {pending_id[:8]} queued after current task"
         # Task Ledger (A7) records what the caller asked for, not delivery
         # mechanics added below.
@@ -3251,7 +3260,11 @@ class Orchestrator(
                 kind="assign-provider-switch",
             )
             self.close(
-                role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True
+                role_name,
+                project=project_ns,
+                suppress_pipeline=True,
+                suppress_auto_chain=True,
+                keep_queue=True,
             )
             QTimer.singleShot(
                 2_000,
@@ -5190,11 +5203,26 @@ class Orchestrator(
         suppress_pipeline: bool = False,
         suppress_auto_chain: bool = False,
         suppress_live_children_warning: bool = False,
+        keep_queue: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
         force=True is for legitimate cockpit lifecycle (tab close, project switch).
         Never expose to CLI — teammates can only call `takkub done`.
+
+        keep_queue=True forwards any queued `_pending_assignments[key]` to a
+        replacement pane after close (via `_resume_after_close`) — for a close
+        that is really "step aside for a respawn", not "stop". Every internal
+        close→respawn recovery path (#603 idle-provider-switch, #514 quota
+        reroute, the stuck/no-content/auth-failure watchdogs) passes this.
+        The default (False) is for a real stop — CLI `takkub close`, a user's
+        pane-× click, `close_all_teammates` — where the whole point is that
+        nothing comes back: any queued assignment is dropped (#593 H1) rather
+        than silently respawning the role seconds after Lead asked it closed.
+        A close with `_task_undelivered_close` (the CURRENT task never even
+        reached the pane, #484) always forwards regardless of `keep_queue` —
+        that text isn't a queued backlog, it's the one thing this pane was
+        asked to do.
 
         suppress_pipeline=True skips the "pane closed without done → mark the
         pipeline role failed + advance" path. Used by the stuck-pane watchdog,
@@ -5353,6 +5381,20 @@ class Orchestrator(
         # #422 item 3: keep the session id for the `close` event below — the
         # PaneState that carries it is popped right here.
         _closed_session_uuid = self._session_uuid_for(key)
+        # #593 H1: a real stop (keep_queue=False, the CLI/user-click default)
+        # abandons any queued next-assignment rather than silently forwarding
+        # it to a replacement pane — see close()'s own docstring. Computed
+        # here, before the state-pop decision below, so the dropped item's
+        # text can be preserved the same way #484 preserves an undelivered
+        # task's text: keep this PaneState alive instead of popping it.
+        _dropped_queue_close = None
+        if (
+            not suppress_pipeline
+            and role_name != LEAD.name
+            and not keep_queue
+            and not _task_undelivered_close
+        ):
+            _dropped_queue_close = getattr(self, "_pending_assignments", {}).pop(key, None)
         if _task_undelivered_close:
             _log_event("close_kept_undelivered_task", role=role_name, project=project_ns)
             self._notify_lead(
@@ -5363,6 +5405,30 @@ class Orchestrator(
                 from_role=role_name,
                 note="close_undelivered",
                 kind="close-undelivered",
+            )
+        elif _dropped_queue_close:
+            _dropped_n = len(_dropped_queue_close)
+            _dropped_ids = ", ".join(
+                item["_queued_task_id"][:8]
+                for item in _dropped_queue_close
+                if item.get("_queued_task_id")
+            )
+            if _ps_close is not None:
+                _ps_close.last_assigned_task = _dropped_queue_close[0]["task"]
+                _ps_close.task_delivered = False
+            _log_event(
+                "close_dropped_pending_queue",
+                role=role_name,
+                project=project_ns,
+                count=_dropped_n,
+            )
+            self._notify_lead(
+                project_ns,
+                f"🗑️ [close] ทิ้งงานคิว {_dropped_n} ใบของ {role_name} (task id {_dropped_ids}) — "
+                f"ดูข้อความได้ที่ `takkub task show --role {role_name}`",
+                from_role=role_name,
+                note="close_dropped_queue",
+                kind="close-dropped-queue",
             )
         else:
             getattr(self, "_pane_state", {}).pop(key, None)
@@ -12306,7 +12372,13 @@ class Orchestrator(
         # close→respawn recovery, not a real pane death.  Neither the pipeline hop
         # nor the auto-chain handoff should advance here — the same role respawns
         # 2 s later with its auto_chain flag restored by _do_respawn.
-        self.close(role, project=project, suppress_pipeline=True, suppress_auto_chain=True)
+        self.close(
+            role,
+            project=project,
+            suppress_pipeline=True,
+            suppress_auto_chain=True,
+            keep_queue=True,
+        )
 
         def _do_respawn() -> None:
             # Restore snapshotted state before spawn() runs so:

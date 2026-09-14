@@ -3357,7 +3357,13 @@ class LeadInboxMixin:
             session_uuid=_snap_uuid,
             snapshot=snapshot,
         )
-        self.close(role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True)
+        self.close(
+            role_name,
+            project=project_ns,
+            suppress_pipeline=True,
+            suppress_auto_chain=True,
+            keep_queue=True,
+        )
 
         def _do_respawn() -> None:
             ps = self._ps(key)

@@ -112,7 +112,45 @@ def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, pro
         assert "second task" in send.call_args.args[1]
 
 
-def test_close_forwards_pending_assignment(orch, monkeypatch, tmp_path):
+def test_close_drops_pending_assignment_by_default(orch, monkeypatch, tmp_path):
+    # #593 H1: a plain close() (CLI `takkub close` / user pane-x click, no
+    # keep_queue) must NOT bring the role back to run a queued next task —
+    # that would silently override an explicit "stop" with a respawn.
+    key = _exit_key(TEST_PROJECT, "backend")
+    pane = _make_working_pane(str(tmp_path))
+    orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+    ps = orch._ps(key)
+    ps.last_assigned_task = "active"
+    ps.task_delivered = True
+    callbacks = []
+    monkeypatch.setattr(
+        "agent_takkub.orchestrator.QTimer.singleShot", lambda ms, cb: callbacks.append(cb)
+    )
+    orch._assign_dispatch("backend", str(tmp_path), "pending", project=TEST_PROJECT)
+    orch.paneClosed.connect(lambda role, project: orch._panes_by_project[project].pop(role, None))
+    with (
+        patch.object(orch, "_warn_if_live_children"),
+        patch.object(orch, "_notify_lead") as notify,
+        patch.object(orch, "_dispatch_next_assignment", return_value=True) as dispatch,
+    ):
+        assert orch.close("backend", project=TEST_PROJECT)[0]
+        for cb in list(callbacks):
+            cb()
+        dispatch.assert_not_called()
+        assert not orch._pending_assignments.get(key)
+        # text stays recoverable via `takkub task show --role backend`, same
+        # preservation shape as #484's undelivered-task keep.
+        assert orch._pane_state[key].last_assigned_task == "pending"
+        assert orch._pane_state[key].task_delivered is False
+        assert any(
+            call.kwargs.get("kind") == "close-dropped-queue" for call in notify.call_args_list
+        )
+
+
+def test_close_keep_queue_forwards_pending_assignment(orch, monkeypatch, tmp_path):
+    # System-internal replace closes (#603 idle-provider-switch, #514 quota
+    # reroute, the stuck/no-content/auth watchdogs) pass keep_queue=True and
+    # must keep forwarding the queue exactly as before.
     key = _exit_key(TEST_PROJECT, "backend")
     pane = _make_working_pane(str(tmp_path))
     orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
@@ -130,11 +168,32 @@ def test_close_forwards_pending_assignment(orch, monkeypatch, tmp_path):
         patch.object(orch, "_notify_lead"),
         patch.object(orch, "_dispatch_next_assignment", return_value=True) as dispatch,
     ):
-        assert orch.close("backend", project=TEST_PROJECT)[0]
+        assert orch.close("backend", project=TEST_PROJECT, keep_queue=True)[0]
         for cb in list(callbacks):
             cb()
         dispatch.assert_called_once_with(TEST_PROJECT, "backend")
         assert orch._pending_assignments[key][0]["task"] == "pending"
+
+
+def test_busy_requeue_preserves_fifo_order(orch, tmp_path):
+    # M3: `_dispatch_next_assignment` pops the queue's FRONT item and
+    # re-delivers it via `_assign_dispatch`; if the pane is still busy at
+    # that instant, the busy-check re-queues it — it must go back to
+    # position 0, not the end, or [A, B, C] silently becomes [B, C, A].
+    key = _exit_key(TEST_PROJECT, "backend")
+    pane = _make_working_pane(str(tmp_path))
+    orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+    ps = orch._ps(key)
+    ps.last_assigned_task = "active"
+    ps.task_delivered = True
+    for label in ("A", "B", "C"):
+        orch._assign_dispatch("backend", str(tmp_path), label, project=TEST_PROJECT)
+    assert [item["task"] for item in orch._pending_assignments[key]] == ["A", "B", "C"]
+
+    with patch.object(orch, "_notify_lead"):
+        orch._dispatch_next_assignment(TEST_PROJECT, "backend")
+
+    assert [item["task"] for item in orch._pending_assignments[key]] == ["A", "B", "C"]
 
 
 class TestUncommittedWarning:
