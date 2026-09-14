@@ -488,6 +488,9 @@ class TestAssignResolutionLineAck:
         self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("agent_takkub.team_preset.can_spawn", lambda *_a, **_kw: (True, ""))
+        # --provider codex is validated against the installed CLI before the ack;
+        # CI runners have no codex binary, so stub availability like test_core_providers.
+        monkeypatch.setattr("agent_takkub.provider_config._provider_available", lambda p: True)
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
             lambda role, project=None: "codex" if role == "reviewer" else "gemini",
