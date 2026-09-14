@@ -699,10 +699,10 @@ def _hop_role_label(role: str) -> str:
 # opinion shouldn't be one accidental palette click away, same reasoning
 # `_build_secondary_brains_panel` already applies elsewhere on this page.
 # Also a function, for the same fresh-per-open reason as `_overridable_roles()`.
-def _pipeline_palette_roles() -> tuple[str, ...]:
+def _pipeline_palette_roles(project: str | None = None) -> tuple[str, ...]:
     from . import team_preset as _team_preset
 
-    groups = _team_preset.role_groups(None)
+    groups = _team_preset.role_groups(project)
     return (*groups["positions"], *groups["extra_positions"], *groups["reviewer_modes"])
 
 
@@ -2256,6 +2256,32 @@ class SettingsWindow(
         exec_label = "แตกหลายคน" if cfg["exec_mode"] == "parallel" else "1 คน/ตำแหน่ง"
         self._team_preset_exec_line.setText(f"โหมดทำงาน: {exec_label}")
 
+    def _current_team_cfg(self) -> dict:
+        """The team-preset config every enablement check on this window
+        should read RIGHT NOW (#592 round-2 item 2) — the previewed
+        team-size card once "ทีม & ตำแหน่ง" has been visited and a card
+        clicked (`self._selected_team_preset_id`, never written to disk
+        until Save & Apply), else the project's real standing preset when
+        that page hasn't been built yet this session (e.g. Pipeline Builder
+        opened first). Shared by the Roles roster (`_row_enabled_now`) and
+        everything the Pipeline Builder renders (`_pipeline_role_enabled`,
+        the pre-run summary) so the two pages can never disagree about the
+        same role inside one open Settings window."""
+        from . import team_preset as _team_preset
+
+        preset_id = getattr(self, "_selected_team_preset_id", None)
+        if preset_id is None:
+            preset_id = _team_preset.current_preset_id(self._project)
+        return _team_preset.resolve(preset_id, self._project)
+
+    def _pipeline_role_enabled(self, role: str) -> bool:
+        """`_row_enabled_now`'s exact formula, against `_current_team_cfg()`
+        — the single enablement check for anything the Pipeline Builder
+        page renders (hop chip dimming, palette dimming; the pre-run
+        summary passes the same cfg into `pipeline_hop_summary_lines`
+        directly). #592 round-2 item 2/3."""
+        return self._row_enabled_now(role, self._current_team_cfg())
+
     def _row_enabled_now(self, role: str, cfg: dict, *, is_lead: bool = False) -> bool:
         """#592 item 1/2: a role's switch reads ON/OFF exactly as
         `can_spawn`/`is_role_enabled` would decide it RIGHT NOW for *cfg*
@@ -2330,7 +2356,7 @@ class SettingsWindow(
             if w is not None:
                 w.deleteLater()
 
-        cfg = _team_preset.resolve(self._selected_team_preset_id, self._project)
+        cfg = self._current_team_cfg()
         groups = _team_preset.role_groups(self._project)
         position_roles = list(groups["positions"])
         reviewer_mode_roles = list(groups["reviewer_modes"])
@@ -2378,6 +2404,7 @@ class SettingsWindow(
         self._role_model_combos: dict[str, QComboBox] = {}
         self._role_effort_combos: dict[str, QComboBox] = {}
         self._role_provider_badges: dict[str, QLabel] = {}
+        self._role_defer_labels: dict[str, tuple[QLabel, str]] = {}
         self._lead_warning_lbl: QLabel | None = None
 
         # Bulk provider picker — stages the same provider change through each
@@ -2466,19 +2493,73 @@ class SettingsWindow(
             color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
-            row = self._build_role_row(
-                role,
-                _team_preset.REVIEWER_MODE_LABELS.get(role, role.capitalize()),
-                color,
-                "",
-                reviewer_group,
-                locked=False,
-                enabled=self._row_enabled_now(role, cfg),
-                current_provider=role_providers.get(role, provider_config.CLAUDE),
-                deletable=False,
-                show_enable_toggle=True,
-            )
+            role_label = _team_preset.REVIEWER_MODE_LABELS.get(role, role.capitalize())
+            # #592 round-2 item 1: qa/critic's OWN provider/model/effort combos
+            # here used to silently do nothing — spawn always reads whichever
+            # row `settings_role_for` names (Reviewer, on every built-in
+            # preset). Render those two as a plain resolved-text row instead
+            # of a second, unused set of controls; only a `custom` preset
+            # explicitly choosing checker="qa" keeps qa's own real row.
+            settings_role = _team_preset.settings_role_for(role, self._project)
+            if settings_role != role:
+                row = self._build_deferred_role_row(
+                    role,
+                    role_label,
+                    color,
+                    reviewer_group,
+                    settings_role=settings_role,
+                    enabled=self._row_enabled_now(role, cfg),
+                )
+            else:
+                row = self._build_role_row(
+                    role,
+                    role_label,
+                    color,
+                    "",
+                    reviewer_group,
+                    locked=False,
+                    enabled=self._row_enabled_now(role, cfg),
+                    current_provider=role_providers.get(role, provider_config.CLAUDE),
+                    deletable=False,
+                    show_enable_toggle=True,
+                )
+                if role == "reviewer":
+                    # Live-refresh every qa/critic deferred label whenever
+                    # Reviewer's own row changes — before Save & Apply, not
+                    # just after (same live-preview spirit as #592 item 3's
+                    # "(default → ...)" labels).
+                    self._role_provider_combos[role].currentIndexChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
+                    self._role_model_combos[role].currentTextChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
+                    self._role_effort_combos[role].currentIndexChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
             reviewer_body.addWidget(row)
+
+        # #590 follow-up, round-2 item 1: qa/critic entries still sitting in
+        # routing.json/role-models.json that settings_role_for no longer
+        # consults (configured but silently unused since the roster stopped
+        # rendering a row for them) — surfaced here, right under the rows
+        # that now explain what actually runs instead.
+        stale_entries = _team_preset.stale_legacy_role_configs(self._project)
+        if stale_entries:
+            stale_lines = "\n".join(
+                f"- {_team_preset.REVIEWER_MODE_LABELS.get(e['role'], e['role'])}: "
+                f"provider={e['provider']}" + (f" model={e['model']}" if e["model"] else "")
+                for e in stale_entries
+            )
+            stale_lbl = QLabel(
+                "พบค่าเก่าที่เคยตั้งไว้แต่ตอนนี้ไม่ถูกใช้แล้ว (แถวด้านบนใช้ค่า Reviewer แทน):\n" + stale_lines,
+                reviewer_group,
+            )
+            stale_lbl.setObjectName("panelHint")
+            stale_lbl.setWordWrap(True)
+            reviewer_body.addWidget(stale_lbl)
+
+        self._refresh_deferred_role_labels()
         outer.addWidget(reviewer_group)
 
         # ตำแหน่งเสริม (ปิดอยู่โดยดีฟอลต์) — tester/analyst/designer/docs/
@@ -2750,6 +2831,68 @@ class SettingsWindow(
             row_lay.addWidget(delete_btn)
 
         return row
+
+    def _build_deferred_role_row(
+        self,
+        role: str,
+        label: str,
+        color: str,
+        parent: QWidget,
+        *,
+        settings_role: str,
+        enabled: bool,
+    ) -> QWidget:
+        """A qa/critic roster row whose Settings row is actually
+        *settings_role*'s (`team_preset.settings_role_for`, #590) — round-2
+        #592 item 1. No independent provider/model/effort controls: editing
+        them here used to silently do nothing, since spawn always reads
+        *settings_role*'s row. Just the resolved text (`_refresh_deferred_
+        role_labels` keeps it live-bound to that row's combos) plus the
+        enable switch this mode's own toggle still governs (whether this
+        review MODE runs at all is independent of whose provider row backs
+        it)."""
+        row = QWidget(parent)
+        row.setObjectName("roleRow")
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(10, 8, 10, 8)
+        row_lay.setSpacing(10)
+        row_lay.addWidget(cockpit_theme.role_chip(label, color, row))
+
+        resolved_lbl = QLabel(row)
+        resolved_lbl.setObjectName("panelHint")
+        resolved_lbl.setWordWrap(True)
+        row_lay.addWidget(resolved_lbl, 1)
+        self._role_defer_labels[role] = (resolved_lbl, settings_role)
+
+        toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
+        toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
+        toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม — ปิดแล้ว assign จะถูกปฏิเสธ")
+        toggle.toggled.connect(self._mark_dirty)
+        row_lay.addWidget(toggle)
+        self._role_toggles[role] = toggle
+        return row
+
+    def _refresh_deferred_role_labels(self, *_args: object) -> None:
+        """Recompute every qa/critic deferred row's resolved text (#592
+        round-2 item 1) from its `settings_role`'s CURRENT combo selections
+        — called once after the roster builds, and again live on every
+        change to that row's provider/model/effort combos. `*_args` absorbs
+        whatever a connected Qt signal passes (index, text, …)."""
+        from . import team_preset as _team_preset
+
+        for _role, (lbl, settings_role) in self._role_defer_labels.items():
+            provider_combo = self._role_provider_combos.get(settings_role)
+            model_combo = self._role_model_combos.get(settings_role)
+            effort_combo = self._role_effort_combos.get(settings_role)
+            if provider_combo is None or model_combo is None or effort_combo is None:
+                continue
+            settings_label = _team_preset.REVIEWER_MODE_LABELS.get(
+                settings_role, settings_role.capitalize()
+            )
+            lbl.setText(
+                f"ใช้ค่าแถว {settings_label} → {provider_combo.currentText()} · "
+                f"{model_combo.currentText().strip()} · {effort_combo.currentText().strip()}"
+            )
 
     def _apply_provider_to_all_roles(self) -> None:
         """Stage the selected provider for every rendered role.
@@ -4542,12 +4685,18 @@ class SettingsWindow(
         pal_hint = QLabel("+ hop เดี่ยวจาก role:", palette_panel)
         pal_hint.setObjectName("panelHint")
         pal_lay.addWidget(pal_hint)
-        for role in _pipeline_palette_roles():
+        for role in _pipeline_palette_roles(self._project):
             label = _hop_role_label(role)
             r = roles_mod.by_name(role)
-            color = cockpit_theme.ROLE_COLORS.get(
+            base_color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
+            # round-2 #592 item 3: dim (never remove — still clickable, a
+            # single disabled hop doesn't break the template) a role that's
+            # off right now, same `_pipeline_role_enabled` formula the hop
+            # chips below use, so the palette can't disagree with them.
+            role_disabled = not self._pipeline_role_enabled(role)
+            color = cockpit_theme.TEXT_MUTED if role_disabled else base_color
             btn = QPushButton(label, palette_panel)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
@@ -4556,6 +4705,8 @@ class SettingsWindow(
                 f" font-size: 11px; }}"
                 f"QPushButton:hover {{ background: rgba(255,255,255,0.06); }}"
             )
+            if role_disabled:
+                btn.setToolTip("ปิดอยู่ — จะถูกข้ามตอนรัน")
             btn.clicked.connect(
                 lambda _checked=False, role_=role: self._on_palette_role_clicked(role_)
             )
@@ -4613,7 +4764,9 @@ class SettingsWindow(
         summary_label = getattr(self, "_pb_summary_label", None)
         if summary_label is not None:
             if self._pb_hops:
-                lines = _team_preset.pipeline_hop_summary_lines(self._pb_hops, self._project)
+                lines = _team_preset.pipeline_hop_summary_lines(
+                    self._pb_hops, self._project, cfg=self._current_team_cfg()
+                )
                 summary_label.setText("\n".join(lines))
                 summary_label.setVisible(True)
             else:
@@ -4671,12 +4824,10 @@ class SettingsWindow(
                 # toggle) — never silently dropped from the template, just
                 # shown dimmed with a tooltip explaining it will be skipped
                 # at run time (`pipeline_executor`'s own skip branch).
-                from . import team_preset as _team_preset
-
-                role_disabled = not (
-                    pipeline_config.is_role_enabled(role, self._project)
-                    and _team_preset.can_spawn(role, self._project)[0]
-                )
+                # round-2 item 2: `_pipeline_role_enabled` is the same
+                # formula the Roles roster's switches use — see
+                # `_current_team_cfg`.
+                role_disabled = not self._pipeline_role_enabled(role)
                 color = cockpit_theme.TEXT_MUTED if role_disabled else base_color
                 pill = QWidget(panel)
                 pill.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 999px;")

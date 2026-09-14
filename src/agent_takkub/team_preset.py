@@ -684,7 +684,7 @@ def assign_resolution_line(
 
 
 def pipeline_hop_summary_lines(
-    hops: list[list[dict]] | list[list], project: str | None = None
+    hops: list[list[dict]] | list[list], project: str | None = None, *, cfg: dict | None = None
 ) -> list[str]:
     """One line per hop describing what `pipeline_executor._fire_pipeline_hop`
     will actually do with each of its roles (#592 item 5) — e.g. ``"hop 2:
@@ -702,10 +702,20 @@ def pipeline_hop_summary_lines(
     qa/critic deferring to Reviewer, #590) is called out as a substitution
     instead, showing the provider that row will actually spawn with
     (`provider_config.effective_provider_for`, degradation-aware).
+
+    `cfg` lets a caller that's PREVIEWING an unsaved team-size card
+    (Settings' Roles page, `SettingsWindow._current_team_cfg`) evaluate
+    `can_spawn` against that preview instead of the real standing preset —
+    round-2 #592 item 2: the Roles roster and this summary must never show
+    a different answer for the same role inside the same open Settings
+    window. Omitted (the CLI ack's case) — resolves the real persisted
+    state via `current(project)`, exactly what will actually spawn.
     """
     from . import provider_config
     from .pipeline_config import is_role_enabled
     from .roles import by_name as _role_by_name
+
+    effective_cfg = cfg if cfg is not None else current(project)
 
     def _label(role: str) -> str:
         r = _role_by_name(role)
@@ -719,7 +729,10 @@ def pipeline_hop_summary_lines(
             if not role:
                 continue
             base_label = _label(role)
-            if not is_role_enabled(role, project) or not can_spawn(role, project)[0]:
+            if (
+                not is_role_enabled(role, project)
+                or not _can_spawn_from_cfg(role, effective_cfg, project)[0]
+            ):
                 parts.append(f"{base_label} ปิดอยู่ จะถูกข้าม")
                 continue
             settings_role = settings_role_for(role, project)
