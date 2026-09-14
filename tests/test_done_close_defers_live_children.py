@@ -207,7 +207,13 @@ class TestDoneCloseDefersForLiveChildren:
             clock["t"] += DONE_CLOSE_LIVE_CHILD_GRACE_S + 60.0
             with patch.object(orch, "close") as final_close_mock:
                 cb()
-            final_close_mock.assert_called_once_with("frontend", project=TEST_PROJECT)
+            # #604: the deferred notice already told Lead about these live
+            # children when the episode started — the grace-expiry close
+            # must suppress `_warn_if_live_children`'s own notice so this
+            # episode produces one Lead message total, not two.
+            final_close_mock.assert_called_once_with(
+                "frontend", project=TEST_PROJECT, suppress_live_children_warning=True
+            )
 
     def test_reassigned_pane_aborts_deferred_close(self, orch: Orchestrator) -> None:
         """If the pane picks up a new task while a close is deferred, the

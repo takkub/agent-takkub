@@ -771,3 +771,23 @@ class TestWarnIfLiveChildren:
             orch.close("devops", project=PROJECT)
 
         assert calls == ["warned", "terminated"], "must warn BEFORE terminate() kills the tree"
+
+    def test_close_suppress_live_children_warning_skips_warn(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#604: `done()`'s grace-expiry close passes this so a pane whose
+        live children were already reported once (the deferred notice) does
+        not get a second, redundant "about to be killed" notice for the
+        same episode. terminate() must still run either way."""
+        _register(orch, LEAD.name, _make_alive_session())
+        session = _make_alive_session()
+        _register(orch, "devops", session)
+
+        calls: list[str] = []
+        monkeypatch.setattr(orch, "_warn_if_live_children", lambda *a, **k: calls.append("warned"))
+        session.terminate = MagicMock(side_effect=lambda *a, **k: calls.append("terminated"))
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch.close("devops", project=PROJECT, suppress_live_children_warning=True)
+
+        assert calls == ["terminated"]
