@@ -2484,6 +2484,7 @@ class Orchestrator(
         other role (spawning a teammate doesn't change the project's size)."""
         base_role = role_name.split("#", 1)[0].strip().lower()
         shard_suffix = ("#" + role_name.split("#", 1)[1]) if "#" in role_name else ""
+        resolved_pane_name = None  # #597: track if role was resolved/converted
         if base_role == "reviewer":
             reviewer_mode = (
                 mode if mode in {"code", "e2e", "ui"} else ("code" if mode == "pane" else mode)
@@ -2495,6 +2496,7 @@ class Orchestrator(
 
                 dispatch_base = _MODE_TO_LEGACY_ROLE.get(reviewer_mode, "reviewer")
                 role_name = f"{dispatch_base}{shard_suffix}"
+                resolved_pane_name = dispatch_base
                 mode = "pane"
         elif mode not in {"pane", "subagent"}:
             return False, f"--mode {mode} is only valid for --role reviewer"
@@ -2914,6 +2916,9 @@ class Orchestrator(
             notice = self._queued_no_pane_notice(project_ns, role_name)
             if notice:
                 result = (result[0], f"{result[1]}\n{notice}")
+            # #597: show the actual pane name when reviewer role with mode is converted
+            if resolved_pane_name:
+                result = (result[0], f"{result[1]} → pane: {resolved_pane_name}")
         return result
 
     def _queued_no_pane_notice(self, project_ns: str, role_name: str) -> str:
