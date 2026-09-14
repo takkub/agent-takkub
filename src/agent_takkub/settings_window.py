@@ -132,6 +132,7 @@ from . import (
     provider_models,
     provider_spec,
     provider_state,
+    response_language,
     role_models,
     shared_dev_tools,
     skill_audit,
@@ -1820,6 +1821,40 @@ class SettingsWindow(
         lang_lay.addWidget(lang_hint)
         lay.addWidget(lang_panel)
 
+        # ภาษาที่ให้ทีมตอบ (#621) — separate from the cockpit-UI-language
+        # placeholder above: this picks what language Lead/specialist prompts
+        # are told to answer, summarize, and write done/progress notes in.
+        # Injected at spawn time (lead_context.py + spawn_engine.py) into
+        # every role, every provider.
+        team_lang_panel = QWidget(view)
+        team_lang_panel.setObjectName("panel")
+        team_lang_lay = QVBoxLayout(team_lang_panel)
+        team_lang_lay.setContentsMargins(16, 16, 16, 16)
+        team_lang_lay.setSpacing(8)
+
+        team_lang_title = QLabel("ภาษาที่ให้ทีมตอบ", team_lang_panel)
+        team_lang_title.setObjectName("panelTitle")
+        team_lang_lay.addWidget(team_lang_title)
+
+        self._team_lang_combo = QComboBox(team_lang_panel)
+        for key in response_language.MODES:
+            self._team_lang_combo.addItem(response_language.label(key), key)
+        idx = self._team_lang_combo.findData(response_language.load())
+        self._team_lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._team_lang_combo.currentIndexChanged.connect(self._on_team_language_changed)
+        team_lang_lay.addWidget(self._team_lang_combo)
+
+        team_lang_hint = QLabel(
+            "ภาษาที่ Lead และ specialist ทุก provider ถูกสั่งให้ใช้ตอบ/สรุป/เขียน done note "
+            "(คง identifier, คำสั่ง, path, ชื่อไฟล์, log เป็นอังกฤษเสมอ) · ดีฟอลต์ไทย · "
+            "มีผลกับ pane ที่ spawn ใหม่หลังบันทึก — pane ที่เปิดค้างอยู่ไม่เปลี่ยนจนกว่าจะ respawn",
+            team_lang_panel,
+        )
+        team_lang_hint.setObjectName("panelHint")
+        team_lang_hint.setWordWrap(True)
+        team_lang_lay.addWidget(team_lang_hint)
+        lay.addWidget(team_lang_panel)
+
         # #364 lever 1: discard a hidden pane's Chromium renderer after it
         # sits inactive past the debounce window — frees ~60MB/pane at the
         # current pane-ceiling, at the cost of a sub-400ms reload when the
@@ -1953,6 +1988,14 @@ class SettingsWindow(
             pass
         cockpit_theme.apply_variant(theme_settings.resolve_variant(mode))
         cockpit_theme.retheme_open_windows()
+
+    def _on_team_language_changed(self, _index: int) -> None:
+        """Write-through (#621) — same live-apply pattern as the theme mode
+        combo above. Only newly-spawned panes pick up the new directive
+        (rendered fresh at spawn time), stated in the panel's hint text."""
+        mode = self._team_lang_combo.currentData() or response_language.DEFAULT_MODE
+        if not response_language.save(mode):
+            QMessageBox.warning(self, "ภาษาที่ให้ทีมตอบ", "บันทึก response-language.json ไม่สำเร็จ")
 
     def retheme(self) -> None:
         """#506: re-apply this dialog's stylesheet + placeholder palette with

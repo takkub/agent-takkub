@@ -553,6 +553,21 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 
     suffix += BIG_FILE_GUARD
 
+    # #621: team response-language directive — the single Thai/English
+    # instruction line every role's prompt must carry so answers/summaries
+    # stop alternating languages. `None` under "as-typed" (no override).
+    from .response_language import prompt_directive as _lang_directive
+
+    _lang_line = _lang_directive()
+    if _lang_line:
+        suffix += f"""
+
+---
+
+## 🗣️ ภาษาที่ตอบ (#621)
+
+{_lang_line}"""
+
     # Inject project-specific CLAUDE.md so Lead knows the project's deploy
     # rules, stack constraints, and conventions at planning time — previously
     # Lead only saw the cockpit CLAUDE.md and had to infer project rules from
