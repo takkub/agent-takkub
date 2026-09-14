@@ -205,8 +205,33 @@ _STRICT_COLLISION_NAMES: frozenset[str] = frozenset({"providers"})
 
 # #504 item 5 — explicitly named as "not data", deleted outright rather than
 # archived. Exact names only; nothing here is a guess.
-_DELETE_OUTRIGHT_NAMES: frozenset[str] = frozenset({"openviking", "claude-config.partial"})
-_DELETE_OUTRIGHT_GLOB = ".takkub_issues.synced-*.bak.json"
+#
+# #605: OS-generated clutter (Finder's `.DS_Store`/AppleDouble `._*`
+# sidecar files/`.localized`, Explorer's `Thumbs.db`/`desktop.ini`) lands
+# at DATA_HOME's top level just by being browsed in a file manager — never
+# real V1 data. Before this, these had no exact-name match anywhere in
+# this module, so `_archive_candidates()` counted them as genuine V1
+# leftovers and `ArchiveV1LegacyStep.validate()` (via `_pending_real_data`)
+# stayed permanently red on a machine where every REAL V1 leftover was
+# already archived, which in turn kept `MigrationEngine`'s `v1_retired`
+# flag false forever and caused already-migrated domain steps
+# (`_ARCHIVED_SOURCE_STEP_IDS`) to be re-applied against their now-missing
+# V1 source (#605's own repro). Same treatment as every other item here:
+# deleted outright, and a deletion failure never blocks validation (#579).
+_DELETE_OUTRIGHT_NAMES: frozenset[str] = frozenset(
+    {
+        "openviking",
+        "claude-config.partial",
+        ".DS_Store",
+        ".localized",
+        "Thumbs.db",
+        "desktop.ini",
+    }
+)
+_DELETE_OUTRIGHT_GLOBS: tuple[str, ...] = (
+    ".takkub_issues.synced-*.bak.json",
+    "._*",  # macOS AppleDouble sidecar files
+)
 
 # #504 H7: known V1-only files that live ONE LEVEL INSIDE a shared V2
 # top-level directory (`_V2_TOP_LEVEL_NAMES` skips the whole directory to
@@ -2342,7 +2367,9 @@ class ArchiveV1LegacyStep:
             return []
         out = []
         for p in sorted(self.data_home.iterdir()):
-            if p.name in _DELETE_OUTRIGHT_NAMES or fnmatch.fnmatch(p.name, _DELETE_OUTRIGHT_GLOB):
+            if p.name in _DELETE_OUTRIGHT_NAMES or any(
+                fnmatch.fnmatch(p.name, pat) for pat in _DELETE_OUTRIGHT_GLOBS
+            ):
                 out.append(p)
         return out
 

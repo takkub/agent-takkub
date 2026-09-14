@@ -336,6 +336,27 @@ class TestFailedPage:
         assert w._stack.currentIndex() == bfw.PAGE_FAILED
         assert "ตรวจสอบ" in w._failed_heading.text()
 
+    def test_failed_page_shows_both_step_and_error_text(self) -> None:
+        """#605: the failed screen used to show only `failed_step`
+        ("project") and silently drop `error` — `failed_step or error`
+        always picked the truthy step id first, so a real error message
+        never reached the screen at all."""
+        outcome = _outcome(
+            ok=False,
+            failed_phase="verify",
+            failed_step="project",
+            error="projects/registry.json อ่านไม่ได้",
+            rolled_back=True,
+            data_intact=True,
+        )
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        sub_text = w._failed_sub.text()
+        assert "project" in sub_text
+        assert "projects/registry.json อ่านไม่ได้" in sub_text
+
     def test_continue_with_old_version_proceeds(self) -> None:
         outcome = _outcome(ok=False, failed_phase="verify", rolled_back=True, data_intact=True)
         flow = _FakeFlow(items=[], plan=_plan(), outcome=outcome)

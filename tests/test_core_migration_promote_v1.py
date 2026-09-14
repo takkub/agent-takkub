@@ -1947,3 +1947,58 @@ def test_archive_junk_deletion_partial_removal_detected(tmp_path, journal_backup
     assert any(
         "still exists after removal" in f for f in apply_report.detail.get("delete_failures", [])
     )
+
+
+# ---------------------------------------------------------------------------
+# #605 — OS junk (.DS_Store/AppleDouble/Explorer clutter) must never count
+# as a real V1 leftover: it blocked `validate()` forever on a machine where
+# every real V1 leftover had already been archived, which kept
+# `MigrationEngine`'s `v1_retired` flag false and caused already-migrated
+# domain steps to be re-applied against their now-missing V1 source.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "junk_name", [".DS_Store", ".localized", "Thumbs.db", "desktop.ini", "._resource"]
+)
+def test_os_junk_names_are_deleted_outright_not_archived(
+    tmp_path, journal_backups, junk_name
+) -> None:
+    """#605: each of these must be swept up by `_delete_candidates()` (and
+    thus deleted outright), never by `_archive_candidates()` — a Finder/
+    Explorer-generated file must never be treated as a real V1 leftover."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / junk_name).write_text("", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step._archive_candidates() == []
+    assert [p.name for p in step._delete_candidates()] == [junk_name]
+
+
+def test_os_junk_at_top_level_does_not_block_validate_after_real_data_archived(
+    tmp_path, journal_backups
+) -> None:
+    """#605 repro: once the real V1 leftover is archived, only Finder/
+    Explorer clutter remains at DATA_HOME's top level — `validate()` must
+    still report ok, not stay permanently red the way it did before this
+    fix (which is what kept `MigrationEngine.apply_pending()`'s
+    `v1_retired` flag false forever and caused already-migrated domain
+    steps to be re-applied against their now-missing V1 source, #605)."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    apply_report = step.apply()
+    assert apply_report.ok
+    assert not (data_home / "projects.json").exists()
+
+    # Simulate Finder/Explorer re-creating clutter after the real archival.
+    (data_home / ".DS_Store").write_text("", encoding="utf-8")
+    (data_home / "._projects.json").write_text("", encoding="utf-8")
+
+    validate_report = step.validate()
+    assert validate_report.ok, validate_report.summary

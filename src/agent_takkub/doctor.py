@@ -3773,6 +3773,19 @@ def _auto_migrate_boot_findings() -> list[Finding]:
                 Status.WARN,
                 f"{len(stale)} step ที่เคย apply สำเร็จ validate ไม่ผ่านตอน boot ล่าสุด ({names}) — "
                 "ไม่ auto-rollback ให้ ต้องตรวจด้วยมือ",
+                # #605: the most common real cause is OS-generated clutter
+                # (.DS_Store, ._*, Thumbs.db, desktop.ini) sitting at
+                # DATA_HOME's top level, mistaken for a real V1 leftover and
+                # keeping `archive-v1-legacy` from ever validating clean —
+                # deleting it and re-validating is the fix in that case; a
+                # genuinely broken target has a pre-write backup under
+                # `<DATA_HOME>/backups/<migration_backups>/<step>__<name>/`
+                # to restore from by hand.
+                fix_hint=(
+                    "ลบไฟล์ขยะของ OS (.DS_Store, ._*, Thumbs.db, desktop.ini) ที่ data home "
+                    "แล้วรัน `takkub migrate validate` ใหม่ — ถ้ายังไม่ผ่าน ดู backup ที่ "
+                    "runtime/core/migration_backups/<step>__<name>/<timestamp>/ เพื่อกู้ด้วยมือ"
+                ),
             )
         )
 

@@ -62,12 +62,32 @@ def write_json_atomic(path: Path, payload: dict) -> None:
         # opening a directory this way on Windows).
 
 
+def _target_has_data(target: Path) -> bool:
+    doc = read_json(target)
+    return bool(isinstance(doc, dict) and doc.get("data"))
+
+
 @dataclass
 class RegistryCopyStep:
     step_id: str
     mappings: tuple[RegistryMapping, ...]
     journal: MigrationJournal = field(default_factory=MigrationJournal)
     backups: BackupManager = field(default_factory=BackupManager)
+
+    def source_retired(self) -> bool:
+        """True once EVERY mapping's V1 source is gone AND its own target
+        already holds real migrated data — #605: read by `MigrationEngine
+        ._source_retired_for` as a per-step fallback when the ladder-wide
+        `v1_retired` flag (driven by `ArchiveV1LegacyStep.validate()`) is
+        false for an unrelated reason (e.g. OS junk clutter still sitting
+        at DATA_HOME's top level). The "target already has data" half
+        matters just as much as "source gone": a mapping whose V1 source
+        never existed at all (nothing to migrate, not "already archived")
+        must NOT be reported as retired before its own `apply()` has ever
+        had a chance to write its (empty but valid) target — that used to
+        make the engine skip this step's re-apply forever, leaving its
+        target file never created at all (a real regression this fixed)."""
+        return all(not m.source.exists() and _target_has_data(m.target) for m in self.mappings)
 
     def _backup_key(self, mapping: RegistryMapping) -> str:
         # Composite key, not bare step_id: two mappings in the same step can
@@ -112,7 +132,15 @@ class RegistryCopyStep:
 
     def apply(self) -> StepReport:
         written: list[str] = []
+        kept: list[str] = []
         for m in self.mappings:
+            if not m.source.exists() and _target_has_data(m.target):
+                # #605: the V1 source is already gone (archived by an
+                # earlier pass) but the V2 target still holds real
+                # migrated data — re-deriving from a missing source would
+                # write `{"data": {}}` over it, wiping it out.
+                kept.append(m.name)
+                continue
             self.backups.backup(self._backup_key(m), m.target)
             payload = {
                 "schema": 1,
@@ -126,13 +154,16 @@ class RegistryCopyStep:
                 self.journal.record(self.step_id, "apply", False, f"{m.name}: {e}")
                 return StepReport(self.step_id, "apply", False, f"write failed for {m.name}: {e}")
             written.append(m.name)
-        self.journal.record(self.step_id, "apply", True, f"wrote {len(written)} target(s)")
+        summary = f"wrote {len(written)} target(s)"
+        if kept:
+            summary += f", kept {len(kept)} target(s) (V1 source archived)"
+        self.journal.record(self.step_id, "apply", True, summary)
         return StepReport(
             self.step_id,
             "apply",
             True,
-            f"wrote {len(written)} target(s)",
-            detail={"written": written},
+            summary,
+            detail={"written": written, "kept": kept},
         )
 
     def validate(self) -> StepReport:
