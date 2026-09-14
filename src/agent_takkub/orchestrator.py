@@ -3006,6 +3006,46 @@ class Orchestrator(
             f"หรือปิด/รอ {role_name} ปัจจุบันให้เสร็จก่อน (takkub close --role {role_name})"
         )
 
+    def _dispatch_next_assignment(self, project: str, role: str) -> bool:
+        key = _exit_key(project, role)
+        queue = getattr(self, "_pending_assignments", {}).get(key, [])
+        if not queue:
+            return False
+        item = queue.pop(0)
+        ok, message = self._assign_dispatch(**item)
+        if not ok:
+            queue.insert(0, item)
+        self._notify_lead(
+            project,
+            f"[queued-assignment] {role}: task {item['_queued_task_id'][:8]} "
+            + ("forwarded when pane ready" if ok else f"retained; dispatch failed: {message}"),
+            from_role=role,
+            note="queued_assignment",
+            kind="queued-assignment",
+        )
+        return True
+
+    def _resume_after_close(self, project: str, role: str, state: PaneState | None, cwd) -> None:
+        key = _exit_key(project, role)
+        # Another assign/spawn may already have taken over this slot.
+        pane = self._project_panes(project).get(role)
+        if pane is not None and pane.session is not None and pane.session.is_alive:
+            return
+        if state is not None and self._pane_state.get(key) is state:
+            ok, message = self.spawn(role, cwd=cwd, project=project, _from_auto_respawn=True)
+            if ok:
+                self._send_when_ready(role, state.last_assigned_task, project=project)
+            self._notify_lead(
+                project,
+                f"[queued-assignment] {role}: undelivered task "
+                + ("forwarded to replacement pane" if ok else f"retained; spawn failed: {message}"),
+                from_role=role,
+                note="queued_assignment",
+                kind="queued-assignment",
+            )
+        else:
+            self._dispatch_next_assignment(project, role)
+
     def _assign_dispatch(
         self,
         role_name: str,
@@ -3023,6 +3063,7 @@ class Orchestrator(
         effort: str | None = None,
         distinct_from: str | None = None,
         scope: str = "normal",
+        _queued_task_id: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -3035,6 +3076,40 @@ class Orchestrator(
         from .provider_spec import PROVIDER_REGISTRY
 
         project_ns = self._resolve_project(project)
+        key = _exit_key(project_ns, role_name)
+        current_state = self._ps(key)
+        current_pane = self._project_panes(project_ns).get(role_name)
+        # Keep the active task's identity, delivery and done metadata intact.
+        # A starting pane also owns its assignment before its first ready prompt.
+        if (
+            current_state.last_assigned_task
+            and current_pane is not None
+            and current_pane.state not in ("done", "empty", "exited")
+        ):
+            if not hasattr(self, "_pending_assignments"):
+                self._pending_assignments = {}
+            pending_id = _queued_task_id or _uuid.uuid4().hex
+            self._pending_assignments.setdefault(key, []).append(
+                dict(
+                    role_name=role_name,
+                    cwd=cwd,
+                    task=task,
+                    requires_commit=requires_commit,
+                    auto_chain=auto_chain,
+                    shard_total=shard_total,
+                    plan=plan,
+                    project=project_ns,
+                    worktree=worktree,
+                    feature=feature,
+                    model=model,
+                    provider=provider,
+                    effort=effort,
+                    distinct_from=distinct_from,
+                    scope=scope,
+                    _queued_task_id=pending_id,
+                )
+            )
+            return True, f"{role_name}: task {pending_id[:8]} queued after current task"
         # Task Ledger (A7) records what the caller asked for, not delivery
         # mechanics added below.
         raw_task_for_ledger = task
@@ -3055,7 +3130,7 @@ class Orchestrator(
         # model_override handling a few lines down.
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
-        ps_assign.task_id = _uuid.uuid4().hex
+        ps_assign.task_id = _queued_task_id or _uuid.uuid4().hex
         existing_pane = self._project_panes(project_ns).get(role_name)
         pane_is_running = bool(
             existing_pane is not None
@@ -5224,6 +5299,16 @@ class Orchestrator(
         # the pane, so they don't free a slot and don't drain.
         if role_name != LEAD.name and not suppress_pipeline and _fanout_queue_enabled():
             QTimer.singleShot(0, lambda p=project_ns: self._drain_fanout_queue(p))
+        if (
+            not suppress_pipeline
+            and role_name != LEAD.name
+            and (_task_undelivered_close or getattr(self, "_pending_assignments", {}).get(key))
+        ):
+            retained = _ps_close if _task_undelivered_close else None
+            closing_cwd = getattr(pane, "_session_cwd", None)
+            QTimer.singleShot(
+                0, lambda: self._resume_after_close(project_ns, role_name, retained, closing_cwd)
+            )
         return True, f"{role_name} closed"
 
     def toggle_provider(self, provider: str, disabled: bool) -> tuple[bool, str]:
@@ -6770,6 +6855,12 @@ class Orchestrator(
         # Capture current session so the delayed close is a no-op if the pane
         # has already been respawned with a new session by the time the timer fires.
         pane.set_state("done", note=note[:80] if note else "done")
+        # Provider/model belong to the still-live session until close, even
+        # though the completed assignment's state has been retired.
+        session_state = self._ps(key)
+        session_state.provider_override = _ps_done.provider_override
+        session_state.model_override = _ps_done.model_override
+        session_state.effort_override = _ps_done.effort_override
         _done_sess = pane.session
         # #554: cross-poll-tick idle tracking for the still-live-children
         # path below — one closure per done() call, reset whenever the
@@ -6781,6 +6872,15 @@ class Orchestrator(
         def _close_if_same_session(_deferred_since: float | None = None) -> None:
             nonlocal _idle_activity, _idle_since
             _pp = self._project_panes(project_ns).get(from_role)
+            pending_state = self._pane_state.get(key)
+            if (
+                pending_state is not None
+                and pending_state.task_id
+                and pending_state.task_id != had_task_id
+            ):
+                return
+            if self._dispatch_next_assignment(project_ns, from_role):
+                return
             if _pp is None or _pp.state not in ("done", "empty"):
                 return
             # #559: `_pp.session` can legitimately become None before this
@@ -6892,7 +6992,10 @@ class Orchestrator(
                 )
             self.close(from_role, project=project_ns)
 
-        QTimer.singleShot(2_500, _close_if_same_session)
+        if getattr(self, "_pending_assignments", {}).get(key):
+            QTimer.singleShot(0, lambda: self._dispatch_next_assignment(project_ns, from_role))
+        else:
+            QTimer.singleShot(2_500, _close_if_same_session)
         _log_event(
             "done",
             role=from_role,
@@ -9033,6 +9136,9 @@ class Orchestrator(
         key = _exit_key(project_ns, role)
         ps = self._pane_state.get(key)
         if ps is None or not ps.last_assigned_task:
+            queue = getattr(self, "_pending_assignments", {}).get(key, [])
+            if queue:
+                return True, "queued task", {"task": queue[0]["task"], "task_file": None}
             return False, f"no task assigned to '{role}' yet", {}
         task_file = ps.last_assigned_task_file
         if task_file:

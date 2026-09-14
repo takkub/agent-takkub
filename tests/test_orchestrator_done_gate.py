@@ -77,6 +77,66 @@ def _written_str(mock_session: MagicMock) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"])
+def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, provider):
+    key = _exit_key(TEST_PROJECT, "backend")
+    pane = _make_working_pane(str(tmp_path))
+    pane.set_state.side_effect = lambda state, **kw: setattr(pane, "state", state)
+    orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+    old = orch._ps(key)
+    old.last_assigned_task = "first task"
+    old.task_id = "first-id"
+    old.task_delivered = True
+    old.provider_override = provider
+    callbacks = []
+    monkeypatch.setattr(
+        "agent_takkub.orchestrator.QTimer.singleShot", lambda ms, cb: callbacks.append((ms, cb))
+    )
+    with (
+        patch.object(orch, "spawn", return_value=(True, "running")),
+        patch.object(orch, "_send_when_ready") as send,
+    ):
+        assert orch._assign_dispatch("backend", str(tmp_path), "second task", project=TEST_PROJECT)[
+            0
+        ]
+        assert old.task_id == "first-id"
+        assert old.last_assigned_task == "first task"
+        assert orch.done("backend", note="first finished", project=TEST_PROJECT)[0]
+        assert not any(ms == 2500 for ms, cb in callbacks)
+        for ms, cb in list(callbacks):
+            if ms == 0:
+                cb()
+        assert "second task" in orch._ps(key).last_assigned_task
+        assert orch._ps(key).task_id != "first-id"
+        assert len(send.call_args_list) == 1
+        assert "second task" in send.call_args.args[1]
+
+
+def test_close_forwards_pending_assignment(orch, monkeypatch, tmp_path):
+    key = _exit_key(TEST_PROJECT, "backend")
+    pane = _make_working_pane(str(tmp_path))
+    orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+    ps = orch._ps(key)
+    ps.last_assigned_task = "active"
+    ps.task_delivered = True
+    callbacks = []
+    monkeypatch.setattr(
+        "agent_takkub.orchestrator.QTimer.singleShot", lambda ms, cb: callbacks.append(cb)
+    )
+    orch._assign_dispatch("backend", str(tmp_path), "pending", project=TEST_PROJECT)
+    orch.paneClosed.connect(lambda role, project: orch._panes_by_project[project].pop(role, None))
+    with (
+        patch.object(orch, "_warn_if_live_children"),
+        patch.object(orch, "_notify_lead"),
+        patch.object(orch, "_dispatch_next_assignment", return_value=True) as dispatch,
+    ):
+        assert orch.close("backend", project=TEST_PROJECT)[0]
+        for cb in list(callbacks):
+            cb()
+        dispatch.assert_called_once_with(TEST_PROJECT, "backend")
+        assert orch._pending_assignments[key][0]["task"] == "pending"
+
+
 class TestUncommittedWarning:
     def test_dirty_returns_warning_with_preview(self) -> None:
         out = Orchestrator._uncommitted_warning("frontend", "M src/app.tsx\nA test.tsx\n")
