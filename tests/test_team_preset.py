@@ -533,9 +533,12 @@ class TestPipelineHopSummaryLines:
         lines = team_preset.pipeline_hop_summary_lines([[{"role": "backend"}]], "proj")
         assert lines == ["hop 1: Backend ปิดอยู่ จะถูกข้าม"]
 
-    def test_qa_shows_reviewer_substitution_with_its_provider(self):
-        from agent_takkub import pipeline_config, role_models
+    def test_qa_shows_reviewer_substitution_with_its_provider(self, monkeypatch):
+        from agent_takkub import pipeline_config, provider_config, role_models
 
+        # codex isn't installed on CI runners; stub availability like
+        # test_core_providers / #590 so the summary can name it.
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         team_preset.set_current("full", "proj")
         role_models.set_provider("reviewer", "codex")
         pipeline_config.save({"rolesEnabled": {"tester": False}}, "proj")

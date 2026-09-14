@@ -1549,9 +1549,14 @@ class TestPipelineBuilderView:
         assert dlg._pb_hops[0][0]["role"] == "tester"
         dlg.deleteLater()
 
-    def test_template_selection_shows_pre_run_summary(self) -> None:
+    def test_template_selection_shows_pre_run_summary(self, monkeypatch) -> None:
         """#592 item 5: selecting a template shows the same per-hop summary
         `takkub pipeline run`'s CLI ack does — before anything actually runs."""
+        from agent_takkub import provider_config
+
+        # codex isn't installed on CI runners; stub availability like
+        # test_core_providers / #590 so the summary can name it.
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         role_models.set_provider("reviewer", "codex")
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         dlg._load_pb_hops("feature")
