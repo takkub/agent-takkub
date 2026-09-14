@@ -2552,8 +2552,20 @@ class Orchestrator(
                 role_name = f"{dispatch_base}{shard_suffix}"
                 resolved_pane_name = dispatch_base
                 mode = "pane"
-        elif mode not in {"pane", "subagent"}:
-            return False, f"--mode {mode} is only valid for --role reviewer"
+        else:
+            from .routing_planner import REVIEWER_MODE_ALIASES
+
+            # #613: qa/critic's own alias mode (e2e/ui) is a no-op here, same
+            # as leaving --mode unset — the CLI/cli_server pre-checks already
+            # let it through for the same reason; this is the third and last
+            # place that used to still bounce it back as "only valid for
+            # --role reviewer" (a deferred, never-surfaced-to-the-caller
+            # rejection, since this call runs off a QTimer — see the
+            # assign() docstring's *worktree_prepared* note above).
+            if mode == REVIEWER_MODE_ALIASES.get(base_role):
+                mode = "pane"
+            elif mode not in {"pane", "subagent"}:
+                return False, f"--mode {mode} is only valid for --role reviewer"
 
         # #510: enforce the Settings → Providers & Roles on/off toggle at the
         # single choke point both pane and subagent assigns pass through —

@@ -677,8 +677,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     # assign ต้องพิมพ์ scope + เหตุผล 1 บรรทัดกลับมาเสมอ (ทั้งตอน auto และตอน Lead ระบุเอง)
     print(f"scope: {scope} ({scope_reason})")
 
-    _warn_deprecated_role(base_role)
-
     mode_requested = getattr(args, "mode", None)
     if base_role == "reviewer":
         if mode_requested is None:
@@ -689,16 +687,47 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "msg": f"--mode for reviewer must be code, e2e, or ui (got {mode_requested!r})",
             }
     else:
-        if mode_requested in {"code", "e2e", "ui"}:
-            return {
-                "ok": False,
-                "msg": f"--mode {mode_requested} is only valid for --role reviewer",
-            }
-        if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
-            return {
-                "ok": False,
-                "msg": "--mode must be pane or subagent",
-            }
+        from .routing_planner import REVIEWER_MODE_ALIASES
+
+        if base_role in REVIEWER_MODE_ALIASES:
+            # #613: qa/critic ARE reviewer --mode e2e/ui under the hood
+            # (#513) — the matching mode is a no-op, not a conflict.
+            # Printing both an error AND a "use reviewer --mode e2e instead"
+            # warn for the exact same `--role qa --mode e2e` combo was
+            # #613 itself. Only a genuinely different mode is an error now,
+            # and only a bare role (no --mode at all) gets the deprecation
+            # nudge, since that's the only case still leaving the mode to
+            # the (deprecated) default instead of stating it explicitly.
+            alias_mode = REVIEWER_MODE_ALIASES[base_role]
+            if mode_requested is None:
+                _warn_deprecated_role(base_role)
+                mode_requested = alias_mode
+            elif mode_requested == alias_mode:
+                pass
+            elif mode_requested in {"code", "e2e", "ui"}:
+                return {
+                    "ok": False,
+                    "msg": (
+                        f"--role {base_role} ผูกกับ --mode {alias_mode} อยู่แล้ว (#513) — "
+                        f"ใช้ --role reviewer --mode {mode_requested} แทนถ้าต้องการโหมดนั้น"
+                    ),
+                }
+            elif mode_requested not in {"pane", "subagent"}:
+                return {
+                    "ok": False,
+                    "msg": "--mode must be pane or subagent",
+                }
+        else:
+            if mode_requested in {"code", "e2e", "ui"}:
+                return {
+                    "ok": False,
+                    "msg": f"--mode {mode_requested} is only valid for --role reviewer",
+                }
+            if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
+                return {
+                    "ok": False,
+                    "msg": "--mode must be pane or subagent",
+                }
 
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
