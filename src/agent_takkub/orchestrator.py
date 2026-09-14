@@ -87,6 +87,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _TYPING_ENTER_DELAY_MS,
     BRACKETED_PASTE_THRESHOLD,
     TASK_HANDOFF_THRESHOLD,
+    UI_NO_UI_MARKER,
     _append_verify_fail_hint,
     _append_worktree_hint,
     _build_transcript_path,
@@ -123,6 +124,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     prune_old_transcripts,
     recovery_snapshot,
     scan_artifacts,
+    screenshot_paths_in_note,
     ui_evidence_gate,
 )
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
@@ -5832,27 +5834,38 @@ class Orchestrator(
         return header.startswith(prefixes)
 
     @staticmethod
-    def _evidence_content_hash(path: pathlib.Path, size: int) -> str | None:
-        """md5 of `path`'s bytes, for cross-file duplicate detection (issue
+    def _evidence_content_hash(path: pathlib.Path, size: int, algo: str = "md5") -> str | None:
+        """Hash of `path`'s bytes, for cross-file duplicate detection (issue
         #182). `None` on any read failure or when `size` exceeds
         `_EVIDENCE_DEDUP_MAX_BYTES` — the caller must treat that as "unknown,
         can't compare" rather than "empty file", so it never collides with a
-        real hash by coincidence."""
+        real hash by coincidence. `algo` defaults to md5 (cheap, display-only
+        tag); `_evidence_dedup_gate` (issue #610) passes `"sha256"` since that
+        result gates whether `done()` completes at all, not just an
+        annotation."""
         if size > _EVIDENCE_DEDUP_MAX_BYTES:
             return None
         try:
-            return hashlib.md5(path.read_bytes()).hexdigest()
+            return hashlib.new(algo, path.read_bytes()).hexdigest()
         except OSError:
             return None
 
     @classmethod
     def _evidence_format_entry(
-        cls, path: pathlib.Path, size: int, dup_of: pathlib.Path | None = None
+        cls,
+        path: pathlib.Path,
+        size: int,
+        dup_of: pathlib.Path | None = None,
+        digest: str | None = None,
     ) -> str:
         """`path (12.3KB)`, tagged `⚠small`/`⚠bad-header` when the file looks
         like a failed capture rather than a real screenshot (issue #159), or
         `⚠dup-of:<name>` when it's byte-identical to an earlier file in the
-        same evidence batch (issue #182)."""
+        same evidence batch (issue #182). `digest`, when given, appends a
+        short `#<8 hex chars>` tag (issue #610) so Lead can eyeball whether
+        two entries across separate done() notices are actually the same
+        bytes — trailing, so it never disturbs the `(NN.NKB)` suffix callers
+        already match on."""
         reasons = []
         if size < _EVIDENCE_SUSPECT_MIN_BYTES:
             reasons.append("small")
@@ -5862,7 +5875,8 @@ class Orchestrator(
             reasons.append(f"dup-of:{dup_of.name}")
         tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
         posix_path = str(path).replace("\\", "/")
-        return f"{posix_path} ({size / 1024:.1f}KB{tag})"
+        digest_tag = f" #{digest[:8]}" if digest else ""
+        return f"{posix_path} ({size / 1024:.1f}KB{tag}){digest_tag}"
 
     @classmethod
     def _find_evidence_files(
@@ -5979,7 +5993,7 @@ class Orchestrator(
                         dup_of = first
                     else:
                         seen_hashes[digest] = p
-                entries.append(cls._evidence_format_entry(p, size, dup_of=dup_of))
+                entries.append(cls._evidence_format_entry(p, size, dup_of=dup_of, digest=digest))
             paths = ", ".join(entries)
             suffix = " (shared dir)" if shared else ""
             return f"📸 evidence: {paths}{suffix}"
@@ -5988,6 +6002,103 @@ class Orchestrator(
         if note and _EVIDENCE_CITE_RE.search(note):
             return ""
         return "⚠ no evidence cited"
+
+    def _evidence_dedup_gate(
+        self, project_ns: str, from_role: str, assign_ts: float, note: str
+    ) -> str | None:
+        """Reject `done()` when its evidence reuses image bytes done() has
+        already seen for this (project, role) — issue #610. A live incident:
+        QA's retest `done()` cited a screenshot that was byte-identical to a
+        PRE-fix failure screenshot from an earlier report on the same task,
+        and Lead only caught it by manually diffing md5 sums. #182's dedup
+        only compares files WITHIN one done() call; this compares against
+        the previous call's evidence too, and actually blocks completion
+        rather than just annotating the note. Uses sha256 (not #182's
+        display-only md5) since this result gates whether the report is
+        accepted at all. Returns a Thai rejection message, or None to let
+        done() proceed. `[no-ui]` in the note opts out exactly like
+        `ui_evidence_gate` (#433) — no screenshots expected, nothing to
+        dedup."""
+        if UI_NO_UI_MARKER in (note or "").lower():
+            return None
+        if assign_ts <= 0:
+            # No tracked assignment window — nothing to scope the check to;
+            # mirrors _scan_done_evidence's own no-op for this case.
+            return None
+
+        base_role, _ = _split_shard(from_role)
+        now = time.time()
+        today = datetime.now().strftime("%Y-%m-%d")
+        artifacts_dir = RUNTIME_DIR / "exports" / today / project_ns
+
+        fresh = self._find_evidence_files(artifacts_dir / base_role, assign_ts, now)
+        shared = False
+        if not fresh and base_role in _EVIDENCE_WARN_ROLES:
+            fresh = self._find_evidence_files(artifacts_dir, assign_ts, now)
+            shared = True
+
+        # Note cites a screenshot by name but the actual file on disk
+        # predates this task's assign_ts (a copy of an old capture, mtime
+        # untouched) — reject with a specific reason rather than letting it
+        # silently fall through to the generic "no evidence cited" warning.
+        cited = screenshot_paths_in_note(note)
+        if cited:
+            fresh_names = {p.name for _, p, _ in fresh}
+            stale_all = self._find_evidence_files(artifacts_dir / base_role, 0.0, now)
+            if not stale_all and shared:
+                stale_all = self._find_evidence_files(artifacts_dir, 0.0, now)
+            stale_by_name = {p.name: mt for mt, p, _ in stale_all if mt < assign_ts}
+            for token in cited:
+                base = pathlib.PurePosixPath(token.replace("\\", "/")).name
+                if base in fresh_names or base not in stale_by_name:
+                    continue
+                return (
+                    f"ปฏิเสธ done: หลักฐานที่อ้างถึง '{base}' เป็นไฟล์ที่มี mtime "
+                    "**ก่อน**เวลา assign งานนี้ (ไฟล์เก่ากว่างาน ไม่ใช่ภาพที่ถ่ายใหม่สำหรับ "
+                    "task นี้) — ถ่ายภาพใหม่แล้วอ้างไฟล์ใหม่ (issue #610)"
+                )
+
+        if not fresh:
+            return None
+
+        history = getattr(self, "_evidence_digest_history", None)
+        if not isinstance(history, dict):
+            history = {}
+            self._evidence_digest_history = history
+        hist_key = (project_ns, base_role)
+        prior = history.get(hist_key) or {}
+
+        seen: dict[str, pathlib.Path] = {}
+        for _, p, size in fresh:
+            digest = self._evidence_content_hash(p, size, algo="sha256")
+            if digest is None:
+                continue
+            earlier_in_batch = seen.get(digest)
+            if earlier_in_batch is not None:
+                return (
+                    f"ปฏิเสธ done: หลักฐาน '{p.name}' เหมือนกับ '{earlier_in_batch.name}' "
+                    f"ทุกไบต์ (sha256 #{digest[:8]}) ในชุดเดียวกัน — ไม่ใช่ภาพคนละสถานะจริง "
+                    "ถ่ายใหม่ให้ต่างกัน (issue #610)"
+                )
+            seen[digest] = p
+            prior_name = prior.get(digest)
+            # Only a DIFFERENT filename reusing these bytes is suspect — the
+            # scan window stays open for the whole task, so the exact same
+            # still-fresh file recurring across repeated done()/progress()
+            # calls (e.g. a --fail then a later real done citing the same
+            # unchanged shot) is the same valid evidence, not reuse.
+            if prior_name is not None and prior_name != p.name:
+                return (
+                    f"ปฏิเสธ done: หลักฐาน '{p.name}' (sha256 #{digest[:8]}) เหมือนทุกไบต์กับ "
+                    f"'{prior_name}' ที่เคยแนบใน done/progress ก่อนหน้าของงานนี้ — ถ้าแก้จริงแล้ว "
+                    "ต้องถ่ายภาพใหม่ ไม่ใช่ส่งไฟล์เดิมซ้ำ (issue #610)"
+                )
+
+        # No reject — remember this batch's digests so the NEXT done()/
+        # progress() on this (project, role) can be compared against it.
+        # "ล่าสุด" per the issue: replace, don't accumulate forever.
+        history[hist_key] = {h: p.name for h, p in seen.items()}
+        return None
 
     @staticmethod
     def _build_blocked_handoff(from_role: str, body: str, what: str) -> str:
@@ -6566,6 +6677,20 @@ class Orchestrator(
             if _gate_msg:
                 _log_event("done_rejected_ui_evidence", role=from_role, project=project_ns)
                 return False, _gate_msg
+
+        # #610: reject a report whose evidence reuses image bytes done()
+        # already saw for this (project, role) — a same-batch duplicate
+        # filed under two names, a stale copy of an old failure screenshot,
+        # or a note citing a screenshot that predates this task's assign_ts.
+        # Runs for failed/blocked reports too (misleading evidence is
+        # misleading regardless of outcome) — `--force` is the one escape
+        # hatch, same as every other done() gate above.
+        if not force:
+            _dedup_assign_ts = getattr(_ps_done, "assign_ts", 0.0) or 0.0
+            _dedup_msg = self._evidence_dedup_gate(project_ns, from_role, _dedup_assign_ts, note)
+            if _dedup_msg:
+                _log_event("done_rejected_evidence_dedup", role=from_role, project=project_ns)
+                return False, _dedup_msg
 
         # #278/#276: refuse a report about an assignment that never reached
         # this pane — see `_pane_reports_undelivered_task`. `--force` stays
