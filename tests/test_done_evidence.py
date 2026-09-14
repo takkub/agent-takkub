@@ -146,8 +146,12 @@ class TestAssignTsCapture:
         orch.done("backend", note="done", project=proj)
 
         assert captured["assign_ts"] == stamp
-        # state popped after done()
-        assert "proj::backend" not in orch._pane_state
+        # state popped after done() (a fresh PaneState carrying only the
+        # still-live session's provider/model/effort override may survive
+        # until close() pops it for real 2.5s later — see orchestrator.py's
+        # `session_state = self._ps(key)` right after the done()-pop)
+        ps = orch._pane_state.get("proj::backend")
+        assert ps is None or not ps.assign_ts
 
 
 # ─────────────────────────────────────────────────────────────

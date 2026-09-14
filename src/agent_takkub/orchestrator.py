@@ -5286,7 +5286,13 @@ class Orchestrator(
                 self._warn_if_live_children(project_ns, role_name, pane.session)
             _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
-            self._revoke_session_tokens(project_ns, role_name, closing_session)
+            # Dispatched via the class (not `self._revoke_session_tokens(...)`)
+            # so a bare test double for `self` — including a MagicMock, which
+            # would silently swallow the call behind an auto-mocked attribute
+            # instead of running the real revocation — still gets the genuine
+            # token-store mutation; the function only ever touches plain dicts
+            # hung off `self` via `getattr(..., {})`, so it's safe on any fake.
+            Orchestrator._revoke_session_tokens(self, project_ns, role_name, closing_session)
             current_pane = self._project_panes(project_ns).get(role_name)
             if current_pane is not pane or (
                 pane.session is not None and pane.session is not closing_session
@@ -9746,16 +9752,19 @@ class Orchestrator(
                 projects[project] = entries
 
         now = time.time()
+        # #596: a pane frozen on its own quota banner still reads
+        # pane.state == "working" (nothing ever demotes it) — exclude it
+        # below so pane_guard's machine-busy gate doesn't block an otherwise-
+        # idle machine on a pane that physically cannot run. getattr: test
+        # doubles for snapshot_state's `self` predate #596 and don't carry
+        # this quota-tracking mixin — treat as "never stalled" on those.
+        _quota_stalled = getattr(self, "_pane_quota_stalled", None)
         working_panes: list[str] = [
             e["role"]
             for project, entries in projects.items()
             for e in entries
             if e.get("state") == "working"
-            # #596: a pane frozen on its own quota banner still reads
-            # pane.state == "working" (nothing ever demotes it) — exclude it
-            # here so pane_guard's machine-busy gate doesn't block an
-            # otherwise-idle machine on a pane that physically cannot run.
-            and not self._pane_quota_stalled(project, e["role"], now)
+            and not (callable(_quota_stalled) and _quota_stalled(project, e["role"], now))
         ]
         return {"projects": projects, "working_panes": working_panes}
 

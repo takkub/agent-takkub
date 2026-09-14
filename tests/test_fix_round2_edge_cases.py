@@ -622,6 +622,9 @@ class TestTokenRevocationOnClose:
         orch._pane_state = {}
         orch._idle_state = {}
         orch._resolve_project = MagicMock(return_value=project)
+        # #597: close() now resolves role aliases before the pane lookup —
+        # `role` has no alias here, so the real behaviour is an identity map.
+        orch.resolve_pane_role = MagicMock(side_effect=lambda r, _p=None: r)
 
         pane = MagicMock()
         pane.session = MagicMock()
@@ -650,6 +653,9 @@ class TestTokenRevocationOnClose:
         orch._pane_state = {}
         orch._idle_state = {}
         orch._resolve_project = MagicMock(return_value="proj")
+        # #597: close() now resolves role aliases before the pane lookup —
+        # "backend" has no alias, so the real behaviour is an identity map.
+        orch.resolve_pane_role = MagicMock(side_effect=lambda r, _p=None: r)
 
         pane = MagicMock()
         pane.session = MagicMock()

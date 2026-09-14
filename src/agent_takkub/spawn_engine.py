@@ -1618,7 +1618,13 @@ class SpawnEngineMixin:
         if not hasattr(self, "_retired_pane_tokens"):
             self._retired_pane_tokens = {}
         for token, identity in list(tokens.items()):
-            if identity == (project, role) and bindings.get(token) is session:
+            # A token with no recorded session binding has no living owner
+            # to protect — revoke it on any exit of its (project, role) slot
+            # rather than only a session-identity match (2026-09-15 batch
+            # review L1: mint-without-bind left it un-revocable forever).
+            if identity == (project, role) and (
+                token not in bindings or bindings.get(token) is session
+            ):
                 self._retired_pane_tokens[token] = tokens.pop(token)
                 bindings.pop(token, None)
         # Retired credentials may only send a recovery message to Lead.
@@ -3964,8 +3970,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 pass
 
         # Revoke pane token on session death so a crashed or exited pane cannot
-        # continue to authenticate send/done after it terminates.
-        self._revoke_session_tokens(project, role_name, session)
+        # continue to authenticate send/done after it terminates. Dispatched
+        # via the class (not `self._revoke_session_tokens(...)`) so a bare
+        # test double for `self` — including a MagicMock, which would silently
+        # swallow the call behind an auto-mocked attribute instead of running
+        # the real revocation — still gets the genuine token-store mutation;
+        # the function only ever touches plain dicts hung off `self` via
+        # `getattr(..., {})`, so it's safe on any fake.
+        SpawnEngineMixin._revoke_session_tokens(self, project, role_name, session)
 
         pane = self._panes_by_project.get(project, {}).get(role_name)
         if (
