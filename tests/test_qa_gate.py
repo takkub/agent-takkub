@@ -563,7 +563,14 @@ class TestNodeProjectGate:
         report = qa_gate.run_gate(cwd=node_repo, write_report=False)
 
         ran = [cmd for cmd, _env in recorder]
-        assert len(ran) == 1 and ran[0][1:] == ["run", "verify"]
+        # #600: turbo-backed verify must force a real, fully-logged run.
+        assert len(ran) == 1 and ran[0][1:] == [
+            "run",
+            "verify",
+            "--",
+            "--output-logs=full",
+            "--force",
+        ]
         assert "pnpm" in str(ran[0][0])
         assert report.ok
 

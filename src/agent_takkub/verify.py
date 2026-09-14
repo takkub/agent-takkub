@@ -198,6 +198,22 @@ def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
     ]
 
 
+def _turbo_force_args(cwd: Path, pkg: dict, script_value: str) -> list[str]:
+    """A `verify`/`test` script that delegates to turbo can cache-hit and
+    replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
+    `Tests: N passed` summary, leaving qa-gate's own log with no evidence a
+    real run happened (#600). Force a genuine run with full output whenever
+    the script actually goes through turbo, so the gate's log is always
+    proof, never a cache stub."""
+    deps: dict = {}
+    for key in ("dependencies", "devDependencies"):
+        d = pkg.get(key)
+        if isinstance(d, dict):
+            deps.update(d)
+    uses_turbo = "turbo" in script_value or "turbo" in deps or (cwd / "turbo.json").exists()
+    return ["--", "--output-logs=full", "--force"] if uses_turbo else []
+
+
 def node_checks(cwd: Path) -> list[Check]:
     """The Node gate (#329 + #368). Order matters — typecheck runs BEFORE test
     because the whole point is that vitest/jest transpile through esbuild and
@@ -219,7 +235,8 @@ def node_checks(cwd: Path) -> list[Check]:
     checks: list[Check] = []
 
     if "verify" in scripts:
-        checks.append(Check(name="verify", cmd=pm_run(pm, "verify"), stack="node"))
+        verify_cmd = pm_run(pm, "verify") + _turbo_force_args(cwd, pkg, str(scripts["verify"]))
+        checks.append(Check(name="verify", cmd=verify_cmd, stack="node"))
     else:
         if "typecheck" in scripts:
             checks.append(Check(name="typecheck", cmd=pm_run(pm, "typecheck"), stack="node"))
@@ -242,7 +259,8 @@ def node_checks(cwd: Path) -> list[Check]:
                     )
                 )
         if "test" in scripts:
-            checks.append(Check(name="test", cmd=pm_run(pm, "test"), stack="node"))
+            test_cmd = pm_run(pm, "test") + _turbo_force_args(cwd, pkg, str(scripts["test"]))
+            checks.append(Check(name="test", cmd=test_cmd, stack="node"))
 
     eslintrc_patterns = [
         ".eslintrc",
