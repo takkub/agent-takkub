@@ -379,6 +379,33 @@ class TestRunMigrationOutcome:
         assert all(o.failed_step == "archive-v1-legacy" for o in outcomes)
         assert all(o.failed_phase == 4 for o in outcomes)
 
+    def test_outcome_error_matches_failed_step_when_only_validate_reports_a_failure(self):
+        """#605: `error` must always describe the SAME step
+        `failed_step`/`failed_step_index` name — before this fix, `error`
+        stayed pinned to the (possibly ok/empty) apply-report failure while
+        `failed_step`/`failed_step_index` moved on to whichever step the
+        LATER validate pass actually found broken, so the failed screen
+        could show one step's position next to a different step's error
+        text (or no error text at all)."""
+        from agent_takkub import auto_migrate_boot
+        from agent_takkub.core.migration.report import StepReport
+
+        result = auto_migrate_boot.BootMigrationResult(
+            "pending_rolled_back",
+            reason="",
+            messages=[],
+            reports=[StepReport("readonly-registries", "apply", True, "ok")],
+            validate_reports=[
+                StepReport("readonly-registries", "validate", True, "ok"),
+                StepReport("project", "validate", False, "projects/registry.json อ่านไม่ได้"),
+            ],
+        )
+        outcome = boot_flow._outcome_from_result(result, plan=None, started=0.0)
+        assert outcome.ok is False
+        assert outcome.failed_step == "project"
+        assert outcome.failed_step_index == 2
+        assert outcome.error == "projects/registry.json อ่านไม่ได้"
+
     def test_rolled_back_action_with_failed_rollback_marks_data_not_intact(self, monkeypatch):
         import agent_takkub.core.storage.layout as layout_mod
         from agent_takkub import auto_migrate_boot

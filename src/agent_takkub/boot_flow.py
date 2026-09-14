@@ -928,6 +928,14 @@ def _outcome_from_result(
             failed_step_index = i
             failed_step = r.step_id
             failed_phase = _phase_of_step(failed_step)
+            # #605: `failing` (below, `error`'s own source) must be
+            # reassigned to THIS SAME report — it used to stay pinned to
+            # the (unrelated, possibly None) apply-report `failing` while
+            # `failed_step`/`failed_step_index` moved on to the validate
+            # report above, so the failed screen could show one step's
+            # name next to a DIFFERENT step's error text (or no error at
+            # all, when the apply pass had none).
+            failing = r
             break
 
     archive_report = next((r for r in result.reports if r.step_id == "archive-v1-legacy"), None)

@@ -1413,6 +1413,56 @@ def test_validate_catches_a_present_but_null_required_domain_value(tmp_path, mon
 
 
 # ---------------------------------------------------------------------------
+# #605 — a domain step's own V1 source can be independently retired (already
+# archived) even while the ladder-wide `v1_retired` flag is false for an
+# UNRELATED reason (here: a generic stray top-level leftover standing in for
+# either OS junk clutter or a different domain step's own not-yet-archived
+# V1 leftover) — `apply_pending()` must still recognize that and never
+# re-derive/overwrite that step's already-migrated V2 target from its
+# now-missing source.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_pending_keeps_project_registry_when_v1_retired_flag_is_false_but_step_source_gone(
+    tmp_path, monkeypatch
+):
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", data_home)
+    monkeypatch.setattr("agent_takkub.config.SETTINGS_HOME", data_home)
+
+    (data_home / "projects.json").write_text(
+        json.dumps({"projects": {"demo": {"paths": {"web": "/tmp/web"}}}}), encoding="utf-8"
+    )
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    engine = MigrationEngine(data_home=data_home, journal=journal)
+    reports = engine.apply()
+    assert all(r.ok for r in reports), [(r.step_id, r.summary) for r in reports]
+
+    registry_path = storage_layout_v2(data_home).projects_root / "registry.json"
+    registry_before = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert registry_before["data"]["projects"]["demo"]["paths"] == {"web": "/tmp/web"}
+    assert not (data_home / "projects.json").exists()  # archived away by the first apply()
+
+    # A stray top-level leftover unrelated to the "project" step — stands in
+    # for OS junk or another domain step's own not-yet-archived V1 source —
+    # forces `archive-v1-legacy`'s own validate() (and thus `v1_retired`)
+    # false on the next pass, WITHOUT touching `projects.json`'s own
+    # already-archived state.
+    (data_home / "some-other-v1-leftover.txt").write_text("stray", encoding="utf-8")
+    archive_step = engine.get_step("archive-v1-legacy")
+    assert archive_step.validate().ok is False  # confirms v1_retired would be False
+
+    engine2 = MigrationEngine(data_home=data_home, journal=journal)
+    engine2.apply_pending()
+
+    registry_after = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert registry_after == registry_before  # "project" step never re-applied over its gone source
+
+
+# ---------------------------------------------------------------------------
 # #576 — apply_pending validates all domain steps regardless of pending
 # ---------------------------------------------------------------------------
 

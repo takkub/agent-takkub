@@ -145,6 +145,36 @@ def _domain_target_problems(specs: list[tuple[Path, tuple[str, ...]]]) -> list[s
     return problems
 
 
+def _source_retired(step: object, step_id: str, *, v1_retired: bool) -> bool:
+    """Whether *step* (one of `_ARCHIVED_SOURCE_STEP_IDS`) can safely skip a
+    live V1-vs-V2 cross-check — either because the ladder-wide `v1_retired`
+    flag (from `ArchiveV1LegacyStep.validate()`) says archival is fully
+    done, or (#605 fallback) because *step*'s OWN V1 source(s) are already
+    independently gone: `v1_retired` can stay false for a reason unrelated
+    to this particular step — e.g. OS junk clutter still sitting at
+    DATA_HOME's top level, or a DIFFERENT domain step's own V1 leftover not
+    archived yet — even once this step's own source has long been archived.
+    Re-reading that gone source as `{}` and comparing it to an already-
+    populated V2 target (or, worse, re-`apply()`-ing over it) must not
+    depend on every OTHER step's archival state finishing first. Best-
+    effort: a step with no `source_retired()` of its own (hand-built test
+    fakes included) falls back to the ladder-wide flag only, exactly the
+    pre-#605 behavior."""
+    if step_id not in _ARCHIVED_SOURCE_STEP_IDS:
+        return False
+    if v1_retired:
+        return True
+    probe = getattr(step, "source_retired", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except OSError:
+        return False  # swallow-ok: a failed probe just means "not proven
+        # retired yet" — the caller falls back to the normal, safe
+        # (re-read-and-compare) path, never a false "safe to skip".
+
+
 class MigrationEngine:
     def __init__(
         self,
@@ -413,7 +443,14 @@ class MigrationEngine:
         V1 source and overwrite the real, already-correct migrated content
         with empty defaults. An already-applied step in that set is treated
         as still valid once V1 is retired, without even calling its own
-        (permanently broken, post-archival) `validate()`."""
+        (permanently broken, post-archival) `validate()`.
+
+        #605: "once V1 is retired" is `_source_retired()`, not the bare
+        `v1_retired` flag — `v1_retired` comes from `ArchiveV1LegacyStep
+        .validate()`, which can stay false for a reason having nothing to
+        do with THIS step (OS junk clutter still at DATA_HOME's top level,
+        or a different domain step's own V1 leftover not archived yet)
+        even once this step's own V1 source is independently long gone."""
         applied_before = set(self.applied_step_ids())
         skip = set(skip_step_ids)
         archive_step = next(
@@ -458,7 +495,7 @@ class MigrationEngine:
             if step_id in skip:
                 continue
             if step_id in applied_before:
-                if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+                if _source_retired(s, step_id, v1_retired=v1_retired):
                     continue
                 # #576: call validate() exactly once here and reuse its result
                 # below — this is the same call the pre-#576 code already made
@@ -540,7 +577,7 @@ class MigrationEngine:
         if not any(self._prune_deferred(s) for s in steps_run):
             return reports
         finished = self._finish_deferred_prune(
-            steps_run, self._downgrade_on_health(steps_run, reports)
+            steps_run, self._downgrade_on_health(steps_run, reports, v1_retired=v1_retired)
         )
         # #574 round14b: `promote-v2-root`/`archive-v1-legacy` were excluded
         # from the inline validate above — their real validate() only means
@@ -581,13 +618,16 @@ class MigrationEngine:
         fn = getattr(s, "apply_copy_only", None)
         return fn() if callable(fn) else s.apply()
 
-    def _post_copy_health(self, s: MigrationStep) -> StepReport:
+    def _post_copy_health(self, s: MigrationStep, *, v1_retired: bool = False) -> StepReport:
         """Re-validate *s* right after its own apply this pass, WITHOUT
         assuming its (possibly still-deferred) prune has run — a
         deferred-prune step's `validate()` is inherently prune-completion-
         gated (`_pending()`-based), so its OWN copy-target health check is
         used instead (#504 round4 B1); every other step's `.validate()` is
-        unchanged."""
+        unchanged, EXCEPT (#605) a domain step whose own V1 source is
+        already retired (see `_source_retired`) — its own `validate()`
+        would otherwise re-read a now-missing V1 source as `{}` and
+        falsely downgrade a just-written, correct apply report."""
         if self._prune_deferred(s):
             problems = s._health_problems()
             step_id = getattr(s, "step_id", "")
@@ -597,10 +637,25 @@ class MigrationEngine:
                 not problems,
                 problems[0] if problems else "copy target healthy",
             )
+        step_id = getattr(s, "step_id", "")
+        if _source_retired(s, step_id, v1_retired=v1_retired):
+            problems = _domain_target_problems(_domain_target_specs(s))
+            return StepReport(
+                step_id,
+                "validate",
+                not problems,
+                problems[0]
+                if problems
+                else "V1 source archived (#605) — target present, readable, correctly shaped",
+            )
         return s.validate()
 
     def _downgrade_on_health(
-        self, steps: Sequence[MigrationStep], reports: list[StepReport]
+        self,
+        steps: Sequence[MigrationStep],
+        reports: list[StepReport],
+        *,
+        v1_retired: bool = False,
     ) -> list[StepReport]:
         """A later step's apply() can silently overwrite an earlier step's
         already-written target while both still report ok:true — each
@@ -615,7 +670,7 @@ class MigrationEngine:
             if not r.ok:
                 out.append(r)
                 continue
-            v = self._post_copy_health(s)
+            v = self._post_copy_health(s, v1_retired=v1_retired)
             if v.ok:
                 out.append(r)
             else:
@@ -766,13 +821,15 @@ class MigrationEngine:
         can reuse the exact same "V1 source archived" special case instead
         of re-deriving it."""
         step_id = getattr(s, "step_id", "")
-        if v1_retired and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+        if _source_retired(s, step_id, v1_retired=v1_retired):
             # #504 R2-H9 `domain_integrity`: "nothing left to cross-check
             # against" used to be an unconditional True — corrupting or
             # deleting the V2 target itself (`projects/registry.json`
             # turning into invalid JSON, say) still validated green
             # forever. Check the target's own basic health instead of
-            # skipping straight to success.
+            # skipping straight to success. #605: reached whenever
+            # *s*'s own V1 source is retired, not only when the whole
+            # ladder's `v1_retired` flag is true — see `_source_retired`.
             problems = _domain_target_problems(_domain_target_specs(s))
             if problems:
                 return StepReport(

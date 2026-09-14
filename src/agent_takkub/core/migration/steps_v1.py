@@ -38,6 +38,16 @@ from .journal import MigrationJournal
 from .registry_copy_step import RegistryCopyStep, RegistryMapping, write_json_atomic
 from .report import StepReport
 
+
+def _has_data(target: Path, key: str) -> bool:
+    """True when *target* is a real, already-written migration envelope
+    whose *key* holds truthy content — #605: used to tell "never migrated
+    yet" (safe to write `{}`) apart from "V1 source is gone but this V2
+    target already holds real data" (must not be overwritten)."""
+    doc = read_json(target)
+    return bool(isinstance(doc, dict) and doc.get(key))
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — read-only registries (lowest risk: a bad value just brings back
 # the built-in default, nothing user-authored is lost)
@@ -309,23 +319,51 @@ class RoleAgentMigrationStep:
             detail={"md_would_change": md_changed},
         )
 
-    def apply(self) -> StepReport:
-        try:
-            reg_target = self._custom_roles_target()
-            self.backups.backup(f"{self.step_id}__registry", reg_target)
-            write_json_atomic(
-                reg_target,
-                {
-                    "schema": 1,
-                    "migrated_from": str(self._custom_roles_source()),
-                    "migrated_at": time.time(),
-                    "data": read_json(self._custom_roles_source()),
-                },
-            )
+    def _registry_retired(self) -> bool:
+        return not self._custom_roles_source().exists() and _has_data(
+            self._custom_roles_target(), "data"
+        )
 
-            routing_target = self._routing_target()
-            self.backups.backup(f"{self.step_id}__routing", routing_target)
-            write_json_atomic(routing_target, self._routing_payload())
+    def _routing_retired(self) -> bool:
+        return not self._global_routing_source().exists() and _has_data(
+            self._routing_target(), "global"
+        )
+
+    def source_retired(self) -> bool:
+        """True once BOTH the registry's and routing's own V1 sources are
+        gone AND their targets already hold real migrated data — #605, see
+        `RegistryCopyStep.source_retired`'s twin docstring for why "target
+        already has data" matters just as much as "source gone"."""
+        return self._registry_retired() and self._routing_retired()
+
+    def apply(self) -> StepReport:
+        # #605: guard each target independently — the registry and routing
+        # targets have their own separate V1 sources, so one can be
+        # archived while the other still exists.
+        skip_registry = self._registry_retired()
+        skip_routing = self._routing_retired()
+        try:
+            if skip_registry:
+                pass  # V1 source archived — keep the existing registry
+            else:
+                reg_target = self._custom_roles_target()
+                self.backups.backup(f"{self.step_id}__registry", reg_target)
+                write_json_atomic(
+                    reg_target,
+                    {
+                        "schema": 1,
+                        "migrated_from": str(self._custom_roles_source()),
+                        "migrated_at": time.time(),
+                        "data": read_json(self._custom_roles_source()),
+                    },
+                )
+
+            if skip_routing:
+                pass  # V1 source archived — keep the existing routing.json
+            else:
+                routing_target = self._routing_target()
+                self.backups.backup(f"{self.step_id}__routing", routing_target)
+                write_json_atomic(routing_target, self._routing_payload())
 
             written_md: list[str] = []
             for role_name, src, dest in self._role_md_pairs():
@@ -337,13 +375,21 @@ class RoleAgentMigrationStep:
             self.journal.record(self.step_id, "apply", False, str(e))
             return StepReport(self.step_id, "apply", False, f"write failed: {e}")
 
+        kept = [
+            name for name, flag in (("registry", skip_registry), ("routing", skip_routing)) if flag
+        ]
+        summary = f"wrote custom-roles registry, routing.json, {len(written_md)} role file(s)"
+        if kept:
+            summary = (
+                f"kept {', '.join(kept)} (V1 source archived); wrote {len(written_md)} role file(s)"
+            )
         self.journal.record(self.step_id, "apply", True, f"{len(written_md)} role file(s)")
         return StepReport(
             self.step_id,
             "apply",
             True,
-            f"wrote custom-roles registry, routing.json, {len(written_md)} role file(s)",
-            detail={"role_files": written_md},
+            summary,
+            detail={"role_files": written_md, "kept": kept},
         )
 
     def validate(self) -> StepReport:
@@ -470,7 +516,28 @@ class ProjectMigrationStep:
             detail={"would_change": would_change},
         )
 
+    def source_retired(self) -> bool:
+        """True once `projects.json` (this step's only V1 source) is gone
+        AND the registry already holds real migrated data — #605, see
+        `RegistryCopyStep.source_retired`'s twin docstring for why "target
+        already has data" is just as required as "source gone": a fresh
+        install that never had a `projects.json` at all must not be
+        reported as retired before its own `apply()` ever had a chance to
+        write its (empty but valid) registry."""
+        return not self._projects_json().exists() and _has_data(self._registry_target(), "data")
+
     def apply(self) -> StepReport:
+        if self.source_retired():
+            # #605: V1 source already archived, but the registry already
+            # holds real migrated project data — `self._load()` below
+            # would read `{}` and overwrite it with an empty registry.
+            return StepReport(
+                self.step_id,
+                "apply",
+                True,
+                "V1 source archived — target kept",
+                detail={"kept": True},
+            )
         data = self._load()
         try:
             self.backups.backup(f"{self.step_id}__registry", self._registry_target())

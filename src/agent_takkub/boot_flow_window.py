@@ -2011,9 +2011,21 @@ class BootFlowWindow(QDialog):
             heading = f"ขั้นที่ {phase_number} {phase_label} ({step_index}/{step_total}) ไม่ผ่าน"
         else:
             heading = f"ขั้นตอน {phase_label} ไม่ผ่าน"
+        # #605: `failed_step` alone ("project") used to be shown with the
+        # real error text silently dropped (`failed_step or error` always
+        # picked the truthy step id first) — a person had no way to tell
+        # WHY a step failed, only its name. `<step_id>: <error>`, elided so
+        # one runaway OSError message can't blow out the failed-page
+        # layout.
+        if failed_step and error:
+            detail = f"{failed_step}: {error}"
+        else:
+            detail = failed_step or error
+        if len(detail) > 200:
+            detail = detail[:200] + "…"
         self._show_failed(
             heading=heading,
-            detail=str(failed_step or error),
+            detail=detail,
             rolled_back=rolled_back,
             data_intact=data_intact,
             outcome=outcome,
