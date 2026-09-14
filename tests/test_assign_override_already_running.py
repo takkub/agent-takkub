@@ -208,3 +208,119 @@ class TestOverrideWarningOnlyOnActualChange:
         ]
         assert len(ignored_calls) == 1
         assert "low" in ignored_calls[0].args[1]
+
+
+def _idle_pane(orch: Orchestrator, role: str, cwd: str, state: str) -> MagicMock:
+    fake_pane = MagicMock()
+    alive_session = MagicMock()
+    alive_session.is_alive = True
+    fake_pane.session = alive_session
+    fake_pane.state = state
+    fake_pane._session_cwd = cwd
+    orch._panes_by_project.setdefault(_PROJECT, {})[role] = fake_pane
+    return fake_pane
+
+
+class TestIdleProviderSwitch:
+    """#603: `assign --provider` on a role whose pane is alive but IDLE (not
+    mid-turn) used to just warn "ไม่มีผล" and leave the stale provider
+    running — Lead had to `close` the pane by hand, then re-assign, risking
+    #593/#594's races along the way. An idle pane (active/done/error, i.e.
+    NOT the busy-queue path and NOT the still-mid-turn edge covered by
+    TestOverrideWarningOnlyOnActualChange above) must instead close and
+    respawn on the requested provider automatically."""
+
+    @pytest.mark.parametrize("state", ["active", "done", "error"])
+    def test_idle_pane_closes_and_schedules_respawn(
+        self,
+        orch: Orchestrator,
+        tmp_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        state: str,
+    ) -> None:
+        role = "backend"
+        cwd = str(tmp_env / "workdir")
+        pathlib.Path(cwd).mkdir(parents=True, exist_ok=True)
+        _idle_pane(orch, role, cwd, state=state)
+        orch._ps(_exit_key(_PROJECT, role)).provider_override = "codex"
+
+        scheduled: list[tuple[int, object]] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", lambda ms, cb: scheduled.append((ms, cb))
+        )
+        with (
+            patch.object(orch_mod.PtySession, "__new__"),
+            patch.object(Orchestrator, "_send_when_ready"),
+            patch.object(Orchestrator, "_notify_lead") as mock_notify,
+            patch.object(Orchestrator, "close") as mock_close,
+        ):
+            ok, msg = orch.assign(role, cwd, "follow-up task", project=_PROJECT, provider="gemini")
+
+        assert ok is True
+        assert "gemini" in msg
+        mock_close.assert_called_once()
+        assert mock_close.call_args.kwargs.get("suppress_pipeline") is True
+        assert mock_close.call_args.kwargs.get("suppress_auto_chain") is True
+        switch_calls = [
+            c
+            for c in mock_notify.call_args_list
+            if c.kwargs.get("kind") == "assign-provider-switch"
+        ]
+        assert len(switch_calls) == 1
+        assert "gemini" in switch_calls[0].args[1]
+        assert len(scheduled) == 1
+        assert scheduled[0][0] == 2_000
+
+    def test_idle_pane_respawn_lands_on_requested_provider(
+        self, orch: Orchestrator, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deferred callback, once the old pane is actually gone, must
+        really spawn a fresh pane on the requested provider (not just warn)."""
+        role = "backend"
+        cwd = str(tmp_env / "workdir")
+        pathlib.Path(cwd).mkdir(parents=True, exist_ok=True)
+        _idle_pane(orch, role, cwd, state="active")
+        orch._ps(_exit_key(_PROJECT, role)).provider_override = "codex"
+
+        scheduled: list[tuple[int, object]] = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", lambda ms, cb: scheduled.append((ms, cb))
+        )
+
+        def _fake_close(role_name, **kwargs):
+            # Mirrors what real close() eventually does once PTY teardown
+            # finishes — the pane widget stays registered (spawn() reuses
+            # it), only its session goes away.
+            pane = orch._panes_by_project[_PROJECT][role_name]
+            pane.session = None
+            return True, "closed"
+
+        # spawn() reads provider_override to pick the CLI then clears it
+        # (its own one-shot "fresh-spawn-clear" contract, unrelated to
+        # #603) — capture the value it actually saw rather than reading it
+        # back afterwards.
+        seen_provider: dict[str, str | None] = {}
+        real_spawn = orch.spawn
+
+        def _spy_spawn(role_name, *a, **kw):
+            seen_provider["value"] = orch._ps(_exit_key(_PROJECT, role_name)).provider_override
+            return real_spawn(role_name, *a, **kw)
+
+        with (
+            patch.object(orch_mod.PtySession, "__new__") as mock_new,
+            patch.object(Orchestrator, "_send_when_ready") as mock_send,
+            patch.object(Orchestrator, "_notify_lead"),
+            patch.object(Orchestrator, "close", side_effect=_fake_close),
+            patch.object(Orchestrator, "spawn", side_effect=_spy_spawn),
+        ):
+            ok, _msg = orch.assign(role, cwd, "follow-up task", project=_PROJECT, provider="gemini")
+            assert ok is True
+            assert len(scheduled) == 1
+            mock_new.assert_not_called()  # not yet — only after the deferred respawn fires
+
+            scheduled[0][1]()  # fire the deferred respawn
+
+            mock_new.assert_called_once()  # fresh pane actually spawned
+            mock_send.assert_called_once()
+
+        assert seen_provider["value"] == "gemini"

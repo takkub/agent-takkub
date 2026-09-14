@@ -599,6 +599,16 @@ class CliServer(QObject):
         if cmd in _token_gated_cmds or _gated_preview:
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
+            retired = getattr(self._orch, "_retired_pane_tokens", {})
+            retired = retired if isinstance(retired, dict) else {}
+            bindings = getattr(self._orch, "_pane_token_sessions", {})
+            bindings = bindings if isinstance(bindings, dict) else {}
+            identity = pane_tokens.get(caller_auth)
+            stale_session = False
+            if identity and caller_auth in bindings:
+                current = self._orch._project_panes(identity[0]).get(identity[1])
+                stale_session = current is None or current.session is not bindings[caller_auth]
+            recovery_send = cmd == "send" and req.get("to") == "lead"
             # Lead token is valid for `send` (Lead sends task specs to teammates),
             # `hook` and `session-report` (Lead's own claude session also fires
             # Stop/Notification/SessionStart hooks — the done-gate itself is a
@@ -618,20 +628,52 @@ class CliServer(QObject):
                 # Lead is sending — identity already verified by the lead-spoof
                 # guard above; allow through with the caller-supplied from/project.
                 pass
-            elif caller_auth in pane_tokens:
+            elif identity and (not stale_session or recovery_send):
                 # Valid pane token — derive identity from the server's registry,
                 # overriding whatever the caller put in `from`/`from_project`.
                 _tok_project, _tok_role = pane_tokens[caller_auth]
                 req = {**req, "from": _tok_role, "from_project": _tok_project}
                 from_project = _tok_project
                 from_role_norm = _tok_role
+            elif caller_auth in retired and recovery_send:
+                _tok_project, _tok_role = retired[caller_auth]
+                req = {
+                    **req,
+                    "from": _tok_role,
+                    "from_project": _tok_project,
+                    "msg": "[retired session recovery] " + str(req.get("msg", "")),
+                }
+                from_project = _tok_project
+                from_role_norm = _tok_role
             else:
+                recovery_hint = ""
+                if cmd == "done":
+                    recovery_hint = (
+                        ' Recovery: takkub send --to lead "done rejected; please recover this pane"'
+                    )
+                    # Never attribute a forged role/project from an invalid request.
+                    known = identity or retired.get(caller_auth)
+                    target_project, target_role = known or (
+                        self._orch._resolve_project(None),
+                        "unknown",
+                    )
+                    warned = getattr(self, "_done_auth_warned", set())
+                    if (target_project, target_role) not in warned:
+                        self._orch._notify_lead(
+                            target_project,
+                            f"[done-auth-rejected] {target_role}: completion rejected; recover pane/session credentials.",
+                            from_role="system",
+                            note="done_auth_rejected",
+                            kind="done-auth-rejected",
+                        )
+                        warned.add((target_project, target_role))
+                        self._done_auth_warned = warned
                 self._reply(
                     sock,
                     ok=False,
                     msg=(
                         f"unauthorized: {cmd} requires a valid pane token (TAKKUB_PANE_TOKEN) "
-                        f"{self._instance_context()}"
+                        f"{self._instance_context()}{recovery_hint}"
                     ),
                 )
                 return

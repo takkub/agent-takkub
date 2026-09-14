@@ -1563,10 +1563,15 @@ class SpawnEngineMixin:
     def _mint_pane_token(self, env: dict, project_ns: str, role_name: str) -> str:
         """Mint a fresh per-pane auth token for ``(project_ns, role_name)``.
 
-        Revokes any prior token for that same pair first — so a respawn never
-        leaves a crashed session's token valid — then registers the new one and
-        stamps it into ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers
-        keep it to revoke explicitly if the spawn then fails. M5#24: this minting
+        Revokes any prior token for the same pair that is NOT bound to a
+        still-alive session (#594/#M5-24 follow-up) — a token left over from
+        a crashed or never-bound spawn must not keep working, but a token
+        already bound to a live session (the successor side of a replacement
+        spawn's mint-before-bind race, #594) must survive. Session teardown
+        separately revokes exactly that session's own token via
+        `_revoke_session_tokens`. Registers the new token and stamps it into
+        ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers keep it to
+        revoke explicitly if the spawn then fails. M5#24: this minting
         boilerplate was copy-pasted across all four provider branches of spawn().
 
         Also stamps ``_pane_token_minted_at[tok]`` (#315) — a plain, unpersisted
@@ -1581,13 +1586,44 @@ class SpawnEngineMixin:
             self._pane_tokens: dict[str, tuple[str, str]] = {}
         if not hasattr(self, "_pane_token_minted_at"):
             self._pane_token_minted_at: dict[str, float] = {}
+        if not hasattr(self, "_retired_pane_tokens"):
+            self._retired_pane_tokens = {}
+        bindings = getattr(self, "_pane_token_sessions", {})
+        for old_tok, identity in list(self._pane_tokens.items()):
+            if identity != (project_ns, role_name):
+                continue
+            bound_session = bindings.get(old_tok)
+            if bound_session is not None and bound_session.is_alive:
+                continue
+            self._retired_pane_tokens[old_tok] = self._pane_tokens.pop(old_tok)
+            bindings.pop(old_tok, None)
+        while len(self._retired_pane_tokens) > 256:
+            self._retired_pane_tokens.pop(next(iter(self._retired_pane_tokens)))
         tok = secrets.token_urlsafe(32)
-        for _t in [t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)]:
-            self._pane_tokens.pop(_t, None)
         self._pane_tokens[tok] = (project_ns, role_name)
         self._pane_token_minted_at[tok] = time.time()
         env["TAKKUB_PANE_TOKEN"] = tok
         return tok
+
+    def _bind_pane_token(self, token: str | None, session) -> None:
+        if token:
+            if not hasattr(self, "_pane_token_sessions"):
+                self._pane_token_sessions = {}
+            self._pane_token_sessions[token] = session
+
+    def _revoke_session_tokens(self, project: str, role: str, session) -> None:
+        """Revoke by object identity; a role slot can already hold its successor."""
+        bindings = getattr(self, "_pane_token_sessions", {})
+        tokens = getattr(self, "_pane_tokens", {})
+        if not hasattr(self, "_retired_pane_tokens"):
+            self._retired_pane_tokens = {}
+        for token, identity in list(tokens.items()):
+            if identity == (project, role) and bindings.get(token) is session:
+                self._retired_pane_tokens[token] = tokens.pop(token)
+                bindings.pop(token, None)
+        # Retired credentials may only send a recovery message to Lead.
+        while len(self._retired_pane_tokens) > 256:
+            self._retired_pane_tokens.pop(next(iter(self._retired_pane_tokens)))
 
     def _current_pane_identity(self, project_ns: str, role_name: str) -> str | None:
         """Return the auth token currently minted for ``(project_ns, role_name)``,
@@ -1601,7 +1637,7 @@ class SpawnEngineMixin:
         only delivered after a later instance took over the same role name
         (#228 — phantom done reports attributed to the wrong pane instance).
         """
-        for tok, (p, r) in getattr(self, "_pane_tokens", {}).items():
+        for tok, (p, r) in reversed(list(getattr(self, "_pane_tokens", {}).items())):
             if p == project_ns and r == role_name:
                 return tok
         return None
@@ -1720,6 +1756,7 @@ class SpawnEngineMixin:
         _build_pane_env = _from_orch("_build_pane_env")
         _build_transcript_path = _from_orch("_build_transcript_path")
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        self._bind_pane_token(pane_tok, session)
         if paste_chunking and paste_chunking[0] > 0:
             # #424: provider-specific paste chunking (codex today).
             session.set_paste_chunking(*paste_chunking)
@@ -3496,6 +3533,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 pre_trust_pane_cwd(project_ns, _exact_pretrust_cwd, role_name)
 
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        self._bind_pane_token(pane_tok, session)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
         self._spawn_in_progress = True
@@ -3927,11 +3965,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         # Revoke pane token on session death so a crashed or exited pane cannot
         # continue to authenticate send/done after it terminates.
-        _ptoks = getattr(self, "_pane_tokens", {})
-        for _t in [t for t, v in list(_ptoks.items()) if v == (project, role_name)]:
-            _ptoks.pop(_t, None)
+        self._revoke_session_tokens(project, role_name, session)
 
         pane = self._panes_by_project.get(project, {}).get(role_name)
+        if (
+            session is not None
+            and pane is not None
+            and pane.session is not None
+            and pane.session is not session
+        ):
+            return
         if pane is None or pane.state != "exited":
             return
 

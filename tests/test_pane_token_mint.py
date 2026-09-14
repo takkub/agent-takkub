@@ -4,8 +4,11 @@ from spawn()'s four provider branches.
 Invariants the four copy-pasted sites all relied on, now in one place:
   1. mints a fresh urlsafe token and stamps it into env["TAKKUB_PANE_TOKEN"];
   2. registers token → (project, role) in self._pane_tokens;
-  3. REVOKES any prior token for the same (project, role) first, so a respawn
-     never leaves a crashed session's old token valid;
+  3. REVOKES any prior token for the same (project, role) that is NOT bound
+     to a still-alive session first, so a respawn never leaves a crashed (or
+     never-bound) session's old token valid — but a token already bound to a
+     live session survives (#594: the successor side of a replacement
+     spawn's mint-before-bind race must not get its own fresh token yanked);
   4. leaves OTHER (project, role) tokens untouched;
   5. lazily creates self._pane_tokens if absent.
 """
@@ -59,6 +62,22 @@ def test_leaves_other_pairs_intact() -> None:
     assert o._pane_tokens[fe] == ("proj", "frontend")
     assert o._pane_tokens[other_proj] == ("proj2", "backend")
     assert o._pane_tokens[be2] == ("proj", "backend")
+
+
+def test_spares_token_bound_to_live_session() -> None:
+    """#594: a pair whose current token is bound to a still-alive session
+    (the successor of a replacement spawn) must not have that token yanked
+    out from under it by a later mint for the same pair."""
+    o = _orch()
+    first = o._mint_pane_token({}, "proj", "backend")
+    live_session = type("_Session", (), {"is_alive": True})()
+    o._pane_token_sessions = {first: live_session}
+    second = o._mint_pane_token({}, "proj", "backend")
+    assert first != second
+    assert o._pane_tokens[first] == ("proj", "backend")  # spared, still live
+    assert o._pane_tokens[second] == ("proj", "backend")
+    live = {t for t, v in o._pane_tokens.items() if v == ("proj", "backend")}
+    assert live == {first, second}
 
 
 def test_lazily_creates_registry() -> None:
