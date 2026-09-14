@@ -102,8 +102,54 @@ def test_node_verify_script_wins_and_runs_alone(tmp_path: Path) -> None:
     (tmp_path / "pnpm-lock.yaml").write_text("")
     checks = detect_stack(tmp_path)
     assert [c.name for c in checks] == ["verify"]
-    assert checks[0].cmd[1:] == ["run", "verify"]
+    # #600: a turbo-backed script must force a real, fully-logged run — a
+    # cache hit would otherwise replay a bare `PASS 58.7s` line with no
+    # underlying jest/vitest summary.
+    assert checks[0].cmd[1:] == ["run", "verify", "--", "--output-logs=full", "--force"]
     assert "pnpm" in Path(checks[0].cmd[0]).name
+
+
+def test_node_test_script_turbo_forces_full_output_no_cache(tmp_path: Path) -> None:
+    """#600: qa-gate's own log must always carry proof of a real run — never
+    a turbo cache-hit stub with no `Tests: N passed` line."""
+    _pkg(tmp_path, {"test": "turbo run test"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
+
+
+def test_node_test_script_non_turbo_untouched(tmp_path: Path) -> None:
+    """A plain (non-turbo) `test` script must not gain turbo-only flags."""
+    _pkg(tmp_path, {"test": "jest --ci"}, devDependencies={"jest": "^29.0.0"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test"]
+
+
+def test_node_test_script_turbo_json_present_but_script_direct_untouched(tmp_path: Path) -> None:
+    """#600 follow-up: `turbo.json`/turbo in devDependencies for OTHER
+    scripts must not flag a `test`/`verify` script that calls vitest/jest
+    directly — a real monorepo sub-package shape. The old deps/turbo.json
+    presence check sent `-- --output-logs=full --force` into vitest, which
+    rejects it as an unknown option and turns a healthy script red."""
+    _pkg(tmp_path, {"test": "vitest run"}, devDependencies={"turbo": "^2.0.0"})
+    (tmp_path / "turbo.json").write_text("{}")
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test"]
+
+
+def test_node_test_script_turbo_chained_command_forces_full_output(tmp_path: Path) -> None:
+    """A chained script (`lint && turbo run test`) still routes through
+    turbo and must still be forced to a real, fully-logged run."""
+    _pkg(tmp_path, {"test": "eslint . && turbo run test"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
 
 
 def test_node_typecheck_script_runs_before_test(tmp_path: Path) -> None:

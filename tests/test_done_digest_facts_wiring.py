@@ -509,6 +509,61 @@ class TestSharedTreePaneDigestFacts:
         assert "shared tree" in facts.merge_note
         assert "path/mtime/size" in facts.files_note
 
+    def test_missing_dirty_baseline_falls_back_to_live_status_not_unverifiable(
+        self, orch, monkeypatch
+    ):
+        """#601: a resume/reroute can leave `assign_dirty_snapshot` None even
+        though cwd/base_sha/git_root are all fine — that must fall back to a
+        live `git status` count (with a caveat noting no pre-assign baseline
+        exists), not the blanket "ตรวจไม่ได้" a genuinely non-git/no-HEAD
+        pane gets."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "reviewer", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::reviewer"] = PaneState(
+            last_assigned_task="review #601",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot=None,
+        )
+
+        class _SharedFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def diffstat_since(self, cwd, base_sha):
+                assert base_sha == "abc123"
+                return " deploy/x.yaml | 2 +-"
+
+            def commits_since(self, cwd, base_sha):
+                return 1
+
+            def shared_tree_status_porcelain(self, cwd):
+                return "?? src/new.py\n"
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _SharedFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("reviewer", note="done", project=proj)
+
+        facts = next(
+            kw["digest_facts"] for notice, kw in captured if notice.startswith("[reviewer")
+        )
+        assert facts.commits_ahead == 1
+        # deploy/x.yaml (committed) + src/new.py (currently dirty, no
+        # baseline to exclude it against) — a real number, not None.
+        assert facts.files_touched == 2
+        assert "ไม่มี dirty snapshot" in facts.files_note
+        assert "ตรวจไม่ได้" not in facts.files_note
+        # No baseline means "unrelated" can't be claimed either way.
+        assert facts.uncommitted_unrelated is False
+
     def test_all_dirty_predates_assign_flags_uncommitted_unrelated(self, orch, monkeypatch):
         """#546: a real incident — an ops/devops report on a shared tree
         showed "⚠3 ไฟล์ยังไม่ commit" for files another pane/Lead had
@@ -600,6 +655,70 @@ class TestSharedTreePaneDigestFacts:
         facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
         assert facts.uncommitted == 1
         assert facts.uncommitted_unrelated is False
+
+    def test_sibling_pane_files_excluded_from_readonly_pane_count(self, orch, monkeypatch):
+        """#601: a real incident — a read-only reviewer's done note showed
+        "ไฟล์ที่แตะ:4 (deploy, docker, docs)" that were actually devops's own
+        files, committed on the same shared tree during the same window.
+        `_sibling_shared_tree_touched_paths` must compute devops's OWN
+        touched-file set (from devops's OWN baseline) and exclude it from
+        reviewer's count — 2 panes sharing a tree, devops touches 4 files,
+        reviewer (read-only) must count 0."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "devops", proj, _make_alive_session(), cwd="/repo")
+        _register_pane(orch, "reviewer", proj, _make_alive_session(), cwd="/repo")
+        orch._pane_state[f"{proj}::devops"] = PaneState(
+            last_assigned_task="deploy",
+            worktree=None,
+            assign_base_sha="devops_base",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+        orch._pane_state[f"{proj}::reviewer"] = PaneState(
+            last_assigned_task="review the deploy change",
+            worktree=None,
+            assign_base_sha="reviewer_base",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+
+        class _SharedTreeSiblingFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def diffstat_since(self, cwd, base_sha):
+                # Same repo/HEAD state regardless of whose (older) baseline
+                # asks — devops's own commits are the only thing that changed.
+                return (
+                    " deploy/x.yaml | 2 +-\n"
+                    " docker/Dockerfile | 1 +\n"
+                    " docs/a.md | 1 +\n"
+                    " docs/b.md | 1 +"
+                )
+
+            def commits_since(self, cwd, base_sha):
+                return 4
+
+            def shared_tree_status_porcelain(self, cwd):
+                return ""
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _SharedTreeSiblingFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("reviewer", note="reviewed, no changes needed", project=proj)
+
+        facts = next(
+            kw["digest_facts"] for notice, kw in captured if notice.startswith("[reviewer")
+        )
+        assert facts.commits_ahead == 4
+        assert facts.files_touched == 0
+        assert "ตัดไฟล์" in facts.files_note
 
     def test_done_status_failure_reports_unverifiable_not_baseline_paths(self, orch, monkeypatch):
         proj = "proj"

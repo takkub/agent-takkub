@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -198,6 +199,27 @@ def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
     ]
 
 
+def _turbo_force_args(script_value: str) -> list[str]:
+    """A `verify`/`test` script that delegates to turbo can cache-hit and
+    replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
+    `Tests: N passed` summary, leaving qa-gate's own log with no evidence a
+    real run happened (#600). Force a genuine run with full output whenever
+    the script actually goes through turbo, so the gate's log is always
+    proof, never a cache stub.
+
+    Decided from the SCRIPT TEXT only (#600 follow-up): a repo can have
+    `turbo.json`/turbo in devDependencies for OTHER scripts while `verify`/
+    `test` calls vitest/jest directly — common in a monorepo sub-package.
+    Flagging on turbo's mere presence sent `-- --output-logs=full --force`
+    into vitest/jest, which reject it as an unknown option and turn a
+    healthy script into a red qa-gate. Only a command that actually IS (or
+    chains through) `turbo ...` counts.
+    """
+    segments = [s.strip() for s in re.split(r"&&|\|\||;", script_value) if s.strip()]
+    uses_turbo = any(seg.split(None, 1)[0:1] == ["turbo"] for seg in segments)
+    return ["--", "--output-logs=full", "--force"] if uses_turbo else []
+
+
 def node_checks(cwd: Path) -> list[Check]:
     """The Node gate (#329 + #368). Order matters — typecheck runs BEFORE test
     because the whole point is that vitest/jest transpile through esbuild and
@@ -219,7 +241,8 @@ def node_checks(cwd: Path) -> list[Check]:
     checks: list[Check] = []
 
     if "verify" in scripts:
-        checks.append(Check(name="verify", cmd=pm_run(pm, "verify"), stack="node"))
+        verify_cmd = pm_run(pm, "verify") + _turbo_force_args(str(scripts["verify"]))
+        checks.append(Check(name="verify", cmd=verify_cmd, stack="node"))
     else:
         if "typecheck" in scripts:
             checks.append(Check(name="typecheck", cmd=pm_run(pm, "typecheck"), stack="node"))
@@ -242,7 +265,8 @@ def node_checks(cwd: Path) -> list[Check]:
                     )
                 )
         if "test" in scripts:
-            checks.append(Check(name="test", cmd=pm_run(pm, "test"), stack="node"))
+            test_cmd = pm_run(pm, "test") + _turbo_force_args(str(scripts["test"]))
+            checks.append(Check(name="test", cmd=test_cmd, stack="node"))
 
     eslintrc_patterns = [
         ".eslintrc",

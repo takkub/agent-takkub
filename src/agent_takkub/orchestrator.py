@@ -5189,6 +5189,7 @@ class Orchestrator(
         reason: str = "",
         suppress_pipeline: bool = False,
         suppress_auto_chain: bool = False,
+        suppress_live_children_warning: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
@@ -5208,6 +5209,14 @@ class Orchestrator(
         the verify-hop pre-authorisation prematurely. External / user-initiated
         closes (force=True, tab close) do NOT suppress so the #8 behaviour holds:
         if a user forcibly removes the last auto-chain pane the handoff still fires.
+
+        suppress_live_children_warning=True skips `_warn_if_live_children`'s own
+        Lead notice (#604). Used only by `done()`'s grace-expiry close: that path
+        already told Lead once, at the start of the grace period, that this pane
+        had live children and was deferring — a second "about to be killed" notice
+        at the end of the SAME episode is a duplicate, not new information. Every
+        other caller (direct/forced close with no prior deferral notice) keeps the
+        warning — it may be the only signal Lead ever gets that work was killed.
         """
         role_name = self.resolve_pane_role(role_name, project)
         role_name = role_name.lower().strip()
@@ -5245,7 +5254,8 @@ class Orchestrator(
                 return True, "lead close ignored (protected)"
             # mark exit as expected so the pane doesn't surface "exited"/crash
             pane.mark_expected_exit()
-            self._warn_if_live_children(project_ns, role_name, pane.session)
+            if not suppress_live_children_warning:
+                self._warn_if_live_children(project_ns, role_name, pane.session)
             _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
             self._revoke_session_tokens(project_ns, role_name, closing_session)
@@ -6065,6 +6075,7 @@ class Orchestrator(
         assign_non_git: bool = False,
         git_facts: dict | None = None,
         ops_task: bool = False,
+        sibling_files: frozenset[str] | None = None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -6193,12 +6204,7 @@ class Orchestrator(
             branch = shared_gf.get("branch")
         else:
             branch = mgr.current_branch(pane_cwd) if pane_cwd else None
-        if (
-            not pane_cwd
-            or not assign_base_sha
-            or not assign_git_root
-            or assign_dirty_snapshot is None
-        ):
+        if not pane_cwd or not assign_base_sha or not assign_git_root:
             return (
                 DigestFacts(
                     role=from_role,
@@ -6214,6 +6220,15 @@ class Orchestrator(
                 ),
                 None,
             )
+        # #601: `assign_dirty_snapshot` alone can come back None on a
+        # resume/reroute path even though cwd/base_sha/git_root are all
+        # fine — that is "no pre-assign dirty baseline to diff against", not
+        # "can't verify anything". Falling through with an empty baseline
+        # (below) still yields a real number instead of the blanket
+        # "ตรวจไม่ได้" this used to short-circuit to, at the cost of possibly
+        # counting dirt that predates the assignment — flagged via
+        # files_note rather than hidden.
+        no_dirty_baseline = assign_dirty_snapshot is None
         # One porcelain read feeds BOTH the uncommitted count and the metadata
         # comparison; done() does not pay for two status subprocesses.
         if shared_gf is not None:
@@ -6242,13 +6257,18 @@ class Orchestrator(
             )
         uncommitted = len(parse_porcelain_paths(porcelain))
         current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
-        changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
+        changed_uncommitted = changed_dirty_paths(
+            assign_dirty_snapshot if assign_dirty_snapshot is not None else {},
+            current_dirty_snapshot,
+        )
         diffstat = (
             str(shared_gf.get("diffstat", ""))
             if shared_gf is not None
             else mgr.diffstat_since(pane_cwd, assign_base_sha)
         )
-        files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)
+        files_touched, dirs = union_files_touched(
+            diffstat, changed_uncommitted, exclude=sibling_files
+        )
         facts = DigestFacts(
             role=from_role,
             ref=ref,
@@ -6260,8 +6280,18 @@ class Orchestrator(
             files_touched=files_touched,
             files_dirs=tuple(dirs),
             files_note=(
-                "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
-                "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
+                "ไม่มี dirty snapshot ตอน assign (resume/reroute, #601) — นับทุกไฟล์ที่ dirty "
+                "ตอนนี้ อาจรวมของเก่าที่มีอยู่ก่อน assign ด้วย"
+                if no_dirty_baseline
+                else (
+                    "เทียบ HEAD + dirty path/mtime/size ตอน assign"
+                    + (
+                        f" — ตัดไฟล์ {len(sibling_files)} รายการที่ pane อื่น แตะในช่วงเดียวกันออกแล้ว"
+                        if sibling_files
+                        else ""
+                    )
+                    + " — shared tree ยังอาจรวมการเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
+                )
             ),
             report_path=report_path,
             headline=headline,
@@ -6269,9 +6299,70 @@ class Orchestrator(
             # #546: every currently-dirty shared-tree path already predates
             # this assignment (the assign-time snapshot diff is empty) —
             # the count is leftover from a sibling pane/Lead, not this task.
-            uncommitted_unrelated=bool(uncommitted) and not changed_uncommitted,
+            # Not claimed when there is no baseline at all (#601) — "unrelated"
+            # would be a guess, not a verified fact, in that case.
+            uncommitted_unrelated=(
+                bool(uncommitted) and not changed_uncommitted and not no_dirty_baseline
+            ),
         )
         return facts, None
+
+    def _sibling_shared_tree_touched_paths(
+        self, project_ns: str, from_role: str, git_root: str | None
+    ) -> frozenset[str]:
+        """#601: a shared tree has no per-pane isolation, so another pane
+        actively committing/editing during THIS pane's assignment window
+        (e.g. devops mid-deploy while reviewer is read-only-reviewing) can
+        leak its own files into this pane's `git diff`/`git status` reads —
+        a real incident: a read-only reviewer's done note showed the 4 files
+        devops had touched in the same window as "ไฟล์ที่แตะ" of its own.
+
+        Best-effort exclusion: for every OTHER shared-tree pane in this
+        project pointed at the same git root, compute ITS OWN touched-file
+        set from ITS OWN assign baseline (same method `_compute_digest_facts`
+        uses for the reporting pane) and return the union — the caller
+        subtracts this from the reporting pane's own set. Never raises —
+        one sibling's git read failing must not block this pane's done()."""
+        if not git_root:
+            return frozenset()
+        from .digest_facts import collect_touched_paths
+        from .worktree_manager import WorktreeManager, changed_dirty_paths
+
+        mgr = WorktreeManager()
+        panes = self._project_panes(project_ns)
+        prefix = f"{project_ns}::"
+        paths: set[str] = set()
+        for key, ps in list(getattr(self, "_pane_state", {}).items()):
+            if not key.startswith(prefix):
+                continue
+            role = key[len(prefix) :]
+            if role == from_role:
+                continue
+            # Worktree-isolated siblings have their own repo — nothing to
+            # attribute onto a shared-tree pane's reads.
+            if getattr(ps, "worktree", None):
+                continue
+            if getattr(ps, "assign_git_root", None) != git_root:
+                continue
+            sib_base_sha = getattr(ps, "assign_base_sha", None)
+            if not sib_base_sha:
+                continue
+            sib_cwd = getattr(panes.get(role), "_session_cwd", None) or git_root
+            try:
+                sib_diffstat = mgr.diffstat_since(sib_cwd, sib_base_sha)
+                sib_porcelain = mgr.shared_tree_status_porcelain(sib_cwd)
+                sib_changed = (
+                    changed_dirty_paths(
+                        getattr(ps, "assign_dirty_snapshot", None) or {},
+                        mgr.dirty_snapshot(git_root, sib_porcelain),
+                    )
+                    if sib_porcelain is not None
+                    else []
+                )
+                paths |= collect_touched_paths(sib_diffstat, sib_changed)
+            except Exception:
+                continue
+        return frozenset(paths)
 
     def _pane_reports_undelivered_task(self, project_ns: str, role: str, pane) -> bool:
         """(#278/#276) True when this pane is reporting on an assignment that
@@ -6724,6 +6815,16 @@ class Orchestrator(
 
             ops_task = detect_ops_task(from_role, raw_note)
             try:
+                sibling_files = (
+                    frozenset()
+                    if had_worktree
+                    else self._sibling_shared_tree_touched_paths(
+                        project_ns, from_role, had_assign_git_root
+                    )
+                )
+            except Exception:  # digest cosmetics must never break done()
+                sibling_files = frozenset()
+            try:
                 digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
                     from_role,
                     issue_ref,
@@ -6737,6 +6838,7 @@ class Orchestrator(
                     assign_non_git=had_assign_non_git,
                     git_facts=git_facts,
                     ops_task=ops_task,
+                    sibling_files=sibling_files,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
@@ -7068,7 +7170,11 @@ class Orchestrator(
                         idle_for_s=int(now - _idle_since),
                         children=names[:10],
                     )
-                    self.close(from_role, project=project_ns)
+                    # #604: the deferred notice already fired on this
+                    # episode's first tick (deferred_for starts at 0, always
+                    # < GRACE_S) — a second "about to be killed" notice here
+                    # would just repeat what Lead was already told.
+                    self.close(from_role, project=project_ns, suppress_live_children_warning=True)
                     return
 
                 if deferred_for < DONE_CLOSE_LIVE_CHILD_GRACE_S:
@@ -7102,6 +7208,11 @@ class Orchestrator(
                     deferred_for_s=int(deferred_for),
                     children=names[:10],
                 )
+                # #604: same reasoning as the idle short-circuit above — the
+                # deferred notice already covered this episode; don't repeat
+                # it as a second "closing" message for the same live children.
+                self.close(from_role, project=project_ns, suppress_live_children_warning=True)
+                return
             self.close(from_role, project=project_ns)
 
         if getattr(self, "_pending_assignments", {}).get(key):

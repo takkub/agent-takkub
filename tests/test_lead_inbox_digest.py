@@ -292,6 +292,38 @@ def test_item_already_pulled_via_inbox_collapses_in_digest(
     assert "[backend]" in written
 
 
+def test_repeated_identical_already_read_digest_is_suppressed(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#604: the same fully-"already read" batch getting re-queued a second
+    time (e.g. a retry/requeue path re-arming the debounce) must not produce
+    a second, content-free digest turn — only the first collapse is useful."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+    body = "[backend done] secret detail Lead already saw"
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(PROJECT, body)
+        orch.inbox_report(project=PROJECT)
+        timers[0][1]()
+
+    calls_after_first = lead.session.write.call_count
+    assert calls_after_first > 0
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(PROJECT, body)  # re-queued, identical, already read
+        timers[-1][1]()
+
+    assert lead.session.write.call_count == calls_after_first
+
+
 def test_item_not_pulled_via_inbox_renders_full_body(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:

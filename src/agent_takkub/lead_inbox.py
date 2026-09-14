@@ -3831,6 +3831,7 @@ class LeadInboxMixin:
         now_ts = time.time()
         already_read = getattr(self, "_inbox_seen", {}).get(project_ns, ())
         lines = []
+        any_new = False
         for entry in items:
             item_body, item_pane_token, item_ts = _unwrap_notice_item(entry)
             item_facts = _unwrap_notice_facts(entry)
@@ -3843,10 +3844,25 @@ class LeadInboxMixin:
                 age = _format_notice_age(now_ts, item_ts)
                 lines.append(f"• [{role or 'system'}] (อ่านแล้วผ่าน takkub inbox{age})")
                 continue
+            any_new = True
             line = _format_digest_item(item_body, item_ts, now_ts, facts=item_facts)
             if self._provenance_stale(project_ns, role, item_pane_token, queued_ts=item_ts):
                 line = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{line}"
             lines.append(line)
+        item_fingerprints = tuple(_notice_fingerprint(_unwrap_notice_item(e)[0]) for e in items)
+        last_sent = getattr(self, "_last_digest_fingerprints", {})
+        if not any_new and not trailing_body and last_sent.get(project_ns) == item_fingerprints:
+            # #604: a batch that fully collapsed to "อ่านแล้ว" the FIRST time
+            # is still useful (#241 confirms Lead already saw it) — but the
+            # exact same already-announced batch getting re-queued (a
+            # retry/requeue re-arming this debounce) produced 3 identical "1
+            # update" digests 8 minutes apart with zero new content. Only
+            # suppress the literal repeat, not every all-collapsed digest.
+            _log_event("lead_inbox_digest_skipped_repeat", project=project_ns, count=len(items))
+            return False
+        if not hasattr(self, "_last_digest_fingerprints"):
+            self._last_digest_fingerprints = {}
+        self._last_digest_fingerprints[project_ns] = item_fingerprints
         digest = "\n".join(
             [
                 f"📬 [Lead Inbox Digest — {len(items)} update{'s' if len(items) != 1 else ''}]",
