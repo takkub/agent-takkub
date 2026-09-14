@@ -1476,13 +1476,16 @@ class TestCliServerPipelineRoute:
         starts, not just in the event log after `_fire_pipeline_hop` hits
         them — same wording `team_preset.pipeline_hop_summary_lines`
         produces, computed against the project `from_project` scopes."""
-        from agent_takkub import pipeline_config, role_models, team_preset
+        from agent_takkub import pipeline_config, provider_config, role_models, team_preset
         from agent_takkub.cli_server import CliServer
 
         from ._qt_timer_leak_guard import stop_timers_after
 
         finalize = stop_timers_after(monkeypatch, CliServer, "shutdown_timers")
 
+        # codex isn't installed on CI runners; stub availability like
+        # test_core_providers / #590 so the ack can name it.
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         team_preset.set_current("full", "proj-x")
         role_models.set_provider("reviewer", "codex")
         pipeline_config.save({"rolesEnabled": {"devops": False}}, "proj-x")
