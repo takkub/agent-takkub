@@ -139,7 +139,8 @@ class LeadWaitMixin:
 
         For each requested role, if it matches a known pane exactly, returns it.
         Otherwise uses pane_role_resolution_chain to search for candidates.
-        Returns flattened list of all matching panes, de-duplicated."""
+        If no candidate matches known_roles, retains the requested role so
+        poll_wait can handle grace period / not found reporting."""
         result = []
         seen = set()
         for role in requested_roles:
@@ -149,10 +150,17 @@ class LeadWaitMixin:
                     seen.add(role)
             else:
                 candidates = pane_role_resolution_chain(role)
+                matched = False
                 for c in candidates:
                     if c in known_roles and c not in seen:
                         result.append(c)
                         seen.add(c)
+                        matched = True
+                        break
+                if not matched:
+                    if role not in seen:
+                        result.append(role)
+                        seen.add(role)
         return result
 
     def begin_wait(self, project_ns: str, roles: list[str] | None, timeout_s: float) -> dict:
@@ -188,12 +196,6 @@ class LeadWaitMixin:
         if requested_roles:
             # #597: resolve requested role names to actual panes, handling aliases like reviewer
             clean_roles = self._resolve_requested_roles(requested_roles, all_known)
-            if not clean_roles:
-                unresolved = ", ".join(requested_roles)
-                return {
-                    "ok": False,
-                    "msg": f"no matching pane(s) for requested role(s): {unresolved}",
-                }
         else:
             # Auto-detect: all known roles except Lead
             clean_roles = sorted({r for r in all_known if r != LEAD.name})
@@ -206,26 +208,73 @@ class LeadWaitMixin:
         now = time.time()
         active = self._active_waits.get(project_ns)
         if active is not None:
+            clients = active.setdefault("clients", {})
+            for cid, cinfo in list(clients.items()):
+                c_timeout = cinfo.get("timeout_s", active["timeout_s"])
+                c_last_poll = cinfo.get("last_poll_ts", active["last_poll_ts"])
+                if now - c_last_poll >= c_timeout + _WAIT_STALE_GRACE_S:
+                    clients.pop(cid, None)
+
+            if clients:
+                all_r = set()
+                for c in clients.values():
+                    all_r.update(c.get("roles", []))
+                active["roles"] = sorted(all_r)
+
             stale_after = active["timeout_s"] + _WAIT_STALE_GRACE_S
-            if now - active["last_poll_ts"] < stale_after:
-                # Attach: union the role sets instead of starting a second,
-                # independent poll loop for the same project (the exact
-                # duplication #242 exists to prevent). #598: increment ref_count.
-                active["roles"] = sorted(set(active["roles"]) | set(clean_roles))
-                active["timeout_s"] = max(active["timeout_s"], timeout_s)
-                active["last_poll_ts"] = now
-                active["ref_count"] = active.get("ref_count", 1) + 1
-                return {
-                    "ok": True,
-                    "msg": f"attached to an existing wait ({len(active['roles'])} role(s))",
-                    "wait_id": active["wait_id"],
-                    "roles": list(active["roles"]),
-                    "started_ts": active["started_ts"],
-                    "attached": True,
-                }
-            # Previous registration's owner never called end_wait (crash,
-            # Ctrl-C, killed pane) and has been silent well past its own
-            # timeout — treat it as abandoned and replace it.
+            if (clients or not active.get("clients")) and now - active[
+                "last_poll_ts"
+            ] < stale_after:
+                # Active wait exists: check if roles match an existing client/registration
+                existing_wait_id = None
+                for cid, cinfo in clients.items():
+                    if set(cinfo.get("roles", [])) == set(clean_roles):
+                        existing_wait_id = cid
+                        break
+                if existing_wait_id is None and set(active.get("roles", [])) == set(clean_roles):
+                    existing_wait_id = active.get("wait_id")
+
+                if existing_wait_id is not None:
+                    client_wait_id = existing_wait_id
+                    active["timeout_s"] = max(active["timeout_s"], timeout_s)
+                    active["last_poll_ts"] = now
+                    if client_wait_id in clients:
+                        clients[client_wait_id]["last_poll_ts"] = now
+                        clients[client_wait_id]["timeout_s"] = max(
+                            clients[client_wait_id].get("timeout_s", timeout_s), timeout_s
+                        )
+                    active["ref_count"] = (
+                        len(clients) if clients else active.get("ref_count", 1) + 1
+                    )
+                    return {
+                        "ok": True,
+                        "msg": f"attached to an existing wait ({len(active['roles'])} role(s))",
+                        "wait_id": client_wait_id,
+                        "roles": list(active["roles"]),
+                        "started_ts": active["started_ts"],
+                        "attached": True,
+                    }
+                else:
+                    # #598: different role set gets distinct wait_id and tracks roles separately
+                    client_wait_id = uuid.uuid4().hex[:12]
+                    clients[client_wait_id] = {
+                        "roles": sorted(set(clean_roles)),
+                        "timeout_s": max(1.0, float(timeout_s)),
+                        "started_ts": now,
+                        "last_poll_ts": now,
+                    }
+                    active["roles"] = sorted(set(active["roles"]) | set(clean_roles))
+                    active["timeout_s"] = max(active["timeout_s"], timeout_s)
+                    active["last_poll_ts"] = now
+                    active["ref_count"] = len(clients)
+                    return {
+                        "ok": True,
+                        "msg": f"attached to an existing wait ({len(active['roles'])} role(s))",
+                        "wait_id": client_wait_id,
+                        "roles": list(active["roles"]),
+                        "started_ts": now,
+                        "attached": True,
+                    }
 
         wait_id = uuid.uuid4().hex[:12]
         self._active_waits[project_ns] = {
@@ -235,6 +284,14 @@ class LeadWaitMixin:
             "timeout_s": max(1.0, float(timeout_s)),
             "last_poll_ts": now,
             "ref_count": 1,
+            "clients": {
+                wait_id: {
+                    "roles": sorted(set(clean_roles)),
+                    "timeout_s": max(1.0, float(timeout_s)),
+                    "started_ts": now,
+                    "last_poll_ts": now,
+                }
+            },
         }
         return {
             "ok": True,
@@ -554,21 +611,69 @@ class LeadWaitMixin:
         message rather than guessing here.
         """
         active = self._active_waits.get(project_ns)
-        if active is None or active["wait_id"] != wait_id:
+        now = time.time()
+        if active is not None:
+            clients = active.setdefault("clients", {})
+            if not clients and "wait_id" in active:
+                clients[active["wait_id"]] = {
+                    "roles": list(active.get("roles", [])),
+                    "last_poll_ts": active.get("last_poll_ts", now),
+                }
+            for cid, cinfo in list(clients.items()):
+                c_timeout = cinfo.get("timeout_s", active.get("timeout_s", 60.0))
+                c_last_poll = cinfo.get("last_poll_ts", active.get("last_poll_ts", now))
+                if now - c_last_poll >= c_timeout + _WAIT_STALE_GRACE_S:
+                    clients.pop(cid, None)
+            if not clients:
+                self._active_waits.pop(project_ns, None)
+                active = None
+
+        client_info = None
+        if active is not None:
+            clients = active.setdefault("clients", {})
+            if wait_id in clients:
+                client_info = clients[wait_id]
+            elif active.get("wait_id") == wait_id:
+                client_info = {
+                    "roles": active.get("roles", []),
+                    "timeout_s": active.get("timeout_s", 60.0),
+                    "started_ts": active.get("started_ts", now),
+                    "last_poll_ts": now,
+                }
+
+        if client_info is None:
             echo = getattr(self, "_wait_resolved_echo", {}).get(project_ns)
-            if (
-                echo is not None
-                and echo["wait_id"] == wait_id
-                and time.time() - echo["ts"] < _WAIT_RESOLVED_ECHO_GRACE_S
-            ):
-                return dict(echo["result"])
+            if echo is not None and echo.get("wait_id") == wait_id:
+                if time.time() - echo["ts"] < _WAIT_RESOLVED_ECHO_GRACE_S:
+                    return dict(echo["result"])
+            else:
+                echo_by_id = getattr(self, "_wait_echo_by_id", {}).get(wait_id)
+                if (
+                    echo_by_id is not None
+                    and time.time() - echo_by_id["ts"] < _WAIT_RESOLVED_ECHO_GRACE_S
+                ):
+                    return dict(echo_by_id["result"])
+
+            if active is not None:
+                pending_roles = ", ".join(active.get("roles", [])) or "none"
+                return {
+                    "ok": False,
+                    "msg": (
+                        f"wait session no longer active — superseded by wait "
+                        f"'{active['wait_id']}' (pending roles: {pending_roles})"
+                    ),
+                }
+
             return {
                 "ok": False,
                 "msg": "wait session no longer active (already ended, timed out, or superseded)",
             }
-        now = time.time()
+
         active["last_poll_ts"] = now
-        started_ts = active["started_ts"]
+        client_info["last_poll_ts"] = now
+        client_started_ts = active.get("started_ts", now)
+        client_timeout_s = client_info.get("timeout_s", active["timeout_s"])
+        client_roles = client_info.get("roles", active["roles"])
 
         # Computed once for the whole tick, not per role — see
         # _resolve_role_wait_status's docstring.
@@ -579,9 +684,9 @@ class LeadWaitMixin:
         failed: dict[str, str] = {}
         gone: dict[str, str] = {}
         pending: dict[str, str] = {}
-        for role in active["roles"]:
+        for role in client_roles:
             kind, detail = self._resolve_role_wait_status(
-                project_ns, role, started_ts, panes, detailed
+                project_ns, role, client_started_ts, panes, detailed
             )
             if kind == "done":
                 done[role] = "delivered"
@@ -597,9 +702,7 @@ class LeadWaitMixin:
         # busy — only checked while something is still pending, since a
         # fully-resolved poll is already about to end the registration on
         # its own.
-        interrupt = (
-            self._pending_notice_outside(project_ns, set(active["roles"])) if pending else None
-        )
+        interrupt = self._pending_notice_outside(project_ns, set(client_roles)) if pending else None
         # #259: a delivery-health system notice (delivery-unconfirmed/
         # spawn-stuck/delivery-boot-stall/spawn-failed) about a role THIS
         # wait IS watching never calls done()/failed() either, so it would
@@ -614,10 +717,10 @@ class LeadWaitMixin:
         # `_pending_user_input_interrupt`'s docstring for why this can
         # never fire on the cockpit's own notice/task pastes.
         if interrupt is None and pending:
-            interrupt = self._pending_user_input_interrupt(project_ns, started_ts)
+            interrupt = self._pending_user_input_interrupt(project_ns, client_started_ts)
 
-        elapsed = now - started_ts
-        expired = elapsed >= active["timeout_s"]
+        elapsed = now - client_started_ts
+        expired = elapsed >= client_timeout_s
         result = {
             "ok": True,
             "msg": "resolved" if not pending else f"{len(pending)} role(s) still pending",
@@ -630,20 +733,28 @@ class LeadWaitMixin:
             "interrupt": interrupt,
         }
         if not pending or expired or interrupt is not None:
-            # #598: decrement ref_count instead of immediately popping,
-            # only pop when last client detaches
-            active["ref_count"] = active.get("ref_count", 1) - 1
-            if active["ref_count"] <= 0:
-                self._active_waits.pop(project_ns, None)
-            # Stash this exact payload so any OTHER client still attached to
-            # *wait_id* whose poll lands after this pop echoes the real
-            # terminal result instead of a manufactured error — see this
-            # method's docstring.
+            # #598: remove this client from active clients; only pop active wait
+            # when no clients remain.
+            clients = active.setdefault("clients", {})
+            clients.pop(wait_id, None)
+            active["ref_count"] = len(clients)
+
             self._wait_resolved_echo[project_ns] = {
                 "wait_id": wait_id,
                 "result": dict(result),
                 "ts": now,
             }
+            if not hasattr(self, "_wait_echo_by_id"):
+                self._wait_echo_by_id = {}
+            self._wait_echo_by_id[wait_id] = self._wait_resolved_echo[project_ns]
+
+            if not clients:
+                self._active_waits.pop(project_ns, None)
+            else:
+                all_r = set()
+                for c in clients.values():
+                    all_r.update(c.get("roles", []))
+                active["roles"] = sorted(all_r)
 
         return result
 
@@ -653,10 +764,32 @@ class LeadWaitMixin:
         matches (already resolved/expired/superseded). #598: decrements
         ref_count and only pops when last client detaches."""
         active = self._active_waits.get(project_ns)
-        if active is not None and active["wait_id"] == wait_id:
-            active["ref_count"] = active.get("ref_count", 1) - 1
-            if active["ref_count"] <= 0:
+        if active is None:
+            return False
+        clients = active.setdefault("clients", {})
+        now = time.time()
+        for cid, cinfo in list(clients.items()):
+            c_timeout = cinfo.get("timeout_s", active["timeout_s"])
+            c_last_poll = cinfo.get("last_poll_ts", active["last_poll_ts"])
+            if now - c_last_poll >= c_timeout + _WAIT_STALE_GRACE_S:
+                clients.pop(cid, None)
+
+        removed = False
+        if wait_id in clients:
+            clients.pop(wait_id, None)
+            removed = True
+        elif active.get("wait_id") == wait_id:
+            removed = True
+
+        if removed:
+            active["ref_count"] = len(clients)
+            if not clients:
                 self._active_waits.pop(project_ns, None)
+            else:
+                all_r = set()
+                for c in clients.values():
+                    all_r.update(c.get("roles", []))
+                active["roles"] = sorted(all_r)
             return True
         return False
 

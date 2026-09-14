@@ -107,7 +107,9 @@ class TestBeginWait:
         second = orch.begin_wait(PROJECT, ["frontend"], 60.0)
 
         assert second["attached"] is True
-        assert second["wait_id"] == first["wait_id"]
+        assert (
+            second["wait_id"] != first["wait_id"]
+        )  # #598: distinct client wait_id for different role sets
         assert set(second["roles"]) == {"backend", "frontend"}
         # Only one registration exists — no duplicate poll loop was created.
         assert len(orch._active_waits) == 1
@@ -1721,3 +1723,56 @@ class TestCliWaitCommand:
         assert rc == cli._WAIT_EXIT_ERROR  # #431: wait itself broke → 2, not 'roles pending'
         assert "takkub wait --role frontend" in out
         assert "backend" not in out.rsplit("resume watching with", 1)[-1]
+
+
+class TestReviewerWaitAliasAndConcurrentClients:
+    def test_resolve_reviewer_alias_to_qa_in_wait(self, orch: Orchestrator) -> None:
+        """#597: when --role reviewer is passed to wait, it resolves to existing qa pane."""
+        _register_working(orch, "qa")
+        result = orch.begin_wait(PROJECT, ["reviewer"], 60.0)
+        assert result["ok"] is True
+        assert result["roles"] == ["qa"]
+
+    def test_concurrent_wait_clients_with_different_role_sets_independent(
+        self, orch: Orchestrator
+    ) -> None:
+        """#598: two clients waiting on different role sets resolve independently."""
+        _register_working(orch, "qa")
+        _register_working(orch, "devops")
+
+        c1 = orch.begin_wait(PROJECT, ["qa"], 60.0)
+        c2 = orch.begin_wait(PROJECT, ["devops"], 60.0)
+
+        assert c2["attached"] is True
+        assert c1["wait_id"] != c2["wait_id"]
+        assert len(orch._active_waits) == 1
+
+        # qa finishes
+        orch._wait_done_events[(PROJECT, "qa")] = {"ts": time.time(), "failed": False}
+
+        # Client 1 polls and resolves
+        res1 = orch.poll_wait(PROJECT, c1["wait_id"])
+        assert res1["ok"] is True
+        assert res1["done"] == {"qa": "delivered"}
+        assert not res1["pending"]
+
+        # Registration is still active for devops
+        assert PROJECT in orch._active_waits
+        assert orch._active_waits[PROJECT]["roles"] == ["devops"]
+
+        # Client 2 polls and is still pending for devops (not errored with 'no longer active')
+        res2 = orch.poll_wait(PROJECT, c2["wait_id"])
+        assert res2["ok"] is True
+        assert "devops" in res2["pending"]
+
+        # devops finishes
+        orch._wait_done_events[(PROJECT, "devops")] = {"ts": time.time(), "failed": False}
+
+        # Client 2 polls and resolves
+        res2_done = orch.poll_wait(PROJECT, c2["wait_id"])
+        assert res2_done["ok"] is True
+        assert res2_done["done"] == {"devops": "delivered"}
+        assert not res2_done["pending"]
+
+        # Now all clients are done, registration is cleared
+        assert PROJECT not in orch._active_waits
