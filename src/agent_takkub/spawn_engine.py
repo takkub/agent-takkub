@@ -1552,10 +1552,15 @@ class SpawnEngineMixin:
     def _mint_pane_token(self, env: dict, project_ns: str, role_name: str) -> str:
         """Mint a fresh per-pane auth token for ``(project_ns, role_name)``.
 
-        Session teardown revokes only that session's token. Minting must not
-        revoke another still-live session during a replacement spawn. Registers it and
-        stamps it into ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers
-        keep it to revoke explicitly if the spawn then fails. M5#24: this minting
+        Revokes any prior token for the same pair that is NOT bound to a
+        still-alive session (#594/#M5-24 follow-up) — a token left over from
+        a crashed or never-bound spawn must not keep working, but a token
+        already bound to a live session (the successor side of a replacement
+        spawn's mint-before-bind race, #594) must survive. Session teardown
+        separately revokes exactly that session's own token via
+        `_revoke_session_tokens`. Registers the new token and stamps it into
+        ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers keep it to
+        revoke explicitly if the spawn then fails. M5#24: this minting
         boilerplate was copy-pasted across all four provider branches of spawn().
 
         Also stamps ``_pane_token_minted_at[tok]`` (#315) — a plain, unpersisted
@@ -1570,6 +1575,19 @@ class SpawnEngineMixin:
             self._pane_tokens: dict[str, tuple[str, str]] = {}
         if not hasattr(self, "_pane_token_minted_at"):
             self._pane_token_minted_at: dict[str, float] = {}
+        if not hasattr(self, "_retired_pane_tokens"):
+            self._retired_pane_tokens = {}
+        bindings = getattr(self, "_pane_token_sessions", {})
+        for old_tok, identity in list(self._pane_tokens.items()):
+            if identity != (project_ns, role_name):
+                continue
+            bound_session = bindings.get(old_tok)
+            if bound_session is not None and bound_session.is_alive:
+                continue
+            self._retired_pane_tokens[old_tok] = self._pane_tokens.pop(old_tok)
+            bindings.pop(old_tok, None)
+        while len(self._retired_pane_tokens) > 256:
+            self._retired_pane_tokens.pop(next(iter(self._retired_pane_tokens)))
         tok = secrets.token_urlsafe(32)
         self._pane_tokens[tok] = (project_ns, role_name)
         self._pane_token_minted_at[tok] = time.time()
