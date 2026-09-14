@@ -37,6 +37,23 @@ WAKE_BUFFER_S = 3 * 60
 # against a false-positive banner match parking a pane that can still work.
 CONFIRM_UTILIZATION_PCT = 95.0
 
+# #595: how often `_maybe_auto_resume_park` is allowed to fire a fresh
+# signal-(b) confirm fetch for the SAME episode — without this it re-fires
+# on every IDLE_WATCHDOG_INTERVAL_MS tick (5s) regardless of whether the
+# previous fetch even finished, spawning a new thread every tick.
+CONFIRM_RETRY_INTERVAL_S = 30
+
+# #595: how long the confirm loop may retry before giving up on signal (b)
+# and rerouting on signal (a) (the banner) alone — real incident:
+# `pane_limit_confirm_failed` fired every ~5s for 2h51m+ (1637 events) with
+# zero reroute, because the profile's own usage telemetry never independently
+# confirmed a banner that was, per the CLI's own text, real. A pane genuinely
+# frozen on quota deserves to move to another provider well before 5 hours
+# pass in silence; a handful of confirm attempts (CONFIRM_RETRY_INTERVAL_S
+# apart) is enough to rule out a one-off fetch/network hiccup without
+# guessing forever.
+CONFIRM_FALLBACK_TIMEOUT_S = 3 * 60
+
 # Give-up status dump (#158): how many trailing non-blank lines of the pane's
 # visible screen to echo in the give-up notice, so the Lead can tell at a
 # glance whether the task actually finished before the pane went quiet.

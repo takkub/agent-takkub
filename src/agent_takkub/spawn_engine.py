@@ -899,6 +899,17 @@ class PaneState:
     # firing a second confirm fetch on every watchdog tick while one is
     # already in flight for the same episode.
     limit_confirm_pending: bool = False
+    # limit_confirm_first_attempt_ts / limit_confirm_last_attempt_ts (#595):
+    # episode-scoped bookkeeping for the signal-(b) confirm loop. First is
+    # stamped once per rate-limit episode (reset in `_rate_limit_suppressed`
+    # alongside quota_marker) and used to bound how long the loop may retry
+    # before falling back to signal (a) alone; last throttles how often a
+    # fresh confirm fetch actually fires. Real incident: with no bound here,
+    # `pane_limit_confirm_failed` fired every ~5s watchdog tick for 2h51m+
+    # straight (1637 events, events.log 2026-09-14 20:34-23:25) and the pane
+    # never rerouted — see `AutoResumeMixin._maybe_auto_resume_park`.
+    limit_confirm_first_attempt_ts: float = 0.0
+    limit_confirm_last_attempt_ts: float = 0.0
     # limit_park_rounds: park→wake cycles used so far for the CURRENT
     # assigned task (capped at auto_resume.MAX_PARK_ROUNDS). Reset to 0 on
     # every fresh assign() — a new task gets a fresh budget.

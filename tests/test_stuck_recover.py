@@ -178,6 +178,17 @@ class _FakeOrch:
         # degrades to when this method is absent.
         return Orchestrator._real_progress_ts(self, role, project_ns, pane, ps, now)  # type: ignore[arg-type]
 
+    def _idle_no_progress_real_activity(self, role, project_ns, pane, now) -> str:
+        # #599: delegate to the real method — it only calls
+        # self._live_non_scaffolding_children (stubbed above, [] by
+        # default) and the pure _cwd_has_recent_file_activity helper
+        # (False for _FakePane's default nonexistent "/x" cwd), so every
+        # EXISTING test in this module sees "" (no suppression) unless it
+        # explicitly sets `live_children` or a real `cwd`.
+        return Orchestrator._idle_no_progress_real_activity(  # type: ignore[arg-type]
+            self, role, project_ns, pane, now
+        )
+
 
 @pytest.fixture(autouse=True)
 def _patch_qtimer(monkeypatch: pytest.MonkeyPatch) -> list:
@@ -1121,18 +1132,46 @@ class TestLiveChildrenDefer:
         assert fake.close_calls == []
         assert fake.spawn_calls == []
 
-    def test_lead_is_told_the_watchdog_held_off(self) -> None:
-        fake, now = self._stuck_pane_orch(["node.exe"])
-        _check(fake, now)
-        assert len(fake.notify_calls) == 1
-        _project, notice, _from_role = fake.notify_calls[0]
-        assert "node.exe" in notice
+    def test_defer_is_logged_but_lead_is_not_notified(self) -> None:
+        """#599: a live child process deferring recovery is the expected/
+        healthy case (e.g. qa/e2e running in the background), not a
+        problem — the notice used to page Lead every deferral episode,
+        which was pure noise for exactly the case this defer exists to
+        handle. Now audit-only: the episode is still logged, but Lead is
+        left alone."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake, now = self._stuck_pane_orch(["node.exe"])
+            _check(fake, now)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.notify_calls == []
+        defer_events = [e for e in logged if e["event"] == "stuck_recover_deferred_live_children"]
+        assert len(defer_events) == 1
+        assert defer_events[0]["role"] == "qa"
+        assert "node.exe" in defer_events[0]["children"]
 
     def test_notice_is_not_repeated_every_tick(self) -> None:
-        fake, now = self._stuck_pane_orch(["node.exe"])
-        for offset in range(0, 60, 5):
-            _check(fake, now + offset)
-        assert len(fake.notify_calls) == 1
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake, now = self._stuck_pane_orch(["node.exe"])
+            for offset in range(0, 60, 5):
+                _check(fake, now + offset)
+        finally:
+            orch_mod._log_event = orig
+
+        defer_events = [e for e in logged if e["event"] == "stuck_recover_deferred_live_children"]
+        assert len(defer_events) == 1
+        assert fake.notify_calls == []
         assert fake.close_calls == []
 
     def test_children_exiting_lets_the_pane_be_recovered_again(self) -> None:
