@@ -82,7 +82,15 @@ from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSettings, QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QGuiApplication, QIcon, QPalette
+from PyQt6.QtGui import (
+    QColor,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QPalette,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -136,6 +144,8 @@ from . import (
 from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 from .lead_context import _allowed_project_roots
+from .orchestrator_text import _teammate_tier
+from .pane_provider_label import shorten_model_name
 from .settings_accounts import AccountsSettingsMixin
 from .settings_knowledge_design import KnowledgeDesignSettingsMixin
 from .settings_usage import UsageSettingsMixin
@@ -479,22 +489,84 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
 }
 
 
-def _fill_model_combo(combo: QComboBox, provider: str, current: str | None) -> None:
+def _resolved_default_model_text(
+    role: str | None,
+    provider: str,
+    project: str | None,
+    *,
+    provider_default_override: str | None = None,
+) -> str:
+    """What a role's model combo actually spawns with when left on
+    "(default)" (#592 item 3) — the same precedence spawn_engine resolves
+    (minus the role-model layer itself, since that's what an empty combo
+    means): the provider-level default (`provider_models.json`, the
+    "MODEL CONNECTIONS" card), else — claude only — the role's code-level
+    tier default (`orchestrator_text._teammate_tier`), else "" when this
+    cockpit has no id to predict (opencode/kimi/cursor — the bare CLI's own
+    default applies). `role=None` is the provider-level combo itself, which
+    has no role tier to fall back to. `provider_default_override` lets a
+    live (unsaved) edit to the provider-level combo preview through instead
+    of the on-disk value — see `_refresh_role_model_defaults_for_provider`."""
+    fallback = (
+        provider_default_override
+        if provider_default_override is not None
+        else (provider_models.model_for(provider) or "")
+    )
+    if not fallback and role and provider == provider_config.CLAUDE:
+        fallback = _teammate_tier(role)[0]
+    return shorten_model_name(fallback)
+
+
+def _model_default_label(
+    role: str | None,
+    provider: str,
+    project: str | None,
+    *,
+    provider_default_override: str | None = None,
+) -> str:
+    resolved = _resolved_default_model_text(
+        role, provider, project, provider_default_override=provider_default_override
+    )
+    return (
+        f"{_MODEL_DEFAULT_LABEL} → {resolved}"
+        if resolved
+        else f"{_MODEL_DEFAULT_LABEL} → ค่าของ CLI"
+    )
+
+
+def _fill_model_combo(
+    combo: QComboBox,
+    provider: str,
+    current: str | None,
+    *,
+    role: str | None = None,
+    project: str | None = None,
+    provider_default_override: str | None = None,
+) -> None:
     """(Re)populate a model picker with *provider*'s presets — the live
     discovery cache (`provider_model_catalog`) merged over the hand-written
     snapshot, freshest ids first, snapshot filling any gap — preserving any
     free-typed value, and point it at *current* (empty/None → "(default)").
     `cached_ids` is a small local JSON read, never a subprocess call, so this
-    stays safe to call inline on the Qt main thread."""
+    stays safe to call inline on the Qt main thread.
+
+    `role`/`project` (role combos only — the provider-level combo passes
+    neither) resolve what "(default)" itself means right now (#592 item 3):
+    the row's placeholder/first item reads "(default → sonnet-5)" instead of
+    a bare "(default)" that never said what actually gets spawned.
+    `provider_default_override` — see `_resolved_default_model_text`."""
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem(_MODEL_DEFAULT_LABEL, "")
+    default_label = _model_default_label(
+        role, provider, project, provider_default_override=provider_default_override
+    )
+    combo.addItem(default_label, "")
     presets = provider_model_catalog.merge_catalog(
         _MODELS_BY_PROVIDER.get(provider, ()), provider_model_catalog.cached_ids(provider)
     )
     for preset in presets:
         combo.addItem(preset, preset)
-    combo.lineEdit().setPlaceholderText(_MODEL_DEFAULT_LABEL)
+    combo.lineEdit().setPlaceholderText(default_label)
     _select_model(combo, current)
     combo.blockSignals(False)
 
@@ -513,18 +585,37 @@ def _select_model(combo: QComboBox, model: str | None) -> None:
 
 
 def _combo_model(combo: QComboBox) -> str:
-    """Read a model picker back: "(default)" (or blank) means no override."""
+    """Read a model picker back: the "(default → ...)" row (or blank) means
+    no override — matched by prefix since that row's text carries the
+    resolved default after it (#592 item 3), not the bare static label."""
     text = combo.currentText().strip()
-    return "" if text == _MODEL_DEFAULT_LABEL else text
+    if text == _MODEL_DEFAULT_LABEL or text.startswith(_MODEL_DEFAULT_LABEL + " "):
+        return ""
+    return text
 
 
 # Empty selection = don't pass an effort argument at all, i.e. the role's
 # tier default (or the TAKKUB_TEAMMATE_EFFORT env override, or the provider's
 # own CLI default) applies instead — see spawn_engine._resolve_teammate_effort.
 _EFFORT_DEFAULT_LABEL = "(ตามค่าเริ่มต้นของ role)"
+_EFFORT_UNSUPPORTED_LABEL = "model นี้ไม่มี effort"
 
 
-def _fill_effort_combo(combo: QComboBox, provider: str, model: str, current: str | None) -> None:
+def _effort_default_label(role: str | None, provider: str, model: str) -> str:
+    """#592 item 3: what the effort combo's default row resolves to — the
+    role's code-level tier effort (`orchestrator_text._teammate_tier`), or a
+    plain "model นี้ไม่มี effort" when this provider/model can't take one at
+    all (`provider_spec.effort_levels_for` already gates the caller for
+    that; this just names it instead of leaving the row unlabeled)."""
+    if not provider_spec.effort_levels_for(provider, model):
+        return _EFFORT_UNSUPPORTED_LABEL
+    tier_effort = _teammate_tier(role)[1] if role else ""
+    return f"{_EFFORT_DEFAULT_LABEL} → {tier_effort}" if tier_effort else _EFFORT_DEFAULT_LABEL
+
+
+def _fill_effort_combo(
+    combo: QComboBox, provider: str, model: str, current: str | None, *, role: str | None = None
+) -> None:
     """(Re)populate an effort picker with the levels *provider* accepts for
     *model* — single source of truth is
     ``provider_spec.effort_levels_for`` (#103: never hardcode a level list
@@ -535,10 +626,15 @@ def _fill_effort_combo(combo: QComboBox, provider: str, model: str, current: str
     kept as the sole selectable item so a stale-but-still-recorded choice
     stays visible instead of silently vanishing — Save & Apply is what
     actually drops it (see the save handler's own note).
+
+    `role` (role combos only) resolves what the default row itself means
+    right now (#592 item 3) — "(ตามค่าเริ่มต้นของ role → high)" instead of a
+    label that never said which effort actually applies.
     """
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem(_EFFORT_DEFAULT_LABEL, "")
+    default_label = _effort_default_label(role, provider, model)
+    combo.addItem(default_label, "")
     levels = provider_spec.effort_levels_for(provider, model)
     if levels:
         for level in levels:
@@ -559,11 +655,16 @@ def _fill_effort_combo(combo: QComboBox, provider: str, model: str, current: str
 
 def _combo_effort(combo: QComboBox) -> str:
     """Read an effort picker back: disabled (unsupported provider/model) or
-    the "(default)" row both mean no override."""
+    the default row (matched by prefix, same reasoning as `_combo_model`)
+    both mean no override."""
     if not combo.isEnabled():
         return ""
     text = combo.currentText().strip()
-    return "" if text == _EFFORT_DEFAULT_LABEL else text
+    if text == _EFFORT_DEFAULT_LABEL or text.startswith(_EFFORT_DEFAULT_LABEL + " "):
+        return ""
+    if text == _EFFORT_UNSUPPORTED_LABEL:
+        return ""
+    return text
 
 
 # Roles rendered as rows in the MCP/Plugins matrices — same set (and order)
@@ -574,12 +675,51 @@ def _matrix_roles() -> tuple[str, ...]:
     return pane_tools_dialog.matrix_roles()
 
 
-# Roles offered in the Pipeline Builder's role palette / per-hop add-role
-# select. Every valid_roles() entry except "shell" — an ad-hoc terminal pane,
-# not a directed pipeline participant (see `_overridable_roles()`'s own
-# note). Also a function, for the same fresh-per-open reason.
-def _pipeline_palette_roles() -> tuple[str, ...]:
-    return tuple(r for r in pipeline_config.valid_roles() if r != "shell")
+def _hop_role_label(role: str) -> str:
+    """Display label for a role wherever a Pipeline hop shows it — qa/critic
+    read as their #513 dispatch mode ("Reviewer · e2e (QA)" / "Reviewer · ui
+    (Critic)", #592 item 4) instead of their bare legacy names; every other
+    role keeps its normal `roles.Role.label`."""
+    from . import team_preset as _team_preset
+
+    if role in _team_preset.REVIEWER_MODE_LABELS:
+        return _team_preset.REVIEWER_MODE_LABELS[role]
+    r = roles_mod.by_name(role)
+    return r.label if r else role.capitalize()
+
+
+# Roles offered in the Pipeline Builder's quick "+ hop เดี่ยวจาก role"
+# palette (#592 item 4): every team position (core/custom AND the
+# tester/analyst/designer/docs/security extras — 2026-09-09 Lead report,
+# test_secondary_positions_are_pipeline_palette_selectable, narrowing this
+# would regress that fix) plus all 3 Reviewer dispatch modes (reviewer/qa/
+# critic, qa/critic relabeled via `_hop_role_label`). Provider panes
+# (codex/gemini/opencode/kimi/cursor) and `shell` are reachable only through
+# the sectioned "+ add role" dropdown (`_hop_add_role_sections`) — a second
+# opinion shouldn't be one accidental palette click away, same reasoning
+# `_build_secondary_brains_panel` already applies elsewhere on this page.
+# Also a function, for the same fresh-per-open reason as `_overridable_roles()`.
+def _pipeline_palette_roles(project: str | None = None) -> tuple[str, ...]:
+    from . import team_preset as _team_preset
+
+    groups = _team_preset.role_groups(project)
+    return (*groups["positions"], *groups["extra_positions"], *groups["reviewer_modes"])
+
+
+# (kicker, section label, roles) for the per-hop "+ add role" dropdown
+# (#592 item 4) — sectioned so a role's group (team position / review mode /
+# second-opinion provider / off-by-default extra) stays visible even when
+# it's reached through the fuller menu instead of the quick palette above.
+def _hop_add_role_sections(project: str | None = None) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    from . import team_preset as _team_preset
+
+    groups = _team_preset.role_groups(project)
+    return (
+        ("ตำแหน่ง", groups["positions"]),
+        ("โหมด Reviewer", groups["reviewer_modes"]),
+        ("สมองเสริม (ความเห็นที่สอง)", groups["secondary_brains"]),
+        ("ปิดอยู่", groups["extra_positions"]),
+    )
 
 
 # New Role's "use default MCP+Plugins ตาม column" toggle (#6): no per-role
@@ -932,7 +1072,13 @@ class SettingsWindow(
                 provider_combo.currentData() if provider_combo else None
             ) or provider_config.CLAUDE
             if role_provider in results:
-                _fill_model_combo(combo, role_provider, _combo_model(combo) or None)
+                _fill_model_combo(
+                    combo,
+                    role_provider,
+                    _combo_model(combo) or None,
+                    role=role,
+                    project=self._project,
+                )
 
     # ──────────────────────────────────────────────────────────
     # chrome: titlebar / status strip
@@ -1921,6 +2067,13 @@ class SettingsWindow(
             model_combo.setAccessibleName(f"{provider.capitalize()} model")
             _fill_model_combo(model_combo, provider, provider_models.model_for(provider))
             model_combo.currentTextChanged.connect(self._mark_dirty)
+            # #592 item 3: every role row's "(default → ...)" label falls
+            # through to THIS provider-level value when the role has no
+            # override of its own — keep those labels live as this combo
+            # changes, not just after Save & Apply.
+            model_combo.currentTextChanged.connect(
+                lambda _t="", p=provider: self._refresh_role_model_defaults_for_provider(p)
+            )
             row_lay.addWidget(model_combo)
             self._provider_model_combos[provider] = model_combo
 
@@ -2103,11 +2256,95 @@ class SettingsWindow(
         exec_label = "แตกหลายคน" if cfg["exec_mode"] == "parallel" else "1 คน/ตำแหน่ง"
         self._team_preset_exec_line.setText(f"โหมดทำงาน: {exec_label}")
 
+    def _current_team_cfg(self) -> dict:
+        """The team-preset config every enablement check on this window
+        should read RIGHT NOW (#592 round-2 item 2) — the previewed
+        team-size card once "ทีม & ตำแหน่ง" has been visited and a card
+        clicked (`self._selected_team_preset_id`, never written to disk
+        until Save & Apply), else the project's real standing preset when
+        that page hasn't been built yet this session (e.g. Pipeline Builder
+        opened first). Shared by the Roles roster (`_row_enabled_now`) and
+        everything the Pipeline Builder renders (`_pipeline_role_enabled`,
+        the pre-run summary) so the two pages can never disagree about the
+        same role inside one open Settings window."""
+        from . import team_preset as _team_preset
+
+        preset_id = getattr(self, "_selected_team_preset_id", None)
+        if preset_id is None:
+            preset_id = _team_preset.current_preset_id(self._project)
+        return _team_preset.resolve(preset_id, self._project)
+
+    def _pipeline_role_enabled(self, role: str) -> bool:
+        """`_row_enabled_now`'s exact formula, against `_current_team_cfg()`
+        — the single enablement check for anything the Pipeline Builder
+        page renders (hop chip dimming, palette dimming; the pre-run
+        summary passes the same cfg into `pipeline_hop_summary_lines`
+        directly). #592 round-2 item 2/3."""
+        return self._row_enabled_now(role, self._current_team_cfg())
+
+    def _row_enabled_now(self, role: str, cfg: dict, *, is_lead: bool = False) -> bool:
+        """#592 item 1/2: a role's switch reads ON/OFF exactly as
+        `can_spawn`/`is_role_enabled` would decide it RIGHT NOW for *cfg*
+        (the previewed preset, or the standing one when no card is being
+        previewed) — the single formula every roster row (position,
+        reviewer-mode, or extra-position) uses, so the display can never
+        drift from enforcement. `can_spawn` already handles the "auto never
+        blocks" exception (#512 item 5) and the qa/critic checker-alias
+        logic (#513/#561) — see `team_preset._can_spawn_from_cfg`."""
+        if is_lead:
+            return True
+        from . import team_preset as _team_preset
+
+        can_spawn_ok, _ = _team_preset._can_spawn_from_cfg(role, cfg, self._project)
+        return can_spawn_ok and pipeline_config.is_role_enabled(role, self._project)
+
+    def _build_collapsible_group(
+        self, kicker: str, title: str, tag: str, parent: QWidget, *, collapsed: bool = True
+    ) -> tuple[QWidget, QVBoxLayout]:
+        """A card whose body starts collapsed (default for every group that
+        isn't "ตำแหน่งในทีม" itself, #592 item 1/4) with a header toggle
+        button — keeps every `valid_roles()` member reachable on the Roles
+        page without regressing to the pre-#513 9-row wall. Returns
+        `(container, body_layout)`; callers fill `body_layout`."""
+        container = QWidget(parent)
+        container.setObjectName("panel")
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(10)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(self._build_card_header(kicker, title, tag, container), 1)
+        toggle_btn = cockpit_theme.secondary_button("แสดง" if collapsed else "ซ่อน", container)
+        toggle_btn.setCheckable(True)
+        toggle_btn.setChecked(not collapsed)
+        toggle_btn.setAccessibleName(f"{title} — toggle section")
+        header_row.addWidget(toggle_btn)
+        outer.addLayout(header_row)
+
+        body = QWidget(container)
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(10)
+        body.setVisible(not collapsed)
+        outer.addWidget(body)
+
+        def _toggle(checked: bool) -> None:
+            body.setVisible(checked)
+            toggle_btn.setText("ซ่อน" if checked else "แสดง")
+
+        toggle_btn.toggled.connect(_toggle)
+        return container, body_lay
+
     def _rebuild_roster_panel(self) -> None:
-        """(Re)builds the 'ตำแหน่งในทีม' panel for `self._selected_team_preset_id`
-        — one row per POSITION_ROLES + custom role the preset roster covers,
-        Lead (always, never preset-governed), and ONE row for whichever role
-        is the active checker (labeled '<role> — ตัวตรวจ'), per #512 item 2.
+        """(Re)builds the Roles page's role groups for
+        `self._selected_team_preset_id` (#592 item 1): "ตำแหน่งในทีม" (team
+        positions, always expanded — CORE_POSITION_ROLES + custom roles),
+        then 3 collapsed-by-default groups so every `pipeline_config.
+        valid_roles()` member still gets a row somewhere — "โหมด Reviewer"
+        (reviewer/qa/critic — #513/#561 folded qa/critic's dispatch into
+        `reviewer --mode`, but each keeps its own toggleable row here now,
+        fixing the "enabled but invisible" gap #590/#592's investigation
+        found) and "ตำแหน่งเสริม" (tester/analyst/designer/docs/security).
         Called on first build AND every team-size card click (preview, no
         disk write — see `_build_team_size_panel`)."""
         from . import team_preset as _team_preset
@@ -2119,21 +2356,16 @@ class SettingsWindow(
             if w is not None:
                 w.deleteLater()
 
-        cfg = _team_preset.resolve(self._selected_team_preset_id, self._project)
-        # #513: this page's role list is 5 positions (frontend/backend/
-        # mobile/devops + reviewer as the checker below) plus any project
-        # custom role — tester/analyst/designer/docs/security stay real,
-        # preset-governed positions (still toggleable via a `custom` preset
-        # payload / the Pipeline Builder palette), they just no longer get a
-        # row on THIS page, so the roster reads as the short list Lead scopes
-        # a task against instead of a 9-row wall most projects never touch.
-        position_roles = [
-            r for r in cfg["roles"].keys() if r not in _team_preset.EXTRA_POSITION_ROLES
-        ]
-        checker_role = _team_preset.CHECKER_ROLES.get(cfg["checker"]) if cfg["checker"] else None
-        display_roles = ["lead", *position_roles, *([checker_role] if checker_role else [])]
+        cfg = self._current_team_cfg()
+        groups = _team_preset.role_groups(self._project)
+        position_roles = list(groups["positions"])
+        reviewer_mode_roles = list(groups["reviewer_modes"])
+        extra_position_roles = list(groups["extra_positions"])
+        display_roles = ["lead", *position_roles]
 
-        role_providers = provider_config.role_provider_map(display_roles, self._project)
+        role_providers = provider_config.role_provider_map(
+            [*display_roles, *reviewer_mode_roles, *extra_position_roles], self._project
+        )
 
         role_panel = QWidget(self._roster_panel)
         role_panel.setObjectName("panel")
@@ -2161,11 +2393,18 @@ class SettingsWindow(
         roster_header_row.addWidget(new_role_btn)
         rp_lay.addLayout(roster_header_row)
 
+        # #592 item 1 acceptance line: nothing on this page auto-spawns —
+        # it only shapes what Lead/Pipeline are ALLOWED to spawn.
+        no_autorun_note = QLabel("ไม่มีตำแหน่งไหนรันเอง — รันเมื่อ Lead สั่ง หรือสั่งรัน Pipeline", role_panel)
+        no_autorun_note.setObjectName("panelHint")
+        rp_lay.addWidget(no_autorun_note)
+
         self._role_toggles = {}
         self._role_provider_combos = {}
         self._role_model_combos: dict[str, QComboBox] = {}
         self._role_effort_combos: dict[str, QComboBox] = {}
         self._role_provider_badges: dict[str, QLabel] = {}
+        self._role_defer_labels: dict[str, tuple[QLabel, str]] = {}
         self._lead_warning_lbl: QLabel | None = None
 
         # Bulk provider picker — stages the same provider change through each
@@ -2211,7 +2450,6 @@ class SettingsWindow(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
             is_lead = role == "lead"
-            is_checker = checker_role is not None and role == checker_role
             description = (
                 "Cockpit coordinator — เปลี่ยน CLI ได้ (บาง feature หายเมื่อไม่ใช่ Claude)"
                 if is_lead
@@ -2219,63 +2457,154 @@ class SettingsWindow(
             )
             row = self._build_role_row(
                 role,
-                f"{base_label} — ตัวตรวจ" if is_checker else base_label,
+                base_label,
                 color,
                 description,
                 role_panel,
                 locked=False,
-                enabled=True if is_lead else cfg["roles"].get(role, is_checker),
+                enabled=self._row_enabled_now(role, cfg, is_lead=is_lead),
                 current_provider=role_providers.get(role, provider_config.CLAUDE),
                 deletable=role in custom_roles.list_role_names(),
                 show_enable_toggle=not is_lead,
                 lead_capability_gate=is_lead,
             )
             rp_lay.addWidget(row)
-            if role == "reviewer":
-                # #590 item B: reviewer's row is the ONE settings surface for
-                # all three review modes (code/e2e/ui) since #513 folded qa/
-                # critic's dispatch into it — spell that out as a hint line
-                # below the row (not the row's own description, which would
-                # force every row to that height — see _build_role_row's
-                # word-wrap comment) so a user understands it also governs
-                # `--mode e2e`/`--mode ui` panes, which never get a roster
-                # row of their own.
-                mode_hint = QLabel(
-                    "Reviewer ใช้ค่านี้กับทุกโหมด: ตรวจโค้ด · ทดสอบหน้าเว็บ (QA) · ตรวจ UI (Critic)",
-                    role_panel,
-                )
-                mode_hint.setObjectName("panelHint")
-                mode_hint.setWordWrap(True)
-                rp_lay.addWidget(mode_hint)
-                # #590 item C: qa/critic entries left over from before #513
-                # (or a since-abandoned custom checker="qa") are still on
-                # disk but no longer consulted — surface them here (never
-                # deleted) so a stale provider doesn't look like a bug.
-                for stale in _team_preset.stale_legacy_role_configs(self._project):
-                    model_part = f" / {stale['model']}" if stale["model"] else ""
-                    notice = QLabel(
-                        f"ค่าเก่าของ {stale['role'].upper()} ({stale['provider']}{model_part}) "
-                        f"ไม่ถูกใช้แล้ว — {stale['role'].upper()} ใช้ค่าของ Reviewer",
-                        role_panel,
-                    )
-                    notice.setObjectName("panelHint")
-                    notice.setWordWrap(True)
-                    rp_lay.addWidget(notice)
 
         outer.addWidget(role_panel)
+
+        # โหมด Reviewer — reviewer (code) / qa (e2e) / critic (ui): #513/#561
+        # folded qa/critic's dispatch into `reviewer --mode`, but each still
+        # gets its own real row now instead of only whichever one happened
+        # to be the active checker (#590/#592: the other two could be fully
+        # enabled yet invisible here, which read as a bug on its own).
+        reviewer_group, reviewer_body = self._build_collapsible_group(
+            "REVIEW", "โหมด Reviewer", f"{len(reviewer_mode_roles)} โหมด", self._roster_panel
+        )
+        reviewer_hint = QLabel(
+            "3 โหมดของ Reviewer เดียวกัน — ตรวจโค้ด (code) · ทดสอบหน้าเว็บ (e2e, เดิมชื่อ QA) · "
+            "ตรวจ UI/ภาพหน้าจอ (ui, เดิมชื่อ Design Critic)",
+            reviewer_group,
+        )
+        reviewer_hint.setObjectName("panelHint")
+        reviewer_hint.setWordWrap(True)
+        reviewer_body.addWidget(reviewer_hint)
+        for role in reviewer_mode_roles:
+            r = roles_mod.by_name(role)
+            color = cockpit_theme.ROLE_COLORS.get(
+                role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+            )
+            role_label = _team_preset.REVIEWER_MODE_LABELS.get(role, role.capitalize())
+            # #592 round-2 item 1: qa/critic's OWN provider/model/effort combos
+            # here used to silently do nothing — spawn always reads whichever
+            # row `settings_role_for` names (Reviewer, on every built-in
+            # preset). Render those two as a plain resolved-text row instead
+            # of a second, unused set of controls; only a `custom` preset
+            # explicitly choosing checker="qa" keeps qa's own real row.
+            settings_role = _team_preset.settings_role_for(role, self._project)
+            if settings_role != role:
+                row = self._build_deferred_role_row(
+                    role,
+                    role_label,
+                    color,
+                    reviewer_group,
+                    settings_role=settings_role,
+                    enabled=self._row_enabled_now(role, cfg),
+                )
+            else:
+                row = self._build_role_row(
+                    role,
+                    role_label,
+                    color,
+                    "",
+                    reviewer_group,
+                    locked=False,
+                    enabled=self._row_enabled_now(role, cfg),
+                    current_provider=role_providers.get(role, provider_config.CLAUDE),
+                    deletable=False,
+                    show_enable_toggle=True,
+                )
+                if role == "reviewer":
+                    # Live-refresh every qa/critic deferred label whenever
+                    # Reviewer's own row changes — before Save & Apply, not
+                    # just after (same live-preview spirit as #592 item 3's
+                    # "(default → ...)" labels).
+                    self._role_provider_combos[role].currentIndexChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
+                    self._role_model_combos[role].currentTextChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
+                    self._role_effort_combos[role].currentIndexChanged.connect(
+                        self._refresh_deferred_role_labels
+                    )
+            reviewer_body.addWidget(row)
+
+        # #590 follow-up, round-2 item 1: qa/critic entries still sitting in
+        # routing.json/role-models.json that settings_role_for no longer
+        # consults (configured but silently unused since the roster stopped
+        # rendering a row for them) — surfaced here, right under the rows
+        # that now explain what actually runs instead.
+        stale_entries = _team_preset.stale_legacy_role_configs(self._project)
+        if stale_entries:
+            stale_lines = "\n".join(
+                f"- {_team_preset.REVIEWER_MODE_LABELS.get(e['role'], e['role'])}: "
+                f"provider={e['provider']}" + (f" model={e['model']}" if e["model"] else "")
+                for e in stale_entries
+            )
+            stale_lbl = QLabel(
+                "พบค่าเก่าที่เคยตั้งไว้แต่ตอนนี้ไม่ถูกใช้แล้ว (แถวด้านบนใช้ค่า Reviewer แทน):\n" + stale_lines,
+                reviewer_group,
+            )
+            stale_lbl.setObjectName("panelHint")
+            stale_lbl.setWordWrap(True)
+            reviewer_body.addWidget(stale_lbl)
+
+        self._refresh_deferred_role_labels()
+        outer.addWidget(reviewer_group)
+
+        # ตำแหน่งเสริม (ปิดอยู่โดยดีฟอลต์) — tester/analyst/designer/docs/
+        # security: off in every built-in preset (EXTRA_POSITION_ROLES) but
+        # always listed, never hidden entirely, so a `custom` preset that
+        # turned one on is still visible/toggleable here (#513 kept them off
+        # the roster outright; #592 puts them back, just collapsed).
+        extra_group, extra_body = self._build_collapsible_group(
+            "OPTIONAL", "ตำแหน่งเสริม", f"{len(extra_position_roles)} ตำแหน่ง", self._roster_panel
+        )
+        for role in extra_position_roles:
+            r = roles_mod.by_name(role)
+            base_label = r.label if r else role.capitalize()
+            color = cockpit_theme.ROLE_COLORS.get(
+                role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+            )
+            row = self._build_role_row(
+                role,
+                base_label,
+                color,
+                "",
+                extra_group,
+                locked=False,
+                enabled=self._row_enabled_now(role, cfg),
+                current_provider=role_providers.get(role, provider_config.CLAUDE),
+                deletable=False,
+                show_enable_toggle=True,
+            )
+            extra_body.addWidget(row)
+        outer.addWidget(extra_group)
 
     def _build_secondary_brains_panel(self, parent: QWidget) -> QWidget:
         """#512 item 3 — codex/gemini/opencode/kimi/cursor as a compact chip
         row: optional second opinions, not team POSITIONS, so no toggle
         lives here (that's still the MODEL CONNECTIONS panel below, unchanged
         — this is a read-only glance, not a second control for the same
-        state)."""
-        panel = QWidget(parent)
-        panel.setObjectName("panel")
-        p_lay = QVBoxLayout(panel)
-        p_lay.setContentsMargins(14, 12, 14, 12)
-        p_lay.setSpacing(10)
-        p_lay.addWidget(self._build_card_header("OPTIONAL", "สมองเสริม", "ไม่ใช่ตำแหน่งในทีม", panel))
+        state). #592 item 1: collapsed by default (same pattern as the
+        Roles page's other non-team-position groups) and also carries
+        `shell` — an ad-hoc terminal pane, never preset-governed, with no
+        provider/model of its own to configure — so it lands SOMEWHERE on
+        this page instead of being unreachable via `role_groups()`'s
+        "other" bucket."""
+        panel, p_lay = self._build_collapsible_group(
+            "OPTIONAL", "สมองเสริม", "ไม่ใช่ตำแหน่งในทีม", parent
+        )
 
         chips_row = QWidget(panel)
         chips_lay = QHBoxLayout(chips_row)
@@ -2299,6 +2628,9 @@ class SettingsWindow(
                 else ("CLI ยังไม่ติดตั้ง" if not installed else "พร้อมใช้")
             )
             chips_lay.addWidget(chip)
+        shell_chip = cockpit_theme.role_chip("Shell", cockpit_theme.TEXT_MUTED, chips_row)
+        shell_chip.setToolTip("เทอร์มินัลเปล่า ไม่ใช่ตำแหน่งในทีม — เปิดได้เสมอผ่านปุ่ม Open Shell")
+        chips_lay.addWidget(shell_chip)
         chips_lay.addStretch(1)
         p_lay.addWidget(chips_row)
         return panel
@@ -2399,6 +2731,8 @@ class SettingsWindow(
             model_combo,
             _role_provider_now,
             role_models.model_for(role, _role_provider_now),
+            role=role,
+            project=self._project,
         )
         row_lay.addWidget(model_combo)
         self._role_model_combos[role] = model_combo
@@ -2416,6 +2750,7 @@ class SettingsWindow(
             _role_provider_now,
             role_models.model_for(role, _role_provider_now) or "",
             role_models.effort_for(role, _role_provider_now),
+            role=role,
         )
         effort_combo.currentIndexChanged.connect(self._mark_dirty)
         row_lay.addWidget(effort_combo)
@@ -2436,6 +2771,8 @@ class SettingsWindow(
                 self._role_model_combos[r],
                 self._role_provider_combos[r].currentData() or provider_config.CLAUDE,
                 _combo_model(self._role_model_combos[r]) or None,
+                role=r,
+                project=self._project,
             )
         )
         combo.currentIndexChanged.connect(lambda _i=0, r=role: self._refresh_role_effort_combo(r))
@@ -2494,6 +2831,68 @@ class SettingsWindow(
             row_lay.addWidget(delete_btn)
 
         return row
+
+    def _build_deferred_role_row(
+        self,
+        role: str,
+        label: str,
+        color: str,
+        parent: QWidget,
+        *,
+        settings_role: str,
+        enabled: bool,
+    ) -> QWidget:
+        """A qa/critic roster row whose Settings row is actually
+        *settings_role*'s (`team_preset.settings_role_for`, #590) — round-2
+        #592 item 1. No independent provider/model/effort controls: editing
+        them here used to silently do nothing, since spawn always reads
+        *settings_role*'s row. Just the resolved text (`_refresh_deferred_
+        role_labels` keeps it live-bound to that row's combos) plus the
+        enable switch this mode's own toggle still governs (whether this
+        review MODE runs at all is independent of whose provider row backs
+        it)."""
+        row = QWidget(parent)
+        row.setObjectName("roleRow")
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(10, 8, 10, 8)
+        row_lay.setSpacing(10)
+        row_lay.addWidget(cockpit_theme.role_chip(label, color, row))
+
+        resolved_lbl = QLabel(row)
+        resolved_lbl.setObjectName("panelHint")
+        resolved_lbl.setWordWrap(True)
+        row_lay.addWidget(resolved_lbl, 1)
+        self._role_defer_labels[role] = (resolved_lbl, settings_role)
+
+        toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
+        toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
+        toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม — ปิดแล้ว assign จะถูกปฏิเสธ")
+        toggle.toggled.connect(self._mark_dirty)
+        row_lay.addWidget(toggle)
+        self._role_toggles[role] = toggle
+        return row
+
+    def _refresh_deferred_role_labels(self, *_args: object) -> None:
+        """Recompute every qa/critic deferred row's resolved text (#592
+        round-2 item 1) from its `settings_role`'s CURRENT combo selections
+        — called once after the roster builds, and again live on every
+        change to that row's provider/model/effort combos. `*_args` absorbs
+        whatever a connected Qt signal passes (index, text, …)."""
+        from . import team_preset as _team_preset
+
+        for _role, (lbl, settings_role) in self._role_defer_labels.items():
+            provider_combo = self._role_provider_combos.get(settings_role)
+            model_combo = self._role_model_combos.get(settings_role)
+            effort_combo = self._role_effort_combos.get(settings_role)
+            if provider_combo is None or model_combo is None or effort_combo is None:
+                continue
+            settings_label = _team_preset.REVIEWER_MODE_LABELS.get(
+                settings_role, settings_role.capitalize()
+            )
+            lbl.setText(
+                f"ใช้ค่าแถว {settings_label} → {provider_combo.currentText()} · "
+                f"{model_combo.currentText().strip()} · {effort_combo.currentText().strip()}"
+            )
 
     def _apply_provider_to_all_roles(self) -> None:
         """Stage the selected provider for every rendered role.
@@ -2562,7 +2961,34 @@ class SettingsWindow(
             return
         provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
         model = _combo_model(self._role_model_combos[role])
-        _fill_effort_combo(effort_combo, provider, model, _combo_effort(effort_combo) or None)
+        _fill_effort_combo(
+            effort_combo, provider, model, _combo_effort(effort_combo) or None, role=role
+        )
+
+    def _refresh_role_model_defaults_for_provider(self, provider: str) -> None:
+        """#592 item 3: live-preview — when the provider-level default model
+        combo (MODEL CONNECTIONS) changes, before Save & Apply, refresh every
+        role row currently pointed at that provider so its
+        "(default → ...)" label reflects the in-progress edit instead of the
+        stale on-disk value."""
+        provider_combo = self._provider_model_combos.get(provider)
+        if provider_combo is None:
+            return
+        live_default = _combo_model(provider_combo)
+        for role, role_provider_combo in self._role_provider_combos.items():
+            if (role_provider_combo.currentData() or provider_config.CLAUDE) != provider:
+                continue
+            model_combo = self._role_model_combos.get(role)
+            if model_combo is None:
+                continue
+            _fill_model_combo(
+                model_combo,
+                provider,
+                _combo_model(model_combo) or None,
+                role=role,
+                project=self._project,
+                provider_default_override=live_default or None,
+            )
 
     def _reset_providers_roles_view(self) -> None:
         self._bulk_role_provider_combo.blockSignals(True)
@@ -4259,12 +4685,18 @@ class SettingsWindow(
         pal_hint = QLabel("+ hop เดี่ยวจาก role:", palette_panel)
         pal_hint.setObjectName("panelHint")
         pal_lay.addWidget(pal_hint)
-        for role in _pipeline_palette_roles():
+        for role in _pipeline_palette_roles(self._project):
+            label = _hop_role_label(role)
             r = roles_mod.by_name(role)
-            label = r.label if r else role.capitalize()
-            color = cockpit_theme.ROLE_COLORS.get(
+            base_color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
+            # round-2 #592 item 3: dim (never remove — still clickable, a
+            # single disabled hop doesn't break the template) a role that's
+            # off right now, same `_pipeline_role_enabled` formula the hop
+            # chips below use, so the palette can't disagree with them.
+            role_disabled = not self._pipeline_role_enabled(role)
+            color = cockpit_theme.TEXT_MUTED if role_disabled else base_color
             btn = QPushButton(label, palette_panel)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
@@ -4273,12 +4705,25 @@ class SettingsWindow(
                 f" font-size: 11px; }}"
                 f"QPushButton:hover {{ background: rgba(255,255,255,0.06); }}"
             )
+            if role_disabled:
+                btn.setToolTip("ปิดอยู่ — จะถูกข้ามตอนรัน")
             btn.clicked.connect(
                 lambda _checked=False, role_=role: self._on_palette_role_clicked(role_)
             )
             pal_lay.addWidget(btn)
         pal_lay.addStretch(1)
         b_lay.addWidget(palette_panel)
+
+        # #592 item 5: a pre-run summary — every skip (disabled role / not
+        # in the project's team preset) and every Reviewer-row substitution
+        # (qa/critic, #590) — named as soon as a template loads, not only
+        # discoverable after the run starts and hits `pipeline_executor`'s
+        # skip branch. `takkub pipeline run`'s CLI ack shows the identical
+        # lines (`team_preset.pipeline_hop_summary_lines`).
+        self._pb_summary_label = QLabel("", builder_panel)
+        self._pb_summary_label.setObjectName("panelHint")
+        self._pb_summary_label.setWordWrap(True)
+        b_lay.addWidget(self._pb_summary_label)
 
         self._pb_hops_container = QWidget(builder_panel)
         self._pb_hops_lay = QVBoxLayout(self._pb_hops_container)
@@ -4314,6 +4759,20 @@ class SettingsWindow(
         self._render_pb_hops()
 
     def _render_pb_hops(self) -> None:
+        from . import team_preset as _team_preset
+
+        summary_label = getattr(self, "_pb_summary_label", None)
+        if summary_label is not None:
+            if self._pb_hops:
+                lines = _team_preset.pipeline_hop_summary_lines(
+                    self._pb_hops, self._project, cfg=self._current_team_cfg()
+                )
+                summary_label.setText("\n".join(lines))
+                summary_label.setVisible(True)
+            else:
+                summary_label.setText("")
+                summary_label.setVisible(False)
+
         while self._pb_hops_lay.count():
             item = self._pb_hops_lay.takeAt(0)
             w = item.widget()
@@ -4355,17 +4814,38 @@ class SettingsWindow(
             roles_row.setSpacing(6)
             for entry in hop:
                 role = entry["role"]
+                label = _hop_role_label(role)
                 r = roles_mod.by_name(role)
-                label = r.label if r else role.capitalize()
-                color = cockpit_theme.ROLE_COLORS.get(
+                base_color = cockpit_theme.ROLE_COLORS.get(
                     role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
                 )
+                # #592 item 4 "ข้อห้ามสำคัญ": a saved hop keeps a role that's
+                # since been disabled (team preset OFF, or Settings' rolesEnabled
+                # toggle) — never silently dropped from the template, just
+                # shown dimmed with a tooltip explaining it will be skipped
+                # at run time (`pipeline_executor`'s own skip branch).
+                # round-2 item 2: `_pipeline_role_enabled` is the same
+                # formula the Roles roster's switches use — see
+                # `_current_team_cfg`.
+                role_disabled = not self._pipeline_role_enabled(role)
+                color = cockpit_theme.TEXT_MUTED if role_disabled else base_color
                 pill = QWidget(panel)
                 pill.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 999px;")
                 pill_lay = QHBoxLayout(pill)
                 pill_lay.setContentsMargins(8, 3, 4, 3)
                 pill_lay.setSpacing(4)
-                pill_lay.addWidget(cockpit_theme.role_chip(label, color, pill))
+                chip = cockpit_theme.role_chip(label, color, pill)
+                if role_disabled:
+                    chip.setToolTip("ปิดอยู่ — จะถูกข้ามตอนรัน")
+                pill_lay.addWidget(chip)
+                if role in _team_preset.SECONDARY_BRAIN_ROLES:
+                    # #592 item 4: a hop pairing a team role with a provider
+                    # second opinion (e.g. the "design" template's critic +
+                    # gemini hop) keeps working exactly as before — this just
+                    # names what the provider pill IS at a glance.
+                    brain_badge = cockpit_theme.gold_soft_chip("สมองเสริม", pill, compact=True)
+                    brain_badge.setToolTip("ความเห็นที่สอง — ไม่ใช่ตำแหน่งในทีม")
+                    pill_lay.addWidget(brain_badge)
                 rm_btn = QPushButton("x", pill)
                 rm_btn.setFixedSize(16, 16)
                 rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4378,14 +4858,8 @@ class SettingsWindow(
                 pill_lay.addWidget(rm_btn)
                 roles_row.addWidget(pill)
 
-            add_combo = QComboBox(panel)
-            add_combo.addItem("+ add role", None)
             used = {e["role"] for e in hop}
-            for role in _pipeline_palette_roles():
-                if role in used:
-                    continue
-                r = roles_mod.by_name(role)
-                add_combo.addItem(r.label if r else role.capitalize(), role)
+            add_combo = self._build_hop_add_role_combo(panel, used)
             add_combo.currentIndexChanged.connect(
                 lambda _index=0, i=idx, combo=add_combo: self._on_hop_add_role_selected(i, combo)
             )
@@ -4406,6 +4880,33 @@ class SettingsWindow(
                 conn.setObjectName("panelHint")
                 conn.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._pb_hops_lay.addWidget(conn)
+
+    def _build_hop_add_role_combo(self, parent: QWidget, used: set[str]) -> QComboBox:
+        """The per-hop "+ add role" dropdown, sectioned by `role_groups()`
+        bucket (#592 item 4: ตำแหน่ง / โหมด Reviewer / สมองเสริม (ความเห็น
+        ที่สอง) / ปิดอยู่) — a section header is a non-selectable row so it
+        can't be picked as a role by mistake. Roles already in the hop
+        (*used*) are left out of every section, same as the flat list this
+        replaces did."""
+        combo = QComboBox(parent)
+        model = QStandardItemModel(combo)
+        placeholder = QStandardItem("+ add role")
+        placeholder.setData(None, Qt.ItemDataRole.UserRole)
+        model.appendRow(placeholder)
+        for section_label, roles in _hop_add_role_sections(self._project):
+            available = [r for r in roles if r not in used]
+            if not available:
+                continue
+            header = QStandardItem(f"── {section_label} ──")
+            header.setFlags(header.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            header.setData(None, Qt.ItemDataRole.UserRole)
+            model.appendRow(header)
+            for role in available:
+                item = QStandardItem(_hop_role_label(role))
+                item.setData(role, Qt.ItemDataRole.UserRole)
+                model.appendRow(item)
+        combo.setModel(model)
+        return combo
 
     def _on_add_hop_clicked(self) -> None:
         self._pb_hops.append([])

@@ -3312,9 +3312,10 @@
         "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.notify",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 16,
+      "fan_in": 17,
       "fan_out": 10
     },
     {
@@ -3366,9 +3367,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane_model",
-        "agent_takkub.project_tab"
+        "agent_takkub.project_tab",
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -3476,9 +3478,10 @@
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
+        "agent_takkub.team_preset",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 2
     },
     {
@@ -4801,6 +4804,8 @@
         "agent_takkub.core.capabilities.skill_store",
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_provider_label",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.performance_settings",
@@ -4831,7 +4836,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 32
+      "fan_out": 34
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -5103,6 +5108,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.routing",
+        "agent_takkub.pipeline_config",
         "agent_takkub.provider_config",
         "agent_takkub.role_models",
         "agent_takkub.roles",
@@ -5126,7 +5132,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 15,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.terminal_widget",

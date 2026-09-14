@@ -27,6 +27,7 @@ from agent_takkub import (
     pipeline_config,
     project_nav,
     provider_config,
+    provider_models,
     provider_state,
     role_models,
     settings_window,
@@ -701,6 +702,25 @@ class TestProvidersRolesView:
         assert "data-eng" not in dlg._role_toggles
         dlg.deleteLater()
 
+    def test_custom_role_switch_matches_can_spawn_under_auto_preset(self) -> None:
+        """#592 item 2 — under the default "auto" preset, `can_spawn` never
+        blocks (advisory-only, #512 item 5) yet `cfg["roles"]` still defaults
+        a freshly-registered custom role to False, which used to render the
+        switch as OFF while the role was actually fully spawnable
+        (`is_role_enabled` defaults True too). The switch must read exactly
+        what `can_spawn`/`is_role_enabled` would decide right now."""
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        role = custom_roles.load_custom_roles()["data-eng"]
+        roles_mod.register_role(role)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert team_preset.current(dlg._project)["preset"] == "auto"
+        can_spawn_ok, _ = team_preset.can_spawn("data-eng", dlg._project)
+        is_enabled = pipeline_config.is_role_enabled("data-eng", dlg._project)
+        assert dlg._role_toggles["data-eng"].isChecked() is (can_spawn_ok and is_enabled)
+        assert dlg._role_toggles["data-eng"].isChecked() is True
+        dlg.deleteLater()
+
     def test_delete_declined_keeps_custom_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from PyQt6.QtWidgets import QPushButton
 
@@ -717,6 +737,74 @@ class TestProvidersRolesView:
 
         assert "data-eng" in custom_roles.load_custom_roles()
         assert "data-eng" in dlg._role_toggles
+        dlg.deleteLater()
+
+
+class TestRoleModelEffortDefaultLabels:
+    """#592 item 3 — the "(default)" row must say what it actually resolves
+    to right now (role tier / provider-level default), and stay live as the
+    provider or the MODEL CONNECTIONS card changes, not just after save."""
+
+    def test_backend_model_default_shows_tier_fallback(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_model_combos["backend"]
+        # backend has no role/provider model set and no provider_models.json
+        # override -> falls to _DEFAULT_TEAMMATE_TIER's model, "claude-sonnet-5".
+        assert combo.itemText(0) == "(default) → sonnet-5"
+        dlg.deleteLater()
+
+    def test_reviewer_model_and_effort_default_show_its_own_tier(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        model_combo = dlg._role_model_combos["reviewer"]
+        effort_combo = dlg._role_effort_combos["reviewer"]
+        # reviewer's tier is ("claude-opus-5", "high", ...) — distinct from
+        # backend's, so the label must be per-role, not one shared constant.
+        assert model_combo.itemText(0) == "(default) → opus-5"
+        assert effort_combo.itemText(0) == "(ตามค่าเริ่มต้นของ role) → high"
+        dlg.deleteLater()
+
+    def test_provider_level_override_wins_over_tier_default(self) -> None:
+        role_models.set_model("backend", "claude", "")
+        provider_models.set_model("claude", "claude-haiku-4-5")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_model_combos["backend"]
+        assert combo.itemText(0) == "(default) → haiku-4-5"
+        dlg.deleteLater()
+
+    def test_editing_the_provider_card_updates_role_default_live(self) -> None:
+        """No Save & Apply yet — a live (unsaved) edit to the MODEL
+        CONNECTIONS card must still be previewed in the role row. Claude has
+        no card of its own here (`provider_state.TOGGLABLE` excludes it —
+        it's the always-on baseline), so this exercises codex instead."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        role_provider_combo = dlg._role_provider_combos["backend"]
+        role_provider_combo.setCurrentIndex(role_provider_combo.findData("codex"))
+        role_combo = dlg._role_model_combos["backend"]
+        assert role_combo.itemText(0) == "(default) → ค่าของ CLI"
+
+        provider_combo = dlg._provider_model_combos["codex"]
+        provider_combo.setCurrentText("gpt-5.6-sol")
+
+        assert role_combo.itemText(0) == "(default) → gpt-5.6-sol"
+        # Nothing written to disk by a live edit alone.
+        assert not provider_models.model_for("codex")
+        dlg.deleteLater()
+
+    def test_provider_with_no_known_default_shows_cli_placeholder(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        provider_combo = dlg._role_provider_combos["backend"]
+        provider_combo.setCurrentIndex(provider_combo.findData("kimi"))
+        model_combo = dlg._role_model_combos["backend"]
+        assert model_combo.itemText(0) == "(default) → ค่าของ CLI"
+        dlg.deleteLater()
+
+    def test_effort_default_names_unsupported_model_instead_of_blank(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        model_combo = dlg._role_model_combos["backend"]
+        effort_combo = dlg._role_effort_combos["backend"]
+        model_combo.setCurrentText("claude-haiku-4-5")
+        assert effort_combo.isEnabled() is False
+        assert effort_combo.itemText(0) == "model นี้ไม่มี effort"
         dlg.deleteLater()
 
 
@@ -1378,6 +1466,105 @@ class TestPipelineBuilderView:
         assert dlg._pb_hops[-1] == [
             {"role": "tester", "cwd": "", "requiresCommit": False, "autoChain": False}
         ]
+        dlg.deleteLater()
+
+    def test_palette_relabels_qa_and_critic_as_reviewer_modes(self) -> None:
+        """#592 item 4: the quick palette still lists qa/critic (unchanged
+        role ids underneath — nothing removed from `valid_roles()`), just
+        with the "Reviewer · e2e/ui" label instead of the bare legacy name."""
+        from PyQt6.QtWidgets import QPushButton
+
+        assert settings_window._hop_role_label("qa") == "Reviewer · e2e (QA)"
+        assert settings_window._hop_role_label("critic") == "Reviewer · ui (Critic)"
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        texts = [
+            w.text()
+            for w in dlg.findChildren(QPushButton)
+            if w.text() in ("Reviewer · e2e (QA)", "Reviewer · ui (Critic)")
+        ]
+        assert "Reviewer · e2e (QA)" in texts
+        assert "Reviewer · ui (Critic)" in texts
+        dlg.deleteLater()
+
+    def test_hop_add_role_dropdown_is_sectioned(self) -> None:
+        """#592 item 4: the per-hop "+ add role" dropdown groups roles into
+        ตำแหน่ง / โหมด Reviewer / สมองเสริม (ความเห็นที่สอง) / ปิดอยู่, each a
+        non-selectable header row."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        combo = dlg._build_hop_add_role_combo(dlg, used=set())
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        assert "── ตำแหน่ง ──" in texts
+        assert "── โหมด Reviewer ──" in texts
+        assert "── สมองเสริม (ความเห็นที่สอง) ──" in texts
+        assert "── ปิดอยู่ ──" in texts
+        header_idx = texts.index("── โหมด Reviewer ──")
+        assert not (
+            combo.model().item(header_idx).flags() & settings_window.Qt.ItemFlag.ItemIsSelectable
+        )
+        codex_idx = combo.findData("codex")
+        assert codex_idx > 0
+        assert combo.itemData(codex_idx) == "codex"
+        dlg.deleteLater()
+
+    def test_hop_add_role_dropdown_excludes_roles_already_in_hop(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        combo = dlg._build_hop_add_role_combo(dlg, used={"frontend", "backend"})
+        assert combo.findData("frontend") == -1
+        assert combo.findData("backend") == -1
+        assert combo.findData("mobile") >= 0
+        dlg.deleteLater()
+
+    def test_design_template_secondary_brain_hop_keeps_working_with_badge(self) -> None:
+        """#592 item 4: the "design" built-in template's critic+gemini hop
+        (a role paired with a "second opinion" provider) still loads/renders
+        and gains a "สมองเสริม" badge on the provider pill."""
+        from PyQt6.QtWidgets import QLabel
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._load_pb_hops("design")
+        assert any([e["role"] for e in hop] == ["critic", "gemini"] for hop in dlg._pb_hops)
+        texts = [w.text() for w in dlg._pb_hops_container.findChildren(QLabel)]
+        assert "สมองเสริม" in texts
+        dlg.deleteLater()
+
+    def test_disabled_role_in_a_saved_hop_is_dimmed_not_removed(self) -> None:
+        """#592 item 4 "ข้อห้ามสำคัญ": a hop role the project has since
+        disabled stays in the template (never auto-dropped) — just dimmed
+        with a tooltip explaining it will be skipped at run time."""
+        pipeline_config.save({"rolesEnabled": {"tester": False}}, None)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._pb_hops = [
+            [{"role": "tester", "cwd": "", "requiresCommit": False, "autoChain": False}]
+        ]
+        dlg._render_pb_hops()
+
+        from PyQt6.QtWidgets import QLabel
+
+        # role_chip() is a small container widget (dot + QLabel) — the
+        # tooltip is set on that container, not the inner label.
+        label = next(w for w in dlg._pb_hops_container.findChildren(QLabel) if w.text() == "Tester")
+        chip = label.parentWidget()
+        assert chip.toolTip() == "ปิดอยู่ — จะถูกข้ามตอนรัน"
+        # still present, never silently dropped
+        assert dlg._pb_hops[0][0]["role"] == "tester"
+        dlg.deleteLater()
+
+    def test_template_selection_shows_pre_run_summary(self) -> None:
+        """#592 item 5: selecting a template shows the same per-hop summary
+        `takkub pipeline run`'s CLI ack does — before anything actually runs."""
+        role_models.set_provider("reviewer", "codex")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._load_pb_hops("feature")
+        text = dlg._pb_summary_label.text()
+        assert "hop 1: Frontend" in text
+        assert "hop 3: QA → ใช้ค่า Reviewer (codex)" in text
+        dlg.deleteLater()
+
+    def test_empty_template_hides_summary(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._pb_hops = []
+        dlg._render_pb_hops()
+        assert dlg._pb_summary_label.text() == ""
         dlg.deleteLater()
 
     def test_remove_hop_shrinks_list(self) -> None:
@@ -2172,43 +2359,62 @@ class TestTeamPresetView:
         assert dlg._role_toggles["reviewer"].isChecked() is True
         dlg.deleteLater()
 
-    def test_clicking_full_hides_extra_positions_from_the_roster(self) -> None:
-        """#513: this page's role list is 5 positions (frontend/backend/
-        mobile/devops/reviewer) + custom roles — tester/analyst/designer/
-        docs/security no longer get a row here (still toggleable via a
-        `custom` preset payload or the Pipeline Builder palette)."""
+    def test_clicking_full_shows_extra_positions_collapsed_but_off(self) -> None:
+        """#592 item 1: tester/analyst/designer/docs/security get a real row
+        now (collapsed section, not hidden entirely like pre-#592/#513) so a
+        toggled-on custom preset stays visible/toggleable here — but under
+        "full" (a built-in preset) they still read OFF, matching `can_spawn`."""
         dlg = settings_window.SettingsWindow(
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("full")
         for role in team_preset.EXTRA_POSITION_ROLES:
-            assert role not in dlg._role_toggles
+            assert role in dlg._role_toggles
+            assert dlg._role_toggles[role].isChecked() is False
         dlg.deleteLater()
 
-    def test_clicking_solo_lead_disables_every_position_and_drops_checker_row(self) -> None:
+    def test_clicking_solo_lead_disables_every_position_but_keeps_rows(self) -> None:
+        """#592 item 1: reviewer/qa/critic and the extra positions now always
+        get a row (collapsed "โหมด Reviewer"/"ตำแหน่งเสริม" sections) — under
+        solo-lead (no checker, nothing governed on) reviewer/qa/extras read
+        OFF instead of being dropped from the page entirely. `critic` is the
+        one long-standing exception (`can_spawn`'s own docstring: "providers,
+        shell, critic" are never preset-governed at all — #513 never added
+        it to `CHECKER_ROLES`) so it stays ON here, same as a provider chip
+        would."""
         dlg = settings_window.SettingsWindow(
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("solo-lead")
         for role in team_preset.CORE_POSITION_ROLES:
             assert dlg._role_toggles[role].isChecked() is False
-        for role in team_preset.EXTRA_POSITION_ROLES:
-            assert role not in dlg._role_toggles
-        assert "qa" not in dlg._role_toggles
-        assert "reviewer" not in dlg._role_toggles
+        for role in (*team_preset.EXTRA_POSITION_ROLES, "qa", "reviewer"):
+            assert role in dlg._role_toggles
+            assert dlg._role_toggles[role].isChecked() is False
+        assert "critic" in dlg._role_toggles
+        assert dlg._role_toggles["critic"].isChecked() is True
         assert "lead" in dlg._role_toggles or "lead" in dlg._role_provider_combos
         dlg.deleteLater()
 
-    def test_checker_row_labeled_as_the_checker(self) -> None:
+    def test_checker_row_labeled_and_qa_critic_always_present_too(self) -> None:
+        """#592 item 1: qa/critic get their own "Reviewer · e2e/ui" rows now
+        (previously invisible unless they happened to be the active
+        checker) alongside reviewer's own "code" row. qa is #513's legacy
+        alias for `reviewer --mode e2e` — `can_spawn` resolves it through
+        the checker alias, so it reads ON here too whenever checker=reviewer
+        (same as `test_pair_allows_reviewer_and_qa_alias_as_checker`)."""
         dlg = settings_window.SettingsWindow(
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
         dlg._on_team_preset_card_clicked("pair")
         assert "reviewer" in dlg._role_toggles
-        assert "qa" not in dlg._role_toggles
-        row = dlg._role_toggles["reviewer"].parent()
+        assert "qa" in dlg._role_toggles
+        assert "critic" in dlg._role_toggles
+        assert dlg._role_toggles["reviewer"].isChecked() is True
+        assert dlg._role_toggles["qa"].isChecked() is True
+        row = dlg._role_toggles["qa"].parent()
         label_texts = [w.text() for w in row.findChildren(settings_window.QLabel)]
-        assert any("ตัวตรวจ" in t for t in label_texts)
+        assert any("e2e" in t for t in label_texts)
         dlg.deleteLater()
 
     def test_lead_row_always_present_regardless_of_preset(self) -> None:
@@ -2264,7 +2470,9 @@ class TestTeamPresetView:
         assert dlg._selected_team_preset_id == "pair"
         assert dlg.pending_team_preset is None
         assert "reviewer" in dlg._role_toggles
-        assert "qa" not in dlg._role_toggles
+        assert "qa" in dlg._role_toggles
+        # pair's checker is reviewer -> qa (its alias) reads ON too.
+        assert dlg._role_toggles["qa"].isChecked() is True
         dlg.deleteLater()
 
     def test_secondary_brains_panel_lists_non_claude_providers_as_chips(self) -> None:
