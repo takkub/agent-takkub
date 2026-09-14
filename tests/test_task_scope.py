@@ -58,6 +58,15 @@ class TestTaskScopeClassify:
             ("ทำฟีเจอร์ export excel สำหรับหน้ารายงาน", "normal"),
             ("สร้างระบบ notification แจ้งเตือนผู้ใช้", "normal"),
             ("เพิ่ม endpoint ดึงประวัติการใช้งาน", "normal"),
+            # #602: deep keywords in context/references/prohibitions must NOT deep
+            ("งานแก้ UI ที่พูดถึง `minDepositValid` ในฟอร์มเช็คอิน", "normal"),
+            (
+                "## ข้อเท็จจริง\nงาน e2e รันกับ dist ที่ใช้ prisma schema อยู่\n## ทำ\nแก้ nginx proxy ให้ timeout เพิ่ม",
+                "normal",
+            ),
+            ("ห้ามแก้ prisma schema โดยตรง ทำงานแค่ UI", "normal"),
+            # #602: signal inside the action section is still deep
+            ("แก้ schema Prisma เพิ่มคอลัมน์ users.role", "deep"),
         ],
     )
     def test_classify_table(self, task_text: str, expected_scope: str) -> None:

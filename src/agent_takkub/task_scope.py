@@ -267,31 +267,151 @@ def inject_budget(task_text: str, scope: str) -> str:
     return f"{block}\n\n{text}"
 
 
+# ── Section-aware signal region (#602) ───────────────────────────────────────
+# A classifier that keyword-matches the *whole* task text treats words that are
+# merely mentioned (context/facts headings, variable & file names in backticks,
+# text after a prohibition like "ห้าม") as if the task will touch them. That
+# over-classifies plain UI/report/e2e/nginx fixes into "deep". Signals are
+# therefore read from the region describing what the task will DO, not from
+# everything the text happens to mention.
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s+")
+_CONTEXT_HEADING_WORDS: frozenset[str] = frozenset(
+    {
+        "ข้อเท็จจริง",
+        "หลักฐาน",
+        "อาการ",
+        "บริบท",
+        "สาเหตุ",
+        "สถานะปัจจุบัน",
+        "ข้อมูลเดิม",
+        "context",
+        "contexts",
+        "background",
+        "backgrounds",
+        "fact",
+        "facts",
+        "evidence",
+        "symptom",
+        "symptoms",
+        "repro",
+        "reproduction",
+        "cause",
+        "current",
+    }
+)
+# Thai words must not use \b (Python regex treats adjacent Thai chars as \w,
+# so there is no boundary between Thai words — same note as _DEEP_PATTERNS).
+_FORBIDDEN_TAIL_RE = re.compile(r"ห้าม|ไม่ต้อง|อย่า|\b(?:never|don['’]t)\b", re.I)
+_FENCED_RE = re.compile(r"```.*?```", re.DOTALL)
+_BACKTICK_RE = re.compile(r"`[^`]*`")
+
+
+def _heading_is_context(line: str) -> bool:
+    """True if *line* is a markdown heading whose first word is a context/facts label."""
+    m = _HEADING_RE.match(line)
+    if not m:
+        return False
+    head = line[m.end() :].lstrip(chr(35)).strip().split(None, 1)[0]
+    return head.rstrip(":：").lower() in _CONTEXT_HEADING_WORDS
+
+
+def _action_region(task_text: str) -> str:
+    """Return the part of *task_text* describing what the task will do.
+
+    Body lines under a known context/facts heading (ข้อเท็จจริง, หลักฐาน, อาการ,
+    บริบท, ...) are a mention, not an action — a deep keyword there does not
+    count (#602). Everything else (ทำ/TODO/checklist/prose) is the action region.
+    """
+    out: list[str] = []
+    in_context = False
+    for line in (task_text or "").split("\n"):
+        # Only headings leave/enter a context block; bare lines inside one stay put.
+        if _HEADING_RE.match(line):
+            in_context = _heading_is_context(line)
+        if in_context:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _clean_analysis(text: str) -> str:
+    """Strip references/prohibitions so deep keywords don't count by mention.
+
+    - drop fenced code and inline backtick contents (variable/file names in
+      backticks are references, not actions),
+    - cut the tail of each line from the first "ห้าม/ไม่ต้อง/อย่า/never/don't"
+      (a prohibition is a boundary, not an action).
+    """
+    text = _FENCED_RE.sub(" ", text or "")
+    text = _BACKTICK_RE.sub(" ", text)
+    lines: list[str] = []
+    for line in text.split("\n"):
+        m = _FORBIDDEN_TAIL_RE.search(line)
+        if m:
+            line = line[: m.start()]
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _deep_categories(text: str) -> tuple[set[str], tuple[str, str] | None]:
+    """Return `(set of matched deep category names, first (name, sample))`."""
+    names: set[str] = set()
+    first: tuple[str, str] | None = None
+    for signal_name, pattern in _DEEP_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            names.add(signal_name)
+            if first is None:
+                first = (signal_name, m.group(0))
+    return names, first
+
+
 def classify(task_text: str) -> ScopeDecision:
     """Classify *task_text* into a ScopeDecision ("tiny" | "normal" | "deep").
 
-    Precedence:
-      1. deep signals always win (schema, migration, auth, security, lockfile...)
+    Precedence (#602):
+      1. deep signal inside the *action region* (what the task says it will
+         do/fix, excluding context/facts headings, backtick references, and
+         text after "ห้าม/ไม่ต้อง/อย่า/never/don't") -> deep.
+         If only >= 2 *distinct* deep categories exist anywhere in the cleaned
+         text, that is also deep (multi-risk task even if phrased in passing).
       2. tiny signals match explicit user size limits (unless forbidden verbs match)
       3. normal is the fallback for everything else
     """
-    text = (task_text or "").strip()
+    text = strip_budget((task_text or "").strip())
     if not text:
         return ScopeDecision("normal", "ข้อความเปล่า (default tier)")
 
-    # 1. Deep check (wins over everything)
-    for signal_name, pattern in _DEEP_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return ScopeDecision(
-                "deep",
-                f"ตรวจพบ signal deep: '{match.group(0)}' ({signal_name}) — ชนะทุก signal",
-            )
+    analyzed = _clean_analysis(_action_region(text))
+    full_analyzed = _clean_analysis(text)
+
+    # 1. Deep check — action-region signals win; >= 2 distinct categories anywhere also count.
+    action_cats, action_first = _deep_categories(analyzed)
+    if action_cats:
+        name, sample = action_first or ("deep", "")
+        return ScopeDecision(
+            "deep",
+            f"ตรวจพบ signal deep: '{sample}' ({name}) ในส่วนที่ต้องทำ — ชนะทุก signal",
+        )
+
+    full_cats, full_first = _deep_categories(full_analyzed)
+    if len(full_cats) >= 2:
+        names = ", ".join(sorted(full_cats))
+        return ScopeDecision(
+            "deep",
+            f"พบ {len(full_cats)} signal deep ต่างหมวด ({names}) — ถือเป็นงานระดับ deep",
+        )
+    if full_cats:
+        name, sample = full_first or ("deep", "")
+        return ScopeDecision(
+            "normal",
+            f"งานทั่วไป — signal '{sample}' ({name}) อยู่ในส่วนบริบท/อ้างอิง/หลังข้อห้าม ไม่ถือเป็น deep",
+        )
 
     # 2. Forbidden tiny check (blocks tiny tier from refactor/rewrite/move/etc.)
-    if not _FORBIDDEN_TINY_RE.search(text):
+    if not _FORBIDDEN_TINY_RE.search(analyzed):
         for signal_name, pattern in _TINY_KEYWORD_PATTERNS:
-            match = pattern.search(text)
+            match = pattern.search(analyzed)
             if match:
                 return ScopeDecision(
                     "tiny",
