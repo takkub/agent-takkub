@@ -1194,8 +1194,19 @@ def _rate_limit_markers() -> tuple[str, ...]:
 
 
 # Reset clock-time, e.g. "resets 3pm", "resets at 3:30pm", "reset at 14:00".
+# #595 (field-verified 2026-09-14): also matches Claude Code's "continuing
+# automatically at 10pm" wording — the actual banner text was "Usage limit
+# reached · continuing automatically at 10pm · esc to cancel", which neither
+# this regex's original "reset(s) at" phrasing nor _DURATION_RESET_RE's
+# "resets in" phrasing matched, so every hit fell through to
+# _RATE_LIMIT_FALLBACK_SEC (a flat 5h) even though the banner itself named
+# the exact reset time — real incident: `rate_limit_detected` logged
+# `resets_in_s: 18000` at 22:00:05 for a banner whose own text said 10pm
+# (i.e. now), and the pane went on to finish its task 4 minutes later.
 _RESET_TIME_RE = re.compile(
-    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
+    r"(?:reset[s]?(?:\s+at)?|continuing\s+automatically\s+at)\s+"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+    re.IGNORECASE,
 )
 # Reset DURATION, e.g. gemini/agy's "Resets in 1h53m57s" (#301, field-verified
 # 2026-08-18) — a countdown from now, not a clock-time-of-day like claude's

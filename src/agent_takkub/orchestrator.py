@@ -91,6 +91,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _append_worktree_hint,
     _build_transcript_path,
     _clean_progress_line,
+    _cwd_has_recent_file_activity,
     _cwd_within_project,
     _decision_note_project_label,
     _describe_valid_project_cwds,
@@ -7879,6 +7880,40 @@ class Orchestrator(
             ts = ps.last_tool_marker_seen_ts
         return ts
 
+    def _idle_no_progress_real_activity(
+        self, role: str, project_ns: str, pane: AgentPane, now: float
+    ) -> str:
+        """#599: evidence of real work `_real_progress_ts` can miss, checked
+        only right before the idle-no-progress notice actually fires (not
+        every tick — this is heavier than that signal on purpose).
+
+        A live non-scaffolding child process (a long test/build run, e.g.
+        `qa`/`e2e` — #308's own `_live_non_scaffolding_children`, already
+        used by the content-static stuck watchdog for the identical reason)
+        or a file freshly written under the pane's own cwd within the
+        notice window both mean the pane is genuinely busy even though
+        neither a `takkub progress()` call nor a screen-scraped tool marker
+        landed this tick. Returns a short human-readable reason when found
+        (caller logs it and skips the Lead notice), "" when nothing is
+        found (fire the notice normally). Best-effort only — a probe
+        failure reads as "nothing found", never raises."""
+        session = pane.session
+        if session is not None:
+            try:
+                children = self._live_non_scaffolding_children(project_ns, role, session)
+            except Exception:
+                children = []
+            if children:
+                return f"live child process(es): {', '.join(children[:3])}"
+        cwd = getattr(pane, "_session_cwd", None)
+        if cwd:
+            try:
+                if _cwd_has_recent_file_activity(cwd, now - IDLE_NO_PROGRESS_NOTICE_S):
+                    return "cwd file activity"
+            except Exception:
+                pass
+        return ""
+
     def _role_delivery_unconfirmed(self, project_ns: str, role: str) -> bool:
         """(#263) True when a "task may not have landed" system notice
         (spawn-failed / delivery-unconfirmed / spawn-stuck / delivery-boot-stall
@@ -9302,11 +9337,17 @@ class Orchestrator(
             if entries:
                 projects[project] = entries
 
+        now = time.time()
         working_panes: list[str] = [
             e["role"]
-            for entries in projects.values()
+            for project, entries in projects.items()
             for e in entries
             if e.get("state") == "working"
+            # #596: a pane frozen on its own quota banner still reads
+            # pane.state == "working" (nothing ever demotes it) — exclude it
+            # here so pane_guard's machine-busy gate doesn't block an
+            # otherwise-idle machine on a pane that physically cannot run.
+            and not self._pane_quota_stalled(project, e["role"], now)
         ]
         return {"projects": projects, "working_panes": working_panes}
 
@@ -9787,9 +9828,13 @@ class Orchestrator(
         """
         working_panes = sorted(
             role
-            for panes in self._panes_by_project.values()
+            for project, panes in self._panes_by_project.items()
             for role, pane in panes.items()
             if pane.state == "working"
+            # #596: exclude a pane quota-stalled at this exact instant — see
+            # `_pane_quota_stalled` docstring for the real-incident evidence
+            # (machine-busy gate blocking an unrelated command).
+            and not self._pane_quota_stalled(project, role, now)
         )
         changed = working_panes != getattr(self, "_machine_state_last_working", None)
         due = (
@@ -11409,23 +11454,44 @@ class Orchestrator(
                     idle_no_progress_for = (now - last_progress_ts) if last_progress_ts else 0.0
                     if idle_no_progress_for >= IDLE_NO_PROGRESS_NOTICE_S:
                         if not ps_ck.idle_no_progress_notified:
-                            _log_event(
-                                "pane_idle_no_progress",
-                                role=role,
-                                project=project_name,
-                                no_progress_for_s=int(idle_no_progress_for),
-                                threshold_s=int(IDLE_NO_PROGRESS_NOTICE_S),
+                            # #599: `_real_progress_ts` deliberately ignores the
+                            # raw content-hash clock (marquee false-positive,
+                            # #570) and file writes/live subprocesses never
+                            # bump it either — a pane can be genuinely busy
+                            # (editing files, running a long test/build) with
+                            # nothing here to show for it. Check the
+                            # hard-but-not-impossible-to-fake evidence this
+                            # signal misses before bothering Lead; log either
+                            # way so the episode is auditable.
+                            real_activity = self._idle_no_progress_real_activity(
+                                role, project_name, pane, now
                             )
-                            self._notify_lead(
-                                project_name,
-                                f"⏳ [system] {role} จอยังขยับอยู่แต่ไม่มี tool call / "
-                                f"file change / `takkub progress` มาเกิน "
-                                f"{int(IDLE_NO_PROGRESS_MIN)} นาที — อาจติดอยู่ใน marquee/"
-                                "loop ที่ไม่ใช่งานจริง (#570) แนะนำเปิด pane ดูตรงๆ",
-                                from_role=role,
-                                note="pane_idle_no_progress",
-                                kind="idle-no-progress",
-                            )
+                            if real_activity:
+                                _log_event(
+                                    "pane_idle_no_progress_suppressed",
+                                    role=role,
+                                    project=project_name,
+                                    no_progress_for_s=int(idle_no_progress_for),
+                                    reason=real_activity,
+                                )
+                            else:
+                                _log_event(
+                                    "pane_idle_no_progress",
+                                    role=role,
+                                    project=project_name,
+                                    no_progress_for_s=int(idle_no_progress_for),
+                                    threshold_s=int(IDLE_NO_PROGRESS_NOTICE_S),
+                                )
+                                self._notify_lead(
+                                    project_name,
+                                    f"⏳ [system] {role} จอยังขยับอยู่แต่ไม่มี tool call / "
+                                    f"file change / `takkub progress` มาเกิน "
+                                    f"{int(IDLE_NO_PROGRESS_MIN)} นาที — อาจติดอยู่ใน marquee/"
+                                    "loop ที่ไม่ใช่งานจริง (#570) แนะนำเปิด pane ดูตรงๆ",
+                                    from_role=role,
+                                    note="pane_idle_no_progress",
+                                    kind="idle-no-progress",
+                                )
                             ps_ck.idle_no_progress_notified = True
                     else:
                         ps_ck.idle_no_progress_notified = False
@@ -11581,9 +11647,15 @@ class Orchestrator(
         The grace is bounded: a child that is itself hung would otherwise pin
         the pane forever, so once the deferral has run past
         ``STUCK_LIVE_CHILD_GRACE_S`` the watchdog takes the pane back and
-        recovers it, with the reason recorded. Lead is told once per pane per
-        deferral episode — the point is that a silent 10-minute pane is
-        expected for script-running work, not that every tick needs a notice.
+        recovers it, with the reason recorded.
+
+        #599: no longer pings Lead while deferring — a live child process is
+        exactly the expected shape for `qa`/`e2e`-style work (this is the
+        proof the pane is fine, not a problem), so the notice just added
+        noise for expected background work (real complaint: "watchdog เตือน
+        จอไม่ขยับเกิน 10 นาที ขณะ qa-gate/e2e รันเบื้องหลัง"). Still logged
+        once per deferral episode (`stuck_recover_deferred_live_children`)
+        so the episode stays auditable without bothering Lead.
         """
         try:
             names = self._live_non_scaffolding_children(project, role, pane.session)
@@ -11618,6 +11690,9 @@ class Orchestrator(
             return False
         if (now - ps_ck.last_live_child_defer_log_ts) >= STUCK_LIVE_CHILD_NOTICE_COOLDOWN_S:
             ps_ck.last_live_child_defer_log_ts = now
+            # #599: audit-only — see this method's docstring for why Lead is
+            # no longer notified here (a live child process deferring
+            # recovery is the expected/healthy case, not a problem).
             _log_event(
                 "stuck_recover_deferred_live_children",
                 role=role,
@@ -11625,15 +11700,6 @@ class Orchestrator(
                 deferred_for_s=int(deferred_for),
                 count=len(names),
                 children=names[:10],
-            )
-            self._notify_lead(
-                project,
-                f"⏳ [{role}] จอไม่ขยับเกิน {int(STUCK_THRESHOLD_S / 60)} นาที แต่ยังมี "
-                f"{len(names)} process ทำงานอยู่ใต้ pane ({', '.join(names[:5])}) — "
-                "watchdog เลื่อนการ respawn ออกไปแทนที่จะฆ่าทิ้ง งานยังเดินอยู่",
-                from_role=role,
-                note="stuck_recover_deferred",
-                kind="stuck-recover-deferred",
             )
         # The pane is demonstrably alive, so give the content clock a fresh
         # window instead of letting it keep accumulating — otherwise the very
@@ -12371,6 +12437,19 @@ class Orchestrator(
             # instead of silently giving up (no-silent-caps rule).
             _log_event("stuck_paste_gave_up", role=role, project=project)
 
+    def _pane_quota_stalled(self, project: str, role: str, now: float) -> bool:
+        """True while `(project, role)` is quota-stalled — same condition
+        `list_status_detailed`'s `stalled:quota` display tier uses (#596).
+
+        `pane.state` stays "working" for a pane frozen on its own quota
+        banner (it was mid-task when it hit the limit; nothing ever demotes
+        it), so a `working_panes` list built from `pane.state` alone counts
+        it as busy. Real incident: `pane_guard`'s machine-busy gate read a
+        quota-stalled pane as "other pane working" and blocked an unrelated
+        `npx tsc` Lead was trying to run on an otherwise-idle machine."""
+        ps = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
+        return ps is not None and ps.rate_limited_until > now
+
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave
         it alone until the limit resets.
@@ -12406,6 +12485,14 @@ class Orchestrator(
         ps.rate_limited_until = reset_at
         ps.quota_marker = marker
         ps.quota_provider = provider
+        # #595: fresh episode — the confirm-loop bookkeeping below belongs to
+        # THIS quota hit only; a stale timestamp surviving from a previous
+        # episode (e.g. the window reset naturally before signal (b) ever
+        # confirmed) would make the new episode look like it had already
+        # waited out CONFIRM_FALLBACK_TIMEOUT_S and skip confirmation
+        # entirely.
+        ps.limit_confirm_first_attempt_ts = 0.0
+        ps.limit_confirm_last_attempt_ts = 0.0
         self._schedule_rate_limit_notice(project, role, reset_at)
         _log_event(
             "rate_limit_detected",

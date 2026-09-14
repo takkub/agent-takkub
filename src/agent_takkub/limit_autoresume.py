@@ -225,6 +225,26 @@ class AutoResumeMixin:
             self._reroute_or_park(project, role, ps)
             return
 
+        if ps.limit_confirm_first_attempt_ts == 0.0:
+            ps.limit_confirm_first_attempt_ts = now
+        elif (now - ps.limit_confirm_first_attempt_ts) >= auto_resume.CONFIRM_FALLBACK_TIMEOUT_S:
+            # #595: signal (b) never confirmed within the bound — real
+            # incident had this retry every ~5s tick for 2h51m+ (1637
+            # `pane_limit_confirm_failed` events) with zero reroute. Fall
+            # back to signal (a) alone rather than sit silent indefinitely.
+            _log_event(
+                "pane_limit_confirm_timeout_fallback",
+                role=role,
+                project=project,
+                waited_s=int(now - ps.limit_confirm_first_attempt_ts),
+            )
+            self._reroute_or_park(project, role, ps)
+            return
+
+        if (now - ps.limit_confirm_last_attempt_ts) < auto_resume.CONFIRM_RETRY_INTERVAL_S:
+            return  # last fetch too recent — wait before firing another
+        ps.limit_confirm_last_attempt_ts = now
+
         ps.limit_confirm_pending = True
         self._confirm_limit_via_usage_async(project, role)
 

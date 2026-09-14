@@ -1640,6 +1640,82 @@ def _exit_key(project: str, role: str) -> str:
     return f"{project}::{role}"
 
 
+# #599: directories a file-activity scan should never descend into — either
+# generated/vendored (a fresh `npm install` or build touches thousands of
+# mtimes with zero human-relevant signal) or version-control internals.
+_FILE_ACTIVITY_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "dist",
+        "build",
+        ".next",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        "coverage",
+        ".turbo",
+    }
+)
+
+
+def _cwd_has_recent_file_activity(
+    cwd: str,
+    since_ts: float,
+    *,
+    max_entries: int = 4000,
+    time_budget_s: float = 0.4,
+) -> bool:
+    """Best-effort, bounded check: has any file under *cwd* been modified
+    since *since_ts* (#599)?
+
+    Signal (a) for the idle-no-progress watchdog: a pane can be genuinely
+    writing/editing files with no PTY tool-call marker sighted that
+    particular tick (`_real_progress_ts` deliberately excludes the raw
+    content-hash clock, see its own docstring), so the notice fires even
+    while real work is landing on disk.
+
+    Deliberately bounded — this can run on the Qt main thread, and a full
+    walk of a JS monorepo's `node_modules` would freeze the UI. Vendored/
+    generated directories are skipped outright and the walk bails the
+    moment either the entry-count or wall-clock budget is exhausted, same
+    "inconclusive, not false" contract as every other best-effort probe in
+    this module: a budget exhausted mid-walk returns False (caller treats
+    that as "no evidence found", not "proven idle" — callers must already
+    be prepared for that per the watchdog's own idiom elsewhere)."""
+    root = pathlib.Path(cwd)
+    if not root.is_dir():
+        return False
+    start = time.monotonic()
+    visited = 0
+    stack = [root]
+    while stack:
+        if visited >= max_entries or (time.monotonic() - start) >= time_budget_s:
+            return False
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    visited += 1
+                    if visited >= max_entries or (time.monotonic() - start) >= time_budget_s:
+                        return False
+                    if entry.name in _FILE_ACTIVITY_SKIP_DIRS:
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(pathlib.Path(entry.path))
+                            continue
+                        if entry.stat(follow_symlinks=False).st_mtime >= since_ts:
+                            return True
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return False
+
+
 def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
     """Return the Lead's MEMORY.md path for the project rooted at *cwd*, or None.
 
