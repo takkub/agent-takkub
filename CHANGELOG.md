@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.7] - 2026-09-14
+
 ### Fixed (แก้)
 
 - **`reviewer --mode e2e|ui` (qa/critic) spawn provider ที่ Settings มองไม่เห็น/แก้ไม่ได้ (#590)** —
