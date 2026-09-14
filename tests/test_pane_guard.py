@@ -467,8 +467,9 @@ class TestGitLeadOnlyDenied:
             "git log --oneline -5",
             "git log --oneline --all --grep=commit",
             "git show HEAD",
-            "git stash",
-            "git stash pop",
+            "git stash list",
+            "git stash show",
+            "git stash show -p",
             "git branch -d merged-branch",  # lowercase -d: safe delete, not -D
             "git tag -l",
             # #385: hyphenated longer subcommands are different (read-only)
@@ -583,6 +584,74 @@ class TestGitLeadOnlyWorktreeCarveOut:
         assert not pane_guard.classify('git commit -m "x"', "backend", cwd=shared).allowed
 
 
+class TestGitStashRestoreCleanDenied:
+    """#609: a `frontend` pane ran `git stash && vitest ...; git stash pop`
+    on the shared tree while a `backend` pane had ~165 files of uncommitted
+    work in progress — every dirty file's mtime changed and the backend
+    pane's work was one `git stash drop` away from gone. `pane_guard` had no
+    rule for `stash`/`restore`/`clean -f` at all (unlike `reset --hard`/
+    `checkout`, already covered)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git stash",
+            "git stash push",
+            "git stash push -u -m wip",
+            "git stash pop",
+            "git stash apply",
+            "git stash drop",
+            "git stash clear",
+            "git stash branch tmp",
+            "git restore .",
+            "git restore --staged foo.py",
+            "git restore --source=HEAD~1 --worktree --staged .",
+            "git clean -f",
+            "git clean -fd",
+            "git clean -fdx",
+            "git clean --force",
+        ],
+    )
+    def test_denied_on_shared_tree(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "frontend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("git_lead_only:")
+
+    def test_stash_denied_even_mixed_with_readonly(self) -> None:
+        """One mutating stash call in a chain denies the whole command, even
+        alongside a read-only one — same conservative direction as every
+        other rule here."""
+        assert not pane_guard.classify("git stash list && git stash pop", "frontend").allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        ["git stash list", "git stash show", "git stash show -p", "git clean -n", "git clean"],
+    )
+    def test_readonly_forms_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git stash",
+            "git stash pop",
+            "git restore .",
+            "git clean -fd",
+        ],
+    )
+    def test_allowed_from_worktree_cwd(self, command: str) -> None:
+        wt = r"C:\Users\dev\.agent-takkub\worktrees\myproj\devops-1789429492"
+        assert pane_guard.classify(command, "devops", cwd=wt).allowed, (
+            f"should be allowed from the pane's own worktree cwd: {command}"
+        )
+
+    def test_denied_from_shared_tree_cwd(self) -> None:
+        shared = r"C:\Users\dev\my-project"
+        assert not pane_guard.classify("git stash", "devops", cwd=shared).allowed
+        assert not pane_guard.classify("git restore .", "devops", cwd=shared).allowed
+        assert not pane_guard.classify("git clean -f", "devops", cwd=shared).allowed
+
+
 class TestRtkPrefixSeenThrough:
     """#466: root CLAUDE.md's own "Golden rule — always prefix shell commands
     with `rtk`" silently defeated every `_CMD_START`-anchored rule, because
@@ -600,6 +669,8 @@ class TestRtkPrefixSeenThrough:
             "rtk git push origin main --force",
             "rtk git reset --hard HEAD~1",
             "rtk git branch -D main",
+            "rtk git stash",
+            "rtk git -C x stash",
             "rtk taskkill /F /T /IM node.exe",
             "rtk pkill node",
             "rtk netsh wlan connect name=Guest",
@@ -1322,6 +1393,102 @@ class TestLeadDirectEdit:
         assert status_after["files_count"] == 1
         assert status_after["total_lines"] == 1
         assert status_after["updated_at"] is not None
+
+
+class TestLeadDirectEditSensitiveKeywordVsTestPath:
+    """#611: Lead's own `apps/api/src/security-e2e/test-harness.ts` type-fix
+    (1 line) was denied because "security" sits in the folder name
+    (`security-e2e/`), not because anything sensitive was actually touched —
+    forcing a full backend-pane spawn for a one-line type fix. The
+    sensitive-keyword half of the deep-category check (auth/security/token/
+    crypto/payment) must skip a test/e2e path on the PATH leg, while still
+    catching a genuinely sensitive DIFF hiding inside one."""
+
+    def test_allowed_type_fix_in_security_e2e_test_file(self, tmp_path) -> None:
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "apps/api/src/security-e2e/test-harness.ts",
+                "old_string": "const id: number = getId();",
+                "new_string": "const id: string = getId();",
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert verdict.allowed
+
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            "apps/api/src/security-e2e/test-harness.ts",
+            "src/auth/__tests__/login.spec.ts",
+            "tests/test_auth.py",
+            "src/payments.test.ts",
+        ],
+    )
+    def test_allowed_when_test_path_and_diff_has_no_sensitive_content(
+        self, tmp_path, file_path: str
+    ) -> None:
+        state_file = tmp_path / f"state-{hash(file_path)}.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": file_path, "old_string": "x = 1\n", "new_string": "x = 2\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert verdict.allowed, f"should allow non-sensitive edit in test path: {file_path}"
+
+    def test_denied_when_source_auth_path_even_with_bland_diff(self, tmp_path) -> None:
+        """A genuinely deep SOURCE path (not a test path) still denies by
+        path alone, same as before #611 — only test/e2e paths are exempted
+        from the path leg."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {"file_path": "src/auth/login.ts", "old_string": "x\n", "new_string": "y\n"},
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    def test_denied_when_sensitive_content_hides_inside_test_path(self, tmp_path) -> None:
+        """The path leg is exempt for a test file, but the DIFF is still
+        checked — a hardcoded secret/token sneaking into a test fixture must
+        still deny."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Edit",
+            {
+                "file_path": "src/security-e2e/fixtures.ts",
+                "old_string": "const apiKey = readFromEnv();",
+                "new_string": 'const apiKey = "hardcoded-not-from-env";',
+            },
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    def test_structural_deep_category_unaffected_by_test_path(self, tmp_path) -> None:
+        """package.json/lockfile/migration/CI/Dockerfile stay path-only with
+        NO test-path exemption — those are deep because of WHERE the file
+        lives, not a word that can appear in a folder name."""
+        state_file = tmp_path / "state.json"
+        for bad_file in [
+            "tests/fixtures/package.json",
+            "e2e/migrations/001_init.sql",
+            "__tests__/.github/workflows/ci.yml",
+        ]:
+            verdict = pane_guard.evaluate_lead_direct_edit(
+                "Edit",
+                {"file_path": bad_file, "old_string": "x\n", "new_string": "y\n"},
+                scope="tiny",
+                state_file=state_file,
+            )
+            assert not verdict.allowed, f"structural deep category must still deny: {bad_file}"
+            assert verdict.rule == "lead_direct_edit:deep_category"
 
 
 class TestDirectEditExemptRuntime:
