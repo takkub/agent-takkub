@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.8] - 2026-09-15
+
 ### Added (เพิ่ม)
 
 - **แสดง provider/model จริงที่แต่ละ pane รันอยู่ บนหัว pane + tab (#591)** — หัว pane (เช่น
@@ -17,6 +19,50 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   spawn_model_explicit` ที่ทั้ง 3 จุด resolve (generic provider / claude teammate / claude Lead)
   · **gap**: opencode/kimi/cursor ไม่มีกลไกรายงาน model จริงกลับมา (CLI ไม่ expose) — โชว์ได้แค่
   ค่าที่ spawn resolve พร้อม tooltip บอกตรงๆ ว่า "CLI นี้ไม่รายงาน model"
+- **Settings ตำแหน่ง/Pipeline บอกความจริง (#592)** — หน้า Roles แบ่ง 4 กลุ่ม (ตำแหน่งในทีม /
+  โหมด Reviewer / สมองเสริม / ตำแหน่งเสริมที่ปิด) ครอบทุก role ใน `valid_roles()`; แถว
+  `Reviewer · e2e (QA)` / `Reviewer · ui (Critic)` เป็นแถวอธิบายที่ mirror ค่าแถว Reviewer (#590)
+  ไม่มี dropdown ของตัวเอง + แจ้งค่าเก่า qa/critic ที่ไม่ถูกใช้; dropdown `(default) → haiku-4-5`
+  บอก model/effort จริงที่จะได้ (resolver เดียวกับตอน spawn); สวิตช์ตำแหน่งเฉพาะโปรเจค
+  (Maintainer/Data-eng) อ่านแหล่งเดียวกับ enforcement (`_can_spawn_from_cfg`); Pipeline palette/
+  hop dim role ที่ปิด + tooltip, เมนู add role แยกหัวข้อ, และสรุปล่วงหน้าก่อนรัน/ใน `takkub
+  pipeline run` ว่า hop ไหนจะใช้ค่า Reviewer หรือถูกข้าม (`team_preset.pipeline_hop_summary_lines`)
+- **`takkub assign --provider` บน pane ที่เปิดอยู่ (#603)** — pane ว่าง → ปิดแล้วเปิดใหม่บน
+  provider ที่ขอให้เอง (pattern เดียวกับ reroute #514); pane ทำงานอยู่ → เข้าคิวแล้ว respawn หลัง done
+
+### Fixed (แก้)
+
+- **Mac: boot migration ล้มที่ step `project` เพราะ `.DS_Store` (#605)** — ไฟล์ขยะของ OS
+  (`.DS_Store`, `._*`, `.localized`, `Thumbs.db`, `desktop.ini`) ถูกนับเป็น V1 leftover →
+  `v1_retired` เป็น False → step ที่ source ถูก archive แล้วถูก validate/re-apply ทับ target
+  ด้วย `{}`; ตอนนี้จัดเป็น junk ลบทิ้ง ไม่ block validate, step ใน `_ARCHIVED_SOURCE_STEP_IDS`
+  รู้จัก `source_retired()` (source หาย **และ** target มีข้อมูล) และไม่เขียนทับ; หน้า failed
+  โชว์ `<step>: <error จริง>` แทนแค่ชื่อ step; `takkub doctor --storage-layout` บอกวิธีกู้
+- **งานที่เข้าคิวให้ pane ที่กำลังทำงานหายตอน auto-close หลัง done (#593)** — assignment
+  ต่อคิวต่อ (project, role) ถูกส่งต่อเข้า pane เดิมเมื่อ ready หรือ spawn pane ใหม่ให้เอง
+  ไม่ pop PaneState ที่ยังมีงานค้าง + แจ้ง Lead `[queued-assignment]`
+- **pane ใหม่ส่ง `takkub done` ไม่ได้ (unauthorized) เมื่อ spawn ทับช่วง pane เก่าปิด (#594)** —
+  pane token ผูกกับ session identity; close/mint revoke เฉพาะ token ที่ไม่ได้ผูกกับ session ที่ยัง
+  alive; token ที่ retired ยังใช้ `takkub send --to lead` กู้สถานการณ์ได้ + cockpit แจ้ง Lead
+- **quota stall ไม่ reroute (#595)** — loop ยืนยัน quota (signal b) ยิงทุก 5s ไม่มีเพดาน (prod:
+  1,637 events/2h51m) ไม่เคยถึง `_reroute_or_park`; ตอนนี้ retry ทุก 30s, เกิน 3 นาที fallback
+  reroute ด้วย banner อย่างเดียว + regex เวลา reset รู้จัก "continuing automatically at 10pm"
+- **busy-machine guard นับ pane `stalled:quota` ว่ากำลังทำงาน (#596)** — `working_panes` ตัด pane
+  ที่ quota-stalled ออก Lead รัน tsc/test ได้
+- **`takkub wait/status/task show/send/close/tail/messages --role reviewer` หา pane `qa`/`critic`
+  ไม่เจอ (#597)** — `resolve_pane_role()` ตัวเดียวใช้ทุกคำสั่ง; `assign` ตอบ `→ pane: qa`;
+  warn deprecated ของ `--role qa` ขึ้นเฉพาะที่ควร
+- **`takkub wait` หลายตัวชนกัน (#598)** — registration เก็บ client แยก (role set/timeout ของตัวเอง)
+  ลบเมื่อ client สุดท้ายจบ; error บอกว่าถูก supersede โดย wait ไหน + role ที่ยัง pending
+- **watchdog เตือน "จอไม่ขยับ" ขณะ pane ทำงานจริง (#599)** — เช็ค child process + mtime ไฟล์ใน cwd
+  (bounded) ก่อนแจ้ง Lead; เคส "stuck แต่มี child อยู่" ลง audit log อย่างเดียว
+- **qa-gate log ไม่มีหลักฐาน PASS เมื่อ turbo cache hit (#600)** — script `verify`/`test` ที่เรียก
+  `turbo` (ตัดสินจากข้อความ script) ได้ `-- --output-logs=full --force` เสมอ
+- **done note นับ "ไฟล์ที่แตะ" ผิดบน shared tree (#601)** — ตัดไฟล์ที่ pane อื่นในโปรเจคเดียวกัน
+  แตะช่วงเดียวกันออก; snapshot ตอน assign หาย → diff กับ baseline ว่างพร้อม caveat แทน "ตรวจไม่ได้"
+- **auto scope จัด deep ผิดจากคำในบริบท (#602)** — อ่าน signal เฉพาะส่วน "ทำ" (ตัด heading
+  ข้อเท็จจริง/หลักฐาน, backtick, ประโยคหลัง "ห้าม"); ≥2 หมวดต่างกันยัง deep; `--scope` ที่ระบุชนะเงียบ
+- **แจ้งเตือนซ้ำต่อ 1 done (#604)** — done→closing ส่ง notice เดียว; digest ที่ซ้ำเดิมทุกรายการไม่ส่ง
 
 ## [v2.1.7] - 2026-09-14
 
