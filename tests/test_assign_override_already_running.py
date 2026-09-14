@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config, provider_config
+from agent_takkub import config, gemini_helper, provider_config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator, _exit_key
 
@@ -276,6 +276,18 @@ class TestIdleProviderSwitch:
     ) -> None:
         """The deferred callback, once the old pane is actually gone, must
         really spawn a fresh pane on the requested provider (not just warn)."""
+        # Unlike the other tests in this file (which only exercise the
+        # override-warning logic and never reach a real spawn), this one
+        # runs the deferred respawn all the way into spawn_engine's
+        # non-claude branch, which resolves the CLI binary via
+        # `ProviderSpec.custom_discovery_fn` directly (not via
+        # `provider_config._provider_available`, already stubbed by the
+        # autouse `_providers_available` fixture above) — on CI, where
+        # `agy` isn't installed, that resolves to None and spawn() bails
+        # out with `spec.install_instructions` before ever touching
+        # `PtySession.__new__`. Stub discovery too so the fresh spawn
+        # actually reaches PtySession.
+        monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "agy")
         role = "backend"
         cwd = str(tmp_env / "workdir")
         pathlib.Path(cwd).mkdir(parents=True, exist_ok=True)
