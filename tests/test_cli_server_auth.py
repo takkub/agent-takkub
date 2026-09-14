@@ -216,6 +216,48 @@ class TestLeadOnlyCommandsAcceptedWithCorrectToken:
 
 
 class TestDoneCommand:
+    @pytest.mark.parametrize(
+        "provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"]
+    )
+    def test_replacement_token_survives_old_session_close(self, server_and_sock, provider):
+        from agent_takkub.spawn_engine import SpawnEngineMixin
+
+        srv, sock, _ = server_and_sock
+        engine = SpawnEngineMixin()
+        old, new = MagicMock(), MagicMock()
+        old_token = engine._mint_pane_token({}, "test-project", "backend")
+        engine._bind_pane_token(old_token, old)
+        new_token = engine._mint_pane_token({}, "test-project", "backend")
+        engine._bind_pane_token(new_token, new)
+        assert old_token in engine._pane_tokens
+        engine._revoke_session_tokens("test-project", "backend", old)
+        assert old_token not in engine._pane_tokens
+        assert new_token in engine._pane_tokens
+        srv._orch._pane_tokens = engine._pane_tokens
+        srv._orch._pane_token_sessions = engine._pane_token_sessions
+        srv._orch._retired_pane_tokens = engine._retired_pane_tokens
+        pane = MagicMock(session=new, provider=provider)
+        srv._orch._project_panes.return_value = {"backend": pane}
+        srv._dispatch(sock, {"cmd": "done", "auth": new_token, "note": "completed"})
+        assert sock.last_response()["ok"] is True
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "done", "auth": old_token, "from_project": "forged"})
+        assert sock.last_response()["ok"] is False
+        assert "takkub send --to lead" in sock.last_response()["msg"]
+        assert srv._orch._notify_lead.call_args.args[0] == "test-project"
+        for target, allowed in [("lead", True), ("frontend", False)]:
+            sock.reset()
+            srv._dispatch(sock, {"cmd": "send", "auth": old_token, "to": target, "msg": "recover"})
+            assert sock.last_response()["ok"] is allowed
+
+    def test_alive_predecessor_cannot_complete_replacement_task(self, server_and_sock):
+        srv, sock, _ = server_and_sock
+        srv._orch._pane_token_sessions = {_PANE_TOKEN_BACKEND: object()}
+        srv._orch._project_panes.return_value = {"backend": MagicMock(session=object())}
+        srv._dispatch(sock, {"cmd": "done", "auth": _PANE_TOKEN_BACKEND})
+        assert sock.last_response()["ok"] is False
+        srv._orch.done.assert_not_called()
+
     def test_done_from_lead_rejected(self, server_and_sock) -> None:
         srv, sock, _ = server_and_sock
         sock.reset()

@@ -5049,7 +5049,8 @@ class Orchestrator(
                 _log_event("close_noop_no_pane", role=role_name, project=project_ns)
                 return True, f"'{role_name}' has no pane open right now — already closed (no-op)"
             return False, cancel_msg
-        was_alive = pane.session is not None
+        closing_session = pane.session
+        was_alive = closing_session is not None
         if was_alive:
             # Lead is permanent; only force=True (tab close, project switch) may terminate
             if role_name == LEAD.name and not force:
@@ -5060,6 +5061,12 @@ class Orchestrator(
             self._warn_if_live_children(project_ns, role_name, pane.session)
             _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
+            self._revoke_session_tokens(project_ns, role_name, closing_session)
+            current_pane = self._project_panes(project_ns).get(role_name)
+            if current_pane is not pane or (
+                pane.session is not None and pane.session is not closing_session
+            ):
+                return True, f"{role_name} old session closed; replacement retained"
             pane.set_state("empty", note=None)
             # Planted AGENTS.md leaves with the last pane that used this cwd —
             # otherwise an IDE-launched CLI in that project reads it and
@@ -5171,10 +5178,7 @@ class Orchestrator(
             self._finalize_worktree(project_ns, role_name, had_worktree_close)
         # Revoke the pane's capability token so stale done/send requests from
         # the closing pane are rejected after it terminates.
-        _pane_tokens = getattr(self, "_pane_tokens", {})
-        _revoke_keys = [t for t, v in _pane_tokens.items() if v == (project_ns, role_name)]
-        for _tok in _revoke_keys:
-            _pane_tokens.pop(_tok, None)
+        self._revoke_session_tokens(project_ns, role_name, closing_session)
 
         if not suppress_auto_chain:
             self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain_close)
