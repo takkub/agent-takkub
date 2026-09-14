@@ -9253,7 +9253,7 @@ class Orchestrator(
         detailed = self.list_status_detailed(project=project_ns)
         panes_out: dict[str, dict] = {}
 
-        for role, info in detailed.items():
+        for pane_role, info in detailed.items():
             state = info["state"]
             display_state = info.get("display_state", state)
             last_ts = info["last_progress_ts"]
@@ -9272,7 +9272,7 @@ class Orchestrator(
                 human_ts = "unknown"
                 abs_ts = "unknown"
 
-            pane = self._project_panes(project_ns).get(role)
+            pane = self._project_panes(project_ns).get(pane_role)
             transcript_tail = ""
             transcript_path = None
             exit_hint = ""
@@ -9281,7 +9281,7 @@ class Orchestrator(
             if not transcript_path or not pathlib.Path(str(transcript_path)).is_file():
                 finder = getattr(self, "_find_latest_transcript_path", None)
                 if finder is not None:
-                    transcript_path = finder(project_ns, role)
+                    transcript_path = finder(project_ns, pane_role)
 
             if transcript_path and pathlib.Path(str(transcript_path)).is_file():
                 try:
@@ -9308,7 +9308,7 @@ class Orchestrator(
                 try:
                     from .provider_config import effective_provider_for
 
-                    _provider = effective_provider_for(role, project=project_ns)
+                    _provider = effective_provider_for(pane_role, project=project_ns)
                     _marker = pane.session.tool_running_marker(_provider)
                     # Guard against a loosely-mocked session in tests —
                     # same isinstance idiom as _check_stuck_tool_panes.
@@ -9321,7 +9321,7 @@ class Orchestrator(
                     pass
 
             last_screenshot = ""
-            if _split_shard(role)[0] in ("qa", "critic", "designer"):
+            if _split_shard(pane_role)[0] in ("qa", "critic", "designer"):
                 today = datetime.now().strftime("%Y-%m-%d")
                 shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
                 try:
@@ -9345,7 +9345,7 @@ class Orchestrator(
                     for f in sorted(proj_dir.iterdir()):
                         if f.suffix != ".md" or f.name.startswith("lead-"):
                             continue
-                        if not f.name.startswith(f"{role}-"):
+                        if not f.name.startswith(f"{pane_role}-"):
                             continue
                         try:
                             if f.stat().st_mtime >= since_ts:
@@ -9357,7 +9357,7 @@ class Orchestrator(
             quota_resets_human = _human_duration(quota_resets_at - now) if quota_resets_at else ""
 
             is_exited = state == "exited" or display_state == "exited"
-            panes_out[role] = {
+            panes_out[pane_role] = {
                 "state": state,
                 "display_state": display_state,
                 "stall_minutes": stall_min,
