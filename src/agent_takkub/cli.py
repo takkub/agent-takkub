@@ -650,15 +650,9 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         scope = auto_decision.scope
         scope_reason = auto_decision.reason
     else:
+        # #602: an explicit --scope from Lead wins silently — no warning, the
+        # auto estimate is only recorded for the ack line.
         scope = requested_scope
-        diff_steps = abs(
-            task_scope.TIER_ORDER.get(scope, 1) - task_scope.TIER_ORDER.get(auto_decision.scope, 1)
-        )
-        if diff_steps >= 2:
-            print(
-                f"warn: --scope {scope} ต่างจากการประเมิน auto ({auto_decision.scope} — {auto_decision.reason}) 2 ขั้น",
-                file=sys.stderr,
-            )
         scope_reason = f"ระบุเอง (auto ประเมินเป็น {auto_decision.scope}: {auto_decision.reason})"
 
     # assign ต้องพิมพ์ scope + เหตุผล 1 บรรทัดกลับมาเสมอ (ทั้งตอน auto และตอน Lead ระบุเอง)
