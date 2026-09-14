@@ -223,8 +223,25 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     return "\n".join([line, *extra]) if extra else line
 
 
+def collect_touched_paths(diffstat_text: str, uncommitted: str | Iterable[str]) -> set[str]:
+    """Combine committed-diff paths (since a baseline SHA) with currently
+    changed dirty paths into one deduped path set. Shared by
+    `union_files_touched` and by sibling-pane exclusion (#601) — the latter
+    needs the raw paths, not just the count."""
+    committed_paths = [
+        line.split("|", 1)[0].strip() for line in diffstat_text.strip().splitlines() if "|" in line
+    ]
+    uncommitted_paths = (
+        parse_porcelain_paths(uncommitted) if isinstance(uncommitted, str) else uncommitted
+    )
+    return {p for p in committed_paths if p} | {p for p in uncommitted_paths if p}
+
+
 def union_files_touched(
-    diffstat_text: str, uncommitted: str | Iterable[str]
+    diffstat_text: str,
+    uncommitted: str | Iterable[str],
+    *,
+    exclude: Iterable[str] | None = None,
 ) -> tuple[int, list[str]]:
     """Combine committed-diff paths (since a baseline SHA) with currently
     changed dirty paths into one deduped "files touched" count + top-level
@@ -234,14 +251,15 @@ def union_files_touched(
     pure tests.  Shared-tree done reports pass the already-filtered path list
     produced by the assign/done metadata snapshots (#251), so pre-existing
     dirty files that did not change during the assignment are excluded.
+
+    *exclude* (#601): paths another shared-tree pane's OWN assign baseline
+    says are its doing — a read-only role (e.g. reviewer) sharing a tree with
+    an actively-committing one (e.g. devops) must not have those files
+    counted as its own "files touched".
     """
-    committed_paths = [
-        line.split("|", 1)[0].strip() for line in diffstat_text.strip().splitlines() if "|" in line
-    ]
-    uncommitted_paths = (
-        parse_porcelain_paths(uncommitted) if isinstance(uncommitted, str) else uncommitted
-    )
-    all_paths = {p for p in committed_paths if p} | {p for p in uncommitted_paths if p}
+    all_paths = collect_touched_paths(diffstat_text, uncommitted)
+    if exclude:
+        all_paths -= set(exclude)
     dirs: list[str] = []
     for path in sorted(all_paths):
         top = path.split("/", 1)[0] if "/" in path else path

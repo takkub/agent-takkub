@@ -6075,6 +6075,7 @@ class Orchestrator(
         assign_non_git: bool = False,
         git_facts: dict | None = None,
         ops_task: bool = False,
+        sibling_files: frozenset[str] | None = None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -6265,7 +6266,9 @@ class Orchestrator(
             if shared_gf is not None
             else mgr.diffstat_since(pane_cwd, assign_base_sha)
         )
-        files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)
+        files_touched, dirs = union_files_touched(
+            diffstat, changed_uncommitted, exclude=sibling_files
+        )
         facts = DigestFacts(
             role=from_role,
             ref=ref,
@@ -6281,8 +6284,13 @@ class Orchestrator(
                 "ตอนนี้ อาจรวมของเก่าที่มีอยู่ก่อน assign ด้วย"
                 if no_dirty_baseline
                 else (
-                    "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
-                    "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
+                    "เทียบ HEAD + dirty path/mtime/size ตอน assign"
+                    + (
+                        f" — ตัดไฟล์ {len(sibling_files)} รายการที่ pane อื่น แตะในช่วงเดียวกันออกแล้ว"
+                        if sibling_files
+                        else ""
+                    )
+                    + " — shared tree ยังอาจรวมการเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
                 )
             ),
             report_path=report_path,
@@ -6298,6 +6306,63 @@ class Orchestrator(
             ),
         )
         return facts, None
+
+    def _sibling_shared_tree_touched_paths(
+        self, project_ns: str, from_role: str, git_root: str | None
+    ) -> frozenset[str]:
+        """#601: a shared tree has no per-pane isolation, so another pane
+        actively committing/editing during THIS pane's assignment window
+        (e.g. devops mid-deploy while reviewer is read-only-reviewing) can
+        leak its own files into this pane's `git diff`/`git status` reads —
+        a real incident: a read-only reviewer's done note showed the 4 files
+        devops had touched in the same window as "ไฟล์ที่แตะ" of its own.
+
+        Best-effort exclusion: for every OTHER shared-tree pane in this
+        project pointed at the same git root, compute ITS OWN touched-file
+        set from ITS OWN assign baseline (same method `_compute_digest_facts`
+        uses for the reporting pane) and return the union — the caller
+        subtracts this from the reporting pane's own set. Never raises —
+        one sibling's git read failing must not block this pane's done()."""
+        if not git_root:
+            return frozenset()
+        from .digest_facts import collect_touched_paths
+        from .worktree_manager import WorktreeManager, changed_dirty_paths
+
+        mgr = WorktreeManager()
+        panes = self._project_panes(project_ns)
+        prefix = f"{project_ns}::"
+        paths: set[str] = set()
+        for key, ps in list(getattr(self, "_pane_state", {}).items()):
+            if not key.startswith(prefix):
+                continue
+            role = key[len(prefix) :]
+            if role == from_role:
+                continue
+            # Worktree-isolated siblings have their own repo — nothing to
+            # attribute onto a shared-tree pane's reads.
+            if getattr(ps, "worktree", None):
+                continue
+            if getattr(ps, "assign_git_root", None) != git_root:
+                continue
+            sib_base_sha = getattr(ps, "assign_base_sha", None)
+            if not sib_base_sha:
+                continue
+            sib_cwd = getattr(panes.get(role), "_session_cwd", None) or git_root
+            try:
+                sib_diffstat = mgr.diffstat_since(sib_cwd, sib_base_sha)
+                sib_porcelain = mgr.shared_tree_status_porcelain(sib_cwd)
+                sib_changed = (
+                    changed_dirty_paths(
+                        getattr(ps, "assign_dirty_snapshot", None) or {},
+                        mgr.dirty_snapshot(git_root, sib_porcelain),
+                    )
+                    if sib_porcelain is not None
+                    else []
+                )
+                paths |= collect_touched_paths(sib_diffstat, sib_changed)
+            except Exception:
+                continue
+        return frozenset(paths)
 
     def _pane_reports_undelivered_task(self, project_ns: str, role: str, pane) -> bool:
         """(#278/#276) True when this pane is reporting on an assignment that
@@ -6750,6 +6815,16 @@ class Orchestrator(
 
             ops_task = detect_ops_task(from_role, raw_note)
             try:
+                sibling_files = (
+                    frozenset()
+                    if had_worktree
+                    else self._sibling_shared_tree_touched_paths(
+                        project_ns, from_role, had_assign_git_root
+                    )
+                )
+            except Exception:  # digest cosmetics must never break done()
+                sibling_files = frozenset()
+            try:
                 digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
                     from_role,
                     issue_ref,
@@ -6763,6 +6838,7 @@ class Orchestrator(
                     assign_non_git=had_assign_non_git,
                     git_facts=git_facts,
                     ops_task=ops_task,
+                    sibling_files=sibling_files,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
