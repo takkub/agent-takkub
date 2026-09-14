@@ -538,6 +538,74 @@ def pane_display_label(role: str, base_label: str, project: str | None = None) -
     return base_label
 
 
+def assign_resolution_line(
+    role: str,
+    mode: str | None,
+    project: str | None = None,
+    *,
+    provider_override: str | None = None,
+    model_override: str | None = None,
+) -> str:
+    """The one-line ``"qa = reviewer --mode e2e · provider codex (ตามแถว
+    Reviewer)\\n"`` banner explaining which Settings row actually backed a
+    qa/critic (or ``reviewer --mode e2e``/``ui``) assign's provider/model
+    (#590 item D). Shared by `orchestrator.assign()`'s deferred dispatch
+    (recomputed right before spawn, base_role already normalized) and
+    `cli_server`'s synchronous ack (computed from the raw CLI ``role``/
+    ``mode`` before the deferred assign has even run) so the two copies
+    can't drift out of sync — the ack used to have no way to show this at
+    all, since `orchestrator.assign()` runs staggered off a QTimer and its
+    return value is never relayed back to the socket.
+
+    *role*/*mode* are the pre-normalization values (as `takkub assign`
+    receives them: ``role="qa"``/``"critic"`` with no mode, or
+    ``role="reviewer"`` with ``mode="e2e"``/``"ui"``) — this mirrors the
+    mapping `orchestrator.assign()` itself does at the top of the method.
+    Returns ``""`` for anything outside that alias pair (plain reviewer
+    ``code``/``pane``, ``subagent`` mode, or any other role) since there's
+    no Settings-row substitution to explain.
+    """
+    from .core.routing import effective_model_for_v2 as _effective_model_for_v2
+    from .provider_config import effective_provider_for
+    from .routing_planner import _MODE_TO_LEGACY_ROLE, resolve_role_alias
+
+    role = role or ""
+    base_role = role.split("#", 1)[0].strip().lower()
+    shard_suffix = f"#{role.split('#', 1)[1]}" if "#" in role else ""
+    if base_role == "reviewer":
+        if mode not in {"e2e", "ui"}:
+            return ""
+        base_role = _MODE_TO_LEGACY_ROLE[mode]
+    elif base_role not in {"qa", "critic"}:
+        return ""
+    elif mode not in (None, "pane"):
+        return ""
+
+    role_name = f"{base_role}{shard_suffix}"
+    settings_role = settings_role_for(base_role, project)
+    _, alias_mode = resolve_role_alias(base_role)
+    provider_override = (provider_override or "").strip().lower()
+    provider_source = (
+        "override"
+        if provider_override
+        else ("reviewer_row" if settings_role != base_role else "own_row")
+    )
+    effective_provider = provider_override or effective_provider_for(settings_role, project=project)
+    resolved_model = model_override or (
+        _effective_model_for_v2(settings_role, effective_provider, project=project) or ""
+    )
+    source_label = {
+        "override": "ตาม --provider ที่ระบุ",
+        "reviewer_row": "ตามแถว Reviewer",
+        "own_row": f"ตามแถว {base_role.upper()}",
+    }[provider_source]
+    model_part = f" / {resolved_model}" if resolved_model else ""
+    return (
+        f"{role_name} = reviewer --mode {alias_mode} · provider {effective_provider}"
+        f"{model_part} ({source_label})\n"
+    )
+
+
 def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]]:
     """#590 item C: `qa`/`critic` entries still sitting in `routing.json`
     (this project's bucket, or the global bucket) or `role-models.json`

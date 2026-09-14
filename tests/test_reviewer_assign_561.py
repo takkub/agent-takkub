@@ -360,6 +360,17 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
                 "agent_takkub.provider_config.effective_provider_for",
                 side_effect=_record,
             ),
+            # #590 follow-up CI fix: a CI runner has neither codex nor the
+            # Antigravity CLI (`agy`) installed, so the real binary-discovery
+            # probe `spawn_engine.py` runs before argv-building
+            # (`spec.custom_discovery_fn()`) returns None and spawn() fails
+            # closed with "codex/agy binary not on PATH" before this test's
+            # own assertions (which only care which ROLE's Settings row
+            # `effective_provider_for` was resolved against, not whether a
+            # real CLI is installed) ever run — a dev machine with codex/agy
+            # on PATH masked this (#587 C3's same class of gap).
+            patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
             patch("agent_takkub.spawn_engine.agent_role_dir", return_value=staging),
             patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
             patch("agent_takkub.spawn_engine._default_plugin_dirs", return_value=[]),

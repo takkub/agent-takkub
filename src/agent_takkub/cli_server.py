@@ -943,6 +943,27 @@ class CliServer(QObject):
                             lambda _role=role, _kw=_assign_kwargs: self._orch.assign(_role, **_kw),
                         )
                     ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
+                    # #590 item D: `orchestrator.assign()` runs staggered off
+                    # a QTimer and its return value (which includes the
+                    # "qa = reviewer --mode e2e · provider ... (ตามแถว
+                    # Reviewer)" resolution banner, #590 item B) is never
+                    # relayed back to this socket — without this, the CLI
+                    # caller had no way to see which Settings row actually
+                    # backed a qa/critic (or reviewer --mode e2e/ui) spawn
+                    # until the pane showed up. Built from the same
+                    # `team_preset.assign_resolution_line` helper the
+                    # deferred assign() itself uses, so the two can't drift.
+                    from .team_preset import assign_resolution_line as _assign_resolution_line
+
+                    resolution_line = _assign_resolution_line(
+                        role,
+                        mode,
+                        project_ns_fp,
+                        provider_override=provider_req,
+                        model_override=(str(req.get("model", "") or "").strip() or None),
+                    )
+                    if resolution_line:
+                        ack_msg = f"{resolution_line}{ack_msg}"
                     if cmd == "assign" and auto_mode_note:
                         ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
                     queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)

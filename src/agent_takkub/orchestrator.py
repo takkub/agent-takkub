@@ -3397,32 +3397,30 @@ class Orchestrator(
         # spawn's provider/model, and why — before this, `takkub assign
         # --role qa` (or `--role reviewer --mode e2e`) gave no clue whether
         # a stale/invisible qa/critic entry or the reviewer row picked the
-        # provider.
-        from .core.routing import effective_model_for_v2 as _effective_model_for_v2_a
-        from .routing_planner import resolve_role_alias as _resolve_role_alias_a
-
+        # provider. `team_preset.assign_resolution_line` is the single
+        # source for this banner text — `cli_server`'s synchronous ack
+        # (#590 item D) builds the same line from the raw CLI role/mode
+        # before this deferred assign has even run, and must never drift
+        # from what actually ends up spawning here.
+        provider_override_a = provider or ps_assign.provider_override or ""
         provider_source = (
             "override"
-            if (provider or ps_assign.provider_override)
+            if provider_override_a
             else ("reviewer_row" if settings_role_a != base_role_a else "own_row")
         )
-        resolution_line = ""
-        if base_role_a in {"qa", "critic"}:
-            _, _alias_mode_a = _resolve_role_alias_a(base_role_a)
-            _resolved_model_a = model or (
-                _effective_model_for_v2_a(settings_role_a, effective_provider, project=project_ns)
-                or ""
-            )
-            _source_label_a = {
-                "override": "ตาม --provider ที่ระบุ",
-                "reviewer_row": "ตามแถว Reviewer",
-                "own_row": f"ตามแถว {base_role_a.upper()}",
-            }[provider_source]
-            _model_part_a = f" / {_resolved_model_a}" if _resolved_model_a else ""
-            resolution_line = (
-                f"{role_name} = reviewer --mode {_alias_mode_a} · provider {effective_provider}"
-                f"{_model_part_a} ({_source_label_a})\n"
-            )
+        # `_assign_dispatch` has no `mode` param of its own — by the time
+        # `assign()` calls in here, `role_name` is already normalized to
+        # `qa`/`critic` (never `reviewer`) and subagent mode never reaches
+        # this dispatch (it returns earlier in `assign()`), so a literal
+        # "pane" is exactly what `assign_resolution_line` needs to match
+        # its `qa`/`critic` branch.
+        resolution_line = _team_preset_a.assign_resolution_line(
+            role_name,
+            "pane",
+            project_ns,
+            provider_override=provider_override_a,
+            model_override=model,
+        )
         if plan and shard_total > 0:
             # Planner wrapping happened before spawn so a fresh Claude pane can
             # receive the complete planner task in its one-shot system prompt.

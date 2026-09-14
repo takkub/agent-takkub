@@ -2057,8 +2057,8 @@
         "agent_takkub.core.routing.router"
       ],
       "imported_by": [
-        "agent_takkub.orchestrator",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.team_preset"
       ],
       "fan_in": 2,
       "fan_out": 4
@@ -3226,7 +3226,6 @@
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.core.conversation.flag",
-        "agent_takkub.core.routing",
         "agent_takkub.design_actions",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
@@ -3280,7 +3279,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 57
+      "fan_out": 56
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -5091,6 +5090,7 @@
       "module": "agent_takkub.team_preset",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.core.routing",
         "agent_takkub.provider_config",
         "agent_takkub.role_models",
         "agent_takkub.roles",
@@ -5114,7 +5114,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 15,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.terminal_widget",
