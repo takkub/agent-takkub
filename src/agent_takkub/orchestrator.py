@@ -5189,6 +5189,7 @@ class Orchestrator(
         reason: str = "",
         suppress_pipeline: bool = False,
         suppress_auto_chain: bool = False,
+        suppress_live_children_warning: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
@@ -5208,6 +5209,14 @@ class Orchestrator(
         the verify-hop pre-authorisation prematurely. External / user-initiated
         closes (force=True, tab close) do NOT suppress so the #8 behaviour holds:
         if a user forcibly removes the last auto-chain pane the handoff still fires.
+
+        suppress_live_children_warning=True skips `_warn_if_live_children`'s own
+        Lead notice (#604). Used only by `done()`'s grace-expiry close: that path
+        already told Lead once, at the start of the grace period, that this pane
+        had live children and was deferring — a second "about to be killed" notice
+        at the end of the SAME episode is a duplicate, not new information. Every
+        other caller (direct/forced close with no prior deferral notice) keeps the
+        warning — it may be the only signal Lead ever gets that work was killed.
         """
         role_name = self.resolve_pane_role(role_name, project)
         role_name = role_name.lower().strip()
@@ -5245,7 +5254,8 @@ class Orchestrator(
                 return True, "lead close ignored (protected)"
             # mark exit as expected so the pane doesn't surface "exited"/crash
             pane.mark_expected_exit()
-            self._warn_if_live_children(project_ns, role_name, pane.session)
+            if not suppress_live_children_warning:
+                self._warn_if_live_children(project_ns, role_name, pane.session)
             _closing_cwd = getattr(pane, "_session_cwd", None)
             pane.session.terminate()
             self._revoke_session_tokens(project_ns, role_name, closing_session)
@@ -6193,12 +6203,7 @@ class Orchestrator(
             branch = shared_gf.get("branch")
         else:
             branch = mgr.current_branch(pane_cwd) if pane_cwd else None
-        if (
-            not pane_cwd
-            or not assign_base_sha
-            or not assign_git_root
-            or assign_dirty_snapshot is None
-        ):
+        if not pane_cwd or not assign_base_sha or not assign_git_root:
             return (
                 DigestFacts(
                     role=from_role,
@@ -6214,6 +6219,15 @@ class Orchestrator(
                 ),
                 None,
             )
+        # #601: `assign_dirty_snapshot` alone can come back None on a
+        # resume/reroute path even though cwd/base_sha/git_root are all
+        # fine — that is "no pre-assign dirty baseline to diff against", not
+        # "can't verify anything". Falling through with an empty baseline
+        # (below) still yields a real number instead of the blanket
+        # "ตรวจไม่ได้" this used to short-circuit to, at the cost of possibly
+        # counting dirt that predates the assignment — flagged via
+        # files_note rather than hidden.
+        no_dirty_baseline = assign_dirty_snapshot is None
         # One porcelain read feeds BOTH the uncommitted count and the metadata
         # comparison; done() does not pay for two status subprocesses.
         if shared_gf is not None:
@@ -6242,7 +6256,10 @@ class Orchestrator(
             )
         uncommitted = len(parse_porcelain_paths(porcelain))
         current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
-        changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
+        changed_uncommitted = changed_dirty_paths(
+            assign_dirty_snapshot if assign_dirty_snapshot is not None else {},
+            current_dirty_snapshot,
+        )
         diffstat = (
             str(shared_gf.get("diffstat", ""))
             if shared_gf is not None
@@ -6260,8 +6277,13 @@ class Orchestrator(
             files_touched=files_touched,
             files_dirs=tuple(dirs),
             files_note=(
-                "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
-                "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
+                "ไม่มี dirty snapshot ตอน assign (resume/reroute, #601) — นับทุกไฟล์ที่ dirty "
+                "ตอนนี้ อาจรวมของเก่าที่มีอยู่ก่อน assign ด้วย"
+                if no_dirty_baseline
+                else (
+                    "เทียบ HEAD + dirty path/mtime/size ตอน assign — shared tree ยังอาจรวม "
+                    "การเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
+                )
             ),
             report_path=report_path,
             headline=headline,
@@ -6269,7 +6291,11 @@ class Orchestrator(
             # #546: every currently-dirty shared-tree path already predates
             # this assignment (the assign-time snapshot diff is empty) —
             # the count is leftover from a sibling pane/Lead, not this task.
-            uncommitted_unrelated=bool(uncommitted) and not changed_uncommitted,
+            # Not claimed when there is no baseline at all (#601) — "unrelated"
+            # would be a guess, not a verified fact, in that case.
+            uncommitted_unrelated=(
+                bool(uncommitted) and not changed_uncommitted and not no_dirty_baseline
+            ),
         )
         return facts, None
 
@@ -7068,7 +7094,11 @@ class Orchestrator(
                         idle_for_s=int(now - _idle_since),
                         children=names[:10],
                     )
-                    self.close(from_role, project=project_ns)
+                    # #604: the deferred notice already fired on this
+                    # episode's first tick (deferred_for starts at 0, always
+                    # < GRACE_S) — a second "about to be killed" notice here
+                    # would just repeat what Lead was already told.
+                    self.close(from_role, project=project_ns, suppress_live_children_warning=True)
                     return
 
                 if deferred_for < DONE_CLOSE_LIVE_CHILD_GRACE_S:
@@ -7102,6 +7132,11 @@ class Orchestrator(
                     deferred_for_s=int(deferred_for),
                     children=names[:10],
                 )
+                # #604: same reasoning as the idle short-circuit above — the
+                # deferred notice already covered this episode; don't repeat
+                # it as a second "closing" message for the same live children.
+                self.close(from_role, project=project_ns, suppress_live_children_warning=True)
+                return
             self.close(from_role, project=project_ns)
 
         if getattr(self, "_pending_assignments", {}).get(key):

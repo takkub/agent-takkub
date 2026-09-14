@@ -509,6 +509,61 @@ class TestSharedTreePaneDigestFacts:
         assert "shared tree" in facts.merge_note
         assert "path/mtime/size" in facts.files_note
 
+    def test_missing_dirty_baseline_falls_back_to_live_status_not_unverifiable(
+        self, orch, monkeypatch
+    ):
+        """#601: a resume/reroute can leave `assign_dirty_snapshot` None even
+        though cwd/base_sha/git_root are all fine — that must fall back to a
+        live `git status` count (with a caveat noting no pre-assign baseline
+        exists), not the blanket "ตรวจไม่ได้" a genuinely non-git/no-HEAD
+        pane gets."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "reviewer", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::reviewer"] = PaneState(
+            last_assigned_task="review #601",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot=None,
+        )
+
+        class _SharedFake:
+            def current_branch(self, cwd):
+                return "main"
+
+            def diffstat_since(self, cwd, base_sha):
+                assert base_sha == "abc123"
+                return " deploy/x.yaml | 2 +-"
+
+            def commits_since(self, cwd, base_sha):
+                return 1
+
+            def shared_tree_status_porcelain(self, cwd):
+                return "?? src/new.py\n"
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _SharedFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("reviewer", note="done", project=proj)
+
+        facts = next(
+            kw["digest_facts"] for notice, kw in captured if notice.startswith("[reviewer")
+        )
+        assert facts.commits_ahead == 1
+        # deploy/x.yaml (committed) + src/new.py (currently dirty, no
+        # baseline to exclude it against) — a real number, not None.
+        assert facts.files_touched == 2
+        assert "ไม่มี dirty snapshot" in facts.files_note
+        assert "ตรวจไม่ได้" not in facts.files_note
+        # No baseline means "unrelated" can't be claimed either way.
+        assert facts.uncommitted_unrelated is False
+
     def test_all_dirty_predates_assign_flags_uncommitted_unrelated(self, orch, monkeypatch):
         """#546: a real incident — an ops/devops report on a shared tree
         showed "⚠3 ไฟล์ยังไม่ commit" for files another pane/Lead had
