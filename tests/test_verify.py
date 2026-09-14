@@ -152,6 +152,35 @@ def test_node_test_script_turbo_chained_command_forces_full_output(tmp_path: Pat
     assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
 
 
+def test_node_test_script_npx_turbo_forces_full_output(tmp_path: Path) -> None:
+    """#605 L3: `npx turbo ...` is still turbo, even though the first word
+    isn't literally `turbo`."""
+    _pkg(tmp_path, {"test": "npx turbo run test"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
+
+
+def test_node_test_script_pnpm_exec_turbo_forces_full_output(tmp_path: Path) -> None:
+    """#605 L3: `pnpm exec turbo ...` must also be detected."""
+    _pkg(tmp_path, {"test": "pnpm exec turbo run test"})
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
+
+
+def test_node_test_script_pnpm_turbo_direct_forces_full_output(tmp_path: Path) -> None:
+    """#605 L3: `pnpm turbo ...` (direct bin invocation, no `exec`) must
+    also be detected — as well as `yarn exec turbo ...`."""
+    _pkg(tmp_path, {"test": "pnpm turbo run test"})
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    checks = detect_stack(tmp_path)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[-3:] == ["--", "--output-logs=full", "--force"]
+
+
 def test_node_typecheck_script_runs_before_test(tmp_path: Path) -> None:
     _pkg(tmp_path, {"test": "vitest run", "typecheck": "tsc --noEmit"})
     (tmp_path / "yarn.lock").write_text("")
