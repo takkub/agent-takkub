@@ -1372,6 +1372,16 @@ def resolve_auto_assign_mode(
     )
 
 
+def _pane_quota_stalled(orch: object, project: str, role: str, now: float) -> bool:
+    """Module-level so callers that only have a lightweight/fake orchestrator
+    (no `_pane_quota_stalled` method bound, e.g. tests double-ing with
+    `types.SimpleNamespace`) can still evaluate the #596 quota-stall check —
+    see `Orchestrator._pane_quota_stalled` for the real-incident rationale.
+    Tolerant of a missing `_pane_state` attribute (defaults to not-stalled)."""
+    ps = getattr(orch, "_pane_state", {}).get(f"{project}::{role}")
+    return ps is not None and ps.rate_limited_until > now
+
+
 class Orchestrator(
     PipelineMixin, LeadInboxMixin, LeadWaitMixin, SpawnEngineMixin, AutoResumeMixin, QObject
 ):
@@ -9755,7 +9765,7 @@ class Orchestrator(
             # pane.state == "working" (nothing ever demotes it) — exclude it
             # here so pane_guard's machine-busy gate doesn't block an
             # otherwise-idle machine on a pane that physically cannot run.
-            and not self._pane_quota_stalled(project, e["role"], now)
+            and not _pane_quota_stalled(self, project, e["role"], now)
         ]
         return {"projects": projects, "working_panes": working_panes}
 
@@ -10242,7 +10252,7 @@ class Orchestrator(
             # #596: exclude a pane quota-stalled at this exact instant — see
             # `_pane_quota_stalled` docstring for the real-incident evidence
             # (machine-busy gate blocking an unrelated command).
-            and not self._pane_quota_stalled(project, role, now)
+            and not _pane_quota_stalled(self, project, role, now)
         )
         changed = working_panes != getattr(self, "_machine_state_last_working", None)
         due = (
@@ -12861,8 +12871,7 @@ class Orchestrator(
         it as busy. Real incident: `pane_guard`'s machine-busy gate read a
         quota-stalled pane as "other pane working" and blocked an unrelated
         `npx tsc` Lead was trying to run on an otherwise-idle machine."""
-        ps = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
-        return ps is not None and ps.rate_limited_until > now
+        return _pane_quota_stalled(self, project, role, now)
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave
