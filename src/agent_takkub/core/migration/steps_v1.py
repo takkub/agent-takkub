@@ -344,7 +344,10 @@ class RoleAgentMigrationStep:
         skip_routing = self._routing_retired()
         try:
             if skip_registry:
-                pass  # V1 source archived — keep the existing registry
+                # #605 M1: V1 source archived — keep the existing registry,
+                # but still back it up so rollback has something to
+                # restore instead of deleting the "kept" data.
+                self.backups.backup(f"{self.step_id}__registry", self._custom_roles_target())
             else:
                 reg_target = self._custom_roles_target()
                 self.backups.backup(f"{self.step_id}__registry", reg_target)
@@ -359,7 +362,8 @@ class RoleAgentMigrationStep:
                 )
 
             if skip_routing:
-                pass  # V1 source archived — keep the existing routing.json
+                # #605 M1: same as skip_registry above.
+                self.backups.backup(f"{self.step_id}__routing", self._routing_target())
             else:
                 routing_target = self._routing_target()
                 self.backups.backup(f"{self.step_id}__routing", routing_target)
@@ -419,13 +423,20 @@ class RoleAgentMigrationStep:
 
     def rollback(self) -> StepReport:
         try:
-            for key, target in (
-                (f"{self.step_id}__registry", self._custom_roles_target()),
-                (f"{self.step_id}__routing", self._routing_target()),
+            for key, target, retired in (
+                (
+                    f"{self.step_id}__registry",
+                    self._custom_roles_target(),
+                    self._registry_retired(),
+                ),
+                (f"{self.step_id}__routing", self._routing_target(), self._routing_retired()),
             ):
                 backup = self.backups.latest_backup(key, target.name)
                 if backup is None:
-                    target.unlink(missing_ok=True)
+                    if not retired:
+                        target.unlink(missing_ok=True)
+                    # else: #605 M1 — retired ("kept") target never backed
+                    # up (e.g. backup dir pruned externally); preserve it.
                 else:
                     self.backups.restore(backup, target)
             for role_name, _src, dest in self._role_md_pairs():
@@ -531,6 +542,9 @@ class ProjectMigrationStep:
             # #605: V1 source already archived, but the registry already
             # holds real migrated project data — `self._load()` below
             # would read `{}` and overwrite it with an empty registry.
+            # M1: still back it up so rollback has something to restore
+            # instead of deleting the "kept" data it exists to protect.
+            self.backups.backup(f"{self.step_id}__registry", self._registry_target())
             return StepReport(
                 self.step_id,
                 "apply",
@@ -596,6 +610,10 @@ class ProjectMigrationStep:
 
     def rollback(self) -> StepReport:
         data = self._load()
+        # #605 M1: when the V1 source is retired, `apply()` keeps the
+        # registry untouched rather than deleting it on a backup-miss —
+        # same "kept" protection as the other migration steps.
+        retired = self.source_retired()
         try:
             for key, target in [
                 (f"{self.step_id}__registry", self._registry_target()),
@@ -606,7 +624,8 @@ class ProjectMigrationStep:
             ]:
                 backup = self.backups.latest_backup(key, target.name)
                 if backup is None:
-                    target.unlink(missing_ok=True)
+                    if not retired:
+                        target.unlink(missing_ok=True)
                 else:
                     self.backups.restore(backup, target)
         except OSError as e:

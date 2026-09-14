@@ -411,6 +411,34 @@ def test_project_apply_keeps_registry_when_v1_source_gone_and_target_populated(
     assert read_json(registry_path) == registry_before  # not wiped to {"projects": {}}
 
 
+def test_project_rollback_after_kept_apply_preserves_registry_byte_identical(
+    v1_homes, journal_backups
+):
+    """#605 M1: a "kept" target (V1 source retired) must survive a
+    rollback byte-identical, not get deleted because the kept branch
+    never took a backup for it to restore from."""
+    data_home, _settings_home = v1_homes
+    journal, backups = journal_backups
+    (data_home / "projects.json").write_text(
+        json.dumps({"projects": {"demo": {"paths": {"web": "/tmp/web"}}}}), encoding="utf-8"
+    )
+    step = ProjectMigrationStep(journal=journal, backups=backups, data_home=data_home)
+    _apply_only(step)
+
+    layout = storage_layout_v2(data_home)
+    registry_path = layout.projects_root / "registry.json"
+    registry_bytes_before = registry_path.read_bytes()
+
+    (data_home / "projects.json").unlink()
+    assert step.source_retired() is True
+    apply_report = step.apply()
+    assert apply_report.detail.get("kept") is True
+
+    rollback_report = step.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    assert registry_path.read_bytes() == registry_bytes_before
+
+
 def test_project_apply_still_writes_empty_registry_when_nothing_was_ever_migrated(
     v1_homes, journal_backups
 ):
@@ -470,6 +498,41 @@ def test_role_agent_apply_keeps_registry_and_routing_when_v1_sources_gone(
     assert read_json(routing_path) == routing_before
 
 
+def test_role_agent_rollback_after_kept_apply_preserves_registry_and_routing(
+    v1_homes, journal_backups
+):
+    """#605 M1: same byte-identical-after-rollback guarantee for the
+    registry/routing pair `RoleAgentMigrationStep` keeps independently."""
+    data_home, settings_home = v1_homes
+    journal, backups = journal_backups
+    (settings_home / "custom-roles.json").write_text(
+        json.dumps({"researcher": {"label": "Researcher"}}), encoding="utf-8"
+    )
+    (settings_home / "role-models.json").write_text(
+        json.dumps({"backend": {"provider": "codex"}}), encoding="utf-8"
+    )
+    step = RoleAgentMigrationStep(
+        journal=journal, backups=backups, data_home=data_home, settings_home=settings_home
+    )
+    _apply_only(step)
+
+    layout = storage_layout_v2(data_home)
+    registry_path = layout.agents / "custom" / "registry.json"
+    routing_path = layout.config_dir / "routing.json"
+    registry_bytes_before = registry_path.read_bytes()
+    routing_bytes_before = routing_path.read_bytes()
+
+    (settings_home / "custom-roles.json").unlink()
+    (settings_home / "role-models.json").unlink()
+    apply_report = step.apply()
+    assert sorted(apply_report.detail.get("kept", [])) == ["registry", "routing"]
+
+    rollback_report = step.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    assert registry_path.read_bytes() == registry_bytes_before
+    assert routing_path.read_bytes() == routing_bytes_before
+
+
 def test_readonly_registries_apply_keeps_target_when_v1_source_gone(v1_homes, journal_backups):
     data_home, settings_home = v1_homes
     journal, backups = journal_backups
@@ -491,6 +554,33 @@ def test_readonly_registries_apply_keeps_target_when_v1_source_gone(v1_homes, jo
     assert apply_report.ok
     assert "provider-models" in apply_report.detail["kept"]
     assert read_json(target) == before  # not wiped
+
+
+def test_readonly_registries_rollback_after_kept_apply_preserves_target_byte_identical(
+    v1_homes, journal_backups
+):
+    """#605 M1: `RegistryCopyStep`'s own kept-branch must back up before
+    skipping, so rollback restores rather than deletes."""
+    data_home, settings_home = v1_homes
+    journal, backups = journal_backups
+    (settings_home / "provider-models.json").write_text(
+        json.dumps({"claude": "opus"}), encoding="utf-8"
+    )
+    step = build_readonly_registries_step(
+        journal, backups, data_home=data_home, settings_home=settings_home
+    )
+    _apply_only(step)
+
+    target = next(m.target for m in step.mappings if m.name == "provider-models")
+    target_bytes_before = target.read_bytes()
+
+    (settings_home / "provider-models.json").unlink()
+    apply_report = step.apply()
+    assert "provider-models" in apply_report.detail["kept"]
+
+    rollback_report = step.rollback()
+    assert rollback_report.ok, rollback_report.summary
+    assert target.read_bytes() == target_bytes_before
 
 
 # ---------------------------------------------------------------------------

@@ -199,6 +199,27 @@ def workspace_tsconfigs(cwd: Path, pkg: dict) -> list[Path]:
     ]
 
 
+_TURBO_RUNNER_PREFIXES: frozenset[str] = frozenset({"npx", "pnpm", "yarn", "bunx"})
+
+
+def _segment_uses_turbo(segment: str) -> bool:
+    """True when *segment* IS (or runs through a package-manager wrapper
+    to) `turbo` — bare `turbo ...`, `npx turbo ...`, `bunx turbo ...`,
+    `pnpm turbo ...`/`yarn turbo ...` (direct bin invocation), or
+    `pnpm exec turbo ...`/`yarn exec turbo ...` (#605 L3: the original
+    "first word is literally turbo" check missed every wrapped form)."""
+    words = segment.split()
+    if not words:
+        return False
+    if words[0] == "turbo":
+        return True
+    if words[0] not in _TURBO_RUNNER_PREFIXES or len(words) < 2:
+        return False
+    if words[1] == "turbo":
+        return True
+    return words[0] in ("pnpm", "yarn") and words[1] == "exec" and words[2:3] == ["turbo"]
+
+
 def _turbo_force_args(script_value: str) -> list[str]:
     """A `verify`/`test` script that delegates to turbo can cache-hit and
     replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
@@ -213,10 +234,11 @@ def _turbo_force_args(script_value: str) -> list[str]:
     Flagging on turbo's mere presence sent `-- --output-logs=full --force`
     into vitest/jest, which reject it as an unknown option and turn a
     healthy script into a red qa-gate. Only a command that actually IS (or
-    chains through) `turbo ...` counts.
+    chains through) `turbo ...` counts — including package-manager
+    wrappers like `npx turbo` / `pnpm exec turbo` (#605 L3).
     """
     segments = [s.strip() for s in re.split(r"&&|\|\||;", script_value) if s.strip()]
-    uses_turbo = any(seg.split(None, 1)[0:1] == ["turbo"] for seg in segments)
+    uses_turbo = any(_segment_uses_turbo(seg) for seg in segments)
     return ["--", "--output-logs=full", "--force"] if uses_turbo else []
 
 

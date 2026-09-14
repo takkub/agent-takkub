@@ -74,6 +74,9 @@ class RegistryCopyStep:
     journal: MigrationJournal = field(default_factory=MigrationJournal)
     backups: BackupManager = field(default_factory=BackupManager)
 
+    def _mapping_retired(self, mapping: RegistryMapping) -> bool:
+        return not mapping.source.exists() and _target_has_data(mapping.target)
+
     def source_retired(self) -> bool:
         """True once EVERY mapping's V1 source is gone AND its own target
         already holds real migrated data — #605: read by `MigrationEngine
@@ -87,7 +90,7 @@ class RegistryCopyStep:
         had a chance to write its (empty but valid) target — that used to
         make the engine skip this step's re-apply forever, leaving its
         target file never created at all (a real regression this fixed)."""
-        return all(not m.source.exists() and _target_has_data(m.target) for m in self.mappings)
+        return all(self._mapping_retired(m) for m in self.mappings)
 
     def _backup_key(self, mapping: RegistryMapping) -> str:
         # Composite key, not bare step_id: two mappings in the same step can
@@ -134,11 +137,15 @@ class RegistryCopyStep:
         written: list[str] = []
         kept: list[str] = []
         for m in self.mappings:
-            if not m.source.exists() and _target_has_data(m.target):
+            if self._mapping_retired(m):
                 # #605: the V1 source is already gone (archived by an
                 # earlier pass) but the V2 target still holds real
                 # migrated data — re-deriving from a missing source would
                 # write `{"data": {}}` over it, wiping it out.
+                # M1: still back up the already-correct target so
+                # rollback always has something to restore instead of
+                # deleting the "kept" data it exists to protect.
+                self.backups.backup(self._backup_key(m), m.target)
                 kept.append(m.name)
                 continue
             self.backups.backup(self._backup_key(m), m.target)
@@ -185,7 +192,11 @@ class RegistryCopyStep:
             backup = self.backups.latest_backup(self._backup_key(m), m.target.name)
             try:
                 if backup is None:
-                    m.target.unlink(missing_ok=True)
+                    if not self._mapping_retired(m):
+                        m.target.unlink(missing_ok=True)
+                    # else: #605 M1 — a retired ("kept") target that was
+                    # never backed up (e.g. backup dir pruned externally)
+                    # must be preserved, not deleted; no-op.
                 else:
                     self.backups.restore(backup, m.target)
             except OSError as e:
