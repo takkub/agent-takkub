@@ -433,23 +433,16 @@ def note_manual_roles_change(new_roles_enabled: dict, project: str | None = None
 # ─────────────────────────────────────────────────────────────────────
 
 
-def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
-    """True unless *role* is a preset-governed position/checker role that the
-    project's EFFECTIVE preset (standing or task-override) doesn't include.
-
-    ``role`` outside the preset roster entirely (providers, `shell`,
-    `critic`) always passes through untouched — see `_governed_roles`.
-    ``qa``/``reviewer`` ARE governed (both are checker-mappable): whichever
-    one is NOT the preset's active `checker` is blocked, unless it's also
-    turned on as a plain POSITION in a custom preset's roster. ``lead``
-    always passes (it's the coordinator, not something Lead "spawns").
-    ``"auto"`` never restricts (advisory-only, #512 item 5) — nothing to
-    enforce until a task override pins a concrete preset.
-    """
+def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tuple[bool, str]:
+    """Core `can_spawn` decision for an already-resolved preset *cfg* (#592
+    item 1/4) — extracted so Settings' team-size-card PREVIEW (before Save &
+    Apply changes what `current(project)` returns) can decide a role's
+    switch state with the exact same governance logic `can_spawn` uses
+    against the real persisted state, instead of drifting into a second
+    hand-rolled copy. See `can_spawn` for the full behavior contract."""
     base = role.split("#", 1)[0].strip().lower()
     if base == "lead":
         return True, ""
-    cfg = current(project)
     if cfg["preset"] == "auto":
         return True, ""
     if base not in _governed_roles(project):
@@ -486,6 +479,90 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
         f"เปลี่ยน preset ที่ Settings หรือ `takkub assign --role lead --team full` "
         "override เฉพาะงานนี้"
     )
+
+
+def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
+    """True unless *role* is a preset-governed position/checker role that the
+    project's EFFECTIVE preset (standing or task-override) doesn't include.
+
+    ``role`` outside the preset roster entirely (providers, `shell`,
+    `critic`) always passes through untouched — see `_governed_roles`.
+    ``qa``/``reviewer`` ARE governed (both are checker-mappable): whichever
+    one is NOT the preset's active `checker` is blocked, unless it's also
+    turned on as a plain POSITION in a custom preset's roster. ``lead``
+    always passes (it's the coordinator, not something Lead "spawns").
+    ``"auto"`` never restricts (advisory-only, #512 item 5) — nothing to
+    enforce until a task override pins a concrete preset.
+    """
+    return _can_spawn_from_cfg(role, current(project), project)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Role grouping (#592 item 1/4) — Roles page + Pipeline Builder palette
+# share one classification so they can never disagree on where a role
+# belongs.
+# ─────────────────────────────────────────────────────────────────────
+
+#: The three review dispatch targets folded into `reviewer --mode` by #513/
+#: #561 — always rendered as their own roster rows now (previously only
+#: whichever one happened to be the active `checker` got a row at all, so
+#: e.g. qa/critic could be fully enabled yet invisible on the Roles page).
+REVIEWER_MODE_ROLES: tuple[str, ...] = ("reviewer", "qa", "critic")
+
+#: Provider panes with no roster row of their own — never preset-governed
+#: (`can_spawn` always passes them through, see `_governed_roles`), shown as
+#: a read-only "second opinion" glance instead (`_build_secondary_brains_panel`).
+SECONDARY_BRAIN_ROLES: tuple[str, ...] = ("codex", "gemini", "opencode", "kimi", "cursor")
+
+#: Human labels for the reviewer-mode rows — qa/critic are #513's legacy
+#: dispatch names, not separate CLI concepts, so the Roles/Pipeline UI names
+#: them by what they actually run (`reviewer --mode e2e`/`--mode ui`).
+REVIEWER_MODE_LABELS: dict[str, str] = {
+    "reviewer": "Reviewer",
+    "qa": "Reviewer · e2e (QA)",
+    "critic": "Reviewer · ui (Critic)",
+}
+
+
+def role_groups(project: str | None = None) -> dict[str, tuple[str, ...]]:
+    """Classify every `pipeline_config.valid_roles()` role into the buckets
+    the Roles page (#592 item 1) and the Pipeline Builder palette/add-role
+    menu (#592 item 4) both render, so the two pages can never drift on
+    where a role belongs.
+
+    Returns an insertion-ordered dict — every `valid_roles()` member appears
+    in EXACTLY one bucket:
+
+      ``"positions"``         — team roster: `CORE_POSITION_ROLES` + every
+                                 registered custom role (order preserved).
+      ``"reviewer_modes"``    — `REVIEWER_MODE_ROLES` (reviewer/qa/critic).
+      ``"secondary_brains"``  — `SECONDARY_BRAIN_ROLES` (provider panes).
+      ``"extra_positions"``   — `EXTRA_POSITION_ROLES` (tester/analyst/
+                                 designer/docs/security) — off by default,
+                                 collapsed on the Roles page, but always
+                                 listed so a project that turned one on
+                                 still sees/toggles it.
+      ``"other"``             — anything left (``shell`` today — an ad-hoc
+                                 terminal pane, never preset-governed).
+    """
+    from .pipeline_config import valid_roles
+
+    positions = tuple(r for r in _position_roles(project) if r not in EXTRA_POSITION_ROLES)
+    extra_positions = tuple(r for r in EXTRA_POSITION_ROLES if r in _position_roles(project))
+    known = (
+        frozenset(positions)
+        | frozenset(REVIEWER_MODE_ROLES)
+        | frozenset(SECONDARY_BRAIN_ROLES)
+        | frozenset(extra_positions)
+    )
+    other = tuple(r for r in valid_roles() if r not in known)
+    return {
+        "positions": positions,
+        "reviewer_modes": REVIEWER_MODE_ROLES,
+        "secondary_brains": SECONDARY_BRAIN_ROLES,
+        "extra_positions": extra_positions,
+        "other": other,
+    }
 
 
 def settings_role_for(role: str, project: str | None = None) -> str:
@@ -604,6 +681,56 @@ def assign_resolution_line(
         f"{role_name} = reviewer --mode {alias_mode} · provider {effective_provider}"
         f"{model_part} ({source_label})\n"
     )
+
+
+def pipeline_hop_summary_lines(
+    hops: list[list[dict]] | list[list], project: str | None = None
+) -> list[str]:
+    """One line per hop describing what `pipeline_executor._fire_pipeline_hop`
+    will actually do with each of its roles (#592 item 5) — e.g. ``"hop 2:
+    QA → ใช้ค่า Reviewer (codex) · Tester ปิดอยู่ จะถูกข้าม"`` — computed BEFORE
+    a run starts instead of only showing up in the event log
+    (`pipeline_role_disabled_skip`/`pipeline_role_team_preset_skip`) after
+    the fact. Shared by the Settings Pipeline Builder (template select /
+    before clicking Run) and `takkub pipeline run`'s CLI ack
+    (`cli_server`'s ``pipeline-run`` handler) so both surfaces say the same
+    thing. Pure/read-only — never spawns anything.
+
+    A role is a "skip" exactly when `_fire_pipeline_hop` would skip it
+    (`pipeline_config.is_role_enabled` False, or `can_spawn` False). A role
+    whose settings row is actually someone else's (`settings_role_for` —
+    qa/critic deferring to Reviewer, #590) is called out as a substitution
+    instead, showing the provider that row will actually spawn with
+    (`provider_config.effective_provider_for`, degradation-aware).
+    """
+    from . import provider_config
+    from .pipeline_config import is_role_enabled
+    from .roles import by_name as _role_by_name
+
+    def _label(role: str) -> str:
+        r = _role_by_name(role)
+        return r.label if r else role.capitalize()
+
+    lines: list[str] = []
+    for hop_idx, hop in enumerate(hops, start=1):
+        parts: list[str] = []
+        for entry in hop:
+            role = (entry.get("role") if isinstance(entry, dict) else None) or ""
+            if not role:
+                continue
+            base_label = _label(role)
+            if not is_role_enabled(role, project) or not can_spawn(role, project)[0]:
+                parts.append(f"{base_label} ปิดอยู่ จะถูกข้าม")
+                continue
+            settings_role = settings_role_for(role, project)
+            if settings_role != role:
+                provider = provider_config.effective_provider_for(settings_role, project)
+                parts.append(f"{base_label} → ใช้ค่า {_label(settings_role)} ({provider})")
+            else:
+                provider = provider_config.effective_provider_for(role, project)
+                parts.append(f"{base_label} ({provider})")
+        lines.append(f"hop {hop_idx}: " + " · ".join(parts))
+    return lines
 
 
 def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]]:

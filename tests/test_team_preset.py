@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_takkub import team_preset
+from agent_takkub import pipeline_config, team_preset
 
 
 @pytest.fixture(autouse=True)
@@ -445,3 +445,123 @@ class TestStaleLegacyRoleConfigs:
         stale = team_preset.stale_legacy_role_configs("proj")
 
         assert {"role": "critic", "provider": "gemini", "model": ""} in stale
+
+
+class TestRoleGroups:
+    """#592 item 1/4 — every `pipeline_config.valid_roles()` member lands in
+    exactly one `role_groups()` bucket, so the Roles page and the Pipeline
+    Builder palette can't silently disagree on where a role belongs."""
+
+    def test_every_valid_role_appears_exactly_once(self):
+        groups = team_preset.role_groups("proj")
+        seen: list[str] = []
+        for bucket in groups.values():
+            seen.extend(bucket)
+        assert sorted(seen) == sorted(set(seen)), "a role appeared in more than one bucket"
+        assert set(seen) == set(pipeline_config.valid_roles())
+
+    def test_reviewer_modes_bucket_is_always_all_three(self):
+        team_preset.set_current("solo-lead", "proj")
+        assert team_preset.role_groups("proj")["reviewer_modes"] == ("reviewer", "qa", "critic")
+
+    def test_extra_positions_bucket_always_lists_all_five_regardless_of_on_off(self):
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": {"tester": True}, "checker": "reviewer"},
+        )
+        assert set(team_preset.role_groups("proj")["extra_positions"]) == set(
+            team_preset.EXTRA_POSITION_ROLES
+        )
+
+    def test_shell_lands_in_other_not_dropped(self):
+        assert "shell" in team_preset.role_groups("proj")["other"]
+
+    def test_custom_role_lands_in_positions(self):
+        from agent_takkub import roles as roles_mod
+
+        roles_mod.register_role(roles_mod.Role("maintainer", "Maintainer", "#94a3b8", 1, 5))
+        try:
+            groups = team_preset.role_groups("proj")
+            assert "maintainer" in groups["positions"]
+            assert "maintainer" not in groups["extra_positions"]
+        finally:
+            roles_mod.unregister_role("maintainer")
+
+
+class TestCanSpawnFromCfg:
+    """#592 item 1 — `_can_spawn_from_cfg` is the extracted core `can_spawn`
+    itself now delegates to; a preview cfg (Settings' team-size-card click,
+    before Save & Apply) must decide identically to the real thing."""
+
+    def test_matches_can_spawn_for_the_standing_preset(self):
+        team_preset.set_current("full", "proj")
+        cfg = team_preset.current("proj")
+        for role in ("backend", "reviewer", "qa", "tester", "critic", "lead"):
+            assert team_preset._can_spawn_from_cfg(role, cfg, "proj") == team_preset.can_spawn(
+                role, "proj"
+            )
+
+    def test_previews_a_not_yet_saved_preset(self):
+        team_preset.set_current("auto", "proj")
+        preview_cfg = team_preset.resolve("solo-lead", "proj")
+        # Real state ("auto") never blocks; the solo-lead PREVIEW must.
+        assert team_preset.can_spawn("backend", "proj")[0] is True
+        assert team_preset._can_spawn_from_cfg("backend", preview_cfg, "proj")[0] is False
+
+
+class TestPipelineHopSummaryLines:
+    """#592 item 5 — a pre-run summary naming a skip or a Reviewer-row
+    substitution before the pipeline actually starts, matching what
+    `pipeline_executor._fire_pipeline_hop` would really do."""
+
+    def test_plain_hop_shows_role_and_provider(self):
+        team_preset.set_current("full", "proj")
+        lines = team_preset.pipeline_hop_summary_lines([[{"role": "backend"}]], "proj")
+        assert lines == ["hop 1: Backend (claude)"]
+
+    def test_disabled_role_reads_as_skip(self):
+        from agent_takkub import pipeline_config
+
+        team_preset.set_current("full", "proj")
+        pipeline_config.save({"rolesEnabled": {"tester": False}}, "proj")
+        lines = team_preset.pipeline_hop_summary_lines([[{"role": "tester"}]], "proj")
+        assert lines == ["hop 1: Tester ปิดอยู่ จะถูกข้าม"]
+
+    def test_role_not_in_team_preset_reads_as_skip(self):
+        team_preset.set_current("solo-lead", "proj")
+        lines = team_preset.pipeline_hop_summary_lines([[{"role": "backend"}]], "proj")
+        assert lines == ["hop 1: Backend ปิดอยู่ จะถูกข้าม"]
+
+    def test_qa_shows_reviewer_substitution_with_its_provider(self):
+        from agent_takkub import pipeline_config, role_models
+
+        team_preset.set_current("full", "proj")
+        role_models.set_provider("reviewer", "codex")
+        pipeline_config.save({"rolesEnabled": {"tester": False}}, "proj")
+
+        lines = team_preset.pipeline_hop_summary_lines(
+            [[{"role": "qa"}, {"role": "tester"}]], "proj"
+        )
+
+        assert lines == ["hop 1: QA → ใช้ค่า Reviewer (codex) · Tester ปิดอยู่ จะถูกข้าม"]
+
+    def test_hop_numbering_is_one_based(self):
+        team_preset.set_current("full", "proj")
+        lines = team_preset.pipeline_hop_summary_lines(
+            [[{"role": "backend"}], [{"role": "devops"}]], "proj"
+        )
+        assert lines[0].startswith("hop 1:")
+        assert lines[1].startswith("hop 2:")
+
+    def test_matches_the_builtin_feature_template(self):
+        """Sanity check against the real seeded template, not a hand-built
+        hop list — catches a shape mismatch `_builtin_templates()` might
+        introduce that a synthetic fixture wouldn't."""
+        from agent_takkub import pipeline_config
+
+        team_preset.set_current("full", "proj")
+        tpl = next(t for t in pipeline_config._builtin_templates() if t["id"] == "feature")
+        lines = team_preset.pipeline_hop_summary_lines(tpl["hops"], "proj")
+        assert len(lines) == len(tpl["hops"])
+        assert all(line.startswith(f"hop {i + 1}:") for i, line in enumerate(lines))

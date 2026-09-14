@@ -1442,6 +1442,27 @@ class CliServer(QObject):
                 if not pre_ok:
                     self._reply(sock, ok=False, msg=pre_msg)
                     return
+                # #592 item 5: name every skip (disabled role / not in the
+                # project's team preset) and every Reviewer-row substitution
+                # (qa/critic, #590) BEFORE the run starts, not just in the
+                # event log after `_fire_pipeline_hop` hits them.
+                from . import pipeline_config as _pipeline_config
+                from . import team_preset as _team_preset
+
+                tpl = next(
+                    (
+                        t
+                        for t in _pipeline_config.load(project=from_project).get("templates", [])
+                        if t["id"] == template_id
+                    ),
+                    None,
+                )
+                summary_lines = (
+                    _team_preset.pipeline_hop_summary_lines(tpl["hops"], from_project)
+                    if tpl is not None
+                    else []
+                )
+                summary_text = ("\n" + "\n".join(summary_lines)) if summary_lines else ""
                 pl_delay = self._next_spawn_delay_ms(None, from_project)
                 self._fire_staggered(
                     pl_delay,
@@ -1451,7 +1472,9 @@ class CliServer(QObject):
                     ),
                 )
                 self._reply(
-                    sock, ok=True, msg=f"pipeline {template_id!r} starting (async, +{pl_delay}ms)"
+                    sock,
+                    ok=True,
+                    msg=f"pipeline {template_id!r} starting (async, +{pl_delay}ms){summary_text}",
                 )
                 return
             elif cmd == "preview":

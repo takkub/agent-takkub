@@ -1467,3 +1467,50 @@ class TestCliServerPipelineRoute:
         req = {"cmd": "pipeline-run", "template_id": "", "from": "lead"}
         template_id = (req.get("template_id") or "").strip()
         assert not template_id  # ensures the guard fires
+
+    def test_pipeline_run_ack_includes_hop_summary(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#592 item 5: the CLI ack for `takkub pipeline run` names a
+        Reviewer-row substitution and a disabled-role skip BEFORE the run
+        starts, not just in the event log after `_fire_pipeline_hop` hits
+        them — same wording `team_preset.pipeline_hop_summary_lines`
+        produces, computed against the project `from_project` scopes."""
+        from agent_takkub import pipeline_config, role_models, team_preset
+        from agent_takkub.cli_server import CliServer
+
+        from ._qt_timer_leak_guard import stop_timers_after
+
+        finalize = stop_timers_after(monkeypatch, CliServer, "shutdown_timers")
+
+        team_preset.set_current("full", "proj-x")
+        role_models.set_provider("reviewer", "codex")
+        pipeline_config.save({"rolesEnabled": {"devops": False}}, "proj-x")
+
+        orch = MagicMock()
+        orch._lead_token = "tok"
+        orch.pipeline_precheck.return_value = (True, "ok")
+
+        srv = CliServer(orch)
+        written: list[dict] = []
+        monkeypatch.setattr(
+            srv, "_reply", lambda s, ok, msg, **kw: written.append({"ok": ok, "msg": msg})
+        )
+
+        srv._dispatch(
+            MagicMock(),
+            {
+                "cmd": "pipeline-run",
+                "template_id": "feature",
+                "from": "lead",
+                "auth": "tok",
+                "from_project": "proj-x",
+            },
+        )
+
+        assert written and written[0]["ok"] is True
+        msg = written[0]["msg"]
+        assert "starting" in msg
+        assert "hop 2: DevOps ปิดอยู่ จะถูกข้าม" in msg
+        assert "hop 3: QA → ใช้ค่า Reviewer (codex)" in msg
+        finalize()
