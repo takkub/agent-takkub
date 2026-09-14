@@ -315,3 +315,133 @@ def test_resolve_ignores_active_override():
 def test_resolve_rejects_unknown_preset():
     with pytest.raises(ValueError):
         team_preset.resolve("nope", "proj")
+
+
+class TestSettingsRoleFor:
+    """#590: qa/critic must resolve provider/model/effort through whichever
+    role the Settings roster actually renders a row for."""
+
+    def test_qa_defers_to_reviewer_under_default_full_preset(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+
+    def test_critic_always_defers_to_reviewer(self):
+        # critic has no CHECKER_ROLES entry — no preset can ever point the
+        # roster at it, so it always defers regardless of checker choice.
+        team_preset.set_current("full", "proj")
+        assert team_preset.settings_role_for("critic", "proj") == "reviewer"
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+        assert team_preset.settings_role_for("critic", "proj") == "reviewer"
+
+    def test_qa_keeps_own_row_when_checker_is_explicitly_qa(self):
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+        assert team_preset.settings_role_for("qa", "proj") == "qa"
+
+    def test_reviewer_and_unrelated_roles_pass_through_unchanged(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.settings_role_for("reviewer", "proj") == "reviewer"
+        assert team_preset.settings_role_for("backend", "proj") == "backend"
+        assert team_preset.settings_role_for("lead", "proj") == "lead"
+
+    def test_defers_under_auto_and_solo_lead_presets_too(self):
+        # "auto" resolves checker="reviewer" (see _resolve); solo-lead has no
+        # checker at all — neither equals "qa", so both defer to reviewer.
+        team_preset.set_current("auto", "proj")
+        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+        team_preset.set_current("solo-lead", "proj")
+        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+
+
+class TestPaneDisplayLabel:
+    """#590 item A: qa/critic panes label themselves after reviewer's mode
+    instead of a bare "QA"/"Design Critic", unless checker=qa keeps qa's
+    own row."""
+
+    def test_qa_labels_as_reviewer_e2e_under_default_checker(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.pane_display_label("qa", "QA", "proj") == "Reviewer · e2e"
+
+    def test_critic_labels_as_reviewer_ui_regardless_of_checker(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.pane_display_label("critic", "Design Critic", "proj") == "Reviewer · ui"
+
+    def test_qa_keeps_own_label_when_checker_is_explicitly_qa(self):
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+        assert team_preset.pane_display_label("qa", "QA", "proj") == "QA"
+
+    def test_other_roles_pass_through_unchanged(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.pane_display_label("backend", "Backend", "proj") == "Backend"
+        assert team_preset.pane_display_label("reviewer", "Reviewer", "proj") == "Reviewer"
+
+
+class TestStaleLegacyRoleConfigs:
+    """#590 item C: qa/critic entries the roster no longer renders a row
+    for, but are still on disk — surfaced for Settings, never deleted."""
+
+    def test_reports_global_qa_entry_unused_under_default_checker(self):
+        from agent_takkub import role_models
+
+        role_models.set_provider("qa", "gemini")
+        team_preset.set_current("full", "proj")
+
+        stale = team_preset.stale_legacy_role_configs("proj")
+
+        assert {"role": "qa", "provider": "gemini", "model": ""} in stale
+
+    def test_project_override_wins_over_global_entry(self):
+        from agent_takkub import provider_config, role_models
+
+        role_models.set_provider("qa", "gemini")
+        routing = provider_config._read_routing()
+        routing["projects"]["proj"] = {"qa": "opencode"}
+        provider_config._write_routing(routing["global"], routing["projects"])
+        team_preset.set_current("full", "proj")
+
+        stale = team_preset.stale_legacy_role_configs("proj")
+
+        assert {"role": "qa", "provider": "opencode", "model": ""} in stale
+
+    def test_nothing_stale_when_no_legacy_entry_exists(self):
+        team_preset.set_current("full", "proj")
+        assert team_preset.stale_legacy_role_configs("proj") == []
+
+    def test_qa_entry_not_stale_when_checker_is_explicitly_qa(self):
+        from agent_takkub import role_models
+
+        role_models.set_provider("qa", "gemini")
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+
+        stale = team_preset.stale_legacy_role_configs("proj")
+
+        assert stale == []
+
+    def test_critic_entry_always_reportable_since_it_never_gets_its_own_row(self):
+        from agent_takkub import role_models
+
+        role_models.set_provider("critic", "gemini")
+        team_preset.set_current(
+            "custom",
+            "proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+
+        stale = team_preset.stale_legacy_role_configs("proj")
+
+        assert {"role": "critic", "provider": "gemini", "model": ""} in stale

@@ -488,5 +488,105 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     )
 
 
+def settings_role_for(role: str, project: str | None = None) -> str:
+    """The role whose Settings -> Providers & Roles row actually governs
+    *role*'s provider/model/effort at spawn time (#590).
+
+    ``qa``/``critic`` are #513's legacy dispatch targets for ``reviewer
+    --mode e2e``/``--mode ui`` (see `routing_planner.resolve_role_alias`),
+    but the roster only ever renders a settings row for the active preset
+    checker — ``reviewer`` on every built-in preset since #513, or an
+    explicit ``custom`` choice of ``checker="qa"`` — never for ``critic``
+    (`CHECKER_ROLES` has no ``critic`` entry, so no preset can ever point
+    the roster at it). A ``qa``/``critic`` pane resolving its own bare
+    config key therefore silently ran on a provider/model/effort a user
+    could see in ``routing.json``/``role-models.json`` but had no roster
+    row left to edit or even notice.
+
+    Returns *role* unchanged for ``reviewer`` itself and for any role
+    outside this alias pair. Also unchanged when *role*'s own alias IS the
+    active checker (custom ``checker="qa"``) — that's the one case the
+    roster does show a settings row for the alias itself.
+    """
+    from .routing_planner import resolve_role_alias
+
+    base = (role or "").strip().lower()
+    canonical, _mode = resolve_role_alias(base)
+    if canonical != "reviewer" or base == "reviewer":
+        return role
+    if current(project).get("checker") == base:
+        return role
+    return "reviewer"
+
+
+def pane_display_label(role: str, base_label: str, project: str | None = None) -> str:
+    """The pane tab/header label for *role* (#590 item A): ``"Reviewer ·
+    e2e"``/``"Reviewer · ui"`` for a qa/critic pane whose provider/model/
+    effort defers to reviewer's Settings row (see `settings_role_for`),
+    else *base_label* unchanged — e.g. a custom preset with
+    ``checker="qa"`` keeps qa's own ``"QA"`` label since Settings shows it
+    its own row in that case. Shard suffixes are the caller's job; this
+    only decides the base text. Internal role identity is never touched —
+    display only.
+    """
+    base = (role or "").strip().lower()
+    if base in {"qa", "critic"} and settings_role_for(base, project) == "reviewer":
+        from .routing_planner import resolve_role_alias
+
+        _, alias_mode = resolve_role_alias(base)
+        return f"Reviewer · {alias_mode}"
+    return base_label
+
+
+def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]]:
+    """#590 item C: `qa`/`critic` entries still sitting in `routing.json`
+    (this project's bucket, or the global bucket) or `role-models.json`
+    that `settings_role_for` no longer consults — configured but silently
+    unused since the roster stopped rendering a row for them. Returns
+    ``[{"role": "qa", "provider": "gemini", "model": "..."}, ...]`` (model
+    empty when the entry is a bare provider override) for Settings to
+    surface as a small notice under the Reviewer row. Read-only — never
+    deletes or migrates the underlying config.
+
+    Checked in order: this project's `routing.json` entry, then the
+    global `routing.json` entry (#590 follow-up — a pre-#513 global
+    override, like a prod install carrying ``global.qa`` with no matching
+    `role-models.json` entry, was silently skipped before since only the
+    project bucket was read), then `role-models.json` for a model to pair
+    with whichever provider was found (or as the provider itself, when
+    routing.json has nothing for this role).
+
+    A stale entry that already matches what Reviewer's row would spawn
+    (same provider *and* model) is dropped — nothing to flag, since the
+    role is already effectively running what the roster shows."""
+    from . import provider_config, role_models
+
+    out: list[dict[str, str]] = []
+    routing = provider_config._read_routing()
+    for role in ("qa", "critic"):
+        if settings_role_for(role, project) == role:
+            continue  # this IS the row Settings shows — nothing stale
+        provider = ""
+        if project:
+            provider = str(routing["projects"].get(project, {}).get(role, "")).strip()
+        if not provider:
+            provider = str(routing["global"].get(role, "")).strip()
+        raw = role_models.raw_model_for(role)
+        model = ""
+        if provider:
+            if raw and raw[0] == provider:
+                model = raw[1]
+        elif raw:
+            provider, model = raw
+        if not provider:
+            continue
+        reviewer_provider = provider_config.provider_for("reviewer", project)
+        reviewer_model = role_models.model_for("reviewer", reviewer_provider) or ""
+        if (provider, model) == (reviewer_provider, reviewer_model):
+            continue  # already what Reviewer uses — nothing to flag
+        out.append({"role": role, "provider": provider, "model": model})
+    return out
+
+
 def lead_may_implement(project: str | None = None) -> bool:
     return bool(current(project).get("lead_may_implement", False))

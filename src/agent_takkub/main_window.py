@@ -737,16 +737,38 @@ class MainWindow(
                 column=2,
                 row=99,
             )
-        elif shard_idx_mw is not None:
-            # Shard: keep base role's color/position but give it the pane_key
-            # as name so the registry stores it under "qa#1", not "qa".
-            role = Role(
-                name=role_name,
-                label=f"{role.label}#{shard_idx_mw}",
-                color=role.color,
-                column=role.column,
-                row=role.row,
+        else:
+            # #590: a qa/critic pane displays as "Reviewer · e2e"/"Reviewer
+            # · ui" (reviewer --mode e2e/ui's legacy dispatch targets)
+            # instead of a bare "QA"/"Design Critic" label, unless a custom
+            # preset's checker is explicitly this role itself — the one
+            # case Settings still shows it its own row for. Internal
+            # identity (role_name/base_role_mw, ledger/events/MCP policy)
+            # is untouched; only this display label changes.
+            from . import team_preset as _team_preset_mw
+
+            display_label = _team_preset_mw.pane_display_label(
+                base_role_mw, role.label, tab.project_name
             )
+            if shard_idx_mw is not None:
+                # Shard: keep base role's color/position but give it the pane_key
+                # as name so the registry stores it under "qa#1", not "qa".
+                sep = " #" if display_label != role.label else "#"
+                role = Role(
+                    name=role_name,
+                    label=f"{display_label}{sep}{shard_idx_mw}",
+                    color=role.color,
+                    column=role.column,
+                    row=role.row,
+                )
+            elif display_label != role.label:
+                role = Role(
+                    name=role.name,
+                    label=display_label,
+                    color=role.color,
+                    column=role.column,
+                    row=role.row,
+                )
 
         pane = AgentPane(role)
         # close routing: AgentPane.closeRequested (pane header ×) AND the

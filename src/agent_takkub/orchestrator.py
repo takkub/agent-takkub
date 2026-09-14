@@ -3040,6 +3040,12 @@ class Orchestrator(
         raw_task_for_ledger = task
         task = self._apply_session_goal(task, project_ns)
         base_role_a = _split_shard(role_name)[0]
+        # #590: qa/critic resolve provider (and, below, the CLI-visible
+        # resolution line) against whichever role the Settings roster
+        # actually shows a row for — see team_preset.settings_role_for.
+        from . import team_preset as _team_preset_a
+
+        settings_role_a = _team_preset_a.settings_role_for(base_role_a, project_ns)
         # Fetched early (normally computed further down, right before spawn)
         # so an explicit --provider (#270) can be validated against
         # pane_is_running and folded into `effective_provider` BEFORE it's
@@ -3066,7 +3072,7 @@ class Orchestrator(
             and provider
             != (
                 ps_assign.provider_override
-                or effective_provider_for(base_role_a, project=project_ns)
+                or effective_provider_for(settings_role_a, project=project_ns)
             )
         ):
             self._notify_lead(
@@ -3093,7 +3099,7 @@ class Orchestrator(
             # the very next spawn anyway; this just does it one call sooner.
             ps_assign.provider_override = provider
         effective_provider = ps_assign.provider_override or effective_provider_for(
-            base_role_a, project=project_ns
+            settings_role_a, project=project_ns
         )
         # #572: `effective_provider_for` above may have silently substituted
         # away from base_role_a's configured provider because it's recorded
@@ -3109,7 +3115,7 @@ class Orchestrator(
         if not ps_assign.provider_override:
             from .provider_config import provider_quota_skip_info
 
-            skip_info = provider_quota_skip_info(base_role_a, project=project_ns)
+            skip_info = provider_quota_skip_info(settings_role_a, project=project_ns)
             if skip_info is not None:
                 skip_from, skip_to, skip_reset_at = skip_info
                 skip_human = (
@@ -3387,6 +3393,36 @@ class Orchestrator(
             initial_delivery_reason = "provider-unsupported (by design)"
         else:
             initial_delivery_reason = "pane-already-running"
+        # #590: surface which role's Settings row actually backed this
+        # spawn's provider/model, and why — before this, `takkub assign
+        # --role qa` (or `--role reviewer --mode e2e`) gave no clue whether
+        # a stale/invisible qa/critic entry or the reviewer row picked the
+        # provider.
+        from .core.routing import effective_model_for_v2 as _effective_model_for_v2_a
+        from .routing_planner import resolve_role_alias as _resolve_role_alias_a
+
+        provider_source = (
+            "override"
+            if (provider or ps_assign.provider_override)
+            else ("reviewer_row" if settings_role_a != base_role_a else "own_row")
+        )
+        resolution_line = ""
+        if base_role_a in {"qa", "critic"}:
+            _, _alias_mode_a = _resolve_role_alias_a(base_role_a)
+            _resolved_model_a = model or (
+                _effective_model_for_v2_a(settings_role_a, effective_provider, project=project_ns)
+                or ""
+            )
+            _source_label_a = {
+                "override": "ตาม --provider ที่ระบุ",
+                "reviewer_row": "ตามแถว Reviewer",
+                "own_row": f"ตามแถว {base_role_a.upper()}",
+            }[provider_source]
+            _model_part_a = f" / {_resolved_model_a}" if _resolved_model_a else ""
+            resolution_line = (
+                f"{role_name} = reviewer --mode {_alias_mode_a} · provider {effective_provider}"
+                f"{_model_part_a} ({_source_label_a})\n"
+            )
         if plan and shard_total > 0:
             # Planner wrapping happened before spawn so a fresh Claude pane can
             # receive the complete planner task in its one-shot system prompt.
@@ -3407,8 +3443,12 @@ class Orchestrator(
                 initial_delivery=initial_delivery,
                 initial_delivery_reason=initial_delivery_reason,
                 effective_provider=effective_provider,
+                provider_source=provider_source,
             )
-            return True, f"planner queued for {role_name} (fan-out {shard_total} on done)"
+            return (
+                True,
+                f"{resolution_line}planner queued for {role_name} (fan-out {shard_total} on done)",
+            )
         if shard_total > 0:
             ps_assign.shard_total = shard_total
             # Create/update shard group for aggregate tracking.
@@ -3442,8 +3482,9 @@ class Orchestrator(
             model_override=model,
             provider_override=provider,
             effort_override=effort,
+            provider_source=provider_source,
         )
-        return True, f"task queued for {role_name} (sending when ready)"
+        return True, f"{resolution_line}task queued for {role_name} (sending when ready)"
 
     def worktree_assign_inputs(
         self,

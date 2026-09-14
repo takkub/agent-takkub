@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import argparse
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
@@ -313,3 +314,201 @@ class TestCodexDiffRouting:
         assert act.kind == routing_planner.ActionKind.INFORMATIONAL
         assert "reviewer" in act.reason
         assert "ถูกปิด" in act.reason or "disabled" in act.reason
+
+
+class TestQaCriticSpawnResolvesReviewerSettingsRole590:
+    """#590 end-to-end regression: a `qa`/`critic` pane's actual spawn()
+    call must resolve provider/model/effort against `reviewer`'s Settings
+    entry (the only row the roster renders), not its own stale/invisible
+    key — unless a custom preset's checker is explicitly `qa` itself."""
+
+    @staticmethod
+    def _spawn_role(
+        orch: orchestrator.Orchestrator,
+        tmp_path: Path,
+        role: str,
+        *,
+        provider_side_effect,
+    ) -> list[str]:
+        """Drives a real `spawn()` call for *role* with every claude-branch
+        side effect mocked out (mirrors test_provider_override.py's
+        `_spawn_backend`), recording which role name each
+        `effective_provider_for` call actually received."""
+        pane = MagicMock()
+        pane.state = "empty"
+        pane.session = None
+        pane._transcript_path = None
+        orch._panes_by_project["test-proj"] = {role: pane}
+        staging = tmp_path / "role"
+        staging.mkdir(exist_ok=True)
+        (staging / "CLAUDE.md").write_text("# role\n", encoding="utf-8")
+
+        seen_roles: list[str] = []
+
+        def _record(role_arg, project=None):
+            seen_roles.append(role_arg)
+            return provider_side_effect(role_arg)
+
+        stack = [
+            patch.object(orch, "_is_spawn_blocked", return_value=False),
+            patch.object(orch, "_final_gate_clear", return_value=True),
+            patch("agent_takkub.orchestrator.PtySession"),
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
+            patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude"),
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                side_effect=_record,
+            ),
+            patch("agent_takkub.spawn_engine.agent_role_dir", return_value=staging),
+            patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+            patch("agent_takkub.spawn_engine._default_plugin_dirs", return_value=[]),
+            patch("agent_takkub.spawn_engine.inject_user_profile_env"),
+            patch("agent_takkub.spawn_engine.apply_claude_auth_overrides"),
+            patch("agent_takkub.mcp_bridge.mcp_argv_for_provider", return_value=[]),
+            patch(
+                "agent_takkub.hook_wiring.ensure_hook_settings_file",
+                return_value="hooks.json",
+            ),
+        ]
+        entered = [ctx.__enter__() for ctx in stack]
+        try:
+            mock_pty = MagicMock()
+            mock_pty.spawn.side_effect = lambda **kwargs: None
+            entered[2].return_value = mock_pty
+            pane.attach_session = MagicMock()
+
+            ok, message = orch.spawn(role, cwd=str(tmp_path), project="test-proj")
+            assert ok is True, message
+        finally:
+            for ctx in reversed(stack):
+                ctx.__exit__(None, None, None)
+        return seen_roles
+
+    def test_qa_pane_resolves_against_reviewer_row_under_full_preset(
+        self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
+    ) -> None:
+        team_preset.set_current("full", "test-proj")
+
+        seen = self._spawn_role(
+            mock_orch,
+            tmp_path,
+            "qa",
+            provider_side_effect=lambda role: "codex" if role == "reviewer" else "gemini",
+        )
+
+        assert "reviewer" in seen
+        assert "qa" not in seen
+
+    def test_critic_pane_resolves_against_reviewer_row(
+        self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
+    ) -> None:
+        team_preset.set_current("full", "test-proj")
+
+        seen = self._spawn_role(
+            mock_orch,
+            tmp_path,
+            "critic",
+            provider_side_effect=lambda role: "codex" if role == "reviewer" else "gemini",
+        )
+
+        assert "reviewer" in seen
+        assert "critic" not in seen
+
+    def test_qa_pane_keeps_own_row_when_custom_checker_is_qa(
+        self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
+    ) -> None:
+        team_preset.set_current(
+            "custom",
+            "test-proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+
+        seen = self._spawn_role(
+            mock_orch,
+            tmp_path,
+            "qa",
+            provider_side_effect=lambda role: "codex" if role == "reviewer" else "gemini",
+        )
+
+        assert seen == ["qa"]
+
+    def test_assign_result_line_and_event_report_reviewer_row_source(
+        self, mock_orch: orchestrator.Orchestrator
+    ) -> None:
+        """#590 item D: `takkub assign --role reviewer --mode e2e` (qa's
+        canonical form) must say which row actually backed the provider,
+        and the `assign` log event must carry `provider_source`."""
+        team_preset.set_current("full", "test-proj")
+        events: list[tuple[str, dict]] = []
+
+        def _fake_effective_provider_for(role, project=None):
+            return "codex" if role == "reviewer" else "gemini"
+
+        def _record_event(name, **fields):
+            events.append((name, fields))
+
+        with (
+            patch.object(mock_orch, "spawn", return_value=(True, "spawned")),
+            patch.object(mock_orch, "_send_when_ready"),
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                side_effect=_fake_effective_provider_for,
+            ),
+            patch("agent_takkub.orchestrator._log_event", side_effect=_record_event),
+        ):
+            ok, msg = mock_orch.assign(
+                role_name="reviewer",
+                cwd="/web",
+                task="test login flow",
+                mode="e2e",
+                project="test-proj",
+            )
+
+        assert ok is True
+        assert "qa = reviewer --mode e2e" in msg
+        assert "provider codex" in msg
+        assert "ตามแถว Reviewer" in msg
+
+        assign_events = [fields for name, fields in events if name == "assign"]
+        assert len(assign_events) == 1
+        assert assign_events[0]["provider_source"] == "reviewer_row"
+        assert assign_events[0]["effective_provider"] == "codex"
+
+    def test_assign_result_line_reports_own_row_when_checker_is_qa(
+        self, mock_orch: orchestrator.Orchestrator
+    ) -> None:
+        team_preset.set_current(
+            "custom",
+            "test-proj",
+            custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
+        )
+        events: list[tuple[str, dict]] = []
+
+        def _fake_effective_provider_for(role, project=None):
+            return "codex" if role == "reviewer" else "gemini"
+
+        def _record_event(name, **fields):
+            events.append((name, fields))
+
+        with (
+            patch.object(mock_orch, "spawn", return_value=(True, "spawned")),
+            patch.object(mock_orch, "_send_when_ready"),
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                side_effect=_fake_effective_provider_for,
+            ),
+            patch("agent_takkub.orchestrator._log_event", side_effect=_record_event),
+        ):
+            ok, msg = mock_orch.assign(
+                role_name="qa",
+                cwd="/web",
+                task="test login flow",
+                project="test-proj",
+            )
+
+        assert ok is True
+        assert "provider gemini" in msg
+        assert "ตามแถว QA" in msg
+        assign_events = [fields for name, fields in events if name == "assign"]
+        assert assign_events[0]["provider_source"] == "own_row"

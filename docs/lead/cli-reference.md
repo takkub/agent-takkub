@@ -18,12 +18,12 @@ takkub assign --role frontend "<task>"                 # spawn (ถ้ายั�
 takkub assign --role reviewer --mode subagent "<scan>" # native child ของ provider เดียวกับ Lead; ไม่เปิด pane/ไม่ใช่ model-diversity
 takkub subagent-done --role reviewer "<summary>"        # child ปิดงานเข้า ledger/inbox/wait (คำสั่งอยู่ใน task capsule)
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
-takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default
+takkub assign --role reviewer --mode e2e --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default
 takkub assign --role backend --effort low "<task>"     # (#323) override reasoning-effort เฉพาะ pane ที่ spawn ใหม่ (low/medium/high); precedence: assign > role > TAKKUB_TEAMMATE_EFFORT env > tier default; provider ไม่มี effort knob (opencode/kimi/cursor วันนี้ — gap #103) = ignore เงียบ ไม่ error; provider มี knob แต่ไม่รับ level นี้ (เช่น xhigh บน codex) = error ชัดก่อน spawn; agy/gemini มี `--effort` จริง (#125 ที่เคย disable ไว้ ถูก fix ต้นทางใน agy 1.1.10 แล้ว — ดู provider_spec.gemini_spec)
 takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)
 takkub assign --role backend --auto-chain "<task>"     # impl done → auto verify sequence (devops→qa) ไม่ต้อง propose
-takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)
-takkub assign --role qa --plan --shards 4 "<task>"     # plan-first: planner pane แบ่ง N buckets → auto fan-out qa#1…#N ฉลาด (ต้อง --shards ≥ 2)
+takkub assign --role reviewer --mode e2e --shards 4 "<task>"        # fan-out N parallel shard panes (qa#1…#N internally · env TAKKUB_SHARD/_TOTAL) — #590: use this canonical form, not bare --role qa, so provider/model/effort resolve against the row Settings actually shows
+takkub assign --role reviewer --mode e2e --plan --shards 4 "<task>" # plan-first: planner pane แบ่ง N buckets → auto fan-out qa#1…#N ฉลาด (ต้อง --shards ≥ 2)
 takkub assign --role frontend --isolation worktree "<task>" # pane รันใน git worktree+branch แยก (wt/<role>-<ts>) — build ขนานไม่ชนกัน · done → Lead ได้ merge PROPOSAL (ไม่ auto) · ไม่ใช่ git repo → fallback shared+warn (#81)
 takkub assign --role backend --task-file <path>        # (#491) อ่าน task จากไฟล์ (utf-8) แทน positional — เลี่ยง shell กิน backtick/$()/วงเล็บ; mutually exclusive กับ positional task; `--task-file -` หรือ positional "-" = อ่านจาก stdin
 takkub worktree list [--cwd <path>]                    # ดู wt/* worktrees + commits-ahead + dirty (lead only · ใช้ได้แม้ cockpit ปิด)

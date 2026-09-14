@@ -150,7 +150,9 @@ class TestTeammatePaneLifecycle:
         window._ensure_teammate_pane("qa#1", "proj")
         pane = window._tabs["proj"].teammate_panes["qa#1"]
         assert pane.role.name == "qa#1"
-        assert pane.role.label == "QA#1"
+        # #590: qa's label defers to reviewer's mode name under the default
+        # preset (checker=reviewer) — see team_preset.pane_display_label.
+        assert pane.role.label == "Reviewer · e2e #1"
 
     def test_ensure_teammate_pane_custom_role_gets_fallback_color(
         self, window: HeadlessWindow

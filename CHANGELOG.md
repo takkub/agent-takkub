@@ -4,6 +4,43 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **`reviewer --mode e2e|ui` (qa/critic) spawn provider ที่ Settings มองไม่เห็น/แก้ไม่ได้ (#590)** —
+  root cause: dispatch ยัง spawn ด้วย role name ดิบ `qa`/`critic` แล้ว provider/model/effort
+  resolve ตรงจาก key `qa`/`critic` ใน `routing.json`/`role-models.json` เอง แต่ roster ของ
+  Settings → Providers & Roles โชว์แถวเดียวสำหรับ checker ที่ active (`reviewer` บนทุก built-in
+  preset ตั้งแต่ #513) — `critic` ไม่เคยมีแถวของตัวเองเลยไม่ว่า preset ไหน (`CHECKER_ROLES` ไม่มี
+  `critic`) ค่าเก่า/ค้างของ `qa`/`critic` เลยรันจริงโดยที่ user แก้ผ่าน UI ไม่ได้ (repro จริง: global
+  `qa=gemini` ค้างจากก่อน #513 ทับ `reviewer=codex` ของโปรเจค ทำให้ `takkub assign --role qa`
+  รัน gemini ทั้งที่ Settings โชว์ reviewer=Codex) — เพิ่ม `team_preset.settings_role_for(role,
+  project)` (เดียว, ใช้ซ้ำทุกจุด) แปลง `qa`/`critic` → `reviewer` ก่อน resolve provider/model/effort
+  ใน `spawn_engine.spawn()` (5 call sites) และ `orchestrator._assign_dispatch` เว้นแต่ custom preset
+  เลือก `checker="qa"` ตรงๆ (แถว QA ของตัวเองยังใช้ได้ปกติ) — ไม่ลบ/ย้ายค่าเก่าใน
+  `routing.json`/`role-models.json` (V2 ไม่ลบข้อมูล) แค่ไม่ใช้เมื่อ roster ไม่แสดง; `qa#N` shard
+  ใช้กติกาเดียวกัน (base role ผ่าน `_split_shard` ก่อนอยู่แล้ว)
+  - **ทำให้เห็นชัด (ไม่ต้องเดา):** (A) pane/tab label ของ qa/critic แสดง `Reviewer · e2e`/`Reviewer
+    · ui` แทน `QA`/`Design Critic` เปล่าๆ (shard: `Reviewer · e2e #2`) — คงชื่อ `QA` เดิมถ้า
+    preset เลือก `checker="qa"` จริง — `team_preset.pane_display_label()`, wired เข้า
+    `main_window._ensure_teammate_pane` + `headless_window._ensure_teammate_pane` (internal role
+    name/ledger/events/MCP policy ไม่เปลี่ยน, display เท่านั้น); (B) แถว Reviewer ใน Settings → Roles
+    & ตำแหน่ง มีคำอธิบายรอง "ใช้กับทุกโหมด: ตรวจโค้ด · ทดสอบหน้าเว็บ (QA/e2e) · ตรวจ UI (Critic/ui)";
+    (C) ถ้ามีค่าเก่าของ qa/critic (global หรือโปรเจคนี้) ที่ตอนนี้ไม่ถูกใช้ Settings โชว์บรรทัดเล็กใต้
+    แถว Reviewer บอก provider/model จริงที่ค้างอยู่ (`team_preset.stale_legacy_role_configs()`,
+    read-only ไม่ลบอะไร); (D) `takkub assign --role qa|critic` หรือ `--role reviewer --mode
+    e2e|ui` พิมพ์บรรทัดผลลัพธ์บอกตรงๆ ว่า resolve ยังไง เช่น `qa = reviewer --mode e2e · provider
+    codex (ตามแถว Reviewer)` และ event `assign`/`assign_plan` มี field ใหม่ `provider_source`
+    (`reviewer_row` | `own_row` | `override`)
+  - docs: `docs/lead/patterns.md`/`docs/lead/cli-reference.md` ตัวอย่างเปลี่ยนเป็น `--role reviewer
+    --mode e2e|ui` เป็นฟอร์มหลัก (`--role qa`/`--role critic` ยังใช้ได้เป็น deprecated alias ตาม
+    #513) · `lead_context.py`/`pipeline_executor.py` prompt text อัปเดตให้สอดคล้อง (branch ที่
+    checker เป็น `qa` จริงๆ — custom preset — ยังคงใช้ `--role qa` ตรงๆ ถูกต้องอยู่แล้ว ไม่แตะ)
+  - **multi-provider gap:** fix นี้เป็น cockpit-side routing ล้วน ไม่ผูกกับ provider ใดเป็นพิเศษ
+    ใช้ได้เหมือนกันทุก provider (claude/codex/gemini-agy/opencode/kimi/cursor) — แต่ pane ที่รันบน
+    provider ที่ไม่มี hook เข้า cockpit เอง (codex/gemini-agy/opencode/kimi/cursor ทุกตัว ต่างจาก
+    claude ที่มี Stop hook) รับรู้ผลลัพธ์ข้อ D ได้แค่ผ่านข้อความ prose ใน argv/system-prompt เท่านั้น
+    ไม่มีทางบังคับ/ตรวจสอบทาง mechanism เดียวกับที่ #588 ระบุไว้สำหรับ scope/test/busy-machine gate
+
 ## [v2.1.6] - 2026-09-13
 
 ### Fixed (แก้)

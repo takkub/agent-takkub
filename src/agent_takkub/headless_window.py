@@ -196,14 +196,32 @@ class HeadlessWindow(QObject):
                 column=2,
                 row=99,
             )
-        elif shard_idx is not None:
-            role = Role(
-                name=role_name,
-                label=f"{role.label}#{shard_idx}",
-                color=role.color,
-                column=role.column,
-                row=role.row,
+        else:
+            # #590: mirrors main_window._ensure_teammate_pane's qa/critic ->
+            # "Reviewer · e2e"/"Reviewer · ui" display-label redirect — see
+            # team_preset.pane_display_label's docstring for the rationale.
+            from . import team_preset as _team_preset_hw
+
+            display_label = _team_preset_hw.pane_display_label(
+                base_role, role.label, tab.project_name
             )
+            if shard_idx is not None:
+                sep = " #" if display_label != role.label else "#"
+                role = Role(
+                    name=role_name,
+                    label=f"{display_label}{sep}{shard_idx}",
+                    color=role.color,
+                    column=role.column,
+                    row=role.row,
+                )
+            elif display_label != role.label:
+                role = Role(
+                    name=role.name,
+                    label=display_label,
+                    color=role.color,
+                    column=role.column,
+                    row=role.row,
+                )
 
         pane = HeadlessPane(role)
         self.orch.register_pane(pane, project=tab.project_name)

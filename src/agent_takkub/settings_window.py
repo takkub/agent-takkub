@@ -2212,17 +2212,16 @@ class SettingsWindow(
             )
             is_lead = role == "lead"
             is_checker = checker_role is not None and role == checker_role
+            description = (
+                "Cockpit coordinator — เปลี่ยน CLI ได้ (บาง feature หายเมื่อไม่ใช่ Claude)"
+                if is_lead
+                else ""
+            )
             row = self._build_role_row(
                 role,
                 f"{base_label} — ตัวตรวจ" if is_checker else base_label,
                 color,
-                # #101: Lead is unlocked (no longer forced to claude) but is
-                # NOT a pipeline participant — no enable/disable toggle for
-                # it (show_enable_toggle=False below), so its description
-                # explains the CLI dropdown instead of the usual empty desc.
-                "Cockpit coordinator — เปลี่ยน CLI ได้ (บาง feature หายเมื่อไม่ใช่ Claude)"
-                if is_lead
-                else "",
+                description,
                 role_panel,
                 locked=False,
                 enabled=True if is_lead else cfg["roles"].get(role, is_checker),
@@ -2232,6 +2231,36 @@ class SettingsWindow(
                 lead_capability_gate=is_lead,
             )
             rp_lay.addWidget(row)
+            if role == "reviewer":
+                # #590 item B: reviewer's row is the ONE settings surface for
+                # all three review modes (code/e2e/ui) since #513 folded qa/
+                # critic's dispatch into it — spell that out as a hint line
+                # below the row (not the row's own description, which would
+                # force every row to that height — see _build_role_row's
+                # word-wrap comment) so a user understands it also governs
+                # `--mode e2e`/`--mode ui` panes, which never get a roster
+                # row of their own.
+                mode_hint = QLabel(
+                    "Reviewer ใช้ค่านี้กับทุกโหมด: ตรวจโค้ด · ทดสอบหน้าเว็บ (QA) · ตรวจ UI (Critic)",
+                    role_panel,
+                )
+                mode_hint.setObjectName("panelHint")
+                mode_hint.setWordWrap(True)
+                rp_lay.addWidget(mode_hint)
+                # #590 item C: qa/critic entries left over from before #513
+                # (or a since-abandoned custom checker="qa") are still on
+                # disk but no longer consulted — surface them here (never
+                # deleted) so a stale provider doesn't look like a bug.
+                for stale in _team_preset.stale_legacy_role_configs(self._project):
+                    model_part = f" / {stale['model']}" if stale["model"] else ""
+                    notice = QLabel(
+                        f"ค่าเก่าของ {stale['role'].upper()} ({stale['provider']}{model_part}) "
+                        f"ไม่ถูกใช้แล้ว — {stale['role'].upper()} ใช้ค่าของ Reviewer",
+                        role_panel,
+                    )
+                    notice.setObjectName("panelHint")
+                    notice.setWordWrap(True)
+                    rp_lay.addWidget(notice)
 
         outer.addWidget(role_panel)
 

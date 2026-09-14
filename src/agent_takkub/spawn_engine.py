@@ -1923,6 +1923,17 @@ class SpawnEngineMixin:
         # role_name ("qa#1") → registry key, pane_state key, TAKKUB_ROLE env
         base_role, shard_idx = _split_shard(role_name)
         project_ns = self._resolve_project(project)
+        # #590: qa/critic (reviewer --mode e2e/ui's legacy dispatch targets)
+        # resolve provider/model/effort against whichever role the Settings
+        # roster actually shows a row for — reviewer's, unless a custom
+        # preset's checker is explicitly qa itself. See
+        # team_preset.settings_role_for's docstring for the full rationale.
+        # Deliberately NOT used for base_role's other jobs (role file, env,
+        # MCP policy via mcp_argv_for_provider) — only the three settings
+        # lookups below.
+        from .team_preset import settings_role_for as _settings_role_for
+
+        settings_role = _settings_role_for(base_role, project_ns)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(role_name)
         if pane is None:
@@ -1988,7 +1999,7 @@ class SpawnEngineMixin:
         # since 1.0.84; `=0` is byte-identical to the direct call, see
         # core/routing/facade.py).
         effective_provider = _ps_initial.provider_override or effective_provider_for_v2(
-            base_role, project=project_ns
+            settings_role, project=project_ns
         )
         if (
             _ps_initial.spawn_initial_task_state == "requested"
@@ -2451,7 +2462,7 @@ class SpawnEngineMixin:
                 # instead of calling role_models/provider_models directly —
                 # see core/routing/facade.py's effective_model_for_v2.
                 provider_model = _ps_initial.model_override or (
-                    effective_model_for_v2(base_role, spec.name, project=project_ns) or ""
+                    effective_model_for_v2(settings_role, spec.name, project=project_ns) or ""
                 )
                 if provider_model:
                     model_argv.extend([spec.model_flag, provider_model])
@@ -2465,7 +2476,7 @@ class SpawnEngineMixin:
                 # accepts — _append_provider_effort is then a no-op whenever
                 # that resolves to "".
                 provider_effort = _resolve_teammate_effort(
-                    base_role, spec, provider_model, override=_ps_initial.effort_override or ""
+                    settings_role, spec, provider_model, override=_ps_initial.effort_override or ""
                 )
                 _append_provider_effort(effort_argv, spec, provider_effort)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
@@ -3138,7 +3149,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # instead of calling role_models/provider_models directly —
                 # see core/routing/facade.py's effective_model_for_v2.
                 teammate_model = (
-                    effective_model_for_v2(base_role, CLAUDE, project=project_ns) or tier_model
+                    effective_model_for_v2(settings_role, CLAUDE, project=project_ns) or tier_model
                 ).strip()
                 teammate_model = _remap_pinned_model(teammate_model, env)
                 apply_default_model(env, teammate_model)
@@ -3147,7 +3158,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # uses — role setting > TAKKUB_TEAMMATE_EFFORT > tier default,
             # then gated so e.g. claude-haiku-4-5 never gets --effort).
             teammate_effort = _resolve_teammate_effort(
-                base_role,
+                settings_role,
                 PROVIDER_REGISTRY[CLAUDE],
                 teammate_model,
                 override=_ps_initial.effort_override or "",

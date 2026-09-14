@@ -570,6 +570,13 @@ class PipelineMixin:
                 "self-verified.\n"
             )
         else:
+            # #590: `mode` here is `team_preset.verify_mode(cfg)` — when it's
+            # literally "qa", this project's checker IS qa (a custom preset
+            # choice), the one case `--role qa` below is its own settings
+            # row (`team_preset.settings_role_for` — see docs/lead/
+            # patterns.md's #513/#590 alias note). Every OTHER checker_role
+            # branch below advises the canonical `--role reviewer --mode
+            # e2e|ui` form instead of the bare qa/critic alias.
             checker_role = mode  # "qa" or "reviewer"
             checker_spawn_ok, _ = team_preset.can_spawn(checker_role, project_ns)
             checker_allowed = is_role_enabled(checker_role, project_ns) and checker_spawn_ok

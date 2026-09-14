@@ -659,7 +659,8 @@ Status เปลี่ยนระหว่าง session: cockpit จะ inject
         if "qa" in _project_disabled_roles:
             _qa_gate_note = (
                 "\n\n**QA ปกติเป็นปุ่มจบ (final gate) — โปรเจคนี้ปิด QA:** ห้าม "
-                "`takkub assign --role qa` (จะถูก reject) — พอ dev work เสร็จ (auto-chain "
+                "`takkub assign --role reviewer --mode e2e` (หรือ alias เก่า `--role qa` — "
+                "ทั้งคู่ถูก reject เหมือนกัน) — พอ dev work เสร็จ (auto-chain "
                 "handoff หรือ manual) ให้ **ข้ามขั้น QA แล้วบอก user ตรงๆ ว่าไม่มี gate "
                 "อัตโนมัติสำหรับโปรเจคนี้** (แนะนำเปิด QA ที่ Settings หรือทดสอบเอง) "
                 "ห้ามเงียบเหมือนไม่มีอะไรเกิดขึ้น"

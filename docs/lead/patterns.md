@@ -47,7 +47,7 @@ wait
 ```bash
 takkub assign --role backend "implement /auth/login + tests"
 # (รอ backend done event)
-takkub assign --role qa "smoke test /auth/login: happy path + invalid creds + rate limit"
+takkub assign --role reviewer --mode e2e "smoke test /auth/login: happy path + invalid creds + rate limit"
 ```
 
 ## Pattern ผสม (parallel ใน group, sequential ระหว่าง group)
@@ -61,7 +61,7 @@ wait
 takkub assign --role devops --cwd <api> "docker compose up -d local · เช็ค docker ps เลือก port ว่าง · healthcheck · report URLs"
 # (รอ devops done — QA ต้องการ stack ที่รันอยู่)
 # Group 3: QA ท้ายสุดเสมอ — เทสกับ stack จริงที่ devops ยกขึ้น
-takkub assign --role qa "e2e /login flow ที่ <urls จาก devops done note>"
+takkub assign --role reviewer --mode e2e "e2e /login flow ที่ <urls จาก devops done note>"
 ```
 
 ## Auto-chain (skip propose for verify sequence)
@@ -75,7 +75,7 @@ wait
 
 ## Shard fan-out + Plan-first
 
-**#513 alias note:** routing (`routing_planner.py`) now names this `reviewer --mode e2e` (`resolve_role_alias("qa") == ("reviewer", "e2e")`) — the `--role qa` commands below still work exactly as written (kept as a deprecated alias, >= 1 release, shard/browser machinery untouched); only the *proposed* role name changed.
+**#513/#590:** use `--role reviewer --mode e2e` (shown below) as the canonical form — `--role qa` still works as a deprecated alias (>= 1 release, shard/browser machinery untouched: `resolve_role_alias("qa") == ("reviewer", "e2e")`), but its provider/model/effort now resolve against reviewer's Settings row too (#590 — the roster never renders qa its own row under any built-in preset), so `--role qa` can look like it's on a different CLI than what Settings shows while `--role reviewer --mode e2e` says so plainly in its result line.
 
 - `--shards 4` → spawn `qa#1…qa#4` คู่ขนาน แต่ละ pane ได้ env `TAKKUB_SHARD`/`TAKKUB_SHARD_TOTAL` split งานเอง (modulo)
 - `--plan --shards 4` → planner pane วิเคราะห์แอป → แบ่ง N buckets balanced+independent → orchestrator auto fan-out พร้อม scope ต่อ shard → consolidated handoff
@@ -97,14 +97,14 @@ wait
 
 ## Critic pipeline (design review 3 hops)
 
-**#513 alias note:** routing names this `reviewer --mode ui` (`resolve_role_alias("critic") == ("reviewer", "ui")`) — the `--role critic` command below still works exactly as written (deprecated alias, >= 1 release, gemini cross-check pipeline untouched); only the *proposed* role name changed.
+**#513/#590:** use `--role reviewer --mode ui` (shown below) as the canonical form — `--role critic` still works as a deprecated alias (>= 1 release, gemini cross-check pipeline untouched: `resolve_role_alias("critic") == ("reviewer", "ui")`), and unlike qa, critic's provider/model/effort have ALWAYS resolved against reviewer's row (the roster never had a checker slot for critic — #590), never its own.
 
 ```bash
 # Hop 1: QA smoke + shots — เขียนลง $TAKKUB_ARTIFACTS_DIR (central, นอก repo)
-takkub assign --role qa --cwd <web> "smoke /login → /dashboard · save shots to \$TAKKUB_ARTIFACTS_DIR/screenshots/"
+takkub assign --role reviewer --mode e2e --cwd <web> "smoke /login → /dashboard · save shots to \$TAKKUB_ARTIFACTS_DIR/screenshots/"
 # (รอ qa done)
 # Hop 2: critic + gemini parallel — design-review เขียนลง $TAKKUB_DOCS_DIR/design-review/
-takkub assign --role critic --cwd <web> "design review screenshots — เสนอ เพิ่ม/ลบ/ปรับ" &
+takkub assign --role reviewer --mode ui --cwd <web> "design review screenshots — เสนอ เพิ่ม/ลบ/ปรับ" &
 takkub assign --role gemini --cwd <web> "เตรียม view images ที่ critic จะส่งมาผ่าน takkub send" &
 wait
 # Hop 3: frontend implement proposals (focus high-impact ก่อน)
